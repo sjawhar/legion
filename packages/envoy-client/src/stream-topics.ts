@@ -12,8 +12,8 @@ export const EXCEPTION_TOPIC_PREFIX = "notifications.envoy.exceptions.";
  * The literal prefixes of the subjects the notification stream (`ENVOY_NOTIFICATIONS`) stores, as
  * the listener's binary compiles them (`streamSubjects` in packages/envoy/internal/bus/stream.go,
  * each a prefix followed by `>`). A session's consumer relays its agent subject and every followed
- * topic under one of them; a topic under none (a team or ad-hoc topic) stays on its core
- * subscription, live only.
+ * topic under one of them; a topic under none is one the listener's publish and subscribe routes
+ * refuse by name, since nothing would store it.
  */
 const STREAM_SUBJECT_PREFIXES = [
   AGENT_TOPIC_PREFIX,
@@ -23,7 +23,9 @@ const STREAM_SUBJECT_PREFIXES = [
   LEGION_NOTICE_TOPIC_PREFIX,
   GHOSTWISPR_TOPIC_PREFIX,
   "notifications.whatsapp.",
+  "notifications.team.",
   `${EXCEPTION_TOPIC_PREFIX}${AGENT_TOPIC_PREFIX}`,
+  `${EXCEPTION_TOPIC_PREFIX}notifications.team.`,
 ] as const;
 
 /**

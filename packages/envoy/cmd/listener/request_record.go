@@ -43,19 +43,12 @@ const (
 	outcomeRoleClaimUnreadable requestOutcome = "role_claim_unreadable"
 	// outcomePublishDenied is a publish the server refused under this listener's own publish
 	// permissions (bus.ErrPublishDenied). Only refuseBusUnavailable records it, from the 403 that
-	// writeBusUnavailable writes; the replay route answers the same error as 503
-	// REPLAY_UNAVAILABLE and records nothing. It is not outcomeBusUnavailable: the bus answered,
-	// with a denial no retry can get past.
+	// writeBusUnavailable writes. It is not outcomeBusUnavailable: the bus answered, with a denial
+	// no retry can get past.
 	outcomePublishDenied requestOutcome = "publish_denied"
-	// outcomeReceiptTimeout, outcomeDeliveryFailed, outcomeNotConfirmed and outcomePublishFailed
-	// are the publish route's confirmed sends answered 504 (confirmed.go), each under the reason
-	// its body names: a role send whose holder's receipt did not arrive after a forward reached
-	// the server, or that no forward was shown to reach; an ad-hoc topic send some recipient did
-	// not confirm, or whose own publish on the topic did not reach NATS.
-	outcomeReceiptTimeout requestOutcome = "receipt_timeout"
+	// outcomeDeliveryFailed is the publish route's role send answered 504 (confirmed.go): its
+	// window ended with no forward the stream stored for the holder.
 	outcomeDeliveryFailed requestOutcome = "delivery_failed"
-	outcomeNotConfirmed   requestOutcome = "not_confirmed"
-	outcomePublishFailed  requestOutcome = "publish_failed"
 	// outcomeStreamFull is a send or publish the stream refused because it holds its byte limit
 	// (bus.ErrStreamFull). It is not outcomeBusUnavailable: the bus answered, that the stream is
 	// full, so an operator reading the record looks at the stream's size, not for an outage.

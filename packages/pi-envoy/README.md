@@ -9,21 +9,21 @@ phase worker or the controller with — is the separate plugin `@sjawhar/pi-legi
 beside this one in a Legion deployment; it reaches this plugin through the in-process interface
 described in `packages/pi-shared/AGENTS.md`.
 
-Normal topic subscriptions are direct NATS subscriptions owned by this extension. A role claim is
-different: the listener arbitrates the core-NATS role lane for the current live holder, then sends
-a receipt-backed request with the original role topic to the holder's direct agent subject.
+A topic subscription is an interest registered with the listener, which filters the session's own
+durable consumer on it; the session's NATS connection holds one subject, the relay the listener
+serves that consumer on. A role claim is
+different: the listener arbitrates the core-NATS role lane for the current live holder, then
+forwards the message with its original role topic to the holder's direct agent subject.
 `envoy_unsubscribe` manages only normal topic subscriptions; it does not relinquish a held role,
 and it keeps open, listing them as kept, the subscriptions another plugin holds for that role.
-The agent pump replies after accepting the envelope. A message sent through the listener's
-`POST /v1/messages/publish` waits for that reply: the listener forwards it again after two seconds
-without one, and answers the sender with an error once four seconds pass without a reply. A role
-topic published straight onto NATS is forwarded once, and a miss is a `receipt_timeout` exception.
-The same route forwards a team or other ad-hoc topic's message to each session registered on the
-topic that holds its own NATS connection, as this one does, other than its sender, and the sender's
-error names each session that did not reply. The stream stores each forward on the recipient's
-agent subject, and when the listener supports consumer delivery that session takes the stored copy
-once, also after a restart or a dropped connection (below). A role message is not kept for a later
-claimant, and on the core path a session does not recover one it missed.
+The stream captures every agent subject, so it stores each forward there, and the holder's own
+consumer delivers it once — also after a restart or a dropped connection (below). No session
+answers a receipt: a message sent through the listener's `POST /v1/messages/publish` waits only
+for the stream's acknowledgement that it stored the forward, and answers the sender with an error
+once four seconds pass without one. A role message is not kept for a later claimant. A
+`notifications.team.<name>` topic is stored like any other followed topic; every other
+`notifications.` topic the stream does not capture is refused by name, at publish and at
+subscribe, because no session would ever be delivered it.
 
 `envoy_list()` shows the union of the local subscriptions and the listener's persisted interest
 registry. Each reported interest identifies whether it is `live`, `registry`, or `both`, so
@@ -44,35 +44,33 @@ details result, including subscriptions whose stream currently has no matching e
 The session's messages come from a durable consumer the listener keeps for it on Envoy's
 notification stream and relays on `notifications.envoy.deliver.<session id>`, which
 the session subscribes before it registers: its own agent subject, the stored copies of role
-messages to a role it holds, and every followed topic the stream stores, in stream order. The
+messages to a role it holds, and every followed topic, in stream order. No session receives from
+any other NATS subscription. The
 session answers each frame `received` as it decodes and `done` once Oh My Pi wrote the card or
 turn to the session file, so a frame not written when the session stops, or published while it
-was down or disconnected, comes again and is shown once, for up to 72 hours. Team and other
-ad-hoc topics, which the stream does not store, stay live only on the session's own
-subscription. "Consumer delivery" in `AGENTS.md` has the rules, and
+was down or disconnected, comes again and is shown once, for up to 72 hours. A
+`notifications.team.<name>` topic is stored and delivered like any other followed topic.
+"Consumer delivery" in `AGENTS.md` has the rules, and
 `packages/envoy/AGENTS.md`, "Session consumers", states them once for every host.
 
-The core path is the rollout fallback dispatch://INFRA-771 removes, for a listener that answers
-`core` and for a plugin of an earlier release. There a message
-published while the session's NATS connection or one of its subscriptions was down is
-recovered from Envoy's notification stream, which keeps messages for 72 hours: the session asks
-its listener (`POST /v1/replay`) for what the stream stored on its own agent subject and on each
-topic it follows, after the place it last read to, and shows each missed message once, as a card
-saying it was published while the connection was down. The session pings NATS every 10 seconds
+A message published while the session's NATS connection was down, or while the session was not
+running, waits in that consumer: nothing has to be fetched back. It is shown once when the
+session returns, as a card whose last line says it was published while the connection was down.
+The session pings NATS every 10 seconds
 and drops a connection that leaves two pings unanswered, so a connection that stops answering
-without closing is left within 30 seconds and redialed. It asks after it reconnects, after a
-subscription is reopened, when it starts or resumes, and on every heartbeat. A targeted Dispatch
-delivery recovered this way (BTW, Aside, Steer, a person's Send) is shown as that card only and
-runs nothing. Role messages are live only and are not recovered; a team or other ad-hoc topic is
-recovered only from the copy the listener forwarded to the session's agent subject while it was
-registered on the topic. Nor is anything older than 72 hours, published before the session
-followed the topic, or published before the session first ran this plugin. A message the session
+without closing is left within 30 seconds and redialed, and the listener restarts the relay at
+the consumer's ack floor. A targeted Dispatch
+delivery shown this way (BTW, Aside, Steer, a person's Send) is shown as that card only and
+runs nothing. What the consumer does not hold: anything older than 72 hours, anything published
+before the session followed the topic, and anything published before the session first
+registered. A message the session
 fails to show three times is replaced by one card naming it and saying how to read it. The
-session file keeps what it was shown and where it read to, so a restart skips nothing the stream
-still holds and shows nothing again (up to 20,000 messages shown in 72 hours); a crash between
-showing a message and recording it can show it twice, never lose it. Against a listener without
-the route, the session warns once that missed messages are not recovered, and live delivery goes
-on as before. "Missed messages" in `AGENTS.md` has the full rules.
+session file keeps what it was shown, so a restart shows nothing again (up to 20,000 messages
+shown in 72 hours); a crash between
+showing a message and recording it can show it twice, never lose it. A registration the listener
+can give no consumer is refused by name, and the session says once that Envoy inbound is
+unavailable and asks again at every heartbeat. "Each frame shown once" in `AGENTS.md` has the
+full rules.
 
 ## Session identity
 

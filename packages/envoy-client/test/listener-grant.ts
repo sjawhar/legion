@@ -3,9 +3,9 @@
  * session consumers: `infra/core.ListenerPermissions` (packages/envoy/infra/core/permissions.go)
  * without the session-consumer entries and without the shared role-lane queue, which is the same
  * grant `packages/envoy/cmd/listener/session_delivery_test.go`'s
- * `listenerGrantBeforeSessionConsumers()` holds a listener to. A listener on it answers every
- * registration that asks for a consumer `{"mode": "core", "reason": "no_grant"}` and keeps the
- * core path, which is what every hub runs until its NATS user is replaced.
+ * `listenerGrantBeforeSessionConsumers()` holds a listener to. A listener on it can give no
+ * session a consumer, so it refuses every registration with `503 {"error": …, "reason":
+ * "no_grant"}` and registers nothing: a session receives only what its own consumer holds.
  *
  * The entries left out, in `ListenerPermissions`' order:
  *
@@ -19,11 +19,11 @@
  *   notifications.role.> envoy-roles                  (subscribe) the shared role-lane queue
  *
  * The listener's own durable keeps its create, info and acknowledgements, so the hub keeps its
- * durable and its sessions keep core delivery, and the role lane falls back to the machine groups.
+ * durable and the role lane falls back to the machine groups.
  *
  * A grant that drifted from the real one is caught by the tests that use it: a missing entry the
  * listener needs keeps the listener from starting, and a session-consumer entry left in has it
- * answer `consumer`, which the core-path scenario refuses.
+ * answer `consumer` where a refusal is expected.
  *
  * As a command, for a shell stack (scripts/e2e/envoy-session-delivery.sh):
  *

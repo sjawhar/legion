@@ -81,7 +81,11 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 // (packages/envoy/cmd/listener/confirmed.go) reports that its forward to the owning architect's
 // session did not complete after it answered the publish 200: the forward failed
 // (`delivery_failed`), the holder lapsed between the two (`no_holder`), or the session the
-// listener forwarded to did not confirm it in time (`receipt_timeout`). Such a listener sends a
+// listener forwarded to did not confirm it in time (`receipt_timeout`). A listener of this
+// release answers no `receipt_timeout`: no session confirms a forward any more, and every
+// forward the stream did not store is `delivery_failed` (dispatch://INFRA-771). The reason is
+// still handled here because a listener of the deployed, older build raises it until the rollout
+// finishes. Such a listener sends a
 // role message on its role lane, which forwards it once and reports a failure on
 // noticeExceptionSubjects instead of answering it; a listener of the confirmed route answers the
 // publish itself, and the notice executor re-holds from that answer (notice). Both run one policy,
@@ -130,9 +134,12 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 // take: the publish, under the dedupe key of reported's row (record.OutboxKey), went to the
 // architect's role topic, the listener named reason, and recipient is the session it forwarded to
 // ("" when it named none). It runs from a role-lane exception of an earlier listener (rehold) and
-// from the 504 `receipt_timeout` answer of the confirmed publish route (notice). A session that
-// stopped running but is still registered produces a receipt_timeout: the listener forwards to it
-// and waits for a receipt that never comes. So does the relaunch window, until the claim's agent
+// from the 504 `receipt_timeout` answer of a confirmed publish route of a listener older than
+// dispatch://INFRA-771, which this daemon still handles until that rollout finishes (a listener
+// of this release answers `delivery_failed` instead). A session that
+// stopped running but is still registered produced a receipt_timeout there: the listener
+// forwarded to it
+// and waited for a receipt that never came. So does the relaunch window, until the claim's agent
 // has taken the Envoy role back. Every such failure is queued, a late receipt from the claim's own
 // session too: a Go relaunch resumes the claim's session id, so a failure naming it cannot tell the
 // stopped process from the relaunched one, and a copy the session already has costs one frame its

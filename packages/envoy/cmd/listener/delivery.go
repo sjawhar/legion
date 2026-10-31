@@ -29,7 +29,10 @@ import (
 // subscriber, so its copy is its delivery (roleForwardCopyDelivery).
 const roleForwardDedupePrefix = "envoy.role.forward."
 
-const roleReceiptTimeout = 2 * time.Second
+// roleForwardTimeout bounds one role forward's wait for the stream's acknowledgement that it
+// stored the forward, which is the whole of its outcome: no holder answers a receipt
+// (startRoleForward).
+const roleForwardTimeout = 2 * time.Second
 
 // exceptionPublishFailedLine is the line a delivery logs when its delivery exception could not be
 // published. The deployed publish-failure metric filter, which the deployment repository's
@@ -43,13 +46,12 @@ func shouldNAKFanoutDelivery(sessionLive bool, err error) bool {
 type listenerDeliveryHandlerConfig struct {
 	client *bus.Client
 	// forwardRole publishes a role-lane envelope to the holder's agent subject and returns the wait
-	// for its outcome; main.go wires startRoleForward(client). The wait's bus.ErrReceiptTimeout
-	// means the forward was flushed to the server and no receipt arrived inside timeout;
-	// bus.ErrForwardNotStored that the stream did not acknowledge storing it; any other error — a
-	// raw nats.ErrTimeout from the flush included, returned by the publish or the wait — means the
-	// forward is not known to have reached the holder. storedOnly asks for a forward that counts as
-	// delivered on the stream's acknowledgement alone (roleForwardStoredOnly).
-	forwardRole func(subject string, item contracts.Envelope, timeout time.Duration, storedOnly bool) (wait func() error, err error)
+	// for its outcome; main.go wires startRoleForward(client). The forward counts as delivered once
+	// the stream acknowledges storing it, which is what its wait returns nil for. The wait's
+	// bus.ErrForwardNotStored means the stream did not acknowledge storing it inside timeout; any
+	// other error — a raw nats.ErrTimeout from the flush included, returned by the publish or the
+	// wait — means the forward is not known to have left this process.
+	forwardRole func(subject string, item contracts.Envelope, timeout time.Duration) (wait func() error, err error)
 	// roleForwards runs the role lane's forwards off its handler (roleForwarder), and servePorts
 	// pushes the durable path's messages to serving-port sessions off its handler, one worker per
 	// session (servePortWorkers); every delivery path hands its forwards and pushes to them, so
@@ -213,11 +215,16 @@ func isExceptionsTopic(topic string) bool {
 	return strings.HasPrefix(topic, bus.ExceptionTopicPrefix)
 }
 
-// publishDeliveryException publishes item's delivery exception for reason. origin, when not empty,
-// identifies the stored message the exception is about (exceptionOrigin): an exception the stream
-// stores then carries Nats-Msg-Id exception.<reason>.<origin>, so the stream keeps one copy
-// however many listeners raise it for that message, each from its own durable.
-func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool, origin string) error {
+// publishDeliveryException publishes item's delivery exception for reason, on the transport its
+// own lane takes (bus.Client.Publish, bus.UsesCoreTransport): the stream stores the lane of an
+// agent subject and of a team topic, and a role lane's exception keeps core NATS, since no stream
+// subject captures it. Every fanout refusal took core NATS until team topics were stored, which
+// keeps nothing: the report of a team message reached only a reader subscribed at that moment,
+// where the stream's copy reaches a session's consumer whenever that session comes back. origin,
+// when not empty, identifies the stored message the exception is about (exceptionOrigin): an
+// exception the stream stores then carries Nats-Msg-Id exception.<reason>.<origin>, so the stream
+// keeps one copy however many listeners raise it for that message, each from its own durable.
+func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession, origin string) error {
 	payload, err := json.Marshal(deliveryExceptionPayload{
 		OriginalTopic:    item.Topic,
 		EventID:          item.EventID,
@@ -246,12 +253,6 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 	}
 	if err := exception.Validate(); err != nil {
 		return fmt.Errorf("validate delivery exception: %w", err)
-	}
-	if fanoutRefusal {
-		if err := client.PublishCore(exception); err != nil {
-			return fmt.Errorf("publish fanout delivery exception: %w", err)
-		}
-		return nil
 	}
 	if origin != "" && bus.StreamCaptures(exception.Topic) {
 		// The stream keeps one copy however many listeners raise it, each from its own durable.
@@ -301,8 +302,8 @@ type deliveryOutcome struct {
 	log func(logger *logging.Logger)
 
 	// exceptionReason, when non-empty, publishes a delivery exception via
-	// publishDeliveryException for control topics. fanoutRefusal also emits a
-	// core-NATS exception for this terminal fanout outcome.
+	// publishDeliveryException for control topics. fanoutRefusal publishes one for this terminal
+	// fanout outcome on any topic, each on the transport its own lane takes.
 	exceptionReason string
 	fanoutRefusal   bool
 	// origin identifies the durable message an exception is about (exceptionOrigin), "" for none.
@@ -342,7 +343,7 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 		outcome.log(cfg.logger)
 	}
 	if outcome.exceptionReason != "" && !isExceptionsTopic(item.Topic) && (isControlTopic(item.Topic) || outcome.fanoutRefusal) {
-		if err := publishDeliveryException(cfg.client, item, outcome.exceptionReason, outcome.sessionID, outcome.fanoutRefusal, outcome.origin); err != nil {
+		if err := publishDeliveryException(cfg.client, item, outcome.exceptionReason, outcome.sessionID, outcome.origin); err != nil {
 			cfg.logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
 			if outcome.exceptionFailureClearsAttempt {
 				cfg.attemptCache.Clear(item.DedupeKey, outcome.sessionID)
@@ -386,13 +387,11 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 		}
 		// The stream captures every agent subject, so it also stores each forward a sender made to
 		// a session's agent subject while keeping the envelope's own topic: a role message the
-		// lane or the publish route forwarded to its holder, an ad-hoc topic message the route
-		// forwarded to each self-subscribed recipient. The forward reached its session over core
-		// NATS, or its sender learned it did not; the stored copy is not a message for this
-		// listener to deliver again, to the role's holder or to the topic's serve-port sessions.
-		// A serving-port holder of this listener is the one exception: it answers no receipt, so
-		// its forward was sent for the stream to store (roleForwardStoredOnly) and this copy is
-		// its delivery, which the path below pushes to its port.
+		// lane or the publish route forwarded to its holder. The stored copy is the holder's own,
+		// and not a message for this listener to deliver again, to the role's holder or to the
+		// topic's serve-port sessions: the holder's session consumer relays it, or, for a
+		// serving-port holder of this listener whose consumer does not hold it, the path below
+		// pushes it to that port (storedForwardCopyIsDelivery).
 		if message.mode == durableDelivery && strings.HasPrefix(message.msg.Subject, contracts.AgentTopicPrefix) && item.Topic != message.msg.Subject &&
 			!storedForwardCopyIsDelivery(cfg, strings.TrimPrefix(message.msg.Subject, contracts.AgentTopicPrefix), message.storedSeq()) {
 			cfg.logger.DeliveryLog(slog.LevelDebug, "listener acknowledged a stored forward copy", strings.TrimPrefix(message.msg.Subject, contracts.AgentTopicPrefix), item.Topic, item.EventID, "forward_copy", slog.String("subject", message.msg.Subject))
@@ -508,8 +507,8 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 }
 
 // roleTopicDelivery arbitrates a role-lane envelope to whichever session
-// currently holds the role, forwarding it over core NATS request-reply so
-// the sender learns immediately whether the holder received it. Before
+// currently holds the role, forwarding it to the holder's agent subject,
+// where the stream stores it for the holder's session consumer. Before
 // forwarding it judges the message by beforeForward, the rules the publish
 // route applies too, with the dedupe and attempt caches as its record of
 // what the holder already took: an echo of the holder's own message and a
@@ -522,8 +521,8 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 // to retry against, so a failed forward is reported via a delivery exception
 // instead of a NAK. The forward itself is handed to the role forwarder
 // (roleForwarder.enqueue) and its outcome reported when it ends
-// (finishRoleForward), so the role lane's handler returns without waiting for
-// the holder.
+// (finishRoleForward), so the role lane's handler returns without waiting
+// for the stream.
 func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	if strings.HasPrefix(item.DedupeKey, roleForwardDedupePrefix) {
 		roleForwardCopyDelivery(cfg, message, item)
@@ -569,7 +568,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 		return
 	}
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
-	cfg.roleForwards.enqueue(roleForward{item: item, sessionID: sessionID, storedOnly: roleForwardStoredOnly(holder)})
+	cfg.roleForwards.enqueue(roleForward{item: item, sessionID: sessionID})
 	message.finalize(false)
 }
 
@@ -604,11 +603,11 @@ func handOverOrRetry(cfg listenerDeliveryHandlerConfig, message deliveryMessage,
 }
 
 // finishRoleForward reports a role forward's outcome, err from its publish or its wait. A forward
-// that reached the server and drew no receipt from the live holder inside roleReceiptTimeout
-// (bus.ErrReceiptTimeout, the one error keyed on) is receipt_timeout; one the stream did not
-// acknowledge storing (bus.ErrForwardNotStored), or not known to have left this process -- the flush
-// timed out or failed, the publish failed -- is delivery_failed like a stale holder or an
-// unadvertised/unreadable delivery mode; no claim is no_holder. Either failure clears the attempt, so
+// the stream acknowledged storing inside roleForwardTimeout is delivered, which is the whole of a
+// forward's outcome: no holder answers a receipt (startRoleForward). One the stream did not
+// acknowledge storing (bus.ErrForwardNotStored), or not known to have left this process -- the
+// flush timed out or failed, the publish failed -- is delivery_failed like a stale holder or an
+// unadvertised/unreadable delivery mode; no claim is no_holder. A failure clears the attempt, so
 // a re-send is forwarded again; a delivered forward records the dedupe entry.
 func finishRoleForward(cfg listenerDeliveryHandlerConfig, forward roleForward, err error) {
 	item, sessionID := forward.item, forward.sessionID
@@ -621,16 +620,6 @@ func finishRoleForward(cfg listenerDeliveryHandlerConfig, forward roleForward, e
 				logger.DeliveryLog(slog.LevelInfo, "listener role forwarded", sessionID, item.Topic, item.EventID, "delivered")
 			},
 			recordDedupe: true,
-		})
-	case errors.Is(err, bus.ErrReceiptTimeout):
-		applyDeliveryOutcome(cfg, item, deliveryOutcome{
-			sessionID:    sessionID,
-			metricStatus: "receipt_timeout",
-			log: func(logger *logging.Logger) {
-				logger.DeliveryLog(slog.LevelWarn, "listener role receipt timed out", sessionID, item.Topic, item.EventID, "receipt_timeout", slog.String("timeout", roleReceiptTimeout.String()))
-			},
-			exceptionReason: "receipt_timeout",
-			clearAttempt:    true,
 		})
 	default:
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{

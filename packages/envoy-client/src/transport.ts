@@ -6,19 +6,6 @@ import { machineID } from "./machine";
 const DEFAULT_TIMEOUT_MS = 5_000;
 const RETRY_DELAY_MS = 250;
 
-/**
- * How long one replay call may take. The listener stops reading at 5 s and its HTTP server writes
- * for at most 10 s, so this waits out a full answer without outliving the server's own deadline.
- */
-const REPLAY_TIMEOUT_MS = 10_000;
-
-/**
- * The `code` a listener answers a replay with, under 503, when NATS refuses the read outright (the
- * listener's user lacks the grant, or there is no notification stream). Retrying at once cannot
- * help, unlike a 503 the listener's start-up gate answers, so a caller tells its session instead.
- */
-export const REPLAY_UNAVAILABLE_CODE = "REPLAY_UNAVAILABLE";
-
 const InterestWireSchema = z.object({
   session_id: z.string(),
   machine_id: z.string(),
@@ -29,20 +16,17 @@ const InterestWireSchema = z.object({
 });
 
 /**
- * How the listener delivers a session's stored subjects, answered to a registration that asked
- * for consumer delivery: `consumer` relays the session's durable consumer on `subject`;
- * `core` (`reason` is the listener's machine-readable why) keeps the core subscriptions and
- * `POST /v1/replay`. The reason is read as a string, so one a later listener adds still parses.
+ * How the listener delivers a session's stored subjects, answered to every registration it
+ * accepts: `consumer` relays the session's durable consumer on `subject`. There is no other
+ * mode — a registration no session consumer can be given is refused (503 `consumer_error` or
+ * `no_grant`, 409 `not_requested` or `invalid_session_id`), never answered.
  */
-const DeliveryAnswerWireSchema = z.discriminatedUnion("mode", [
-  z.object({
-    mode: z.literal("consumer"),
-    subject: z.string().min(1),
-    stream_id: z.string(),
-    gap: z.boolean(),
-  }),
-  z.object({ mode: z.literal("core"), reason: z.string() }),
-]);
+const DeliveryAnswerWireSchema = z.object({
+  mode: z.literal("consumer"),
+  subject: z.string().min(1),
+  stream_id: z.string(),
+  gap: z.boolean(),
+});
 
 const SessionWireSchema = z.object({
   session_id: z.string(),
@@ -69,6 +53,11 @@ const SessionWireSchema = z.object({
   // fields and for a session whose plugin predates them.
   plugin: z.string().optional(),
   plugin_version: z.string().optional(),
+  // How the listener delivers to the session: "consumer" when its own session consumer holds its
+  // stored messages, "" for a session on the core path. A listener that reports delivery writes
+  // the key for every session, so an absent key is only a listener predating the field, never a
+  // session on the core path; optional here so such a listener's row still parses.
+  delivery: z.string().optional(),
 });
 
 const RoleWireSchema = z.object({
@@ -87,41 +76,15 @@ const RoleHeldWireSchema = z.object({
 const ErrorWireSchema = z.object({
   error: z.string(),
   code: z.string().optional(),
+  // The machine-readable why of a registration the listener refused because it can give the
+  // session no consumer (`consumer_error`, `no_grant`, `not_requested`, `invalid_session_id`).
+  reason: z.string().optional(),
   expected: z.array(z.string()).optional(),
 });
 
 const EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: z.string().optional(),
   holder: z.string().optional(),
-});
-
-const ReplayWireSchema = z.object({
-  stream: z.object({
-    // The stream's `envoy_stream_id` metadata: absent from an older listener's answer, or for a
-    // stream without it. `created` is what identifies the stream then.
-    id: z.string().min(1).optional(),
-    created: z.string(),
-    first_seq: z.number().int().nonnegative(),
-    last_seq: z.number().int().nonnegative(),
-  }),
-  subjects: z.array(
-    z.object({
-      subject: z.string(),
-      messages: z.array(
-        z.object({
-          seq: z.number().int().positive(),
-          subject: z.string(),
-          time: z.string(),
-          data: z.string(),
-        })
-      ),
-      next_after: z.number().int().nonnegative(),
-      more: z.boolean(),
-      // `not_followed` or `not_retained` today; read as a string so a reason a later listener adds
-      // still parses, as a subject that answered nothing.
-      refused: z.string().optional(),
-    })
-  ),
 });
 
 export type EnvoyFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -143,8 +106,9 @@ export type Interest = z.infer<typeof InterestWireSchema>;
 export type DeliveryAnswer = z.infer<typeof DeliveryAnswerWireSchema>;
 
 /**
- * The registration's answer: the interest, and the delivery mode. A listener of an earlier release
- * answers no `delivery` field, which reads as `core` (`not_answered`).
+ * The registration's answer: the interest, and the delivery it was given. Every answer carries
+ * one; a registration the listener can give no consumer is refused, never answered
+ * (`parseSubscribeAnswer`).
  */
 export type SubscribeResult = Interest & { readonly delivery: DeliveryAnswer };
 
@@ -163,26 +127,42 @@ export interface DeliveryRequest {
   readonly resume?: ResumePoint;
 }
 
-/** The reason a registration answer without a `delivery` field (an earlier listener) reads as. */
-const DELIVERY_NOT_ANSWERED = "not_answered";
+/** A delivery answer this build does not take, read far enough to name it in the failure. */
+const DeliveryRefusalSchema = z.object({
+  mode: z.string(),
+  reason: z.string().optional(),
+});
 
-/** The reason an answer whose `delivery` field this build cannot read reads as. */
-const DELIVERY_UNREADABLE = "unreadable_answer";
+/** What an answer whose `delivery` field this build cannot read at all is reported as. */
+const DELIVERY_UNREADABLE = "answered a delivery field this build cannot read";
 
-// An answer without a `delivery` field (an earlier listener), or with an unreadable one (a mode a
-// later listener adds), is `core`: the core path still works, so neither fails the registration.
-function parseSubscribeAnswer(body: unknown): SubscribeResult {
+/**
+ * Reads a registration answer. A session receives only what its own consumer holds, so an answer
+ * that names no consumer delivery — none at all (a listener predating session consumers), the
+ * `core` mode this build no longer accepts, or one this build cannot read — fails the
+ * registration here, loudly and with the listener's own words in the message, rather than
+ * leaving the session registered and deaf.
+ */
+export function parseSubscribeAnswer(body: unknown): SubscribeResult {
   const interest = InterestWireSchema.parse(body);
   const raw =
     typeof body === "object" && body !== null && "delivery" in body ? body.delivery : undefined;
   if (raw === undefined || raw === null) {
-    return { ...interest, delivery: { mode: "core", reason: DELIVERY_NOT_ANSWERED } };
+    throw new Error(
+      `the listener answered no delivery for ${interest.session_id}: it predates session consumers, and a session receives only what its own consumer holds`
+    );
   }
   const delivery = DeliveryAnswerWireSchema.safeParse(raw);
-  return {
-    ...interest,
-    delivery: delivery.success ? delivery.data : { mode: "core", reason: DELIVERY_UNREADABLE },
-  };
+  if (!delivery.success) {
+    const named = DeliveryRefusalSchema.safeParse(raw);
+    const said = named.success
+      ? `answered delivery mode ${named.data.mode}${named.data.reason === undefined ? "" : ` (${named.data.reason})`}`
+      : DELIVERY_UNREADABLE;
+    throw new Error(
+      `the listener gave ${interest.session_id} no consumer: it ${said}, and a session receives only what its own consumer holds`
+    );
+  }
+  return { ...interest, delivery: delivery.data };
 }
 
 /**
@@ -217,8 +197,11 @@ export type SubscribeInput = {
   readonly capabilities?: readonly string[];
   readonly driving: boolean;
   readonly selfSubscribed?: boolean;
-  /** Asks for consumer delivery (`DeliveryRequest`); absent keeps the core path. */
-  readonly delivery?: DeliveryRequest;
+  /**
+   * Asks for consumer delivery (`DeliveryRequest`). Required: a session receives only what its
+   * own consumer holds, so a registration that asked for none is refused `409 not_requested`.
+   */
+  readonly delivery: DeliveryRequest;
   /** The plugin this session registers through (its npm package name) and that plugin's build,
    * sent on every registration so the listener's session list shows which build each session
    * runs. */
@@ -323,31 +306,17 @@ export type PublishResult = {
   readonly holder?: string;
 };
 
-/** One followed subject of a replay request, read from after `after`, or, without one, started. */
-export interface ReplaySubjectInput {
-  readonly subject: string;
-  /** The last stream sequence handled; absent, the listener answers no messages and the watermark,
-   *  which is where a new cursor starts. */
-  readonly after?: number;
-}
-
-export interface ReplayInput {
-  readonly sessionID: string;
-  readonly subjects: readonly ReplaySubjectInput[];
-  /** The most messages across the whole answer; the listener defaults to 100 and caps it at 500. */
-  readonly maxMessages?: number;
-}
-
-/** The listener's answer to `POST /v1/replay`, in its wire shape. */
-export type ReplayResult = z.infer<typeof ReplayWireSchema>;
-export type ReplaySubjectResult = ReplayResult["subjects"][number];
-export type ReplayMessage = ReplaySubjectResult["messages"][number];
-
 export class EnvoyApiError extends Error {
   readonly name = "EnvoyApiError";
   readonly expected: readonly string[] | undefined;
   /** The listener's machine-readable `code`, when its error body carries one. */
   readonly code: string | undefined;
+  /**
+   * Why the listener refused, when its error body carries one: the reason a registration no
+   * session consumer can be given is refused with (`consumer_error`, `no_grant`,
+   * `not_requested`, `invalid_session_id`).
+   */
+  readonly reason: string | undefined;
 
   constructor(
     readonly details: {
@@ -364,13 +333,16 @@ export class EnvoyApiError extends Error {
     } catch {
       // A non-JSON error remains useful in the transport diagnostic.
     }
+    // The reason joins the message: a refused registration must fail with the listener's own
+    // machine-readable why in what the session is shown, not only in the client's field.
     super(
       parsed === undefined
         ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}`
-        : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`
+        : `${parsed.error}${parsed.reason === undefined ? "" : ` (reason: ${parsed.reason})`}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`
     );
     this.expected = parsed?.expected;
     this.code = parsed?.code;
+    this.reason = parsed?.reason;
   }
 }
 
@@ -384,12 +356,6 @@ export type EnvoyClient = {
   readonly setRole: (input: SetRoleInput) => Promise<SetRoleResult>;
   readonly getRole: (role: string) => Promise<RoleInfo>;
   readonly listSessions: (input?: ListSessionsInput) => Promise<readonly SessionInfo[]>;
-  /**
-   * Reads what the notification stream stored for a session's followed subjects after each one's
-   * cursor. Tried once, with no retry of a 5xx: a sweep runs again on its next trigger, and a 503
-   * `REPLAY_UNAVAILABLE` must reach the caller at once so the session can be told.
-   */
-  readonly replay: (input: ReplayInput) => Promise<ReplayResult>;
 };
 
 type RequestOptions = { readonly timeoutMs?: number; readonly retry?: boolean };
@@ -468,7 +434,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             ...(input.selfSubscribed === undefined
               ? {}
               : { self_subscribed: input.selfSubscribed }),
-            ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
+            delivery: input.delivery,
             // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
             // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
             // re-subscribes on each tick). The listener stores it separately from the registering
@@ -573,24 +539,6 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       const query = search.size === 0 ? "" : `?${search.toString()}`;
       return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
     },
-    replay: async (input) =>
-      ReplayWireSchema.parse(
-        JSON.parse(
-          await post(
-            "/v1/replay",
-            {
-              session_id: input.sessionID,
-              subjects: input.subjects.map((cursor) =>
-                cursor.after === undefined
-                  ? { subject: cursor.subject }
-                  : { subject: cursor.subject, after: cursor.after }
-              ),
-              ...(input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }),
-            },
-            { timeoutMs: REPLAY_TIMEOUT_MS, retry: false }
-          )
-        )
-      ),
   };
 }
 

@@ -2,6 +2,7 @@ package core
 
 import (
 	"slices"
+	"strings"
 
 	"github.com/nats-io/nats.go"
 
@@ -35,13 +36,14 @@ const inboxes = nats.InboxPrefix + ">"
 // entries. Publish, in this order:
 //   - every notification topic (bus.NotificationTopicPrefix): the stream's subjects, the role
 //     lanes, every exception lane, the session relay subjects (bus.DeliverSubjectPrefix), and any
-//     other topic a caller of /v1/messages/publish names, which the listener publishes over core
-//     NATS (an ad-hoc topic such as notifications.team.deploy-squad);
+//     other topic the listener publishes over core NATS, a role lane's forward among them
+//     (/v1/messages/publish refuses by name a notifications. topic no stream subject captures);
 //   - the stream's info, create and update, its stored-message get, its durable's
 //     (bus.ListenerDurable) info and create, the durable's acknowledgements, and JetStream's
-//     account info. The stored-message get is the read /v1/replay makes to return the retained
-//     notifications a session missed while its subscription was down: it reads one stored message
-//     at a time and can create, change or delete nothing;
+//     account info. The stored-message get reads one stored message at a time and can create,
+//     change or delete nothing; SessionPermissions does not hold it, so no session reads the
+//     stream's stored messages itself and each takes its own from the consumer its listener
+//     relays;
 //   - for each bucket of bus.ListenerBuckets in turn (the buckets the listener's keeper raises),
 //     the calls nats.go's KV makes and the raise a start sends (bucketPermissions): the bucket's
 //     stream info, create and update, direct and stream message gets, writes to its keys, its
@@ -193,13 +195,28 @@ func DispatchPermissions(machineID string) Permissions {
 }
 
 // SessionPermissions is the grant any agent session needs, with * for the session id. Publish:
-// reply inboxes (the receipt a role delivery waits for), then its agent stream's frames
-// (contracts.AgentStreamFramesSubject). Subscribe: every notification topic, then its agent
-// stream's control subject (contracts.AgentStreamControlSubject).
+// reply inboxes (the receipt a role delivery waits for, and the receipt of each relay frame),
+// then its agent stream's frames (contracts.AgentStreamFramesSubject). Subscribe: its own relay
+// subject (bus.DeliverSubject), the subject the listener that owns the session publishes every
+// message of the session's consumer (bus.SessionConsumerName) on, then its agent stream's control
+// subject (contracts.AgentStreamControlSubject). A session subscribes to no notification topic:
+// it receives what its consumer delivers, on that one subject, and nothing else.
+//
+// A Legion controller session needs nothing added for its project's notice lane
+// (notifications.legion.<project>.controller, the daemon's notify.ControllerTopic): it registers
+// that lane as an interest while it holds the project's controller role
+// (bus.ReachesPrivateStreamSubject), and the listener's relay hands it the notices on the relay
+// subject above, as it hands it every other message. No session subscribes to the lane itself,
+// which this set rightly refuses.
+//
+// What this set does not solve: every session on a shared user holds the same set, so the relay
+// subject carries * and one session can read another's relay frames until the per-session
+// credentials of dispatch://INFRA-840. dispatch://INFRA-778 is what hands a deployment's sessions
+// this grant; nothing here does.
 func SessionPermissions() Permissions {
 	return Permissions{
 		Publish:   Rules{Allow: []string{inboxes, contracts.AgentStreamFramesSubject("*")}},
-		Subscribe: Rules{Allow: []string{bus.NotificationTopicPrefix + ">", contracts.AgentStreamControlSubject("*")}},
+		Subscribe: Rules{Allow: []string{bus.DeliverSubject("*"), contracts.AgentStreamControlSubject("*")}},
 	}
 }
 
@@ -215,16 +232,30 @@ func DaemonPermissions() Permissions {
 
 // HostPermissions is the grant of a host's one NATS user, which its listener and every session on
 // the host share: in each direction the listener grant (listenerGrant), then each entry of the
-// session's it lacks. It holds no session-consumer call (sessionConsumerCalls), so a listener
-// connecting as a host user keeps its own durable alone and answers every registration that asks
-// for consumer delivery core; its sessions read on their own subscriptions and catch up through
-// /v1/replay. A listener whose user no session shares takes ListenerHostPermissions instead,
-// which holds those calls beside the same notifications.> subscribe.
+// session's it lacks, and in the subscribe direction the plain notifications.> entry this set
+// names itself. It holds no session-consumer call (sessionConsumerCalls), so a listener
+// connecting as a host user keeps its own durable alone and can give no session a consumer. A
+// listener whose user no session shares takes ListenerHostPermissions instead, which holds those
+// calls beside the same notifications.> subscribe.
+//
+// That subscribe is this set's own, not one it takes from the session's: SessionPermissions holds
+// it no longer, and a listener run with ENVOY_SUBSCRIBE_ALL_TOPICS=1, which a host user may be,
+// is refused the subscription without it and ends its start. Naming it here also leaves the
+// sessions sharing a host user the reach they have today, which the per-session credentials of
+// dispatch://INFRA-840 take away.
 func HostPermissions(machineID string) Permissions {
 	listener, agent := listenerGrant(machineID), SessionPermissions()
+	// notifications.> admits every notification subject the session's set names, its relay subject
+	// among them, so only the session entries outside that family are added: a second entry for
+	// subjects already allowed would re-render every deployed host user, and a hub's users are
+	// rendered into the VM's cloud-config, which changes only by replacing the VM.
+	subscribe := union(listener.Subscribe.Allow, []string{bus.NotificationTopicPrefix + ">"})
+	outside := slices.DeleteFunc(agent.Subscribe.Allow, func(entry string) bool {
+		return strings.HasPrefix(entry, bus.NotificationTopicPrefix)
+	})
 	return Permissions{
 		Publish:   Rules{Allow: union(listener.Publish.Allow, agent.Publish.Allow)},
-		Subscribe: Rules{Allow: union(listener.Subscribe.Allow, agent.Subscribe.Allow)},
+		Subscribe: Rules{Allow: union(subscribe, outside)},
 	}
 }
 

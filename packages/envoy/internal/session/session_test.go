@@ -108,7 +108,11 @@ func TestDeliver_NoRegistryEntry(t *testing.T) {
 	}
 }
 
-func TestDeliver_SkipsPush_whenSelfSubscribedSessionHasNoPort(t *testing.T) {
+// An entry the previous build wrote for a self-subscribed session with no serving port names a
+// session on the core path: it holds no consumer, nothing can be pushed to it, and no
+// subscription of its own takes its messages any more. The delivery is ErrNoPushTarget, which
+// raises a delivery exception, rather than the silent skip that rule once made.
+func TestDeliver_NoPushTarget_whenSelfSubscribedSessionHasNoPort(t *testing.T) {
 	// Given
 	var requests atomic.Int32
 	sessions, deliverer := newKVDeliverer(t)
@@ -131,8 +135,8 @@ func TestDeliver_SkipsPush_whenSelfSubscribedSessionHasNoPort(t *testing.T) {
 	)
 
 	// Then
-	if err != nil {
-		t.Fatalf("expected self-subscribed portless delivery to succeed, got %v", err)
+	if !errors.Is(err, session.ErrNoPushTarget) {
+		t.Fatalf("expected ErrNoPushTarget for a self-subscribed session with no port, got %v", err)
 	}
 	if got := requests.Load(); got != 0 {
 		t.Fatalf("expected no prompt_async request, got %d", got)
@@ -218,7 +222,7 @@ func TestDeliver_SkipsStoredTopics_whenSessionIsOnConsumerDelivery(t *testing.T)
 		resolved,
 	)
 	liveErr := deliverThroughEntry(t, deliverer, sessions,
-		newTestEnvelope("agent", "notifications.team.deploy", "live message"),
+		newTestEnvelope("agent", "notifications.lxspec.deploy", "live message"),
 		store.Interest{SessionID: "ses_consumer"},
 	)
 

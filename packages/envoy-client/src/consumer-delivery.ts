@@ -1,8 +1,7 @@
 import { agentSubject } from "@legion/contracts";
 import { z } from "zod";
 import { type DedupeIdentity, DedupeIdentitySchema, renderInbound } from "./delivery";
-import { type ReplayEngine, type ReplayNotice, subjectsOverlap } from "./replay";
-import { streamStores } from "./stream-topics";
+import { type DeliveryLedger, envoyNoticeText, subjectsOverlap } from "./delivery-ledger";
 import {
   type DeliveryAnswer,
   type DeliveryRequest,
@@ -161,13 +160,15 @@ export interface ConsumerEpoch {
 }
 
 /**
- * A notice the session is told once: messages may be missing. A host shows it as it shows the
- * replay engine's notice of the same kind.
+ * A notice the session is told once: messages may be missing. The relay is the one place that
+ * learns of a gap, from the registration answer or a frame's `Envoy-Gap` header, so this is the
+ * one place a gap notice is worded; the host renders it as it renders a failure notice
+ * (`envoyNoticeText`, `gapNoticeFields`).
  */
-export type ConsumerGapNotice = Extract<
-  ReplayNotice,
-  { readonly kind: "retention_gap" | "stream_recreated" }
->;
+export interface ConsumerGapNotice {
+  readonly kind: "retention_gap" | "stream_recreated";
+  readonly message: string;
+}
 
 const GAP_MESSAGES: Record<ConsumerGapNotice["kind"], string> = {
   retention_gap:
@@ -201,7 +202,7 @@ export interface ConsumerDeliveryHost {
    * or, from its third delivery on, `done` with the frame's failure notice (`ledger.liveFailed`).
    */
   deliver(frame: ConsumerFrame): void | Promise<void>;
-  /** Tells the session once that messages may be missing (the replay engine's gap notices). */
+  /** Tells the session once that messages may be missing. */
   gap(notice: ConsumerGapNotice): void;
   log(message: string, error?: unknown): void;
 }
@@ -212,14 +213,10 @@ export interface ConsumerDeliveryOptions {
   /** Publishes a reply body on a frame's reply subject (core NATS, no reply expected). */
   readonly publish: (reply: string, body: RelayReply) => void;
   /**
-   * The persisted ledger of frames written (`ReplayEngine.delivered`), which also shows the failure
-   * notice of a frame given up on (`ReplayEngine.liveFailed`). Its cursors seed the first
-   * registration of a session that moves from the core path to consumer delivery (`registration`)
-   * and say since which stream sequence that session followed each topic, so a frame stored while
-   * it was away is shown rather than dropped as stored before its follow time (`receive`), and
-   * `setConsumerMode` tells it whether the listener relays the stream now (`answered`).
+   * The persisted ledger of frames written (`DeliveryLedger.delivered`), which also shows the
+   * failure notice of a frame given up on (`DeliveryLedger.liveFailed`).
    */
-  readonly ledger: Pick<ReplayEngine, "delivered" | "liveFailed" | "state" | "setConsumerMode">;
+  readonly ledger: Pick<DeliveryLedger, "delivered" | "liveFailed">;
   /**
    * Stores the snapshot the host persists, called only when it changed since the last write; the
    * host keeps it where it keeps the session's state, and answers whether it stored it. A `false`
@@ -256,33 +253,29 @@ export interface ConsumerDelivery {
   beginEpoch(): ConsumerEpoch;
   /**
    * The registration's `delivery` field: the epoch, and the resume point. That is where this
-   * session is up to when it has one; with none — a session that has never taken a frame from a
-   * consumer — it is seeded from the ledger's cursors, so a session moving from the core path to
-   * consumer delivery resumes where its sweeps left off instead of at the stream's end.
+   * session is up to; with none — a session that has never taken a frame from a consumer — the
+   * listener starts the consumer at the stream's end.
    */
   registration(): DeliveryRequest;
   /**
-   * Takes the registration's answer and the topics that registration carried, and returns the
-   * answer's mode. A consumer answer that reports a gap, or names another stream than the resume
-   * the registration sent (its own point, or the one seeded from the ledger's cursors), tells the
-   * session once; its stored topics (`streamStores`) become the ones the
-   * listener relays (`relays`), and the ledger is put in consumer mode. Any other answer leaves
-   * the core path running. Persists the snapshot when it changed.
+   * Takes the registration's answer. An answer that
+   * reports a gap, or names another stream than the resume the registration sent, tells the
+   * session once. Persists the snapshot when it changed.
    */
-  answered(answer: DeliveryAnswer, topics: readonly string[]): DeliveryAnswer["mode"];
-  /**
-   * Whether the listener relays `topic` from the session's consumer: the core copy of a frame on
-   * it is shown nothing, since the relay's copy is the one shown.
-   */
-  relays(topic: string): boolean;
-  /** Whether the last registration was answered `consumer`. */
+  answered(answer: DeliveryAnswer): void;
+  /** Whether a registration has been answered since the relay was opened or last closed. */
   relaying(): boolean;
   /**
+   * Whether the session followed `topic` before a frame stored at `storedAtMs`: a frame the
+   * stream kept while the session was away acts on a topic only when it predates nothing
+   * (`closeReplayedRemoval`). The same clock allowance the follow filter uses applies.
+   */
+  followedBefore(topic: string, storedAtMs: number): boolean;
+  /**
    * Takes the topics the session follows now (its agent subject is always taken, and never kept
-   * among them). A new one is stamped now, so frames stored before it are dropped unless the
-   * ledger's cursors say the core path already followed it from below their sequence; a dropped
-   * one is forgotten. Call it before the registration that adds a topic. Persists the snapshot
-   * when it changed.
+   * among them). A new one is stamped now, so frames stored before it are dropped; a dropped one
+   * is forgotten. Call it before the registration that adds a topic. Persists the snapshot when
+   * it changed.
    */
   setFollowed(topics: Iterable<string>): void;
   /** Offers the snapshot to the host's `persist`, when it changed: call it after a frame is
@@ -351,16 +344,14 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
   let streamID: string | undefined;
   let held = new Set<number>();
   let written: number | undefined;
-  // The resume the last `registration()` sent, its own point or the seeded one (`seededResume`):
-  // a session moving from the core path has no resume point of its own, so this is what the
-  // answer's stream is compared with (`answered`).
+  // The resume the last `registration()` sent: what the answer's stream is compared with
+  // (`answered`).
   let registeredResume: ResumePoint | undefined;
   // A retention gap the registration answer told: the next frame's `Envoy-Gap` is the same one.
   let gapTold = false;
   let closed = false;
-  // The stored topics of the last registration answered `consumer`, which the listener relays
-  // (`streamStores`); undefined on the core path.
-  let relayed: ReadonlySet<string> | undefined;
+  // Whether a registration has been answered since this relay was opened or last closed.
+  let relaying = false;
   // The snapshot the host last wrote (`persist`): an unchanged one is not offered again. A new
   // delivery holds nothing, which is what a host with no snapshot of its own stored.
   let persisted = JSON.stringify({ follows: {} } satisfies ConsumerDeliverySnapshot);
@@ -397,10 +388,8 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
 
   // Tells `stream_recreated` once when the stream the last registration asked to resume on is not
   // `id`, the stream the listener now relays: that stream was replaced and what it held is gone.
-  // A session moving from the core path has no resume point of its own, only the seeded one, so
-  // this is the only comparison that can see the replacement; it runs on whichever of the
-  // registration's answer and the relay's first frame arrives first, since the listener starts the
-  // relay before it writes the answer.
+  // It runs on whichever of the registration's answer and the relay's first frame arrives first,
+  // since the listener starts the relay before it writes the answer.
   const tellReplacedResume = (id: string) => {
     const asked = resumePoint() ?? registeredResume;
     if (asked === undefined || asked.stream_id === id) return;
@@ -416,24 +405,6 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
       if (earliest === undefined || at < earliest) earliest = at;
     }
     return earliest;
-  };
-
-  // Whether the core path's ledger says the session followed a topic reaching this frame's
-  // subject from before the frame was stored. Its cursors are stream sequences, not wall clocks:
-  // `since` is the sequence the session started following that subject at, so a frame above it
-  // was stored while the session followed the topic however long ago it was away. A session
-  // moving from the core path has those cursors and no consumer snapshot, so `setFollowed` stamps
-  // every topic at the resume time; without this, every frame the relay owes it on a followed
-  // topic would be dropped as stored before the follow. Cursors read on another stream say
-  // nothing about this frame's sequence. Read only when the follow time would drop the frame.
-  const followedOnCorePath = (frame: RelayFrame): boolean => {
-    const state = ledger.state();
-    if (state.stream_id !== frame.streamID) return false;
-    for (const [topic, cursor] of Object.entries(state.subjects)) {
-      if (cursor.since === undefined || frame.streamSeq <= cursor.since) continue;
-      if (reaches(topic, frame.subject)) return true;
-    }
-    return false;
   };
 
   const settle = (entry: Entry, body: "done" | "nak") => {
@@ -466,11 +437,11 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
       settle(entry, "nak");
       return;
     }
-    // The session gets the notice a failed live frame gets.
+    // The frame is not coming back: the session is told what it was never shown.
     safely("failure notice", () => {
       const { subject, data } = entry.frame;
       const { envelope } = renderInbound(data, sessionID, subject);
-      if (envelope !== undefined) void ledger.liveFailed(subject, envelope, error, now());
+      if (envelope !== undefined) void ledger.liveFailed(envelope, error);
     });
     settle(entry, "done");
   };
@@ -560,14 +531,10 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
       return;
     }
 
-    // Not followed (the agent subject always is), stored before its topic was followed and not
-    // followed before that on the core path either (`followedOnCorePath`, which recovers what a
-    // session moving from the core path was owed), or already written: answered done, and the
-    // resume point passes it.
+    // Not followed (the agent subject always is), stored before its topic was followed, or
+    // already written: answered done, and the resume point passes it.
     const since = followedAt(frame.subject);
-    const unfollowed =
-      (since === undefined || frame.storedAtMs < since - FOLLOW_CLOCK_ALLOWANCE_MS) &&
-      !followedOnCorePath(frame);
+    const unfollowed = since === undefined || frame.storedAtMs < since - FOLLOW_CLOCK_ALLOWANCE_MS;
     const identity = unfollowed ? undefined : parseIdentity(frame.data);
     if (unfollowed || alreadyWritten(identity)) {
       send(frame.reply, "done");
@@ -600,27 +567,6 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     return written === undefined ? undefined : { stream_id: streamID, seq: written };
   };
 
-  // Where a session with no resume point of its own starts its first consumer: the lowest cursor
-  // the core path left over the subjects a relay carries (its agent subject and the followed
-  // topics the stream stores), on the stream those cursors were read on. Everything the sweeps
-  // handled is at or below it and what they never reached is above it, so the consumer the
-  // listener creates at that sequence plus one relays what is still owed and the stream's order
-  // holds; a frame below another followed topic's own cursor is already written, and the ledger
-  // drops it. A ledger with no cursor yet, or a state older than stream ids (a `resume` names the
-  // stream), seeds nothing: that consumer starts at the stream's end, as a session with no
-  // history does.
-  const seededResume = (): ResumePoint | undefined => {
-    const state = ledger.state();
-    const stream = state.stream_id;
-    if (stream === undefined) return undefined;
-    let lowest: number | undefined;
-    for (const [subject, cursor] of Object.entries(state.subjects)) {
-      if (cursor.after === undefined || !streamStores(subject)) continue;
-      if (lowest === undefined || cursor.after < lowest) lowest = cursor.after;
-    }
-    return lowest === undefined ? undefined : { stream_id: stream, seq: lowest };
-  };
-
   const snapshot = (): ConsumerDeliverySnapshot => {
     const resume = resumePoint();
     return {
@@ -646,7 +592,7 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
       return currentEpoch;
     },
     registration() {
-      const resume = resumePoint() ?? seededResume();
+      const resume = resumePoint();
       registeredResume = resume;
       return {
         consumer: true,
@@ -654,32 +600,28 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
         ...(resume === undefined ? {} : { resume }),
       };
     },
-    answered(answer, topics) {
-      if (answer.mode === "consumer") {
-        if (answer.stream_id !== "" && answer.stream_id !== streamID) {
-          // The stream the registration asked to resume on — the session's own resume point, or
-          // the one seeded from the ledger's cursors — is not the one the listener answered: that
-          // stream was replaced, the consumer starts at the new stream's end, and what the old
-          // one held is gone. Told once: the switch below makes the answer's stream the current
-          // one, so a later answer naming it tells nothing, and a relay frame that came first
-          // already told it (`tellReplacedResume` in `receive`).
-          tellReplacedResume(answer.stream_id);
-          switchStream(answer.stream_id);
-        }
-        if (answer.gap) {
-          tellGap("retention_gap");
-          gapTold = true;
-        }
-        relayed = new Set([...topics].filter(streamStores));
-      } else {
-        relayed = undefined;
+    answered(answer) {
+      relaying = true;
+      if (answer.stream_id !== "" && answer.stream_id !== streamID) {
+        // The stream the registration asked to resume on is not the one the listener answered:
+        // that stream was replaced, the consumer starts at the new stream's end, and what the
+        // old one held is gone. Told once: the switch below makes the answer's stream the
+        // current one, so a later answer naming it tells nothing, and a relay frame that came
+        // first already told it (`tellReplacedResume` in `receive`).
+        tellReplacedResume(answer.stream_id);
+        switchStream(answer.stream_id);
       }
-      ledger.setConsumerMode(relayed !== undefined);
+      if (answer.gap) {
+        tellGap("retention_gap");
+        gapTold = true;
+      }
       persist();
-      return answer.mode;
     },
-    relays: (topic) => relayed?.has(topic) === true,
-    relaying: () => relayed !== undefined,
+    relaying: () => relaying,
+    followedBefore(topic, storedAtMs) {
+      const at = follows.get(topic);
+      return at !== undefined && storedAtMs >= at - FOLLOW_CLOCK_ALLOWANCE_MS;
+    },
     setFollowed(topics) {
       const at = now();
       const next = new Map<string, number>();
@@ -707,8 +649,7 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     },
     close() {
       closed = true;
-      relayed = undefined;
-      ledger.setConsumerMode(false);
+      relaying = false;
       queue.length = 0;
       for (const entry of [...entries.values()]) settle(entry, "nak");
       blocking = undefined;
@@ -716,24 +657,38 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
   };
 }
 
-/** The answer a registration that asked the listener for no relay reads as. */
-const NOT_ASKED: DeliveryAnswer = { mode: "core", reason: "not_asked" };
+/** The `notice:` value of a gap notice whose kind has a name of its own. */
+const GAP_NOTICE_NAMES: Record<ConsumerGapNotice["kind"], string> = {
+  retention_gap: "messages may be missing",
+  stream_recreated: "stream recreated",
+};
+
+/** What a gap notice says, field by field. */
+function gapNoticeFields(notice: ConsumerGapNotice): Readonly<Record<string, string>> {
+  return { notice: GAP_NOTICE_NAMES[notice.kind], detail: notice.message };
+}
 
 /**
- * Takes the answer to a registration that asked for no relay, for the topics it carried: nothing
- * is relayed whatever the listener answered, so the session's delivery — when one is open since
- * the registration went out — takes none of the topics and the ledger leaves consumer mode, and
- * the core path's sweeps run on. With no delivery open the ledger alone is told, so this module
- * stays the one writer of its consumer mode.
+ * A gap notice as every host shows it: a card, rendered as every notice is (`envoyNoticeText`).
+ * It is a card and not a warning because it is about the messages the session was shown, which
+ * the session itself must know of, not about how this process is set up.
  */
-export function registeredWithoutRelay(
-  ledger: Pick<ReplayEngine, "setConsumerMode">,
-  delivery: ConsumerDelivery | undefined,
-  topics: readonly string[]
-): void {
-  if (delivery === undefined) {
-    ledger.setConsumerMode(false);
-    return;
-  }
-  delivery.answered(NOT_ASKED, topics);
+export function gapNoticeText(notice: ConsumerGapNotice): string {
+  return envoyNoticeText(gapNoticeFields(notice));
+}
+
+/**
+ * What a session is told when the listener can give it no consumer, worded once for every host:
+ * its registration was refused (`503 consumer_error|no_grant`, `409
+ * not_requested|invalid_session_id`) or failed, so nothing reaches it until a later registration
+ * is accepted. `why` is the listener's own message, which carries its machine-readable reason.
+ * Each host shows it where it shows a gap notice and says once per outage.
+ */
+export function inboundUnavailableNoticeText(why: string): string {
+  return envoyNoticeText({
+    notice: "Envoy inbound unavailable",
+    error: why,
+    detail:
+      "The listener gave this session no durable consumer, which is the only path an Envoy message reaches it by, so it receives none. Everything else works, and the session registers again at every heartbeat; what the stream stored meanwhile arrives once a registration is accepted.",
+  });
 }

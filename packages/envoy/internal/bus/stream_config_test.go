@@ -323,7 +323,9 @@ func TestStreamConfigExcludesRoleLanes(t *testing.T) {
 		"notifications.legion.>",
 		"notifications.ghostwispr.>",
 		"notifications.whatsapp.>",
+		"notifications.team.>",
 		"notifications.envoy.exceptions.notifications.agent.>",
+		"notifications.envoy.exceptions.notifications.team.>",
 	}
 	if !reflect.DeepEqual(streamCfg.Subjects, wantSubjects) {
 		t.Fatalf("stream subjects = %v, want %v", streamCfg.Subjects, wantSubjects)
@@ -335,58 +337,49 @@ func TestStreamConfigExcludesRoleLanes(t *testing.T) {
 	}
 }
 
-// Every subject of the stream's configuration is classified for /v1/replay as shared or private,
-// and in one list only, so a subject added to the stream without a decision on whether a session
-// may replay it through a registered interest fails here; a list naming a subject the stream does
-// not carry is a stale classification and fails too.
-func TestEveryStreamSubjectIsClassifiedForReplay(t *testing.T) {
+// Every subject of the stream's configuration is classified by whether a topic under it ever
+// carries one agent session's private payload: a private one is in privateStreamSubjects, which
+// POST /v1/interests/subscribe reads (ReachesPrivateStreamSubject) to refuse a session an
+// interest over another session's messages, and every other is named here with the reason its
+// publisher gives. Only privateStreamSubjects is production code, read by that one route, so the
+// subjects deliberately left out of it live here, where they only have to force the decision. A
+// subject added to the stream without one fails here, one in both lists fails, and a private
+// subject the stream does not carry is a stale classification and fails too.
+func TestEveryStreamSubjectIsClassifiedForInterestRegistration(t *testing.T) {
+	notPrivate := []string{
+		// Dispatch's outbox: an issue's, a document's or a project's events
+		// (internal/dispatch/outbox envelope), each readable on its owner in Dispatch, and
+		// Dispatch's start (startup.Subject); a copy for one session goes to that session's agent
+		// subject, and an issue-less message has no owner and is not published (outbox publish).
+		"notifications.dispatch.>",
+		// A repository's GitHub webhook events (internal/webhook github, contracts.GithubEnvelopes)
+		// and the CI settlements derived from them (internal/cistore).
+		"notifications.github.>",
+		// A Slack channel's or thread's messages and app mentions (internal/webhook slack,
+		// contracts.SlackEnvelopes).
+		"notifications.slack.>",
+		// A Ghost Wispr recording's events, under its recording id, not an agent session's
+		// (internal/webhook ghostwispr, contracts.GhostWisprEnvelope).
+		"notifications.ghostwispr.>",
+		// A WhatsApp chat's messages the MCP bridge relays (internal/mcpbridge BuildEnvelope).
+		"notifications.whatsapp.>",
+		// A team's own topic, published by the listener's route for whoever registered it
+		// (cmd/listener publishHandler): a group's lane carries no one session's private payload,
+		// as its sender names the team and not a session.
+		"notifications.team.>",
+	}
 	for _, subject := range streamCfg.Subjects {
-		shared, private := slices.Contains(sharedStreamSubjects, subject), slices.Contains(privateStreamSubjects, subject)
+		private, shared := slices.Contains(privateStreamSubjects, subject), slices.Contains(notPrivate, subject)
 		switch {
-		case !shared && !private:
-			t.Errorf("stream subject %q is neither shared nor private for replay: add it to sharedStreamSubjects or privateStreamSubjects with the reason its publisher gives", subject)
-		case shared && private:
-			t.Errorf("stream subject %q is both shared and private for replay", subject)
+		case !private && !shared:
+			t.Errorf("stream subject %q is classified neither way: add it to privateStreamSubjects when a topic under it carries one session's payload, and to notPrivate here with the reason its publisher gives otherwise", subject)
+		case private && shared:
+			t.Errorf("stream subject %q is both private and not private", subject)
 		}
 	}
-	for _, subject := range slices.Concat(sharedStreamSubjects, privateStreamSubjects) {
+	for _, subject := range slices.Concat(privateStreamSubjects, notPrivate) {
 		if !slices.Contains(streamCfg.Subjects, subject) {
-			t.Errorf("replay classifies %q, which is no subject of the stream", subject)
-		}
-	}
-}
-
-// A topic is shared only under one shared stream subject: an issue, document, GitHub, Slack, Ghost
-// Wispr or WhatsApp topic, a wildcard inside one of them included, and nothing under an agent
-// subject, an exception lane or the Legion controller's notices, nor a wildcard wider than one
-// shared subject.
-func TestSharedStreamTopicHoldsOnlyTopicsUnderASharedStreamSubject(t *testing.T) {
-	for topic, want := range map[string]bool{
-		"notifications.dispatch.issue.KEY-1.>":                        true,
-		"notifications.dispatch.issue.KEY-1.ask.answered":             true,
-		"notifications.dispatch.document.ACME.notes-md.>":             true,
-		"notifications.dispatch.>":                                    true,
-		"notifications.github.acme.widgets.pr.7":                      true,
-		"notifications.github.acme.widgets.pr.7.>":                    true,
-		"notifications.slack.T1.C1.message":                           true,
-		"notifications.ghostwispr.20260326041405.>":                   true,
-		"notifications.whatsapp.15551234567.>":                        true,
-		"notifications.agent.ses_a":                                   false,
-		"notifications.agent.>":                                       false,
-		"notifications.envoy.exceptions.notifications.agent.ses_a":    false,
-		"notifications.envoy.exceptions.>":                            false,
-		"notifications.envoy.exceptions.notifications.dispatch.issue": false,
-		"notifications.legion.ACME.controller":                        false,
-		"notifications.role.reviewer":                                 false,
-		"notifications.team.x.y":                                      false,
-		"notifications.dispatch":                                      false,
-		"notifications.*.acme.widgets.pr.7":                           false,
-		"notifications.*":                                             false,
-		"notifications.>":                                             false,
-		">":                                                           false,
-	} {
-		if got := SharedStreamTopic(topic); got != want {
-			t.Errorf("SharedStreamTopic(%q) = %v, want %v", topic, got, want)
+			t.Errorf("the classification names %q, which is no subject of the stream", subject)
 		}
 	}
 }

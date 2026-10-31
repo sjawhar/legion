@@ -1,11 +1,5 @@
 import type { RelayHeaders } from "@legion/envoy-client/consumer-delivery"
-import {
-  createDeliveryDedupe,
-  type DedupeIdentity,
-  DedupeIdentitySchema,
-  type DeliveryDedupe,
-  readArrivals,
-} from "@legion/envoy-client/delivery"
+import { DedupeIdentitySchema } from "@legion/envoy-client/delivery"
 import { messageFor } from "@legion/envoy-client/errors"
 import { expandSubscriptionTopics } from "@legion/envoy-client/transport"
 import { z } from "zod"
@@ -14,25 +8,13 @@ import { z } from "zod"
 export interface ChannelBrokerMessage {
   readonly subject: string
   readonly data: Uint8Array
+  /**
+   * The frame's reply subject, which only a relay frame carries anything useful in: the relay's
+   * own answer token (`RelayMessage`, consumer delivery).
+   */
   readonly reply?: string
   /** The message's NATS headers; only a relay frame (consumer delivery) carries any read here. */
   readonly headers?: RelayHeaders
-}
-
-/** A broker message as the forwarder delivers it: decoded once and classified. */
-export interface ChannelInboundMessage extends ChannelBrokerMessage {
-  /** `data` decoded as UTF-8 once, at the broker boundary. */
-  readonly raw: string
-  /**
-   * The event already reached the channel queue, or its relayed copy is the one shown
-   * (`ChannelForwarderOptions.relayed`); direct request-reply still needs its receipt.
-   */
-  readonly duplicate?: true
-  /**
-   * The topic the envelope itself names. It differs from `subject` when the listener forwarded
-   * a lane (a role topic) onto the direct subject and is waiting for a receipt.
-   */
-  readonly envelopeTopic?: string
 }
 
 export interface ChannelTopicSubscription extends AsyncIterable<ChannelBrokerMessage> {
@@ -56,62 +38,28 @@ export interface ChannelForwarderConnection {
   status(): AsyncIterable<ChannelConnectionStatus>
 }
 
+/**
+ * The topics this session follows, and the one broker connection it holds. Nothing is subscribed
+ * for a topic: the listener relays every followed subject from the session's own durable consumer
+ * (`ConsumerDelivery`), so a topic is followed by registering it, and the only subscription the
+ * process holds is that consumer's relay subject.
+ */
 export interface ChannelForwarder {
-  /** Start delivering a topic; a topic already followed is left alone. */
+  /** Start following a topic; one already followed is left alone. */
   follow(topic: string): void
-  /** Stop delivering the given topics, or every topic when the list is empty. */
-  unfollow(topics: readonly string[]): Promise<void>
-  /** Topics currently delivered, in follow order. */
+  /** Stop following the given topics, or every topic when the list is empty. */
+  unfollow(topics: readonly string[]): void
+  /** Topics currently followed, in follow order. */
   topics(): readonly string[]
   /** True once the connection is closed for good. */
   isClosed(): boolean
-  /** Stop every subscription and drain the NATS connection; never rejects. */
+  /** Drain the NATS connection; never rejects. */
   close(): Promise<void>
 }
 
-/** The replay ledger as the live path sees it (`@legion/envoy-client/replay`). */
-export interface ChannelForwarderLedger {
-  /** Whether the session was shown the frame already, before this process started included. */
-  delivered(frame: DedupeIdentity): boolean
-  /** Records a frame Claude Code was handed, so no replay shows it again; never rejects. */
-  recordDelivered(frame: DedupeIdentity): Promise<void>
-}
-
 export interface ChannelForwarderOptions {
-  /**
-   * Hands one frame on and resolves whether Claude Code got it; `false`, or a rejection, releases
-   * the frame's dedupe claim, so a re-send of it still arrives.
-   */
-  readonly deliver: (message: ChannelInboundMessage) => Promise<boolean>
   /** How long close waits for a broker drain before closing outright. */
   readonly drainTimeoutMs?: number
-  /** The claims of the live path; a replay engine reads them to leave a frame in flight alone. */
-  readonly dedupe?: DeliveryDedupe
-  readonly ledger?: ChannelForwarderLedger
-  /**
-   * A frame whose delivery rejected, after its claim was released: `topic` is the subscription it
-   * came on, which says whether a replay will show it again, and `receivedAt` when the
-   * subscription yielded it (`Date.now`, `readArrivals`), however long the frames before it took
-   * to deliver, which says whether a replay cursor started past it.
-   */
-  readonly failed?: (
-    message: ChannelInboundMessage,
-    topic: string,
-    error: unknown,
-    receivedAt: number,
-  ) => void
-  /**
-   * Whether the listener relays the subscription `topic`'s subject from the session's consumer
-   * (consumer delivery), which shows its frames: a core frame on it claims nothing and goes on as
-   * a duplicate, only to answer a lane's receipt. Read before the claim, so the core copy never
-   * holds the claim its relayed copy needs.
-   */
-  readonly relayed?: (topic: string) => boolean
-}
-
-interface Following {
-  readonly subscription: ChannelTopicSubscription
-  readonly done: Promise<void>
 }
 
 // A delivery's identity fields parse independently: a field the shared rule refuses identifies
@@ -125,7 +73,6 @@ const DeliveryIdentity = DedupeIdentitySchema.extend({
   topic: z.string().min(1).optional().catch(undefined),
 })
 
-const decoder = new TextDecoder()
 const DEFAULT_DRAIN_TIMEOUT_MS = 1_000
 
 /** A frame's identity fields, each kept only when valid; undefined for a frame that is not JSON. */
@@ -145,103 +92,37 @@ function report(what: string, error: unknown): void {
 }
 
 /**
- * One channel process receives both its direct Envoy route and every followed
- * topic. It deduplicates at the broker boundary, by event id and by dedupe key,
- * so an event covered by several patterns, and a re-send of one already
- * delivered, still becomes one Claude Code channel notification. With a replay
- * ledger, a frame the session was shown before this process started is dropped
- * too, and each frame handed on is recorded there before its claim settles.
+ * One channel process follows its direct Envoy route and every topic a human or a tool added to
+ * it. Each is a concrete subject the registration carries (`expandSubscriptionTopics`), and the
+ * listener relays all of them from the session's own consumer, so nothing here subscribes: the
+ * set is what a registration advertises and what the relay is filtered on.
  */
 export function createChannelForwarder(
   connection: ChannelForwarderConnection,
-  options: ChannelForwarderOptions,
+  options: ChannelForwarderOptions = {},
 ): ChannelForwarder {
-  const following = new Map<string, Following>()
-  const dedupe = options.dedupe ?? createDeliveryDedupe()
+  const following = new Set<string>()
   const drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS
-
-  const deliver = async (topic: string, subscription: ChannelTopicSubscription): Promise<void> => {
-    try {
-      for await (const { message, receivedAt } of readArrivals(subscription)) {
-        const raw = decoder.decode(message.data)
-        const identity = deliveryIdentity(raw)
-        // The relay shows this subject's frames: the core copy answers only a lane's receipt.
-        let claim = options.relayed?.(topic) === true ? undefined : dedupe.claim(identity)
-        // A repeat of a frame the session was shown before this process started, which only the
-        // replay ledger knows of: it goes on as a duplicate, which still answers a lane's receipt.
-        if (claim !== undefined && identity !== undefined && options.ledger?.delivered(identity)) {
-          claim.settle()
-          claim = undefined
-        }
-        // A nats.js Msg exposes subject/data/reply through prototype getters,
-        // which an object spread would silently drop; copy the fields by name.
-        const inbound: ChannelInboundMessage = {
-          subject: message.subject,
-          data: message.data,
-          raw,
-          // nats.js MsgImpl.reply is a getter returning "" when unset; absent means no reply address.
-          ...(message.reply ? { reply: message.reply } : {}),
-          ...(identity?.topic === undefined ? {} : { envelopeTopic: identity.topic }),
-          ...(claim === undefined ? { duplicate: true } : {}),
-        }
-        let handed: boolean
-        try {
-          handed = await options.deliver(inbound)
-        } catch (error) {
-          claim?.release()
-          report(`could not deliver a message on ${message.subject}`, error)
-          // A duplicate was never being shown; only its receipt can have failed.
-          if (claim !== undefined) options.failed?.(inbound, topic, error, receivedAt)
-          continue
-        }
-        if (claim === undefined) continue
-        if (!handed) {
-          claim.release()
-          continue
-        }
-        // Recorded before the claim settles, so a replay never finds the frame neither pending
-        // nor in the ledger and shows it a second time. The next frame does not wait for the
-        // write: a repeat of this one meanwhile still finds its claim.
-        const taken = claim
-        const settle = () => taken.settle()
-        if (identity === undefined || options.ledger === undefined) settle()
-        else void options.ledger.recordDelivered(identity).then(settle, settle)
-      }
-    } catch (error) {
-      report(`delivery from ${topic} stopped`, error)
-    }
-  }
-
-  const stop = async (topics: readonly string[]): Promise<void> => {
-    const stopping = topics.flatMap((topic) => {
-      const entry = following.get(topic)
-      if (entry === undefined) return []
-      following.delete(topic)
-      entry.subscription.unsubscribe()
-      return [entry.done]
-    })
-    await Promise.all(stopping)
-  }
 
   return {
     follow(topic) {
-      for (const subject of expandSubscriptionTopics([topic])) {
-        if (following.has(subject)) continue
-        const subscription = connection.subscribe(subject)
-        following.set(subject, { subscription, done: deliver(subject, subscription) })
-      }
+      for (const subject of expandSubscriptionTopics([topic])) following.add(subject)
     },
     unfollow(topics) {
-      return stop(topics.length === 0 ? [...following.keys()] : expandSubscriptionTopics(topics))
+      if (topics.length === 0) {
+        following.clear()
+        return
+      }
+      for (const subject of expandSubscriptionTopics(topics)) following.delete(subject)
     },
     topics() {
-      return [...following.keys()]
+      return [...following]
     },
     isClosed() {
       return connection.isClosed()
     },
     async close() {
-      await stop([...following.keys()])
+      following.clear()
       if (connection.isClosed()) return
       const timeout = Promise.withResolvers<void>()
       const timer = setTimeout(timeout.resolve, drainTimeoutMs)

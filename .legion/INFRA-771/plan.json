@@ -1,0 +1,153 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-771",
+  "completed": "2026-10-30T21:05:00Z",
+  "plan": "dispatch://INFRA-771/artifact/plan-md",
+  "basedOn": "sjawhar/legion#2446 head c6be54a4 (branch legion/INFRA-594, open). No implementation commit before #2446 merges; the implementer starts with `jj new main@origin` after that merge, when INFRA-514's architect says.",
+  "shipsInThisPullRequest": [
+    "T1 the measurement surface: `delivery` on GET /v1/sessions and /v1/registry/<id>, the client session schema, and the e2e's vacuous assertion fixed",
+    "T3 team topics stored under a new `notifications.team.>` stream subject, every other uncaptured `notifications.` topic refused by name at publish and at interest subscribe, and the ad-hoc transport deleted",
+    "T4 every role and topic forward becomes stored-only; the lane receipt and both plugins' receipt publishes are deleted",
+    "T5 the listener refuses a registration it cannot give a consumer, before the interest write; the `core` answer mode and both `SelfSubscribed && Port == 0` disjuncts are deleted; the start fails when the session-consumer connection or the relay reply subscription fails",
+    "T6 POST /v1/replay deleted with its handler, route, tests, the shared/private replay classification, and the server-change soak rewritten onto the relay",
+    "T7 envoy-client, pi-envoy and claude-envoy: replay.ts split into a kept ledger and a deleted sweep, `delivery` required, a non-consumer answer refused, both core subscribe/pump paths deleted",
+    "T8 tests inverted, deleted and added (seven new tests, listed in the plan)",
+    "T9 the fallback removed from the normative prose; docs/solutions records marked as the pre-INFRA-771 design",
+    "T10 the live proof: `--listener-grant` and `core_path_shown` deleted, a `team` event kind added",
+    "T11 changelog fragments in envoy, envoy-client, pi-envoy, claude-envoy",
+    "T12 the deploy, the measurement and the production record"
+  ],
+  "waits": [
+    "G1 (gate, theorem-labs/agent-infra, no legion code): one `listenerMachineId` user for every host that runs its own listener and for the listener beside envoy-dispatch, with its seed. Until it is deployed, those sessions cannot get a consumer and the removal cuts them off rather than moving them. Deployed, with acceptance 1 reading 0, before T5 reaches production.",
+    "Role topics in the stream: a separate issue, since the role-lane purge must be deleted and deployed everywhere before a later build may add the subject (two deploys).",
+    "Acceptance 6, the SessionPermissions narrowing: spec v4's own order (after dispatch://INFRA-554 proves dispatch://INFRA-14, after both listeners' sessions are on consumers, after dispatch://INFRA-777, after ENVOY_SUBSCRIBE_ALL_TOPICS is no longer needed). Its cross-session half needs per-session credentials and should be split off."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker — the phase's own rules: the handoff, the push, the pull-request body and the no-deferral rule this change will be tempted to break.",
+      "skill://legion-worker/references/pr-body.md — the six acceptance lines each need a proof entry with a surface, a command and a negative control.",
+      "skill://legion-worker/references/cleanup-deletion.md — the change deletes a route (/v1/replay), a transport (the ad-hoc publish path) and a module half (replay.ts's sweep).",
+      "skill://legion-worker/references/conflicts-and-rewrites.md — the branch must be based on main after #2446 merges, and reintegrating the base is bounded.",
+      "skill://legion-worker/references/skip-checks-trailer.md — handoff-only pushes carry the trailer, code pushes never do.",
+      "skill://legion-worker/references/tools.md — the live proof needs socat >= 1.8.0, psql and python3 in the pod.",
+      "skills/envoy/SKILL.md and skills/envoy/references/deliveries.md — the delivery rules this change rewrites and must keep true.",
+      "skill://ce-simplify-code — T5 to T7 are mostly deletion; the simplify pass is where the leftover seams are found.",
+      "skill://dispatch and skill://dispatch-first — any finding or ask raised during the work."
+    ],
+    "test": [
+      "skill://legion-worker — the tester's phase rules and its CI-red interruption rule.",
+      "skill://legion-worker/references/pr-body.md — what a proof and a negative control are, which this issue needs for all five provable acceptance lines.",
+      "skills/envoy/references/deliveries.md — the delivery rules the live proof asserts; the tester judges the e2e against them.",
+      "scripts/e2e/README.md, the envoy-session-delivery.sh entry — the live proof's own contract: required inputs, exit codes and how a pass reads.",
+      "skill://legion-worker/references/tools.md — the pod's tool set and what to do when a test fails in the pod."
+    ],
+    "review": [
+      "skill://legion-worker and skill://legion-worker/references/review-threads.md — how a review round is posted and resolved.",
+      "skill://legion-worker/references/merge-gate.md — the approval, the head by SHA and what READY refuses.",
+      "skill://thermonuclear-deep-review — a removal that can strand a live session is a correctness and developer-experience risk; the refusal paths and the rollout are where it bites.",
+      "skill://thermonuclear-code-quality — the replay.ts split and the listener's refusal paths are the two places a type and module boundary can blur.",
+      "skill://asd-ste100 — this change rewrites AGENTS.md, the envoy skill and the documentation site."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Removing the plugins' core subscription breaks every receipt /v1/messages/publish waits for; the spec never mentions receipts. A relay frame cannot answer one: its Reply is the relay's own ack token (cmd/listener/session_relay.go:747).",
+        "answer": "Plan section 1: every forward becomes stored-only (roleForwardStoredOnly true for every holder; confirmTopicRecipient gone with the ad-hoc transport), which StartRequestStoredTo already blesses for a holder that answers no receipt. T4. The contract change — a role send and a topic send stop answering 504 for a live recipient that did not confirm — is decision 1 to INFRA-514's architect."
+      },
+      {
+        "finding": "Ambiguity: acceptance 2 ('no subscription that delivers to the transcript') permits a receipt-only core subscription; the Outcome ('no code path receives') forbids it.",
+        "answer": "Plan section 2 takes the Outcome: no core subscription on an agent subject or a notification topic survives in either plugin. With stored-only forwards nothing is lost by the stricter reading. Acceptance 2's test (new test 7) asserts the subscription set is exactly the relay subject and the agent-stream control subject."
+      },
+      {
+        "finding": "Unsupported claim: 'a plugin update on each dev box' cannot move a session whose listener runs as a host NATS user, because HostPermissions and DispatchPermissions hold no sessionConsumerCalls and so answer every registration core/no_grant.",
+        "answer": "Plan section 3a. The plan does not widen those grants — permissions.go:83-94 reserves those calls to a user no session shares, and permissions_test.go:112-119 and :232-241 assert it. #2446 already ships ListenerHostPermissions (permissions.go:127-131), rendered from the hub's existing listenerMachineId input (infra/gcp/natshub.go:146, :455). The prerequisite is gate G1, a theorem-labs/agent-infra change with no legion code; decision 6 asks who lands it."
+      },
+      {
+        "finding": "Acceptance 1 has no surface: GET /v1/sessions carries no delivery mode, and the e2e's `all(.delivery == \"core\")` passes vacuously.",
+        "answer": "T1 adds `delivery` to sessionInfo and its builder (api.go:765-782, :805-822) and to the client's session schema, and fixes the e2e assertion. Acceptance 1's command is in the plan's section 12 table, read on the hub and the in-cluster listener."
+      },
+      {
+        "finding": "Adding notifications.role.> to the stream is destroyed by any older ConnectOwningStream caller: reconcileSubjects drops a subject capturing a role lane and migrateRoleLanesOffStream purges the stored role messages.",
+        "answer": "Plan section 5: role topics stay out of the stream in this issue. Storing them needs two deploys (delete the purge everywhere, then add the subject), which one pull request cannot do, so it is a separate issue. Spec departure 2."
+      },
+      {
+        "finding": "'Store every topic a session can receive' is not expressible for ad-hoc topics: the namespace is open, a stream subject is a literal prefix plus '>', and notifications.> would capture the relay subject and overlap the role lanes.",
+        "answer": "Plan section 4: add one closed prefix notifications.team.> and refuse every other uncaptured notifications. topic by name at publish and at interest subscribe. A new non-overlapping prefix is rollout-safe (reconcileSubjects keeps a foreign deployed subject). No session can raw-publish a notifications. subject (SessionPermissions.Publish is _INBOX.> and agentstream.*.frames), so the refusal strands no session. Spec departure 1."
+      },
+      {
+        "finding": "Storing role topics delivers nothing unless the holder registers the role topic, which both plugins strip; and a consumer keeps its position when its filter changes, so a role message stored before the next claimant added the filter is never delivered. The one-holder rule would break.",
+        "answer": "Moot under the plan's section 5: role topics are not stored. The role path stays as #2446 leaves it — the publish route resolves the holder and forwards to its agent subject, a stored subject — with only the stored-only change of T4, so a role message to a down holder arrives once when it returns."
+      },
+      {
+        "finding": "Acceptance 6's cross-session half is unachievable: the hub grants SessionPermissions to one credential-free user every session becomes, rendered with * for the session id, so notifications.envoy.deliver.* necessarily lets any session subscribe to any session's relay subject.",
+        "answer": "Plan section 6: acceptance 6 waits by spec v4's own order, and the plan asks the architect (decision 4) to split it — the achievable half (notifications.> and notifications.agent.* refused, the session's own relay subject works) now, the cross-session half as its own issue needing per-session credentials."
+      },
+      {
+        "finding": "'A registration that cannot get a consumer is refused with a named error' covers four situations, two transient and two permanent, and the spec defines no status, no rollback of the interest row already written, and no client behaviour.",
+        "answer": "T5: the delivery decision moves before UpsertWithin so a refused registration writes nothing; 503 with reason consumer_error or no_grant for the transient cases, 409 with reason not_requested or invalid_session_id for the permanent ones; the client fails the registration loudly in both. Decision 5 asks the architect the one product question: the session starts with Envoy inbound unavailable and retries each heartbeat, rather than refusing to start."
+      },
+      {
+        "finding": "Stale core-path session entries written by the previous build survive the deploy; without the SelfSubscribed && Port == 0 disjunct each becomes ErrNoPushTarget and raises an exception per stored message.",
+        "answer": "Plan section 11 item 1: no shim. The deploy is gated on acceptance 1 reading 0 and on one interest-reaper window after the last core session left, and the deploy record names the bounded exception window if any appears. An exception that says a session is unreachable is the honest answer; a silent skip would hide it."
+      },
+      {
+        "finding": "The listener's own 'stays on core delivery' start-up fallbacks (connectSessionDelivery, the relay reply subscription) become undefined once the core path is gone.",
+        "answer": "T5: the start fails as the live topics lane already does (main.go:973-985), so a bad deploy stops at the rollout rather than becoming a listener that refuses every session."
+      },
+      {
+        "finding": "Acceptance 5 has no surface in the live proof: no window leaves both listeners' role lanes unsubscribed and no event kind publishes a team or ad-hoc topic, so acceptance 3 can pass while acceptance 5 is unproven.",
+        "answer": "T10 adds a `team` event kind published through /v1/messages/publish in every window, so window a (both sessions SIGKILLed) proves the team half. The role half is rewritten by spec departure 2 to what window a already proves: a role message to a down holder arrives once when it returns."
+      },
+      {
+        "finding": "Acceptance 1, 3 and 4 name no command, no host and no artifact.",
+        "answer": "The plan's section 12 table gives each a surface, an exact command and a pass condition, including committing the live proof's TABLES.md under .legion/INFRA-771/evidence/ as #2446 did."
+      },
+      {
+        "finding": "The Why's 'fix whatever keeps causing agents to re-introduce this' has no acceptance line; acceptance 2 only tests the current code.",
+        "answer": "New test 7 asserts the plugin's subscription set after registration is exactly the relay subject and the agent-stream control subject, so the build fails the moment a subscription is added back; and T9 rewrites the AGENTS.md rule from 'the fallback INFRA-771 removes' to a flat prohibition, which is what dispatch://INFRA-779's grep reads."
+      },
+      {
+        "finding": "'The /v1/replay catch-up that exists only to patch it' is true of the HTTP sweep and false of the module: replay.ts is also the dedupe ledger and failure-notice engine consumer delivery depends on.",
+        "answer": "T7 splits it: the sweep, the HTTP call, the cursors and the not_served/unavailable notices go; the ledger, liveFailed, gap-notice routing, rememberedTopics, replayFollowedSubjects and closeReplayedRemoval stay, and the module is renamed to what it now is."
+      },
+      {
+        "finding": "Ambiguity: 'Remove the docs that describe the fallback' — delete or annotate? Deleting a docs/solutions record destroys the record of a solved problem, and INFRA-779 wants each remaining hit to name itself as the pre-INFRA-7 design.",
+        "answer": "T9 and plan section 9: the fallback is removed from the normative documents and the docs/solutions records are marked as the pre-INFRA-771 design rather than deleted. CHANGELOG.md files are never edited; packages/claude-envoy/dist/ is never committed."
+      },
+      {
+        "finding": "Ambiguity: is acceptance 1's measurement taken before the merge or before the deploy? A dev box re-registers at every heartbeat, so a clean reading at merge time says nothing about deploy time.",
+        "answer": "Both, in the plan's sections 11 item 3 and 12: read against the hub carrying G1 and T1+T3 and quoted on the pull request before sign-off, and read again immediately before the listener deploy that carries T5."
+      },
+      {
+        "finding": "The architect asked which steps ship and which wait, and the spec's bullet order does not give it.",
+        "answer": "The plan's section 8 table (T1, G1, T3 to T12) and the shipsInThisPullRequest and waits lists of this handoff."
+      }
+    ]
+  },
+  "planReview": { "verdict": "approved", "rounds": 2 },
+  "specDepartures": [
+    {
+      "spec": "Change: 'Store every topic a session can receive in the stream, role topics and team or ad-hoc topics included' — for team and ad-hoc topics.",
+      "plan": "One new closed stream subject, notifications.team.>, and a named refusal at POST /v1/messages/publish and POST /v1/interests/subscribe for every other uncaptured notifications. topic, which deletes the ad-hoc transport (sendToTopic, topicRecipients, confirmTopicRecipient and the UsesCoreTransport publish branch) instead of storing an open namespace.",
+      "evidence": "An ad-hoc topic is defined as any notifications.<x> the stream does not capture (internal/bus/nats.go:1202-1218); a stream subject must be a literal prefix plus '>' (internal/bus/stream.go:212-226); the only subject covering the namespace, notifications.>, would capture the relay subject notifications.envoy.deliver.<id> (stream.go:96-99) and overlaps notifications.role.>, which reconcileSubjects drops unconditionally (stream.go:354-356) before purgeLegacyRoleMessages runs (stream.go:264-271). A new non-overlapping prefix is rollout-safe (stream.go:358-369). SessionPermissions.Publish is _INBOX.> and agentstream.*.frames only (infra/core/permissions.go:195-201), so no session can raw-publish a notifications. subject and the refusal strands none.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The stored topic namespace is notifications.team.>; a publish or an interest subscribe naming any other uncaptured notifications. topic is refused by name rather than carried over core NATS. Acceptance 5's team half is unchanged and becomes provable past the 5-minute session TTL that topicRecipients depends on today."
+      }
+    },
+    {
+      "spec": "Change: 'Store every topic a session can receive in the stream, role topics (notifications.role.>, taken out of the stream by sjawhar/legion#753) ... so a role message sent while no role lane is subscribed ... waits in the stream instead of being lost.' Acceptance 5, first half.",
+      "plan": "Role topics stay out of the stream and the role lane is unchanged; only the forward to the holder becomes stored-only. Storing notifications.role.> is a separate issue.",
+      "evidence": "reconcileSubjects drops any deployed subject capturing a role lane (internal/bus/stream.go:354-356) and migrateRoleLanesOffStream purges the stored role messages (stream.go:264-300, called at :448-460), so one start of any not-yet-upgraded ConnectOwningStream caller deletes the subject and the messages: the purge must be deleted and deployed everywhere before a later build adds the subject, which one pull request cannot do. Storing them would also overturn packages/envoy/AGENTS.md:2771 ('none is kept for a later claimant', sjawhar/legion#753; the same reasoning at dispatch://INFRA-122/comment/694d10a8). Nothing regresses: the Legion daemon publishes role notices through POST /v1/messages/publish (packages/daemon/internal/notify/notify.go:140-175), which forwards to the holder's agent subject, a stored subject.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "Acceptance 5's role half becomes: a role message published through /v1/messages/publish while its holder's session is down reaches that session once after it returns, proven on a real stack. The case the spec names — a raw nats pub with every listener's role lane unsubscribed — is lost today and is lost after this change, unchanged."
+        ],
+        "scope": "notifications.role.> is not added to the stream in this issue; a separate issue carries it with its own two-deploy sequence (delete the purge everywhere, then add the subject), excluding role topics from sessionConsumerFilter and forwarding only from the listener owning the resolved holder."
+      }
+    }
+  ]
+}

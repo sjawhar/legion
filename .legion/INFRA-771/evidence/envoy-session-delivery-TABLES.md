@@ -1,0 +1,72 @@
+build: listener and bridge this checkout (4610c9421 plus the working copy); plugins this checkout (4610c9421 plus the working copy)
+disruption             kind   event             marker           pi   cc
+a session-restart      issue  comment-1         LDTce93-001Z      1    1
+a session-restart      issue  comment-2         LDTce93-002Z      1    1
+a session-restart      agent  dispatch-message  LDTce93-003Z      1    -
+a session-restart      agent  dispatch-message  LDTce93-004Z      -    1
+a session-restart      agent  listener-send     LDTce93-005Z      1    -
+a session-restart      agent  listener-send     LDTce93-006Z      -    1
+a session-restart      role   listener-publish  LDTce93-007Z      1    -
+a session-restart      role   listener-publish  LDTce93-008Z      -    1
+a session-restart      role   core-publish      LDTce93-009Z      1    -
+a session-restart      role   core-publish      LDTce93-010Z      -    1
+a session-restart      team   team-publish      LDTce93-011Z      1    1
+b nats-cut             issue  comment-1         LDTce93-012Z      1    1
+b nats-cut             issue  comment-2         LDTce93-013Z      1    1
+b nats-cut             agent  dispatch-message  LDTce93-014Z      1    -
+b nats-cut             agent  dispatch-message  LDTce93-015Z      -    1
+b nats-cut             agent  listener-send     LDTce93-016Z      1    -
+b nats-cut             agent  listener-send     LDTce93-017Z      -    1
+b nats-cut             role   listener-publish  LDTce93-018Z      1    -
+b nats-cut             role   listener-publish  LDTce93-019Z      -    1
+b nats-cut             role   core-publish      LDTce93-020Z      1    -
+b nats-cut             role   core-publish      LDTce93-021Z      -    1
+b nats-cut             team   team-publish      LDTce93-022Z      1    1
+c listener-shared      issue  comment-1         LDTce93-023Z      1    1
+c listener-shared      issue  comment-2         LDTce93-024Z      1    1
+c listener-shared      agent  dispatch-message  LDTce93-025Z      1    -
+c listener-shared      agent  dispatch-message  LDTce93-026Z      -    1
+c listener-shared      agent  listener-send     LDTce93-027Z      1    -
+c listener-shared      agent  listener-send     LDTce93-028Z      -    1
+c listener-shared      role   listener-publish  LDTce93-029Z      1    -
+c listener-shared      role   listener-publish  LDTce93-030Z      -    1
+c listener-shared      role   core-publish      LDTce93-031Z      1    -
+c listener-shared      role   core-publish      LDTce93-032Z      -    1
+c listener-shared      team   team-publish      LDTce93-033Z      1    1
+d listener-dispatch    issue  comment-1         LDTce93-034Z      1    1
+d listener-dispatch    issue  comment-2         LDTce93-035Z      1    1
+d listener-dispatch    agent  dispatch-message  LDTce93-036Z    0/0    -
+d listener-dispatch    agent  dispatch-message  LDTce93-037Z      -  0/0
+d listener-dispatch    agent  listener-send     LDTce93-038Z      1    -
+d listener-dispatch    agent  listener-send     LDTce93-039Z      -    1
+d listener-dispatch    role   listener-publish  LDTce93-040Z      1    -
+d listener-dispatch    role   listener-publish  LDTce93-041Z      -    1
+d listener-dispatch    role   core-publish      LDTce93-042Z      1    -
+d listener-dispatch    role   core-publish      LDTce93-043Z      -    1
+d listener-dispatch    team   team-publish      LDTce93-044Z      1    1
+e dispatch-kill        issue  comment-1         LDTce93-045Z      1    1
+e dispatch-kill        issue  comment-2         LDTce93-046Z      1    1
+e dispatch-kill        agent  dispatch-message  LDTce93-047Z      1    -
+e dispatch-kill        agent  dispatch-message  LDTce93-048Z      -    1
+e dispatch-kill        agent  listener-send     LDTce93-049Z      1    -
+e dispatch-kill        agent  listener-send     LDTce93-050Z      -    1
+e dispatch-kill        role   listener-publish  LDTce93-051Z      1    -
+e dispatch-kill        role   listener-publish  LDTce93-052Z      -    1
+e dispatch-kill        role   core-publish      LDTce93-053Z      1    -
+e dispatch-kill        role   core-publish      LDTce93-054Z      -    1
+e dispatch-kill        team   team-publish      LDTce93-055Z      1    1
+f none                 issue  comment-1         LDTce93-056Z      1    1
+f none                 issue  comment-2         LDTce93-057Z      1    1
+f none                 agent  dispatch-message  LDTce93-058Z      1    -
+f none                 agent  dispatch-message  LDTce93-059Z      -    1
+f none                 agent  listener-send     LDTce93-060Z      1    -
+f none                 agent  listener-send     LDTce93-061Z      -    1
+f none                 role   listener-publish  LDTce93-062Z      1    -
+f none                 role   listener-publish  LDTce93-063Z      -    1
+f none                 role   core-publish      LDTce93-064Z      1    -
+f none                 role   core-publish      LDTce93-065Z      -    1
+f none                 team   team-publish      LDTce93-066Z      1    1
+(a cell is the count of entries carrying the marker in that session's transcript; "!" marks a count other than expected; "/0" marks an event its publisher refused, expected 0 times; "-" an event not meant for that session)
+note: Dispatch published LIVE-1's comments in another order than they were written: written ; stored 
+issue order: every comment of LIVE-1 appears in its stream order in both transcripts
+transcripts: pi /legion/scratch/tmp/envoy-session-delivery.e6wugzHm/sessions/pi/sessions/2026-10-31T15-27-09-999Z_01a19292-64af-7450-95e2-f8e38e7a597c.jsonl; cc /legion/scratch/tmp/envoy-session-delivery.e6wugzHm/sessions/cc/config/projects/-legion-scratch-tmp-envoy-session-delivery-e6wugzHm-sessions-cc-cwd/9ebbd95b-914f-4ba4-8ff5-c0809b8d9de7.jsonl

@@ -1,5 +1,5 @@
 import type { DedupeIdentity, DeliveryClaim } from "@legion/envoy-client/delivery";
-import { replayLedgerIdentity } from "@legion/envoy-client/replay";
+import { ledgerIdentity } from "@legion/envoy-client/delivery-ledger";
 import type { ContentBlock } from "@legion/pi-shared/pi-types";
 import { type HeldReplayNotice, writtenCardIdentity } from "./missed-messages";
 
@@ -123,7 +123,7 @@ export interface UnwrittenFramesHost {
 
 /**
  * The keys a card waiting to be written is found under, from the frame it shows: its event id and
- * its dedupe key, as the ledger knows it (`replayLedgerIdentity`), so the written card names it
+ * its dedupe key, as the ledger knows it (`ledgerIdentity`), so the written card names it
  * by either. None for a frame the ledger keeps nothing of.
  */
 export function unwrittenCardKeys(identity: {
@@ -190,7 +190,7 @@ export class UnwrittenFrames {
     claim: DeliveryClaim | undefined
   ): "queued" | "shown" {
     const hand = deliverAs !== "inert" || this.#host.settled();
-    const keys = identity === undefined ? [] : unwrittenCardKeys(replayLedgerIdentity(identity));
+    const keys = identity === undefined ? [] : unwrittenCardKeys(ledgerIdentity(identity));
     const card: UnwrittenCard | undefined =
       identity === undefined || keys.length === 0
         ? undefined
@@ -223,7 +223,7 @@ export class UnwrittenFrames {
 
   /** Whether a card of the frame `identity` waits to be written: that card shows it. */
   waitsOnCard(identity: DedupeIdentity): boolean {
-    return unwrittenCardKeys(replayLedgerIdentity(identity)).some((key) => this.#cards.has(key));
+    return unwrittenCardKeys(ledgerIdentity(identity)).some((key) => this.#cards.has(key));
   }
 
   /**

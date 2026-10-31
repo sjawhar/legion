@@ -93,7 +93,7 @@ type relaySessions struct {
 	frames *collector[relayFrameRec]
 
 	modeChanges, frameCount, duplicates, redelivered, gaps, undecodable atomic.Int64
-	replyErrors, coreCopies, laneReceipts                               atomic.Int64
+	replyErrors, coreCopies                                             atomic.Int64
 }
 
 func newRelaySessions(sessions, conns int) *relaySessions {
@@ -233,15 +233,11 @@ func (r *relaySessions) reply(m *nats.Msg, word []byte) bool {
 	return true
 }
 
-// coreCopy takes a core copy of a relayed session's subject: on the agent topic it answers the lane
-// receipt the role lane waits for (an empty reply), as the plugin does in both modes.
-func (r *relaySessions) coreCopy(m *nats.Msg, agent bool) {
+// coreCopy takes a core copy of a relayed session's subject: the relay frame is the session's
+// delivery, so the copy is counted and dropped. Nothing is answered on it, as a session answers
+// no frame.
+func (r *relaySessions) coreCopy() {
 	r.coreCopies.Add(1)
-	if agent && m.Reply != "" {
-		if err := m.Respond(nil); err == nil {
-			r.laneReceipts.Add(1)
-		}
-	}
 }
 
 // sessionDeliverySummary is how the sessions' delivery went under consumer delivery.
@@ -265,18 +261,16 @@ type sessionDeliverySummary struct {
 	Gaps        int64 `json:"gaps"`
 	Undecodable int64 `json:"undecodable"`
 	// ReplyErrors counts the replies that could not be sent (no reply subject, or a publish
-	// error); CoreCopies the core copies of relayed sessions' subjects, not counted;
-	// LaneReceipts the lane receipts answered on them.
-	ReplyErrors  int64 `json:"reply_errors"`
-	CoreCopies   int64 `json:"core_copies"`
-	LaneReceipts int64 `json:"lane_receipts"`
+	// error); CoreCopies the core copies of relayed sessions' subjects, not counted.
+	ReplyErrors int64 `json:"reply_errors"`
+	CoreCopies  int64 `json:"core_copies"`
 }
 
 func (r *relaySessions) summary() sessionDeliverySummary {
 	out := sessionDeliverySummary{CoreReasons: map[string]int{},
 		ModeChanges: r.modeChanges.Load(), Frames: r.frameCount.Load(), Duplicates: r.duplicates.Load(),
 		Redelivered: r.redelivered.Load(), Gaps: r.gaps.Load(), Undecodable: r.undecodable.Load(),
-		ReplyErrors: r.replyErrors.Load(), CoreCopies: r.coreCopies.Load(), LaneReceipts: r.laneReceipts.Load()}
+		ReplyErrors: r.replyErrors.Load(), CoreCopies: r.coreCopies.Load()}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, a := range r.answers {

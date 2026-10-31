@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -45,11 +47,11 @@ func newSessionConsumerRigOn(t *testing.T, client *bus.Client, url string) *sess
 	harness := newListenerDeliveryHarnessOn(t, client, listenerTransport(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("unexpected prompt_async request")
 	}))
-	delivery := connectSessionDelivery([]string{url}, harness.config.logger)
-	t.Cleanup(delivery.close)
-	if delivery.consumers == nil {
-		t.Fatal("the session-consumer connection did not open")
+	delivery, err := connectSessionDelivery([]string{url}, harness.config.logger)
+	if err != nil {
+		t.Fatalf("the session-consumer connection did not open: %v", err)
 	}
+	t.Cleanup(delivery.close)
 	observer, err := bus.ConnectSessionConsumers([]string{url})
 	if err != nil {
 		t.Fatalf("connect the test's view of the session consumers: %v", err)
@@ -70,8 +72,16 @@ type subscribeAnswer struct {
 		Subject  string `json:"subject"`
 		StreamID string `json:"stream_id"`
 		Gap      *bool  `json:"gap"`
-		Reason   string `json:"reason"`
 	} `json:"delivery"`
+}
+
+// subscribeRefusal is what a test reads of a registration the listener refused: its status and
+// the body naming why (deliveryRefusal).
+type subscribeRefusal struct {
+	raw    string
+	status int
+	Error  string `json:"error"`
+	Reason string `json:"reason"`
 }
 
 func (rig *sessionConsumerRig) post(t *testing.T, path, body string) string {
@@ -91,6 +101,45 @@ func (rig *sessionConsumerRig) subscribe(t *testing.T, body string) subscribeAns
 		t.Fatalf("decode the registration's answer %s: %v", answer.raw, err)
 	}
 	return answer
+}
+
+// refusedSubscribe posts a registration the listener is expected to refuse and returns its answer;
+// a registration it took fails the test.
+func (rig *sessionConsumerRig) refusedSubscribe(t *testing.T, body string) subscribeRefusal {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	rig.mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(body)))
+	refusal := subscribeRefusal{raw: recorder.Body.String(), status: recorder.Code}
+	if recorder.Code == http.StatusOK {
+		t.Fatalf("POST /v1/interests/subscribe %s was taken: %s", body, refusal.raw)
+	}
+	if err := json.Unmarshal([]byte(refusal.raw), &refusal); err != nil {
+		t.Fatalf("decode the refusal %s: %v", refusal.raw, err)
+	}
+	return refusal
+}
+
+// requireRefused fails the test unless the refusal is status with reason.
+func (r subscribeRefusal) requireRefused(t *testing.T, status int, reason string) {
+	t.Helper()
+	if r.status != status || r.Reason != reason {
+		t.Fatalf("refusal %d %s, want %d with reason %s", r.status, r.raw, status, reason)
+	}
+	if r.Error == "" {
+		t.Fatalf("refusal %s carries no error sentence", r.raw)
+	}
+}
+
+// requireNothingWritten fails the test unless sessionID has neither an interest row nor a session
+// entry: a refused registration writes neither.
+func (rig *sessionConsumerRig) requireNothingWritten(t *testing.T, sessionID string) {
+	t.Helper()
+	if interest, err := rig.harness.registry.Get(context.Background(), sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("interest row of %s: %+v (%v), want none", sessionID, interest, err)
+	}
+	if entry, err := rig.harness.sessions.Get(sessionID); err == nil {
+		t.Fatalf("session entry of %s: %+v, want none", sessionID, entry)
+	}
 }
 
 func (rig *sessionConsumerRig) streamID(t *testing.T) string {
@@ -177,9 +226,9 @@ func TestSessionConsumerRegistrationAnswersConsumerModeAndFiltersOnStoredFollowe
 	if answer.Delivery.Gap == nil || *answer.Delivery.Gap {
 		t.Fatalf("answer %s, want gap false", answer.raw)
 	}
-	want := []string{"notifications.agent." + sessionID, "notifications.dispatch.issue.A.>"}
+	want := []string{"notifications.agent." + sessionID, "notifications.dispatch.issue.A.>", "notifications.team.deploy"}
 	if got := rig.filters(t, sessionID); !slices.Equal(got, want) {
-		t.Fatalf("consumer filters %v, want %v (the team topic is not stored)", got, want)
+		t.Fatalf("consumer filters %v, want %v (the stream stores a team topic, so the session's consumer carries it)", got, want)
 	}
 	if entry := rig.entry(t, sessionID); entry.Delivery != session.DeliveryConsumer || entry.Epoch != "epoch-1" {
 		t.Fatalf("session entry %+v, want consumer delivery at epoch-1", entry)
@@ -196,6 +245,40 @@ func TestSessionConsumerFollowAddedBySecondRegistrationIsInTheFilterWhenItAnswer
 	rig.store(t, "notifications.dispatch.issue.B.comment")
 	rig.store(t, "notifications.dispatch.issue.C.comment")
 
+	if answer.Delivery == nil || answer.Delivery.Mode != "consumer" {
+		t.Fatalf("answer %s, want delivery mode consumer", answer.raw)
+	}
+	rig.awaitPending(t, sessionID, 1)
+}
+
+// A Legion controller's notices reach it through its own consumer: the registration of the
+// session holding legion-<project>-controller carries notifications.legion.<project>.controller
+// into the consumer's filter, so a notice published while the controller was away between
+// registrations is pending for it when it comes back, and another project's lane is not. Until
+// INFRA-771 that lane reached the session as a live core subscription alone, which handed it
+// nothing published while it was gone.
+func TestSessionConsumerFiltersOnTheControllerNoticeLaneOfTheRoleItHolds(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const (
+		sessionID = "ses_controller"
+		role      = "legion-ACME-controller"
+		lane      = "notifications.legion.ACME.controller"
+	)
+	claimRoles(t, rig.harness.registry, sessionID, role)
+	awaitRoles(t, rig.harness.registry, sessionID, role)
+	registration := `{"session_id":"ses_controller","self_subscribed":true,
+		"topics":["notifications.legion.ACME.controller"],"delivery":{"consumer":true,"epoch":"e"}}`
+	rig.subscribe(t, registration)
+
+	want := []string{contracts.AgentSubject(sessionID), lane}
+	if got := rig.filters(t, sessionID); !slices.Equal(got, want) {
+		t.Fatalf("consumer filters %v, want %v: the lane the controller registered must be in them", got, want)
+	}
+
+	// The controller is away; a notice and another project's are published; it registers again.
+	rig.store(t, lane)
+	rig.store(t, "notifications.legion.OTHER.controller")
+	answer := rig.subscribe(t, registration)
 	if answer.Delivery == nil || answer.Delivery.Mode != "consumer" {
 		t.Fatalf("answer %s, want delivery mode consumer", answer.raw)
 	}
@@ -264,33 +347,40 @@ func TestSessionConsumerServingPortRegistrationGetsAConsumer(t *testing.T) {
 	}
 }
 
-func TestSessionConsumerInvalidSessionIDAnswersCore(t *testing.T) {
+// A session id no consumer can be named after is refused for good: no later registration of that
+// id can be given one, so the refusal is 409 and nothing is written for it.
+func TestSessionConsumerInvalidSessionIDIsRefused(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 
-	answer := rig.subscribe(t, `{"session_id":"ses.dotted","self_subscribed":true,"topics":[],"delivery":{"consumer":true,"epoch":"e"}}`)
+	refusal := rig.refusedSubscribe(t, `{"session_id":"ses.dotted","self_subscribed":true,"topics":[],"delivery":{"consumer":true,"epoch":"e"}}`)
 
-	if answer.Delivery == nil || answer.Delivery.Mode != "core" || answer.Delivery.Reason != "invalid_session_id" {
-		t.Fatalf("answer %s, want delivery core with reason invalid_session_id", answer.raw)
-	}
-	if entry := rig.entry(t, "ses.dotted"); entry.Delivery != "" {
-		t.Fatalf("session entry %+v, want no consumer delivery", entry)
-	}
+	refusal.requireRefused(t, http.StatusConflict, "invalid_session_id")
+	rig.requireNothingWritten(t, "ses.dotted")
 }
 
-func TestSessionConsumerRegistrationWithoutDeliveryAnswersWithoutIt(t *testing.T) {
+// A registration carrying no delivery field is a plugin older than consumer delivery. Nothing
+// would deliver to it, so it is refused 409 and leaves no row, no entry and no consumer: the
+// plugin learns it must ask for a consumer instead of waiting on a subscription of its own.
+func TestSessionConsumerRegistrationWithoutDeliveryIsRefused(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 
-	answer := rig.subscribe(t, `{"session_id":"ses_plain","self_subscribed":true,"topics":["notifications.dispatch.issue.A.>"]}`)
+	refusal := rig.refusedSubscribe(t, `{"session_id":"ses_plain","self_subscribed":true,"topics":["notifications.dispatch.issue.A.>"]}`)
 
-	if strings.Contains(answer.raw, `"delivery"`) {
-		t.Fatalf("answer %s, want no delivery field", answer.raw)
-	}
+	refusal.requireRefused(t, http.StatusConflict, "not_requested")
 	if _, err := rig.consumers.Info(context.Background(), "ses_plain"); !errors.Is(err, bus.ErrSessionConsumerNotFound) {
 		t.Fatalf("consumer of ses_plain: %v, want none", err)
 	}
-	if entry := rig.entry(t, "ses_plain"); entry.Delivery != "" || entry.Epoch != "" {
-		t.Fatalf("session entry %+v, want no consumer delivery", entry)
-	}
+	rig.requireNothingWritten(t, "ses_plain")
+}
+
+// A registration that carries delivery and asks for no consumer is refused the same way.
+func TestSessionConsumerRegistrationAskingForNoConsumerIsRefused(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+
+	refusal := rig.refusedSubscribe(t, `{"session_id":"ses_no_ask","self_subscribed":true,"topics":[],"delivery":{"consumer":false,"epoch":"e"}}`)
+
+	refusal.requireRefused(t, http.StatusConflict, "not_requested")
+	rig.requireNothingWritten(t, "ses_no_ask")
 }
 
 func TestSessionConsumerUnsubscribeShrinksTheFilter(t *testing.T) {
@@ -346,7 +436,8 @@ func TestSessionConsumerRegistrationTellsTheRelayWhenTheEpochChanges(t *testing.
 	rig.subscribe(t, body("first"))
 	rig.subscribe(t, body("first"))
 	rig.subscribe(t, body("second"))
-	rig.subscribe(t, `{"session_id":"ses_epoch_core","self_subscribed":true,"topics":[]}`)
+	// A registration the listener refuses tells the relay nothing: it holds no consumer to relay.
+	rig.refusedSubscribe(t, `{"session_id":"ses_epoch_refused","self_subscribed":true,"topics":[]}`)
 
 	want := []string{"ses_epoch new epoch", "ses_epoch same epoch", "ses_epoch new epoch"}
 	relay.mu.Lock()
@@ -385,16 +476,19 @@ func deliveredMetrics(t *testing.T, harness listenerDeliveryHarness) string {
 }
 
 // A consumer-delivery session's stored messages wait in its consumer, so the durable path
-// acknowledges them with nothing pushed and nothing reported, on its agent subject and on a followed
-// topic alike. The same session on the core path, neither self-subscribed nor on a serving port, has
-// its message reported as undeliverable, which shows the exception lanes are heard.
+// acknowledges them with nothing pushed and nothing reported, on its agent subject and on a
+// followed topic alike. An entry the previous build left for a session on the core path, portless
+// and on no consumer, is unreachable: its stored message is reported as undeliverable, which is
+// the honest answer and shows the exception lanes are heard.
 func TestSessionConsumerMessageRaisesNoExceptionOnTheDurablePath(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 	exceptions := subscribeExceptionLanes(t, rig.harness.client.Conn)
-	rig.subscribe(t, `{"session_id":"ses_core_only","topics":[]}`)
+	if err := rig.harness.sessions.Put("ses_core_only", session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("write the entry of a session the previous build left on the core path: %v", err)
+	}
 	rig.harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, listenerTestEnvelope(contracts.AgentSubject("ses_core_only"), "core-only"))})
 	if _, err := exceptions.NextMsg(2 * time.Second); err != nil {
-		t.Fatalf("the core-path session's undeliverable message raised no exception: %v", err)
+		t.Fatalf("the unreachable session's message raised no exception: %v", err)
 	}
 
 	rig.subscribe(t, `{"session_id":"ses_relayed","topics":["notifications.dispatch.issue.R.>"],"delivery":{"consumer":true,"epoch":"e"}}`)
@@ -438,10 +532,12 @@ func listenerGrantBeforeSessionConsumers() []string {
 	return append(allow, "$JS.API.STREAM.PURGE.KV_"+bus.InterestBucket)
 }
 
-// On a hub whose grant predates session consumers, a registration that asks for one answers core
-// for want of the grant, logged once however many sessions ask, and the session's messages reach it
-// as before: over its core subscription, with the durable acknowledging the stored copy as skipped.
-func TestSessionConsumerWithoutTheGrantAnswersCoreAndDeliversAsBefore(t *testing.T) {
+// On a hub whose grant predates session consumers, a registration that asks for one is refused
+// 503 no_grant, logged once however many sessions ask, and writes nothing: no interest row and no
+// session entry, so the listener neither fans a message out to a session it cannot reach nor
+// reports one as live. The grant is the negative control: the same registration on a hub that
+// carries session consumers is answered consumer (the tests above).
+func TestSessionConsumerWithoutTheGrantIsRefusedAndWritesNothing(t *testing.T) {
 	seed, public := testnats.User(t)
 	grant := testnats.StartNkeyGranted(t, public, listenerGrantBeforeSessionConsumers()...)
 	t.Setenv("NATS_NKEY_SEED", seed)
@@ -451,43 +547,61 @@ func TestSessionConsumerWithoutTheGrantAnswersCoreAndDeliversAsBefore(t *testing
 	}
 	t.Cleanup(client.Close)
 	rig := newSessionConsumerRigOn(t, client, grant.URL)
-	standIn, err := bus.Connect([]string{grant.URL}, bus.WithName("session-stand-in"))
-	if err != nil {
-		t.Fatalf("connect the session stand-in: %v", err)
-	}
-	t.Cleanup(standIn.Close)
-	inbox, err := standIn.Conn.SubscribeSync(contracts.AgentSubject("ses_ungranted"))
-	if err != nil {
-		t.Fatalf("subscribe the session stand-in: %v", err)
-	}
-	exceptions := subscribeExceptionLanes(t, standIn.Conn)
 
-	first := rig.subscribe(t, `{"session_id":"ses_ungranted","self_subscribed":true,"topics":[],"delivery":{"consumer":true,"epoch":"e"}}`)
-	second := rig.subscribe(t, `{"session_id":"ses_ungranted_too","self_subscribed":true,"topics":[],"delivery":{"consumer":true,"epoch":"e"}}`)
+	first := rig.refusedSubscribe(t, `{"session_id":"ses_ungranted","self_subscribed":true,"topics":["notifications.dispatch.issue.U.>"],"delivery":{"consumer":true,"epoch":"e"}}`)
+	second := rig.refusedSubscribe(t, `{"session_id":"ses_ungranted_too","self_subscribed":true,"topics":[],"delivery":{"consumer":true,"epoch":"e"}}`)
 
-	for _, answer := range []subscribeAnswer{first, second} {
-		if answer.Delivery == nil || answer.Delivery.Mode != "core" || answer.Delivery.Reason != "no_grant" {
-			t.Fatalf("answer %s, want delivery core with reason no_grant", answer.raw)
-		}
+	for _, refusal := range []subscribeRefusal{first, second} {
+		refusal.requireRefused(t, http.StatusServiceUnavailable, "no_grant")
 	}
-	if lines := strings.Count(rig.harness.logs.String(), "sessions stay on core delivery until the grant carries them"); lines != 1 {
+	if lines := strings.Count(rig.harness.logs.String(), "every registration is refused until the grant carries them"); lines != 1 {
 		t.Fatalf("the missing grant was logged %d times, want once:\n%s", lines, rig.harness.logs.String())
 	}
-	if entry := rig.entry(t, "ses_ungranted"); entry.Delivery != "" {
-		t.Fatalf("session entry %+v, want no consumer delivery", entry)
-	}
+	rig.requireNothingWritten(t, "ses_ungranted")
+	rig.requireNothingWritten(t, "ses_ungranted_too")
+}
 
-	item := listenerTestEnvelope(contracts.AgentSubject("ses_ungranted"), "ungranted")
-	data := marshalListenerEnvelope(t, item)
-	if _, err := client.JS().Publish(item.Topic, data); err != nil {
-		t.Fatalf("store the message: %v", err)
-	}
-	if _, err := inbox.NextMsg(2 * time.Second); err != nil {
-		t.Fatalf("the session's core subscription did not receive its message: %v", err)
-	}
-	rig.harness.handler(&natsgo.Msg{Data: data})
-	requireNoException(t, exceptions, "the core-path session's message")
-	if body := deliveredMetrics(t, rig.harness); !strings.Contains(body, `test_messages_delivered{delivery_status="skipped"} 1`) {
-		t.Fatalf("delivery metrics %s, want the stored copy skipped", body)
+// A portless session, which every Oh My Pi and Claude Code session is, is delivered its stored
+// message by its relay and by nothing else: both frames arrive on the session's relay subject,
+// and the durable path, reading the same copies off the stream, pushes nothing, raises no
+// exception and acknowledges both as skipped.
+func TestSessionConsumerPortlessSessionIsDeliveredByItsRelayAlone(t *testing.T) {
+	rig := newRelayRig(t)
+	sessionID := "ses_portless_" + id.New()
+	agentSubject := contracts.AgentSubject(sessionID)
+	topic := "notifications.dispatch.issue.PORTLESS-" + id.New() + ".comment"
+	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
+	exceptions := subscribeExceptionLanes(t, rig.harness.client.Conn)
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1", topic))
+	// The rig's one client holds one subscription, so the durable of this test reads the agent
+	// subject off the stream, bound before the message is stored as the listener's own durable
+	// is, and the followed topic's copy is handed to the same handler below.
+	bindTestDurable(t, rig, "listener-portless-"+id.New(), agentSubject)
+
+	agent, _ := rig.storeEvent(t, agentSubject)
+	followed, _ := rig.storeEvent(t, topic)
+	rig.harness.handler(&natsgo.Msg{Subject: topic, Data: marshalListenerEnvelope(t, followed)})
+
+	requireFrames(t, standIn.collect(t, 2, 5*time.Second), agent, followed)
+	awaitSkipped(t, rig.harness, 2)
+	requireNoException(t, exceptions, "a relayed session's stored message")
+	standIn.none(t, time.Second)
+}
+
+// awaitSkipped waits until the durable path has acknowledged want stored messages with nothing
+// pushed and nothing reported, and fails the test when it has not within 5 s.
+func awaitSkipped(t *testing.T, harness listenerDeliveryHarness, want int) {
+	t.Helper()
+	line := fmt.Sprintf(`test_messages_delivered{delivery_status="skipped"} %d`, want)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		body := deliveredMetrics(t, harness)
+		if strings.Contains(body, line) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("delivery metrics %s, want %s", body, line)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

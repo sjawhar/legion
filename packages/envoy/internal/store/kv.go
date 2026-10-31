@@ -617,8 +617,12 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 // clock, and NATS connect notices ($SYS) are not available to replace it.
 func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []string) (Interest, error) {
 	cur, getErr := r.Get(ctx, item.SessionID)
+	roles, err := r.controllerLaneRoles(item.SessionID, cur.Topics, item.Topics, topics)
+	if err != nil {
+		return Interest{}, err
+	}
 	now := r.now().UnixMilli()
-	merged, err := mergeForUpsert(cur, getErr, item, topics, now)
+	merged, err := mergeForUpsert(cur, getErr, item, topics, now, roles)
 	if err != nil {
 		return Interest{}, err
 	}
@@ -676,10 +680,13 @@ func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []str
 // not the transient case, its topics are ones this build never routed (the cache holds no record
 // it cannot decode), and the session's own subscribe is the authority on its record.
 //
-// The merged row keeps no topic reaching a private stream subject other than the
-// session's own agent subject (dropPrivateStreamTopics): a row stored before the
-// listener refused such a topic is cleaned at the session's next registration.
-func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, now int64) (Interest, error) {
+// The merged row keeps no topic reaching a private stream subject that is not the session's own,
+// and holds them sorted (MergedTopics, which the listener's registration route reads to build the
+// same set before this write): a row stored before the listener refused such a topic is cleaned at
+// the session's next registration. roles is what the session holds (controllerLaneRoles), which
+// decides the one private subject a session registers beside its own agent subject: the controller
+// notice lane of the project whose controller role it holds.
+func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, now int64, roles []string) (Interest, error) {
 	if getErr != nil && !errors.Is(getErr, nats.ErrKeyNotFound) && !errors.Is(getErr, ErrMalformedInterest) {
 		return Interest{}, getErr
 	}
@@ -690,10 +697,24 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 	item.MachineID = first(item.MachineID, curValue(cur.MachineID))
 	item.Dir = first(item.Dir, curValue(cur.Dir))
 	item.UpdatedAt = now
-	item = Merge(item, topics)
-	item.Topics = dropPrivateStreamTopics(sessionID, item.Topics)
-	sort.Strings(item.Topics)
+	item.Topics = MergedTopics(sessionID, roles, item.Topics, topics)
 	return item, nil
+}
+
+// controllerLaneRoles reports the roles sessionID holds (RolesHeldBy) when one of the topic sets
+// names a Legion controller notice lane (bus.NamesControllerNoticeLane), and nil when none does:
+// that lane is the one private stream subject whose owner the rule reads a session's roles for
+// (bus.ReachesPrivateStreamSubject), so a write naming none makes no view read and is refused for
+// none. A write that names one is refused while the view cannot answer (ErrRoleViewNotReady)
+// rather than storing the row without the lane: the row drives the session's consumer filter, and
+// a notice published while the lane was out of that filter reaches the controller on no later
+// path.
+func (r *Registry) controllerLaneRoles(sessionID string, topics ...[]string) ([]string, error) {
+	named := slices.ContainsFunc(topics, bus.NamesControllerNoticeLane)
+	if !named {
+		return nil, nil
+	}
+	return r.RolesHeldBy(sessionID)
 }
 
 // ErrMalformedRoleClaim is a role claim record the bucket holds and this build cannot read: one
@@ -936,7 +957,11 @@ func (r *Registry) removeInterestTopics(ctx context.Context, sessionID string, t
 		return err
 	}
 	item = Remove(item, topics)
-	item.Topics = dropPrivateStreamTopics(sessionID, item.Topics)
+	roles, err := r.controllerLaneRoles(sessionID, item.Topics)
+	if err != nil {
+		return err
+	}
+	item.Topics = dropPrivateStreamTopics(sessionID, roles, item.Topics)
 	if len(item.Topics) == 0 {
 		return r.deleteInterest(ctx, sessionID)
 	}
@@ -1180,19 +1205,6 @@ func (r *Registry) Match(machineID string, topic string) []Interest {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.matchLocked(func(visit func(string)) { r.index.match(machineID, topic, visit) })
-}
-
-// MatchAll returns every cached interest whose topics match topic, on any machine, sorted by
-// SessionID for deterministic output: a sender that must confirm delivery to each subscribed
-// session needs them all, wherever each session registered.
-func (r *Registry) MatchAll(topic string) []Interest {
-	r.mu.RLock()
-	out := r.matchLocked(func(visit func(string)) { r.index.matchAll(topic, visit) })
-	r.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].SessionID < out[j].SessionID
-	})
-	return out
 }
 
 // matchLocked returns, once each, the cached interests of the keys walk visits over the subject

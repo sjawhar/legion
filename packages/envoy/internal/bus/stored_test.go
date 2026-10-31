@@ -106,47 +106,84 @@ func TestCheckFilterSubjectRefusesWhatNATSCannotFilterOn(t *testing.T) {
 	}
 }
 
+// ControllerNoticeRole pairs one project's controller notice lane with the role token its holder
+// claims, from the project token the lane names, so the listener never builds the two strings
+// side by side. Only a literal lane of the family pairs: a wildcard, a bare prefix, an issue
+// notice and a longer subject name no role.
+func TestControllerNoticeRolePairsALaneWithItsRoleToken(t *testing.T) {
+	for topic, want := range map[string]string{
+		"notifications.legion.ACME.controller":      "legion-ACME-controller",
+		"notifications.legion.omp.controller":       "legion-omp-controller",
+		"notifications.legion.ACME.LEGION-208":      "",
+		"notifications.legion.*.controller":         "",
+		"notifications.legion.>":                    "",
+		"notifications.legion..controller":          "",
+		"notifications.legion.controller":           "",
+		"notifications.legion.ACME.x.controller":    "",
+		"notifications.agent.ses_a":                 "",
+		"notifications.role.legion-ACME-controller": "",
+	} {
+		role, lane := ControllerNoticeRole(topic)
+		if role != want || lane != (want != "") {
+			t.Errorf("ControllerNoticeRole(%q) = %q, %v; want %q, %v", topic, role, lane, want, want != "")
+		}
+	}
+}
+
 // What a session may register as an interest (/v1/interests/subscribe): anything but a topic
-// reaching a private stream subject other than its own agent subject: another session's agent
-// subject by name or any wildcard over the agent subjects, a failed-delivery lane (its own
-// included) or a wildcard over them, the Legion controller lane, and wildcards reaching any of
-// those. Its own agent subject is its own only when it is one literal subject.
+// reaching a private stream subject that is not its own: another session's agent subject by name
+// or any wildcard over the agent subjects, a failed-delivery lane (its own included) or a wildcard
+// over them, a controller notice lane of a project whose controller role it does not hold, and
+// wildcards reaching any of those. Its own agent subject is its own only when it is one literal
+// subject, and so is the notice lane of the project whose controller role its claims name: the
+// holder registers that lane because the notices reach it through its own consumer alone
+// (INFRA-771), while another project's controller lane, and every other private subject, stay out
+// of a controller's registration too.
 func TestReachesPrivateStreamSubjectBoundsInterests(t *testing.T) {
+	controller := []string{"legion-ACME-controller", "reviewer"}
 	for _, tc := range []struct {
 		sessionID, topic string
+		roles            []string
 		want             bool
 	}{
-		{"ses_a", "notifications.agent.ses_a", false},
-		{"ses_a", "notifications.agent.ses_b", true},
-		{"ses_a", "notifications.agent.*", true},
-		{"ses_a", "notifications.agent.>", true},
-		{"ses_a", "notifications.agent.ses_a.>", true},
-		{"ses_a", "notifications.>", true},
-		{"ses_a", "notifications.*.ses_a", true},
-		{"ses_a", "notifications.*.*.x", true},
-		{"ses_a", ">", true},
-		{">", "notifications.agent.>", true},
-		{"*", "notifications.agent.*", true},
-		{"ses_a", "notifications.envoy.exceptions.notifications.agent.ses_a", true},
-		{"ses_a", "notifications.envoy.exceptions.notifications.agent.ses_b", true},
-		{"ses_a", "notifications.envoy.exceptions.notifications.agent.>", true},
-		{"ses_a", "notifications.envoy.exceptions.>", true},
-		{"ses_a", "notifications.envoy.>", true},
-		{"ses_a", "notifications.legion.ACME.controller", true},
-		{"ses_a", "notifications.legion.>", true},
-		{"ses_a", "notifications.*.ACME.controller", true},
-		{"ses_a", "notifications.agent", false},
-		{"ses_a", "notifications.*", false},
-		{"ses_a", "notifications.legion", false},
-		{"ses_a", "notifications.dispatch.issue.KEY-1.>", false},
-		{"ses_a", "notifications.github.acme.widgets.pr.7.>", false},
-		{"ses_a", "notifications.team.x.>", false},
-		{"ses_a", "notifications.role.reviewer", false},
-		{"ses_a", "notifications.envoy.exceptions.notifications.role.reviewer", false},
-		{"ses_a", "notifications.exceptions.agent.ses_b", false},
+		{sessionID: "ses_a", topic: "notifications.agent.ses_a", want: false},
+		{sessionID: "ses_a", topic: "notifications.agent.ses_b", want: true},
+		{sessionID: "ses_a", topic: "notifications.agent.*", want: true},
+		{sessionID: "ses_a", topic: "notifications.agent.>", want: true},
+		{sessionID: "ses_a", topic: "notifications.agent.ses_a.>", want: true},
+		{sessionID: "ses_a", topic: "notifications.>", want: true},
+		{sessionID: "ses_a", topic: "notifications.*.ses_a", want: true},
+		{sessionID: "ses_a", topic: "notifications.*.*.x", want: true},
+		{sessionID: "ses_a", topic: ">", want: true},
+		{sessionID: ">", topic: "notifications.agent.>", want: true},
+		{sessionID: "*", topic: "notifications.agent.*", want: true},
+		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.agent.ses_a", want: true},
+		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.agent.ses_b", want: true},
+		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.agent.>", want: true},
+		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.>", want: true},
+		{sessionID: "ses_a", topic: "notifications.envoy.>", want: true},
+		{sessionID: "ses_a", topic: "notifications.legion.ACME.controller", want: true},
+		{sessionID: "ses_a", topic: "notifications.legion.>", want: true},
+		{sessionID: "ses_a", topic: "notifications.*.ACME.controller", want: true},
+		{sessionID: "ses_a", topic: "notifications.legion.ACME.controller", roles: controller, want: false},
+		{sessionID: "ses_a", topic: "notifications.legion.OTHER.controller", roles: controller, want: true},
+		{sessionID: "ses_a", topic: "notifications.legion.>", roles: controller, want: true},
+		{sessionID: "ses_a", topic: "notifications.legion.*.controller", roles: controller, want: true},
+		{sessionID: "ses_a", topic: "notifications.agent.ses_b", roles: controller, want: true},
+		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.agent.ses_a", roles: controller, want: true},
+		{sessionID: "ses_a", topic: "notifications.legion.ACME.controller", roles: []string{"legion-OTHER-controller"}, want: true},
+		{sessionID: "ses_a", topic: "notifications.agent", want: false},
+		{sessionID: "ses_a", topic: "notifications.*", want: false},
+		{sessionID: "ses_a", topic: "notifications.legion", want: false},
+		{sessionID: "ses_a", topic: "notifications.dispatch.issue.KEY-1.>", want: false},
+		{sessionID: "ses_a", topic: "notifications.github.acme.widgets.pr.7.>", want: false},
+		{sessionID: "ses_a", topic: "notifications.team.x.>", want: false},
+		{sessionID: "ses_a", topic: "notifications.role.reviewer", want: false},
+		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.role.reviewer", want: false},
+		{sessionID: "ses_a", topic: "notifications.exceptions.agent.ses_b", want: false},
 	} {
-		if got := ReachesPrivateStreamSubject(tc.sessionID, tc.topic); got != tc.want {
-			t.Errorf("ReachesPrivateStreamSubject(%q, %q) = %v, want %v", tc.sessionID, tc.topic, got, tc.want)
+		if got := ReachesPrivateStreamSubject(tc.sessionID, tc.topic, tc.roles); got != tc.want {
+			t.Errorf("ReachesPrivateStreamSubject(%q, %q, %v) = %v, want %v", tc.sessionID, tc.topic, tc.roles, got, tc.want)
 		}
 	}
 }

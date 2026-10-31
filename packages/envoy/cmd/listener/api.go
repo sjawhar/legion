@@ -517,7 +517,7 @@ func deliveryModeVerdict(sessionID string, entry session.SessionEntry, payload s
 // its publish share it, and GET /v1/roles/<role> resolves its holder within it too. The publish
 // route spends it on the publish of a topic the stream captures, and a role send's first
 // resolution of the role's holder (sendToRole, every attempt of that resolution) is answered within
-// it too; a role or ad-hoc topic send then runs on within publishDeliveryWindow (confirmed.go). GET
+// it too; a role send then runs on within publishDeliveryWindow (confirmed.go). GET
 // /v1/sessions, GET /v1/registry/<session_id> and GET /v1/interests/<session_id> read within it as
 // well, and every route that writes does its store work within it: subscribe, unsubscribe, POST
 // /v1/roles/set, and DELETE of /v1/interests/<session_id> and /v1/sessions/<session_id>. The HTTP
@@ -648,15 +648,15 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 }
 
 // publishHandler rejects agent-targeted topics (must use /v1/messages/send
-// instead) and sends the envelope. A role topic is forwarded to its holder and
-// an ad-hoc topic confirmed with each self-subscribed recipient, both answered
-// once confirmed or when publishDeliveryWindow from the request's arrival has
-// passed (sendToRole, sendToTopic in confirmed.go); a topic the stream captures
-// is answered once the stream stored it. An explicit dedupe_key is used
-// verbatim (a re-send a receiver's own dedupe recognises); it is mutually
-// exclusive with idempotency_key, may not begin with roleForwardDedupePrefix,
-// the mark the role arbiter drops on sight, and may not ride a dispatch
-// envelope. Every host drops a repeat of any dispatch key
+// instead) and sends the envelope. A role topic is forwarded to its holder,
+// answered once confirmed or when publishDeliveryWindow from the request's
+// arrival has passed (sendToRole in confirmed.go); a topic the stream captures
+// is answered once the stream stored it, and any other notifications. topic is
+// refused by name, since nothing would store it for a session to read. An
+// explicit dedupe_key is used verbatim (a re-send a receiver's own dedupe
+// recognises); it is mutually exclusive with idempotency_key, may not begin
+// with roleForwardDedupePrefix, the mark the role arbiter drops on sight, and
+// may not ride a dispatch envelope. Every host drops a repeat of any dispatch key
 // (contracts.DedupeKeyNamesTheUpstreamEvent), and Dispatch's outbox keys are
 // sequential (dispatch-<event id>), so a caller that chose one could make a
 // host drop the real event it names. Dispatch itself never needs this route's
@@ -734,10 +734,14 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			sendToRole(ctx, w, record, d, item, role, arrived)
 			return
 		}
+		// Every other topic the stream does not capture is refused by name. A session reads only
+		// what its own consumer holds, so such a publish would reach nobody, now or later;
+		// nothing retries into success, so it is the 400 the refusals above answer rather than a
+		// 504. Team topics are the namespace an agent names itself and the stream stores them
+		// (bus.StreamSubjects).
 		if bus.UsesCoreTransport(request.Topic) {
-			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
-			defer cancel()
-			sendToTopic(ctx, w, record, d, item, arrived)
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest,
+				"no stream subject captures "+request.Topic+", so no session would receive it; publish to a notifications.team.<name> topic instead", "topic")
 			return
 		}
 		// The sender stamp's read and the publish take this one deadline, derived from the
@@ -779,6 +783,14 @@ type sessionInfo struct {
 	// predates the fields.
 	Plugin        string `json:"plugin,omitempty"`
 	PluginVersion string `json:"plugin_version,omitempty"`
+	// Delivery is how this listener delivers to the session: session.DeliveryConsumer
+	// ("consumer") when its own session consumer holds its stored messages, empty for a session on
+	// the core path. Written always, never omitempty: the production reading of "0 sessions on
+	// core" has to tell a listener that does not report delivery at all - a build older than this
+	// field, which sends no such key - from a session this listener reports as on the core path.
+	// With omitempty both are a row with no "delivery" key and the two cannot be told apart, so
+	// the count of core sessions would read as zero on a fleet that never reported one.
+	Delivery string `json:"delivery"`
 }
 
 // sessionInterestReadTimeout bounds sessionInfoFor's read of one session's interest record from
@@ -820,6 +832,7 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID str
 		LastSeen:       entry.UpdatedAt,
 		Plugin:         entry.Plugin,
 		PluginVersion:  entry.PluginVersion,
+		Delivery:       entry.Delivery,
 	}
 	readCtx, cancel := context.WithTimeout(ctx, sessionInterestReadTimeout)
 	defer cancel()
@@ -1376,23 +1389,61 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			return
 		}
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir), slog.String("plugin", body.Plugin), slog.String("plugin_version", body.PluginVersion))
-		// A topic reaching a private stream subject (another session's inbox, a failed-delivery
-		// lane, the Legion controller lane; bus.ReachesPrivateStreamSubject) is left out and named in
-		// a warning, the rest of the registration stored: the topics stored here drive the
-		// listener's fan-out to serve-port sessions (`store.Registry.Match`), and such a topic would
-		// hand this session messages meant for another session or for the controller's role holder;
-		// /v1/replay refuses such a subject on its own (`bus.SharedStreamTopic`). A registration
-		// naming one is not refused whole, since a released pi-envoy registers every subject it has
-		// open, a fork parent's agent subject and any topic its envoy_subscribe took included. The
-		// registry drops such a topic from the stored row too (`store.Registry.Upsert`), so a row an
-		// earlier build stored with one is cleaned by this registration.
+		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+		defer cancel()
+		// The roles this session holds decide one topic of the registration: its own project's
+		// controller notice lane (notifications.legion.<project>.controller, the daemon's
+		// notify.ControllerTopic), which its holder registers because a Legion controller
+		// receives that lane from its own consumer now and from no core subscription of its own
+		// (INFRA-771). The view is read only when a registration names such a lane, so no other
+		// registration is refused while it cannot answer (store.ErrRoleViewNotReady), and one
+		// that does is refused the bus-unavailable 503 rather than stored without the lane: the
+		// stored topics are the consumer's filter, and a notice published while the lane is out
+		// of it reaches the controller on no later path.
+		var roles []string
+		if bus.NamesControllerNoticeLane(body.Topics) {
+			held, err := d.registry.RolesHeldBy(body.SessionID)
+			if err != nil {
+				logger.Warn("listener read of the session's roles failed",
+					slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
+				writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
+				return
+			}
+			roles = held
+		}
+		// A topic reaching a private stream subject that is not this session's (another session's
+		// inbox, a failed-delivery lane, another project's controller notice lane;
+		// bus.ReachesPrivateStreamSubject) is left out and named in a warning, the rest of the
+		// registration stored: the topics stored here drive the listener's fan-out to serve-port
+		// sessions (`store.Registry.Match`) and the filters of the session's own consumer
+		// (`sessionConsumerFilter`), and such a topic would hand this session messages meant for
+		// another session or for another project's controller. A registration naming one is not
+		// refused whole, since a released pi-envoy registers every subject it has open, a fork
+		// parent's agent subject and any topic its envoy_subscribe took included. The registry
+		// drops such a topic from the stored row too (`store.Registry.Upsert`), so a row an
+		// earlier build stored with one, and the lane of a session that has since lost the
+		// controller role, are cleaned by this registration.
 		warnings := make([]string, 0)
 		topics := make([]string, 0, len(body.Topics)+1)
 		for _, topic := range append(body.Topics, contracts.AgentSubject(body.SessionID)) {
-			if bus.ReachesPrivateStreamSubject(body.SessionID, topic) {
-				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches a private stream subject (another session's inbox, a failed-delivery lane, or the Legion controller lane), and of those a session registers only its own agent subject, %s",
+			if bus.ReachesPrivateStreamSubject(body.SessionID, topic, roles) {
+				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches a private stream subject (another session's inbox, a failed-delivery lane, or a Legion controller notice lane), and of those a session registers only its own agent subject, %s, and the notice lane of a project whose controller role it holds",
 					topic, contracts.AgentSubject(body.SessionID)))
 				continue
+			}
+			// A notifications. topic no stream subject captures, and that is no role lane, is
+			// refused by name with the whole registration: a session receives only what its own
+			// consumer holds, which is what the stream stored, so such an interest would be
+			// stored and deliver nothing, and the plugin that asked for it would never learn
+			// why. It is the registration and not the topic alone, unlike a private-subject
+			// topic above, because no live caller names one: a census of production on
+			// 2026-10-30 read all 596 interest rows and found every uncaptured non-role topic
+			// in use to be a notifications.team.* topic, which this build stores. A role lane is
+			// registered by its holder (POST /v1/roles/set) and still travels over core NATS.
+			if bus.UsesCoreTransport(topic) && !strings.HasPrefix(topic, contracts.RoleTopicPrefix) {
+				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("no stream subject captures %s, so nothing would be delivered to %s on it; follow a notifications.team.<name> topic instead",
+					topic, body.SessionID), "topics")
+				return
 			}
 			topics = append(topics, topic)
 		}
@@ -1400,8 +1451,35 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			logger.Warn("listener subscribe refused topics reaching private stream subjects",
 				slog.String("session_id", body.SessionID), slog.Any("refused", warnings))
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
-		defer cancel()
+		// The session's consumer is filtered on the topics its interest row will hold, so the
+		// write's own merge is computed here, before the write: store.Registry.UpsertWithin adds
+		// these topics to the row it holds and drops every topic reaching a private stream subject
+		// (store.MergedTopics), and a filter naming a topic the row does not would carry into this
+		// session messages no interest of its own follows. The read is the registry cache's on
+		// every heartbeat; a read that fails refuses the registration, as the write it precedes
+		// would.
+		stored, err := storedInterestTopics(ctx, d.registry, body.SessionID)
+		if err != nil {
+			logger.Warn("listener read of the session's interest row failed",
+				slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
+			writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
+			return
+		}
+		topics = store.MergedTopics(body.SessionID, roles, stored, topics)
+		// The delivery decision comes before both writes: a session is delivered to through its
+		// own consumer alone, so a registration this listener cannot give one is refused and must
+		// leave no interest row and no session entry behind - the row would make the listener
+		// deliver to a session nothing reaches, and the entry would say a session is here that
+		// receives nothing. The consumer is created, or has its filter set to the topics about to
+		// be stored, before the registration answers, so a message published on a newly followed
+		// stored topic after the answer is the consumer's to deliver.
+		delivery, refusal := d.consumers.register(r.Context(), body, topics)
+		if refusal != nil {
+			logger.Warn("listener refused a registration it can give no session consumer",
+				slog.String("session_id", body.SessionID), slog.String("reason", refusal.Reason), slog.Int("status", refusal.status))
+			writeJSON(w, refusal.status, refusal)
+			return
+		}
 		item, err := d.registry.UpsertWithin(ctx, store.Interest{
 			SessionID: body.SessionID,
 			MachineID: machineID,
@@ -1415,25 +1493,21 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
 			return
 		}
-		// The session's consumer, when the registration asks for one, is created or has its filter
-		// set to the topics just stored before the registration answers, so a message published on
-		// a newly followed stored topic after the answer is the consumer's to deliver.
-		delivery := d.consumers.register(r.Context(), body, item.Topics)
-		if body.Port > 0 || body.SelfSubscribed || delivery.relayed() {
-			epochChanged := false
-			if delivery.relayed() {
-				previous, err := d.sessions.Get(body.SessionID)
-				epochChanged = err != nil || previous.Delivery != session.DeliveryConsumer || previous.Epoch != delivery.epoch
-			}
-			if err := d.sessions.PutWithin(ctx, body.SessionID, sessionEntryFromSubscribe(body, machineID, delivery)); err != nil {
-				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
-				writeStoreError(ctx, w, fmt.Errorf("session registry unavailable: %w", err), http.StatusServiceUnavailable)
-				return
-			}
-			if delivery.relayed() {
-				// The relay serves every registration answered consumer, so there is one to tell.
-				d.consumers.relay.registered(body.SessionID, epochChanged)
-			}
+		// Every registration answered writes the session's entry. All but one holds the session's
+		// consumer and is relayed (sessionDelivery.register); the exception is a serving-port
+		// session this listener could give none, which its port is pushed to instead.
+		epochChanged := false
+		if delivery.relayed() {
+			previous, err := d.sessions.Get(body.SessionID)
+			epochChanged = err != nil || previous.Delivery != session.DeliveryConsumer || previous.Epoch != delivery.epoch
+		}
+		if err := d.sessions.PutWithin(ctx, body.SessionID, sessionEntryFromSubscribe(body, machineID, delivery)); err != nil {
+			logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
+			writeStoreError(ctx, w, fmt.Errorf("session registry unavailable: %w", err), http.StatusServiceUnavailable)
+			return
+		}
+		if delivery.relayed() {
+			d.consumers.relay.registered(body.SessionID, epochChanged)
 		}
 		warningCtx, cancelWarnings := context.WithTimeout(ctx, unwiredRepositoryWarningTimeout)
 		defer cancelWarnings()
@@ -1510,7 +1584,6 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
 	v1.HandleFunc("/v1/messages/send", sendHandler(d, logger))
 	v1.HandleFunc("/v1/messages/publish", publishHandler(d, logger))
-	v1.HandleFunc("/v1/replay", replayHandler(d))
 	v1.HandleFunc("/v1", func(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "not found")
 	})

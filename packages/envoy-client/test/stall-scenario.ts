@@ -1,9 +1,8 @@
 import { expect } from "bun:test";
-import { agentSubject } from "@legion/contracts";
-import { connect, type KV, type NatsConnection } from "nats";
+import { connect, type KV } from "nats";
 import { z } from "zod";
 import { deliverSubject } from "../src/consumer-delivery";
-import { REPLAYED_SUFFIX } from "../src/replay";
+import { STORED_WHILE_AWAY_SUFFIX } from "../src/delivery-ledger";
 import type { EnvoyStack } from "./envoy-stack";
 import type { StallProxy } from "./stall-proxy";
 
@@ -72,76 +71,24 @@ async function subscribedSince(monitorUrl: string, subject: string, since: numbe
   );
 }
 
-/** The listener's answer to a registration that asked for a session consumer. */
-const DeliveryAnswerSchema = z.object({
-  delivery: z.object({ mode: z.string(), reason: z.string().optional() }).optional(),
-});
-
 /**
- * The delivery a registration asking for a session consumer is answered with now, from a
- * registration of the scenario's own: a session id of its own, so the plugin's own session is left
- * alone, removed again once it is answered.
- */
-async function registrationDelivery(
-  envoyUrl: string
-): Promise<z.infer<typeof DeliveryAnswerSchema>["delivery"]> {
-  const probe = `ses_grantprobe${crypto.randomUUID().replaceAll("-", "")}`;
-  const answer = await fetch(`${envoyUrl}/v1/interests/subscribe`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      session_id: probe,
-      self_subscribed: true,
-      topics: [],
-      delivery: { consumer: true, epoch: "probe" },
-    }),
-  });
-  expect(answer.status).toBe(200);
-  const delivery = DeliveryAnswerSchema.parse(await answer.json()).delivery;
-  await fetch(`${envoyUrl}/v1/sessions/${probe}`, { method: "DELETE" });
-  return delivery;
-}
-
-/** The names of the stream's consumers that are session consumers (`bus.SessionConsumerName`). */
-async function sessionConsumerNames(observer: NatsConnection): Promise<string[]> {
-  const manager = await observer.jetstreamManager();
-  const names: string[] = [];
-  for await (const consumer of manager.consumers.list("ENVOY_NOTIFICATIONS")) {
-    if (consumer.name.startsWith("s-")) names.push(consumer.name);
-  }
-  return names;
-}
-
-/**
- * The freeze every session plugin must survive, in the delivery mode `host.stack`'s listener
- * grant decides.
- *
- * On consumer delivery (`listenerGrant: "current"`: the listener holds the session's durable
- * consumer and relays it on `notifications.envoy.deliver.<id>`) the session's registration is
- * answered `consumer` and its relay subject is subscribed, and a direct message is shown live.
- * Then the session's NATS path is frozen and a second message sent while it is cut off: it must be
- * shown within 60 s of the freeze, after the connection nats.js dialled in place of the frozen one
+ * The freeze every session plugin must survive. The listener holds the session's durable consumer
+ * and relays it on `notifications.envoy.deliver.<id>`: the session's registration is answered
+ * `consumer` and its relay subject is subscribed, and a direct message is shown live. Then the
+ * session's NATS path is frozen and a second message sent while it is cut off: it must be shown
+ * within 60 s of the freeze, after the connection nats.js dialled in place of the frozen one
  * subscribed the relay subject again and the session registered a new epoch, so the listener
  * restarted the relay at the consumer's ack floor. A third message, sent after that registration,
- * is relayed on the new connection. Each of the three is shown once, and none as a replay: the
- * relay, not `POST /v1/replay`, brought the one sent during the freeze.
- *
- * On the core path (`listenerGrant: "before-session-consumers"`, the path every hub runs until its
- * NATS user carries session consumers) a registration asking for a consumer is answered
- * `core`/`no_grant`, no session consumer exists on the stream, and the session takes its messages
- * on its own core subscription, `notifications.agent.<id>`. The message sent while the path was
- * frozen reached nobody live: the session must be shown it within 60 s of the freeze all the same,
- * exactly once and as a replay, which is `POST /v1/replay`'s catch-up after the reconnect.
+ * is relayed on the new connection. Each of the three is shown once, and none as a frame the
+ * session was told it had been away for: the relay delivers all three.
  *
  * The host runs on nats.js's real ping and dial timers against a real listener, so each wait is
  * real time.
  */
 export async function runFreezeScenario(host: FreezeScenarioHost): Promise<void> {
   const { label, stack, sessionID, proxy, shown, waitFor } = host;
-  const onCorePath = stack.listenerGrant === "before-session-consumers";
-  // The subject the session's own connection takes the message on: its relay subject on consumer
-  // delivery, its agent subject on the core path.
-  const sessionSubject = onCorePath ? agentSubject(sessionID) : deliverSubject(sessionID);
+  // The subject the session's own connection takes every message on.
+  const sessionSubject = deliverSubject(sessionID);
   const send = async (marker: string) => {
     const answer = await fetch(`${stack.envoyUrl}/v1/messages/send`, {
       method: "POST",
@@ -162,23 +109,12 @@ export async function runFreezeScenario(host: FreezeScenarioHost): Promise<void>
         const entry = await sessionEntry(sessions, sessionID);
         if (entry === undefined) return false;
         firstEpoch = entry.delivery === "consumer" ? entry.epoch : undefined;
-        if (onCorePath ? entry.delivery !== undefined : firstEpoch === undefined) return false;
+        if (firstEpoch === undefined) return false;
         return await subscribedSince(stack.monitorUrl, sessionSubject, 0);
       },
       started + 30_000,
-      onCorePath
-        ? "the session's registration recorded on the core path, with its agent subject subscribed"
-        : "the session's registration answered consumer, with its relay subject subscribed"
+      "the session's registration answered consumer, with its relay subject subscribed"
     );
-    if (onCorePath) {
-      // The grant carries no session consumer, so a registration that asks for one is answered
-      // core, and the stream holds no session consumer at all.
-      expect(await registrationDelivery(stack.envoyUrl)).toEqual({
-        mode: "core",
-        reason: "no_grant",
-      });
-      expect(await sessionConsumerNames(observer)).toEqual([]);
-    }
 
     const live = `stall-live-before-${run}`;
     await send(live);
@@ -204,20 +140,14 @@ export async function runFreezeScenario(host: FreezeScenarioHost): Promise<void>
       RECOVERY_BOUND_MS
     );
     expect(shownAt - frozenAt).toBeLessThan(RECOVERY_BOUND_MS);
-    // The connection that replaced the frozen one carries the session's subject.
+    // The connection that replaced the frozen one carries the session's relay subject.
     expect(await subscribedSince(stack.monitorUrl, sessionSubject, frozenAt)).toBe(true);
+    // The relay restarted only on a registration that named a new epoch, still on consumer
+    // delivery.
     const renewed = await sessionEntry(sessions, sessionID);
-    if (onCorePath) {
-      // The reconnect's registration left the session on the core path: no consumer, no epoch.
-      expect(renewed?.delivery).toBeUndefined();
-      expect(await sessionConsumerNames(observer)).toEqual([]);
-    } else {
-      // The relay restarted only on a registration that named a new epoch, still on consumer
-      // delivery.
-      expect(renewed?.delivery).toBe("consumer");
-      expect(renewed?.epoch).toBeDefined();
-      expect(renewed?.epoch).not.toBe(firstEpoch);
-    }
+    expect(renewed?.delivery).toBe("consumer");
+    expect(renewed?.epoch).toBeDefined();
+    expect(renewed?.epoch).not.toBe(firstEpoch);
 
     const after = `stall-live-after-${run}`;
     await send(after);
@@ -227,13 +157,12 @@ export async function runFreezeScenario(host: FreezeScenarioHost): Promise<void>
       "the message after the reconnect"
     );
 
-    // Each shown once. On consumer delivery the relay delivered all three, so none is a replay; on
-    // the core path the two live ones came over the session's subscription and the frozen window's
-    // over /v1/replay, which marks it.
+    // Each shown once, and the relay delivered all three, so none carries the line a frame stored
+    // while the session was away would carry.
     for (const marker of [live, missed, after]) {
       const messages = shown(marker);
       expect(messages).toHaveLength(1);
-      expect(messages[0]?.includes(REPLAYED_SUFFIX)).toBe(onCorePath && marker === missed);
+      expect(messages[0]?.includes(STORED_WHILE_AWAY_SUFFIX)).toBe(false);
     }
   } finally {
     await observer.close();

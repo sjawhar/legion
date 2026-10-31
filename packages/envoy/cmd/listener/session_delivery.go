@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -15,17 +17,14 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 )
 
-// The modes of a registration's delivery answer (deliveryAnswer.Mode).
-const (
-	// deliveryModeConsumer: the listener holds the session's consumer, filtered on the session's
-	// agent subject and its stored followed topics, and relays it on the session's relay subject.
-	deliveryModeConsumer = "consumer"
-	// deliveryModeCore: the session stays on the core path, its core subscriptions and the
-	// durable's Skipped acknowledgement, as before consumer delivery.
-	deliveryModeCore = "core"
-)
+// deliveryModeConsumer is the one mode a registration is answered (deliveryAnswer.Mode): the
+// listener holds the session's consumer, filtered on the session's agent subject and its stored
+// followed topics, and relays it on the session's relay subject. A registration the listener
+// cannot give a consumer is refused (deliveryRefusal), since no other path reaches a session.
+const deliveryModeConsumer = "consumer"
 
-// The reasons of a core delivery answer (deliveryAnswer.Reason), short and machine-readable.
+// The reasons a registration is refused for want of a session consumer (deliveryRefusal.Reason),
+// short and machine-readable.
 const (
 	// deliveryReasonNoGrant: the listener's NATS user may not manage session consumers (a hub whose
 	// grant predates them, bus.ErrConsumerNotGranted).
@@ -35,7 +34,8 @@ const (
 	// deliveryReasonConsumerError: the consumer could not be read, created or updated, or this
 	// listener has no session-consumer connection.
 	deliveryReasonConsumerError = "consumer_error"
-	// deliveryReasonNotRequested: the registration carried delivery without asking for a consumer.
+	// deliveryReasonNotRequested: the registration asked for no consumer and registered no serving
+	// port, so nothing would deliver to the session it describes.
 	deliveryReasonNotRequested = "not_requested"
 )
 
@@ -45,31 +45,44 @@ const (
 const sessionConsumerCallTimeout = 5 * time.Second
 
 // noGrantBackoff is how long, after a consumer call the server refused for want of a grant, every
-// registration that asks for a consumer is answered core with reason no_grant without a call to the
-// server; the next registration after it probes again. A hub whose grant predates session consumers
-// would otherwise log a permissions violation, on the server and here, for every heartbeat of
-// every session.
+// registration that asks for a consumer is refused no_grant without a call to the server; the next
+// registration after it probes again. The backoff survives the refusal it once spared a session:
+// without it a hub whose grant predates session consumers would have every heartbeat of every
+// session call the server, and log a permissions violation there and here, for an answer this
+// listener already knows.
 const noGrantBackoff = 10 * time.Minute
 
 // sessionConsumerDrain bounds the drain of the session-consumer connection at shutdown, inside
 // what is left of the HTTP stop's budget.
 const sessionConsumerDrain = 2 * time.Second
 
-// deliveryAnswer is the delivery field of a registration's answer (subscribeResponse.Delivery),
-// present whenever the registration carried delivery or registered a serving port. A listener of an
-// earlier release answers without it, which the plugin reads as core.
+// deliveryAnswer is the delivery field of a registration's answer (subscribeResponse.Delivery).
+// Every registration this listener answers at all carries one: the session's consumer is held and
+// relayed, which is the only way a message reaches a session.
 type deliveryAnswer struct {
 	Mode string `json:"mode"`
-	// Subject is the session's relay subject (bus.DeliverSubject), in consumer mode.
+	// Subject is the session's relay subject (bus.DeliverSubject).
 	Subject string `json:"subject,omitempty"`
-	// StreamID is the stream's identity (bus.StreamIDMetadataKey), in consumer mode: the one a
-	// relay frame carries and the plugin's resume point names.
+	// StreamID is the stream's identity (bus.StreamIDMetadataKey): the one a relay frame carries
+	// and the plugin's resume point names.
 	StreamID string `json:"stream_id,omitempty"`
-	// Gap, in consumer mode, is true when this registration created the consumer at a start below
-	// the stream's first sequence: messages it would have delivered are gone.
+	// Gap is true when this registration created the consumer at a start below the stream's first
+	// sequence: messages it would have delivered are gone.
 	Gap *bool `json:"gap,omitempty"`
-	// Reason says why, in core mode.
-	Reason string `json:"reason,omitempty"`
+}
+
+// deliveryRefusal is the answer to a registration the listener cannot give a session consumer.
+// The registration is refused before anything is written, so it leaves no interest row and no
+// session entry behind (subscribeHandler): a session nothing delivers to is not registered.
+type deliveryRefusal struct {
+	// status is 503 for a cause that may pass of itself - this listener holds no session-consumer
+	// connection, or a consumer call failed - and 409 for one that will not: the registration
+	// asked for no consumer, or its session id names none. The plugin's own half of this is
+	// dispatch://INFRA-771: it starts with Envoy inbound unavailable, says so, and asks again at
+	// each heartbeat.
+	status int
+	Error  string `json:"error"`
+	Reason string `json:"reason"`
 }
 
 // sessionDeliveryOutcome is what sessionDelivery.register did for one registration.
@@ -96,23 +109,23 @@ func (o sessionDeliveryOutcome) relayed() bool {
 type sessionRelay interface {
 	// registered reports a registration of sessionID that recorded consumer delivery on its entry.
 	// epochChanged is set when the entry it replaced did not hold consumer delivery with the same
-	// epoch: the plugin connected anew, or came over from the core path, so the relay restarts
-	// the session's consumer at its ack floor before it relays again.
+	// epoch: the plugin connected anew, so the relay restarts the session's consumer at its ack
+	// floor before it relays again.
 	registered(sessionID string, epochChanged bool)
 }
 
 // sessionDelivery manages the session consumers (bus.SessionConsumers) for the listener's
 // registrations: it creates each one a registration asks for, keeps its filter on the session's
 // agent subject and stored followed topics as they change, and tells the relay of each
-// registration. A nil sessionDelivery, or one without consumers (the session-consumer connection
-// failed at start), answers every registration that asks with core.
+// registration. A nil sessionDelivery, or one without consumers, refuses every registration with
+// consumer_error; main's listener has neither, since its start ends when the session-consumer
+// connection fails, and only a test builds a listener without one.
 type sessionDelivery struct {
 	consumers *bus.SessionConsumers
 	logger    *logging.Logger
 	// relay hears each registration that records consumer delivery. A sessionDelivery with
-	// consumers has one (startSessionRelays sets it before /v1 opens, and a relay that could not
-	// start replaces the whole sessionDelivery with one without consumers, which answers every
-	// registration core), so a registration answered consumer is relayed.
+	// consumers has one (startSessionRelays sets it before /v1 opens, and main's start ends when
+	// that relay cannot start), so a registration answered consumer is relayed.
 	relay sessionRelay
 	// now is the clock of the no-grant backoff; time.Now unless a test sets it.
 	now func() time.Time
@@ -140,15 +153,14 @@ type sessionDelivery struct {
 }
 
 // connectSessionDelivery opens the session-consumer connection (bus.ConnectSessionConsumers) on
-// urls. A connection that fails is logged once and leaves the listener serving every registration
-// on the core path, as a listener of an earlier release does.
-func connectSessionDelivery(urls []string, logger *logging.Logger) *sessionDelivery {
+// urls. Every session takes its messages from the consumer this connection manages, so a failure
+// is the whole start's: main ends the process with it, as it does for the live topics lane.
+func connectSessionDelivery(urls []string, logger *logging.Logger) (*sessionDelivery, error) {
 	consumers, err := bus.ConnectSessionConsumers(urls)
 	if err != nil {
-		logger.Error("session consumer connection failed; every session stays on core delivery", slog.String("error", err.Error()))
-		return &sessionDelivery{logger: logger, now: time.Now}
+		return nil, err
 	}
-	return &sessionDelivery{consumers: consumers, logger: logger, now: time.Now}
+	return &sessionDelivery{consumers: consumers, logger: logger, now: time.Now}, nil
 }
 
 // close closes the session-consumer connection, if one is open.
@@ -178,32 +190,60 @@ func (m *sessionDelivery) drain(ctx context.Context) {
 	}
 }
 
-// register gives a registration the delivery it asks for, once its topics are stored: topics are
-// the session's stored interest topics. A registration that carried delivery with consumer set, or
-// registered a serving port, gets the session's consumer, created when the stream holds none (at
-// the sequence after its resume point when that names the stream's current identity, else at the
-// stream's end) and otherwise updated to the current filter, before the registration answers.
-func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topics []string) sessionDeliveryOutcome {
-	if body.Delivery == nil && body.Port <= 0 {
-		return sessionDeliveryOutcome{}
+// register gives a registration the session consumer every portless session is delivered through,
+// filtered on topics, the topics the registration's interest row will hold. One this listener
+// cannot give a consumer is refused by name, and the handler then writes nothing.
+//
+// A session on a serving port is the exception: the listener that owns it pushes to its port, so
+// a consumer it cannot be given leaves it registered with no delivery field, as a listener before
+// session consumers answered it, and its messages come down the durable path
+// (dispatch://INFRA-429 removes that path and this exception with it).
+func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topics []string) (sessionDeliveryOutcome, *deliveryRefusal) {
+	outcome, refusal := m.consumerFor(ctx, body, topics)
+	if refusal != nil && body.Port > 0 {
+		return sessionDeliveryOutcome{}, nil
 	}
-	if body.Port <= 0 && !body.Delivery.Consumer {
-		return coreDeliveryOutcome(deliveryReasonNotRequested)
+	return outcome, refusal
+}
+
+// consumerFor creates the session's consumer when the stream holds none (at the sequence after its
+// resume point when that names the stream's current identity, else at the stream's end) and
+// otherwise updates it to the current filter, before the registration answers; it refuses a
+// registration that asks for none, or that this listener can give none.
+func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, topics []string) (sessionDeliveryOutcome, *deliveryRefusal) {
+	if body.Port <= 0 && (body.Delivery == nil || !body.Delivery.Consumer) {
+		// A registration with no delivery field at all is a plugin older than consumer delivery.
+		// It receives nothing either way, so it is told so rather than left registered and silent.
+		return sessionDeliveryOutcome{}, &deliveryRefusal{
+			status: http.StatusConflict,
+			Error: fmt.Sprintf("%s asked for no session consumer: a session receives only what its own consumer holds, so register with delivery.consumer true",
+				body.SessionID),
+			Reason: deliveryReasonNotRequested,
+		}
 	}
 	if _, ok := bus.SessionConsumerName(body.SessionID); !ok {
-		return coreDeliveryOutcome(deliveryReasonInvalidSessionID)
+		return sessionDeliveryOutcome{}, &deliveryRefusal{
+			status: http.StatusConflict,
+			Error: fmt.Sprintf("%q names no session consumer: a session id holds no dot, star, angle bracket, slash or whitespace",
+				body.SessionID),
+			Reason: deliveryReasonInvalidSessionID,
+		}
 	}
 	if m == nil || m.consumers == nil {
-		return coreDeliveryOutcome(deliveryReasonConsumerError)
+		return sessionDeliveryOutcome{}, &deliveryRefusal{
+			status: http.StatusServiceUnavailable,
+			Error:  "this listener holds no session-consumer connection, so it can give " + body.SessionID + " no consumer",
+			Reason: deliveryReasonConsumerError,
+		}
 	}
 	if m.grantRefused() {
-		return coreDeliveryOutcome(deliveryReasonNoGrant)
+		return sessionDeliveryOutcome{}, noGrantRefusal(body.SessionID)
 	}
 	ctx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
 	defer cancel()
 	streamID, err := m.consumers.StreamID(ctx)
 	if err != nil {
-		return m.refused(body.SessionID, err)
+		return sessionDeliveryOutcome{}, m.refused(body.SessionID, err)
 	}
 	var startSeq uint64
 	var epoch string
@@ -217,7 +257,7 @@ func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topi
 	start, err := m.consumers.Ensure(ctx, body.SessionID, sessionConsumerFilter(body.SessionID, topics), startSeq)
 	unlock()
 	if err != nil {
-		return m.refused(body.SessionID, err)
+		return sessionDeliveryOutcome{}, m.refused(body.SessionID, err)
 	}
 	m.granted()
 	gap := start.Gap
@@ -230,17 +270,23 @@ func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topi
 		},
 		epoch:         epoch,
 		consumerStart: start.StartSeq,
+	}, nil
+}
+
+// noGrantRefusal is the refusal of sessionID's registration for want of the grant that manages
+// session consumers, from a call the server refused or from the backoff that call started.
+func noGrantRefusal(sessionID string) *deliveryRefusal {
+	return &deliveryRefusal{
+		status: http.StatusServiceUnavailable,
+		Error:  "this listener may not manage session consumers, so it can give " + sessionID + " none",
+		Reason: deliveryReasonNoGrant,
 	}
 }
 
-// coreDeliveryOutcome is the outcome of a registration left on the core path for reason.
-func coreDeliveryOutcome(reason string) sessionDeliveryOutcome {
-	return sessionDeliveryOutcome{answer: &deliveryAnswer{Mode: deliveryModeCore, Reason: reason}}
-}
-
-// refused is the core outcome of a consumer call for sessionID that failed with err. A refusal for
-// want of a grant starts the no-grant backoff (noGrantBackoff), or extends the episode running.
-func (m *sessionDelivery) refused(sessionID string, err error) sessionDeliveryOutcome {
+// refused is the refusal of a registration whose consumer call for sessionID failed with err:
+// both causes may pass of themselves, so both are 503. A refusal for want of a grant starts the
+// no-grant backoff (noGrantBackoff), or extends the episode running.
+func (m *sessionDelivery) refused(sessionID string, err error) *deliveryRefusal {
 	if consumerGrantRefused(err) {
 		m.grantMu.Lock()
 		m.noGrantUntil = m.now().Add(noGrantBackoff)
@@ -248,14 +294,18 @@ func (m *sessionDelivery) refused(sessionID string, err error) sessionDeliveryOu
 		m.noGrantLogged = true
 		m.grantMu.Unlock()
 		if first {
-			m.logger.Warn("the NATS user may not manage session consumers; sessions stay on core delivery until the grant carries them",
+			m.logger.Warn("the NATS user may not manage session consumers; every registration is refused until the grant carries them",
 				slog.String("session_id", sessionID), slog.String("error", err.Error()), slog.String("probe_again_in", noGrantBackoff.String()))
 		}
-		return coreDeliveryOutcome(deliveryReasonNoGrant)
+		return noGrantRefusal(sessionID)
 	}
-	m.logger.Warn("session consumer call failed; the session stays on core delivery",
+	m.logger.Warn("session consumer call failed; the registration is refused",
 		slog.String("session_id", sessionID), slog.String("error", err.Error()))
-	return coreDeliveryOutcome(deliveryReasonConsumerError)
+	return &deliveryRefusal{
+		status: http.StatusServiceUnavailable,
+		Error:  "the session consumer of " + sessionID + " could not be read or created",
+		Reason: deliveryReasonConsumerError,
+	}
 }
 
 // consumerGrantRefused reports whether err is the server's refusal of a consumer call for want of a
@@ -282,10 +332,11 @@ func (m *sessionDelivery) granted() {
 }
 
 // refollow sets the filter of sessionID's consumer to its stored interest topics after a change
-// that removed some (an unsubscribe), when the session's entry records consumer delivery; a session
-// on the core path, or whose consumer is gone, is left alone, and its next registration sets the
-// filter. A failure is logged, not returned: the consumer then still delivers a topic the session
-// no longer follows, and the plugin drops a frame no followed topic matches.
+// that removed some (an unsubscribe), when the session's entry records consumer delivery; a
+// session whose entry records none, an entry the previous build wrote, or whose consumer is gone,
+// is left alone, and its next registration sets the filter. A failure is logged, not returned:
+// the consumer then still delivers a topic the session no longer follows, and the plugin drops a
+// frame no followed topic matches.
 func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, sessionID string) {
 	if m == nil || m.consumers == nil {
 		return
@@ -361,14 +412,26 @@ func (l *sessionLocks) lock(sessionID string) (unlock func()) {
 }
 
 // sessionConsumerFilter is the subjects sessionID's consumer filters on: its agent subject and
-// every one of topics the stream stores (bus.StreamCaptures). A topic the stream does not store (a
-// team or other ad-hoc topic, a role lane) reaches the session over its core subscription only.
+// every one of topics the stream stores (bus.StreamCaptures), a team topic among them. A Legion
+// controller's notice lane (notifications.legion.<project>.controller) is one of those topics
+// while the session holds that project's controller role, and this filter is the whole of how it
+// now reaches the controller: the lane's live core subscription, which handed the session only
+// what was published while it was subscribed, went with the rest of the core receive path
+// (INFRA-771), so a notice published while the controller was away is delivered from the stream
+// when it returns. A topic the stream does not store reaches the session on no path of its own: a
+// role lane reaches its holder as a forward on the holder's agent subject, and a topic an earlier
+// build's row still names, which /v1/interests/subscribe refuses now, reaches nothing.
 // SessionConsumers reduces the list to filters that do not overlap.
+//
+// A topic the server would refuse as a filter subject (bus.CheckFilterSubject: an empty token, as
+// in a GitHub topic that spells a repository name with a dot, or a `>` before the last token) is
+// left out, though the row stores it: with it in the list the server refuses the whole call and
+// the session gets no consumer at all, and no message can reach such a subject anyway.
 func sessionConsumerFilter(sessionID string, topics []string) []string {
 	filter := make([]string, 0, len(topics)+1)
 	filter = append(filter, contracts.AgentSubject(sessionID))
 	for _, topic := range topics {
-		if bus.StreamCaptures(topic) {
+		if bus.StreamCaptures(topic) && bus.CheckFilterSubject(topic) == nil {
 			filter = append(filter, topic)
 		}
 	}

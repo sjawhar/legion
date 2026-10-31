@@ -4,9 +4,9 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Interest, SubscribeResult } from "@legion/envoy-client/transport"
 import type {
+  ChannelBrokerMessage,
   ChannelConnectionStatus,
   ChannelForwarderConnection,
-  ChannelInboundMessage,
   ChannelTopicSubscription,
 } from "../src/channel-forwarder"
 import {
@@ -17,13 +17,13 @@ import {
   startChannelSession,
 } from "../src/envoy-channel-server"
 import { SessionIdentity } from "../src/session-identity"
-import { emptyReplay, type FakeClient } from "./channel-session-harness"
+import type { FakeClient } from "./channel-session-harness"
 
 class IdleNats implements ChannelForwarderConnection {
   subscribe(): ChannelTopicSubscription {
     return {
       unsubscribe: () => undefined,
-      async *[Symbol.asyncIterator](): AsyncGenerator<ChannelInboundMessage> {},
+      async *[Symbol.asyncIterator](): AsyncGenerator<ChannelBrokerMessage> {},
     }
   }
 
@@ -63,9 +63,17 @@ function interest(): Interest {
   }
 }
 
-/** The listener's answer to a registration: the interest, and the core delivery mode. */
+/** The listener's answer to a registration: the interest, and this session's own consumer. */
 function registered(): SubscribeResult {
-  return { ...interest(), delivery: { mode: "core", reason: "not_answered" } }
+  return {
+    ...interest(),
+    delivery: {
+      mode: "consumer",
+      subject: "notifications.envoy.deliver.ses_current",
+      stream_id: "stream-1",
+      gap: false,
+    },
+  }
 }
 
 test("reasserts a role claimed after channel startup on the next heartbeat", async () => {
@@ -84,7 +92,6 @@ test("reasserts a role claimed after channel startup on the next heartbeat", asy
       return { claimed: true, interest: interest() }
     },
     getRole: async () => ({ role: "reviewer", holder: "ses_lost", last_seen: 1 }),
-    replay: emptyReplay,
   }
   let session: ChannelSession | undefined
 

@@ -359,34 +359,85 @@ func TestListenerHostPermissionsOnRealServers(t *testing.T) {
 	}
 }
 
-// A user holding SessionPermissions alone, as sessions that share one user hold it, receives its
-// notifications and publishes a reply, and the server refuses it a subscribe to the reply inboxes
-// and a JetStream API request, on the 2.10 image and on the hub's: request/reply from such a
-// session is refused by design, and it reads missed notifications only through the listener.
+// A user holding SessionPermissions alone, as sessions that share one user hold it, receives on
+// its own relay subject, the subject the listener that owns the session publishes the session's
+// consumer messages on, and publishes a reply; the server refuses it every notification topic
+// beside that one, a subscribe to the reply inboxes and a JetStream API request, on the 2.10
+// image and on the hub's. A session takes no message from a notification subscription of its own:
+// not notifications.>, not the agent subjects (notifications.agent.*), not even its own agent
+// subject. Request/reply from such a session is refused by design, and it reads the stream
+// through no call of its own.
 func TestSessionPermissionsOnRealServers(t *testing.T) {
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
 			t.Parallel()
-			seed, server, uri := startGrantServer(t, image.Ref, core.SessionPermissions())
-			conn, errs := connect(t, uri, seed)
-			_, err := conn.SubscribeSync(contracts.AgentSubject(liveSession))
+			// The session user holds SessionPermissions and presents no credential, as a session
+			// on a hub does; the listener's user publishes the relay frame, as the listener that
+			// owns the session does.
+			listenerSeed, server, uri := startSplitServer(t, image.Ref)
+			conn, errs := connect(t, uri, "")
+			relayed, err := conn.SubscribeSync(bus.DeliverSubject(liveSession))
+			require.NoError(t, err)
+			_, err = conn.SubscribeSync(contracts.AgentStreamControlSubject(liveSession))
 			require.NoError(t, err)
 			require.NoError(t, conn.Publish(natsgo.InboxPrefix+"example.1", nil))
+			require.NoError(t, conn.Flush())
+
+			item := contracts.Envelope{
+				EventID:        "evt-session-grant",
+				Source:         "agent",
+				SourceEventID:  "evt-session-grant",
+				SourceSession:  liveSession,
+				Topic:          contracts.AgentSubject(liveSession),
+				DedupeKey:      "permissions-live-test.evt-session-grant",
+				IssuedAt:       contracts.NowMillis(),
+				PayloadSummary: "example relayed message",
+				Payload:        "example relayed message",
+				TraceID:        "trace-evt-session-grant",
+			}
+			data, err := json.Marshal(item)
+			require.NoError(t, err)
+			listener, _ := connect(t, uri, listenerSeed)
+			require.NoError(t, listener.Publish(bus.DeliverSubject(liveSession), data))
+			require.NoError(t, listener.Flush())
+			frame, err := relayed.NextMsg(10 * time.Second)
+			require.NoError(t, err, "no relay frame reached %s", bus.DeliverSubject(liveSession))
+			var received contracts.Envelope
+			require.NoError(t, json.Unmarshal(frame.Data, &received))
+			require.Equal(t, item.Topic, received.Topic)
+			require.Equal(t, item.PayloadSummary, received.PayloadSummary)
+
+			// Every notification topic beside that subject is refused: the family's root, the
+			// agent subjects a session of an earlier release subscribed to, and its own among
+			// them. Every allowed operation came first, so a violation for one would arrive before
+			// these.
+			for _, subject := range []string{
+				bus.NotificationTopicPrefix + ">",
+				contracts.AgentTopicPrefix + "*",
+				contracts.AgentSubject(liveSession),
+			} {
+				_, err := conn.SubscribeSync(subject)
+				require.NoError(t, err)
+				requireViolation(t, conn, errs, `Subscription to "`+subject+`"`)
+			}
 			_, err = conn.SubscribeSync(natsgo.InboxPrefix + ">")
 			require.NoError(t, err)
 			requireViolation(t, conn, errs, `Subscription to "_INBOX.>"`)
-			// The inbox subscribe is all the server refused: the notification subscribe and the reply
-			// came first and were allowed.
-			for _, v := range violationsOnceLogged(t, server, "_INBOX.>") {
-				require.Equal(t, []string{"Subscription", "_INBOX.>"}, v[1:], "the server refused what the set allows: %s", v[0])
+			// No JetStream API call is the session's either: its consumer is the listener's to
+			// create and pull, and the stream's stored-message get is refused it.
+			const streamRead = "$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS"
+			require.NoError(t, conn.Publish(streamRead, nil))
+			requireViolation(t, conn, errs, `Publish to "`+streamRead+`"`)
+
+			// Those refusals are all the server refused.
+			refused := [][]string{
+				{"Subscription", bus.NotificationTopicPrefix + ">"},
+				{"Subscription", contracts.AgentTopicPrefix + "*"},
+				{"Subscription", contracts.AgentSubject(liveSession)},
+				{"Subscription", "_INBOX.>"},
+				{"Publish", streamRead},
 			}
-			// No JetStream API call is the session's: the stored-message get the listener's replay
-			// makes is refused it, so a session reads what it missed only through the listener.
-			const replayRead = "$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS"
-			require.NoError(t, conn.Publish(replayRead, nil))
-			requireViolation(t, conn, errs, `Publish to "`+replayRead+`"`)
-			refused := [][]string{{"Subscription", "_INBOX.>"}, {"Publish", replayRead}}
-			for _, v := range violationsOnceLogged(t, server, replayRead) {
+			for _, v := range violationsOnceLogged(t, server, streamRead) {
 				require.Contains(t, refused, v[1:], "the server refused what the set allows: %s", v[0])
 			}
 		})

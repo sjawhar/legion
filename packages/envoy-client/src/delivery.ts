@@ -126,32 +126,6 @@ export async function postDeliveryReply(
   });
 }
 
-/**
- * Whether an inbound frame is a forwarded role lane waiting for a receipt on `reply`. The
- * listener forwards a role-lane event to the holder's direct subject as a core request with
- * the envelope's `topic` still the role topic, and reports a missing receipt as a failed
- * delivery. Every other frame on the direct subject — a Dispatch author route, a peer
- * envoy_send — is a JetStream publish whose reply inbox belongs to the server's PubAck; an
- * empty receipt there fails the publisher with `nats: invalid jetstream publish response`.
- * `reply` is absent as `""` (nats.js's getter) or `undefined` (a host that omits the field).
- */
-export function expectsLaneReceipt<
-  Frame extends {
-    readonly subject: string;
-    readonly directSubject: string;
-    readonly envelopeTopic: string | undefined;
-    readonly reply: string | undefined;
-  },
->(frame: Frame): frame is Frame & { readonly reply: string } {
-  return (
-    frame.reply !== undefined &&
-    frame.reply !== "" &&
-    frame.subject === frame.directSubject &&
-    frame.envelopeTopic !== undefined &&
-    frame.envelopeTopic !== frame.directSubject
-  );
-}
-
 /** A message a subscription yielded, and when it arrived. */
 export interface Arrival<Message> {
   readonly message: Message;

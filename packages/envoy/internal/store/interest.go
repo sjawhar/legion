@@ -55,17 +55,32 @@ func Remove(item Interest, topics []string) Interest {
 	return item
 }
 
-// dropPrivateStreamTopics removes from topics every one reaching a private stream subject other
-// than sessionID's own agent subject (bus.ReachesPrivateStreamSubject): another session's inbox, a
-// failed-delivery lane, the Legion controller lane, or a wildcard overlapping one. Registry.Match
-// fans a stored topic out to its serve-port session, so such a topic would hand that session
-// messages meant for another session or for the controller's role holder. The listener refuses
-// one at /v1/interests/subscribe; this drops one a row stored before that guard holds, so every
-// write of a row (Upsert, Remove) cleans it. sessionID is the row's key, not the session_id its
-// stored value names. It filters topics in place, so callers pass a slice they own (Merge's and
-// Remove's results are).
-func dropPrivateStreamTopics(sessionID string, topics []string) []string {
+// dropPrivateStreamTopics removes from topics every one reaching a private stream subject that is
+// not sessionID's own (bus.ReachesPrivateStreamSubject): another session's inbox, a
+// failed-delivery lane, a controller notice lane of a project whose controller role roles does not
+// name, or a wildcard overlapping one. Registry.Match fans a stored topic out to its serve-port
+// session, so such a topic would hand that session messages meant for another session or for
+// another project's controller. The listener refuses one at /v1/interests/subscribe; this drops
+// one a row stored before that guard held, and one whose role the session has since lost, so every
+// write of a row (Upsert, Remove) cleans it. roles is what the session holds now
+// (Registry.RolesHeldBy, read by controllerLaneRoles). sessionID is the row's key, not the
+// session_id its stored value names. It filters topics in place, so callers pass a slice they own
+// (Merge's and Remove's results are).
+func dropPrivateStreamTopics(sessionID string, roles []string, topics []string) []string {
 	return slices.DeleteFunc(topics, func(topic string) bool {
-		return bus.ReachesPrivateStreamSubject(sessionID, topic)
+		return bus.ReachesPrivateStreamSubject(sessionID, topic, roles)
 	})
+}
+
+// MergedTopics is the topic set an upsert of topics into a row of sessionID holding cur stores:
+// their union (Merge), without a topic reaching a private stream subject that is not the session's
+// own (dropPrivateStreamTopics), sorted. mergeForUpsert stores exactly this, and the listener's
+// registration route builds the session consumer's filter from it before the write
+// (cmd/listener's subscribeHandler), so the filter and the row it stores name one set: a filter
+// naming a topic the row does not would carry that topic into a session no interest of its own
+// follows.
+func MergedTopics(sessionID string, roles []string, cur []string, topics []string) []string {
+	merged := dropPrivateStreamTopics(sessionID, roles, Merge(Interest{Topics: cur}, topics).Topics)
+	slices.Sort(merged)
+	return merged
 }
