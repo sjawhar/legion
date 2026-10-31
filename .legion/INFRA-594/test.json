@@ -2,43 +2,66 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-594",
-  "completed": "2026-10-31T09:32:00Z",
-  "round": 12,
+  "completed": "2026-10-31T13:42:00Z",
+  "round": 13,
   "roundShape": {
-    "classification": "narrow: test files only",
+    "classification": "full, narrow in scope",
     "tool": "dispatch://INFRA-598/artifact/round-shape-py version 3, re-fetched into this pod",
-    "output": "pull request 2446, base main / old head f41a4d8c -> f41a4d8cb9c114731b82d64faaa0cf3b357ee7f9 / new head 811eda38 -> 811eda387b4b6e1364efde270516a5bf402ec608 / files whose own diff differs: 3 — packages/envoy-client/src/__tests__/free-ports.test.ts, packages/envoy-client/test/envoy-stack.ts, packages/envoy/cmd/listener/session_relay_hold_test.go.",
-    "why": "All three are test files: my own red test, the real-stack harness it pins, and the hold test I handed the implementer. No product file changed since f41a4d8c, so round 11's live runs, its controls and its race run stand for the code that merges, and this round proves what this round changed."
+    "output": "pull request 2446, base main / old head 89fb442f / new head 3666db31 / files whose own diff differs: 5 — .github/workflows/ci.yaml, packages/envoy/.changes/unreleased/INFRA-594-serving-port-relay-refusals.yaml, packages/envoy/AGENTS.md, packages/envoy/cmd/listener/delivery.go and packages/envoy/cmd/listener/session_relay_test.go.",
+    "why": "delivery.go is the fan-out, so every criterion was driven again at this head: the live runs, the race run and every earlier control, not only this round's new subtest."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "I drove both of this round's claims myself rather than reading them: my red test is green here with its body unchanged and red against the old freePort, and the hold test the implementer committed is byte-for-byte the one I handed over and passes twenty times running. I also measured the fix's limit, below, which the implementer's proof does not state."
+    "how": "I drove the new subtest and its control myself, and then drove the thing the subtest does not assert — that the session's LATER messages arrive — on the real stack, with the pre-fix fan-out as the control. Both live runs, the race run, the five earlier controls and the flake measurement are mine, taken in this pod at this head."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Round 11's red test is answered: the real-stack harness chooses its ports so that one port cannot be handed to two processes of one stack",
-      "surface": "The harness's own exported chooser, driven by the test I wrote in round 11, in this pod",
-      "command": "bun test packages/envoy-client/src/__tests__/free-ports.test.ts",
-      "observed": "2 pass, 0 fail, 4,000 expect() calls — the 2,000 rounds of the distinctness case and the bind-back case. My test's body is unchanged: the whole diff from my commit d8eecf87 to this head is the two import lines swapped for biome's order, nothing else. `freePorts(count)` (envoy-stack.ts:71) holds every probe socket open until all count ports are chosen and closes them in a `finally`, and `startEnvoyStack` takes its three in one call.",
-      "headSha": "811eda387b4b6e1364efde270516a5bf402ec608",
-      "negativeControl": "Two, both reverted. (1) The harness restored to f41a4d8c's one-at-a-time `freePort`: the test fails at once, `SyntaxError: Export named 'freePorts' not found`, 1 fail — the seam the fix adds is what the test asks for. (2) The sharper one, the old algorithm behind the new seam (freePorts rewritten to probe and close one port at a time): 2 pass, three runs in a row. That is the honest limit of my own test and I state it rather than let it read as a lock — see `testLimit` below."
+      "criterion": "Review round 5: a message whose delivery mode cannot be read leaves no attempt record, is reported exactly once, and does not stall the serving-port session",
+      "surface": "The listener package's real stack (natsd with JetStream, the listener's fan-out and its session relays, two serving-port sessions and a bound durable), driven by the subtest the fix added",
+      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -count=1 -v -run TestServePortRelayRefusesAnUnadvertisedModeTheFanoutAlsoRefused ./cmd/listener",
+      "observed": "PASS, ok 7.012s: both 'the session does not advertise the mode' (3.73s) and the new 'the mode cannot be read' (3.17s). The subtest asserts the relay acks the message, the port is pushed nothing, and the topic's exception lane carries exactly one delivery_failed for the relayed session.",
+      "headSha": "3666db3184d3affd299afd6a10b3708bdd7683f3",
+      "negativeControl": "delivery.go alone restored from ce082506, every other file of this head kept: 'the mode cannot be read' FAILS, session_relay_test.go:1156, 'the consumer of ses_mode_relayed_… has 1 pending ack, ack floor 0; want 0 pending and everything through 1 acked', while 'the session does not advertise the mode' still PASSes. That is the regression review round 5 found, reproduced by me, and it names the fan-out's single decision as the cause rather than anything else of this round."
     },
     {
-      "criterion": "A relay holding a message another path is pushing delays only that session, and pushes the held message once the attempt record clears",
-      "surface": "The listener package's real stack (natsd, the listener's own relays, two serving-port sessions), the test I wrote in round 11 and handed over, as the implementer committed it",
-      "command": "cd packages/envoy && go test -count=20 -run TestARelayHoldDelaysOnlyThatSession ./cmd/listener",
-      "observed": "ok github.com/sjawhar/envoy/cmd/listener 62.141s — twenty runs, no failure. The committed file is the one I handed over: same assertions, same bounds (the hold's log line within 30 s, the other session's message at its port within 20 s, the held session pushed nothing at that moment, the held message within 30 s of the clear and not a second time within 2 s).",
-      "headSha": "811eda387b4b6e1364efde270516a5bf402ec608",
-      "negativeControl": "Measured in round 11 on the identical body and still standing, since no product file changed since: one package-level mutex around holdWhilePushedElsewhere in pushUntilAccepted (so every session's judgement serializes) → FAIL, 'the other session's message … never reached its port while ses_held_… held one'; and the attempt record never cleared → FAIL, 'the held message … never reached the port after the other push ended'."
+      "criterion": "The harm the subtest does not measure: the session's LATER messages arrive, rather than waiting out attemptCacheTTL behind the refused one",
+      "surface": "The same real stack: a serving-port session on consumer delivery, an unreadable-mode message stored first, an ordinary message on the same topic stored behind it, the relay started only after the fan-out has decided both",
+      "command": "A scratch test of mine in cmd/listener, not committed: TestScratchUnreadableModeDoesNotStallLaterMessages",
+      "observed": "PASS, 2.46s. The later message reaches the port within seconds of the relay starting, and the exception lane carries exactly one delivery_failed. I wrote it because the committed subtest proves the stream is not stalled (0 pending, ack floor past the message) and not that a later message is delivered, which is the promise this issue is about.",
+      "headSha": "3666db3184d3affd299afd6a10b3708bdd7683f3",
+      "negativeControl": "The same delivery.go restored from ce082506: FAIL after 30 s, 'the later message ce35e164… never reached the port: the unreadable-mode message before it stalled the session'. Thirty seconds is my bound; the real wait there is attemptCacheTTL, five minutes. So the fix is worth what it says it is worth, measured end to end rather than inferred from an ack floor."
+    },
+    {
+      "criterion": "Every earlier control still fails at this head",
+      "surface": "The listener's real stack and the envoy-client ledger",
+      "command": "The four tests run green first, then each control applied and reverted",
+      "observed": "All green at this head before each control.",
+      "headSha": "3666db3184d3affd299afd6a10b3708bdd7683f3",
+      "negativeControl": "(a) Rounds 3 and 4 together: the five production files of 1881c6fe restored from 0d71712b → all three variants of TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer FAIL, each 'the listener never logged \"session relay holds a message another path is pushing\" within 45s'. The control is blunter than round 11's, where only the two new variants fell, because this round's test waits on the hold's own state rather than on timing: the pre-fix code has no hold at all, so every variant now falls. (b) The hold test: one package-level mutex around holdWhilePushedElsewhere in pushUntilAccepted → FAIL, 'the other session's message 85db175e… never reached its port while ses_held_c9211c3e… held one'. (c) `const asked = resumePoint()` alone (consumer-delivery.ts:405) → both seeded-resume tests fail. (d) The receive-side tellReplacedResume branch removed → 'a frame from another stream than the seeded resume's, before the answer, is told once' fails alone. All reverted; the workspace is clean."
+    },
+    {
+      "criterion": "Sessions take every event once through all six disruptions, and through a release, at this head",
+      "surface": "Real Oh My Pi and real Claude Code under this checkout's legion claude-bridge, natsd with JetStream, two listener processes, envoy-dispatch on Postgres 17 with pgvector, in the issue pod",
+      "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' bash scripts/e2e/envoy-session-delivery.sh; and the same with --disruptions a --resume-plugins-from 8d0030ea1cd1 --second-followed-issue",
+      "observed": "Six windows: ENVOY SESSION DELIVERY: PASS (every event once, the issue in order), no '!' cell in the table, built from '3666db318 plus the working copy'. Upgrade: PASS, with the run's notes 'the sessions start on pi-envoy 13.10.1 and claude-envoy 1.0.0 from 8d0030ea1cd1 until the resume of window a, then this run's' and 'both sessions resume on this run's pi-envoy and claude-envoy, after the window's events were stored'.",
+      "headSha": "3666db3184d3affd299afd6a10b3708bdd7683f3",
+      "negativeControl": "ANTHROPIC_API_KEY unset in my environment, the key read into a shell variable and grepped over both evidence trees and both outputs: 0 hits over 248 and 66,057 files."
+    },
+    {
+      "criterion": "The listener package is free of data races at this head",
+      "surface": "The listener package under the Go race detector, cgo enabled, one package at a time, against the pod's Postgres",
+      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB CGO_ENABLED=1 DISPATCH_TEST_DATABASE_URL=… go test -race -p 1 -count=1 -timeout 40m ./cmd/listener",
+      "observed": "ok github.com/sjawhar/envoy/cmd/listener 673.581s. The detector fails a test on a race it finds, so a package that passes under -race is one where it found none.",
+      "headSha": "3666db3184d3affd299afd6a10b3708bdd7683f3",
+      "negativeControl": "CGO_ENABLED=1 is set because without it -race does not run at all, which is the pass that proves nothing I once reported; and DISPATCH_TEST_DATABASE_URL because without it the package panics 'rootless Docker not found' before reaching every test."
     }
   ],
-  "testLimit": "My free-ports distinctness case is a guaranteed pass for the correct chooser and only a probabilistic detector of a revert, and I would rather say so than have a later reader trust it further than it goes. In round 11 I measured the old algorithm repeating a port in 1 triple of 2,000 — taken while two live e2e runs were churning this pod's ports. On an idle pod I now measure 0 duplicates in 20,000 triples, and 0 in 3,000 under a churn loop of my own, so that 1-in-2,000 is not reproducible on demand and the case would catch a revert only sometimes. The bind-back case is deterministic and does lock the fix against a version that keeps its probe sockets open.",
-  "residualRisk": "The fix removes one of the two ways that error can happen, and I could not attribute CI's failure to the one it removes. `freePorts` closes every probe before `startEnvoyStack` starts natsd and the listener, so a process outside this test still has a window to take one of the three ports between the close and the children's binds; what the fix makes impossible is the stack handing one port to two of its own processes. The listener's log line at job 124443217959 names only the port it could not bind, not who held it, so I cannot say which of the two reddened that run. If envoy-session-stall fails this way again, the remedy that covers both is for startEnvoyStack to retry on a child's EADDRINUSE rather than to choose better; it is not worth doing before a second occurrence, and it is the architect's to schedule.",
-  "ci": "Read on GitHub at the code head ce082506, never re-run, at 09:27Z: 30 success, 1 failure, 1 skipped, 1 still running. `envoy-session-stall` — the lane round 11 failed on — is GREEN. The failure is `envoy-go`, and it is main's, not ours: job 124478243090, `--- FAIL: TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries`, `docs/kubernetes.md's claim list and the claims the exchange decides on disagree` (claims_doc_test.go:79), the same test and message round 11 proved fails on main's own tree at ab7c2339 with nothing of this branch in it; the architect says INFRA-588's fix is coming. Every lane the architect named is green: test, lint, typecheck, pr-title, envoy-go-race (and its api/docs/pmdoc lanes), pi-envoy, claude-envoy, listener-server-change, envoy-client. UNREAD: `ci-ok`, still queued when I completed — it condenses the selected jobs and cannot pass while envoy-go is red, so its verdict is already decided by that lane rather than by anything of this round.",
+  "memory": "Run under the architect's cap (-p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, -race one package at a time), with the bounded sampler as a named harness job stopped by proc://…/kill at each run's end. Race run: sampled peak 3.68 GiB of 19, 325 samples. The reconnect-flake runs: sampled peak 4.13 GiB of 19, 346 samples. Both are sampled peaks at two-second intervals, so a shorter spike is missed; both samplers were confirmed stopped (the file stopped growing, `jobs -l` empty, no sampler process left).",
+  "ci": "Read on GitHub at the code head 196233c0, never re-run, at 13:38Z: 30 success, 1 failure, 1 skipped, 5 cancelled, 1 still running. Every lane the architect named is green: test, lint, typecheck, pr-title, envoy-go-race, pi-envoy, claude-envoy, listener-server-change, envoy-session-stall and envoy-client. The five cancelled are all pr-title, superseded by that workflow's own later run, which succeeded. The one failure is envoy-go, job 124527092266 — and it is NOT the claims test any more, which main's #2598 fixed: it is `--- FAIL: TestAReconnectCatchesUpWhatTheListenerMissed`, delivery_live_hub_test.go:776, in internal/dispatch/api, a package outside this diff. I measured it rather than take round 10's reading: at this head 4 failures in 80 runs (batches of 20: 3, 0, 0, 1); on main's own tree at 8d0030ea, extracted with git archive with nothing of this branch in it, 4 failures in 60 runs (0, 2, 2). Equal within the noise of a flake, so it is main's and not introduced here. UNREAD: `dispatch`, still running when I completed, and `ci-ok`, which had not started because it waits for every selected job — it will be red while envoy-go is, so that lane decides it rather than anything of this round.",
   "observations": [
-    "No Go suite of mine ran after the architect's 08:24Z memory rule: the only one this round was the -count=20 hold run, which finished at 06:52Z, well before it. So this handoff carries no sampled peak; the next round's Go runs will carry one, taken with the bounded sampler and the file's sample count.",
+    "The scratch later-message test is three dozen lines and is the only check that measures what the fix is for, end to end. I did not commit it: a test commit restarts the whole CI run, which the architect's 00:31Z rule says to spend only when needed, and the committed subtest already falls to the same control. The implementer is welcome to land it in the next code round at no extra CI cost.",
     "Still true in this pod: GH_TOKEN and GITHUB_TOKEN are set in the environment, where `skill://legion-worker` says to leave them empty. Every gh call of mine this round was a read."
   ]
 }
