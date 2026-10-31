@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-714",
-  "completed": "2026-10-31T14:40:00Z",
+  "completed": "2026-10-31T21:30:00Z",
   "proof": [
     {
       "criterion": "A3 / R1 - a red CI settlement moves no issue and reaches the phase holder, the implementer and the architect as one message naming each check and its conclusion, and the result they are told is the code head's latest attempt, carried by a handoff-only head.",
@@ -123,6 +123,54 @@
       "observed": "19 Go packages ok and 1076 TypeScript tests pass, 0 fail, with biome and all four typechecks clean. Three refused turns in a row fail the claim with the provider's own words in the cause and hold the issue as a death does; reports in order, reversed and late all give the same run; the architect's retry and legion claims retry --fresh-session each start a new session that gets its phase task, from a refusal failure and from an operator stop, with no store edit; a tester's phase task waits for the implementer's open turn and is then adopted and sent exactly once; a check that failed on the code head and passed on a handoff-only head above it reads green, and a check pending everywhere reads pending rather than red.",
       "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
       "negativeControl": "Three fixes were each shown red against a deliberately broken version before being kept, then restored: the stuck marker made to hold a blocked-then-clean approval back (the issue stayed in reviewing); the carried-verdict merge removed so the old failure won again (3 role messages instead of 6, naming pr-title failed); and, from the round before, the turn-closing line and the status fence. Each revert was confirmed by jj diff to have touched only the fix."
+    },
+    {
+      "criterion": "Round five / the review's critical 1: an approval reaches accepting, because the reviewer's handoff push carries no skip-checks trailer",
+      "surface": "the Go daemon's workflow suite over a real Postgres and NATS on the issue volume",
+      "command": "cd packages/daemon && go test ./internal/workflow/ ./internal/api/ -count=1 -timeout 55m -p 1",
+      "observed": "ok internal/workflow 564.310s, ok internal/api 193.934s; the trailer rule is stated once per prose file and the guard test counts the five occurrences",
+      "headSha": "4785803e1d466cd95faf98972da32ba40fa52a65",
+      "negativeControl": "the rule reverted on the reviewer's push leaves the approved head with no check run, which is the blocked state the finding reported"
+    },
+    {
+      "criterion": "Round five / the review's critical 2: the merger disarms auto-merge before it merges",
+      "surface": "the Go daemon's workflow suite and the merger's prompt",
+      "command": "cd packages/daemon && go test ./internal/workflow/ ./internal/prompts/ -count=1 && grep -n 'disable-auto' internal/prompts/roles/merger.md",
+      "observed": "ok internal/workflow, ok internal/prompts 0.129s; the merger's step 1 reads the pull request's autoMergeRequest and turns it off with gh pr merge <n> --disable-auto before it merges",
+      "headSha": "4785803e1d466cd95faf98972da32ba40fa52a65",
+      "negativeControl": "with the disarm removed, a pull request armed by the old daemon merges on a head afterwards that no one reviewed, which is the finding"
+    },
+    {
+      "criterion": "Round five / the five red CI jobs are fixed at their causes",
+      "surface": "the repository's own gate scripts and the TypeScript suites, run as CI runs them",
+      "command": "bunx biome check . ; bun test packages/contracts/src packages/pi-shared packages/pi-legion/src packages/claude-envoy/tests ; (cd docs/site && bun run build) ; for s in .github/scripts/select-e2e-proofs.test.sh .github/scripts/check-ci-filters.sh .github/scripts/check-private-names.sh .github/scripts/check-release-credentials.sh .github/scripts/check-zod-version.sh .github/scripts/check-bun-version.sh; do bash $s; done",
+      "observed": "biome exit 0 (Checked 1377 files, 2 warnings and 2 infos, all pre-existing on main at the same lines); 1080 pass 0 fail; docs/site build OK; all six gate scripts PASS",
+      "headSha": "4785803e1d466cd95faf98972da32ba40fa52a65",
+      "negativeControl": "select-e2e-proofs.test.sh printed 17 FAIL lines before the deleted proofs left its list, and the pi-legion stall suite ran 3 pass / 6 fail with the stale max_fix_attempts fixture"
+    },
+    {
+      "criterion": "Round five / finding 7: one refused turn below the limit no longer leaves the worker idle",
+      "surface": "the claude-envoy phase hook against its own HTTP endpoint and inbox",
+      "command": "bun test packages/claude-envoy/tests/legion-phase-hook.test.ts",
+      "observed": "28 pass, 0 fail; a StopFailure turn is answered {} and the delayed timer then delivers exactly one reminder, with the worker's own last words kept and the provider's error text discarded",
+      "headSha": "4785803e1d466cd95faf98972da32ba40fa52a65",
+      "negativeControl": "with the arming reverted the inbox stays empty for the whole wait and nothing ever wakes the worker, which is the defect the finding named"
+    },
+    {
+      "criterion": "Round five / R11 and A13 survive the forward merge with main's own workspace-command rule",
+      "surface": "the Go workspace and repocache suites, which drive real git commands on the issue volume",
+      "command": "cd packages/daemon && go test ./internal/workspace/ ./internal/repocache/ -count=1 -timeout 25m",
+      "observed": "ok internal/workspace 400.923s, ok internal/repocache 52.966s; CacheStreamLowSpeed appears 8 times in fetch.go and 7 in config.go, main's 'names no absolute working directory' refusal is present, and stream_test.go carries A13's two cases",
+      "headSha": "4785803e1d466cd95faf98972da32ba40fa52a65",
+      "negativeControl": "the merge's one conflict was resolved the other way first, taking main's unpackCache whole; that drops R11 and A13 entirely, which is what the resolution exists to prevent"
+    },
+    {
+      "criterion": "Round five / a dead live-proof driver and three stale references to deleted scripts",
+      "surface": "the repository tree and the e2e-tagged build",
+      "command": "cd packages/daemon && go vet -tags e2e ./... && cd ../.. && grep -rn 'merged-root-waits|no-required-checks|merged_root_waits|no_required_checks' --include='*.go' --include='*.sh' --include='*.ts' --include='*.py' --include='*.yaml' .",
+      "observed": "go vet -tags e2e exit 0 with merged_root_waits_live_test.go removed; the grep returns nothing outside the changelog entry that records the removal and the committed handoffs",
+      "headSha": "4785803e1d466cd95faf98972da32ba40fa52a65",
+      "negativeControl": "before the removal the same grep returned four files, among them a driver whose own doc comment named a script deleted in round one"
     }
   ],
   "filesChanged": [
@@ -148,7 +196,8 @@
     "Two reviewer findings were deliberately not applied in the simplify pass: rewriting the base-push fan-out into a join, and moving the merge-state trigger's lookups out of the fact lock. Both are design changes rather than simplifications, and this change is already large. The costs are recorded here so the reviewer can weigh them: the fan-out reads one issue row and rewrites one whole pull-request row per open pull request on a pushed base, and the trigger repeats inside the fact lock the lookups the engine has just made.",
     "A1's main-side run: the tests of R1, R2 and the phase vocabulary cannot compile at main 8a911ecca3a5, because this change deletes the packages and the phase they name - internal/requiredchecks, internal/ghautomerge, the READY route, phase.AwaitingMerge. For those the evidence is a negative control per entry: the production code deliberately broken at this head until the covering test goes red, then reverted. For R3 to R8 and R10 to R12, whose subjects all exist at main, the main-side run is a black-box observation at main, made by this issue's tester and recorded in .legion/INFRA-714/test.json; each entry names the one it rests on. My earlier handoff generalised the impossibility argument from the first set to the second, which was wrong, and the architect corrected it.",
     "The reviewer's critical finding 1 was escalated to the architect as a design decision. I proposed carrying the merge state across a handoff-only push; the architect ruled for dropping the skip-checks trailer from the reviewer's push instead, because GitHub computes mergeStateStatus for the current head alone, so every later read would answer blocked for the trailered head and overwrite anything carried. That ruling is implemented. The head-tying half of my proposal was kept, as the architect directed, since it is the reviewer's finding 4.",
-    "The forward merge found that main has independently shipped its own forget-session feature, so both sides declared the same symbols and disagreed on which claim states may forget a session. Main's set - queued, suspended, failed, retired - wins over this branch's failed and retired, because it is a strict superset, main's own operator surface depends on the extra states, and this branch's only caller reaches the event for failed or retired phase workers alone. This branch's refusal wording for a suspended claim is dropped, since main deliberately allows that case now."
+    "The forward merge found that main has independently shipped its own forget-session feature, so both sides declared the same symbols and disagreed on which claim states may forget a session. Main's set - queued, suspended, failed, retired - wins over this branch's failed and retired, because it is a strict superset, main's own operator surface depends on the extra states, and this branch's only caller reaches the event for failed or retired phase workers alone. This branch's refusal wording for a suspended claim is dropped, since main deliberately allows that case now.",
+    "Round five: I removed R11's five files from the forward merge, having read main and the child branch legion/INFRA-495 and found the work in neither, and concluded it was another tree's. The architect corrected me from the approved spec - R11 is this issue's own design and A13 its acceptance, and INFRA-495 is the child folded into this pull request, so its old branch lacking the work is expected. All five files are restored and re-merged against main rather than restored over it, so main's own absolute-Dir rule survives beside them. Nothing left this session: the role topic had no holder and the Dispatch comment was refused on a closed issue."
   ],
   "openQuestions": [
     "The merger's handoff_complete now records its phase row and triggers nothing, since the merge is what moves the issue. So the architect hears nothing between retro's completion and the merge. That follows from R2, which says the merger sends no completion, but it is a real loss of signal; telling the architect would be an addition rather than a deletion and was not made."
