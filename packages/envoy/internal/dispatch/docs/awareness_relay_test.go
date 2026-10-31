@@ -451,20 +451,20 @@ func TestAwarenessClientsThatLeaveFreeTheRoomsBoundAtOnce(t *testing.T) {
 func TestAnAwarenessBatchIsSplitAcrossNotificationsWithinTheLimit(t *testing.T) {
 	relay := newAwarenessRelay(&Service{processID: "00000000-0000-0000-0000-000000000001"})
 	room := "00000000-0000-0000-0000-000000000002"
-	batch := make(map[uint64][]byte)
+	batch := make(map[uint64]awarenessEntry)
 	for client := uint64(1); client <= 5; client++ {
 		state := `{"name":"` + strings.Repeat("x", 2_500) + `"}`
 		entries, err := decodeAwarenessEntries(awarenessStates(client, 1, client, state))
 		if err != nil {
 			t.Fatal(err)
 		}
-		batch[client] = entries[0].raw
+		batch[client] = entries[0]
 	}
 	huge, err := decodeAwarenessEntries(awarenessStates(99, 1, 1, `{"name":"`+strings.Repeat("y", roomSyncPayloadLimit)+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch[99] = huge[0].raw
+	batch[99] = huge[0]
 
 	payloads := relay.awarenessNotifications(room, batch)
 	if len(payloads) < 2 {
@@ -479,7 +479,7 @@ func TestAnAwarenessBatchIsSplitAcrossNotificationsWithinTheLimit(t *testing.T) 
 		if err := json.Unmarshal([]byte(payload), &message); err != nil {
 			t.Fatal(err)
 		}
-		if message.Room != room || message.Sender != relay.service.processID {
+		if message.Room != room || message.Sender != relay.host.relaySender() {
 			t.Fatalf("a notification names room %q and sender %q", message.Room, message.Sender)
 		}
 		update, err := base64.StdEncoding.DecodeString(message.Data)

@@ -193,10 +193,71 @@ func varUintLen(v uint64) int {
 	return n
 }
 
+// awarenessHost is the process the relay relays for: the rooms whose awareness it watches, the
+// other processes it sends to, and the windows tests open in its paths. *Service is the host in
+// production, where each of these is the service's own (Service.roomAwareness and the methods
+// below it); the test that drives the relay through every interleaving of a room's comings and
+// goings is a host of its own, which needs neither a database nor a ygo server
+// (awareness_relay_schedule_test.go).
+type awarenessHost interface {
+	// roomAwareness is room's awareness, while room is resident on this process
+	// (Server.GetAwareness).
+	roomAwareness(room string) (*awareness.Awareness, bool)
+	// injectAwareness applies another process's awareness update to this process's room of the
+	// document (Server.Inject).
+	injectAwareness(ctx context.Context, room string, update []byte) error
+	// notifyAwareness sends one notification on documentAwarenessChannel.
+	notifyAwareness(ctx context.Context, payload string) error
+	// relaySender names this process in what it sends, which is what the other processes drop
+	// their own notifications by (received).
+	relaySender() string
+	// hasLocalConnection reports whether a reader of this process is connected to room, or is
+	// being admitted to it.
+	hasLocalConnection(room string) bool
+	// holdsRoomForReaders reports whether room is one another process's awareness is to be
+	// applied to here.
+	holdsRoomForReaders(room string) bool
+	// coalesceAwareness runs a room's flush once the coalescing window has passed
+	// (awarenessCoalesceWindow).
+	coalesceAwareness(flush func())
+	// awarenessWindows are the windows a test opens in the relay's paths.
+	awarenessWindows() awarenessWindows
+}
+
+// awarenessWindows are the moments of the relay's own paths a test runs its work in, each one a
+// moment another goroutine runs in production: the two within a change's own path, the one
+// between the read an answer stands on and the record of it, and the two a flush is split at.
+// Each is nil outside tests.
+type awarenessWindows struct {
+	// beforeWatch is given a room's awareness before the relay registers its own observer on it
+	// (watchRoomAwareness). Tests use it to put an observer of their own ahead of the relay's,
+	// since ygo fires a room's update observers in the order they were registered.
+	beforeWatch func(room string, aw *awareness.Awareness)
+	// beforeSnapshot runs between what the relay's observer read of its own lists under mu and
+	// the read of the room that gives each of its entries a clock (touched): the window where
+	// the list a removal is decided from and the room it is read against are two moments.
+	beforeSnapshot func(room string, aw *awareness.Awareness, entries []awarenessEntry)
+	// beforeRecord runs with what the relay's observer is to send of a change (touched) and
+	// before it records it (record). Tests use it to announce a departing client again in that
+	// window, so the return's own record runs first.
+	beforeRecord func(room string, aw *awareness.Awareness, entries []awarenessEntry)
+	// beforeAnswerRecord runs with the states the relay read of a room's local clients to answer
+	// another process's query (answer) and before it records them (record). Tests use it to hold
+	// that read open while the room moves on under it.
+	beforeAnswerRecord func(room string, aw *awareness.Awareness, entries []awarenessEntry)
+	// beforeResolve runs with the batch a flush has taken, before it reads the room for the
+	// clients that batch holds a nil for (resolve): the window a change recorded after the batch
+	// was taken, which the next batch carries, lands in.
+	beforeResolve func(room string, batch map[uint64]awarenessEntry)
+	// beforeRaise runs within that read, after the states are read and before the list is raised
+	// to them under mu (resolve): the window the room's own paths move the list in.
+	beforeRaise func(room string, batch map[uint64]awarenessEntry)
+}
+
 // awarenessRelay is the service's cluster.Relay (see the top of this file). It is per process:
 // what it tracks is this process's rooms and the awareness clients connected to them here.
 type awarenessRelay struct {
-	service *Service
+	host awarenessHost
 	// mu guards every map below. It is taken ahead of a room's awareness lock, never behind it:
 	// record reads the room under it (awarenessClientStanding), and nothing of this package can
 	// hold ygo's awareness lock while it takes mu, since that lock is private to ygo and every
@@ -209,9 +270,17 @@ type awarenessRelay struct {
 	// pending is, per room, what the next flush is to carry for each client; a room is in it
 	// from its first change until the batch the window then sends takes it. A client's entry is
 	// the bytes to send - the removal the room's observer encoded at the clock the client held -
-	// or nil for a client whose current state the flush is to read from the room's awareness
-	// (resolve), so a reader that moves twice within the window is sent where it is now.
-	pending map[string]map[uint64][]byte
+	// with a nil raw for a client whose current state the flush is to read from the room's
+	// awareness (resolve), so a reader that moves twice within the window is sent where it is
+	// now. Each entry carries the clock it stands at, which is what keeps an entry recorded
+	// late from writing over a later one of the same client (record).
+	pending map[string]map[uint64]awarenessEntry
+	// flushing is the rooms a flush is sending the batches of now, and whether another flush of
+	// the same room stepped aside while it sent: a room's batches are taken and sent one flush
+	// at a time, so what the other processes receive of a room stands in the order its own paths
+	// recorded it (flush, takeBatch, nextBatch). A room has an entry here while a flush of it is
+	// sending, and none at any other moment.
+	flushing map[string]bool
 	// inbound is, per room, the clients another process's notification is being applied to now,
 	// and how many such injections name each: the room's observer, which ygo fires inside that
 	// apply (received), leaves them to the process they came from rather than relaying them
@@ -246,12 +315,13 @@ type awarenessRelay struct {
 	oversized atomic.Uint64
 }
 
-func newAwarenessRelay(service *Service) *awarenessRelay {
+func newAwarenessRelay(host awarenessHost) *awarenessRelay {
 	return &awarenessRelay{
-		service: service,
-		pending: make(map[string]map[uint64][]byte),
-		inbound: make(map[string]map[uint64]int),
-		local:   make(map[string]map[uint64]uint64),
+		host:     host,
+		pending:  make(map[string]map[uint64]awarenessEntry),
+		flushing: make(map[string]bool),
+		inbound:  make(map[string]map[uint64]int),
+		local:    make(map[string]map[uint64]uint64),
 	}
 }
 
@@ -279,10 +349,10 @@ func (r *awarenessRelay) Start(context.Context, cluster.Sink) error {
 // this process is connecting to then queries the other processes for their readers' states; one
 // only a write or a settlement loaded does not, since nothing here would show them.
 func (r *awarenessRelay) RoomActivated(room string) {
-	if aw, resident := r.service.srv.GetAwareness(room); resident {
+	if aw, resident := r.host.roomAwareness(room); resident {
 		r.watchRoomAwareness(room, aw)
 	}
-	if r.service.hasLocalConnection(room) {
+	if r.host.hasLocalConnection(room) {
 		r.query(room)
 	}
 }
@@ -291,7 +361,7 @@ func (r *awarenessRelay) RoomActivated(room string) {
 // unless a successor instance is already resident under the name. Its awareness, the watcher
 // registered on it included, goes with the instance itself.
 func (r *awarenessRelay) RoomDeactivated(room string) {
-	if _, resident := r.service.srv.GetAwareness(room); resident {
+	if _, resident := r.host.roomAwareness(room); resident {
 		return
 	}
 	r.mu.Lock()
@@ -380,10 +450,19 @@ func (r *awarenessRelay) Close() error {
 // clock as the removal of it (awareness/awareness.go:566-581) - and it is the clock every other
 // process takes the removal at for the same reason. A removal of a client the list does not
 // hold has no clock of this process's own to stand at and stands as the room's own observer
-// built it, at the clock that path's snapshot of the client gave (touched). A state at the
-// clock the list holds, or past it, is where the client stands now: it goes on the list at its
-// own clock and into the batch as it came - a nil from the room's own change, for the flush to
-// read, and the state itself from an answer's read.
+// built it, at the clock that path's snapshot of the client gave (touched) - unless the batch
+// holds a later entry of that client, which is a removal the room's own path settled after this
+// one and recorded before it, and which stands. Two of a client's removals are recorded out of
+// their order where the client left, came back and left again within one window, each
+// departure's snapshot taken before the record of the one ahead of it (touched); the older of
+// them, written over the later, would reach the other processes as the client's last word, and
+// every one of them holding the client at the later clock would drop it and keep a cursor whose
+// reader has left until it expired (awarenessExpiry, 30 s). A state's own entry needs no such
+// guard: it is recorded where the room holds the client live, and a client live again stands at
+// a strictly higher clock than any removal of it, its clock being its own counter.
+// A state at the clock the list holds, or past it, is where the client stands now: it goes on
+// the list at its own clock and into the batch as it came - a nil from the room's own change,
+// for the flush to read, and the state itself from an answer's read.
 func (r *awarenessRelay) record(room string, aw *awareness.Awareness, entries []awarenessEntry) {
 	if len(entries) == 0 {
 		return
@@ -395,7 +474,7 @@ func (r *awarenessRelay) record(room string, aw *awareness.Awareness, entries []
 	}
 	batch, armed := r.pending[room]
 	if !armed {
-		batch = make(map[uint64][]byte, min(len(entries), maxAwarenessClientsPerRoom))
+		batch = make(map[uint64]awarenessEntry, min(len(entries), maxAwarenessClientsPerRoom))
 	}
 	clients := r.local[room]
 	for _, entry := range entries {
@@ -405,10 +484,13 @@ func (r *awarenessRelay) record(room string, aw *awareness.Awareness, entries []
 				if _, live := awarenessClientStanding(aw, entry.client); live {
 					continue
 				}
-				entry.raw = awarenessRemoval(entry.client, held)
+				entry.clock, entry.raw = held, awarenessRemoval(entry.client, held)
 			}
 			delete(clients, entry.client)
-			batch[entry.client] = entry.raw
+			if carried, pending := batch[entry.client]; pending && carried.clock > entry.clock {
+				continue
+			}
+			batch[entry.client] = entry
 			continue
 		}
 		clock, state := entry.clock, entry.raw
@@ -424,7 +506,7 @@ func (r *awarenessRelay) record(room string, aw *awareness.Awareness, entries []
 			r.local[room] = clients
 		}
 		clients[entry.client] = clock
-		batch[entry.client] = state
+		batch[entry.client] = awarenessEntry{client: entry.client, clock: clock, raw: state}
 	}
 	if len(clients) == 0 {
 		delete(r.local, room)
@@ -434,7 +516,7 @@ func (r *awarenessRelay) record(room string, aw *awareness.Awareness, entries []
 	}
 	r.pending[room] = batch
 	r.sends.Add(1)
-	time.AfterFunc(awarenessCoalesceWindow, func() {
+	r.host.coalesceAwareness(func() {
 		defer r.sends.Done()
 		r.flush(room)
 	})
@@ -462,23 +544,78 @@ func awarenessClientStanding(aw *awareness.Awareness, client uint64) (uint64, bo
 
 // flush sends room's pending batch, if any is still pending, in as many notifications as its size
 // takes (awarenessNotifications), each client at the state the room holds now (resolve).
+//
+// One flush of a room sends at a time, and each takes the room's batch as its turn comes
+// (takeBatch), so what the other processes receive of a room stands in the order the room's own
+// paths recorded it. Two of a room's flushes are under way together where the first is still
+// sending as the second's window ends - a notification waiting its turn on the process's sender
+// (roomSyncSender), or on a connection it had to open again - and the second, left to take the
+// batch the first did not, would send a reader's removal ahead of the state the first read
+// before that reader left. Every other process would take the removal, then take the older
+// state as the first word of a client it has forgotten (reclaimAwarenessSlots), and the cursor
+// of a reader who has left would sit in their rooms until it expired (awarenessExpiry, 30 s).
+// So the second steps aside and leaves its batch to the first, which takes it as soon as it has
+// sent its own (nextBatch): the batch waits for the flush ahead of it and for nothing else,
+// since its own window has already passed.
 func (r *awarenessRelay) flush(room string) {
+	for batch := r.takeBatch(room); batch != nil; batch = r.nextBatch(room) {
+		if ahead := r.host.awarenessWindows().beforeResolve; ahead != nil {
+			ahead(room, batch)
+		}
+		r.resolve(room, batch)
+		if len(batch) == 0 {
+			continue
+		}
+		r.send(room, batch)
+	}
+}
+
+// takeBatch is the batch a flush of room is to send: what is pending, or nil where nothing is -
+// and nil where another flush of that room is sending, which is left to take this flush's batch
+// too (nextBatch).
+func (r *awarenessRelay) takeBatch(room string) map[uint64]awarenessEntry {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, sending := r.flushing[room]; sending {
+		r.flushing[room] = true
+		return nil
+	}
 	batch := r.pending[room]
+	if len(batch) == 0 {
+		return nil
+	}
 	delete(r.pending, room)
-	r.mu.Unlock()
-	if len(batch) == 0 {
-		return
+	r.flushing[room] = false
+	return batch
+}
+
+// nextBatch is what a flush is to send after the batch it has just sent: what is pending, where
+// another flush of the room stepped aside while this one sent, and nil otherwise - which gives
+// the room's turn back. A room whose next change is recorded after that arms a window of its own
+// (record), as the first change of any room does.
+func (r *awarenessRelay) nextBatch(room string) map[uint64]awarenessEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	batch := r.pending[room]
+	if !r.flushing[room] || len(batch) == 0 {
+		delete(r.flushing, room)
+		return nil
 	}
-	r.resolve(room, batch)
-	if len(batch) == 0 {
-		return
-	}
+	delete(r.pending, room)
+	r.flushing[room] = false
+	return batch
+}
+
+// send relays batch, room's resolved client entries, to the other processes: as many
+// notifications as its size takes, each within the payload limit (awarenessNotifications). A
+// send that fails takes the ones behind it with it, since the batch they share is one moment of
+// the room.
+func (r *awarenessRelay) send(room string, batch map[uint64]awarenessEntry) {
 	payloads := r.awarenessNotifications(room, batch)
 	ctx, cancel := context.WithTimeout(context.Background(), roomSyncSendTimeout)
 	defer cancel()
 	for _, payload := range payloads {
-		if err := r.service.roomSyncSender.Notify(ctx, documentAwarenessChannel, payload); err != nil {
+		if err := r.host.notifyAwareness(ctx, payload); err != nil {
 			slog.Warn("dispatch: relay a document room's awareness to the other processes", "room", room, "error", err)
 			return
 		}
@@ -510,17 +647,26 @@ func (r *awarenessRelay) flush(room string) {
 // removal recorded there takes a client off it, a later state puts it on at a later clock, and
 // neither is undone here. The states are read first and mu taken after, which is the order
 // every path that takes both takes them in (record).
-func (r *awarenessRelay) resolve(room string, batch map[uint64][]byte) {
+//
+// A client taken off the list in that window left it a removal, waiting in the room's next
+// batch at the clock the list held when it was recorded - which is below the state being sent
+// here, since the raise that would have carried the list up to it comes after. That removal is
+// raised to the clock of the entry sent here instead, where it stands as the removal of that
+// very state: every other process takes a null at the clock it holds the client at
+// (awareness/awareness.go:566-581), and at the lower clock it would take none of them and keep
+// the cursor of a reader who has left. The next batch is where the removal is, since one flush
+// of a room sends at a time (flush) and a record puts it nowhere else.
+func (r *awarenessRelay) resolve(room string, batch map[uint64]awarenessEntry) {
 	unread := make([]uint64, 0, len(batch))
 	for client, entry := range batch {
-		if entry == nil {
+		if entry.raw == nil {
 			unread = append(unread, client)
 		}
 	}
 	if len(unread) == 0 {
 		return
 	}
-	aw, resident := r.service.srv.GetAwareness(room)
+	aw, resident := r.host.roomAwareness(room)
 	if !resident {
 		for _, client := range unread {
 			delete(batch, client)
@@ -547,13 +693,28 @@ func (r *awarenessRelay) resolve(room string, batch map[uint64][]byte) {
 		}
 		return
 	}
+	if ahead := r.host.awarenessWindows().beforeRaise; ahead != nil {
+		ahead(room, batch)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	clients := r.local[room]
+	waiting := r.pending[room]
 	for _, entry := range entries {
-		batch[entry.client] = entry.raw
-		if stood, listed := clients[entry.client]; listed && entry.clock > stood {
-			clients[entry.client] = entry.clock
+		batch[entry.client] = entry
+		if stood, listed := clients[entry.client]; listed {
+			if entry.clock > stood {
+				clients[entry.client] = entry.clock
+			}
+			continue
+		}
+		if gone, recorded := waiting[entry.client]; recorded && gone.removed && gone.clock < entry.clock {
+			waiting[entry.client] = awarenessEntry{
+				client:  entry.client,
+				clock:   entry.clock,
+				raw:     awarenessRemoval(entry.client, entry.clock),
+				removed: true,
+			}
 		}
 	}
 }
@@ -561,8 +722,8 @@ func (r *awarenessRelay) resolve(room string, batch map[uint64][]byte) {
 // awarenessNotifications packs batch, room's client entries, into the fewest notification payloads
 // each within roomSyncPayloadLimit, whole clients to each, in client order. A client whose entry
 // alone does not fit is dropped and counted.
-func (r *awarenessRelay) awarenessNotifications(room string, batch map[uint64][]byte) []string {
-	framing, err := json.Marshal(awarenessMessage{Sender: r.service.processID, Room: room, Data: "-"})
+func (r *awarenessRelay) awarenessNotifications(room string, batch map[uint64]awarenessEntry) []string {
+	framing, err := json.Marshal(awarenessMessage{Sender: r.host.relaySender(), Room: room, Data: "-"})
 	if err != nil {
 		slog.Error("dispatch: frame a document room's awareness notification", "room", room, "error", err)
 		return nil
@@ -584,7 +745,7 @@ func (r *awarenessRelay) awarenessNotifications(room string, batch map[uint64][]
 			return
 		}
 		update := encodeAwarenessEntries(group)
-		payload, err := json.Marshal(awarenessMessage{Sender: r.service.processID, Room: room, Data: base64.StdEncoding.EncodeToString(update)})
+		payload, err := json.Marshal(awarenessMessage{Sender: r.host.relaySender(), Room: room, Data: base64.StdEncoding.EncodeToString(update)})
 		if err != nil {
 			slog.Error("dispatch: encode a document room's awareness notification", "room", room, "error", err)
 		} else {
@@ -593,7 +754,7 @@ func (r *awarenessRelay) awarenessNotifications(room string, batch map[uint64][]
 		group, size = nil, 0
 	}
 	for _, client := range clients {
-		entry := batch[client]
+		entry := batch[client].raw
 		if !fits(1, len(entry)) {
 			dropped := r.oversized.Add(1)
 			slog.Warn("dispatch: drop an awareness state too large to relay to the other processes",
@@ -613,7 +774,7 @@ func (r *awarenessRelay) awarenessNotifications(room string, batch map[uint64][]
 // query asks every other process holding room for its local clients' awareness states, on a
 // goroutine of its own: its callers run inside ygo's room load and a socket's admission.
 func (r *awarenessRelay) query(room string) {
-	payload, err := json.Marshal(awarenessMessage{Sender: r.service.processID, Room: room, Query: true})
+	payload, err := json.Marshal(awarenessMessage{Sender: r.host.relaySender(), Room: room, Query: true})
 	if err != nil {
 		slog.Error("dispatch: encode a document room's awareness query", "room", room, "error", err)
 		return
@@ -628,7 +789,7 @@ func (r *awarenessRelay) query(room string) {
 		defer r.sends.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), roomSyncSendTimeout)
 		defer cancel()
-		if err := r.service.roomSyncSender.Notify(ctx, documentAwarenessChannel, string(payload)); err != nil {
+		if err := r.host.notifyAwareness(ctx, string(payload)); err != nil {
 			slog.Warn("dispatch: ask the other processes for a document room's awareness", "room", room, "error", err)
 		}
 	}()
@@ -706,7 +867,7 @@ func (r *awarenessRelay) received(ctx context.Context, payload string) {
 		slog.Debug("dispatch: drop an awareness notification that does not parse", "error", err)
 		return
 	}
-	if message.Sender == r.service.processID {
+	if message.Sender == r.host.relaySender() {
 		return
 	}
 	if message.Query {
@@ -718,7 +879,7 @@ func (r *awarenessRelay) received(ctx context.Context, payload string) {
 		slog.Debug("dispatch: drop an awareness notification that does not decode", "room", message.Room, "error", err)
 		return
 	}
-	if !r.service.holdsRoomForReaders(message.Room) {
+	if !r.host.holdsRoomForReaders(message.Room) {
 		return
 	}
 	entries, err := decodeAwarenessEntries(update)
@@ -732,11 +893,11 @@ func (r *awarenessRelay) received(ctx context.Context, payload string) {
 	// took it, or a close - and then Inject loads it again for this one update. That room has no
 	// peer, so it idles out after roomIdleTimeout like any room a write loads; the window is the
 	// few microseconds between the two calls, against a sweep that waits a minute.
-	err = r.service.srv.Inject(ctx, cluster.Inbound{Room: message.Room, Kind: cluster.KindAwareness, Data: update})
+	err = r.host.injectAwareness(ctx, message.Room, update)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		slog.Debug("dispatch: apply another process's awareness to a document room", "room", message.Room, "error", err)
 	}
-	if aw, resident := r.service.srv.GetAwareness(message.Room); resident {
+	if aw, resident := r.host.roomAwareness(message.Room); resident {
 		reclaimAwarenessSlots(message.Room, aw)
 	}
 }
@@ -756,7 +917,7 @@ func (r *awarenessRelay) received(ctx context.Context, payload string) {
 // settled against the room itself rather than recorded at the clock this read stands at, so a
 // reader who has left is neither relisted nor left in the other processes' rooms (record).
 func (r *awarenessRelay) answer(room string) {
-	aw, resident := r.service.srv.GetAwareness(room)
+	aw, resident := r.host.roomAwareness(room)
 	if !resident {
 		return
 	}
@@ -773,7 +934,7 @@ func (r *awarenessRelay) answer(room string) {
 	if len(entries) == 0 {
 		return
 	}
-	if ahead := r.service.beforeAwarenessAnswerRecord; ahead != nil {
+	if ahead := r.host.awarenessWindows().beforeAnswerRecord; ahead != nil {
 		ahead(room, aw, entries)
 	}
 	r.record(room, aw, entries)
@@ -794,12 +955,12 @@ func (r *awarenessRelay) answer(room string) {
 // room instance's awareness itself; a successor instance under the same name is a new awareness,
 // and RoomActivated gives it its own.
 func (r *awarenessRelay) watchRoomAwareness(room string, aw *awareness.Awareness) {
-	if ahead := r.service.beforeAwarenessWatch; ahead != nil {
+	if ahead := r.host.awarenessWindows().beforeWatch; ahead != nil {
 		ahead(room, aw)
 	}
 	aw.OnUpdate(func(event awareness.UpdateEvent) {
 		entries := r.touched(room, aw, event)
-		if ahead := r.service.beforeAwarenessRecord; ahead != nil {
+		if ahead := r.host.awarenessWindows().beforeRecord; ahead != nil {
 			ahead(room, aw, entries)
 		}
 		r.record(room, aw, entries)
@@ -868,6 +1029,9 @@ func (r *awarenessRelay) touched(room string, aw *awareness.Awareness, event awa
 		}
 	}
 	r.mu.Unlock()
+	if ahead := r.host.awarenessWindows().beforeSnapshot; ahead != nil {
+		ahead(room, aw, entries)
+	}
 	for i, entry := range entries {
 		// The clock the room holds now, which is the one the flush will read its state at.
 		if meta, known := aw.Meta(entry.client); known {
@@ -974,6 +1138,53 @@ func (s *Service) hasLocalConnection(room string) bool {
 // finishing.
 func (s *Service) holdsRoomForReaders(room string) bool {
 	return s.hasLocalConnection(room) && s.roomHeld(room)
+}
+
+// The service is the relay's host in production (awarenessHost): the rooms the relay watches are
+// the ones resident on this process, what it sends goes out on this process's NOTIFY connection
+// under this process's id, and what the other processes send is applied to this process's rooms.
+var _ awarenessHost = (*Service)(nil)
+
+// roomAwareness is the awareness of this process's room of a document, while the room is
+// resident.
+func (s *Service) roomAwareness(room string) (*awareness.Awareness, bool) {
+	return s.srv.GetAwareness(room)
+}
+
+// injectAwareness applies another process's awareness update to this process's room of a
+// document, which ygo hands to that room's peers.
+func (s *Service) injectAwareness(ctx context.Context, room string, update []byte) error {
+	return s.srv.Inject(ctx, cluster.Inbound{Room: room, Kind: cluster.KindAwareness, Data: update})
+}
+
+// notifyAwareness sends one awareness notification to the other processes, on
+// documentAwarenessChannel through this process's NOTIFY connection.
+func (s *Service) notifyAwareness(ctx context.Context, payload string) error {
+	return s.roomSyncSender.Notify(ctx, documentAwarenessChannel, payload)
+}
+
+// relaySender names this process in what its relay sends (Service.processID).
+func (s *Service) relaySender() string {
+	return s.processID
+}
+
+// coalesceAwareness runs a room's flush once the coalescing window has passed, on a timer of the
+// runtime's: the window is what keeps a reader moving at typing speed to one notification per
+// window (awarenessCoalesceWindow).
+func (s *Service) coalesceAwareness(flush func()) {
+	time.AfterFunc(awarenessCoalesceWindow, flush)
+}
+
+// awarenessWindows are the windows the service's own tests open in the relay's paths, each kept
+// as a field of the service and nil outside tests. The two a flush is split at have no field
+// here: the test that opens them is its own host (awareness_relay_schedule_test.go), since a
+// flush of a whole process runs on a timer no test holds.
+func (s *Service) awarenessWindows() awarenessWindows {
+	return awarenessWindows{
+		beforeWatch:        s.beforeAwarenessWatch,
+		beforeRecord:       s.beforeAwarenessRecord,
+		beforeAnswerRecord: s.beforeAwarenessAnswerRecord,
+	}
 }
 
 // removeLocalAwareness removes the awareness states of room's local clients before this process
