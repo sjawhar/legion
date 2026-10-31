@@ -200,12 +200,6 @@ RULES = {
         (f"{FIX}/capability-redaction-plugin-report.json", "internal/capabilities/capabilities_test.go:236 readFixture")),
     f"{DAEMON}/internal/claim/claim_test.go": reads((f"{FIX}/project-tokens.json", "internal/claim/claim_test.go:196")),
     f"{DAEMON}/internal/classify/fixtures_test.go": reads((f"{FIX}/classification/**", "internal/classify/fixtures_test.go:179 (runtime.Caller :184)")),
-    f"{DAEMON}/internal/claudebridge/bridge_test.go": reads(
-        ("packages/pi-legion/src/phase-stall.ts", "internal/claudebridge/bridge_test.go:674 reads it, :816-817 bun -e imports it in ../../../pi-legion"),
-        ("packages/pi-legion/package.json", "internal/claudebridge/bridge_test.go:817 bun runs in packages/pi-legion"),
-        ("packages/pi-shared/**", "internal/claudebridge/bridge_test.go:816 phase-stall.ts imports @legion/pi-shared/interface"),
-        ("package.json", "internal/claudebridge/bridge_test.go:816 bun resolves workspace packages"),
-        ("bun.lock", "internal/claudebridge/bridge_test.go:816 bun resolves workspace packages")),
     f"{DAEMON}/internal/config/controller_test.go": reads(("deploy/kubernetes/daemon/controller.yaml.example", "internal/config/controller_test.go:179 (config.ControllerConfigExample)")),
     f"{DAEMON}/internal/config/kubernetes_test.go": reads(("deploy/kubernetes/operator-route/pod.yml", "internal/config/kubernetes_test.go:1322")),
     f"{DAEMON}/internal/daemon/agentmodels_omp_test.go": reads(
@@ -267,7 +261,7 @@ RULES = {
         (f"{ENVOY}/scripts/fixtures/github/*", "internal/contracts/normalize_test.go:2379")),
     f"{ENVOY}/internal/dispatch/api/copy_lock_order_test.go": [
         run(ENVOY, ["./cmd/dispatch"], "internal/dispatch/api/copy_lock_order_test.go:263 go list -deps -export ./cmd/dispatch in packages/envoy", mode="build")],
-    f"{ENVOY}/internal/dispatch/api/delivery_live_diff_test.go": reads((f"{FIX}/delivery-live/*", "internal/dispatch/api/delivery_live_diff_test.go:982")),
+    f"{ENVOY}/internal/dispatch/api/delivery_live_diff_test.go": reads((f"{FIX}/live/*", "internal/dispatch/api/delivery_live_diff_test.go:982,1011")),
     f"{ENVOY}/internal/dispatch/api/delivery_measures_test.go": reads(
         (f"{ENVOY}/internal/dispatch/delivery/measures/testdata/dora-fixture.json", "internal/dispatch/api/delivery_measures_test.go:82")),
     f"{ENVOY}/internal/dispatch/api/delivery_test.go": reads(
@@ -397,6 +391,8 @@ GATES = [
                                      "selector over the repository's own list"),
         ("scripts/third-party-notices.test.ts", at("test", "Test third-party notices")),
         ("scripts/third-party-notices.ts", "scripts/third-party-notices.test.ts:5,125; scripts/pi-plugin-prepack.sh:93,96 (packed by promptreferences_omp_test.go)"),
+        ("scripts/semantic-line-breaks.test.ts", at("test", "Test the semantic line-break checker")),
+        ("scripts/semantic-line-breaks.ts", "scripts/semantic-line-breaks.test.ts:6 spawns it"),
         ("scripts/sessions-import-pods.test.sh", at("test", "Test the session import pods script (a stand-in kubectl)")),
         ("scripts/sessions-import-pods.sh", "scripts/sessions-import-pods.test.sh:11"),
         ("scripts/e2e/**", f"{at('test', 'bun test scripts/e2e/lib')} (lib/script-functions.test.ts:101-104 scans scripts/e2e/*.sh and lib/*); "
@@ -562,7 +558,7 @@ GATES = [
         ("packages/dispatch/**", f"{at('dispatch', 'Lint dispatch dashboard')}, typecheck, test, build, check:classes, check:asset-sizes and Playwright in packages/dispatch"),
         ("packages/proof-editor/**", f"{at('dispatch', 'Lint proof editor')}, typecheck and test; packages/dispatch/web/vite.config.ts:104-123"),
         (CONTRACTS_SRC, f"{at('dispatch', 'Build contracts for dispatch e2e')}; packages/dispatch/web/vite.config.ts:94-103 aliases"),
-        (f"{FIX}/delivery-live/**", "packages/dispatch/web/src/features/delivery/lib/applyDelta.test.ts:2-4, e2e/__tests__/delivery-live-probe.test.ts:8-12"),
+        (f"{FIX}/live/**", "packages/dispatch/web/src/features/delivery/lib/applyDelta.test.ts:2-4, e2e/__tests__/delivery-live-probe.test.ts:8-12"),
         (f"{FIX}/decision-blocks/**", "packages/dispatch/web/src/features/doc/decision-blocks.test.ts:10, features/inbox/AskCard.test.tsx:411"),
         ("packages/envoy-client/bin/dispatch.ts", "packages/dispatch/e2e/cli-body-cap.e2e.ts:17 runs it through e2e/dispatch-cli.ts:8"),
         (ENVOY_CLIENT_SRC, "imported by packages/envoy-client/bin/dispatch.ts, which cli-body-cap.e2e.ts:17 runs"),
@@ -652,18 +648,26 @@ GATES = [
     ) + setup_go("envoy-infra-go", f"{INFRA}/go.mod") + CI_SELF),
 
     gate("envoy_go_race", "envoy-go-race", runs=[
-        step_run("envoy-go-race", "Race-test the API, pmdoc, delivery, the store, and the bus",
-                 "go test -race -timeout 30m ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... "
-                 "./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/",
-                 ENVOY, ["./internal/dispatch/api/", "./internal/dispatch/pmdoc/...",
-                         "./internal/dispatch/delivery/...", "./internal/dispatch/store/...", "./internal/bus/"], race=True),
-        step_run("envoy-go-race", "Race-test the listener, the registry store, the session cache and kvwatch",
-                 "go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...", ENVOY,
-                 ["./cmd/listener/", "./internal/store/", "./internal/session/", "./internal/kvwatch/..."], race=True),
+        step_run("envoy-go-race", "Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch",
+                 "go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...",
+                 ENVOY, ["./internal/dispatch/delivery/...", "./internal/dispatch/store/...", "./internal/bus/",
+                         "./cmd/listener/", "./internal/store/", "./internal/session/", "./internal/kvwatch/..."], race=True),
+    ], reads=setup_go("envoy-go-race", f"{ENVOY}/go.mod") + CI_SELF),
+
+    gate("envoy_go_race_pmdoc", "envoy-go-race-pmdoc", runs=[
+        step_run("envoy-go-race-pmdoc", "Race-test pmdoc",
+                 "go test -race -timeout 40m ./internal/dispatch/pmdoc/...",
+                 ENVOY, ["./internal/dispatch/pmdoc/..."], race=True),
     ], reads=reads(
         (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:16, differential.ts:21, edit-blocks.ts:21"),
         ("packages/proof-editor/src/**", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:6, differential.ts:12-13, edit-blocks.ts:10 import @legion/proof-editor"),
-    ) + setup_go("envoy-go-race", f"{ENVOY}/go.mod") + bun_job("envoy-go-race") + CI_SELF),
+    ) + setup_go("envoy-go-race-pmdoc", f"{ENVOY}/go.mod") + bun_job("envoy-go-race-pmdoc") + CI_SELF),
+
+    gate("envoy_go_race_api", "envoy-go-race-api", runs=[
+        step_run("envoy-go-race-api", "Race-test the Dispatch API",
+                 "go test -race -timeout 30m ./internal/dispatch/api/",
+                 ENVOY, ["./internal/dispatch/api/"], race=True),
+    ], reads=setup_go("envoy-go-race-api", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("envoy_go_race_docs", "envoy-go-race-docs", runs=[
         step_run("envoy-go-race-docs", "Race-test the document service",
