@@ -619,6 +619,16 @@ func (s *server) storeArtifact(
 		}
 		published = append(published, event)
 	}
+	// The approval this upload's own version superseded, read in its transaction as the edit
+	// route reads it: an upload to an existing document always writes a version, so a
+	// replacement of an approved spec closes its design gate as an edit does. A new document
+	// has no review of its own to supersede.
+	var superseded *supersededApproval
+	if kind == "doc" && !created {
+		superseded = s.supersededApprovalAdvice(
+			r.Context(), tx, "POST /api/v1/issues/{key}/artifacts", artifactIssueKey(artifact), artifact.ID, version.Number,
+		)
+	}
 	var advice *writeAdvice
 	if target.IssueKey != nil && issueStatus != nil {
 		advice = s.writeAdvice(
@@ -642,12 +652,15 @@ func (s *server) storeArtifact(
 	}
 	if advice != nil {
 		advice.documentBlocks = blocks
+		advice.SupersededApproval = superseded
 	}
 	responsePayload := map[string]any{"artifact": artifact, "version": version}
 	if target.IssueKey != nil {
 		WriteJSON(w, http.StatusCreated, withAdvice(responsePayload, advice))
-	} else if blocks != nil {
-		WriteJSON(w, http.StatusCreated, withRawAdvice(responsePayload, blocks))
+	} else if blocks != nil || superseded != nil {
+		WriteJSON(w, http.StatusCreated, withRawAdvice(responsePayload, documentWriteAdvice{
+			documentBlocks: blocks, SupersededApproval: superseded,
+		}))
 	} else {
 		WriteJSON(w, http.StatusCreated, responsePayload)
 	}
@@ -1033,6 +1046,15 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 			published = append(published, event)
 		}
 	}
+	// The approval this edit's own version superseded, read in the edit's transaction after that
+	// version and any carry it made: a person's approval of a spec is Legion's design gate, and
+	// the writer is the only one who learns in time that this write closed it.
+	var superseded *supersededApproval
+	if written != nil {
+		superseded = s.supersededApprovalAdvice(
+			r.Context(), tx, "POST /api/v1/artifacts/{id}/edits", artifactIssueKey(artifact), artifact.ID, written.Version.Number,
+		)
+	}
 	var advice *writeAdvice
 	if artifact.IssueKey != nil && status != nil {
 		advice = s.writeAdvice(
@@ -1077,11 +1099,23 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		DecisionBlockChecks: s.decisionBlockChecks(r.Context(), artifact, edit.AddedAskBlocks, actor),
 	}
 	if artifact.IssueKey == nil || advice == nil {
-		WriteJSON(w, http.StatusOK, withRawAdvice(responsePayload, blocks))
+		WriteJSON(w, http.StatusOK, withRawAdvice(responsePayload, documentWriteAdvice{
+			editBlocks: blocks, SupersededApproval: superseded,
+		}))
 		return
 	}
 	advice.editBlocks = blocks
+	advice.SupersededApproval = superseded
 	WriteJSON(w, http.StatusOK, withAdvice(responsePayload, advice))
+}
+
+// artifactIssueKey is the issue a document belongs to, or the empty string for a project
+// document, for a log line that names where a write ran.
+func artifactIssueKey(artifact model.Artifact) string {
+	if artifact.IssueKey == nil {
+		return ""
+	}
+	return *artifact.IssueKey
 }
 
 // lostOps is the edit response's lost_ops: the operations the live document did not hold after

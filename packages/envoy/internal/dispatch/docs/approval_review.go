@@ -154,10 +154,31 @@ const latestReviewByQuery = `
 	limit 1
 `
 
+// newestReviewQuery selects the newest review of the document $1 names, in any state. Like the
+// two above it reads one row from artifact_reviews_by_artifact_event_seq (migration 0120), the
+// index in ReviewOrder's own order, rather than sorting every review of the document.
+const newestReviewQuery = `
+	select ` + ReviewColumns + `
+	from artifact_reviews
+	where artifact_id = $1
+	order by ` + ReviewOrder + `
+	limit 1
+`
+
 // LatestApprovedReview is the newest approval of artifactID, whoever gave it, or nil when nobody
 // has approved the document at any version.
 func LatestApprovedReview(ctx context.Context, q Queryer, artifactID string) (*model.ArtifactReview, error) {
 	return newestReview(ctx, q, "latest approved review", latestApprovedReviewQuery, artifactID)
+}
+
+// NewestReview is the newest review of artifactID in any state, whoever gave it, or nil when
+// nobody has reviewed the document. It orders as every newest-review read does, by the order the
+// reviews' events committed (ReviewOrder): artifact_reviews.created_at is its transaction's start
+// and its id is random, so a review that committed later can carry the earlier pair - an approval
+// a version write carries forward (carryApproval) against an approval committed while that write
+// was open, among others.
+func NewestReview(ctx context.Context, q Queryer, artifactID string) (*model.ArtifactReview, error) {
+	return newestReview(ctx, q, "newest review", newestReviewQuery, artifactID)
 }
 
 // latestReviewBy is the newest review of artifactID a person gave, in any state, by his canonical
