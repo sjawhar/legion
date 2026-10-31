@@ -43,7 +43,7 @@ the kernel kill pod processes below their own limits, and the kubelet does not s
 | `dispatch-claimant-delivery.sh` | Dispatch's outbox delivers a person's answer, comment or untargeted message on an issue a session has claimed to that session's own `notifications.agent.<session>`, driven over HTTP through the real `envoy-dispatch` against a loopback PostgreSQL the caller names and a NATS of the run's own: a person's answer to an ask another session opened reaches the asker and the claimant, a person's reply in a person's thread on the issue's spec and a person's untargeted message reach the claimant, while a message targeted at another session, another session's comment and a person's comment on an unclaimed issue reach no claimant. A person's comment mentioning a session skips that session's own copy only when the mention's send landed: a delivered mention of the claimant leaves its topic out, a failed one reaches it, and a failed mention of an ask's follower still reaches the follower. Run against a base binary (`DISPATCH_BIN`), it is the change's negative control |
 | `child-adoption.sh` | a labelled root still queued in admission, which a person then makes a child of a live tree, joins that tree and runs there, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own: Dispatch's re-parent event takes it out of `admission.waiting` and into the tree, planning with no slot and no architect of its own; `release_children` adopts one the daemon saw no re-parent of before it answers, from todo, from backlog (writing todo, whose event runs it) and from the state INFRA-214 reached (backlog, label off, todo), and the old linger's close stops none of it; a todo root under an unreleased child of the live tree is recorded but waits in no line, even with a slot free and a root of its own parked between it and the tree, until its release, and its own todo child waits with it, is refused 409 `CHILD_IN_OTHER_TREE` naming it and the held root when released alone, and joins the tree with it; such a root takes the free slot once a person moves an ancestor out from under the tree, unrecorded or recorded; a root that ran as a tree of its own is never held so, and takes the free slot; and a child recorded in another live tree is refused 409 `CHILD_IN_OTHER_TREE` naming it and that tree, with nothing changed or written |
 | `no-required-checks.sh` | a pull request whose base branch requires no check and no workflow has no CI verdict, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own, with GitHub's settlements, push and synchronize as its own envelopes and what each base requires read by the daemon's own required-checks pass from a GitHub stand-in the driver switches: a failed check on a base that requires nothing leaves no `checksVerdict` key on `GET /legion/v1/state`, the issue in `testing` and no `checks-red`; the same failure once that base requires the check is `red`, sends the work to `implementing` and tells one `checks-red` naming it; a passing required check is `green`; and at an exhausted fix-attempt count a code push onto the held head once its base requires nothing leaves the counted attempt, `fixAttempts` unchanged, so the new head's red once the base requires the check again sends the work back with a `checks-red` rather than being held |
-| `envoy-session-delivery.sh` | every Envoy event reaches a real Oh My Pi session and a real Claude Code session under `legion claude-bridge` exactly once — agent sends and Dispatch messages, comments on a followed Dispatch issue (in their publish order), role publishes through the listener and core role publishes through the role lane — also when it was published while the session was killed and resumed, its NATS connection was cut, either of two listeners was killed, or Dispatch was SIGKILLed right after its writes, all built from the checkout and run in an issue pod; with `--build-from` an earlier revision's listener and plugins show the losses under a session restart. Manual, never CI |
+| `envoy-session-delivery.sh` | every Envoy event reaches a real Oh My Pi session and a real Claude Code session under `legion claude-bridge` exactly once — agent sends and Dispatch messages, comments on a followed Dispatch issue (in their publish order), role publishes through the listener, core role publishes through the role lane, and a publish to the team topic both sessions follow — also when it was published while the session was killed and resumed, its NATS connection was cut, either of two listeners was killed, or Dispatch was SIGKILLed right after its writes, all built from the checkout and run in an issue pod; with `--build-from` an earlier revision's listener and plugins show the losses under a session restart. Manual, never CI |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, and `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone. Devbox only |
 | `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` | the daemon's `POST /legion/v1/handoff/complete` with `ready: true`, over a real Postgres and as the real implement App, holds a pull request's head to its review round's approved head plus retro's commits: GitHub's compare of the two must show nothing outside `docs/solutions/` and `.legion/<issue>/`, or READY is refused `READY_UNREVIEWED_CHANGE` naming the paths. Devbox only |
 
@@ -2972,8 +2972,7 @@ writes through `LEGION_E2E_DAEMON_LOG`.
 
 INFRA-594's live proof: every Envoy event reaches a real Oh My Pi session and a real Claude Code
 session exactly once, also when it was published while the session, its NATS connection, either
-listener or Dispatch was down. Manual, like `packages/pi-envoy/scripts/smoke-replay.sh`: it needs a
-model provider and is never wired into CI.
+listener or Dispatch was down. Manual: it needs a model provider and is never wired into CI.
 
 ```bash
 LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:<port>/postgres?sslmode=disable' \
@@ -2983,9 +2982,8 @@ LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:<port>/postgres?sslmode=disabl
 … bash scripts/e2e/envoy-session-delivery.sh --build-from c3d09eec --expect-lost agent,issue,role
 … bash scripts/e2e/envoy-session-delivery.sh --build-from 926040d9048572765639e56d516226b822288b46 --expect-lost role
 
-# The two rollout states production meets first: this checkout on the listener grant a hub still
-# carries, and this checkout's hub with the plugins of the release before it.
-… bash scripts/e2e/envoy-session-delivery.sh --listener-grant before-session-consumers
+# The rollout state production meets first: this checkout's hub with the plugins of the release
+# before it.
 … bash scripts/e2e/envoy-session-delivery.sh --plugins-from origin/main
 
 # The upgrade: the sessions start on the plugins of <rev> and are resumed on this checkout's, so
@@ -3029,9 +3027,12 @@ It runs in an issue pod: no Docker, tmux or root. It needs `go`, `bun`, `jq`, `c
 Each session reads an `envoy.json` naming listener `shared` and, as its only NATS server, a
 `socat` proxy of its own, which the script can cut, with Dispatch off. Dispatch reaches NATS
 through a proxy of its own too. Each session gets one setup prompt, which makes it follow
-`notifications.dispatch.issue.<KEY>.>` and hold a role of its own; the listener's registry is then
-read to show both. Then six windows run, each with one disruption, and every event of the window
-is published while the disruption holds:
+`notifications.dispatch.issue.<KEY>.>` and the run's own team topic
+`notifications.team.live-delivery-<run>`, and hold a role of its own; the listener's registry is
+then read to show them, and `GET /v1/sessions` to show each session's `delivery` reading
+`consumer` — read again with the table, and a failure either time — so every count below is a
+count of what a session's own consumer carried. Then six windows run, each with one disruption,
+and every event of the window is published while the disruption holds:
 
 | window | disruption |
 | :--- | :--- |
@@ -3065,6 +3066,7 @@ Every window publishes these events. Each event carries a marker of its own in i
 | agent | `POST /v1/messages/send` to each session; a Dispatch message to each session (an aside from a session actor, on a second issue the sessions do not follow) |
 | issue | two Dispatch comments on the followed issue |
 | role | `POST /v1/messages/publish` to each session's role; a core NATS publish of an Envoy envelope on `notifications.role.<role>`, which the role lane forwards |
+| team | `POST /v1/messages/publish` to the team topic both sessions follow, one event counted in both of them. `notifications.team.>` is a stream subject, so the publish is stored and each session's own consumer holds it until that session is back: in window a, which SIGKILLs both sessions, the row must still read 1 for each |
 
 The listener sends go to listener `dispatch`, and to listener `shared` in window d. In window d,
 Dispatch cannot reach its listener: its lookup of the session (`GET /v1/registry/<id>`) gets no
@@ -3097,9 +3099,10 @@ pack under 1.4.4). claude-envoy is that tree's `scripts/build.ts --out` build wh
 takes `--out`; a revision whose `build.ts` does not (`c3d09eec` and `926040d9` among them) is from
 before pull requests stopped committing `dist/`, and its committed `dist/` and `legion/` are used.
 natsd and Dispatch stay this checkout's. The bridge's argv carries `--replay-user-messages` only
-when that revision's `claudelaunch.go` (or, before it existed, `runtime/tmux/claude.go`) does. `--expect-lost <kinds>` turns
-the run into a negative control: it exits 0 only when every event of those kinds in window a
-counted 0 in both sessions. It prints the rest of the table and does not judge it. Main before
+when that revision's `claudelaunch.go` (or, before it existed, `runtime/tmux/claude.go`) does.
+`--expect-lost <kinds>` (`agent`, `issue`, `role`, `team`) turns the run into a negative control:
+it exits 0 only when every event of those kinds in window a counted 0 in both sessions. It prints
+the rest of the table and does not judge it. Main before
 sjawhar/legion#2228 (`c3d09eec`) loses agent, issue and role events under a session restart. The
 merge-forward head of #2228 (`926040d9`) recovers agent and issue events through
 `POST /v1/replay` and still loses role forwards.
@@ -3107,27 +3110,12 @@ merge-forward head of #2228 (`926040d9`) recovers agent and issue events through
 `--plugins-from <rev>` builds pi-envoy and claude-envoy from `<rev>`, as `--build-from` builds
 them, and leaves the listeners, natsd, Dispatch and the bridge this checkout's: the mixed rollout,
 a hub already updated serving a session that still runs the plugins of the release before it.
-`--build-from` and `--plugins-from` each name the tree the plugins come from, so the run takes one
-or the other. A plugin that asks for no session consumer is answered `core` with reason
-`not_requested` and runs the core path, which recovers an agent or issue event of a window through
-`POST /v1/replay` and a role forward not at all, as `--build-from 926040d9` shows.
-
-`--listener-grant before-session-consumers` runs both listeners as a NATS user whose grant is the
-one a hub carries before session consumers, rendered by
-[`packages/envoy-client/test/listener-grant.ts`](../../packages/envoy-client/test/listener-grant.ts)
-(`infra/core.ListenerPermissions` without the session-consumer entries and without the shared
-`envoy-roles` queue), so every registration asking for a consumer is answered `core`/`no_grant`
-and every session runs the core path this release meets first. natsd then reads a configuration of
-the run's own, `nats.conf` in the evidence directory: one nkey user per listener, each with that
-grant and its seed in `seeds/<machine>.seed` (`NATS_NKEY_SEED_FILE`, never an argument and never
-printed), and `no_auth_user` for every other client — the sessions, Dispatch and the script's own
-NATS clients — which may publish and subscribe to anything. After the sessions have registered,
-and again with the table, the run prints and checks the four readings that say the core path is
-what ran: each listener's answer to a registration asking for a consumer (one the run makes
-itself, under a session id nothing else uses, removed again), which must be `core`/`no_grant`;
-each listener's `sessions stay on core delivery` line; the session entries, none recording
-consumer delivery; and the stream's consumers, the two listener durables and no `s-<session>`.
-The role lane falls back to the machine groups, since that grant carries no shared queue.
+`--build-from` and `--plugins-from` each name the tree the plugins come from, so the run takes
+one or the other. The listener this checkout builds refuses a registration it can give no
+session consumer before it writes anything (`409 not_requested` or `409 invalid_session_id`,
+`503 no_grant` or `503 consumer_error`), so `--plugins-from` names a tree whose plugins ask for
+one; a tree from before they did is run with `--build-from`, which serves it the listener of its
+own revision.
 
 `--disruptions a,c` runs only the windows named.
 
