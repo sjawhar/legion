@@ -28,8 +28,9 @@ import {
 import {
   type ConsumerDelivery,
   type ConsumerFrame,
+  type ConsumerGapNotice,
   createConsumerDelivery,
-  registeredWithoutRelay,
+  gapNoticeText,
 } from "@legion/envoy-client/consumer-delivery";
 import {
   createDeliveryDedupe,
@@ -40,10 +41,20 @@ import {
   inboundTimestamp,
   postDeliveryReply,
   type RenderInboundResult,
-  readArrivals,
   renderInbound,
   senderLabel,
 } from "@legion/envoy-client/delivery";
+import {
+  closeReplayedRemoval,
+  createDeliveryLedger,
+  type DeliveryLedger,
+  envoyNoticeText,
+  failureNoticeFields,
+  ledgerIdentity,
+  reachesPrivateStreamSubject,
+  replayFollowedSubjects,
+  storedText,
+} from "@legion/envoy-client/delivery-ledger";
 import { commandName } from "@legion/envoy-client/dispatch-command";
 import {
   type ActiveDispatchConfig,
@@ -65,28 +76,11 @@ import {
   resultsEnd,
   writeSessionTitle,
 } from "@legion/envoy-client/dispatch-session-state";
-import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe";
 import { askgateSetting, readEnvoyConfig } from "@legion/envoy-client/envoy-config";
 import { MIN_PASS_DEADLINE_MS } from "@legion/envoy-client/envoy-settings";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { natsConnectionOptions } from "@legion/envoy-client/nats-connection";
-import {
-  closeReplayedRemoval,
-  createReplayEngine,
-  envoyNoticeText,
-  failureNoticeFields,
-  type ReplayDeliveryOutcome,
-  type ReplayEngine,
-  type ReplayFrame,
-  type ReplayNotice,
-  reachesPrivateStreamSubject,
-  replayedText,
-  replayFollowedSubjects,
-  replayLedgerIdentity,
-  replaySuppressed,
-  routeReplayNotice,
-} from "@legion/envoy-client/replay";
 import {
   readSessionAnswers,
   sessionAnswersFailureLine,
@@ -259,8 +253,8 @@ const NATS_RETRY_INTERVAL_MS = 15_000;
 const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
 /** The most BTW event ids an instance remembers, so a failure notice naming one stays inert. */
 const BTW_EVENTS_LIMIT = 1_000;
-/** The line a replayed BTW's notice ends with: it runs nothing and asks for nothing. */
-const REPLAYED_BTW_NOTE =
+/** The line a late BTW's card ends with: it runs nothing and asks for nothing. */
+const LATE_BTW_NOTE =
   "This BTW was asked while this session was not taking messages. It is shown for your " +
   "information only: it runs no side turn and needs no answer. Dispatch shows whether it was " +
   "answered.";
@@ -1107,18 +1101,17 @@ export default function envoyExtension(pi: PiApi): void {
     return connection;
   };
 
-  // nats.js resubscribes every subscription once it reconnects, but nothing published while it was
-  // away is kept for it: each reconnect sweeps the stream for what this session missed, and, while
-  // the relay subscription is open, begins a new epoch and registers it at once, so the listener
-  // restarts the session's relay at its ack floor (`renewRelayEpoch`). The reader ends with the
-  // connection, and stops acting once another connection replaced it.
+  // nats.js resubscribes every subscription once it reconnects, but nothing published while it
+  // was away is kept for it: each reconnect begins a new epoch and registers it at once, so the
+  // listener restarts the session's relay at its ack floor and redelivers what the session never
+  // acknowledged (`renewRelayEpoch`). The reader ends with the connection, and stops acting once
+  // another connection replaced it.
   const watchReconnects = async (watched: NatsConnection): Promise<void> => {
     try {
       for await (const status of watched.status()) {
         if (connection !== watched) return;
         if (status.type !== Events.Reconnect) continue;
         renewRelayEpoch();
-        triggerReplay();
       }
     } catch (error) {
       logger.warn("envoy: the NATS connection's status reader failed", {
@@ -1159,7 +1152,7 @@ export default function envoyExtension(pi: PiApi): void {
     isOwnSession: (session) => sessionOpen(session),
   });
 
-  // A card's message: its `details` name the frame (`replayLedgerIdentity`), which the host keeps
+  // A card's message: its `details` name the frame (`ledgerIdentity`), which the host keeps
   // on the message it writes, beside the wake's card marker. An `inert` card is a steer that starts
   // no turn on an idle host; a turn streaming when it is handed takes it and runs another model
   // turn for it, so `UnwrittenFrames` hands an inert card only to a settled host (`hostSettled`).
@@ -1170,7 +1163,7 @@ export default function envoyExtension(pi: PiApi): void {
     deliverAs: CardDelivery,
     identity: DedupeIdentity | undefined
   ): void => {
-    const known = identity === undefined ? {} : replayLedgerIdentity(identity);
+    const known = identity === undefined ? {} : ledgerIdentity(identity);
     const frame = unwrittenCardKeys(known).length === 0 ? undefined : { ...known };
     if (deliverAs === "inert") {
       pi.sendMessage(
@@ -1419,51 +1412,27 @@ export default function envoyExtension(pi: PiApi): void {
     }
   };
 
-  // `topic` is the subscription the frame came on, `subject` the subject it was published to, and
-  // `receivedAt` when the subscription yielded it (`readArrivals`): a cursor that started after
-  // that may stand past it (`liveFailed`), however long the frames before it took to deliver.
-  // `relayed` is the relay frame (consumer delivery) a frame came as; a core frame has none. A
-  // relay frame is answered `done` once it is written, or skipped, suppressed, a repeat, or
-  // rejected (after the rejection reply is posted), and `nak` once the host dropped it unwritten.
-  // A BTW's side turn and every Dispatch reply run off the caller (`offWorker`), so the frames
-  // after one never wait on a model call or a reply.
-  const deliver = async (
-    topic: string,
-    subject: string,
-    raw: string,
-    receivedAt: number,
-    relayed?: ConsumerFrame
-  ): Promise<void> => {
+  // `subject` is the subject the frame was published on, and `relayed` the relay frame it came
+  // as: every frame reaches the session through its own consumer's relay. A relay frame is
+  // answered `done` once it is written, or skipped,
+  // suppressed, a repeat, or rejected (after the rejection reply is posted), and `nak` once the
+  // host dropped it unwritten. A BTW's side turn and every Dispatch reply run off the caller
+  // (`offWorker`), so the frames after one never wait on a model call or a reply.
+  const deliver = async (subject: string, raw: string, relayed: ConsumerFrame): Promise<void> => {
     const rendered = renderInbound(raw, sessionID, subject);
-    // The listener relays this subscription's subject from the session's consumer
-    // (`relaysCoreTopic`): the relay's frame is the one shown, and this core copy is dropped.
-    if (relayed === undefined && relaysCoreTopic(topic)) return;
-    // A human unsubscribed one of our topics: drop it locally too, the same
-    // way envoy_unsubscribe does, so the resubscribe-on-drop recovery path
-    // below does not undo the human's action a few seconds later. The event
-    // also reaches the issue's own topic (every subscriber, not just the
-    // removed session), so this only fires for a removal naming us.
-    let removed = false;
-    for (const topic of subscriptionRemovedTopics(raw, sessionID) ?? []) {
-      if (closeIntentionally(topic)) removed = true;
-    }
-    if (removed) {
-      void replayFollowedChanged();
-      // The listener's consumer still relays the session's topics: registered again without this
-      // one, the relay stops taking it at once (`setFollowed`) and the listener's filter drops it.
-      if (relay?.sessionID === sessionID && relay.delivery.relaying()) {
-        void Promise.resolve()
-          .then(registerSession)
-          .catch(() => undefined);
-      }
-    }
+    // A human unsubscribed one of our topics: drop it locally too, the same way
+    // envoy_unsubscribe does. The event also reaches the issue's own topic (every subscriber,
+    // not just the removed session), so this only fires for a removal naming us, and only when
+    // the stream stored it after this session started following the topic it names
+    // (`closeReplayedRemoval`): a removal the stream kept while the session was away must not
+    // close a topic followed again since.
+    await closeRemovedSubscriptions(raw, relayed.storedAtMs);
     const dedupeIdentity = ClaimIdentitySchema.safeParse(rendered.envelope);
     const identity = dedupeIdentity.success ? dedupeIdentity.data : undefined;
     const held = rendered.skip ? undefined : delivered.claim(identity);
     if (held === undefined) {
       // Skipped for this session, or a copy of a frame this process shows or has shown: nothing
-      // waits on a relay frame's write.
-      relayed?.done();
+      relayed.done();
       return;
     }
     // A relay frame's claim answers the listener as the claim ends: `done` once it settles (the
@@ -1474,23 +1443,20 @@ export default function envoyExtension(pi: PiApi): void {
     // relay's own to count (its failure notice comes from `createConsumerDelivery`).
     let handing = true;
     let releasedWhileHanding = false;
-    const claim: DeliveryClaim =
-      relayed === undefined
-        ? held
-        : {
-            settle: () => {
-              held.settle();
-              relayed.done();
-              relay?.delivery.persist();
-            },
-            release: () => {
-              held.release();
-              if (handing) releasedWhileHanding = true;
-              else relayed.nak();
-            },
-          };
+    const claim: DeliveryClaim = {
+      settle: () => {
+        held.settle();
+        relayed.done();
+        relay?.delivery.persist();
+      },
+      release: () => {
+        held.release();
+        if (handing) releasedWhileHanding = true;
+        else relayed.nak();
+      },
+    };
     // A repeat of a frame this session was shown before a restart, which the in-memory claim
-    // cannot know of: the replay ledger, rebuilt from the transcript, holds it.
+    // cannot know of: the delivery ledger, rebuilt from the transcript, holds it.
     if (identity !== undefined && replay?.delivered(identity) === true) {
       claim.settle();
       return;
@@ -1516,23 +1482,21 @@ export default function envoyExtension(pi: PiApi): void {
     const refuse = async (delivery: DispatchDelivery, error: string): Promise<void> => {
       held.release();
       await postDispatchReply(delivery, { error });
-      relayed?.done();
+      relayed.done();
     };
-    // Runs a side turn or a Dispatch reply off the caller (a pump or the relay's queue), so the
-    // next frame is handed without waiting on it. One that throws is handled as a delivery that
-    // throws: its claim is released, and a core frame no sweep will show again gets its notice; a
-    // relay frame is done (a BTW is in the ledger already, so its redelivery would be dropped).
+    // Runs a side turn or a Dispatch reply off the caller (the relay's queue), so the next frame
+    // is handed without waiting on it. One that throws is handled as a delivery that throws: its
+    // claim is released and the relay frame is done (a BTW is in the ledger already, so its
+    // redelivery would be dropped).
     const offWorker = (work: () => Promise<void>): void => {
-      relayed?.release();
+      relayed.release();
       void work().catch((error: unknown) => {
         held.release();
         console.warn(
           `[envoy] failed to deliver envelope ${envelope?.event_id ?? "unknown"}`,
           error
         );
-        if (relayed !== undefined) relayed.done();
-        else if (envelope !== undefined)
-          void replay?.liveFailed(topic, envelope, error, receivedAt);
+        relayed.done();
       });
     };
     try {
@@ -1547,13 +1511,13 @@ export default function envoyExtension(pi: PiApi): void {
           "[envoy] dropping malformed Dispatch targeted delivery without a reply address"
         );
         claim.settle();
-      } else if (rendered.delivery?.mode === "btw" && relayed?.late === true) {
+      } else if (rendered.delivery?.mode === "btw" && relayed.late === true) {
         // A BTW that arrives late (delivered before, or stored before this connection's epoch
         // began) never starts a side turn: it is one inert card, as a replayed BTW is, written to
         // the transcript and done then. Its answer, if any, is on Dispatch.
         noteBtw(identity?.event_id);
         unwritten.sendCard(
-          `${replayedText(rendered.content, relayed.storedAt)}\n${REPLAYED_BTW_NOTE}`,
+          `${storedText(rendered.content, relayed.storedAt)}\n${LATE_BTW_NOTE}`,
           "inert",
           identity,
           claim
@@ -1676,158 +1640,42 @@ export default function envoyExtension(pi: PiApi): void {
       handing = false;
       held.release();
       console.warn(`[envoy] failed to deliver envelope ${envelope?.event_id ?? "unknown"}`, error);
-      // A frame no sweep will show again (a role forward, already acknowledged; one on a
-      // subscription the replay does not read: refused, not started, or the listener's replay
-      // failing) gets its notice at once. The stream's copy of any other waits for a sweep. A
-      // relay frame's failure is the relay's to count: it comes again, or gets its notice.
-      if (relayed === undefined && envelope !== undefined) {
-        void replay?.liveFailed(topic, envelope, error, receivedAt);
-      }
+      // The failure is the relay's to count: the frame comes again, or, from its third delivery
+      // on, the relay shows its failure notice (`createConsumerDelivery`).
       throw error;
     }
     handing = false;
-    if (releasedWhileHanding) relayed?.nak();
+    if (releasedWhileHanding) relayed.nak();
   };
 
   const RESUBSCRIBE_DELAY_MS = Number(process.env.ENVOY_RESUBSCRIBE_DELAY_MS ?? "") || 5_000;
   let shuttingDown = false;
 
-  // Topics this session closed on purpose: the session-switch rebind and the
-  // envoy_unsubscribe tool. The pump's recovery path below exists for
-  // connections that died under us, and it cannot tell those two cases apart on
-  // its own, because an explicit unsubscribe() ends the async iterator exactly
-  // the way a dropped connection does. Without this marker the recovery path
-  // resurrects the topic seconds later, so a switched-away session keeps
-  // receiving the previous session's traffic and envoy_unsubscribe silently
-  // undoes itself.
-  const intentionallyClosed = new Set<string>();
+  // The topics this session follows, as the concrete subjects a registration carries
+  // (`expandSubscriptionTopics`). The listener relays every one of them from the session's own
+  // durable consumer, so the plugin holds no NATS subscription on any of them: after a
+  // registration its connection holds exactly its relay subject and its agent-stream control
+  // subject.
+  const followed = new Set<string>();
 
-  // Topics whose pump is sitting in the resubscribe delay. Such a topic has no
-  // entry in `subscriptions`, so this is the only way to know a deliberate close
-  // still has something to suppress.
-  const awaitingRetry = new Set<string>();
-
-  // Drop a topic we no longer want. Every marker set here is consumed again by
-  // the pump end-path, the retry callback, or the next subscribe(), so the set
-  // cannot accumulate topics that were never live in the first place.
-  const closeIntentionally = (topic: string): boolean => {
-    const subscription = subscriptions.get(topic);
-    if (subscription === undefined) {
-      if (!awaitingRetry.has(topic)) return false;
-      intentionallyClosed.add(topic);
-      return true;
+  // Follows `topic`; answers whether anything was added, so a caller registers only a change.
+  const follow = (topic: string): boolean => {
+    let added = false;
+    for (const subject of expandSubscriptionTopics([topic])) {
+      if (followed.has(subject)) continue;
+      followed.add(subject);
+      added = true;
     }
-    intentionallyClosed.add(topic);
-    subscription.unsubscribe();
-    subscriptions.delete(topic);
-    return true;
+    return added;
   };
 
-  // The sessions whose agent subject still addresses the host's current session: that session and
-  // the ones it continues (a fork's or branch's parent), the announced one included while the host
-  // has moved on and no pass has yet seen where.
-  const lineageOf = (id: string): readonly string[] => {
-    const lineage = continuedBy(id);
-    return announced !== undefined &&
-      announced.from !== id &&
-      carriesSession(announced.reason) &&
-      !lineage.includes(announced.from)
-      ? [...lineage, announced.from]
-      : lineage;
-  };
-
-  // Whether a frame on the subscription `topic` is addressed to a session the host has replaced
-  // (a `/new` or resume), arriving before a pass closes that session's agent subject. Injected
-  // now, the frame would land in the new session's transcript; it stays undelivered and
-  // unacknowledged, as on the closed subject (a role lane counts a failed delivery and the daemon
-  // re-sends to the role's holder, a BTW's sender sees its wait time out). A fork or branch carries
-  // the session on, so its parent's frames arrive. A subject the role holds is addressed to the
-  // role, not a session: its notices arrive until a pass ends the role, since the controller, the
-  // one plugin that opens such subjects, claims its role again for the session its pane is left on.
-  const replacedSessionTopic = (topic: string): boolean => {
-    if (!topic.startsWith(agentSubject(""))) return false;
-    const host = hostSessionID();
-    return host !== "" && !lineageOf(host).some((id) => topic === agentSubject(id));
-  };
-
-  const pump = async (topic: string, subscription: Subscription): Promise<void> => {
-    try {
-      for await (const { message, receivedAt } of readArrivals(subscription)) {
-        // Left undelivered here, the frame stays in the stream: when this session id is resumed,
-        // its first sweep shows it.
-        if (replacedSessionTopic(topic)) {
-          logger.warn("envoy: frame for a session a switch replaced left undelivered", {
-            subject: message.subject,
-          });
-          continue;
-        }
-        try {
-          await deliver(topic, message.subject, codec.decode(message.data), receivedAt);
-        } catch {
-          // A failed injection is logged by deliver and must not tear down the subscription; the
-          // next sweep shows the stream's copy, or deliver reported one no sweep can show. A BTW
-          // is neither: it is recorded before its side turn, so no sweep shows it, and its outcome
-          // is Dispatch's record (a reply that failed leaves the attempt unanswered there, and a
-          // Retry runs again).
-        }
-      }
-    } catch {
-      // Iterator failure falls through to the resubscribe path below.
+  // Stops following `topic`; false when the session did not follow it, so nothing closed.
+  const unfollow = (topic: string): boolean => {
+    let dropped = false;
+    for (const subject of expandSubscriptionTopics([topic])) {
+      if (followed.delete(subject)) dropped = true;
     }
-    // Only retire our own generation: a later subscribe() for this topic may
-    // already own the map entry.
-    if (subscriptions.get(topic) === subscription) subscriptions.delete(topic);
-    if (shuttingDown) return;
-    // A close we asked for is not an outage. Consume the marker so a later,
-    // genuine death of this same topic still recovers.
-    if (intentionallyClosed.delete(topic)) return;
-    // Otherwise the iterator only ended because the connection was closed or
-    // errored out from under nats.js's own reconnect handling. Re-establish
-    // rather than staying silently deaf while the HTTP registration heartbeat
-    // keeps the session looking healthy in the registry. Whether the topic served a role, and how
-    // many roles had ended, are taken once, here: every retry of the chain, a failed reconnect's
-    // included, compares against them, so a role that ends mid-chain keeps the topic closed.
-    const snapshot = roleSnapshot(topic);
-    const retry = (delayMs: number): void => {
-      awaitingRetry.add(topic);
-      setTimeout(() => {
-        awaitingRetry.delete(topic);
-        // A subscribe() during the delay already cleared the marker and owns the
-        // topic, so there is nothing to do here.
-        if (shuttingDown || subscriptions.has(topic)) return;
-        // A close that landed during the delay leaves the marker for us instead
-        // of the pump end-path. Consume it here so it cannot outlive the timer.
-        if (intentionallyClosed.delete(topic)) return;
-        // Reopened, the topic is live again, but what was published to it while it was down is
-        // only in the stream: a sweep shows it.
-        void subscribeUnlessRoleEnds(topic, snapshot).then(
-          (wanted) => {
-            if (wanted) triggerReplay();
-          },
-          () => retry(NATS_RETRY_INTERVAL_MS)
-        );
-      }, delayMs);
-    };
-    retry(RESUBSCRIBE_DELAY_MS);
-  };
-
-  const subscribe = async (topic: string, live: Fence = UNFENCED): Promise<boolean> => {
-    const subjects = expandSubscriptionTopics([topic]).filter(
-      (candidate) => !subscriptions.has(candidate)
-    );
-    if (subjects.length === 0) return false;
-    const activeConnection = await ensureConnection(live);
-    // The pass that asked for this topic was abandoned while the connection was made: it opens
-    // nothing, so a subject a newer pass has since settled is not reopened behind its back.
-    if (!live()) return false;
-    for (const subject of subjects) {
-      const subscription = activeConnection.subscribe(subject);
-      // A fresh subscription supersedes any earlier deliberate close of this topic.
-      intentionallyClosed.delete(subject);
-      subscriptions.set(subject, subscription);
-      void pump(subject, subscription);
-    }
-    return true;
+    return dropped;
   };
 
   const noteInbox = (envelope: NonNullable<RenderInboundResult["envelope"]>): void => {
@@ -1840,55 +1688,43 @@ export default function envoyExtension(pi: PiApi): void {
     if (inbox.length > 50) inbox.pop();
   };
 
-  // What the session follows for replay (`replayFollowedSubjects`): what `registerSession`
-  // registers, its own agent subject and every open subscription not held for a role, with a
-  // subscription still in its resubscribe delay, which the session still follows (dropped, its
-  // cursor would restart past what the outage cost).
+  // What the session registers, and what its consumer therefore relays
+  // (`replayFollowedSubjects`): its own agent subject and every followed topic not held for a
+  // role.
   const followedSubjects = (): string[] => {
     if (sessionID === "") return [];
-    const open = [...subscriptions.keys(), ...awaitingRetry].filter(
-      (subject) => !intentionallyClosed.has(subject)
-    );
-    return replayFollowedSubjects(agentSubject(sessionID), open, isRoleBound);
+    return replayFollowedSubjects(agentSubject(sessionID), followed, isRoleBound);
   };
 
-  // Replays a stored frame: a card and nothing else. A targeted frame (BTW, Aside, Steer, a
-  // person's Send) runs no side turn, asks Dispatch to accept no user turn and posts no reply: a
-  // person's input run late could act on an instruction they no longer mean, so the session is
-  // shown it and decides. A removal closes a topic and takes it out of the listener's registry
-  // only when it was stored after the session started following that topic
-  // (`closeReplayedRemoval`). The card is `queued` until the host writes it (`showReplayCard`).
-  const showReplayed = async (frame: ReplayFrame): Promise<ReplayDeliveryOutcome> => {
-    const rendered = renderInbound(frame.data, sessionID, frame.subject);
-    if (replay !== undefined) {
-      await closeReplayedRemoval(frame, {
+  // Acts on a `subscription.removed` naming this session, which the relay delivers like any
+  // other frame: the topics it names are dropped locally, the same way envoy_unsubscribe does,
+  // and taken out of the listener's registry, but only those this session followed before the
+  // stream stored the frame (`closeReplayedRemoval`), so a removal the stream kept while the
+  // session was away never closes a topic followed again since. Registered again without them,
+  // the session's consumer stops relaying them at once.
+  const closeRemovedSubscriptions = async (raw: string, storedAtMs: number): Promise<void> => {
+    const open = relay?.sessionID === sessionID ? relay : undefined;
+    const closed = await closeReplayedRemoval(
+      { data: raw },
+      {
         sessionID,
-        engine: replay,
-        close: closeIntentionally,
+        followedBefore: (topic) => open?.delivery.followedBefore(topic, storedAtMs) !== false,
+        close: unfollow,
         unregister: async (topics) => {
-          await active?.client
-            .unsubscribe({ sessionID, topics })
-            .catch((error: unknown) =>
-              logger.warn(
-                "envoy: a replayed subscription removal was not taken out of the registry",
-                { topics, error: messageFor(error) }
-              )
-            );
+          await active?.client.unsubscribe({ sessionID, topics }).catch((error: unknown) =>
+            logger.warn("envoy: a subscription removal was not taken out of the registry", {
+              topics,
+              error: messageFor(error),
+            })
+          );
         },
         followedChanged: replayFollowedChanged,
-      });
-    }
-    if (replaySuppressed(rendered)) return "suppressed";
-    if (rendered.envelope !== undefined) noteInbox(rendered.envelope);
-    const shown = replayedText(rendered.content, frame.time);
-    // A BTW that reaches replay, whatever became of it live (answered, refused, or never received),
-    // is one inert notice: a card that starts no turn, so a stale side question never runs as a
-    // turn. Its answer, if any, is on Dispatch.
-    if (rendered.delivery?.mode === "btw") {
-      noteBtw(rendered.envelope?.event_id);
-      return showReplayCard(`${shown}\n${REPLAYED_BTW_NOTE}`, frame.envelope, "inert");
-    }
-    return showReplayCard(shown, frame.envelope);
+      }
+    );
+    if (closed.length === 0) return;
+    void Promise.resolve()
+      .then(registerSession)
+      .catch(() => undefined);
   };
 
   // The session this instance and the host are both on: an entry appended now lands in its
@@ -1898,31 +1734,27 @@ export default function envoyExtension(pi: PiApi): void {
     return host !== "" && host === sessionID ? host : undefined;
   };
 
-  // Tells the session a replay or relay notice: one about the listener as a warning, one about the
-  // stream as a card held until the host is settled (`UnwrittenFrames.sendNotice`), which the
-  // transcript records held, so a restart holds it again.
-  const tellReplayNotice = (notice: ReplayNotice): void => {
+  // Tells the session a gap notice: a card held until the host is settled
+  // (`UnwrittenFrames.sendNotice`), which the transcript records held, so a restart holds it
+  // again.
+  const tellGapNotice = (notice: ConsumerGapNotice): void => {
     logger.warn(`envoy: ${notice.message}`);
-    routeReplayNotice(notice, {
-      warn: (message) => activeSessionContext?.ui.notify(`envoy: ${message}`, "warning"),
-      card: (content) => unwritten.sendNotice(content),
-    });
+    unwritten.sendNotice(gapNoticeText(notice));
   };
 
-  // Shows the session each message the notification stream stored for it while its subscriptions
-  // were down, once (`@legion/envoy-client/replay`). Its sessions are this instance's: work started
-  // for one session stops once the host, or this instance, is on another.
-  const replay: ReplayEngine | undefined =
+  // What this session was already shown, and the notice naming a frame it could not be shown
+  // (`@legion/envoy-client/delivery-ledger`). Its sessions are this instance's: work started for
+  // one session stops once the host, or this instance, is on another.
+  const replay: DeliveryLedger | undefined =
     active === undefined || !inbound
       ? undefined
-      : createReplayEngine({
+      : createDeliveryLedger({
           host: {
             sessionID: () => (shuttingDown ? undefined : transcriptSessionID()),
-            // A session shutting down starts no replay work, but the host still writes its
+            // A session shutting down starts no new work, but the host still writes its
             // transcript, so a refused BTW's record still reaches it (`recordDeliveredFor`).
             writeSessionID: transcriptSessionID,
             followedSubjects,
-            deliver: showReplayed,
             showFailureNotice: async (notice) =>
               showReplayCard(
                 envoyNoticeText(failureNoticeFields(notice)),
@@ -1939,7 +1771,6 @@ export default function envoyExtension(pi: PiApi): void {
                 "warning"
               );
             },
-            notify: tellReplayNotice,
             log: (message, error) =>
               logger.warn(
                 `envoy: ${message}`,
@@ -1950,40 +1781,30 @@ export default function envoyExtension(pi: PiApi): void {
               if (change.state !== undefined) pi.appendEntry(REPLAY_STATE_ENTRY, change.state);
             },
           },
-          transport: active.client,
-          dedupe: delivered,
         });
 
-  // A sweep reads the cursors of a session whose agent subject and recovered interests a pass
-  // opened (`inboundOpenFor`): before that, a topic restored from the transcript is not yet open
-  // again, and a sweep would drop its cursor. Each sweep runs on the engine's own chain, never in
-  // the passes' or the role moves' queues.
+  // The ledger's followed topics are written once a pass has opened the session's inbound
+  // (`inboundOpenFor`): before that, a topic restored from the transcript is not followed again
+  // yet, and the write would drop it.
   const replayOpen = (): boolean =>
     !shuttingDown && sessionID !== "" && inboundOpenFor === sessionID;
-  const triggerReplay = (): void => {
-    if (replay !== undefined && replayOpen()) void replay.sweep();
-  };
   const replayFollowedChanged = async (): Promise<void> => {
     if (replay !== undefined && replayOpen()) await replay.followedChanged();
   };
 
-  // Consumer delivery (`@legion/envoy-client/consumer-delivery`). While a pass holds the session's
-  // agent subject open, it holds the session's relay subject open too, subscribed before any
-  // registration, and every registration then asks the listener for consumer delivery. Answered
-  // `consumer`, the listener relays the session's durable consumer on that subject: its agent
-  // subject and every followed topic the stream stores, each frame handed to `deliver` in stream
-  // order and answered `done` once written. The core copies of those subjects are then shown
-  // nothing (`relays`), and the replay engine makes no `/v1/replay` call. Answered `core`, or not
-  // at all, the core path runs as before.
+  // Consumer delivery (`@legion/envoy-client/consumer-delivery`). While a pass holds the
+  // session's inbound open, it holds the session's relay subject open, subscribed before any
+  // registration, and every registration asks the listener for consumer delivery. The listener
+  // relays the session's durable consumer on that subject — its agent subject and every followed
+  // topic — each frame handed to `deliver` in stream order and answered `done` once written; a
+  // registration it can give no consumer is refused, and the session has no inbound at all until
+  // a later heartbeat's registration is answered.
   interface Relay {
     readonly sessionID: string;
     readonly delivery: ConsumerDelivery;
     subscription: Subscription | undefined;
   }
   let relay: Relay | undefined;
-
-  const relaysCoreTopic = (topic: string): boolean =>
-    relay?.sessionID === sessionID && relay.delivery.relays(topic);
 
   // A relay frame for a session the host is no longer on (a switch, before the next pass closes
   // its relay), or one that drains in while the session shuts down, is one the session cannot
@@ -1994,23 +1815,22 @@ export default function envoyExtension(pi: PiApi): void {
       frame.nak();
       return;
     }
-    await deliver(frame.subject, frame.subject, frame.data, Date.now(), frame);
+    await deliver(frame.subject, frame.data, frame);
   };
-
   // The relay of session `id`, its snapshot restored from `entries` (before any `setFollowed`),
   // and every later change of it appended to the transcript of the session it is for
   // (`CONSUMER_STATE_ENTRY`): after a frame is written, after the followed topics change, and
   // after a registration answer moves the stream. The follows map goes with an entry only when it
   // changed, so a written frame costs one resume point beside the frame's own entries; what the
   // relay restored is stored already and is not appended again.
-  const createRelay = (id: string, entries: readonly unknown[], ledger: ReplayEngine): Relay => {
+  const createRelay = (id: string, entries: readonly unknown[], ledger: DeliveryLedger): Relay => {
     let persistedFollows = "";
     const delivery: ConsumerDelivery = createConsumerDelivery({
       sessionID: id,
       ledger,
       host: {
         deliver: (frame) => deliverRelayed(delivery, frame),
-        gap: tellReplayNotice,
+        gap: tellGapNotice,
         log: (message, error) =>
           logger.warn(
             `envoy: ${message}`,
@@ -2116,26 +1936,16 @@ export default function envoyExtension(pi: PiApi): void {
       .catch(() => undefined);
   };
 
-  // What a registration's answer says of consumer delivery, for the session it registered with
-  // the topics it carried, and the relay it asked for. One that asked nothing (no relay subject
-  // open) relays nothing, whatever the listener answered, so the relay takes none of the topics
-  // and the replay engine sweeps again (`registeredWithoutRelay`, the module that owns the
-  // ledger's consumer mode). An answer for a session this instance has left, or for a relay since
+  // What a registration's answer says of consumer delivery, for the session it registered and
+  // the relay it asked for. An answer for a session this instance has left, or for a relay since
   // closed, changes nothing.
   const takeDeliveryAnswer = (
     registeredSession: string,
-    topics: readonly string[],
     asked: Relay | undefined,
     result: SubscribeResult
   ): void => {
-    if (sessionID !== registeredSession || (asked !== undefined && relay !== asked)) return;
-    if (asked !== undefined) {
-      asked.delivery.answered(result.delivery, topics);
-      return;
-    }
-    if (replay === undefined) return;
-    const open = relay?.sessionID === registeredSession ? relay : undefined;
-    registeredWithoutRelay(replay, open?.delivery, topics);
+    if (sessionID !== registeredSession || asked === undefined || relay !== asked) return;
+    asked.delivery.answered(result.delivery);
   };
 
   // The live agent conversation stream (LEGION-232). This session's own turns, tool calls and
@@ -2362,7 +2172,7 @@ export default function envoyExtension(pi: PiApi): void {
     claimedRoleTopic = undefined;
     claimedRoleSessionID = undefined;
     roleEnds += 1;
-    for (const subject of roleNoticeSubjects) closeIntentionally(subject);
+    for (const subject of roleNoticeSubjects) unfollow(subject);
     roleNoticeSubjects.clear();
   };
 
@@ -2405,19 +2215,15 @@ export default function envoyExtension(pi: PiApi): void {
     endsBefore: roleEnds,
   });
 
-  // Opens `topic` unless it served a role that has ended since `snapshot` was taken (a first
-  // subscribe, or any retry of a dropped topic's chain): a role-bound subject is not reopened, and
-  // one whose role ends while its connection is made is closed as soon as it opens, before any
-  // registration can carry it. Answers whether the topic is still wanted.
-  const subscribeUnlessRoleEnds = async (
-    topic: string,
-    snapshot: RoleSnapshot
-  ): Promise<boolean> => {
+  // Follows `topic` unless it served a role that has ended since `snapshot` was taken: a
+  // role-bound subject is not followed again, and one whose role ends meanwhile is dropped
+  // before any registration can carry it. Answers whether the topic is still wanted.
+  const followUnlessRoleEnds = (topic: string, snapshot: RoleSnapshot): boolean => {
     const roleEnded = () => snapshot.roleBound && roleEnds !== snapshot.endsBefore;
     if (roleEnded()) return false;
-    await subscribe(topic);
+    follow(topic);
     if (!roleEnded()) return true;
-    for (const subject of expandSubscriptionTopics([topic])) closeIntentionally(subject);
+    unfollow(topic);
     return false;
   };
 
@@ -2428,9 +2234,34 @@ export default function envoyExtension(pi: PiApi): void {
   let registeredFor = "";
   let registeredAt = -Infinity;
 
-  // The listener delivers nothing to a self-subscribed session (it takes its topics over its own
-  // NATS subscriptions), so the registered topics serve recovery on resume; a role-bound subject
-  // stays out of them, and so does one reaching another session's agent subject (a fork parent's,
+  // Said once per outage: the listener refused this session's registration, so no consumer
+  // delivers to it and Envoy inbound is unavailable. The session still starts and runs; the
+  // reason is the listener's own (`consumer_error`, `no_grant`, `not_requested`,
+  // `invalid_session_id`, carried in the error's message), and the heartbeat registers again
+  // every tick until one is accepted.
+  let inboundUnavailableTold = false;
+  const tellInboundUnavailable = (error: unknown): void => {
+    if (inboundUnavailableTold) return;
+    inboundUnavailableTold = true;
+    const why = messageFor(error);
+    logger.warn(`envoy: this session receives nothing: ${why}`);
+    activeSessionContext?.ui.notify(
+      `envoy: inbound messages are unavailable (${why}); registering again every heartbeat`,
+      "warning"
+    );
+    unwritten.sendNotice(
+      envoyNoticeText({
+        notice: "Envoy inbound unavailable",
+        error: why,
+        detail:
+          "The listener gave this session no durable consumer, which is the only path an Envoy message reaches it by, so it receives none. Everything else works, and the session registers again at every heartbeat; what the stream stored meanwhile arrives once a registration is accepted.",
+      })
+    );
+  };
+
+  // The listener delivers nothing to a self-subscribed session (its own consumer's relay does),
+  // so the registered topics are what that consumer is filtered on; a role-bound subject stays
+  // out of them, and so does one reaching another session's agent subject (a fork parent's,
   // until a pass closes it, or a wildcard over them), which the listener refuses to store.
   // A registration moves the session's `last_seen` at the listener, even one
   // whose answer is lost, so every hold this process abandoned under that session is its own again
@@ -2438,9 +2269,12 @@ export default function envoyExtension(pi: PiApi): void {
   // settles.
   // Every accepted registration is timed here — the pass's, `envoy_subscribe`'s and the
   // heartbeat's own direct refresh all feed the one clock.
-  // While the session's relay subject is open, the registration asks for consumer delivery
-  // (`delivery`: the relay's epoch and resume point), the relay taking the topics it carries as
-  // followed first; its answer says whether the listener relays them.
+  // Every registration asks the listener for consumer delivery (`delivery`: the relay's epoch
+  // and resume point), the relay taking the topics it carries as followed first: a session
+  // receives only what its own consumer holds, so a registration carrying no relay would be
+  // refused `409 not_requested` and leave nothing registered. With no relay subject open (no
+  // NATS connection yet, or inbound off for this session) there is nothing to ask for, so the
+  // registration fails here, loudly, and the next heartbeat tries again.
   const registerSession = () => {
     const registeringFor = sessionID;
     const own = agentSubject(sessionID);
@@ -2452,14 +2286,21 @@ export default function envoyExtension(pi: PiApi): void {
     const topics = [
       ...new Set([
         own,
-        ...[...subscriptions.keys()].filter(
+        ...[...followed].filter(
           (subject) => !isRoleBound(subject) && !reachesPrivateStreamSubject(own, subject)
         ),
       ]),
     ];
     const asking =
       relay?.sessionID === sessionID && relay.subscription !== undefined ? relay : undefined;
-    if (asking !== undefined) asking.delivery.setFollowed(topics);
+    if (asking === undefined) {
+      const refused = new Error(
+        "this session holds no relay subject, so the listener can give it no consumer and it can receive nothing"
+      );
+      tellInboundUnavailable(refused);
+      return Promise.reject(refused);
+    }
+    asking.delivery.setFollowed(topics);
     return requireEnvoy()
       .client.subscribe({
         sessionID,
@@ -2476,14 +2317,24 @@ export default function envoyExtension(pi: PiApi): void {
         driving: false,
         selfSubscribed: true,
         plugin: { name: packageName, version: packageVersion },
-        ...(asking === undefined ? {} : { delivery: asking.delivery.registration() }),
+        delivery: asking.delivery.registration(),
       })
-      .then((result) => {
-        registeredFor = registeringFor;
-        registeredAt = Date.now();
-        takeDeliveryAnswer(registeringFor, topics, asking, result);
-        return result;
-      });
+      .then(
+        (result) => {
+          registeredFor = registeringFor;
+          registeredAt = Date.now();
+          inboundUnavailableTold = false;
+          takeDeliveryAnswer(registeringFor, asking, result);
+          return result;
+        },
+        (error: unknown) => {
+          // A registration the listener refused leaves the session with no consumer at all
+          // (`503 consumer_error|no_grant`, `409 not_requested|invalid_session_id`), so the
+          // session is told once and the heartbeat asks again.
+          tellInboundUnavailable(error);
+          throw error;
+        }
+      );
   };
 
   /**
@@ -2610,12 +2461,9 @@ export default function envoyExtension(pi: PiApi): void {
       // Sessions can be created lazily after session_start (a fresh TUI has no session yet); until
       // the host mints an id there is nothing to register.
       if (context.sessionManager.getSessionId() === "") return;
-      // A held inert card or replay notice, or a card the host withdrew unwritten, is handed first,
-      // while the host is settled (`hostSettled`), so the sweep finds its frame still claimed.
-      // Every tick also sweeps the stream, outside the pass, so a sweep never waits on one: it
-      // catches up on what a missed trigger left, and keeps probing a listener without replay.
+      // A held inert card or notice, or a card the host withdrew unwritten, is handed first,
+      // while the host is settled (`hostSettled`).
       unwritten.handBackWithdrawn();
-      triggerReplay();
       if (healing) {
         // A pass that has not settled holds the queue, and with it the registration refresh that
         // is its last step. The age is measured from the last registration accepted for the
@@ -2711,14 +2559,16 @@ export default function envoyExtension(pi: PiApi): void {
     // Abandoned during the unsubscribe: a newer pass reads the registry itself, and this one
     // registers nothing further.
     if (!live()) return;
-    // The newest replay state's topics (`rememberedTopics`), but a retired Slack topic.
+    // The newest ledger state's topics (`rememberedTopics`), but a retired Slack topic. They are
+    // followed again, so the registration that ends this pass carries them and the session's
+    // consumer relays what the stream kept for them.
     const remembered = rememberedSubjects(
       activeSessionContext?.sessionManager.getEntries() ?? []
     ).filter((topic) => !(slackRetired && slackTopicChannel(topic) !== undefined));
     for (const topic of new Set([...registered, ...remembered])) {
       if (topic === agentSubject(sessionID) || topic.startsWith(ROLE_TOPIC_PREFIX)) continue;
       if (retired.includes(topic)) continue;
-      await subscribe(topic, live);
+      follow(topic);
     }
   };
 
@@ -3067,7 +2917,7 @@ export default function envoyExtension(pi: PiApi): void {
     }
     for (const other of agentSessions) {
       if (other === host) continue;
-      closeIntentionally(agentSubject(other));
+      unfollow(agentSubject(other));
       agentSessions.delete(other);
       if (inboundOpenFor === other) inboundOpenFor = "";
     }
@@ -3078,12 +2928,11 @@ export default function envoyExtension(pi: PiApi): void {
       ensureHeartbeat(context);
       return true;
     }
-    // Only opening the session's agent subject needs NATS. The registration and the role go over
-    // HTTP, so a NATS outage stops neither (a Legion claim through the bridge included): the pass
-    // reports it once they are settled, and the next pass opens the subject. A steady pass touches
-    // no NATS, and the subscriptions' own retry resubscribes an open subject once NATS is back.
+    // Only the relay subject and the agent-stream control subject need NATS. The registration
+    // and the role go over HTTP, so a NATS outage stops neither (a Legion claim through the
+    // bridge included): the pass reports it once they are settled, and the next pass opens the
+    // relay. A steady pass touches no NATS.
     let inboundFailure: unknown;
-    let openedInbound = false;
     if (inbound && inboundOpenFor !== host) {
       try {
         agentSessions.add(host);
@@ -3091,8 +2940,7 @@ export default function envoyExtension(pi: PiApi): void {
         // Each await is a place the host can move and a place this pass can be abandoned at its
         // deadline: a fenced pass opened nothing, so it records nothing as open either.
         if (!owns()) return false;
-        await subscribe(agentSubject(host), live);
-        if (!owns()) return false;
+        follow(agentSubject(host));
         // The relay subject opens before any registration asks for consumer delivery, so the
         // listener's first relayed frame has a subscriber.
         await openRelay(context, host, live);
@@ -3106,7 +2954,6 @@ export default function envoyExtension(pi: PiApi): void {
           if (!owns()) return false;
         }
         inboundOpenFor = host;
-        openedInbound = true;
       } catch (error) {
         inboundFailure = error;
       }
@@ -3124,10 +2971,7 @@ export default function envoyExtension(pi: PiApi): void {
       establishedSession = host;
       ensureHeartbeat(context);
     }
-    // The agent subject and the recovered topics are open, and registered as this session's, which
-    // the listener's replay asks: what the stream stored while they were closed is swept now, on
-    // its own chain, and the pass goes on.
-    if (openedInbound) triggerReplay();
+
     // The nested move has its own queue and its own deadline: it is fenced by `roleMoves`, not
     // by this pass.
     const decided = await roleMoves.run((moveLive) =>
@@ -3398,7 +3242,7 @@ export default function envoyExtension(pi: PiApi): void {
     // Taken once the subjects are marked: nothing awaits between the two.
     const snapshot = roleSnapshot(topic);
     try {
-      if (!(await subscribeUnlessRoleEnds(topic, snapshot))) return;
+      if (!followUnlessRoleEnds(topic, snapshot)) return;
     } catch (error) {
       // Nothing opened, so nothing may keep the session's role in place on its behalf. A role that
       // ended meanwhile already dropped these marks, and a newer subscription may hold them now.
@@ -3603,9 +3447,7 @@ export default function envoyExtension(pi: PiApi): void {
       clearTimeout(timer);
       connection = undefined;
       activeSessionContext = undefined;
-      subscriptions.clear();
-      intentionallyClosed.clear();
-      awaitingRetry.clear();
+      followed.clear();
       agentStreamControl = undefined;
       agentStreamControlSession = "";
       // This process serves the session no longer, so what it was shown goes with it: the id this
@@ -4168,7 +4010,7 @@ export default function envoyExtension(pi: PiApi): void {
           const added: string[] = [];
           const already: string[] = [];
           for (const topic of topicsFor(parameters)) {
-            ((await subscribe(topic)) ? added : already).push(topic);
+            (follow(topic) ? added : already).push(topic);
           }
           let warnings: readonly string[] | undefined;
           let registrationError: string | undefined;
@@ -4178,10 +4020,9 @@ export default function envoyExtension(pi: PiApi): void {
             } catch (error) {
               registrationError = messageFor(error);
             }
-            // A new follow starts its cursor at the stream's end now, with no older history, so
-            // what is published from here on is recovered if the subscription drops.
+            // A new follow is stamped now, so the session's consumer relays what is published
+            // from here on and nothing the stream stored before it.
             await replayFollowedChanged();
-            triggerReplay();
           }
           const subscribed = `Subscribed: ${added.join(", ") || "(none new)"}`;
           return toolSuccess(
@@ -4198,20 +4039,17 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.unsubscribe: {
           // The session's own inbox is not a subscription the tool manages.
-          // Role topics can be ordinary local NATS subscriptions too, but their
-          // listener interest represents the independently-held role claim: close
-          // the local subscription without unregistering that interest.
+          // A role topic is followed through the independently-held role claim: drop the local
+          // follow without unregistering that interest.
           const inbox = agentSubject(sessionID);
           // Concrete subjects, a named `X.>` already expanded to `X.>` and `X`.
-          const candidates = topicsFor(parameters, [...subscriptions.keys()]).filter(
+          const candidates = topicsFor(parameters, [...followed]).filter(
             (subject) => subject !== inbox
           );
           // A subject another plugin opened for the role this session holds lasts as long as the
           // role does, so the tool keeps it and says so rather than leave the session deaf to it.
           const kept = candidates.filter(isRoleBound);
-          const removed = candidates
-            .filter((subject) => !isRoleBound(subject))
-            .filter(closeIntentionally);
+          const removed = candidates.filter((subject) => !isRoleBound(subject)).filter(unfollow);
           // Persisted at once, so the topic stays unfollowed across a restart.
           if (removed.length > 0) await replayFollowedChanged();
           const registryRemoved = removed.filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX));
