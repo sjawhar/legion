@@ -68,6 +68,15 @@ func apiPage(a *api) (string, error) {
 		for _, o := range refusals(c.Refusals) {
 			refused = append(refused, fmt.Sprintf("%d `%s`", o.Status, o.Code))
 		}
+		// An HTML page past 400 refuses the class as much as a coded JSON answer does, so it
+		// belongs in this column; it carries no code, so the words say what it is instead.
+		var pageRefusals []string
+		for _, o := range c.Refusals {
+			if o.Page && o.Status >= 400 {
+				pageRefusals = union(pageRefusals, []string{fmt.Sprintf("%d (an HTML page)", o.Status)})
+			}
+		}
+		refused = append(refused, pageRefusals...)
 		if len(refused) == 0 {
 			refused = []string{"none"}
 		}

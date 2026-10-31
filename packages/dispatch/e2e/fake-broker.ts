@@ -76,9 +76,6 @@ async function decide(recordID: string, approve: boolean, request: Request): Pro
   if (record.approver !== "anyone" && record.approver !== body.approver) {
     return brokerError(403, "NOT_APPROVER", `${body.approver} may not decide this request`);
   }
-  if (record.decided !== null) {
-    return brokerError(409, "RECORD_TERMINAL", "this machine login was already decided");
-  }
   const credentialID = approve ? `cred-${record.record_id}` : null;
   login.record = {
     ...record,

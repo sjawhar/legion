@@ -16,12 +16,22 @@ import (
 // page's, which answers HTML pages and redirects through w.WriteHeader.
 const apiDir = envoyDir + "/internal/broker/api"
 
+// approvalDir is the broker's approval page: it declares the methods serving the page's routes,
+// and the one the API package calls to refuse a request before any route runs.
+const approvalDir = envoyDir + "/internal/broker/approval"
+
 // varies stands in for a message refgen cannot spell out, such as a wrapped error's own text.
 const varies = "(varies)"
 
 // refusalWriters is each API function that answers a refusal, called (w, status, code, message,
 // …), with the type of the body it answers when that body carries more than code and error.
 var refusalWriters = map[string]string{"writeError": "", "writePageRefusal": "pageRefusal"}
+
+// pageAnswerers is each method of another of the broker's packages that answers a request the
+// API package is serving, with the directory of the package declaring it. A table is needed
+// because such a call's receiver is a field expression (s.deps.Approval), and refgen parses with
+// go/ast and runs no type checker, so it cannot read the receiver's package from the expression.
+var pageAnswerers = map[string]string{"WriteRateLimited": approvalDir}
 
 type route struct {
 	Method, Pattern string
@@ -250,7 +260,7 @@ type siteKind int
 const (
 	siteError   siteKind = iota // a refusalWriters call: writeError(w, status, code, message, …)
 	siteSuccess                 // writeJSON(w, status, v) or w.WriteHeader(status)
-	siteCall                    // a call to another function or method of the package
+	siteCall                    // a call to another function or method: this package's, or a pageAnswerers one
 )
 
 // site is one call that answers the request, or that leads to code that does.
@@ -258,6 +268,7 @@ type site struct {
 	kind      siteKind
 	call      *ast.CallExpr
 	callee    string
+	dir       string   // a pageAnswerers call's: the directory of the package declaring callee, "" for this one
 	sentinels []string // the messages of the errors.Is targets of the case clause around it
 	bodyType  string   // readJSON's: the request body's type
 	respType  string   // writeJSON's: the response body's type, "" when refgen cannot name it; a refusal writer's, the body it answers beyond code and error
@@ -422,6 +433,8 @@ func (g *graph) collect(file *ast.File, body ast.Node, params *ast.FieldList) fu
 				s.kind, s.callee, s.query = siteCall, "", name
 			case g.funcs[fun.Sel.Name] != nil && g.funcs[fun.Sel.Name].Recv != nil:
 				s.kind, s.callee = siteCall, fun.Sel.Name
+			case !g.pages() && pageAnswerers[fun.Sel.Name] != "":
+				s.kind, s.callee, s.dir = siteCall, fun.Sel.Name, pageAnswerers[fun.Sel.Name]
 			default:
 				return true
 			}
@@ -559,7 +572,8 @@ type outcome struct {
 }
 
 // resolve lists every outcome of info, whose parameters env binds to the values a caller passed
-// (each a set of candidates), following calls into the package's other functions.
+// (each a set of candidates), following calls into the package's other functions and into a
+// pageAnswerers method, which it reads in the graph of the package declaring it.
 func (g *graph) resolve(info funcInfo, params map[string][]string, visiting map[string]bool) ([]outcome, error) {
 	env := map[string][]string{}
 	for name, values := range params {
@@ -645,8 +659,19 @@ func (g *graph) resolve(info funcInfo, params map[string][]string, visiting map[
 			if visiting[s.callee] {
 				continue
 			}
-			callee := g.funcs[s.callee]
-			calleeInfo := g.collect(g.src.fileOf(callee), callee.Body, callee.Type.Params)
+			cg := g
+			if s.dir != "" {
+				other, err := g.in(s.dir)
+				if err != nil {
+					return nil, err
+				}
+				if other.funcs[s.callee] == nil {
+					return nil, fmt.Errorf("%s: %s declares no %s, which pageAnswerers names", s.at, s.dir, s.callee)
+				}
+				cg = other
+			}
+			callee := cg.funcs[s.callee]
+			calleeInfo := cg.collect(cg.src.fileOf(callee), callee.Body, callee.Type.Params)
 			calleeEnv := map[string][]string{}
 			for i, name := range calleeInfo.params {
 				if i < len(s.call.Args) {
@@ -654,7 +679,7 @@ func (g *graph) resolve(info funcInfo, params map[string][]string, visiting map[
 				}
 			}
 			visiting[s.callee] = true
-			got, err := g.resolve(calleeInfo, calleeEnv, visiting)
+			got, err := cg.resolve(calleeInfo, calleeEnv, visiting)
 			delete(visiting, s.callee)
 			if err != nil {
 				return nil, err
