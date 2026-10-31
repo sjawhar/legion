@@ -12,10 +12,13 @@ import (
 // A start's task names a decision a person made while nobody in the root's tree could hear it, and
 // the root's architect takes it: its turn on that task starts, so the architect has been told. The
 // write recording that confirmation is the one that tells the decision (store.tellKeptDecisions),
-// and it can fail — a database error, a lost connection — while the turn goes on. When the turn
-// then ends and the delivery is retired, the architect has still been told: the decision must not
-// stand KEPT for the root's next start or catch-up to name it a second time.
-func TestADecisionToldInATurnWhoseConfirmationFailedIsNotToldAgain(t *testing.T) {
+// and it can fail — a database error, a lost connection — while the turn goes on. The daemon then
+// cannot record that it told, so the decision stands KEPT and the root's next start names it again.
+// That is the accepted behaviour: the tree's rule is that a person's decision is never lost and
+// that telling it twice is the lesser fault (the architect's ruling on #2163, review round cap, 31
+// October 2026). What this test holds is the other half: the decision is told again, never zero
+// times, so a failed write cannot lose it.
+func TestADecisionToldInATurnWhoseConfirmationFailedIsToldAgain(t *testing.T) {
 	r := newHeldTaskRig(t)
 	ref := "dispatch://" + heldTaskRoot + "/ask/ask-told"
 	keepDecision(t, r.pool, r.records, heldTaskRoot, ref, time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC))
@@ -64,9 +67,9 @@ func TestADecisionToldInATurnWhoseConfirmationFailedIsNotToldAgain(t *testing.T)
 	if err != nil {
 		t.Fatalf("compose the next start's task: %v", err)
 	}
-	if strings.Contains(task, ref) {
-		t.Fatalf("the root's next start task %q names %s again; the architect was told it in the turn that started on "+
-			"the first start's task, whose confirmation's write failed (kept now: %s)",
+	if !strings.Contains(task, ref) {
+		t.Fatalf("the root's next start task %q does not name %s; the turn's confirmation write failed, so nothing recorded "+
+			"that the architect was told, and the decision must be told again rather than lost (kept now: %s)",
 			task, ref, keptRefs(keptDecisions(t, r.pool, r.records, heldTaskRoot)))
 	}
 }
