@@ -2,18 +2,18 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-314",
-  "completed": "2026-10-31T17:26:13Z",
-  "round": 2,
-  "reviewedCodeHead": "0bcfc8d5c99dc7477eef22cb3939b226517447cd",
+  "completed": "2026-10-31T19:03:36Z",
+  "round": 3,
+  "reviewedCodeHead": "e2dcb986ec24",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 0,
-  "scope": "The architect narrowed this round at review_round_cap (Envoy 7674e64b): the source_test.go exception, the nil RecordID, and the reviewer's own PR-body lines, plus any correctness defect. All three are met at 0bcfc8d5. All 18 round-1 threads are verified fixed and answered.",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran once on the delta 139ff281..597d645. Both verdicts were CHANGES: one finding about behaviour (the 429 on the page routes) and stale operator prose. Their remaining maintainability findings are listed in the review body for the architect, and this round does not request them.",
-  "proseFixedByReviewer": "This round's prose commit: operate.md lines 167, 306 and 484 and packages/envoy/AGENTS.md line 4187 now say the page reads discovery once and keeps it, and name the renamed log line `approval sign-in: reach the provider`. packages/envoy/AGENTS.md line 4439 now says who reports an approval (the broker's sign-in). The identity.go approveURL comment, which the older-broker fallback had made false, is corrected.",
-  "ci": "CI run 41221042736 for code head 0bcfc8d5 was still queued (about 40 minutes) when this round ended. It was not waited for, because this round requests changes.",
+  "minor": 1,
+  "scope": "The architect narrowed this round twice (Envoy 7e931e3c) to the 429 finding and the five maintainability items, plus any correctness defect in their delta. All six items are done. The delta introduced one defect: the generated API reference lost the 429 of the approval page's routes.",
+  "thermonuclear": "thermonuclear-deep-review ran once on the delta 9558f6ed..e2dcb986, verdict CHANGES (the refgen finding and the fake-broker comment). thermonuclear-code-quality's stream failed partway, and its partial output agrees on items 1-5 and on the fake-broker branch. The reviewer reproduced the refgen finding by running cmd/broker-refgen at 9558f6ed and at the head and diffing the output.",
+  "ci": "CI run 41228752083 for code head e2dcb986 was still queued when this round ended, behind a repository-wide runner backlog. It was not waited for, because this round requests changes. The compare from e2dcb986 to 6c7bcc4f is handoffs only.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/broker/api/server.go", "description": "authenticate's authSignIn case, and signInStatus, answer an exhausted bucket through refuseAccountAddress. That answer is JSON reading 'too many requests with a ServiceAccount token' and carries none of the page's headers (CSP, X-Frame-Options, Referrer-Policy, Cache-Control: no-store, nosniff). The spec's Design says every answer of a page route carries those headers. No test drives a page route past the limit, so removing the round-1 limit would pass every suite. The limits.go comments (DefaultAccountLimit, refuseAccountAddress) still describe the bucket as serving ServiceAccount callers only."}
+    {"severity": "important", "file": "packages/envoy/internal/broker/api/server.go", "description": "The authSignIn case now refuses through s.deps.Approval.WriteRateLimited. cmd/broker-refgen resolves a class's refusals from authenticate's case (routes.go readAuthClasses) and does not follow the call into the approval package. So the generated reference at the head lists the 'Broker sign-in session' class's refusals as 'none' (it was 429 at 9558f6ed), and errors.md's RATE_LIMITED row drops 'every Broker sign-in session route'. That contradicts the class's own text ('Every route of the class spends its source address's bucket first'), and broker-refgen's tests still pass."},
+    {"severity": "minor", "file": "packages/dispatch/e2e/fake-broker.ts", "description": "decide's comment says the refusal of a record already decided is gone, but lines 79-81 still return 409 RECORD_TERMINAL, and no test reaches it."}
   ]
 }
