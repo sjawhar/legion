@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -95,15 +94,11 @@ type codeFlow struct {
 	clients         map[string]*codeFlowClient
 	queued          []map[string]any
 	signInByDefault map[string]any
-	// unqueued chooses the claims of an authorization request that finds none
-	// queued (SignInUnqueued); nil, such a request falls back to
-	// signInByDefault.
-	unqueued   func(query url.Values) (map[string]any, error)
-	codes      map[string]codeGrant
-	grants     map[string]*refreshGrant
-	refreshes  int
-	token      tokenFailure
-	revocation revocation
+	codes           map[string]codeGrant
+	grants          map[string]*refreshGrant
+	refreshes       int
+	token           tokenFailure
+	revocation      revocation
 	// omitRefresh makes a code exchange answer with no refresh token
 	// (OmitRefreshTokens).
 	omitRefresh bool
@@ -155,23 +150,9 @@ type refreshGrant struct {
 	revoked  bool
 }
 
-// New starts an issuer serving no keys yet. The server is closed at cleanup.
+// New starts an issuer on a random loopback port, serving no keys yet. The
+// server is closed at cleanup.
 func New(t TB) *Issuer {
-	t.Helper()
-	return newIssuer(t, nil)
-}
-
-// NewOnListener is New serving on listener rather than on a random loopback
-// port, for a caller that must know the issuer's address before it starts:
-// cmd/dev-oidc-issuer. The listener is closed with the server at cleanup.
-func NewOnListener(t TB, listener net.Listener) *Issuer {
-	t.Helper()
-	return newIssuer(t, listener)
-}
-
-// newIssuer starts the issuer on listener, or on a random loopback port when
-// listener is nil.
-func newIssuer(t TB, listener net.Listener) *Issuer {
 	t.Helper()
 	issuer := &Issuer{mux: http.NewServeMux()}
 	mux := issuer.mux
@@ -180,12 +161,7 @@ func newIssuer(t TB, listener net.Listener) *Issuer {
 	mux.HandleFunc("GET /authorize", issuer.handleAuthorize)
 	mux.HandleFunc("POST /token", issuer.handleToken)
 	mux.HandleFunc("POST /revoke", issuer.handleRevoke)
-	if listener == nil {
-		issuer.server = httptest.NewServer(mux)
-	} else {
-		issuer.server = &httptest.Server{Listener: listener, Config: &http.Server{Handler: mux}}
-		issuer.server.Start()
-	}
+	issuer.server = httptest.NewServer(mux)
 	t.Cleanup(issuer.server.Close)
 	issuer.issuerClaim = issuer.server.URL
 	return issuer
@@ -398,26 +374,12 @@ func (i *Issuer) SignInAs(claims map[string]any) {
 }
 
 // SignInByDefault sets the claims an authorization request signs in with when
-// SignInAs has queued none and SignInUnqueued set no chooser, so every sign-in
-// completes as that person until a queued one takes a turn. Without it and
-// without a chooser, such a request is refused.
+// SignInAs has queued none, so every sign-in completes as that person until a
+// queued one takes a turn. Without it, such a request is refused.
 func (i *Issuer) SignInByDefault(claims map[string]any) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.codeFlow.signInByDefault = maps.Clone(claims)
-}
-
-// SignInUnqueued makes an authorization request that finds no sign-in queued
-// sign in with the claims choose returns for the request's query, as an
-// identity provider's own sign-in page chooses a person, from the request's
-// login_hint say, rather than taking SignInByDefault's person or refusing it.
-// An error from choose refuses the request 400 with its text; a nil choose
-// leaves such a request to SignInByDefault again. choose runs with the issuer
-// locked, so it must not call the issuer.
-func (i *Issuer) SignInUnqueued(choose func(query url.Values) (map[string]any, error)) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.codeFlow.unqueued = choose
 }
 
 // UpdateGrants changes the claims every refresh token issued so far answers
@@ -451,7 +413,7 @@ func (i *Issuer) Refreshes() int {
 // Authorize follows authURL the way a browser does through the identity
 // provider's sign-in, and returns the code and state the issuer redirects back
 // with. The person signed in is the one SignInAs queued, or, when none is
-// queued, the one SignInUnqueued's chooser picks or SignInByDefault set.
+// queued, the one SignInByDefault set.
 func (i *Issuer) Authorize(t TB, authURL string) (code, state string) {
 	t.Helper()
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -545,12 +507,11 @@ func (i *Issuer) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAuthorize issues a code for the next queued sign-in, or else the person
-// SignInUnqueued chooses or SignInByDefault set, and redirects to the request's
-// redirect_uri with it and the request's state. It records the client the code
-// is for, the request's nonce, for the ID token, and its PKCE code_challenge,
-// which only the S256 method may carry: a challenge by any other method, plain
-// included, is a bad request, so a client that sends one never gets a code to
-// exchange.
+// SignInByDefault set, and redirects to the request's redirect_uri with it and
+// the request's state. It records the client the code is for, the request's
+// nonce, for the ID token, and its PKCE code_challenge, which only the S256
+// method may carry: a challenge by any other method, plain included, is a bad
+// request, so a client that sends one never gets a code to exchange.
 func (i *Issuer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	i.mu.Lock()
@@ -568,8 +529,8 @@ func (i *Issuer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	case query.Has("code_challenge") && (query.Get("code_challenge") == "" || query.Get("code_challenge_method") != "S256"):
 		http.Error(w, "bad authorization request: code_challenge must be S256", http.StatusBadRequest)
 		return
-	case len(flow.queued) == 0 && flow.unqueued == nil && flow.signInByDefault == nil:
-		http.Error(w, "no sign-in queued (SignInAs), no chooser (SignInUnqueued) and no default (SignInByDefault)", http.StatusBadRequest)
+	case len(flow.queued) == 0 && flow.signInByDefault == nil:
+		http.Error(w, "no sign-in queued (SignInAs) and no default (SignInByDefault)", http.StatusBadRequest)
 		return
 	}
 	var claims map[string]any
@@ -577,13 +538,6 @@ func (i *Issuer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	case len(flow.queued) > 0:
 		claims = flow.queued[0]
 		flow.queued = flow.queued[1:]
-	case flow.unqueued != nil:
-		chosen, err := flow.unqueued(query)
-		if err != nil {
-			http.Error(w, "bad authorization request: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		claims = maps.Clone(chosen)
 	default:
 		claims = maps.Clone(flow.signInByDefault)
 	}

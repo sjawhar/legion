@@ -19,6 +19,17 @@ import (
 // one call to its revocation endpoint.
 const tokenTimeout = 10 * time.Second
 
+// tokenClient is the HTTP client every call that carries the client's credentials is made with:
+// the code flow's own calls to the token and revocation endpoints, and CheckClient's discovery
+// read and token request. A redirect is answered as it stands: following a 307 or 308 would
+// re-send the form, and with it a code, a refresh token or the client's secret, to wherever the
+// redirect points.
+func tokenClient() *http.Client {
+	return &http.Client{Timeout: tokenTimeout, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+}
+
 // signInScopes are the scopes a sign-in asks for: an ID token (openid) naming the person.
 var signInScopes = []string{gooidc.ScopeOpenID, "email", "profile"}
 
@@ -77,11 +88,7 @@ func NewCodeFlow(issuer, clientID, clientSecret, hostedDomain string) *CodeFlow 
 			return discoverCodeFlow(ctx, issuer, clientID, clientSecret)
 		}),
 		hostedDomain: hostedDomain,
-		// A redirect is answered as it stands: following a 307 or 308 would re-send the form, and
-		// with it a code or a refresh token, to wherever the redirect points.
-		http: &http.Client{Timeout: tokenTimeout, CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		}},
+		http:         tokenClient(),
 	}
 }
 

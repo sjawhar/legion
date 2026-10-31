@@ -122,12 +122,13 @@ type authClass struct {
 // credentialLabels names, for a reader, the credential each adapter accepts. refgen refuses an
 // adapter missing here, so a new one cannot reach the page under its Go name.
 var credentialLabels = map[string]string{
-	"public":       "None",
-	"sessionAuth":  "Session proof",
-	"renewAuth":    "Renewal session proof",
-	"launcherAuth": "Machine credential",
-	"accountAuth":  "Caller ServiceAccount token",
-	"signInAuth":   "Broker sign-in session",
+	"public":                     "None",
+	"sessionAuth":                "Session proof",
+	"renewAuth":                  "Renewal session proof",
+	"launcherAuth":               "Machine credential",
+	"accountAuth":                "Caller ServiceAccount token",
+	"accountAuthAfterRecordKind": "Caller ServiceAccount token, checked by the handler",
+	"signInAuth":                 "Broker sign-in session",
 }
 
 // readAuthClasses reads each adapter a route uses: its doc comment, the routeAuth constant it

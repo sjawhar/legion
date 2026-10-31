@@ -60,16 +60,17 @@ var DefaultLauncherLimits = LauncherLimits{
 // refused before the provider does any work.
 var DefaultTokenLimit = ratelimit.Limit{Every: 500 * time.Millisecond, Burst: 60}
 
-// DefaultAccountLimit bounds every route accountAuth authenticates per source address, in one
-// bucket the whole class shares: the nine Dispatch's server relays a person's pages and decisions
-// through, and POST /v1/oauth/introspect. It is a burst of 200 and fifty a second, per process,
-// so a fleet of N broker pods allows N times it. Each request spends it before the caller's token
-// is verified, as a token login spends its address's bucket, since a token signed under a key the
-// broker does not hold makes the verifier fetch the issuer's keys again, and the issuer and
-// audience a forged token has to name are configuration, not secrets. So a flood from one address
-// makes the broker verify, and fetch the issuer's keys for, 200 tokens at once and fifty a second
-// after that, rather than one for every request it can send; the rest are refused 429 RATE_LIMITED
-// with Retry-After, before any work.
+// DefaultAccountLimit bounds every route a caller's ServiceAccount token authenticates, per
+// source address, in one bucket they all share: the nine Dispatch's server relays a person's
+// pages and decisions through, the two decide routes among them, which spend it in their own
+// handler (accountAuthAfterRecordKind, decideRecord), and POST /v1/oauth/introspect. It is a
+// burst of 200 and fifty a second, per process, so a fleet of N broker pods allows N times it.
+// Each request spends it before the caller's token is verified, as a token login spends its
+// address's bucket, since a token signed under a key the broker does not hold makes the verifier
+// fetch the issuer's keys again, and the issuer and audience a forged token has to name are
+// configuration, not secrets. So a flood from one address makes the broker verify, and fetch the
+// issuer's keys for, 200 tokens at once and fifty a second after that, rather than one for every
+// request it can send; the rest are refused 429 RATE_LIMITED with Retry-After, before any work.
 //
 // A listed caller spends it once a request whatever the route; introspection spends nothing more
 // inside its handler. Most of what the class carries is introspection — a resource server asks
@@ -325,8 +326,9 @@ func (s *server) tokenAllows(r *http.Request) bool {
 }
 
 // refuseAccountAddress writes 429 RATE_LIMITED and reports true when r's source address has no
-// request left in the bucket every accountAuth route shares (DefaultAccountLimit): authenticate's
-// first step for that class, spent before the caller's token is verified.
+// request left in the bucket every route a ServiceAccount token authenticates shares
+// (DefaultAccountLimit): authenticate's first step for the accountAuth class and the decide
+// routes' own first step, spent before the caller's token is verified.
 func (s *server) refuseAccountAddress(w http.ResponseWriter, r *http.Request) bool {
 	if s.accountLimiter.AllowAt(clientAddress(r, s.deps.TrustedProxyHeader), time.Now()) {
 		return false

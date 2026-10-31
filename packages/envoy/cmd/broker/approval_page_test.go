@@ -78,10 +78,7 @@ func newApprovalFixture(t *testing.T) approvalFixture {
 	if err := os.WriteFile(f.secrets, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.clientFile = filepath.Join(t.TempDir(), "signin-client-secret")
-	if err := os.WriteFile(f.clientFile, []byte(brokertest.SignInClientSecret+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	f.clientFile = signInClientSecretFile(t)
 	return f
 }
 

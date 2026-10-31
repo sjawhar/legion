@@ -83,6 +83,17 @@ func accountAuth(h func(*server, http.ResponseWriter, *http.Request, string)) ro
 	}}
 }
 
+// accountAuthAfterRecordKind is a route whose handler authenticates its own caller, because what
+// it may answer is settled before any credential is read: the two decide routes read the record's
+// kind first and refuse a secret request 403 DECIDE_ON_BROKER_PAGE naming the broker's own page,
+// to every caller, token or none. Register checks nothing for such a row; the handler spends the
+// account class's per-address bucket and then authenticates a machine login's decision exactly as
+// accountAuth does (decideRecord), so one is still decided only on a listed service's
+// ServiceAccount token.
+func accountAuthAfterRecordKind(h func(*server, http.ResponseWriter, *http.Request)) routeHandler {
+	return routeHandler{auth: authNone, serve: func(s *server, w http.ResponseWriter, r *http.Request, _ caller) { h(s, w, r) }}
+}
+
 // signInAuth is a route of the broker's own approval page, for a person in a browser signed in to
 // the broker itself (OpenID Connect with the broker's own client, BROKER_SIGNIN_*). The handler is
 // given the session the request's __Host-broker-session cookie names, or the zero session when it
@@ -150,16 +161,17 @@ func routes() []apiRoute {
 		{http.MethodGet, "/v1/credential-requests/{record}", accountAuth((*server).readRecord)},
 		// Approve a pending machine login as the named person, who must type its code: the broker
 		// takes the person's name on the caller's word, from a listed service's ServiceAccount
-		// token, which the handler verifies itself. The row is public because a secret request is
-		// refused before any caller is looked at: it is decided only on the broker's own page by
-		// a person signed in to the broker, so this answers 403 DECIDE_ON_BROKER_PAGE naming that
-		// page to every caller, token or none, writing nothing.
-		{http.MethodPost, "/v1/credential-requests/{record}/approve", public((*server).approveRecord)},
+		// token, which the handler verifies itself after it has read the record's kind. It reads
+		// the kind first because a secret request is refused before any caller is looked at: it is
+		// decided only on the broker's own page by a person signed in to the broker, so this
+		// answers 403 DECIDE_ON_BROKER_PAGE naming that page to every caller, token or none,
+		// writing nothing.
+		{http.MethodPost, "/v1/credential-requests/{record}/approve", accountAuthAfterRecordKind((*server).approveRecord)},
 		// Deny a pending machine login as the named person, who must type its code, on the
 		// caller's word and behind the same authentication as approve. A secret request is
 		// refused the same way, writing nothing, with 403 DECIDE_ON_BROKER_PAGE naming the page
 		// where a person signed in to the broker denies it.
-		{http.MethodPost, "/v1/credential-requests/{record}/deny", public((*server).denyRecord)},
+		{http.MethodPost, "/v1/credential-requests/{record}/deny", accountAuthAfterRecordKind((*server).denyRecord)},
 		// Find a pending machine login by the confirmation code its machine shows.
 		{http.MethodPost, "/v1/machine-logins/lookup", accountAuth((*server).lookupMachineLogin)},
 		// List the machine logins the named person may revoke, every service's, such as the Legion

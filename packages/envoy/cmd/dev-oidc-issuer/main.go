@@ -238,13 +238,9 @@ func mintHandler(issuer *oidctest.Issuer, key *oidctest.Key, p *process, lifetim
 		if want.PodUID == "" {
 			want.PodUID = uuid.NewString()
 		}
-		now := time.Now()
-		claims := issuer.Claims(want.Subject, want.Audience)
-		claims["iat"] = now.Unix()
-		claims["exp"] = now.Add(lifetime).Unix()
-		claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": want.PodUID}}
+		token := mintToken(issuer, key, p, want.Subject, want.Audience, want.PodUID, lifetime)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"token": issuer.Mint(p, key, claims)})
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": token})
 	})
 }
 
@@ -335,15 +331,23 @@ func serve(ctx context.Context, specs []tokenSpec, flow codeFlow, lifetime time.
 	}
 }
 
+// mintToken mints one ServiceAccount token: the claims a projected service-account token carries
+// for account at audience, bound to the pod podUID, issued now and expiring lifetime from now.
+// Both the token a --token file holds and the one the mint control answers are minted here, so
+// the two can never drift.
+func mintToken(issuer *oidctest.Issuer, key *oidctest.Key, p *process, account, audience, podUID string, lifetime time.Duration) string {
+	now := time.Now()
+	claims := issuer.Claims(account, audience)
+	claims["iat"] = now.Unix()
+	claims["exp"] = now.Add(lifetime).Unix()
+	claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": podUID}}
+	return issuer.Mint(p, key, claims)
+}
+
 // writeToken mints spec's token, issued now and expiring lifetime from now, and replaces spec.file
 // with it in one rename, so a reader sees the old token or the new one and never a part of either.
 func writeToken(issuer *oidctest.Issuer, key *oidctest.Key, p *process, spec tokenSpec, lifetime time.Duration) error {
-	now := time.Now()
-	claims := issuer.Claims(spec.account, spec.audience)
-	claims["iat"] = now.Unix()
-	claims["exp"] = now.Add(lifetime).Unix()
-	claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": spec.podUID}}
-	token := issuer.Mint(p, key, claims)
+	token := mintToken(issuer, key, p, spec.account, spec.audience, spec.podUID, lifetime)
 	temporary, err := os.CreateTemp(filepath.Dir(spec.file), "."+filepath.Base(spec.file)+".*")
 	if err != nil {
 		return fmt.Errorf("write %s: %w", spec.file, err)

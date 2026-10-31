@@ -191,20 +191,25 @@ func (s *server) denyRecord(w http.ResponseWriter, r *http.Request) {
 }
 
 // decideRecord refuses a secret request for every caller and decides a machine login for a
-// listed service. It reads the record's kind first, before anything about the caller: a secret
-// request answers 403 DECIDE_ON_BROKER_PAGE naming its page on the broker, whether or not the
-// caller holds a ServiceAccount token, since no token makes one decidable here and a caller
-// turned away with 401 or ACCOUNT_NOT_LISTED would be told the wrong thing to do. Nothing is
-// written and no body is read for that refusal. Every other record is then authenticated exactly
-// as the other account routes are (authenticate with authAccount: the source address's bucket,
-// the ServiceAccount token, and BROKER_API_ACCOUNTS), and only afterwards does a record id no
-// record has answer 404, so an unauthenticated caller learns no more about which ids exist than
-// a machine login's own answer tells it. A machine login's decision is logged with the caller
-// that relayed it and the approver it named, the record of who acted, since that name is the
-// caller's to state.
+// listed service. It spends the source address's bucket first, the one every route a
+// ServiceAccount token authenticates shares (refuseAccountAddress, DefaultAccountLimit), so no
+// caller drives the record read below unmetered; the bucket is spent once a request, here rather
+// than in authenticate. It then reads the record's kind, before anything else about the caller:
+// a secret request answers 403 DECIDE_ON_BROKER_PAGE naming its page on the broker, whether or
+// not the caller holds a ServiceAccount token, since no token makes one decidable here and a
+// caller turned away with 401 or ACCOUNT_NOT_LISTED would be told the wrong thing to do. Nothing
+// is written and no body is read for that refusal. Every other record is then authenticated
+// exactly as the other account routes are (accountCaller: the ServiceAccount token and
+// BROKER_API_ACCOUNTS), and only afterwards does a record id no record has answer 404, so an
+// unauthenticated caller learns no more about which ids exist than a machine login's own answer
+// tells it. A machine login's decision is logged with the caller that relayed it and the
+// approver it named, the record of who acted, since that name is the caller's to state.
 func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, approve bool) {
 	recordID, ok := pathRecordID(w, r, "record", "RECORD_ID_INPUT")
 	if !ok {
+		return
+	}
+	if s.refuseAccountAddress(w, r) {
 		return
 	}
 	kind, kindErr := s.deps.Machine.RecordKind(r.Context(), recordID)
@@ -214,7 +219,7 @@ func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, approve bo
 			"a secret request is decided only on the secrets broker's own page, by a person signed in to the broker: "+page, page)
 		return
 	}
-	who, ok := s.authenticate(w, r, authAccount)
+	who, ok := s.accountCaller(w, r)
 	if !ok {
 		return
 	}
