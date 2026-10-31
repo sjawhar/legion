@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-429",
+  "completed": "2026-10-31T04:37:52Z",
+  "planDocument": "dispatch://INFRA-429/artifact/plan-md",
+  "scope": "Change 1 of the approved spec (dispatch://INFRA-429/spec v6) only: R1 (delete OpenCode support from sjawhar/legion) and the start of R2 (the post-merge dispatch ask for npm deprecate). Acceptance A1 and A2. Changes 2 and 3 and the integration check are INFRA-888, INFRA-889, INFRA-891 and INFRA-890, and are not planned here. The plan is dispatch://INFRA-429/artifact/plan-md: tasks T1-T14, the acceptance proofs, the verification commands and the keep lists are there. The implementer bases on main (d7e1daaa at planning time), not on legion/INFRA-429@origin's stale 81a3b5ef, which this handoff commit moves forward.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase contract, the shared workspace, the push and the handoff.",
+      "skill://legion-worker/references/cleanup-deletion.md: this is a deletion pull request; its rules on the complete deletion chain (implementation, manifest entry, docs, CI job) are what T1-T6 follow, and its 'almost entirely deletions' rule bounds T7-T11.",
+      "skill://legion-worker/references/systematic-rename.md: the change removes one package name and one host value across 80-odd files; its sweep-and-classify discipline is what stops the config-file guards being deleted with them.",
+      "skill://legion-worker/references/pr-body.md: the body template, what a proof is, the E2E (implementer) line, and the one ce-simplify-code pass; A1 also requires the body to carry the per-file keep-category table (T13).",
+      "skill://legion-worker/references/tools.md: the pod carries no docker and no root; the Postgres and Playwright recipes the /settings browser proof needs come from here.",
+      "skill://legion-worker/references/skip-checks-trailer.md: the handoff-only pushes of this issue carry the trailer, the code pushes do not.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md: sjawhar/legion#2446 edits 19 of the same files; this names when the base may be brought in.",
+      "skill://legion-worker/references/findings.md: the defect found in packages/envoy/deploy/scripts/sync-host.sh is fixed in this pull request (T1/D6), not filed.",
+      "skill://ce-simplify-code: the one simplify pass the implementer runs on its own diff in the first implementing round.",
+      "skill://dispatch and skill://dispatch-first: the post-merge npm deprecate ask (T14) is a Dispatch write, searched for first.",
+      "skill://asd-ste100: that ask is read by a person."
+    ],
+    "test": [
+      "skill://legion-worker: the tester's handoff, failures and verdict.",
+      "skill://legion-worker/references/pr-body.md: the rules every phase's evidence follows, implementerProof {verdict, how}, and the E2E (tester) line; it also says CI is read on GitHub and never re-run as evidence.",
+      "skill://legion-worker/references/tools.md: re-running the /settings browser proof needs the pod's own Postgres and the checkout's own Playwright, never bunx.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md: the unchanged-diff fingerprint, if a forward merge is needed against #2446."
+    ],
+    "review": [
+      "skill://legion-worker: the reviewer's round, what goes back and what the reviewer fixes itself.",
+      "skill://legion-worker/references/pr-body.md: the reviewer writes 'Look at first' and 'Not proven / risk', checks the Thermo line, and verifies the A1 keep-category table against the live grep.",
+      "skill://legion-worker/references/review-threads.md: replying to and resolving threads individually, and judging a bot's finding.",
+      "skill://legion-worker/references/merge-gate.md: the approval of the head by SHA that READY compares against.",
+      "skill://legion-worker/references/cleanup-deletion.md: the yardstick for a deletion pull request, and the check that no guard, fixture or installed-plugin-field comment was swept up."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "B1. A1's grep cannot be clean at any head of this pull request, because about twelve of its hits are text describing the serve-port push that INFRA-889 owns (probe-webhook-e2e.sh, live_topics_test.go, permissions_live_test.go, infra/docs/nats-hub.md, deploy/README.md, single-node.compose.yml, envoy/AGENTS.md, skills/envoy/references/deliveries.md, tool-contract.ts) and A1's three keep-categories do not cover them. Either reword them here or widen A1.",
+        "answer": "Plan decision D1: every one of those hits is a comment or a parenthetical, so the plan rewords all of them (T8, T10, T11) and touches no identifier, setting or behaviour of the push lane. A1 then needs no fourth category, and the conflict left for INFRA-889 is reword-versus-delete, which resolves to delete. The ambiguous case, tool-contract.ts:187, is D2: only ', such as an OpenCode agent,' goes, because deleting the whole sentence would make the shipped tool description silent about a lane that still exists until INFRA-889 merges."
+      },
+      {
+        "finding": "B2. The merge does not close INFRA-429 and opens no production check: it is the tree root and its four children are in the workflow, so the daemon records the merge, leaves the issue in awaiting_merge and tells the architect once (pr-merged). Nothing wakes the implementer, and the post-deploy proof has no owner.",
+        "answer": "Plan decision D9 and task T14: the issue stays open, so a dispatch ask on it is accepted; the implementer opens it on the first turn it gets after the merge, which the architect gives it by messaging it on its pr-merged notice. The plan reports that requirement to the architect (Reported to the architect, item 1), with the alternative that the architect opens the ask itself, and with the warning that a later close of INFRA-429 withdraws an open ask. The post-deploy Dispatch production check and A1's literal grep on main are INFRA-890's, which the plan names in Acceptance."
+      },
+      {
+        "finding": "B3. A2 is not machine-checkable as written: R2 gives no verbatim message, npm view reports only the latest version's deprecated field so the deprecate call needs a range, and nothing says what happens if the person never runs it.",
+        "answer": "T14 fixes all three as how-to detail: the exact command npm deprecate \"@sjawhar/opencode-legion-envoy@*\" \"Legion no longer supports OpenCode. Use @sjawhar/pi-envoy with Oh My Pi.\" (the * range so npm view's latest-version read answers, the message naming Oh My Pi as R2 requires), the reason only the one maintainer can run it, and the instruction to run it after the merge so no release can publish an undeprecated version afterwards. A2 is recorded as pending with the ask's reference until he answers, and INFRA-890 reads npm view."
+      },
+      {
+        "finding": "B4. Nineteen files this change edits are also edited by the open, already-conflicting sjawhar/legion#2446 (branch legion/INFRA-594), among them ci.yaml and tool-contract.ts. The spec's claim that change 1 'touches no listener delivery code, so it can merge at once' is true of code and false of files.",
+        "answer": "Plan section 'Base, ordering and conflicts': the change does not branch off #2446 and does not wait for it, as the approved spec directs; the overlap is prose and filter lists, which resolve by taking both. The base is brought in only on a real conflict, under skill://legion-worker/references/conflicts-and-rewrites.md. Reported to the architect, item 4, names tool-contract.ts and ci.yaml as where a real conflict would appear."
+      },
+      {
+        "finding": "C1. The three wire-field comments (contracts/src/dispatch-api.ts:1817, contracts/AGENTS.md:139, envoy/internal/dispatch/model/model.go:363) are not covered by A1's third category, which says 'fields that installed plugin versions still send', while SearchResult.issue is a field the server sends and an old client reads. One scout said keep verbatim, another said drop the name.",
+        "answer": "Plan decision D3: keep all three verbatim, because the spec's non-goals keep the published versions installable, so an installed OpenCode plugin can still read the field and the retirement condition stays true; dropping the name would make the comment claim the field may go when it may not. Recorded as the plan's one spec departure, since A1's category wording is what changes; the architect decides whether A1 is widened, and the plan does not wait on it."
+      },
+      {
+        "finding": "C2. Changelog fragments: the deleted package can hold none, this change touches several packages that have a .changie.yaml, and AGENTS.md's 'seven packages' list names envoy-plugin.",
+        "answer": "T12 writes one fragment each in packages/envoy-client (Removed), packages/pi-envoy and packages/claude-envoy (Changed), after the pull request number exists; none in packages/envoy (prose only), packages/contracts (unchanged) or the deleted package. T2 edits AGENTS.md's list to six, which no opencode grep finds, and T6 removes the CHANGELOG_PACKAGES entry in the same change."
+      },
+      {
+        "finding": "C3. Deleting packages/envoy-plugin/CHANGELOG.md is mechanically safe but is a decision: A1's grep excludes CHANGELOG.md, so keeping it costs nothing, and it is the released history of a package that stays installable.",
+        "answer": "Plan decision D5: it goes with the package, because release-push.sh would fail on a package with no .changie.yaml at HEAD once CHANGELOG_PACKAGES loses the entry, nothing else reads it, and npm keeps the released history. Its one pending fragment is also in claude-envoy and pi-envoy, so the fold loses nothing."
+      },
+      {
+        "finding": "C4. The /settings browser proof is new work with prerequisites nobody had measured: no node_modules, Playwright not installed, and the harness needs a loopback Postgres.",
+        "answer": "Measured in this pod before the plan was written and recorded in Acceptance: bun install --frozen-lockfile, the checkout's own ./node_modules/.bin/playwright install chromium under PLAYWRIGHT_BROWSERS_PATH=$TMPDIR/ms-playwright (never bunx, which resolves a newer Playwright and a browser build the suite does not want), a postgresql-17 plus pgvector unpacked with dpkg-deb -x under $TMPDIR, a pre-built cmd/dispatch binary, then bun run e2e e2e/agent-tokens.e2e.ts --project=chromium. agent-tokens.e2e.ts passed in 6.4 s; chromium launches under gVisor with no missing libraries and no root. A bare bun run e2e must not be used: WebKit cannot launch in this pod, and that is the environment, not the change."
+      },
+      {
+        "finding": "C5. A second thing a person reads changes: the architecture page loses the envoy-plugin component on re-import, and INFRA-429's own component link then reads as unknown.",
+        "answer": "T1 deletes .dispatch/architecture/envoy-plugin.md with the code, as the repository rule requires. The deployment's reader-facing rule is about the Dispatch web app's own pages, and its proof shape (a browser test failing at the parent build and passing at the head) cannot apply to a change that arrives through a data import, so the plan does not demand one for it. Reported to the architect, item 3: updating the issue's own components is the architect's, not the implementer's."
+      },
+      {
+        "finding": "C6. Deleting scripts/sync-envoy-host.sh removes the ssh mkdir -p that the surviving packages/envoy/deploy/scripts/sync-host.sh needs on a fresh host, because its rsync creates only the final path component.",
+        "answer": "Plan decision D6 and task T1: the ssh \"$host\" 'mkdir -p ~/legion/default/packages/envoy' moves into packages/envoy/deploy/scripts/sync-host.sh above its rsync, in this pull request, as the no-deferrals rule requires."
+      },
+      {
+        "finding": "C7. check-zod-version.sh names @opencode-ai/plugin, a dependency declared only by the deleted package, and the hit falls in no keep-category.",
+        "answer": "T4: the comment loses ', @opencode-ai/plugin' and keeps its meaning with one example; the script's logic derives its manifest set from the root workspaces list and needs no change."
+      },
+      {
+        "finding": "C8. Everything in A1 but the grep is provable at the pull request's head; only the committed packages/claude-envoy/dist blocks it, and there is a clean substitute.",
+        "answer": "Plan decision D8 and the Acceptance section adopt that substitute verbatim: the repository grep with ':!packages/claude-envoy/dist' plus a fresh build with bun scripts/build.ts --out \"$TMPDIR/ce-head\" grepped in place, with the parent commit as the negative control. A1's literal command on main after the rebuild commit is INFRA-890's, and the implementer says so on the pull request. A1's last sentence, 'The pull request lists each file and which of these it is', stays binding on this pull request and is task T13."
+      },
+      {
+        "finding": "W1-W7, recorded. Path references no earlier measurement had named (release-envoy-listener.yaml's path filter, ci_job_reads.py's WORKSPACES entry beside its gate, ci-ok.test.sh's fixture job name, README.md's three rows); the --envoy-plugin-root and gate-refuses-without-the-envoy-plugin false positives; that the merge starts release runs including an Envoy-listener release with no listener change; that an installed OpenCode plugin keeps working until INFRA-889 refuses its port; that the npm package published past the tree, so the deprecation must follow the last publish; and that nats: false has three real non-OpenCode callers, so its justification must be re-owned rather than deleted.",
+        "answer": "Each is in the plan: T4 (release-envoy-listener.yaml, ci_job_reads.py:93, ci-ok.test.sh under decision D7, check-zod-version.sh), T11 (README.md's three rows and the false-positive keep list), the Risks section (the release runs the merge starts, and what an installed plugin keeps), T14 (the deprecation follows the merge and so the last publish), and T7 step 4 (envoy-settings.ts and the envoy-client README re-own nats: false to the dispatch command, claude-envoy's envoy-send and pi-legion)."
+      }
+    ]
+  },
+  "planReview": { "verdict": "approved", "rounds": 1 },
+  "specDepartures": [
+    {
+      "spec": "A1 admits three kinds of surviving opencode hit: files that implement, test or document the config-file guards the non-goals keep, recorded third-party fixtures, and 'comments about fields that installed plugin versions still send'.",
+      "plan": "The plan keeps three comments verbatim that name opencode-legion-envoy in the retirement condition of SearchResult.issue (packages/contracts/src/dispatch-api.ts:1817, packages/contracts/AGENTS.md:139, packages/envoy/internal/dispatch/model/model.go:363) and lists them in the pull request's A1 table under that third category, read as covering a field installed plugin versions still send or read.",
+      "evidence": "SearchResult.issue is sent by the server and read by an agent client built before #1119; the spec's own non-goals keep the 441 published versions of @sjawhar/opencode-legion-envoy installable, so an installed OpenCode plugin can still read it and the condition 'remove once no installed pi-legion-envoy / opencode-legion-envoy / claude-envoy predates it' stays true. Dropping the name would make the comment claim the field may be removed when it may not.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A1's third keep-category is read as 'comments about fields that installed plugin versions still send or read', so that those three files may appear in A1's grep list on main."
+        ]
+      }
+    }
+  ]
+}
