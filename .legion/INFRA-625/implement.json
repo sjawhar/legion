@@ -2,8 +2,32 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-625",
-  "completed": "2026-10-30T21:30:00Z",
+  "completed": "2026-10-31T01:05:00Z",
   "proof": [
+    {
+      "criterion": "Round 3's second failure: the dispatch-memory lane. The tester's red (a four-column table at 260 MiB against 256) is not a regression of this change, and the lane's distribution is moved away from its bound rather than left where it was.",
+      "surface": "The repository's own dispatch-memory lane on CI (the only place it can run: an issue pod has no /proc/<pid>/clear_refs under gVisor), plus the lane's workload driven in process here with runtime.ReadMemStats.",
+      "command": "gh api repos/sjawhar/legion/actions/runs/41127919212/jobs and that job's logs; and a probe in package docs that encodes the heaviest admitted document, decodes it cold, applies the same one-word replace and writes it back, run against trees extracted with git archive at 1f4ee5d1 and at 37a00f76.",
+      "observed": "CI at the previous code head 5b4ffd8c, run 41127919212 job 124321859415: dispatch-memory SUCCESS, with the four-column table at 178 MiB and the two-column table the closest to the bound at 252. So that shape reads 153, 155, 178 and 260 across runs of effectively the same code. The in-process measurement says the same: identical totalAlloc on both heads for every shape (four-column 248 MiB on each), the same heaviest admitted document on both, and WrittenReadBack already present at 1f4ee5d1 where the lane passed - while the /edits route the lane drives never records or reads a read-back at all, it runs ApplyOps. The allocation cuts this round then took the cold edit down about a third on every shape (four-column 249 to 171 MiB, two-column 245 to 166, list items 221 to 142, HTML spans 248 to 170, footnote references 242 to 164, ')_' 322 to 244) with the local spread falling from 22 MiB to 5.",
+      "headSha": "94f1cabac311313126c5c9d93dd44e2dca2fed8e",
+      "negativeControl": "The hypothesis was tested and refused rather than assumed: had the read-back retention been the cause, removing it would have moved the numbers, but the trees at the two heads allocate byte for byte the same and the route under measurement never touches it. The lane's own history is the second control - a shape whose figure moves 153/155/178/260 at effectively one code state is a distribution, and at 5b4ffd8c a different shape is the one near the bound."
+    },
+    {
+      "criterion": "Round 3's first failure: A1's write row. The row passes with no retries, the write's variance is named from measurement, and the 1 s bound is untouched.",
+      "surface": "The Dispatch API's document write against the real Go server and Postgres, through the e2e row, and 20 writes of the 8,000-item body driven through the registered mux in one warm server process on the production settle window.",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts heavy-bodies.e2e.ts --project=chromium -g 'a document write of each heavy body' --retries=0, twenty times; and a throwaway Go rig driving 20 writes with phase timers, GODEBUG=gctrace=1 and allocation per write window.",
+      "observed": "The row passes 20 of 20 with --retries=0 (and three more runs of my own since). The variance is the settlement each write queues landing on the writes after it, not the write's own work: writes 1-5 of every run allocate 176.2 MB and take 474-592 ms, and from write 6 - the first to run beside a settlement, the window being 2 s and the writes ~550 ms apart - the window's allocation climbs to 200-520 MB and the time to 594-1,186 ms. The control is flat: the same 20 writes with a 4 s gap allocate 165.8-176.2 MB throughout and 19 of 20 are under 800 ms. Two cuts landed - AppendUpdateTx reads the update's item count from its own header instead of decoding it into a throwaway document, and LoadDoc validates the stored history by the same header check instead of a full decode ygo repeats a step later - worth 153 ms of CPU and 72 MB of allocation a write.",
+      "headSha": "94f1cabac311313126c5c9d93dd44e2dca2fed8e",
+      "negativeControl": "The 4 s-gap control is the measurement that names the cause rather than describing the symptom: same code, same body, same pod, and the tail disappears when no settlement runs beside a write. A second factor was measured and reported rather than claimed as the cause: giving each document its own issue (so the upload and the settlement do not contend on one issue row's lock) cut the over-800 count from 4-6 to 2 per run but left the spikes."
+    },
+    {
+      "criterion": "The architect's third item: the pull request says what a reader of a deferred document actually waits for.",
+      "surface": "The pull request body, against the tester's end-to-end measurement on the real API and the cited document's Referenced by panel.",
+      "command": "Read the tester's handoff (.legion/INFRA-625/test.json) and rewrite the body's two deferral sentences; packages/envoy/AGENTS.md carries the same correction.",
+      "observed": "The body now says the blocks reach the index at the next reconciliation, out of the request, every 30 s, and names the measurement: a 2,402-block document wrote in 261 ms, and for 34.5 s the citing row was there but named the document rather than the block - link without a #b- fragment, the citing block's raw id where its quoted text goes - after which it quoted the paragraph and carried the fragment.",
+      "headSha": "94f1cabac311313126c5c9d93dd44e2dca2fed8e",
+      "negativeControl": "The tester's own control stands behind the number: a document under the bound carries #b- and quotes its paragraph at once (packages/dispatch/e2e/block-references.e2e.ts), and its first attempt measured the wrong thing - GET /artifacts/<id>/blocks answers the live tree rather than the graph index the deferral postpones."
+    },
     {
       "criterion": "Review round 1, finding 1: the worker threshold leaves the slowest body the page still parses itself clear room under the 1,000 ms bound in every engine, measured.",
       "surface": "The Dispatch Conversation tab in Chromium, WebKit and Firefox against the real Go server and Postgres, on the pod harness: the row 'a comment of 49 list markers on one line then blank lines, just under the worker's threshold', which the page parses on its own thread and the Conversation parses twice (the card's preview and the open body).",
