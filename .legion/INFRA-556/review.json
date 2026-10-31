@@ -2,34 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-556",
-  "completed": "2026-10-30T22:43:59Z",
-  "round": 4,
+  "completed": "2026-10-31T04:07:29Z",
+  "round": 5,
   "decision": "changes_requested",
-  "reviewedCodeHead": "bf6318c01ed94bc202d8ad7b84b99c8e60daa521",
+  "reviewedCodeHead": "b9bbf075daa7181779d8d542ec36b55dae33562e",
   "critical": 0,
-  "important": 2,
-  "minor": 7,
+  "important": 1,
+  "minor": 3,
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/tree.go", "description": "4f15d975: a read can install a stale copy as the room's rendered replica. holdLive copies the room, a commit T lands, the observer fails to apply and recover() Resets the log (consuming T) and sets doc nil; startFromRead then sees doc nil and Pending 0 and installs the copy without T; the next base (with T) is skipped by observe because doc != nil (:480). The replica lacks T until the room unloads, and hold() serves it to reads and captureLiveTextAndAuthors. Fix: read the replica epoch before snapshotDocument and refuse in startFromRead when it changed; add a failing-first test."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/awareness_relay.go", "description": "f09fd0f9: a removal is raised to aw.Meta's clock (:695-700), and Meta also answers a live client. A client removed off its own goroutine (another tab that echoed it disconnects, or expiry) that re-announces at c+1 before touched reads Meta gets a removal at c+1, which other processes accept: they drop a live cursor and the client leaves local. Raise only when the room holds the client as a tombstone; drop the removal when it is live again; add a failing-first test."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/livewrite.go", "description": "Round-3 item 5 not done: 1,067 lines (main 978). Move recordPublishedLoss/publishedLossTimeout (:921-981) and roomBehindHead (:393-445) into stored_head.go."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/append_gate.go", "description": "appendGateRow (:109-117) has no job after the fold; scan into locals."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/awareness_relay_test.go", "description": "awarenessStates' comment (:414-415) says it is the one encoder; awarenessEntryUpdate (:538-545) is a second. Add a clock parameter and delete the second."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/awareness_limit.go", "description": "Rest of round-3 item 11: the frame-length encoding exists twice (keepalive.go:55-62 keepAliveFrame, awareness_limit.go:405-412 maskedFrameHeader)."},
-    {"severity": "minor", "file": "packages/envoy/.changes/unreleased/pr2414-Changed-rebuild-resumption-queue-across-processes.yaml", "description": "Says a cold agent write no longer loads a room; pr2414-Changed-room-copied-once-for-its-reads.yaml and the code (livewrite.go:877,904-906; service.go:1519-1528) say its settlement loads it one settle delay later."},
-    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/README.md", "description": "README.md:589,595 'Eleven periodic maintenance loops' is twelve with the settlement resumption leased; packages/dispatch/AGENTS.md:1088-1090 still names SetIssueClosed and a close on one process only."},
-    {"severity": "minor", "file": "PR body", "description": "Census 4 'not a hit' line omits docs/awareness_limit_socket_test.go; Rollout line says 'first message' where the filter closes on any nameless message; Size stale (124 files, +15639/-4405); Fast-follow names decideAppend; E2E (implementer) says five awareness tests (four); thread line PRRT_kwDORFy7ds6xFht4 says ten fragments (eleven)."}
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/awareness_relay.go", "description": "Round-4 defect 2 is narrowed, not closed. touched reads aw.GetStates() (:710) and then aw.Meta() (:715) under separate read locks, so a return landing between them passes the 'back' check and raises the removal to the live clock c+1 (window 1). And a removal built at tombstone clock c can be recorded after the return's own record (local[X]=c+1, batch[X]=nil); record (:328-338) then deletes local[X] and overwrites batch[X] with the removal at c, which other processes accept (window 2). TestAReaderInTheRoomAgainKeepsItsStateThoughARemovalRacesItsReturn brings the reader back before touched reads anything, so it covers neither window. Fix: read Meta before GetStates (or refuse a raise from a live state), and in record drop a removal whose clock is below the clock local holds; add a test hook after touched's reads that lands the return in each window, failing first."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/awareness_limit.go", "description": "frameHeader takes the mask bit as a raw byte and each masked caller appends the key itself (awareness_limit.go:319, :392-393; keepalive.go:54 passes 0); take the key as a parameter and set the bit only with a key; its comment (keepalive.go:285-286) omits pass."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/stored_head.go", "description": "The file comment (:14-21) does not list roomBehindHead (:167) and recordPublishedLoss (:229), moved in by 88f5b001."},
+    {"severity": "minor", "file": "PR body", "description": "Size stale (127 files, +15823/-4429 at b9bbf075); E2E (implementer) says '88f5b001's parent a3bda21a', which is 4f2e3319's parent."}
   ],
   "verified": [
-    "Merge: migrations 0150-0152 contiguous with main's 0149; ConnectionsPerProcess 64+4+1+14+1+1+2+4 = 91 = dispatchConnectionsPerPod (main 89); merges keep both sides; no conflict with main ecbc2c8f.",
-    "Clock-0 removal: TestAReaderLeavingIsRelayedAtItsClientsClockThoughAPurgeRacesTheEncode fails at cf17a2e1 and passes at bf6318c0; tester's throwaway test fails at 09e42b20.",
-    "Round-3 items 3,4,6,7,8,9,10,12,13,14,15 done; 11 done for the named parts; 16 in part.",
-    "Required checks at code head bf6318c0: lint success, test success, pr-title success, typecheck skipped; compare to bc35a30c handoffsOnly."
+    "Round-4 defect 1 closed: startFromRead(doc, epoch) refuses when the epoch changed (tree.go:621-625), the epoch is read before snapshotDocument (tree.go:733), recover draws a new epoch under mu (:654); TestAReadStartsNoReplicaBehindACommitARecoverTookAway fails at a3bda21a and passes at head.",
+    "Round-4 items 3-9 done: livewrite.go 950 lines, appendGateRow gone, one awareness test encoder, one frameHeader, fragment fixed, twelve loops, SetIssueClosed text gone, census 4 and Rollout lines fixed.",
+    "Merge with main 8a72cf79 keeps both sides; migrations 0150-0152 follow main's 0149; dispatchConnectionsPerPod 91 = main 89 + 2; the dropped README notes for 0150-0152 follow main's new rule (README.md:751-752: a migration describes itself in its .up.sql header), and the three headers do.",
+    "No new Dispatch key in the diff, title, body or round-5 commit messages."
   ],
-  "threads": {"accepted": ["PRRT_kwDORFy7ds6x-D6a", "PRRT_kwDORFy7ds6x-D6h", "PRRT_kwDORFy7ds6x-D6n", "PRRT_kwDORFy7ds6x-D6u", "PRRT_kwDORFy7ds6x-D60", "PRRT_kwDORFy7ds6x-D62", "PRRT_kwDORFy7ds6x-D65", "PRRT_kwDORFy7ds6x-D6-", "PRRT_kwDORFy7ds6x-D7B", "PRRT_kwDORFy7ds6x-D7G"]},
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at bf6318c0 (2 Medium introduced in round 4: stale replica after recover; removal raised to a live client's clock)",
-    "codeQuality": "Verdict: CHANGES at bf6318c0 (1 Medium = deep-review M1; item 5 not done; 3 Minor)"
+    "deepReview": "Verdict: CHANGES at b9bbf075 (defect 2 windows 1 and 2; its README finding withdrawn: main's README rule moves migration notes into the .up.sql header)",
+    "codeQuality": "Verdict: CHANGES at b9bbf075 (2 Minor; found window 1 independently)"
   },
-  "ci": "Required (rulesets): lint, typecheck, test, pr-title. CI head bf6318c0: lint success, test success, pr-title success (one earlier run cancelled), typecheck skipped. compare bf6318c0...bc35a30c handoffsOnly true (2 files)."
+  "ci": "Required (rulesets): lint, typecheck, test, pr-title. CI head b9bbf075: lint success, pr-title success, typecheck skipped, test queued; ci-ok not posted. compare b9bbf075...5f5cced7 handoffsOnly true (2 files)."
 }
