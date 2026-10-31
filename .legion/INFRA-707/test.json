@@ -2,57 +2,56 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-707",
-  "completed": "2026-10-31T00:30:00Z",
+  "completed": "2026-10-31T05:55:00Z",
   "verdict": "pass",
-  "headTested": "00441179b54d3a15314f25ed7fec848a4219491c",
-  "round": 4,
-  "roundShape": "A full round on the one behaviour this round changed (the block-id backfill now stores the room's unstored updates before its stamp), the rest carried from round 3, which the INFRA-514 architect set at 23:45Z. Everything below is at the code head 00441179 unless it names another commit.",
+  "headTested": "6b5c1050f718e2a7ccb4b6d1d71556753584c8f9",
+  "branchHead": "d178bdad0bf5a85bcd12f736e2dbe96ec10c624b",
+  "round": 5,
+  "roundShape": "The narrow round the INFRA-514 architect set at 05:30Z on review round 2's race fix, with round-shape.py v3 run to show what else moved. I added no commit of my own this round, so the pull request's CI run at the code head is not restarted.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Entry 1 re-run at this head with the control rebuilt from the merge base: `go test ./internal/dispatch/docs/ -run TestStoredOrder -count=1` gives ok 17.456s, and the soak with `-args -stored-order-rounds=300` gives `rounds=300 counted=298 mismatching_rounds=0 mismatching_counted_rounds=0 mismatches=0 writes=600 write_p50=261.983832ms write_p99=785.153544ms`, PASS, so n=298 counted rounds against the 200 the plan requires. The control is the merge base d8bfdcea's own tree plus this branch's storedorder.go and storedorder_test.go alone (no flush.go, no shadow.go): 11 red there, soak `rounds=12 counted=12 mismatching_counted_rounds=12 mismatches=154`. Entry 2's surface was driven at cluster scale in round 3 and this round changes nothing it exercises (see backfillIsNotOnTheClusterPath). I also ran `go vet ./internal/dispatch/docs/ ./cmd/dispatch/ ./loadtest/browsertype/` clean and `go test ./cmd/dispatch/ ./loadtest/browsertype/` (ok 312.638s, ok 0.198s) locally, because no CI lane ran at this head (see ciAtTheHead).",
+    "how": "Acceptance 1 re-run at this head: the soak gives `rounds=300 counted=300 mismatching_rounds=0 mismatching_counted_rounds=0 mismatches=0 writes=600 write_p50=271.08288ms write_p99=1.174203631s elapsed=16m40.361s`, PASS, so 300 counted rounds against the 200 the plan requires. The round's own fix is verified both ways below, and the two tests I added in round 4 still pass at this head unchanged: `go test ./internal/dispatch/docs/ -run 'TestStoredOrderBackfill|TestAnEditWhoseForkWentAndWhoseRoomHasCommittedIsRefusedAsUnavailable' -count=1 -v` gives PASS for TestStoredOrderBackfillStampOverAnUnstoredEdit (3.00s), TestStoredOrderBackfillDoesNotStoreTheRoomsCommittedEditTwice (0.68s) and TestAnEditWhoseForkWentAndWhoseRoomHasCommittedIsRefusedAsUnavailable (0.99s). I checked that my round-4 test was not weakened: the diff f33d68d2..d178bdad of backfill_order_test.go only adds imports and appends the implementer's new race test after it; my test's body and assertions are untouched.",
     "entriesVerified": 2
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "The round's one behaviour change: the block-id backfill's stored order replays to every version, and the order it replaced was wrong.",
-      "surface": "Go test against a real Postgres, driving the backfill over a room that holds a browser update the store has not taken yet: the browser appends a paragraph carrying the first block's id (so the document needs the repair that makes the backfill write at all), that append is held inside the store, and the backfill then stamps and stores",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<local Postgres> go test ./internal/dispatch/docs/ -run TestStoredOrderBackfillStampOverAnUnstoredEdit -count=1 -v (the test is packages/envoy/internal/dispatch/docs/backfill_order_test.go, written by me this round)",
-      "observed": "PASS in 6.38s at 00441179: the backfill stamped, the held append was released, and CheckStoredOrder found no mismatch over a non-zero number of checked updates (the test fails if the check compared nothing).",
-      "headSha": "00441179b54d3a15314f25ed7fec848a4219491c",
-      "negativeControl": "The same test against the previous head eb0fe0be, whose backfill appended its stamp alone (AppendUpdateTx with a class from closureChangedMarkdown, no flush): FAIL in 6.30s, `the stored history does not replay: pending update=2 parked_items=1 parked_delete_ranges=1` - the stamp was stored before the browser update it was made over, so the fold cannot apply it. So the old order was wrong, not merely different, and the test pins the new one."
+      "criterion": "Review round 2's fix: the block-id backfill takes the document's advisory lock BEFORE it reads the room's queue, so it never stores an update the room's own worker has already committed.",
+      "surface": "Go test against a real Postgres, under the race detector, driving the worker's own window: the worker has committed bob's edit and holds the document's lock, and has not marked that update stored yet; the backfill then runs",
+      "command": "cd packages/envoy && CGO_ENABLED=1 DISPATCH_TEST_DATABASE_URL=<local Postgres> go test -race ./internal/dispatch/docs/ -run TestStoredOrderBackfillDoesNotStoreTheRoomsCommittedEditTwice -count=50",
+      "observed": "ok 55.032s at 6b5c1050: fifty runs under -race, no failure and no data race. The lock is taken at service.go:2362, `lockDocumentRoom(storeCtx, tx, artifactID)`, before `ledger.storeRepair`.",
+      "headSha": "6b5c1050f718e2a7ccb4b6d1d71556753584c8f9",
+      "negativeControl": "The same test with the lock moved back to where it was before this round (the `lockDocumentRoom` call deleted, so the lock is taken at the first append inside storeRepair), in a scratch copy of the head's tree: FAIL within 5 runs, `bob's edit is stored in 2 rows, want 1: the backfill read the room's queue before it held the document's lock` and `the stored history does not replay: class update=3 stored=true expected=false`. So the test pins the fix and not the weather."
     },
     {
-      "criterion": "errForkReleased refuses as service-unavailable (503, retryable) rather than as an error that maps to 500.",
-      "surface": "Go test driving the real refusal on a warm room: one joined transaction appends, an operation is refused after it moved the fork so the fork is released, a browser edit the room commits moves it past the transaction's read point, and the transaction's next operation reaches rebuildFork's warm branch",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<local Postgres> go test ./internal/dispatch/docs/ -run TestAnEditWhoseForkWentAndWhoseRoomHasCommittedIsRefusedAsUnavailable -count=1 -v (the test is packages/envoy/internal/dispatch/docs/fork_released_test.go, written for me this round)",
-      "observed": "PASS in 3.56s: the refused edit's error satisfies errors.Is(err, ErrServiceUnavailable), which is what api/server.go:636 maps to http.StatusServiceUnavailable. The test asserts the error a handler would map, not the sentinel's wiring, and it asserts on the way that it really released the fork (write.fork nil with updates already appended, write.cold false).",
-      "headSha": "00441179b54d3a15314f25ed7fec848a4219491c",
-      "negativeControl": "Two temporary one-line changes to production code, each reverted and the test re-run green afterwards. Dropping the ErrServiceUnavailable wrap from errForkReleased (livewrite.go:378): FAIL, `the refused edit answered ... want the service-unavailable refusal a route serves as 503`. Replacing the warm-rebuild refusal at livewrite.go:408 with another error: FAIL with that error's text, which proves the test reaches that line and not some other 503 path."
+      "criterion": "1. A test drives an agent write racing browser updates on one warm room, fails on main, passes at the head over enough rounds.",
+      "surface": "Go tests against a real Postgres, as CI runs them",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<local Postgres> go test ./internal/dispatch/docs/ -run TestStoredOrderSoak -count=1 -v -args -stored-order-rounds=300",
+      "observed": "PASS in 1007.05s: `rounds=300 counted=300 mismatching_counted_rounds=0 mismatches=0 writes=600`.",
+      "headSha": "6b5c1050f718e2a7ccb4b6d1d71556753584c8f9",
+      "negativeControl": "Not rebuilt this round and not needed: the merge-base control was run at round 4's head (11 red, soak 12 of 12 counted rounds mismatching, 154 mismatches) and this round changes no file of the live-write path it exercises. The round's own control is the lock mutation above."
     }
   ],
-  "backfillIsNotOnTheClusterPath": "Read from the code, as the architect asked: Service.BackfillBlockIDs is called from packages/envoy/cmd/dispatch/subcommands.go alone (lines 114 and 136, the backfill-block-ids subcommand, which builds a service of its own with no HTTP server), and nothing in internal/dispatch/api or the server's boot calls it. So a typed cluster load step never runs the backfill path, and no new cluster pass is owed for this change: round 3's cluster evidence stands (23 typed-document checks at the head, all clean, against a merge-base control mismatching on 5 of 6; dispatch://INFRA-707/artifact/infra-707-tester-cluster-passb-and-head-tar-gz).",
-  "carriedFromRound3": {
-    "acceptance1": "pass (re-verified at this head above).",
-    "acceptance2": "pass, at eb0fe0be's cluster runs; unchanged by this round because the backfill is the only behaviour it moves and that path is not in a load step.",
-    "acceptance3": "pass, 5 interleaved runs per side at 0.25x: edit p50 399 to 369 ms, edit p99 1,560 to 1,468, upload p50 441 to 486, upload p99 1,235 to 1,139, every bar met. This round's diff is a refactor of the same write path; its 300-round soak at this head gives write_p50 261.983832ms and write_p99 785.153544ms against round 3's 389ms and 3.295s on the same pod, so nothing in it slowed the write.",
-    "acceptance4": "pass, confirmed first-hand by all three sibling implementers."
+  "roundShapeCheck": {
+    "command": "LEGION_WORKSPACE=<workspace> python3 round-shape.py f33d68d2ab3e52e2973b230926e64c7fd8001d70 d178bdad0bf5a85bcd12f736e2dbe96ec10c624b 2496 (version 3 of dispatch://INFRA-598/artifact/round-shape-py, fetched this round)",
+    "printedHeads": "old f33d68d2ab3e52e2973b230926e64c7fd8001d70 -> f33d68d2ab3e52e2973b230926e64c7fd8001d70; new d178bdad0bf5a85bcd12f736e2dbe96ec10c624b -> d178bdad0bf5a85bcd12f736e2dbe96ec10c624b",
+    "filesWhoseOwnDiffDiffers": ["packages/envoy/AGENTS.md", "packages/envoy/internal/dispatch/docs/backfill_order_test.go", "packages/envoy/internal/dispatch/docs/flush.go", "packages/envoy/internal/dispatch/docs/ledger.go", "packages/envoy/internal/dispatch/docs/roomcursor.go", "packages/envoy/internal/dispatch/docs/service.go", "packages/envoy/internal/dispatch/docs/stale_room_test.go"],
+    "reading": "Seven files, four of them runtime, so this is a FULL round by the rule and not a confirmation - which is what the architect asked for, narrowly on the fix. What the four runtime files hold, read in the diff: service.go takes the lock before the queue read (the fix); ledger.go and roomcursor.go rename settlement's `settling` ledger to `ownTx` and say that the backfill is the second writer with a transaction of its own; flush.go drops the comment that named the backfill as the one caller taking the lock late, which is no longer true. AGENTS.md's 9,519 changed lines are main's one-sentence-per-line reflow (#2474) meeting this branch's own AGENTS.md corrections, not new prose of this round; stale_room_test.go follows the rename."
   },
   "ciAtTheHead": {
-    "head": "00441179b54d3a15314f25ed7fec848a4219491c",
-    "lanesRead": "none - every lane is UNREAD, and the cause is in this branch's own push",
-    "why": "The implementer's push ended on the handoff commit 42677175, whose message carries `skip-checks: true`. GitHub skips EVERY workflow for a push whose head commit carries that trailer, including the code commit below it, which is the rule the INFRA-514 architect relayed on 2026-10-29 at 14:13Z. So no CI workflow ran for this push: the only runs on the branch for 00441179 are `PR Title` (a pull_request and pull_request_review workflow, which the trailer does not stop), and `gh api .../commits/00441179.../check-runs` lists no lint, typecheck, test, envoy-go, envoy-go-race, docs, dispatch, dispatch-browser-multiprocess, dispatch-memory, dispatch-multiprocess, envoy-smoke, build, docker or worker-image run at all. The branch head 42677175 has no check run either.",
-    "whatIDidAboutIt": "My own push of this handoff carries NO skip-checks trailer, deliberately and against the usual rule for a handoff-only push, because it is the only push left in this round and it is what starts CI over this code. The reviewer must read the lanes at my push's head, which holds 00441179's code unchanged plus two test files and this handoff; a lane GitHub shows queued or running is read as such, and a red one sends the work back.",
-    "locallyInsteadOfCI": "Because no lane ran, I ran what is cheap locally and label it local, not CI: `go vet ./internal/dispatch/docs/ ./cmd/dispatch/ ./loadtest/browsertype/` clean; `go test ./cmd/dispatch/` ok 312.638s; `go test ./loadtest/browsertype/` ok 0.198s; the stored-order family and both new tests above. The docs package in full, the race lane, lint, typecheck and the TypeScript packages are NOT covered by anything I ran.",
-    "previousHead": "At eb0fe0be the race lane's one failure was internal/bus TestTwoStartsRaisingOneStreamAtOnceBothSucceed, a package this pull request does not touch and byte-identical to the main commit it merged; that reading is in round 3's handoff and is unchanged by this round."
+    "head": "6b5c1050f718e2a7ccb4b6d1d71556753584c8f9",
+    "readAt": "2026-10-31T05:52Z",
+    "run": "CI run created 2026-10-31T04:49:42Z from the pull_request event; read on GitHub, never re-run by me",
+    "settledGreen": ["lint", "changes", "ci-filters (changes)", "docs / build", "envoy-infra-go", "listener-server-change", "worker-image / build", "pr-title"],
+    "skipped": ["typecheck", "contracts", "envoy-client", "envoy-plugin", "pi-envoy", "pi-legion", "pi-shared", "claude-envoy", "broker-multiprocess", "envoy-e2e-local", "ci-images", "worker-image / attest"],
+    "unreadBecauseStillRunning": ["test", "envoy-go", "envoy-go-race", "envoy-go-race-api", "envoy-go-race-docs", "envoy-go-race-pmdoc", "dispatch", "dispatch-browser-multiprocess", "dispatch-memory", "dispatch-multiprocess", "envoy-session-stall", "envoy-smoke"],
+    "failing": [],
+    "note": "No lane has failed. Twelve lanes are queued or in progress at my reading and are therefore UNREAD, as the architect asked me to name; a tester never waits for them, and a required red settles the issue back by itself. The race lane is now four lanes (envoy-go-race, -api, -docs, -pmdoc) since #2516 split it, which is also what removes the round-2 timeout risk from this pull request's new tests. `typecheck` is skipped, not unread: the filters find no TypeScript change in this round."
   },
-  "testsIAdded": [
-    "packages/envoy/internal/dispatch/docs/backfill_order_test.go - TestStoredOrderBackfillStampOverAnUnstoredEdit, green at 00441179 and red at eb0fe0be.",
-    "packages/envoy/internal/dispatch/docs/fork_released_test.go - TestAnEditWhoseForkWentAndWhoseRoomHasCommittedIsRefusedAsUnavailable, green at 00441179 and red under either of the two production mutations above."
-  ],
   "notes": [
-    "The review round's structural changes move no behaviour I could find beyond the backfill: I read the diff eb0fe0be..00441179 for AppendRoomFlush, the one version-merge and cursor helper, roomcursor.go, the deleted wrappers and `ran`, and the errForkReleased wrap, and the two behaviours it does change are the two I tested above.",
-    "The soak's counted rounds were 298 of 300 this time (a counted round is one where a browser update was unstored at the append); round 3's run counted 300 of 300. Both are far above the 200 the plan's rule requires, and 0 mismatches in both."
+    "I added no commit this round. My handoff push carries the skip-checks trailer, per the architect's correction of 00:31Z, so it starts no run of its own and does not cancel the code head's CI - which is what my round-4 push did, and which I withdrew with the run ids in the pull request body.",
+    "The backfill is still reached only from cmd/dispatch/subcommands.go's backfill-block-ids subcommand, so this fix changes nothing a load step exercises and no cluster pass is owed; round 3's cluster evidence stands (23 typed-document checks clean at the head against a merge-base control mismatching on 5 of 6).",
+    "Acceptance 2, 3 and 4 are unchanged by this round: 2 and 3 because no file of the live-write or load path moved, 4 because the three sibling implementers' agreements name their own heads and nothing of this round touches the shared paths they named."
   ]
 }
