@@ -1,6 +1,6 @@
 kind: Fixed
 body: |-
-  Every Envoy card goes to Oh My Pi as an aside with `triggerTurn`, busy session or idle, so no card waits in the steering queue a person's typed message waits in. A card handed to an idle session as a steer joined that queue whenever the session turned busy first, and the queue releases one message per model turn. The startup phase keeps its follow-up. This needs Oh My Pi v18.13.2-sami.20261027-235348 or later.
+  Every Envoy card but an inert one goes to Oh My Pi as an aside with `triggerTurn`, busy session or idle, so no such card waits in the steering queue a person's typed message waits in. A card handed to an idle session as a steer joined that queue whenever the session turned busy first, and the queue releases one message per model turn. The startup phase keeps its follow-up, and an inert card (a replayed BTW, or a failure notice naming one) stays a steer with no turn, handed only to a settled session. This needs Oh My Pi 18.13.2-sami.20261027-235348 or later; `.omp-pin` moves to 18.13.3-sami.20261029-115123.
 time: 2026-10-31T18:00:00.000000000Z
 custom:
     Issue: pr2609

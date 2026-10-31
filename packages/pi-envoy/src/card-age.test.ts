@@ -159,7 +159,32 @@ describe("a card in a model request", () => {
     expect(text).toContain('waited: "4 h 45 min');
   });
 
-  test("written before this process started, with no ledger record, is left as it is", () => {
+  // The process ended after the host wrote the card and before its ledger record was appended: the
+  // card's entry carries the time it was handed, so the entries written before it bound the write.
+  test("written before this process started, its ledger record lost, takes the newest entry time up to its own entry", () => {
+    const old = card("evt-old", SENT, SENT);
+    const ages = new CardAges({ now: () => LATE + 86_400_000 });
+    const branch = [
+      { type: "message", timestamp: "2026-10-31T11:12:58.000Z", message: { role: "assistant" } },
+      {
+        type: "custom_message",
+        customType: "envoy-message",
+        timestamp: new Date(SENT).toISOString(),
+        details: { event_id: "evt-old" },
+        content: old.content,
+      },
+    ];
+
+    const text = textOf(
+      ages.annotate([old], () => branch),
+      "evt-old"
+    );
+
+    expect(text).toContain('delivered: "2026-10-31T11:12:58Z"');
+    expect(text).toContain('waited: "4 h 45 min');
+  });
+
+  test("handed before this process started and never written into the session is left as it is", () => {
     const old = card("evt-old", SENT, SENT);
     const ages = new CardAges({ now: () => LATE });
 

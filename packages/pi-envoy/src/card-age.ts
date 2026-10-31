@@ -39,9 +39,10 @@ interface CardText {
  * The delivery time of a card is the time the host emitted its `message_end` in this process
  * (`written`). A card whose `message_end` this process did not see before its first request has
  * the time its replay ledger record was written (`REPLAY_DELIVERED_ENTRY`, its `at`), when the
- * session's entries hold one, else the time of that first request, when the host handed the card
- * to this process (`timestamp`) after this instance started. A card known by none of them keeps
- * its text as it is.
+ * session's entries hold one; else, when they hold the card's own entry (written, its record lost
+ * to a process that ended in between), the newest entry time up to it; else the time of that first
+ * request, when the host handed the card to this process (`timestamp`) after this instance
+ * started. A card known by none of them keeps its text as it is.
  *
  * A request's bytes up to the newest message repeat on the next request, so the provider's prompt
  * cache can read them again: each card's delivery time is fixed the first time it is used and
@@ -80,7 +81,7 @@ export class CardAges {
       if (card === undefined) return message;
       let delivered = this.#delivered.get(card.eventID);
       if (delivered === undefined) {
-        recorded ??= ledgerTimes(branch());
+        recorded ??= branchTimes(branch());
         delivered = recorded.get(card.eventID) ?? this.#handedHere(message);
         if (delivered === undefined) return message;
         this.#remember(card.eventID, delivered);
@@ -111,21 +112,42 @@ export class CardAges {
   }
 }
 
-/** The time each event's ledger record was written (`ReplayLedgerEntry.at`), from the entries. */
-function ledgerTimes(entries: readonly unknown[]): Map<string, number> {
-  const times = new Map<string, number>();
+/**
+ * The time each card was written, from the session's entries: its ledger record's (`ReplayLedgerEntry.at`),
+ * else, for a card whose entry is there with no record (the process ended between the host's write and
+ * the record's), the newest time of any entry up to the card's own. The card's entry carries the time the
+ * host was handed the card, and every entry before it was written before it, so that newest time is the
+ * write's lower bound, within one step of it.
+ */
+function branchTimes(entries: readonly unknown[]): Map<string, number> {
+  const ledger = new Map<string, number>();
+  const positions = new Map<string, number>();
+  let newest = Number.NEGATIVE_INFINITY;
   for (const entry of entries) {
     if (typeof entry !== "object" || entry === null) continue;
-    if (!("type" in entry) || entry.type !== "custom") continue;
+    const stamp = Date.parse(
+      "timestamp" in entry && typeof entry.timestamp === "string" ? entry.timestamp : ""
+    );
+    if (!Number.isNaN(stamp)) newest = Math.max(newest, stamp);
+    if (!("type" in entry)) continue;
+    if (entry.type === "custom_message") {
+      const eventID = writtenCardIdentity(entry)?.event_id;
+      if (eventID !== undefined && !positions.has(eventID) && Number.isFinite(newest)) {
+        positions.set(eventID, newest);
+      }
+      continue;
+    }
+    if (entry.type !== "custom") continue;
     if (!("customType" in entry) || entry.customType !== REPLAY_DELIVERED_ENTRY) continue;
     const data: unknown = "data" in entry ? entry.data : undefined;
     if (typeof data !== "object" || data === null) continue;
     const eventID = "event_id" in data ? data.event_id : undefined;
     const at = "at" in data ? data.at : undefined;
-    if (typeof eventID !== "string" || typeof at !== "number" || times.has(eventID)) continue;
-    times.set(eventID, at);
+    if (typeof eventID !== "string" || typeof at !== "number" || ledger.has(eventID)) continue;
+    ledger.set(eventID, at);
   }
-  return times;
+  for (const [eventID, at] of positions) if (!ledger.has(eventID)) ledger.set(eventID, at);
+  return ledger;
 }
 
 /** The card `message` is, when it is an `envoy-message` card naming an event with an `envoy:` block. */
