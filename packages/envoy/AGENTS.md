@@ -3822,12 +3822,13 @@ ALREADY_ENROLLED`, and the policy never sees the slot:
 a pod is a requester with no operator, whose service is its launcher credential's only when its verified subject matches `BROKER_SERVICES`.
 Migration 0007 is forward-only: an older broker binary's conflict lookup reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled back past it once a slotted enrollment exists.
 An older broker binary refuses a `BROKER_SERVICES` that names a service for more than one account (`must give each service once`), and the broker is one pod, so once the setting names a service twice the image is never rolled back past this change without moving the setting back in the same step.
-An enrollment's kind is `session` (an agent session on a machine its person logged in:
-the helper's own, or a key a launcher such as agentbox brings through the helper's `enroll-session-key`) or `pod`;
-migration 0012 rewrote every stored `box`/`host` to `session`.
+An enrollment the broker creates is of kind `session` (an agent session on a machine its person logged in:
+the helper's own, or a key a launcher such as agentbox brings through the helper's `enroll-session-key`) or `pod`.
+The `enrollments` kind constraint also admits `vm` (migration 0020), which no route creates.
+Migration 0012 rewrote every stored `box`/`host` to `session`.
 `POST /v1/enrollments` takes only `session` and `pod` (`400 INVALID_KIND` otherwise):
 the `host` and `box` of a helper before legion-envoy 10 are refused, since such a helper can no longer log in again.
-No reader of stored data needs them: the `enrollments` kind constraint admits only the two, and a record body that predates 0012 keeps its `box`/`host` as text its id hashes, which `record.ParseBody` reads without checking the kind.
+No reader of stored data needs them: the kind constraint admits neither, and a record body that predates 0012 keeps its `box`/`host` as text its id hashes, which `record.ParseBody` reads without checking the kind.
 The helper still asks an older broker, which answers `session` `400 INVALID_KIND`, once more as `host` or `box` (`helper/broker.go`, `enroll`:
 gone once the production broker records `session`).
 The CLI and helper speak only the kind-free pair:
