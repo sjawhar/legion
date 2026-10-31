@@ -619,14 +619,14 @@ func (s *server) storeArtifact(
 		}
 		published = append(published, event)
 	}
-	// The approval this upload's own version superseded, read in its transaction as the edit
-	// route reads it: an upload to an existing document always writes a version, so a
-	// replacement of an approved spec closes its design gate as an edit does. A new document
-	// has no review of its own to supersede.
+	// The approval this upload's own version superseded, read in its read phase as the edit route
+	// reads it: an upload to an existing document always writes a version, so a replacement of an
+	// approved spec closes its design gate as an edit does. A new document has no review of its
+	// own to supersede.
 	var superseded *supersededApproval
 	if kind == "doc" && !created {
 		superseded = s.supersededApprovalAdvice(
-			r.Context(), tx, "POST /api/v1/issues/{key}/artifacts", artifactIssueKey(artifact), artifact.ID, version.Number,
+			r.Context(), tx, ledger, "POST /api/v1/issues/{key}/artifacts", artifactIssueKey(artifact), artifact.ID, version.Number,
 		)
 	}
 	var advice *writeAdvice
@@ -1046,13 +1046,13 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 			published = append(published, event)
 		}
 	}
-	// The approval this edit's own version superseded, read in the edit's transaction after that
-	// version and any carry it made: a person's approval of a spec is Legion's design gate, and
-	// the writer is the only one who learns in time that this write closed it.
+	// The approval this edit's own version superseded, read in the edit's read phase, where that
+	// version and any carry it made are queued: a person's approval of a spec is Legion's design
+	// gate, and the writer is the only one who learns in time that this write closed it.
 	var superseded *supersededApproval
 	if written != nil {
 		superseded = s.supersededApprovalAdvice(
-			r.Context(), tx, "POST /api/v1/artifacts/{id}/edits", artifactIssueKey(artifact), artifact.ID, written.Version.Number,
+			r.Context(), tx, ledger, "POST /api/v1/artifacts/{id}/edits", artifactIssueKey(artifact), artifact.ID, written.Version.Number,
 		)
 	}
 	var advice *writeAdvice

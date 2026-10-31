@@ -94,6 +94,9 @@ type Ledger struct {
 	// approvals holds, per document, its open approval request as this transaction's queued
 	// writes leave it (pendingApproval).
 	approvals map[string]*pendingApproval
+	// reviews holds, per document, the newest review this transaction has queued (QueueReview),
+	// which the table answers only once the write phase has run (PendingReview).
+	reviews map[string]model.ArtifactReview
 	// referenced is, per source, the targets its references cite once this transaction's queued
 	// reconciliation of them is written, and blockIndexes, per document, what its block index holds
 	// once its queued indexing is written: what a later reconciliation of the same source in this
@@ -466,6 +469,32 @@ func recordPendingApproval(ctx context.Context, tx pgx.Tx, artifactID string, pe
 		ledger.approvals = make(map[string]*pendingApproval)
 	}
 	ledger.approvals[artifactID] = &pending
+}
+
+// recordPendingReview records review as the newest review of artifactID on the ledger ctx queues
+// tx's writes on: the caller has queued the insert that writes it (QueueReview), and a read of
+// artifact_reviews before the write phase still answers the review before this one.
+func recordPendingReview(ctx context.Context, tx pgx.Tx, artifactID string, review model.ArtifactReview) {
+	ledger := queueFor(ctx, tx)
+	if ledger == nil {
+		return
+	}
+	if ledger.reviews == nil {
+		ledger.reviews = make(map[string]model.ArtifactReview)
+	}
+	ledger.reviews[artifactID] = review
+}
+
+// PendingReview is the review of artifactID this transaction has queued and not yet written
+// (recordPendingReview): a review it queued is newer than every stored one, so a read of the
+// document's newest review before Commit takes it from here. False when this transaction queued
+// none, and once its write phase has begun, when the table holds it.
+func (l *Ledger) PendingReview(artifactID string) (model.ArtifactReview, bool) {
+	if l == nil || l.sealed {
+		return model.ArtifactReview{}, false
+	}
+	review, queued := l.reviews[artifactID]
+	return review, queued
 }
 
 type ledgerVersion struct {

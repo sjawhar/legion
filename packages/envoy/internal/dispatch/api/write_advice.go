@@ -356,19 +356,19 @@ type supersededApproval struct {
 }
 
 // supersededApprovalAdvice reports the approval the write of version just made stale, or nil when
-// it made none, which is every write of a document nobody has approved. It runs inside the write's
-// own transaction, after the version row and the approval carry (docs.carryApproval) are written,
-// so it reads what the write left: a carried approval is pinned to version itself and reports
+// it made none, which is every write of a document nobody has approved. It runs in the write's
+// read phase, where the version row and the approval carry (docs.carryApproval) are queued rather
+// than written, so the carry's own review comes off the ledger (docs.Ledger.PendingReview) and
+// everything else from the table: a carried approval is pinned to version itself and reports
 // nothing, which is right - the gate reopens on that carry's own artifact.approved event.
 //
 // The read is the newest review of the document (docs.NewestReview), one entry of
 // artifact_reviews_by_artifact_event_seq in docs.ReviewOrder, the order the reviews' events
-// committed: artifact_reviews.created_at is its transaction's start and its id is random, so the
-// carry's own approval of this version can carry an earlier pair than an approval committed while
-// this write was open, and ordering by those two alone would report a gate this write did not
-// close. It reports only when that newest review approves the version right below this one: an
-// older approval was already stale before this write, and a newer changes request had already
-// closed the gate.
+// committed: artifact_reviews.created_at is its transaction's start and its id is random, so an
+// approval committed while this write was open can carry an earlier pair than an older one, and
+// ordering by those two alone would report a gate this write did not close. It reports only when
+// that newest review approves the version right below this one: an older approval was already
+// stale before this write, and a newer changes request had already closed the gate.
 //
 // Like every other advice query this runs behind a savepoint, because a failed statement aborts
 // the transaction it ran in and this must never fail the write it describes. It writes nothing,
@@ -376,11 +376,17 @@ type supersededApproval struct {
 func (s *server) supersededApprovalAdvice(
 	ctx context.Context,
 	tx pgx.Tx,
+	ledger *docs.Ledger,
 	route string,
 	issueKey string,
 	artifactID string,
 	version int,
 ) *supersededApproval {
+	// A review this transaction queued is newer than every stored one and no read of the table
+	// can see it before the write phase runs, so it answers for the newest review by itself.
+	if review, queued := ledger.PendingReview(artifactID); queued {
+		return supersededBy(&review, version)
+	}
 	adviceTx, err := tx.Begin(ctx)
 	if err != nil {
 		s.logAdviceError(route, issueKey, "superseded_approval", err)
@@ -409,14 +415,20 @@ func newestReviewAsApproval(ctx context.Context, q docs.Queryer, artifactID stri
 	if err != nil {
 		return nil, fmt.Errorf("read the document's newest review: %w", err)
 	}
+	return supersededBy(review, version), nil
+}
+
+// supersededBy is that rule over one review, whichever read answered it: the document's newest,
+// reported when it approves the version right below version and nothing otherwise.
+func supersededBy(review *model.ArtifactReview, version int) *supersededApproval {
 	if review == nil || review.State != "approved" || review.Version != version-1 {
-		return nil, nil
+		return nil
 	}
 	return &supersededApproval{
 		ApprovedVersion: review.Version,
 		Version:         version,
 		ApprovedBy:      review.Actor.ID,
-	}, nil
+	}
 }
 
 // documentWriteAdvice is the whole advice of a document write with no issue state to report: a

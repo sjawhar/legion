@@ -135,11 +135,25 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 	if err != nil {
 		return err
 	}
-	return write(ctx, tx, func(b *store.WriteBatch) error {
+	if err := write(ctx, tx, func(b *store.WriteBatch) error {
 		return QueueReview(b, s.events, artifact, version.Number, "approved", review.Actor, &reason, askID, func(_ model.ArtifactReview, event model.Event) {
 			sink(event)
 		})
+	}); err != nil {
+		return err
+	}
+	// The carry's own approval is this document's newest review from here on, and no read of the
+	// table sees it until the write phase runs, so a read of the newest review later in this
+	// transaction (supersededApprovalAdvice) takes it off the ledger.
+	recordPendingReview(ctx, tx, artifactID, model.ArtifactReview{
+		ArtifactID: artifactID,
+		Version:    version.Number,
+		State:      "approved",
+		Actor:      review.Actor,
+		Reason:     &reason,
+		AskID:      askID,
 	})
+	return nil
 }
 
 // carriedReview is the review version number of artifactID, whose markdown is markdown and whose
