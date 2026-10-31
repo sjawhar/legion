@@ -466,6 +466,7 @@ jobs:
               - 'scripts/e2e/**'
               - 'scripts/dispatch/**'
               - 'scripts/github-apps/**'
+              - 'scripts/sessions/**'
               # The tools the job installs: jj, mise and Oh My Pi, uv, changie, and the NATS images.
               - *omp_install
               - '.github/actions/install-uv/**'
@@ -1482,6 +1483,13 @@ jobs:
       # scripts/github-apps is no workspace either; the root package pins its TypeScript and Bun types.
       - name: Typecheck the GitHub App registration script
         run: bunx tsc --noEmit -p scripts/github-apps
+
+      - name: Lint the session message-wait script
+        run: bunx biome check --error-on-warnings scripts/sessions
+
+      # scripts/sessions is no workspace either; the root package pins its TypeScript and Bun types.
+      - name: Typecheck the session message-wait script
+        run: bunx tsc --noEmit -p scripts/sessions
 
       - id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

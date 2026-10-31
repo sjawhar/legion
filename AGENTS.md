@@ -53,7 +53,7 @@ tmux, the worker image's copy in a pod.
 bun install                   # Setup
 bunx biome check <package>/   # Lint (the root pins @biomejs/biome so bunx resolves the real Biome; CI's required `lint` job runs `bunx biome check .`, and a package's `bun run lint` checks only the paths its recipe names)
 (cd <package> && bun run typecheck)  # Type check one package against its own tsconfig. The root has no tsconfig.json, so a bare `bunx tsc --noEmit` there checks nothing: it prints tsc's help and exits 1. CI runs this command in each of these, in a job of ci.yaml that runs when a change touches a file it reads: packages/contracts, envoy-client, envoy-plugin, claude-envoy, pi-shared, pi-envoy, pi-legion, proof-editor and dispatch, and docs/site
-bunx tsc --noEmit -p scripts/dispatch && bunx tsc --noEmit -p scripts/github-apps  # Type check the two script directories that are no workspace, as ci.yaml's `test` job does
+bunx tsc --noEmit -p scripts/dispatch && bunx tsc --noEmit -p scripts/github-apps && bunx tsc --noEmit -p scripts/sessions  # Type check the three script directories that are no workspace, as ci.yaml's `test` job does
 (cd packages/daemon && go vet -tags e2e ./...)  # What ci.yaml's `typecheck` job runs: vet of the Go daemon, its e2e-tagged live proofs included
 bun test                      # Test
 ```
