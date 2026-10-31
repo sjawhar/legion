@@ -512,7 +512,7 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 	s.routeIndex = routeIndexEntries(routes)
 	replays := s.keyedReplays()
 	for _, route := range routes {
-		handler := route.Handler
+		handler := s.resolveShortIDs(route.Pattern, route.Handler)
 		if keyedMethod(route.Method) {
 			handler = s.keyedWrites(route.Method, route.Pattern, handler, replays[route.Method+" "+route.Pattern])
 		}
@@ -1025,15 +1025,22 @@ func capExceeded(w http.ResponseWriter, field string, length, limit int) {
 	writeError(w, err.code, err.status, err.message)
 }
 
-// requireUUIDPath rejects a non-uuid `{id}` path value with 400 <KIND>_ID_INPUT before it
-// reaches a uuid column (where pgx would surface it as a 500). kind is "ask", "comment", or "message".
+// askIDShape is how every refusal of an ask id names what one looks like. A short id - the
+// first shortIDMinimum hex digits or more - is resolved before a handler runs
+// (resolveShortIDs), so what reaches here is neither a uuid nor one of those.
+const askIDShape = "ask IDs are UUIDs; use the full ask ID, or at least its first 8 characters"
+
+// requireUUIDPath rejects a `{id}` path value that is neither a uuid nor a short id the route's
+// layer resolved, with 400 <KIND>_ID_INPUT, before it reaches a uuid column (where pgx would
+// surface it as a 500). kind is "ask", "comment", or "message".
 func requireUUIDPath(w http.ResponseWriter, r *http.Request, kind string) bool {
 	id := r.PathValue("id")
 	if _, err := uuid.Parse(id); err != nil {
 		if kind == "ask" {
-			writeError(w, "ASK_ID_INPUT", http.StatusBadRequest, "ask IDs are UUIDs; use the full ask ID")
+			writeError(w, "ASK_ID_INPUT", http.StatusBadRequest, askIDShape)
 		} else {
-			writeError(w, strings.ToUpper(kind)+"_ID_INPUT", http.StatusBadRequest, kind+" id must be a full uuid")
+			writeError(w, strings.ToUpper(kind)+"_ID_INPUT", http.StatusBadRequest,
+				kind+" id must be a full uuid, or at least its first 8 characters")
 		}
 		return false
 	}

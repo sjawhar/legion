@@ -1025,8 +1025,11 @@ export class DispatchApiClient {
     return this.post<Ask>(`/api/v1/asks/${pathSegment(id)}/answer`, input, bounds);
   }
 
-  getAsk(id: string): Promise<AskRead> {
-    return this.json<AskRead>(`/api/v1/asks/${pathSegment(id)}`);
+  /** `GET /api/v1/asks/{id}`. `issue` is the issue the link being followed names: the server
+   *  resolves a short id - the first characters of the ask's uuid, which is how a link is
+   *  written by hand - within it, and refuses one that names more than one ask. */
+  getAsk(id: string, issue?: string): Promise<AskRead> {
+    return this.json<AskRead>(pathWithQuery(`/api/v1/asks/${pathSegment(id)}`, { issue }));
   }
 
   /** `GET /api/v1/me/answers`: the signed-in person's answers and ask replies, newest first,
@@ -1071,8 +1074,9 @@ export class DispatchApiClient {
     return this.post<Comment>(`/api/v1/issues/${pathSegment(key)}/comments`, input, bounds);
   }
 
-  getComment(id: string): Promise<CommentRead> {
-    return this.json<CommentRead>(`/api/v1/comments/${pathSegment(id)}`);
+  /** `GET /api/v1/comments/{id}`, with the issue a short id is resolved within, as `getAsk`. */
+  getComment(id: string, issue?: string): Promise<CommentRead> {
+    return this.json<CommentRead>(pathWithQuery(`/api/v1/comments/${pathSegment(id)}`, { issue }));
   }
 
   resolveComment(id: string, bounds: WriteBounds): Promise<Comment> {

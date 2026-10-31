@@ -28,6 +28,7 @@ import {
 import {
   DISPATCH_WRITE_RETRY,
   DispatchClient,
+  DispatchServiceError,
   DispatchWriteLandedError,
   type DispatchWriteRetry,
 } from "../dispatch-http";
@@ -545,14 +546,14 @@ describe("executeDispatchTool", () => {
     expect(replying.problems).toEqual([
       "--body is required (string)",
       "unknown flag --message",
-      "in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)",
+      "in_reply_to must be a message id (a uuid, or at least its first 8 hex characters), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)",
     ]);
     expect(replying.message).toBe(
       [
         "dispatch message was not called: 3 problems",
         "- --body is required (string)",
         "- unknown flag --message",
-        "- in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)",
+        "- in_reply_to must be a message id (a uuid, or at least its first 8 hex characters), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)",
         "- Allowed flags: --issue, --issue-file, --body, --body-file, --in-reply-to, --in-reply-to-file, --image, --clear-images, --help, --dry-run",
         "- Example: dispatch message --issue DSP-1 --body 'Implementation started.'",
       ].join("\n")
@@ -1341,7 +1342,7 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(
-      "in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)"
+      "in_reply_to must be a message id (a uuid, or at least its first 8 hex characters), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)"
     );
   });
 
@@ -8639,7 +8640,7 @@ describe("executeDispatchTool", () => {
     });
     expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
-      "/api/v1/asks/aaaaaaaa-0000-4000-8000-000000000042",
+      "/api/v1/asks/aaaaaaaa-0000-4000-8000-000000000042?issue=DSP-42",
       "/api/v1/references?to=dispatch%3A%2F%2FDSP-42%2Fask%2Faaaaaaaa-0000-4000-8000-000000000042",
       "/api/v1/references?from=dispatch%3A%2F%2FDSP-42%2Fask%2Faaaaaaaa-0000-4000-8000-000000000042",
     ]);
@@ -9246,7 +9247,7 @@ describe("executeDispatchTool", () => {
     });
     expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
-      "/api/v1/comments/cccccccc-0000-4000-8000-000000000042",
+      "/api/v1/comments/cccccccc-0000-4000-8000-000000000042?issue=DSP-42",
       "/api/v1/references?to=dispatch%3A%2F%2FDSP-42%2Fcomment%2Fcccccccc-0000-4000-8000-000000000042",
       "/api/v1/references?from=dispatch%3A%2F%2FDSP-42%2Fcomment%2Fcccccccc-0000-4000-8000-000000000042",
     ]);
@@ -10608,19 +10609,14 @@ describe("executeDispatchTool", () => {
     expect(requested).toContain(`/api/v1/issues/DSP-42/messages/${message}`);
   });
 
-  test("resolves an 8-character ask id prefix against the issue's asks", async () => {
+  test("sends an 8-character ask id prefix to Dispatch with the issue the reference names", async () => {
     const full = "7430fab3-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
     const requested: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
-      requested.push(target.pathname);
-      if (target.pathname === "/api/v1/issues/DSP-42/asks") {
-        return response([
-          { id: full, question: releaseQuestion },
-          { id: "9999aaaa-1c2d-4e5f-8a9b-0c1d2e3f4a5b", question: "Other" },
-        ]);
-      }
-      if (target.pathname === `/api/v1/asks/${full}`) {
+      requested.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/asks/7430fab3") {
+        // Dispatch resolves the prefix within the issue and answers the ask it names.
         return response({
           ask: {
             id: full,
@@ -10651,13 +10647,12 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toContain(`Question: ${releaseQuestion}`);
-    expect(requested).toEqual([
-      "/api/v1/issues/DSP-42/asks",
-      `/api/v1/asks/${full}`,
-      "/api/v1/references",
-      "/api/v1/references",
-    ]);
+    // The prefix reaches the server as written, carrying the issue that scopes it; the owner's
+    // ask list is not read at all, because the rule lives on the server.
+    expect(requested[0]).toBe("/api/v1/asks/7430fab3?issue=DSP-42");
+    expect(requested.some((path) => path.startsWith("/api/v1/issues/DSP-42/asks"))).toBe(false);
 
+    // A prefix the server finds ambiguous is its refusal, surfaced as it was written.
     const ambiguous = await executeDispatchTool({
       tool: "dispatch_read",
       args: { ref: "dispatch://DSP-42/ask/7430fab3" },
@@ -10667,20 +10662,26 @@ describe("executeDispatchTool", () => {
       env: {},
       exec: repoExec("owner/repo"),
       fetchImpl: (async (url: RequestInfo | URL) => {
-        expect(new URL(String(url)).pathname).toBe("/api/v1/issues/DSP-42/asks");
-        return response([
-          { id: full, question: releaseQuestion },
-          { id: "7430fab3-ffff-4e5f-8a9b-0c1d2e3f4a5b", question: "Other" },
-        ]);
+        expect(new URL(String(url)).pathname + new URL(String(url)).search).toBe(
+          "/api/v1/asks/7430fab3?issue=DSP-42"
+        );
+        return new Response(
+          JSON.stringify({
+            code: "AMBIGUOUS_ID",
+            error: `ask id 7430fab3 names 2 asks on DSP-42: ${full} on DSP-42, 7430fab3-ffff-4e5f-8a9b-0c1d2e3f4a5b on DSP-42. Use the full id.`,
+          }),
+          { status: 409, headers: { "content-type": "application/json" } }
+        );
       }) as typeof fetch,
     }).then(
       () => undefined,
       (error: unknown) => error
     );
-    if (!(ambiguous instanceof ToolInputError)) throw new Error("expected ToolInputError");
-    expect(ambiguous.problems).toEqual([
-      "ask id 7430fab3 matches 2 asks on DSP-42; use the full id",
-    ]);
+    if (!(ambiguous instanceof DispatchServiceError)) {
+      throw new Error(`expected DispatchServiceError, got ${String(ambiguous)}`);
+    }
+    expect(ambiguous.status).toBe(409);
+    expect(ambiguous.message).toContain("names 2 asks on DSP-42");
   });
 
   test("finds an ask in the issue's spec by its own id or its block's id, whole or as a unique prefix", async () => {
@@ -10706,7 +10707,16 @@ describe("executeDispatchTool", () => {
         ]);
       }
       if (target.pathname.startsWith("/api/v1/asks/")) {
-        const id = target.pathname.slice("/api/v1/asks/".length);
+        // Dispatch's own rule, as the server applies it: the id whole, else the one ask whose
+        // id starts with it when that is 8 hex digits or more, else a refusal.
+        const written = decodeURIComponent(target.pathname.slice("/api/v1/asks/".length));
+        if (!/^[0-9a-f][0-9a-f-]{7,}$/i.test(written)) {
+          return response({ code: "ASK_ID_INPUT", error: "ask IDs are UUIDs" }, 400);
+        }
+        const id =
+          Object.keys(questions).find(
+            (candidate) => candidate === written || candidate.startsWith(written.toLowerCase())
+          ) ?? "";
         const question = questions[id];
         if (question === undefined) return response({ code: "NOT_FOUND", error: "not found" }, 404);
         return response({
@@ -10745,27 +10755,32 @@ describe("executeDispatchTool", () => {
       expect([id, result.text.split("\n")[0]]).toEqual([id, `Question: ${questions[ask]}`]);
       // The writes to an ask take its own id, which the read prints whatever id it was given.
       expect([id, result.text.split("\n").includes(`Ask id: ${ask}`)]).toEqual([id, true]);
-      expect(requested.filter((path) => path.startsWith("/api/v1/asks/"))).toContain(
-        `/api/v1/asks/${ask}`
-      );
+      // The id as written always reaches the server first; a block id gets there only after
+      // Dispatch has refused it as an ask id.
+      expect([
+        id,
+        requested.filter((path) => path.startsWith("/api/v1/asks/"))[0]?.toLowerCase(),
+      ]).toEqual([id, `/api/v1/asks/${encodeURIComponent(id).toLowerCase()}`]);
     }
-    // An ask's own full id is read directly, with no list.
-    requested.length = 0;
-    await read(specAsk);
-    expect(requested).not.toContain("/api/v1/issues/DSP-42/asks");
+    // An ask's own id, whole or short, is read straight from the server, with no list.
+    for (const id of [specAsk, specAsk.slice(0, 8)]) {
+      requested.length = 0;
+      await read(id);
+      expect([id, requested]).toEqual([id, [`/api/v1/asks/${id}`, "/api/v1/references", "/api/v1/references"]]);
+    }
 
     const refusal = (id: string) =>
       read(id).then(
         () => undefined,
         (error: unknown) => (error instanceof Error ? error.message : String(error))
       );
-    expect(await refusal("deadbeef")).toContain(
-      "ask id deadbeef matches none of the asks on DSP-42; use the full id"
-    );
-    expect(await refusal("rule-nobody-wrote")).toContain(
-      "ask id rule-nobody-wrote must be a full uuid, a prefix of at least 8 hex characters, or the id of an :::ask block on DSP-42"
-    );
-    expect(await refusal("deadbeef-0000-4000-8000-000000000000")).toContain("not found");
+    // Dispatch finds no ask and the owner carries no such block, so the refusal names both.
+    for (const id of ["deadbeef", "rule-nobody-wrote", "deadbeef-0000-4000-8000-000000000000"]) {
+      expect([id, await refusal(id)]).toEqual([
+        id,
+        expect.stringContaining(`ask id ${id} names no ask and no :::ask block on DSP-42`),
+      ]);
+    }
   });
 
   test("reads the children listing from a Dispatch children reference", async () => {
@@ -11056,12 +11071,13 @@ test("resolving a document comment by bare id reports the document it lives on",
   ]);
 });
 
-test("resolving a comment through a project-document reference resolves a short id against the document", async () => {
+test("a comment named by a short id under a project document is resolved by Dispatch, scoped to that document", async () => {
   const commentUuid = "cccccccc-0000-4000-8000-000000000044";
   const requests: string[] = [];
   const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
-    const pathname = new URL(String(url)).pathname;
-    requests.push(pathname);
+    const target = new URL(String(url));
+    const pathname = target.pathname;
+    requests.push(pathname + target.search);
     if (pathname === "/api/v1/projects/CORE/artifacts/design-notes") {
       return response({
         id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
@@ -11069,10 +11085,9 @@ test("resolving a comment through a project-document reference resolves a short 
         slug: "design-notes",
       });
     }
-    if (pathname === "/api/v1/artifacts/a4cf7999-cab2-4326-939d-cb1e76733cc3/comments") {
-      return response([{ id: commentUuid }, { id: "dddddddd-0000-4000-8000-000000000001" }]);
-    }
-    if (pathname === `/api/v1/comments/${commentUuid}`) {
+    if (pathname === "/api/v1/comments/cccccccc") {
+      // The document scopes the resolution, so the short id reaches the server with it.
+      expect(target.search).toBe("?artifact=a4cf7999-cab2-4326-939d-cb1e76733cc3");
       return response({
         comment: {
           id: commentUuid,
@@ -11122,7 +11137,14 @@ test("resolving a comment through a project-document reference resolves a short 
     document: "CORE/design-notes",
     comment: commentUuid,
   });
+  expect(requests).toContain(
+    "/api/v1/comments/cccccccc?artifact=a4cf7999-cab2-4326-939d-cb1e76733cc3"
+  );
   expect(requests).toContain(`/api/v1/comments/${commentUuid}/resolve`);
+  // The document's comment list is not read: the rule lives on the server.
+  expect(requests).not.toContain(
+    "/api/v1/artifacts/a4cf7999-cab2-4326-939d-cb1e76733cc3/comments"
+  );
 });
 
 test("refuses to resolve a comment named by an ask reference", async () => {
@@ -11377,22 +11399,26 @@ function openAsksBody(asks: readonly { readonly id: string; readonly question: s
   };
 }
 
-/** The three tools whose only owner is the ask id the caller supplies. */
+/** The three tools whose only owner is the ask id the caller supplies. `writes` is keyed by the
+ *  id the caller wrote, since a short one reaches Dispatch as written and Dispatch resolves it. */
 const askWriteTools = [
   {
     tool: "dispatch_edit_ask",
     args: (ask: string) => ({ ask, question: revisedPlanQuestion }),
-    writes: [`PATCH /api/v1/asks/${askUUID}`],
+    writes: (id: string) => [`PATCH /api/v1/asks/${id}`],
   },
   {
     tool: "dispatch_resolve_ask",
     args: (ask: string) => ({ ask, kind: "retracted", reason: "Superseded." }),
-    writes: [`POST /api/v1/asks/${askUUID}/resolve`],
+    writes: (id: string) => [`POST /api/v1/asks/${id}/resolve`],
   },
   {
     tool: "dispatch_follow",
     args: (ask: string) => ({ ask, action: "follow" }),
-    writes: [`GET /api/v1/asks/${askUUID}`, `PUT /api/v1/asks/${askUUID}/followers/session-42`],
+    writes: (id: string) => [
+      `GET /api/v1/asks/${id}`,
+      `PUT /api/v1/asks/${id}/followers/session-42`,
+    ],
   },
 ] as const;
 
@@ -11403,8 +11429,13 @@ function askWriteFetch(requests: string[], openAsks: () => Response): typeof fet
     const method = init?.method ?? "GET";
     requests.push(`${method} ${target.pathname}`);
     if (target.pathname === "/api/v1/asks/open") return openAsks();
-    if (target.pathname === `/api/v1/asks/${askUUID}/followers/session-42`) return response({});
-    if (target.pathname.startsWith(`/api/v1/asks/${askUUID}`)) {
+    // Dispatch answers the ask under its own id and under any short id that names it alone.
+    const written = target.pathname.split("/")[4] ?? "";
+    if (!askUUID.startsWith(written)) {
+      throw new Error(`unexpected request: ${method} ${target.pathname}`);
+    }
+    if (target.pathname.endsWith("/followers/session-42")) return response({});
+    {
       const ask = {
         id: askUUID,
         issue_key: "DSP-42",
@@ -11419,7 +11450,6 @@ function askWriteFetch(requests: string[], openAsks: () => Response): typeof fet
       };
       return response(method === "GET" ? { ask, replies: [], edits: [] } : ask);
     }
-    throw new Error(`unexpected request: ${method} ${target.pathname}`);
   }) as typeof fetch;
 }
 
@@ -11486,20 +11516,15 @@ for (const { tool, args, writes } of askWriteTools) {
     expect(requests).toEqual(["GET /api/v1/asks/open"]);
   });
 
-  test(`${tool} resolves an 8-character prefix of one open ask to its full uuid`, async () => {
+  test(`${tool} sends an 8-character prefix to Dispatch without reading the open-ask list`, async () => {
     const requests: string[] = [];
-    const fetchImpl = askWriteFetch(requests, () =>
-      response(
-        openAsksBody([
-          { id: askUUID, question: revisedPlanQuestion },
-          { id: "9999aaaa-1c2d-4e5f-8a9b-0c1d2e3f4a5b", question: "A different question" },
-        ])
-      )
-    );
+    const fetchImpl = askWriteFetch(requests, () => {
+      throw new Error("a short id must not read the open-ask list: Dispatch resolves it");
+    });
 
     await executeAskWrite(tool, args("7430fab3"), fetchImpl);
 
-    expect(requests).toEqual(["GET /api/v1/asks/open", ...writes]);
+    expect(requests).toEqual(writes("7430fab3"));
   });
 
   test(`${tool} sends a full uuid without reading the open-ask list`, async () => {
@@ -11510,7 +11535,7 @@ for (const { tool, args, writes } of askWriteTools) {
 
     await executeAskWrite(tool, args(askUUID), fetchImpl);
 
-    expect(requests).toEqual([...writes]);
+    expect(requests).toEqual(writes(askUUID));
   });
 }
 

@@ -746,7 +746,20 @@ func (s *server) getArtifactBlockPath(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
 	}
-	path, err := s.deps.Docs.BlockPath(r.Context(), artifact.ID, r.PathValue("block_id"))
+	blockID := r.PathValue("block_id")
+	path, err := s.deps.Docs.BlockPath(r.Context(), artifact.ID, blockID)
+	if errors.Is(err, pmdoc.ErrTargetNotFound) {
+		// An id the document does not carry may be the first characters of one it does. The
+		// exact id always wins, since a document can hold a short literal id of its own.
+		resolved, refusal := s.resolveShortBlockID(r.Context(), artifact.ID, blockID)
+		if refusal != nil {
+			s.writeHandlerError(w, refusal)
+			return
+		}
+		if resolved != "" {
+			path, err = s.deps.Docs.BlockPath(r.Context(), artifact.ID, resolved)
+		}
+	}
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

@@ -429,7 +429,9 @@ func TestListOpenAsksRequiresExactlyOneScope(t *testing.T) {
 	}
 }
 
-func TestTargetedReadsRejectNonUUIDIDsWithA400(t *testing.T) {
+// A value that is neither a uuid nor a short id - fewer than eight hex digits, or a character
+// that is no hex digit - is still 400, and says that the first eight characters would do.
+func TestTargetedReadsRejectIDsThatAreNeitherAUUIDNorAShortIDWithA400(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Short ids", "A spec")
 	for _, test := range []struct {
@@ -437,9 +439,9 @@ func TestTargetedReadsRejectNonUUIDIDsWithA400(t *testing.T) {
 		code   string
 		text   string
 	}{
-		{target: "/api/v1/asks/7430fab3", code: "ASK_ID_INPUT", text: "ask IDs are UUIDs; use the full ask ID"},
-		{target: "/api/v1/comments/7430fab3", code: "COMMENT_ID_INPUT", text: "comment id must be a full uuid"},
-		{target: "/api/v1/issues/" + issue.Key + "/messages/7430fab3", code: "MESSAGE_ID_INPUT", text: "message id must be a full uuid"},
+		{target: "/api/v1/asks/7430fab", code: "ASK_ID_INPUT", text: "ask IDs are UUIDs; use the full ask ID, or at least its first 8 characters"},
+		{target: "/api/v1/comments/7430fabz", code: "COMMENT_ID_INPUT", text: "comment id must be a full uuid, or at least its first 8 characters"},
+		{target: "/api/v1/issues/" + issue.Key + "/messages/7430fab", code: "MESSAGE_ID_INPUT", text: "message id must be a full uuid, or at least its first 8 characters"},
 	} {
 		response := sessionRequest(t, handler, http.MethodGet, test.target, nil)
 		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) || !strings.Contains(response.Body.String(), test.text) {

@@ -276,7 +276,7 @@ test("an ask's unfurl card never borrows its issue's status, and reads no issue,
     </Providers>
   );
   try {
-    await waitFor(() => expect(getAsk).toHaveBeenCalledWith("ask-1"));
+    await waitFor(() => expect(getAsk).toHaveBeenCalledWith("ask-1", "CORE-1"));
     // The ask has not answered: the card says what it is, not the issue's status.
     await Bun.sleep(20);
     const card = within(view.container).getByRole("link");

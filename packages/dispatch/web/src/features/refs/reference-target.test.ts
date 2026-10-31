@@ -232,10 +232,10 @@ test("hovering an ask, a comment or a message warms its own read and nothing of 
     slug: "runbook-md",
   });
   await expectKeys(queryClient, [
-    ["ask", "ask-1"],
-    ["comment", "comment-1"],
+    ["ask", "ask-1", "CORE-1"],
+    ["comment", "comment-1", "CORE-1"],
     ["issue-message", "CORE-1", "m-1"],
-    ["ask", "ask-2"],
+    ["ask", "ask-2", undefined],
   ]);
   expect(reads.getIssue).not.toHaveBeenCalled();
   expect(reads.getIssueSummary).not.toHaveBeenCalled();

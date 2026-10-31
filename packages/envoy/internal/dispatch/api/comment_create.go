@@ -277,7 +277,16 @@ func (s *server) normalizeCommentThreadTarget(
 		return commentThreadTarget{}, s.askIDInputForOwner(ctx, tx, owner)
 	}
 	if _, err := uuid.Parse(*input.AskID); err != nil {
-		return commentThreadTarget{}, s.askIDInputForOwner(ctx, tx, owner)
+		// The thread's owner is known here, so a short ask id is resolved under it: the same id
+		// a link carries names the same ask in a reply.
+		resolved, refusal, short := s.resolveShortAsk(ctx, tx, owner, *input.AskID)
+		if !short {
+			return commentThreadTarget{}, s.askIDInputForOwner(ctx, tx, owner)
+		}
+		if refusal != nil {
+			return commentThreadTarget{}, refusal
+		}
+		return s.describeAsk(ctx, tx, owner, &resolved)
 	}
 	return s.describeAsk(ctx, tx, owner, input.AskID)
 }

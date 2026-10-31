@@ -81,6 +81,7 @@ import {
   type DispatchWriteRetry,
   type GraphReferencesQuery,
   type IssueReadOptions,
+  type ItemScope,
 } from "./dispatch-http";
 import {
   dispatchChildRef,
@@ -661,7 +662,7 @@ const askIdProblem = "ask must be a bare ask id or a dispatch://.../ask/<id> ref
 const commentIdProblem =
   "comment must be a bare comment id or a dispatch://.../comment/<id> reference";
 const messageIdProblem =
-  "in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)";
+  "in_reply_to must be a message id (a uuid, or at least its first 8 hex characters), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)";
 
 /** The ask id a bare id or dispatch://.../ask/<id> names; `argumentProblems` refused anything else. */
 function askId(args: ToolArguments): string {
@@ -669,7 +670,9 @@ function askId(args: ToolArguments): string {
   return ask.startsWith("dispatch://") ? (parseDispatchRef(ask)?.id ?? ask) : ask;
 }
 
-/** The message uuid a bare id or dispatch://KEY/message/<id> names, or undefined for anything else. */
+/** The message id a bare id or dispatch://KEY/message/<id> names, or undefined for anything
+ *  else. A short id - 8 hex characters or more - is carried as written: Dispatch resolves it
+ *  within the issue the route names, and refuses one that names more than one message. */
 function messageIdOf(value: string): string | undefined {
   const id = value.startsWith("dispatch://")
     ? (() => {
@@ -677,7 +680,8 @@ function messageIdOf(value: string): string | undefined {
         return reference?.kind === "message" ? reference.id : undefined;
       })()
     : value;
-  return id === undefined ? undefined : normalizeUUID(id);
+  if (id === undefined) return undefined;
+  return normalizeUUID(id) ?? (idPrefixPattern.test(id) ? id.toLowerCase() : undefined);
 }
 
 /** A block reference to a comment's or message's block: the item and the block's id. */
@@ -738,6 +742,15 @@ function refOwnerName(ref: ParsedDispatchRef): string {
     : `${ref.owner.project}/${ref.artifact ?? ref.id}`;
 }
 
+/** The owner a reference names, as the item routes take it: Dispatch resolves a short id within
+ *  it. A project document's own id is not written in the reference, so a caller that has read
+ *  the document passes it and one that has not leaves the item to be resolved across the
+ *  workspace, where a short id two records share is refused rather than guessed. */
+function refScope(ref: ParsedDispatchRef, artifactId?: string): ItemScope {
+  if (ref.owner.kind === "issue") return { issue: ref.owner.issue };
+  return artifactId === undefined ? {} : { artifact: artifactId };
+}
+
 /** The owner fields of an ask or comment a reference is checked against. */
 interface RefItem {
   readonly id: string;
@@ -785,81 +798,45 @@ async function refuseItemOffRef(
   ]);
 }
 
-/**
- * The full id an ask or comment reference names. A full uuid passes through; a unique prefix
- * is resolved against `list()`, the candidate set `ownerName` names; anything else is refused.
- */
-async function resolveIdPrefix(
-  tool: string,
-  kind: "ask" | "comment",
-  id: string,
-  ownerName: string,
-  list: () => Promise<readonly { readonly id: string }[]>
-): Promise<string> {
-  const fullID = normalizeUUID(id);
-  if (fullID !== undefined) return fullID;
-  if (!idPrefixPattern.test(id)) {
-    throw new ToolInputError(tool, [
-      `${kind} id ${id} must be a full uuid or a prefix of at least 8 hex characters`,
-    ]);
-  }
-  const prefix = id.toLowerCase();
-  const matches = (await list()).filter((item) => item.id.toLowerCase().startsWith(prefix));
-  if (matches.length === 1 && matches[0] !== undefined) return matches[0].id;
-  throw new ToolInputError(tool, [
-    matches.length === 0
-      ? `${kind} id ${id} matches none of the ${kind}s on ${ownerName}; use the full id`
-      : `${kind} id ${id} matches ${matches.length} ${kind}s on ${ownerName}; use the full id`,
-  ]);
-}
-
 const askIdShapeProblem = "ask ids are uuids (a prefix of at least 8 hex characters works)";
 
 /**
- * The ask `dispatch read` of `dispatch://…/ask/<id>` names, read. An ask in a document has two
- * ids: its own uuid and the id of its `:::ask{#<id>}` block, which can look like a uuid too.
- * Either names it, whole or as an 8+ hex prefix exactly one of `list()`, the owner's asks, carries.
- * A full uuid is read as an ask id first; the list is read only when no ask has that id.
+ * The ask `dispatch read` of `dispatch://…/ask/<id>` names, read. Dispatch resolves the id,
+ * whole or as a short one (its first 8 hex characters or more), within the owner the reference
+ * names, and refuses a short one that names more than one ask: that rule lives on the server,
+ * so a person following the same link in the dashboard reaches the same ask.
+ *
+ * An ask in a document has a second identifier that is not a short form of its id at all: the
+ * id of its `:::ask{#<id>}` block, which can be any text an author wrote and which only the
+ * owner's ask list maps to an ask. That list is read here, and only when Dispatch found no ask
+ * under the id as written (404) or would not read it as an id at all (400).
  */
 async function readAskRef(
   tool: string,
   id: string,
   ownerName: string,
+  scope: ItemScope,
   client: DispatchClient,
   list: () => Promise<readonly Pick<Ask, "id" | "block_id">[]>
 ): Promise<AskRead> {
-  const fullID = normalizeUUID(id);
-  if (fullID !== undefined) {
-    try {
-      return await client.getAsk(fullID);
-    } catch (error) {
-      if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
-      const blocks = (await list()).filter((ask) => ask.block_id?.toLowerCase() === fullID);
-      if (blocks.length !== 1 || blocks[0] === undefined) throw error;
-      return client.getAsk(blocks[0].id);
+  try {
+    return await client.getAsk(normalizeUUID(id) ?? id, scope);
+  } catch (error) {
+    const refused = error instanceof DispatchServiceError && (error.status === 404 || error.status === 400);
+    if (!refused) throw error;
+    const written = id.toLowerCase();
+    const asks = await list();
+    let matches = asks.filter((ask) => ask.block_id?.toLowerCase() === written);
+    if (matches.length === 0 && idPrefixPattern.test(id)) {
+      matches = asks.filter((ask) => ask.block_id?.toLowerCase().startsWith(written) ?? false);
     }
+    if (matches.length === 1 && matches[0] !== undefined) return client.getAsk(matches[0].id);
+    throw new ToolInputError(tool, [
+      matches.length === 0
+        ? `ask id ${id} names no ask and no :::ask block on ${ownerName}; use the full id`
+        : `ask id ${id} names ${matches.length} :::ask blocks on ${ownerName}; use the full id`,
+    ]);
   }
-  const asks = await list();
-  let matches = asks.filter((ask) => ask.block_id === id);
-  if (matches.length === 0) {
-    if (!idPrefixPattern.test(id)) {
-      throw new ToolInputError(tool, [
-        `ask id ${id} must be a full uuid, a prefix of at least 8 hex characters, or the id of an :::ask block on ${ownerName}`,
-      ]);
-    }
-    const prefix = id.toLowerCase();
-    matches = asks.filter(
-      (ask) =>
-        ask.id.toLowerCase().startsWith(prefix) ||
-        (ask.block_id?.toLowerCase().startsWith(prefix) ?? false)
-    );
-  }
-  if (matches.length === 1 && matches[0] !== undefined) return client.getAsk(matches[0].id);
-  throw new ToolInputError(tool, [
-    matches.length === 0
-      ? `ask id ${id} matches none of the asks on ${ownerName}; use the full id`
-      : `ask id ${id} matches ${matches.length} asks on ${ownerName}; use the full id`,
-  ]);
 }
 
 /** The open asks this session authored: the read `dispatch_open_asks` reports. */
@@ -882,11 +859,12 @@ function openAskHints(asks: readonly Pick<OpenAsk, "id" | "question">[]): string
 }
 
 /**
- * The ask uuid `dispatch_edit_ask`, `dispatch_resolve_ask`, and `dispatch_follow` write to.
- * A full uuid passes through; an 8+ hex prefix resolves against this session's own open asks;
- * anything else is refused before the write, naming those asks so the next call carries a real
- * id. An open-asks read that fails never masks that rule. An ask named by a dispatch:// reference
- * is read first and refused unless it is on the issue or document the reference names.
+ * The ask id `dispatch_edit_ask`, `dispatch_resolve_ask`, and `dispatch_follow` write to. A full
+ * uuid and a short id (8 hex characters or more) both pass to Dispatch, which resolves the short
+ * one and refuses one that names more than one ask; anything else is refused before the write,
+ * naming this session's open asks so the next call carries a real id. An open-asks read that
+ * fails never masks that rule. An ask named by a dispatch:// reference is read first, under the
+ * owner that reference names, and refused unless it is on that issue or document.
  */
 async function resolveAskArgument(
   tool: string,
@@ -901,19 +879,18 @@ async function resolveAskArgument(
       asks === undefined ? askIdShapeProblem : `${askIdShapeProblem}; ${openAskHints(asks)}`,
     ]);
   }
-  const resolved = await resolveIdPrefix(tool, "ask", id, "this session", () =>
-    sessionOpenAsks(client, sessionId)
-  );
+  const written = normalizeUUID(id) ?? id;
   const reference = stringArg(args, "ask");
   // `argumentProblems` refused a dispatch:// value that is not an ask reference.
   const ref = reference.startsWith("dispatch://") ? parseDispatchRef(reference) : null;
-  if (ref === null) return { id: resolved };
-  const read = await client.getAsk(resolved);
+  if (ref === null) return { id: written };
+  const read = await client.getAsk(written, refScope(ref));
   await refuseItemOffRef(tool, "ask", ref, reference, read.ask, async () => {
     const document = await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true });
     return document.artifact.id;
   });
-  return { id: resolved, read };
+  // The read already resolved a short id; the write names the ask the server found.
+  return { id: read.ask.id, read };
 }
 
 /** A reply's target: the comment or message it answers and the block of that item it names, if
@@ -1009,7 +986,7 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
       const message = optionalString(args, "message");
       if (message !== undefined && messageIdOf(message) === undefined) {
         problems.push(
-          "message must be a full message id (uuid) or a dispatch://KEY/message/<id> reference"
+          "message must be a message id (a uuid, or at least its first 8 hex characters) or a dispatch://KEY/message/<id> reference"
         );
       }
       const events = optionalNumber(args, "events");
@@ -3821,24 +3798,22 @@ export async function executeDispatchTool(
       const ref = reference.startsWith("dispatch://") ? parseDispatchRef(reference) : null;
       let id = reference;
       let document: Artifact | undefined;
+      let scope: ItemScope = {};
       if (ref?.owner.kind === "issue") {
-        const issueKey = ref.owner.issue;
-        id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () =>
-          client.getComments(issueKey)
-        );
+        id = ref.id;
+        scope = refScope(ref);
       } else if (ref !== null) {
-        const artifact = (
-          await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true })
-        ).artifact;
-        document = artifact;
-        id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () =>
-          client.getArtifactComments(artifact.id)
-        );
+        document = (await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true }))
+          .artifact;
+        id = ref.id;
+        scope = refScope(ref, document.id);
       }
-      // A full id is resolved as it is, so the comment is read first and held to the owner the
-      // reference names before it is resolved.
+      // Dispatch resolves a short id within that owner. The comment is then read and held to
+      // the owner the reference names before it is resolved, since a full id is read as it is
+      // whatever owner the reference carries.
       if (ref !== null) {
-        const read = await client.getComment(id);
+        const read = await client.getComment(id, scope);
+        id = read.comment.id;
         await refuseItemOffRef(input.tool, "comment", ref, reference, read.comment, async () =>
           document === undefined ? "" : document.id
         );
@@ -4488,10 +4463,16 @@ export async function executeDispatchTool(
       };
       if (ownerArguments.ref?.kind === "ask") {
         const ref = ownerArguments.ref;
-        const askRead = await readAskRef(input.tool, ref.id, refOwnerName(ref), client, async () =>
-          ref.owner.kind === "issue"
-            ? client.listIssueAsks(ref.owner.issue)
-            : client.getArtifactAsks(await documentIdOf(ref), "all")
+        const askRead = await readAskRef(
+          input.tool,
+          ref.id,
+          refOwnerName(ref),
+          ref.owner.kind === "issue" ? refScope(ref) : refScope(ref, await documentIdOf(ref)),
+          client,
+          async () =>
+            ref.owner.kind === "issue"
+              ? client.listIssueAsks(ref.owner.issue)
+              : client.getArtifactAsks(await documentIdOf(ref), "all")
         );
         await refuseItemOffRef(input.tool, "ask", ref, stringArg(args, "ref"), askRead.ask, () =>
           documentIdOf(ref)
@@ -4512,17 +4493,11 @@ export async function executeDispatchTool(
       }
       if (ownerArguments.ref?.kind === "comment") {
         const ref = ownerArguments.ref;
-        const id = await resolveIdPrefix(
-          input.tool,
-          "comment",
+        const comment = await client.getComment(
           ref.id,
-          refOwnerName(ref),
-          async () =>
-            ref.owner.kind === "issue"
-              ? client.getComments(ref.owner.issue)
-              : client.getArtifactComments(await documentIdOf(ref))
+          ref.owner.kind === "issue" ? refScope(ref) : refScope(ref, await documentIdOf(ref))
         );
-        const comment = await client.getComment(id);
+        const id = comment.comment.id;
         await refuseItemOffRef(
           input.tool,
           "comment",

@@ -48,7 +48,7 @@ func (s *server) askIDInputForOwner(ctx context.Context, q queryer, owner owner)
 	if len(hints) == 0 {
 		hints = append(hints, "none")
 	}
-	return errorf(http.StatusBadRequest, "ASK_ID_INPUT", "ask IDs are UUIDs; use the full ask ID; %s open asks: %s", scope, strings.Join(hints, ", "))
+	return errorf(http.StatusBadRequest, "ASK_ID_INPUT", "%s; %s open asks: %s", askIDShape, scope, strings.Join(hints, ", "))
 }
 
 func askQuestionHint(question string) string {

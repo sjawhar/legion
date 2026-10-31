@@ -391,10 +391,12 @@ func TestCreateCommentSeparatesMalformedAndWrongOwnerThreadIDs(t *testing.T) {
 			message: "reply_to must identify a comment on this owner",
 		},
 		{
-			name:    "short ask_id",
-			input:   map[string]any{"body": "reply", "ask_id": "aabbccdd"},
+			// Seven hex digits is no id at all; a short one Dispatch can look up is 404 when it
+			// names no ask (TestACommentTakesAShortAskID covers the one that does).
+			name:    "malformed ask_id",
+			input:   map[string]any{"body": "reply", "ask_id": "aabbccd"},
 			code:    "ASK_ID_INPUT",
-			message: "ask IDs are UUIDs; use the full ask ID; this issue's open asks: none",
+			message: "ask IDs are UUIDs; use the full ask ID, or at least its first 8 characters; this issue's open asks: none",
 		},
 		{
 			name:    "wrong-owner ask_id",
@@ -431,7 +433,7 @@ func TestCommentReplyToNumberedAskListsOpenAsks(t *testing.T) {
 	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 		"body": "I recommend the first option.", "ask_id": "12", "actor": sessionActor(),
 	})
-	want := "ask IDs are UUIDs; use the full ask ID; this issue's open asks: " + first.ID[:8] + "… Which implementation?, " + secondAsk.ID[:8] + "… Which rollout?"
+	want := "ask IDs are UUIDs; use the full ask ID, or at least its first 8 characters; this issue's open asks: " + first.ID[:8] + "… Which implementation?, " + secondAsk.ID[:8] + "… Which rollout?"
 	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"ASK_ID_INPUT"`) || !strings.Contains(response.Body.String(), want) {
 		t.Fatalf("reply to numbered ask: status=%d body=%s, want 400 ASK_ID_INPUT %q", response.Code, response.Body.String(), want)
 	}

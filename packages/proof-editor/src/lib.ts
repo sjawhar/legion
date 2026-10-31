@@ -256,6 +256,21 @@ function cssEscapeAttrValue(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
 
+/** The one block whose id starts with `written`, or null when none or several do. A link to a
+ *  block is written by hand with the first characters of its id, as a link to an ask is, so a
+ *  `#b-` fragment that names no block exactly still lands on the block it meant - and never on
+ *  the wrong one, since an ambiguous start focuses nothing. */
+function onlyBlockStartingWith(root: HTMLElement, written: string): HTMLElement | null {
+  if (written.length < 8) return null;
+  let found: HTMLElement | null = null;
+  for (const candidate of root.querySelectorAll<HTMLElement>(`[${BLOCK_ID_DOM_ATTR}]`)) {
+    if (!(candidate.getAttribute(BLOCK_ID_DOM_ATTR) ?? '').startsWith(written)) continue;
+    if (found !== null) return null;
+    found = candidate;
+  }
+  return found;
+}
+
 /**
  * Replaces `parserCtx`'s value with a self-healing wrapper (LEGION-566). Milkdown's own `parser`
  * plugin builds `parserCtx`'s `ParserState` once, at boot, and never rebuilds it
@@ -492,10 +507,12 @@ export async function createProofEditor(
     },
     focusBlock(blockId: string): void {
       const escaped = cssEscapeAttrValue(blockId);
-      const element = view.dom.querySelector<HTMLElement>(`[${BLOCK_ID_DOM_ATTR}="${escaped}"]`);
+      const element =
+        view.dom.querySelector<HTMLElement>(`[${BLOCK_ID_DOM_ATTR}="${escaped}"]`) ??
+        onlyBlockStartingWith(view.dom, blockId);
       if (element === null) return;
       element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      pulseHighlight(view, 'block', blockId);
+      pulseHighlight(view, 'block', element.getAttribute(BLOCK_ID_DOM_ATTR) ?? blockId);
     },
     setActiveMarks(markIds: readonly string[]): void {
       setActiveHighlights(view, 'mark', markIds);

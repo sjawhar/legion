@@ -250,6 +250,24 @@ export interface SearchOptions {
   readonly offset?: number;
 }
 
+/** The owner a reference names, which the server resolves a short item id within: the issue of
+ *  `dispatch://CORE-1/ask/<id>`, or the document of `dispatch://CORE/artifact/plan/ask/<id>`.
+ *  A read that names neither is resolved across the workspace, where a short id two records
+ *  share is refused rather than guessed. */
+export interface ItemScope {
+  readonly issue?: string;
+  readonly artifact?: string;
+}
+
+/** `scope` as the query the item routes read, or undefined when it names no owner. */
+function itemScopeQuery(scope?: ItemScope): { issue?: string; artifact?: string } | undefined {
+  if (scope?.issue === undefined && scope?.artifact === undefined) return undefined;
+  return {
+    ...(scope.issue === undefined ? {} : { issue: scope.issue }),
+    ...(scope.artifact === undefined ? {} : { artifact: scope.artifact }),
+  };
+}
+
 /** One node's edges: `to` reads what points at it, `from` what it points to; exactly one. */
 export type GraphReferencesQuery = ({ readonly to: string } | { readonly from: string }) & {
   readonly kind?: readonly GraphEdgeKind[];
@@ -1310,8 +1328,12 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "artifacts", id, "references"]);
   }
 
-  async getAsk(id: string): Promise<AskRead> {
-    return this.#json("GET", ["api", "v1", "asks", id]);
+  /** `GET /api/v1/asks/{id}`. `scope` is the owner the reference being read names - its issue,
+   *  or the document of a project document's ask - which the server resolves a short id (the
+   *  first 8 hex characters or more of the ask's uuid) within, refusing one that names more
+   *  than one ask rather than guessing. */
+  async getAsk(id: string, scope?: ItemScope): Promise<AskRead> {
+    return this.#json("GET", ["api", "v1", "asks", id], undefined, itemScopeQuery(scope));
   }
 
   /** A bearer follows only its own session: the body names it and the path repeats it. */
@@ -1323,8 +1345,9 @@ export class DispatchClient {
     await this.#json("DELETE", ["api", "v1", "asks", id, "followers", sessionId], { actor });
   }
 
-  async getComment(id: string): Promise<CommentRead> {
-    return this.#json("GET", ["api", "v1", "comments", id]);
+  /** `GET /api/v1/comments/{id}`, scoped as `getAsk` is. */
+  async getComment(id: string, scope?: ItemScope): Promise<CommentRead> {
+    return this.#json("GET", ["api", "v1", "comments", id], undefined, itemScopeQuery(scope));
   }
 
   /** Resolves a comment thread as `actor`; the server takes no reason and any actor may resolve. */
