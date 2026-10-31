@@ -2,31 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-839",
-  "completed": "2026-10-31T13:45:00Z",
-  "round": 3,
-  "reviewedCodeHead": "703782de8f2b822a982f95dc3fe7303b75c3b292",
+  "completed": "2026-10-31T17:45:00Z",
+  "round": 4,
+  "reviewedCodeHead": "5593037ddf8314876e8130cf794e5a4ca07d3dbb",
   "diffBase": "3666db3184d3 (legion/INFRA-594, the base commit the branch merged)",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 3,
-  "minor": 8,
-  "ci": "The base legion/INFRA-594 requires no check. At CI head 703782de8f2b, the changes job and pr-title were queued when I read it at about 13:15Z. The compare from 703782de8f2b to 7d4ba962c721 is handoffs only. That does not gate a REQUEST_CHANGES. When CI concludes, the outbox lane needs -v output, or proof the job sets DISPATCH_TEST_DATABASE_URL, before TestARoleRoutedEventTellsTheRoleLaneToKeepNothing counts.",
-  "round2": "Round-2 findings 2 to 12 are fixed or answered (the claim-window clock assumption is stated in the doc, and I accept it). Finding 1 is only partly fixed; what remains is round-3 finding 1. I answered each round-2 thread.",
+  "important": 2,
+  "minor": 3,
+  "ci": "Run 41212135030 (CI, pull_request, 5593037ddf83) completed failure at 17:32Z. ci-ok failed because envoy-go-race failed. Its race step reports WARNING: DATA RACE and --- FAIL: TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim/role_delivery (race detected during execution of test): the claim's handover goroutine reads the session registry (role_keep.go:493 -> role_holder.go:229 -> session/registry.go:529) while the test swaps it (api_test.go:999). envoy-go, pr-title, lint, typecheck, test and every other job succeeded. The base legion/INFRA-594 requires no check. As the architect asked, I pushed nothing until this run finished.",
+  "round3": "All three round-3 blocking findings and all eight minors are fixed. I answered each round-3 thread.",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 703782de",
-    "codeQuality": "Verdict: CHANGES at 703782de"
+    "deepReview": "Verdict: APPROVE at 5593037d",
+    "codeQuality": "Verdict: CHANGES at 5593037d"
   },
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:443", "description": "The handover gives a lane up with copies on it while the holder is live. Three cases: (a) a walk that only skips expired or refused copies has forwarded == 0, so four such walks (800 copies in a row) end the handover; (b) four failed walks about 1 s apart, or one failed holder resolution, end it, which a bus outage longer than a few seconds produces; (c) a listener restart in the middle of a drain ends it. Nothing starts another handover while the holder stays live, so 202-kept copies age out. Fix: count a cursor advance as progress, retry failures with backoff inside the handover window, and add a sweep that starts a handover for any role whose kept lane is ahead of its cursor and has a live holder (on start and on a periodic tick)."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/outbox/publisher.go:1248", "description": "The reason given for keep:false on Dispatch's role route, that Dispatch redelivers a role-routed event from its own outbox on its own receipts, is not what the outbox does. publishDestination sends each destination once, and the event is marked published once core NATS accepts it. Nothing in internal/dispatch consumes no_holder. So Dispatch's role-routed events to an unheld role are still dropped, and the PR's Outcome line is false for them. The architect needs to decide again with these facts: either drop keep:false from publishRoute, or keep it and correct envelope.ts, role_keep.go, the outbox comment and test, the census row and the Outcome."},
-    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:452", "description": "The handover resolves the holder before its pause. After a busy lane the pause is 60 s, so the next walk uses a holder and an entry 60 s old, and roleKeepDrainHolds counts an unclaimed role as still held. A holder that released the role or ended during the pause is handed up to 20 copies, and the cursor moves past them. Fix: resolve after the pause, and resolve in one place (drop the holder and entry parameters from drainKeptRole)."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:436", "description": "walkCtx starts before the per-role lock (:515), so a walk that waits on another walk spends its 60 s window waiting and can fail its confirm, leaving a claim that blocks for 60 s. Start the window after the lock."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:629", "description": "A kept copy whose forward drew no receipt is counted as delivered and its dedupe recorded. The role lane counts the same thing as receipt_timeout. Finish it with the receipt-timeout outcome, so the two counters agree."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:182", "description": "writeRoleKeepCursor turns ErrCursorMoved into owned == false, and roleKeepWriteEnd turns it back into an end state, with a fake 'drained' value for 'go on'. Pass the error through and map it once."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/confirmed.go:252", "description": "The keep decision lives in two flags: request.Keep threaded as roleSend.keep, and Envelope.Keep, which keepForNextHolder reads. Set item.Keep from the request and let keepForNextHolder decide for both paths."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/publisher.go:1266", "description": "Every role-routed envelope points at one package variable, dispatchRoleKeep, so a write through any of them changes every later event. Use new(false)."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:96", "description": "The roleKeepDrainIdleRounds doc says 3 idle walks, but the loop gives up on the 4th (idle > 3)."},
-    {"severity": "minor", "file": "packages/pi-legion/.changes/unreleased/pr2588-phase-reminder-kept.yaml", "description": "The fragment says the stall reminder is now kept by Envoy. It now opts out with keep:false. The contracts fragment does not announce the new envelope field keep, and the envoy fragment does not say that the role lane honours it or that Dispatch sets it."},
-    {"severity": "minor", "file": "packages/envoy/AGENTS.md:2405", "description": "AGENTS.md:2403-2405 ('The next claim takes the rest') and docs/architecture.md:279-282 still describe the round-2 drain, and architecture.md:106 names two of the four keep-nothing cases."}
+    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:493", "description": "envoy-go-race is red at 5593037ddf83. Every handover pass resolves the role's holder before it reads the kept lane, so every POST /v1/roles/set starts a goroutine that does a claim read and a session read even for a role nothing was ever kept for. TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim swaps the session registry after its claim, and the race detector fails it. Fix: open each pass with the lane-head read that keptRoleCopiesLeft does (one helper shared with walkKeptRole's opening), and resolve the holder only when copies are left. A claim of a role with no kept lane then costs one stream read again."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/api.go:754", "description": "Envelope.Keep has no producer now that the outbox reversal is done. Only api.go:754 writes it, copying the request flag onto the envelope, and the envelope then carries keep:false onto every forward to a holder (confirmed.go:399) and every publish answer, which means every daemon notice and phase reminder. The contract (envelope.ts, envelope.schema.json, generated.go) and two fragments advertise a raw-lane opt-out that nothing uses. Delete the field and check the request's flag in the route's give-up (one flag, on the request)."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:624", "description": "keptRoleCopiesLeft repeats walkKeptRole's opening reads, error texts and comparison. Use one helper (also the fix for the red lane)."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:523", "description": "The decision after each walk is split between roleKeepDrainAgain and the loop's re-branch on result.end, with the progress test written twice. Write it as one switch."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:608", "description": "The sweep logs 'found a lane no handover was draining' at Info and starts a goroutine before it knows the role has a live holder. A role with no holder keeps its lane ahead of the cursor for 72 h, so every listener logs and works on it every 5 minutes. Check the holder first, or log only when a walk runs."}
   ]
 }
