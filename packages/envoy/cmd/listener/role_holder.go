@@ -1,6 +1,7 @@
 // Role-holder resolution: reading a role's claim and its holder's session through to the
-// bucket, releasing a lapsed claim, answering the race a superseded release loses, and the 404
-// that names a role with no live holder.
+// bucket, releasing a lapsed claim, answering the race a superseded release loses, deciding
+// whether a soft claim takes the role from the holder it found, and the 404 that names a role
+// with no live holder.
 
 package main
 
@@ -231,6 +232,101 @@ func liveSessionEntry(
 		return session.SessionEntry{}, nats.ErrKeyNotFound
 	}
 	return entry, err
+}
+
+// bucketSessionEntry is sessionID's entry read from the session bucket itself
+// (session.SessionRegistry.Refresh) and from nowhere else, for the one decision that must not be
+// made on a cached entry: a soft claim naming a predecessor, which reads that predecessor's client
+// instance id to decide whether the role passes to the claimant (POST /v1/roles/set). It asks the
+// cache nothing, not even as a first answer the way liveSessionEntry does, because the cache
+// follows the bucket through a watcher and so trails it: the entry it still holds can carry an
+// instance id that session has since replaced, or no id at all where the bucket has one, and a
+// stale entry would then decide who keeps a role - handing it to a client instance the predecessor
+// no longer belongs to, which is the whole point of reading the id.
+//
+// nats.ErrKeyNotFound is the bucket's word that the session is gone, and the caller acts on it;
+// any other error is a read that did not answer, on which nothing is taken from a holder. The read
+// gets bound, derived from ctx, so a route answers its 503 inside the deadline its own caller
+// holds.
+func bucketSessionEntry(ctx context.Context, sessions *session.SessionRegistry, sessionID string, bound time.Duration) (session.SessionEntry, error) {
+	readCtx, cancel := context.WithTimeout(ctx, bound)
+	defer cancel()
+	return sessions.Refresh(readCtx, sessionID)
+}
+
+// roleSupersession is what a soft claim may do to the role holder it found (POST /v1/roles/set,
+// the issue's R6): take the role from that holder, leave it where it is, or neither, because a
+// session read did not answer. roleSupersessionVerdict answers one of these, so the route states
+// the rule that decides it nowhere and words only the answers.
+type roleSupersession uint8
+
+const (
+	// roleStaysWithHolder: nothing is taken. A live holder the claimant did not name as its
+	// predecessor keeps the role, and so does a named predecessor still live inside another
+	// client instance; store.Registry.SetRoleWithPrevious then answers the 409 that names it.
+	roleStaysWithHolder roleSupersession = iota
+	// roleTakenFromHolder: the holder gives the role up, because it has no live session entry
+	// in the bucket, or because it is the claimant's named predecessor and its entry carries
+	// the claimant's own client instance id - the same conversation continuing inside the
+	// instance that held the role.
+	roleTakenFromHolder
+	// roleTakenFromUnidentifiedPredecessor is roleTakenFromHolder for the one case
+	// session.InstanceMatches accepts without two ids to compare: a live named predecessor
+	// where its entry or the claimant carries no client instance id, a client predating the
+	// field. It is a verdict of its own only so the route can log that takeover without
+	// restating the rule that reached it.
+	roleTakenFromUnidentifiedPredecessor
+	// roleHolderUnread: a session read that did not answer, so nothing is taken from anyone.
+	// It comes with the error the route answers (writeBusUnavailable), already worded for the
+	// read that failed.
+	roleHolderUnread
+)
+
+// roleSupersessionVerdict decides whether a soft claim takes the role from the holder it found,
+// for the one route that asks (roleSetHandler). holder is the session the role's claim names,
+// neither empty nor the claimant itself; previous is the predecessor the claimant declared,
+// already trimmed; claimantInstanceID is the client instance the claimant's own registration
+// carries.
+//
+// A holder the claimant did not name as its predecessor is weighed on liveness alone
+// (liveSessionEntry): gone from the session bucket it has lapsed and the role is free, live it
+// keeps the role. The declared predecessor is weighed on the client instance it belongs to as
+// well, and is read from the bucket itself (bucketSessionEntry, which says why a cached entry
+// cannot decide this): gone, it gives the role up; live, it gives it up only to a claimant
+// session.InstanceMatches accepts, which is its own client instance, or a side that carries no
+// id at all - the one of those two arms the route logs, and the only reason this function tells
+// them apart.
+//
+// The error is non-nil only with roleHolderUnread, wrapped as the route reports it, naming the
+// read that failed. A key the bucket does not hold is that bucket's word that the session is
+// gone, not a failure; every other read failure takes nothing from a holder. Both reads are
+// bounded by roleHolderReadTimeout within ctx, so the route answers inside the budget its own
+// caller holds.
+func roleSupersessionVerdict(ctx context.Context, sessions *session.SessionRegistry, holder, previous, claimantInstanceID string) (roleSupersession, error) {
+	if previous == "" || holder != previous {
+		_, err := liveSessionEntry(ctx, sessions, holder, roleHolderReadTimeout, registered)
+		switch {
+		case errors.Is(err, nats.ErrKeyNotFound):
+			return roleTakenFromHolder, nil
+		case err != nil:
+			return roleHolderUnread, fmt.Errorf("read role holder liveness: %w", err)
+		default:
+			return roleStaysWithHolder, nil
+		}
+	}
+	predecessor, err := bucketSessionEntry(ctx, sessions, holder, roleHolderReadTimeout)
+	switch {
+	case errors.Is(err, nats.ErrKeyNotFound):
+		return roleTakenFromHolder, nil
+	case err != nil:
+		return roleHolderUnread, fmt.Errorf("read role predecessor registration: %w", err)
+	case !session.InstanceMatches(predecessor.ClientInstanceID, claimantInstanceID):
+		return roleStaysWithHolder, nil
+	case predecessor.ClientInstanceID == "" || claimantInstanceID == "":
+		return roleTakenFromUnidentifiedPredecessor, nil
+	default:
+		return roleTakenFromHolder, nil
+	}
 }
 
 // roleHolderSession is liveSessionEntry as the role paths that hold no request context ask it: the
