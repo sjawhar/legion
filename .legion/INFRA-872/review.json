@@ -2,32 +2,33 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-872",
-  "completed": "2026-10-31T02:22:00Z",
+  "completed": "2026-10-31T03:40:00Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedCodeHead": "66e10d6bbd5060d18f9fc61bc298a29e22644be7",
+  "reviewedCodeHead": "e56b8561390b",
   "critical": 0,
-  "important": 3,
-  "minor": 7,
+  "important": 1,
+  "minor": 2,
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/infra/README.md", "description": "No migration step for a consumer that declared its own tailscale.Service svc:<hostname> under the old tailnetService contract. The provider's Create is VIPServices().CreateOrUpdate (terraform-provider-tailscale v0.29.2 resource_service.go:124), so the component adopts the live Service; when the consumer then removes its own declaration, Pulumi deletes it after the creates and the Delete removes the Service the component just adopted (resource_service.go:188-196). The README and the changelog fragment must say: drop it from the consumer's state first (pulumi state delete <urn>, or retainOnDelete for the apply that removes it), never let Pulumi delete it."},
-    {"severity": "important", "file": "PR body", "description": "Not proven / risk bullet says tailscale.NewService fails on the first apply when svc:<hostname> already exists. False: Create is an upsert, so an existing Service is taken over and its comment, ports and tags are overwritten. Same claim in implement.json openQuestions. The go.mod bullet's cause is also wrong: the seven indirect modules are reached through this module's own core tests importing envoy's internal/testnats and internal/dispatch/store (go mod why), not the envoy module's test dependencies."},
-    {"severity": "important", "file": "packages/envoy/infra/gcp/dispatch_test.go", "description": "The Construct assertion that the front-door Deployment and Serve ConfigMap wait for the Tailscale Service was deleted and not replaced; no test asserts the tailscale provider requirement (refused without it on the front door, not required in the sandbox) or the Service's own inputs (Name svc:<hostname>, Ports tcp:443, Tags, Protect following deletionProtection)."},
-    {"severity": "minor", "file": "packages/envoy/infra/README.md", "description": "Lines 1390-1396 and 699-702 say grants on the front door's tags do not cover the Service's address, while the Service now carries those same tags; step 1's 'without one of the two' warning is false for this release and 'as a source' is meaningless."},
-    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_frontdoor.go", "description": "Protect rationale (line 484-485, README:561) says the consumer has no way to unprotect a protected child; pulumi state unprotect does. The real reason is that the consumer's program has no option that reaches it."},
-    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_kube.go", "description": "Lines 348-368: one-key special case plus an []any/labels/outputStrings path whose error branch cannot run; one typed StringArray join gives the same bytes for one key."},
-    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_construct_test.go", "description": "Line 159: require.Equal over the instance's whole dependency list pins unrelated siblings; assert the consumer's URN is absent."},
-    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/multiprocess_test.go", "description": "TestAStagedKeyRotationThatSkipsTheAddApplyIsRefusedAtBoot runs the same refusal path as the first row of TestAProcessWhoseKeySetALivePeerDoesNotShareRefusesToStart (~25 s per run)."},
-    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_construct_test.go", "description": "Stale counts: 'nine' inputs of the two groups at dispatch_construct_test.go:569,577 and dispatch_cluster_only_test.go:114; the groups now hold eight."},
-    {"severity": "minor", "file": "packages/envoy/.changes/unreleased/INFRA-797-dispatch-sandbox-mode.yaml", "description": "Unreleased fragment still lists tailnetService in the tailnet group and will publish beside its removal; it and the other unreleased fragments named for a Dispatch key break the root AGENTS.md fragment rule."}
+    {"severity": "important", "file": "packages/envoy/infra/README.md", "description": "Lines 1434-1437 (and the changelog fragment lines 8-10): step 1 of 'Moving a stack that declares the Service itself' runs `pulumi state delete` on the consumer's Service, but every stack that followed the earlier releases' docs passed that Service's Name output into the component, so the component depends on it in state. `pulumi state delete` refuses a resource that others depend on (pulumi pkg/resource/edit/operations.go:83-86) and suggests `--target-dependents`, which removes the Dispatch component and every child from state. Reproduced by the deep review with pulumi v3.268.0 on a file backend. The working route is retainOnDelete (one apply that sets it on the old pin, then the apply that removes the declaration), plus unprotecting first if the consumer protected the Service."},
+    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_frontdoor.go", "description": "Lines 484-486, README.md:561 and README.md:688-690: 'no resource option of the consumer's own program reaches a component's child' contradicts README.md:2101-2105, which says a resource transform on the component reaches each child. The true reason: the child's explicit Protect overrides what it would inherit, so only a transform or a state edit could change a fixed one."},
+    {"severity": "minor", "file": "packages/envoy/infra/README.md", "description": "Lines 561, 1220 and 1314 link `(#inputs)`, which GitHub gives to the first `### Inputs` heading (gcp:ClusteredNatsHub, line 177); gcp:Dispatch's is `#inputs-1`. All three links are this pull request's own."}
   ],
-  "architectQuestions": {
-    "goModDrift": "Verified: go mod tidy on main's own packages/envoy/infra/go.mod (GOWORK=off, base 4ca6415a) adds exactly the seven modules; the other go.mod moves (pulumi sdk 3.268.0, go-crypto 1.5.2, go-git/go-billy beta.1, sha1cd 0.7.0, cpuid dropped) follow from pulumi-tailscale v0.29.2 requiring pulumi sdk v3.268.0 (go mod graph); the head go.mod and go.sum are tidy.",
-    "serviceTags": "The component creates a new Service resource; no known consumer declares one (theorem-labs/agent-infra dispatch/ pins envoy-infra 2.9.1). Tags equal to the node tags are accepted as the design; the README must state their grant effect correctly.",
-    "removedInputThroughConstruct": "Not a defect: a Go consumer fails to compile, and Pulumi YAML refuses a property the schema lacks (pulumi-yaml pkg/pulumiyaml/analyser.go, NonExistentFieldFormatter in isAssignable). Only a raw gRPC Construct is silent."
+  "roundOneThreads": {
+    "accepted": ["PRRT_kwDORFy7ds6yMoRS", "PRRT_kwDORFy7ds6yMoRT", "PRRT_kwDORFy7ds6yMoRY", "PRRT_kwDORFy7ds6yMoRa", "PRRT_kwDORFy7ds6yMoRb", "PRRT_kwDORFy7ds6yMoRe", "PRRT_kwDORFy7ds6yMoRg"],
+    "stillStanding": {
+      "PRRT_kwDORFy7ds6yMoRO": "migration section added, but its step 1 fails (finding 1)",
+      "PRRT_kwDORFy7ds6yMoRj": "the changelog fragment names the same failing step (finding 1)",
+      "PRRT_kwDORFy7ds6yMoRW": "the new Protect reason contradicts README.md:2101-2105 (finding 2)"
+    }
   },
-  "declined": [
-    "Hoisting dependsOnInput into a shared package: plan D7 decided the per-package copy.",
-    "Dropping the ConfigMap->Service and Deployment->instance edges as transitive: the acceptance names the Deployment->instance edge, and the ConfigMap edge costs nothing."
+  "verified": [
+    "go vet ./gcp/ ./internal/... ./provider/ and go vet -tags multiprocess ./cmd/dispatch/ clean; go test ./gcp/ -run 'TestDispatch|TestConstruct' -count=1 ok 12.239s at e56b8561; gofmt clean.",
+    "Deep review: dropping `service` from the front door's DependsOn fails TestDispatchTheFrontDoorWaitsForItsTailscaleService; deleting the tailscale Require block fails TestDispatchRequiresATailscaleProviderOnlyWithAFrontDoor/with_a_front_door; forcing it always on fails the sandbox subtest. The StringArray join keeps the one-key bytes and the secret flag (sdk v3.268.0 internal/types.go awaitInputs).",
+    "The renamed fragments: pr2504 is the pull request that added the INFRA-743 file (f12c22adb), pr2553 the INFRA-797 ones (ecbc2c8fa); no fragment in unreleased/ carries an INFRA- key."
   ],
-  "ci": "At code head 66e10d6b the CI run 41156098319 is still queued (lint, test, envoy-infra-go queued; typecheck skipped); not waited for, since this round requests changes."
+  "notes": [
+    "implement.json proof 3 still says the newest tag is envoy-infra-v6.4.0; it is v6.6.0 and v7.0.0 still holds. The tester's note on the PR corrects it, and retro removes the handoff before READY; the implementer corrects it when it next writes implement.json."
+  ],
+  "ci": "At code head e56b8561 the CI run 41162202857 is still queued; not waited for, since this round requests changes."
 }
