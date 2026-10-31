@@ -32,7 +32,7 @@ A missing check never blocks the plan. When a check's call fails (the task retur
 
 ## Plan handoff
 
-Write `.legion/<issue>/plan.json` with the `write` tool, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "plan"`, `issue: "<issue>"`, `completed: "<RFC 3339 UTC time of writing>"`, `requiredSkills` (above), and the three records below; nothing stamps the first four for you. Commit it with `jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/<issue>/plan.json`, push it, then report completion.
+Write `.legion/<issue>/plan.json` with the `write` tool, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "plan"`, `issue: "<issue>"`, `previousHandoff` (the commit the daemon part's revset prints, an empty string when it prints none), `requiredSkills` (above), and the three records below; nothing stamps the first three for you. Commit it with `jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/<issue>/plan.json`, push it, then report completion.
 
 The handoff records the two plan checks and the plan's departures from the spec:
 
