@@ -1,137 +1,150 @@
 {
-  "schemaVersion": 1,
-  "phase": "implement",
-  "issue": "INFRA-839",
-  "completed": "2026-10-31T09:30:00Z",
-  "round": 3,
-  "answersReviewFindings": [
-    {
-      "finding": "1. Expired copies used up the 20-copy drain budget, so fresh kept messages were not forwarded.",
-      "fix": "roleKeepDrainMax (20) now bounds forwards only; a second constant, roleKeepScanMax (200), bounds the walk, with its reason in a comment: a lane can hold nothing but copies past the window, since the stream keeps a copy 72 h against a one-hour keep window. An expired or undecodable copy costs a scan, not a forward.",
-      "commit": "a70a061a03c9",
-      "test": "TestADrainSpendsItsBudgetOnForwardsRatherThanOnExpiredCopies; at the pre-change files it fails 'the drain forwarded [], want every copy still inside the keep window: [envoy.role.forward.kept-budget-22 … -28]'."
-    },
-    {
-      "finding": "2. Two listeners draining one role both forwarded every copy, because the cursor was written once after the walk; the guard comment described a guard that did not exist. The same defect let envoy_role_kept_expired_total count one copy again on every re-walk.",
-      "fix": "claimKeptRoleCopy claims each copy before anything is done with it: it advances the cursor to that one copy's stored.Sequence under the compare-and-swap, carrying the returned sequence into the next iteration, and only the drain whose claim landed forwards, drops or passes over that copy. An error wrapping bus.ErrCursorMoved stops the drain at once, logged at debug, reporting nothing wrong. The doc states the cost: a process that dies between a claim and its forward loses that one copy rather than delivering it twice.",
-      "commit": "a70a061a03c9",
-      "test": "TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder; at the pre-change files all six copies fail with 'reached [ses_kept_drain_second ses_kept_drain_first]; a kept copy reaches exactly one holder'."
-    },
-    {
-      "finding": "3. The drain skipped beforeForward (echo, repeat, delivery-mode capability) and a kept copy carried no sender stamp.",
-      "fix": "sendToRole stamps senderStamp onto the envelope before the first resolution, so the copy a keep stores carries the sender as a live delivery's forward does. keptRoleForwardAllowed runs beforeForward for each claimed copy with the role lane's own seen (dedupeCache.Seen || attemptCache.Seen): echo skipped, repeat dedupe, a delivery-mode refusal failed with the lane's delivery_failed exception, each under its own line; only forwardAllowed forwards. withPublishRoute in confirmed_test.go now wires the attemptCache that rig left nil.",
-      "commit": "a70a061a03c9",
-      "test": "TestAKeptRoleMessageCarriesTheSenderThePublishStamped (pre-change: 'the kept copy's sender is <nil>') and TestTheDrainJudgesAKeptCopyByTheRulesEveryForwardPathApplies, echo and unadvertised mode (pre-change: 'the drain forwarded the copy 1 times, want none' in both subtests)."
-    },
-    {
-      "finding": "4. A role token rolePattern can never match was kept and answered 202, for a role no claim can take.",
-      "fix": "Keeping is (request.Keep == nil || *request.Keep) && isValidRole(role), with the reason at that line. Such a role gets exactly today's 404, byte for byte, with nothing stored; the 404 rather than a new 400, so no caller meets a status this route never gave it.",
-      "commit": "a70a061a03c9",
-      "test": "TestAPublishToARoleNoClaimCanNameIsRefusedAndKeepsNothing; at the pre-change files 'publish to a role no claim can name: status 202'."
-    },
-    {
-      "finding": "5. A keep stored after a concurrent claim's drain had read the lane waited for a claim that seldom comes inside the hour.",
-      "fix": "drainAfterKeep: after a keep lands, on the publish route and on the role lane alike, the role's holder is resolved again by role delivery's rule (resolveRoleHolder with laneHolderFresh) under roleKeepHolderWindow (5 s), and a live holder is drained to. It runs off the request, so neither caller's answer waits; a resolution that failed logs at debug and changes nothing, since the copy is stored and the next claim still takes it.",
-      "commit": "a70a061a03c9",
-      "test": "TestAKeptCopyReachesTheHolderThatClaimedTheRoleUnderTheKeep; at the pre-change files 'the copy kept for ses_kept_under_claim, which held the role already, reached it in no 20 seconds'."
-    },
-    {
-      "finding": "6. The role lane kept for a lapsed claim the restart grace retained, which no claim write ever drains.",
-      "fix": "One predicate, roleKeepable(roleHolderResult): keep for an unclaimed role, and for a lapsed claim unless store.ExpiredRoleClaimRetained. Both give-up paths call it, the publish route's first resolution included, so a retained claim keeps nothing and is answered exactly as before the kept lane: the lane's delivery_failed, the route's 404 holder_lapsed.",
-      "commit": "a70a061a03c9",
-      "test": "TestTheRoleLaneKeepsNothingForAClaimTheRestartGraceRetained; at the pre-change files 'read delivery exception: nats: timeout', the lane having kept instead of excepting."
-    },
-    {
-      "finding": "7. The phase worker's stall notice to its architect lost its retry: a 202 marked it reported, so a notice nobody claimed the role for inside the hour was dropped.",
-      "fix": "tellArchitect sends keep: false and keeps its 404 retry, which is the case the design reserves the flag for: this sender's retry is the reminding itself, and reminders never stop while the phase is open. keptNothing is roleUnheld again with a true doc comment, and a 202 that reached it anyway is read as the 404 is, so the run's next reminder publishes again under the same key.",
-      "commit": "ed0d30a267e4",
-      "test": "'a kept answer is not the architect being told, so the run's next reminder publishes again' (pre-change: expect(published[0]?.keep).toBe(false) receives undefined, and with the two keep assertions removed, reported: true where false is wanted), plus the 404 test, which now also pins keep: false on the wire."
-    },
-    {
-      "finding": "8. StreamSubjects() had become the stream's list, so every consumer filter had to remember DurableNotificationSubjects() and the tests no longer modelled the listener's filter.",
-      "fix": "streamSubjects and StreamSubjects() are the consumer list again, without the kept prefix, and durable.go calls it. streamCarriedSubjects (the consumer list plus KeptTopicPrefix + \">\") is the stream's own, read by streamCfg.Subjects, StreamCaptures and the replay classification, exported as StreamCarriedSubjects() for a caller that builds or checks the stream, which is what bustest takes. DurableNotificationSubjects and its prefix filter are deleted. Every caller was re-read: the consumer filters needed no edit and now model the listener's filter correctly; the stream-modelling tests (internal/bus/keeper_test.go, adhoc_topic_test.go, bustest) moved to streamCarriedSubjects. TestStreamConfigExcludesRoleLanes and TestEveryStreamSubjectIsClassifiedForReplay read streamCfg.Subjects and are unchanged.",
-      "commit": "4958a413c57a",
-      "test": "No new test: a refactor with no behaviour of its own, held by the suites above, which pass unchanged."
-    },
-    {
-      "finding": "9. Listener-only subjects lived in the shared contracts package with no TypeScript caller, hand-copied into the Go generator, so the string existed three times.",
-      "fix": "KeptTopicPrefix, KeptRoleSubject and KeptRoleCursorSubject are defined in internal/bus/stream.go beside ExceptionTopicPrefix and DeliverSubjectPrefix. The three TypeScript exports, their types, the gen-go.ts block and the generated Go are deleted, and pr2588-kept-subjects.yaml announces only the envelope's kept_at, which stays in contracts because both hosts read it.",
-      "commit": "4958a413c57a",
-      "test": "bun run check:go passes on the regenerated file, so the string exists once."
-    },
-    {
-      "finding": "10. A package-global guard map and a cfg == nil branch that existed only for tests.",
-      "fix": "The guard set is a roleKeepGuards field on listenerDeliveryHandlerConfig beside deferredUnplaceable, built once in main.go and in each harness, and listenerDeliveryHandler refuses a config without it as it refuses one without deferredUnplaceable. The global and both nil branches (startKeptRoleDrain's and drainAfterKeep's) are gone, and the rigs that claim a role through POST /v1/roles/set carry a delivery. The two-listener test gives the second drain a guard set of its own, which is what a second listener has.",
-      "commit": "4958a413c57a",
-      "test": "No new test: held by the suites, and by the two-listener test, which no longer reaches into a global."
-    },
-    {
-      "finding": "11. The pull request body carried no contract change census for the publish route's 404 → 202 at a process boundary.",
-      "fix": "A '## Contract change census' section lists every caller of POST /v1/messages/publish for a role topic with its disposition: the five in this repository's production code (the client and the two envoy_publish tools adapted; the phase reminder and the daemon's notice publisher opted out with keep: false), the four scripts and live proofs (the rig adapted; three unaffected, each because it publishes to a role a live session holds), and the four hits outside it. theorem-labs/agent-infra holds no caller: two Pulumi.prod.yaml comments naming the route, one deployment-instructions page telling agents to reach roles with the envoy_publish tool (covered by the client), and one test that classifies a delivered frame. theorem-labs/nats-server has no hit for messages/publish, notifications.role or envoy_publish. The section ends with the rollout line.",
-      "commit": "the pull request body",
-      "test": "The search is recorded in the section: ripgrep over this repository and GitHub code search over the other two, on main, for the three terms."
-    },
-    {
-      "finding": "Minors: the lane's duplicated keep call, the PublishStoredOn/PublishStoredAs pair, the hand-copied keptReason union, and the authz hardening on the publish route.",
-      "fix": "The lane keeps in one decision before its branches (a70a061a03c9). One exported PublishStoredAs(ctx, subject, item, msgID) error, with delivery.go passing the exception's own topic and role_keep.go the kept subject (4958a413c57a). keptReason is z.infer<typeof PublishResponseSchema>[\"kept_reason\"] (ed0d30a267e4). publishHandler refuses any topic under KeptTopicPrefix the way it refuses the agent prefix (a70a061a03c9), which closes the cursor rewind.",
-      "commit": "a70a061a03c9, ed0d30a267e4, 4958a413c57a",
-      "test": "TestAPublishToTheListenersKeptLaneIsRefused, over the role and the cursor subject; at the pre-change files 'status 200' and the publish stored on the kept subject."
-    }
-  ],
-  "proof": [
-    {
-      "criterion": "Acceptance 2a and 2b at this round's head: a role message published with no holder reaches the next holder's session once, and one published while the claim has lapsed reaches the next claimant once, each carrying kept_at; and a held role still answers 200 with no kept field.",
-      "surface": "packages/envoy/scripts/e2e-local.sh: the real envoy-listener binary built from this head, a real NATS server (internal/testnats/cmd/natsd) and a real session process on a serving port.",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && bash packages/envoy/scripts/e2e-local.sh",
-      "observed": "Exit 0. 'unclaimed-role window: kept message 18f6900b7aeeb6a8e22f619e328d8733 reached the fake session exactly once, carrying kept_at'; 'lapsed-claim window: kept message af8c5579ae17e8befa9ec4de19dc22eb reached the fake session exactly once, carrying kept_at'; both PASS lines. out/e2e/: unheld role 202 {\"kept\":true,\"kept_reason\":\"unclaimed\"}; lapsed claim 202 {\"holder\":\"ses_e2e_local\",\"kept\":true,\"kept_reason\":\"holder_lapsed\"}; held role 200 {\"holder\":\"ses_e2e_local\"} with no kept field.",
-      "headSha": "2d7167658086e378d2b08ce81f9f742f0b7b8bf3",
-      "negativeControl": "The same run's keep-false control: 'keep-false control: the unheld role answered 404, nothing was stored and its claimant was handed nothing' — HTTP 404 {\"error\":\"no holder for role e2e-unkept\",\"reason\":\"unclaimed\"}, nothing on the bus for it, its claimant handed nothing."
-    },
-    {
-      "criterion": "Every blocking finding of review round 1 is fixed, and each fix is pinned by a test that did not hold before it.",
-      "surface": "cmd/listener's tests against a real nats-server, and pi-shared's against a real @legion/envoy-client over a stand-in listener.",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test -count=1 -timeout 2400s ./cmd/listener ./internal/bus ./internal/integration; cd packages/pi-shared && bun test",
-      "observed": "ok github.com/sjawhar/envoy/cmd/listener 632.935s; ok github.com/sjawhar/envoy/internal/bus 355.458s; ok github.com/sjawhar/envoy/internal/integration 98.742s; pi-shared 93 pass 0 fail. The eight new Go tests and the two TypeScript ones are listed against their findings above, each with the assertion that fails at the pre-change files.",
-      "headSha": "4958a413c57a (the tree this head changes only in packages/envoy/AGENTS.md)",
-      "negativeControl": "Each new test was run against the pre-change production files, swapped in with jj file show and cp and restored after, and each failed with the assertion quoted above; the suites are green only with the fixes in."
-    },
-    {
-      "criterion": "The refactors changed no behaviour, and the contracts package still generates its Go cleanly without the kept subjects.",
-      "surface": "The static gates and the full suites of every package the moves touched.",
-      "command": "cd packages/contracts && bun run check:go && bunx tsc --noEmit; bunx biome check packages/contracts packages/envoy-client packages/pi-envoy packages/claude-envoy packages/pi-shared; cd packages/envoy && gofmt -l cmd/listener internal && go build ./... && go vet ./...; bun test in contracts, envoy-client, pi-shared, pi-envoy, claude-envoy",
-      "observed": "check:go and tsc clean; biome 'No fixes applied'; gofmt silent, build and vet clean; bun test green in all five (contracts 328, envoy-client 1348 with 10 skipped, pi-shared 93, pi-envoy 1763 with 42 skipped, claude-envoy 301 with 15 skipped). check-private-names clean over 7061 files.",
-      "headSha": "2d7167658086e378d2b08ce81f9f742f0b7b8bf3",
-      "negativeControl": "The refactors are held by assertions that would break if a move were wrong rather than by new tests: TestStreamConfigExcludesRoleLanes still pins the stream's own subject list with the kept entry, TestEveryStreamSubjectIsClassifiedForReplay still classifies every subject the stream carries, main_test.go pins the migrated durable's filter to the consumer list, and listenerDeliveryHandler panics on a config with no guard set, as it does with no deferral set."
-    }
-  ],
-  "filesChanged": [
-    "packages/envoy/cmd/listener/role_keep.go — roleKeepScanMax, claimKeptRoleCopy, keptRoleForwardAllowed, drainAfterKeep, runKeptRoleDrain, roleKeepable, roleKeepGuards; the kept subjects taken from internal/bus.",
-    "packages/envoy/cmd/listener/confirmed.go — noHolder gated on roleKeepable and draining after a keep; senderStamp before the first resolution.",
-    "packages/envoy/cmd/listener/delivery.go — one keep decision before the lane's branches; the roleKeepDrains field on listenerDeliveryHandlerConfig and the handler's refusal of a config without it.",
-    "packages/envoy/cmd/listener/api.go — the kept-prefix refusal and the isValidRole gate on keeping.",
-    "packages/envoy/cmd/listener/main.go, durable.go — one guard set for the process; the durable filter back to bus.StreamSubjects().",
-    "packages/envoy/internal/bus/stream.go — KeptTopicPrefix, KeptRoleSubject, KeptRoleCursorSubject; streamSubjects as the consumer list and streamCarriedSubjects as the stream's; DurableNotificationSubjects deleted.",
-    "packages/envoy/internal/bus/nats.go — one exported PublishStoredAs taking its subject.",
-    "packages/envoy/internal/bus/bustest/bustest.go — the fixture builds and checks the stream from StreamCarriedSubjects().",
-    "packages/contracts/src/subject.ts, scripts/gen-go.ts, packages/envoy/internal/contracts/generated.go, .changes/unreleased/pr2588-kept-subjects.yaml — the kept subjects removed; kept_at stays.",
-    "packages/pi-shared/src/phase-reminder.ts — keep: false on the stall notice, the retry restored, a 202 read as nobody told.",
-    "packages/envoy-client/src/transport.ts — keptReason derived from the answer's schema.",
-    "packages/envoy/AGENTS.md — the kept lane's rule cites the two subject lists that now exist.",
-    "Tests: cmd/listener (role_keep_test.go, confirmed_test.go, api_test.go, main_test.go, dispatch_resolution_test.go, session_delivery_test.go, write_routes_frozen_bus_test.go), internal/bus (kept_test.go, keeper_test.go, adhoc_topic_test.go), pi-shared (phase-reminder.test.ts)."
-  ],
-  "trickyParts": [
-    "Claiming each copy before forwarding it trades at-least-once for at-most-once: a drain that dies between its claim and its forward loses that one copy. That is the reviewer's and the architect's choice over two holders receiving one copy, and the drain's doc comment says so in those words.",
-    "drainAfterKeep resolves the holder again after a keep, which can release a lapsed claim as resolveRoleHolder always may. It runs off the request so neither caller's answer waits for it, and a resolution that failed changes nothing.",
-    "The two subject lists are a real distinction now and have to stay one: StreamSubjects() is what every consumer filter takes, StreamCarriedSubjects() is what builds or checks the stream. A test that models the listener's filter takes the first; one that models the stream takes the second.",
-    "dispatch://INFRA-392 (sjawhar/legion#2596) makes an unresponsive holder keep its claim and answer 404 holder_lapsed. Its architect and implementer have both confirmed that an unresponsive holder is always a RETAINED claim, so roleKeepable sends it down the unkept path and the two changes compose with neither undoing the other. Whichever merges second reconciles; I have told both."
-  ],
-  "deviations": [
-    "Finding 4 is answered with today's 404 rather than the 400 the reviewer offered as an alternative, so no caller of this route meets a status it never gave.",
-    "The workspace was recreated twice during this round, at a release roll and again after it, and the uncommitted work was lost each time. It was re-applied and is now committed in four pushed commits; the INFRA merge lane's rescue branch legion/INFRA-839-rescue was not needed and its author has deleted it."
-  ],
-  "openQuestions": [],
-  "discoveredComplexity": [
-    "The Postgres a few cmd/listener tests need has to be unpacked onto the issue volume by hand and does not survive a pod roll; it was rebuilt twice this round. sjawhar/legion#2579 gives every issue pod a test PostgreSQL and LEGION_TEST_PG_DSN, which would remove this; the INFRA merge lane says it is in review and turns on at a later re-pin.",
-    "Without DISPATCH_TEST_DATABASE_URL the Postgres-backed cmd/listener tests do not skip: they panic 'rootless Docker not found', so a run that looks like a clean skip is a package that never ran them."
-  ]
+ "schemaVersion": 1,
+ "phase": "implement",
+ "issue": "INFRA-839",
+ "completed": "2026-10-31T10:05:00Z",
+ "round": 3,
+ "answersReviewFindings": [
+  {
+   "finding": "1. Expired copies used up the 20-copy drain budget, so fresh kept messages were not forwarded.",
+   "fix": "roleKeepDrainMax (20) now bounds forwards only; a second constant, roleKeepScanMax (200), bounds the walk, with its reason in a comment: a lane can hold nothing but copies past the window, since the stream keeps a copy 72 h against a one-hour keep window. An expired or undecodable copy costs a scan, not a forward.",
+   "commit": "a70a061a03c9",
+   "test": "TestADrainSpendsItsBudgetOnForwardsRatherThanOnExpiredCopies; at the pre-change files it fails 'the drain forwarded [], want every copy still inside the keep window: [envoy.role.forward.kept-budget-22 … -28]'."
+  },
+  {
+   "finding": "2. Two listeners draining one role both forwarded every copy, because the cursor was written once after the walk; the guard comment described a guard that did not exist. The same defect let envoy_role_kept_expired_total count one copy again on every re-walk.",
+   "fix": "claimKeptRoleCopy claims each copy before anything is done with it: it advances the cursor to that one copy's stored.Sequence under the compare-and-swap, carrying the returned sequence into the next iteration, and only the drain whose claim landed forwards, drops or passes over that copy. An error wrapping bus.ErrCursorMoved stops the drain at once, logged at debug, reporting nothing wrong. The doc states the cost: a process that dies between a claim and its forward loses that one copy rather than delivering it twice.",
+   "commit": "a70a061a03c9",
+   "test": "TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder; at the pre-change files all six copies fail with 'reached [ses_kept_drain_second ses_kept_drain_first]; a kept copy reaches exactly one holder'."
+  },
+  {
+   "finding": "3. The drain skipped beforeForward (echo, repeat, delivery-mode capability) and a kept copy carried no sender stamp.",
+   "fix": "sendToRole stamps senderStamp onto the envelope before the first resolution, so the copy a keep stores carries the sender as a live delivery's forward does. keptRoleForwardAllowed runs beforeForward for each claimed copy with the role lane's own seen (dedupeCache.Seen || attemptCache.Seen): echo skipped, repeat dedupe, a delivery-mode refusal failed with the lane's delivery_failed exception, each under its own line; only forwardAllowed forwards. withPublishRoute in confirmed_test.go now wires the attemptCache that rig left nil.",
+   "commit": "a70a061a03c9",
+   "test": "TestAKeptRoleMessageCarriesTheSenderThePublishStamped (pre-change: 'the kept copy's sender is <nil>') and TestTheDrainJudgesAKeptCopyByTheRulesEveryForwardPathApplies, echo and unadvertised mode (pre-change: 'the drain forwarded the copy 1 times, want none' in both subtests)."
+  },
+  {
+   "finding": "4. A role token rolePattern can never match was kept and answered 202, for a role no claim can take.",
+   "fix": "Keeping is (request.Keep == nil || *request.Keep) && isValidRole(role), with the reason at that line. Such a role gets exactly today's 404, byte for byte, with nothing stored; the 404 rather than a new 400, so no caller meets a status this route never gave it.",
+   "commit": "a70a061a03c9",
+   "test": "TestAPublishToARoleNoClaimCanNameIsRefusedAndKeepsNothing; at the pre-change files 'publish to a role no claim can name: status 202'."
+  },
+  {
+   "finding": "5. A keep stored after a concurrent claim's drain had read the lane waited for a claim that seldom comes inside the hour.",
+   "fix": "drainAfterKeep: after a keep lands, on the publish route and on the role lane alike, the role's holder is resolved again by role delivery's rule (resolveRoleHolder with laneHolderFresh) under roleKeepHolderWindow (5 s), and a live holder is drained to. It runs off the request, so neither caller's answer waits; a resolution that failed logs at debug and changes nothing, since the copy is stored and the next claim still takes it.",
+   "commit": "a70a061a03c9",
+   "test": "TestAKeptCopyReachesTheHolderThatClaimedTheRoleUnderTheKeep; at the pre-change files 'the copy kept for ses_kept_under_claim, which held the role already, reached it in no 20 seconds'."
+  },
+  {
+   "finding": "6. The role lane kept for a lapsed claim the restart grace retained, which no claim write ever drains.",
+   "fix": "One predicate, roleKeepable(roleHolderResult): keep for an unclaimed role, and for a lapsed claim unless store.ExpiredRoleClaimRetained. Both give-up paths call it, the publish route's first resolution included, so a retained claim keeps nothing and is answered exactly as before the kept lane: the lane's delivery_failed, the route's 404 holder_lapsed.",
+   "commit": "a70a061a03c9",
+   "test": "TestTheRoleLaneKeepsNothingForAClaimTheRestartGraceRetained; at the pre-change files 'read delivery exception: nats: timeout', the lane having kept instead of excepting."
+  },
+  {
+   "finding": "7. The phase worker's stall notice to its architect lost its retry: a 202 marked it reported, so a notice nobody claimed the role for inside the hour was dropped.",
+   "fix": "tellArchitect sends keep: false and keeps its 404 retry, which is the case the design reserves the flag for: this sender's retry is the reminding itself, and reminders never stop while the phase is open. keptNothing is roleUnheld again with a true doc comment, and a 202 that reached it anyway is read as the 404 is, so the run's next reminder publishes again under the same key.",
+   "commit": "ed0d30a267e4",
+   "test": "'a kept answer is not the architect being told, so the run's next reminder publishes again' (pre-change: expect(published[0]?.keep).toBe(false) receives undefined, and with the two keep assertions removed, reported: true where false is wanted), plus the 404 test, which now also pins keep: false on the wire."
+  },
+  {
+   "finding": "8. StreamSubjects() had become the stream's list, so every consumer filter had to remember DurableNotificationSubjects() and the tests no longer modelled the listener's filter.",
+   "fix": "streamSubjects and StreamSubjects() are the consumer list again, without the kept prefix, and durable.go calls it. streamCarriedSubjects (the consumer list plus KeptTopicPrefix + \">\") is the stream's own, read by streamCfg.Subjects, StreamCaptures and the replay classification, exported as StreamCarriedSubjects() for a caller that builds or checks the stream, which is what bustest takes. DurableNotificationSubjects and its prefix filter are deleted. Every caller was re-read: the consumer filters needed no edit and now model the listener's filter correctly; the stream-modelling tests (internal/bus/keeper_test.go, adhoc_topic_test.go, bustest) moved to streamCarriedSubjects. TestStreamConfigExcludesRoleLanes and TestEveryStreamSubjectIsClassifiedForReplay read streamCfg.Subjects and are unchanged.",
+   "commit": "4958a413c57a",
+   "test": "No new test: a refactor with no behaviour of its own, held by the suites above, which pass unchanged."
+  },
+  {
+   "finding": "9. Listener-only subjects lived in the shared contracts package with no TypeScript caller, hand-copied into the Go generator, so the string existed three times.",
+   "fix": "KeptTopicPrefix, KeptRoleSubject and KeptRoleCursorSubject are defined in internal/bus/stream.go beside ExceptionTopicPrefix and DeliverSubjectPrefix. The three TypeScript exports, their types, the gen-go.ts block and the generated Go are deleted, and pr2588-kept-subjects.yaml announces only the envelope's kept_at, which stays in contracts because both hosts read it.",
+   "commit": "4958a413c57a",
+   "test": "bun run check:go passes on the regenerated file, so the string exists once."
+  },
+  {
+   "finding": "10. A package-global guard map and a cfg == nil branch that existed only for tests.",
+   "fix": "The guard set is a roleKeepGuards field on listenerDeliveryHandlerConfig beside deferredUnplaceable, built once in main.go and in each harness, and listenerDeliveryHandler refuses a config without it as it refuses one without deferredUnplaceable. The global and both nil branches (startKeptRoleDrain's and drainAfterKeep's) are gone, and the rigs that claim a role through POST /v1/roles/set carry a delivery. The two-listener test gives the second drain a guard set of its own, which is what a second listener has.",
+   "commit": "4958a413c57a",
+   "test": "No new test: held by the suites, and by the two-listener test, which no longer reaches into a global."
+  },
+  {
+   "finding": "11. The pull request body carried no contract change census for the publish route's 404 → 202 at a process boundary.",
+   "fix": "A '## Contract change census' section lists every caller of POST /v1/messages/publish for a role topic with its disposition: the five in this repository's production code (the client and the two envoy_publish tools adapted; the phase reminder and the daemon's notice publisher opted out with keep: false), the four scripts and live proofs (the rig adapted; three unaffected, each because it publishes to a role a live session holds), and the four hits outside it. theorem-labs/agent-infra holds no caller: two Pulumi.prod.yaml comments naming the route, one deployment-instructions page telling agents to reach roles with the envoy_publish tool (covered by the client), and one test that classifies a delivered frame. theorem-labs/nats-server has no hit for messages/publish, notifications.role or envoy_publish. The section ends with the rollout line.",
+   "commit": "the pull request body",
+   "test": "The search is recorded in the section: ripgrep over this repository and GitHub code search over the other two, on main, for the three terms."
+  },
+  {
+   "finding": "Minors: the lane's duplicated keep call, the PublishStoredOn/PublishStoredAs pair, the hand-copied keptReason union, and the authz hardening on the publish route.",
+   "fix": "The lane keeps in one decision before its branches (a70a061a03c9). One exported PublishStoredAs(ctx, subject, item, msgID) error, with delivery.go passing the exception's own topic and role_keep.go the kept subject (4958a413c57a). keptReason is z.infer<typeof PublishResponseSchema>[\"kept_reason\"] (ed0d30a267e4). publishHandler refuses any topic under KeptTopicPrefix the way it refuses the agent prefix (a70a061a03c9), which closes the cursor rewind.",
+   "commit": "a70a061a03c9, ed0d30a267e4, 4958a413c57a",
+   "test": "TestAPublishToTheListenersKeptLaneIsRefused, over the role and the cursor subject; at the pre-change files 'status 200' and the publish stored on the kept subject."
+  }
+ ],
+ "proof": [
+  {
+   "criterion": "Acceptance 2a and 2b at this round's head: a role message published with no holder reaches the next holder's session once, and one published while the claim has lapsed reaches the next claimant once, each carrying kept_at; and a held role still answers 200 with no kept field.",
+   "surface": "packages/envoy/scripts/e2e-local.sh: the real envoy-listener binary built from this head, a real NATS server (internal/testnats/cmd/natsd) and a real session process on a serving port.",
+   "command": "cd -- \"$LEGION_WORKSPACE\" && bash packages/envoy/scripts/e2e-local.sh",
+   "observed": "Exit 0. 'unclaimed-role window: kept message 18f6900b7aeeb6a8e22f619e328d8733 reached the fake session exactly once, carrying kept_at'; 'lapsed-claim window: kept message af8c5579ae17e8befa9ec4de19dc22eb reached the fake session exactly once, carrying kept_at'; both PASS lines. out/e2e/: unheld role 202 {\"kept\":true,\"kept_reason\":\"unclaimed\"}; lapsed claim 202 {\"holder\":\"ses_e2e_local\",\"kept\":true,\"kept_reason\":\"holder_lapsed\"}; held role 200 {\"holder\":\"ses_e2e_local\"} with no kept field.",
+   "headSha": "db64c79daa3860604ddac05c833be00ea1d07e63 (re-run at the forward-merge head; first measured at eb34676a9c406cd8f6c5317e694e4c1ef55bd9a4)",
+   "negativeControl": "The same run's keep-false control: 'keep-false control: the unheld role answered 404, nothing was stored and its claimant was handed nothing' — HTTP 404 {\"error\":\"no holder for role e2e-unkept\",\"reason\":\"unclaimed\"}, nothing on the bus for it, its claimant handed nothing."
+  },
+  {
+   "criterion": "Every blocking finding of review round 1 is fixed, and each fix is pinned by a test that did not hold before it.",
+   "surface": "cmd/listener's tests against a real nats-server, and pi-shared's against a real @legion/envoy-client over a stand-in listener.",
+   "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test -count=1 -timeout 2400s ./cmd/listener ./internal/bus ./internal/integration; cd packages/pi-shared && bun test",
+   "observed": "ok github.com/sjawhar/envoy/cmd/listener 632.935s; ok github.com/sjawhar/envoy/internal/bus 355.458s; ok github.com/sjawhar/envoy/internal/integration 98.742s; pi-shared 93 pass 0 fail. The eight new Go tests and the two TypeScript ones are listed against their findings above, each with the assertion that fails at the pre-change files.",
+   "headSha": "db64c79daa3860604ddac05c833be00ea1d07e63 (re-run at the forward-merge head; first measured at eb34676a9c406cd8f6c5317e694e4c1ef55bd9a4)",
+   "negativeControl": "Each new test was run against the pre-change production files, swapped in with jj file show and cp and restored after, and each failed with the assertion quoted above; the suites are green only with the fixes in."
+  },
+  {
+   "criterion": "The refactors changed no behaviour, and the contracts package still generates its Go cleanly without the kept subjects.",
+   "surface": "The static gates and the full suites of every package the moves touched.",
+   "command": "cd packages/contracts && bun run check:go && bunx tsc --noEmit; bunx biome check packages/contracts packages/envoy-client packages/pi-envoy packages/claude-envoy packages/pi-shared; cd packages/envoy && gofmt -l cmd/listener internal && go build ./... && go vet ./...; bun test in contracts, envoy-client, pi-shared, pi-envoy, claude-envoy",
+   "observed": "Exit 0 at the forward-merge head. 'unclaimed-role window: kept message 3762635a3b5d81ee3fcc14d9be7ab21e reached the fake session exactly once, carrying kept_at'; 'lapsed-claim window: kept message 0d7691cc6669efdd9ffc1b7486cdecd9 reached the fake session exactly once, carrying kept_at'; both PASS lines.",
+   "headSha": "db64c79daa3860604ddac05c833be00ea1d07e63 (re-run at the forward-merge head; first measured at eb34676a9c406cd8f6c5317e694e4c1ef55bd9a4)",
+   "negativeControl": "The refactors are held by assertions that would break if a move were wrong rather than by new tests: TestStreamConfigExcludesRoleLanes still pins the stream's own subject list with the kept entry, TestEveryStreamSubjectIsClassifiedForReplay still classifies every subject the stream carries, main_test.go pins the migrated durable's filter to the consumer list, and listenerDeliveryHandler panics on a config with no guard set, as it does with no deferral set."
+  }
+ ],
+ "filesChanged": [
+  "packages/envoy/cmd/listener/role_keep.go — roleKeepScanMax, claimKeptRoleCopy, keptRoleForwardAllowed, drainAfterKeep, runKeptRoleDrain, roleKeepable, roleKeepGuards; the kept subjects taken from internal/bus.",
+  "packages/envoy/cmd/listener/confirmed.go — noHolder gated on roleKeepable and draining after a keep; senderStamp before the first resolution.",
+  "packages/envoy/cmd/listener/delivery.go — one keep decision before the lane's branches; the roleKeepDrains field on listenerDeliveryHandlerConfig and the handler's refusal of a config without it.",
+  "packages/envoy/cmd/listener/api.go — the kept-prefix refusal and the isValidRole gate on keeping.",
+  "packages/envoy/cmd/listener/main.go, durable.go — one guard set for the process; the durable filter back to bus.StreamSubjects().",
+  "packages/envoy/internal/bus/stream.go — KeptTopicPrefix, KeptRoleSubject, KeptRoleCursorSubject; streamSubjects as the consumer list and streamCarriedSubjects as the stream's; DurableNotificationSubjects deleted.",
+  "packages/envoy/internal/bus/nats.go — one exported PublishStoredAs taking its subject.",
+  "packages/envoy/internal/bus/bustest/bustest.go — the fixture builds and checks the stream from StreamCarriedSubjects().",
+  "packages/contracts/src/subject.ts, scripts/gen-go.ts, packages/envoy/internal/contracts/generated.go, .changes/unreleased/pr2588-kept-subjects.yaml — the kept subjects removed; kept_at stays.",
+  "packages/pi-shared/src/phase-reminder.ts — keep: false on the stall notice, the retry restored, a 202 read as nobody told.",
+  "packages/envoy-client/src/transport.ts — keptReason derived from the answer's schema.",
+  "packages/envoy/AGENTS.md — the kept lane's rule cites the two subject lists that now exist.",
+  "Tests: cmd/listener (role_keep_test.go, confirmed_test.go, api_test.go, main_test.go, dispatch_resolution_test.go, session_delivery_test.go, write_routes_frozen_bus_test.go), internal/bus (kept_test.go, keeper_test.go, adhoc_topic_test.go), pi-shared (phase-reminder.test.ts)."
+ ],
+ "trickyParts": [
+  "Claiming each copy before forwarding it trades at-least-once for at-most-once: a drain that dies between its claim and its forward loses that one copy. That is the reviewer's and the architect's choice over two holders receiving one copy, and the drain's doc comment says so in those words.",
+  "drainAfterKeep resolves the holder again after a keep, which can release a lapsed claim as resolveRoleHolder always may. It runs off the request so neither caller's answer waits for it, and a resolution that failed changes nothing.",
+  "The two subject lists are a real distinction now and have to stay one: StreamSubjects() is what every consumer filter takes, StreamCarriedSubjects() is what builds or checks the stream. A test that models the listener's filter takes the first; one that models the stream takes the second.",
+  "dispatch://INFRA-392 (sjawhar/legion#2596) makes an unresponsive holder keep its claim and answer 404 holder_lapsed. Its architect and implementer have both confirmed that an unresponsive holder is always a RETAINED claim, so roleKeepable sends it down the unkept path and the two changes compose with neither undoing the other. Whichever merges second reconciles; I have told both."
+ ],
+ "deviations": [
+  "Finding 4 is answered with today's 404 rather than the 400 the reviewer offered as an alternative, so no caller of this route meets a status it never gave.",
+  "The workspace was recreated twice during this round, at a release roll and again after it, and the uncommitted work was lost each time. It was re-applied and is now committed in four pushed commits; the INFRA merge lane's rescue branch legion/INFRA-839-rescue was not needed and its author has deleted it.",
+  "The base legion/INFRA-594 moved again and GitHub read the pull request dirty, so it ran no lane even on a code head pushed alone. The base was merged forward at db64c79daa38, resolving packages/envoy/AGENTS.md by taking the base's layout and re-applying this branch's meaning, and CI runs exist on the merge head. The fingerprint changed, so this head takes a full test round."
+ ],
+ "openQuestions": [],
+ "discoveredComplexity": [
+  "The Postgres a few cmd/listener tests need has to be unpacked onto the issue volume by hand and does not survive a pod roll; it was rebuilt twice this round. sjawhar/legion#2579 gives every issue pod a test PostgreSQL and LEGION_TEST_PG_DSN, which would remove this; the INFRA merge lane says it is in review and turns on at a later re-pin.",
+  "Without DISPATCH_TEST_DATABASE_URL the Postgres-backed cmd/listener tests do not skip: they panic 'rootless Docker not found', so a run that looks like a clean skip is a package that never ran them.",
+  "A code head pushed alone still gets no CI while GitHub reads the pull request dirty: the conflicting base is the gate, not the push shape. Both are needed - the code head alone AND a head GitHub can compute a merge ref for."
+ ],
+ "forwardMerge": {
+  "from": "eb34676a9c406cd8f6c5317e694e4c1ef55bd9a4",
+  "to": "db64c79daa3860604ddac05c833be00ea1d07e63",
+  "base": "legion/INFRA-594 moved 0d71712bd594344706b3c8d247e7896e49450822 to 811eda387b4b6e1364efde270516a5bf402ec608",
+  "why": "GitHub read the pull request mergeable false, mergeable_state dirty, so it computed no merge ref and ran no lane at all; the code head pushed alone still had no CI run. After the merge it reads mergeable true, mergeable_state unstable, and runs 41188931937 (CI) and 41188931836 (PR Title) exist on the head.",
+  "conflict": "packages/envoy/AGENTS.md alone, in two regions, layout against content: the base re-wrapped those bullets into multi-line form keeping the old wording, this branch rewrote the wording of four places on one line each. Resolved by taking the base's text as it wrote it and re-applying this branch's four meanings into the base's own layout; diff of the resolved file against the base's copy shows those four changes and nothing else.",
+  "fingerprintBefore": "f74d71f15d3577b87c263ecf62fde07f7be0748c9eadb21175b86a02d4d9aaf6",
+  "fingerprintAfter": "9bf05077cb2dc166525022c9b44356832cad55c651cd7bbc8ff60e1ab32ac645",
+  "verdict": "changed; each side is the pull request's own diff against its base at that head, so the change is the base's movement plus this round's fixes, and the head needs a full test round rather than the bare gates. Posted as a comment on the pull request.",
+  "rebuilt": "Built the branch and ran its proof again at the merge head: go test -p 1 ./internal/store ./cmd/listener ./internal/bus ok (32.132s, 645.824s, 332.726s) under GOMAXPROCS=4 GOMEMLIMIT=12GiB, sampled peak 3.84 GiB of 19 from 491 samples; gofmt, build and vet clean; e2e-local.sh exit 0 with both kept windows delivered exactly once carrying kept_at and the keep-false control refused 404 with nothing stored; check-private-names clean."
+ }
 }
