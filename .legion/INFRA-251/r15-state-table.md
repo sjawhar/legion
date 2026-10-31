@@ -37,10 +37,13 @@ decision and whatever named the older one leaves it alone.
 | HELD(c,d) | KEPT | the same transaction (the issue left `c`'s tree); `releaseKeptDecisions` at `RetireDelivery`; `Store.ReleaseHeldDecisions` at the send-time drop | the delivery told it to nobody it was owed to, or ended without telling |
 | HELD(c,d) | HELD(c,d′) | the claim store's `putDelivery` | a death took the task back under a new id (`interrupted`, `takeBackPending`) |
 
-Two transitions write a fresh catch-up as well, so that nothing waits KEPT while the tree it is
+Three transitions write a fresh catch-up as well, so that nothing waits KEPT while the tree it is
 owed to has an architect to hear it: `HandOverKept` writes one to the architect of **each** tree
 the rows it released are owed to now (`workflow.CatchUpTheTreesOwed`, for the launch that tree's
-architect claim stands at), and so does the send-time drop in the daemon's `rootTask`.
+architect claim stands at), the send-time drop in the daemon's `rootTask` does too, and so does an
+adoption (`workflow.Engine.Adopt`), whose live tree's architect already runs and gets no ready:
+what the adopted root kept while it waited is owed to that tree the moment the record moves it
+(property seed 48 found the adoption telling nobody; `TestAnAdoptionIntoATreeWhoseArchitectRunsWritesItACatchUp`).
 
 ## The validity rule, on both sides
 
