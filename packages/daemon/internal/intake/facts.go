@@ -571,13 +571,22 @@ func (PullRequestChecks) isFact() {}
 // request (workflowRuntime.readIssuePullRequest). Mergeable is record.MergeabilityUnknown while
 // GitHub is still computing it, record.MergeabilityMergeable or record.MergeabilityConflicting
 // once it has. MergeState is
-// GitHub's own merge state for the head from the same answer's `mergeable_state`, which the
-// engine records beside Mergeable and decides nothing on: it tells a head GitHub holds on a check
-// or a review the repository requires from one GitHub would merge now, which Mergeable cannot.
+// GitHub's own merge state for the head from the same answer's `mergeable_state`, and it is what
+// an approval standing on the head waits for: a state the issue may advance on
+// (record.MergeState.Mergeable) ends the round in accepting, and any other state leaves the
+// approval standing where it is and tells the architect and the reviewer so (workflow's
+// reviewRound). It tells a head GitHub holds on a check or a review the repository requires from
+// one GitHub would merge now, which Mergeable cannot.
+//
+// HeadSHA is the head GitHub answered both of them for, from the same answer's `head.sha`. Every
+// read fills it, and the engine records the answer only while the record still stands at that
+// head (workflow's mergeability): a read is one round trip to GitHub, a push can land during it,
+// and a verdict about another head's tree says nothing about this one.
 type PullRequestMergeability struct {
 	Repo       string
 	Number     int
 	Base       string
+	HeadSHA    string
 	Mergeable  record.Mergeability
 	MergeState record.MergeState
 }

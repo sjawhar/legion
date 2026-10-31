@@ -7,8 +7,8 @@ import (
 
 // 0069 records the commit a push left a pull request's base branch at. No release before it
 // recorded a push onto a base at all, so a pull request written before it has none to carry: the
-// column takes the empty value, which reads as "no push onto the base recorded", and the next
-// two-minute pass reads the pull request regardless.
+// column takes the empty value, which reads as "no push onto the base recorded", and the daemon
+// reads that pull request again at its issue's next event, its next handoff or the next start.
 func TestAPullRequestRecordedBefore0069HasNoMovedBase(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()

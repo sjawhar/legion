@@ -328,13 +328,14 @@ type SuperviseRequest struct {
 	// budget, the runner finishes this row rather than retrying it as RequestRetry with fresh
 	// budgets: the failed claim stays failed for the boot report to name.
 	RuleResume bool `json:"ruleResume,omitempty"`
-	// Quiesce is the role whose phase a start takes over without that role's completion: CI settled
-	// red while it tested, reviewed a round it had not completed, or worked toward its READY as the
-	// merger (workflow's TriggerChecksRed). The start acts only once that role's claim is out of its
-	// turn (supervise.Machine.Quiesce), so the two never write the shared workspace together. It is
-	// empty for every other start, which a completion or a person's move hands the phase, for a move
-	// between two phases of one role (retro back to implementing on a red, where the implementer
-	// keeps its turn and is handed the new task once it ends), and for every other operation.
+	// Quiesce is the role whose phase a start takes over without that role's completion: the head
+	// started conflicting with its base while that role worked, or the reviewer's own review
+	// decided a round it had not completed (workflow's takenOver). The start acts only once that
+	// role's claim is out of its turn (supervise.Machine.Quiesce), so the two never write the
+	// shared workspace together. It is empty for every other start, which a completion or a
+	// person's move hands the phase, for a move between two phases of one role (retro back to
+	// implementing, where the implementer keeps its turn and is handed the new task once it
+	// ends), and for every other operation.
 	Quiesce claim.Role `json:"quiesce,omitempty"`
 	// Linger is the root generation whose linger a tree close expires. A member keeps its
 	// generation across re-admission, so the close acts only while its tree lingers at that root
@@ -736,12 +737,13 @@ func validateOutboxPayload(payload OutboxPayload) error {
 	return nil
 }
 
-// validNoticeKind is every notice kind the daemon publishes, and `ready-refused`, which it writes
-// no more: READY went with the daemon's merge, and the kind is kept only so a row an older daemon
-// queued that migration 0073's delete missed still decodes rather than failing its row for good.
+// validNoticeKind is every notice kind the daemon publishes, which is also every kind a row may
+// decode as (DecodeOutboxPayload). `ready-refused` is not one of them: READY went with the
+// daemon's merge, so nothing writes the kind, and migration 0073 deletes every row an older
+// daemon left carrying it, in the same migration that drops the four merge kinds from this list.
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "pull-request-missing", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted", "session-lost", "session-store-fault":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "pull-request-missing", "design-approved", "design-changes-requested", "carried-gate-opened", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted", "session-lost", "session-store-fault":
 		return true
 	default:
 		return false

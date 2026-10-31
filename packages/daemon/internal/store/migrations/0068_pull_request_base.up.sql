@@ -12,8 +12,8 @@
 -- pushes to.
 --
 -- Every existing row takes '', which reads as "not recorded yet" rather than a base the migration
--- would have to invent from a column that does not hold one: the next GitHub read of the pull
--- request fills it, since the two-minute required-checks pass already decodes the base of every
--- open pull request, and until then no base push matches the row.
+-- would have to invent from a column that does not hold one: the daemon's next read of the pull
+-- request fills it, since every such read decodes the base GitHub names, and until then no base
+-- push matches the row.
 alter table pull_requests add column base text not null default '';
 create index pull_requests_open_on_base on pull_requests (repo, base) where state = 'open';

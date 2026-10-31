@@ -116,8 +116,16 @@ func inWindow(named record.Named, start string, since time.Time) bool {
 // wait for (arrivalPushes), and returns the named moves its judgement left (names, the run's). The
 // recorded CI settlement stays, as CheckedHead's: it is the new head's too once every push between
 // them is known to change only .legion/ (settled), and a settlement for another head replaces it
-// (SettlementFor). The move and the chain's pushes join the moves made (madeMoves), and the pushes
-// they spend go (unspentPushes). Nothing here judges the settlement: a CI result moves no issue
+// (SettlementFor). GitHub's own verdict on merging the head - Mergeability and MergeState - goes
+// when the pushes say the move changed code (codeMove), and stays when they say it changed only
+// the issue's own handoffs, the same test that carries an approval across (carriedBack): a
+// handoff-only push changes nothing GitHub checks, so the verdict read at the head before it
+// still describes the tree being merged, while a code push changes what GitHub would check, and
+// the verdict is unknown until GitHub answers for the new head. A move the recorded pushes cannot
+// link yet is neither: it keeps the verdict, as it keeps an approval that no longer stands, and
+// the push that links it replays the arrival (replayRun) and takes the verdict then. The move and
+// the chain's pushes join the moves made (madeMoves), and the pushes they spend go
+// (unspentPushes). Nothing here judges the settlement: a CI result moves no issue
 // (dispatch://INFRA-714/spec R1), so a head arrives counting nothing.
 func advance(pr record.PullRequest, arrival Arrival, headSHA string, names []record.Named) (record.PullRequest, bool, []record.Named) {
 	read := arrivalPushes(pr, arrival, headSHA, names)
@@ -129,6 +137,11 @@ func advance(pr record.PullRequest, arrival Arrival, headSHA string, names []rec
 		chain = chainOf(read.pushes, pr.HeadSHA, headSHA)
 		chained = chain != nil
 	}
+	// The verdict is read against the pull request's own pushes, before the move spends them, as
+	// the reader of an approval reads it (ApprovalStands).
+	if codeMove(pr.Pushes, pr.HeadSHA, headSHA) {
+		pr.Mergeability, pr.MergeState = "", record.MergeStateUnread
+	}
 	if !read.waits {
 		// An arrival that waits is judged for now by pushes that may not be its own (provisional),
 		// so it makes no move and spends no push: each stays for the arrival whose own it is.
@@ -137,6 +150,17 @@ func advance(pr record.PullRequest, arrival Arrival, headSHA string, names []rec
 	pr.Pushes = unspentPushes(pr.Pushes, pr.Moves, true)
 	pr.HeadSHA = headSHA
 	return pr, chained && !read.waits, read.names
+}
+
+// codeMove is whether the recorded pushes say the move from previous to head changed code: a
+// chain of pushes that each said which head it replaced leads from previous to head (chainOf),
+// and no such chain changed only the issue's own handoffs (carriedBack). A move no chain reaches
+// is not one: its pushes have not arrived, and until they do nothing says what it changed.
+func codeMove(pushes []record.ClassifiedPush, previous, head string) bool {
+	if previous == "" || previous == head {
+		return false
+	}
+	return chainOf(pushes, previous, head) != nil && !carriedBack(pushes, head, previous)
 }
 
 // maxMoves bounds the moves a pull request remembers (record.PullRequest.Moves): a push for a move
@@ -1091,6 +1115,19 @@ func ApprovalStands(pr record.PullRequest, reviewed string) bool {
 		return false
 	}
 	return carriedBack(pr.Pushes, pr.HeadSHA, reviewed)
+}
+
+// ApprovalSetAside is the one spelling of the state an approval of reviewed is in when it neither
+// stands at the pull request's head nor waits on anything the record already holds: it does not
+// carry up to the head (ApprovalStands), and no push that may change code is on its way to
+// replace that head (CodeOnItsWay), whose arrival would decide it. A recorded push carries an
+// approval only from the head it replaced, so an approval is set aside when the webhook of the
+// push above it was lost, still waits behind the GitHub consumer's backlog, or came from a
+// listener that could not say what it changed - and GitHub's compare of the two heads is the only
+// thing that settles it (daemon's readApprovalCarry, the outbox's approvalCarry, workflow's
+// carryApproval and stuckApprovedOtherCode).
+func ApprovalSetAside(pr record.PullRequest, reviewed string) bool {
+	return reviewed != "" && !ApprovalStands(pr, reviewed) && !CodeOnItsWay(pr)
 }
 
 // CodeOnItsWay says whether a push that may change code lies on the path forward from the pull

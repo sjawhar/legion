@@ -3,7 +3,6 @@ package workflow
 import (
 	"context"
 	"fmt"
-	"slices"
 
 	"github.com/jackc/pgx/v5"
 
@@ -727,19 +726,23 @@ func (e *Engine) tellGateMoved(ctx context.Context, tx pgx.Tx, key string, versi
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, root.Tree); err != nil || lingers {
 		return err
 	}
-	project, err := claim.ProjectToken(root.Project)
+	members, err := e.store.TreeIssues(ctx, tx, root.Tree)
 	if err != nil {
 		return err
 	}
-	// The tree's architect owns the tree, so its claim is the tree root's; the phase it works
-	// itself (accepting) is that same claim, and is told once with it.
-	architect, err := claim.NewToken(project, root.Tree, claim.RoleArchitect)
-	if err != nil {
-		e.logOnCommit(ctx, "workflow: the design gate moved and its tree's architect could not be named, so it is not told",
-			"issue", key, "tree", root.Tree, "version", version, "open", open, "error", err)
-		architect = ""
+	// The members first, then the tree's architect, which owns the tree and so is named on the
+	// tree root; the phase it works itself (accepting) is that same claim, and is told once with
+	// it.
+	recipients := make([]roleRecipient, 0, len(members)+1)
+	for _, member := range members {
+		if role := RoleFor(member.Phase); role != claim.RoleArchitect {
+			recipients = append(recipients, roleRecipient{issue: member.Key, role: role, row: member.Key})
+		}
 	}
-	members, err := e.store.TreeIssues(ctx, tx, root.Tree)
+	recipients = append(recipients, roleRecipient{issue: root.Tree, role: claim.RoleArchitect, row: root.Tree})
+	told, err := e.addressRoles(root.Project, recipients,
+		e.logUnnamable(ctx, "workflow: the design gate moved and this holder could not be named, so it is not told",
+			"tree", root.Tree, "version", version, "open", open))
 	if err != nil {
 		return err
 	}
@@ -750,35 +753,14 @@ func (e *Engine) tellGateMoved(ctx context.Context, tx pgx.Tx, key string, versi
 		detail = "the version is approved, so the design you are working to is the approved one. A merge the closed gate held is released."
 	}
 	body := fmt.Sprintf("The design gate of %s %s at spec version %d: %s", root.Tree, moved, version, detail)
-	var told []claim.Token
-	if architect != "" {
-		told = append(told, architect)
-	}
-	for _, member := range members {
-		role := RoleFor(member.Phase)
-		if role == "" || role == claim.RoleArchitect {
-			continue
-		}
-		token, err := claim.NewToken(project, member.Key, role)
-		if err != nil {
-			e.logOnCommit(ctx, "workflow: the design gate moved and this holder could not be named, so it is not told",
-				"issue", member.Key, "tree", root.Tree, "role", role, "version", version, "open", open, "error", err)
-			continue
-		}
-		if slices.Contains(told, token) {
-			continue
-		}
-		told = append(told, token)
-		if err := e.enqueue(ctx, tx, member.Key, record.RoleMessage{Role: string(token), Body: body}); err != nil {
+	for _, to := range told {
+		if err := e.enqueue(ctx, tx, to.issue, record.RoleMessage{Role: string(to.token), Body: body}); err != nil {
 			return err
 		}
 	}
 	e.logOnCommit(ctx, "workflow: the design gate moved and every phase holder of the tree is told", "issue", key, "tree", root.Tree,
 		"version", version, "open", open, "told", len(told))
-	if architect == "" {
-		return nil
-	}
-	return e.enqueue(ctx, tx, root.Tree, record.RoleMessage{Role: string(architect), Body: body})
+	return nil
 }
 
 // tellChangesOnce tells fact's changes request to its issue's architect once, by a notice or by the

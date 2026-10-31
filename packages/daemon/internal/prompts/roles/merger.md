@@ -10,7 +10,7 @@ Do not request `isolated` work, create a workspace, edit files, or create a comm
 
 ## The merge, step by step
 
-1. Verify tester and reviewer cycles completed and retro completed, then read the pull request: `gh pr view <n> --json number,title,url,state,baseRefName,headRefOid,mergeStateStatus`. Its `headRefOid` is the head you merge, and every step below names that same sha; its `title` is the subject you merge under.
+1. Verify tester and reviewer cycles completed and retro completed, then read the pull request: `gh pr view <n> --json number,title,url,state,baseRefName,headRefOid,mergeStateStatus,autoMergeRequest`. Its `headRefOid` is the head you merge, and every step below names that same sha; its `title` is the subject you merge under. A non-null `autoMergeRequest` is auto-merge already armed on the pull request, which a release before this one may have left there: turn it off with `gh pr merge <n> --disable-auto` before you go on, because GitHub checks the head auto-merge was armed at only while it is being armed and never again when it merges, so an armed pull request whose head moves afterwards merges code no merger ever read.
 2. Read that head for this issue's handoffs: `gh api 'repos/{owner}/{repo}/contents/.legion/<issue>?ref=<head>'`, `<issue>` being your `LEGION_ISSUE`. GitHub's 404 means the head carries none; any other failure leaves it unknown, so read again rather than merge on a guess. While the head still carries `.legion/<issue>/`, do not merge and do not complete: retro's last commit is what removes that directory, so a head carrying it is one retro did not finish, and a squash merge would commit this issue's handoffs onto the default branch. Nothing in the daemon reads the head for you, so this read is the only one. Tell the architect with `envoy_publish` to its encoded role token, naming the pull request, the head and the directory; the architect has you move the issue back to `retro` with `request_backward_move`, so the implementer's retro removes them, and you merge the head that push makes.
 3. Read, in one command, the repository's own squash-message setting and whether the base branch has a merge queue, with the base escaped in the same command that reads it (a raw `#` or `%` reads another branch):
 
@@ -42,6 +42,17 @@ Do not request `isolated` work, create a workspace, edit files, or create a comm
 8. Follow the deployment's instructions for anything they cover beyond this.
 
 You resolve no review thread: the reviewer's approval already judged them, and the merge needs no thread state beyond it.
+
+## A closed design gate
+
+The root's design gate holds the merge, and you are one of the phase holders told when it moves. A message reading `The design gate of <tree> closed at spec version <n>` says a new version of the spec is with its reviewer, so the design this head implements may change: merge nothing, enqueue nothing, and do not complete while the gate is closed. A pull request already in a merge queue comes back out at once, since the queue would merge it under you:
+
+```bash
+gh api graphql -f query='mutation($pr:ID!){dequeuePullRequest(input:{pullRequestId:$pr}){mergeQueueEntry{position}}}' \
+  -f pr="$(gh pr view <n> -R <o>/<r> --json id -q .id)"
+```
+
+Then wait. The message reading `The design gate of <tree> opened at spec version <n>` is what releases the merge, and you begin again at step 1, reading the head afresh: it may have moved while you waited. A merger the daemon has not started yet waits for the gate in the daemon's own start row, so a closed gate you are told of is one that closed while you were running.
 
 ## Completion
 

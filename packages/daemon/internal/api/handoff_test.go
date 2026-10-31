@@ -45,75 +45,38 @@ func (t handoffTokens) ReadToken(ctx context.Context, role appauth.AppRole, owne
 	return lease, err
 }
 
-// handoffFile is a handoff of phase word as a worker stamps it for issue: READY reads only whether
-// the head still carries the directory, never what a file holds.
-func handoffFile(word, issue string) string {
-	return fmt.Sprintf(`{"schemaVersion":1,"phase":%q,"issue":%q,"completed":"2026-10-09T08:00:00Z"}`, word, issue)
-}
-
 // handoffGitHub is GitHub's REST API for one repository, acme/widgets unless a test names another
-// (repo), as a completion reads it: READY's reads of the files at each commit (whether a head
-// still carries .legion/<issue>/) and of pull request #42 on main, and the implementer's
-// completion's list of the open pull requests on its branch, which lists #42 while it is open,
-// whatever head the list asks for. A test changes what it serves between calls; every call's
-// bearer, every path it is asked for (served) and every contents read are recorded.
+// (repo), as a completion reads it: pull request #42 on main, and the implementer's completion's
+// list of the open pull requests on its branch, which lists #42 while it is open, whatever head
+// the list asks for. A test changes what it serves between calls; every call's bearer and every
+// path it is asked for (served) are recorded.
 type handoffGitHub struct {
 	url  string
 	mu   sync.Mutex
 	repo string
-	// files is the content of each path at each commit, by sha then path; a directory is listed
-	// when a path is under it.
-	files map[string]map[string]string
 	// fail is the status GitHub answers every route under the given path prefix with instead of
 	// its answer: GitHub's trouble.
 	fail map[string]int
 	// pull request #42, on legion/LEGION-208: its head, its mergeable_state, its state, whether it
-	// is merged, and its updated_at. merge is the project's merge policy, and pullFiles the JSON
-	// array GitHub answers for the pull request's changed files.
+	// is merged, and its updated_at. pullFiles is the JSON array GitHub answers for the pull
+	// request's changed files.
 	pullHead       string
 	mergeableState string
 	pullState      string
 	merged         bool
 	pullUpdatedAt  time.Time
 	pullFiles      string
-	// What GitHub would answer for main and for the head, none of which READY reads: the rulesets'
-	// rules (with the status the read answers when not 200), the branch's protection, and the
-	// head's check runs and commit statuses. A READY that judged the head's checks itself would
-	// read the last two, and served is what proves it does not.
-	rules       string
-	rulesStatus int
-	mainBranch  string
-	checkRuns   string
-	statuses    string
-	bearers     []string
-	// served is each path the stand-in was asked for, relative to the repository, and contentsRead
-	// each path read through the contents API, as path@ref.
-	served       []string
-	contentsRead []string
-	// compare is GitHub's answer to the compare of approvedSHA with pullHead, the pull request's
-	// head; compareAnswers holds the answer to any other basehead (<base>...<head>), and one in
-	// neither is GitHub's 404 (fail makes the compare fail outright); compareRead is each basehead
-	// READY asked it for.
-	compare        string
-	compareAnswers map[string]string
-	compareRead    []string
+	bearers        []string
+	// served is each path the stand-in was asked for, relative to the repository.
+	served []string
 }
 
 func newHandoffGitHub(t *testing.T) *handoffGitHub {
 	t.Helper()
 	g := &handoffGitHub{
-		files: map[string]map[string]string{}, fail: map[string]int{}, repo: "acme/widgets",
+		fail: map[string]int{}, repo: "acme/widgets",
 		pullFiles: `[{"filename":"src/main.go"}]`,
 		pullHead:  headSHA, mergeableState: "clean", pullState: "open", pullUpdatedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC),
-		rules:      `[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`,
-		mainBranch: `{"name":"main","protection":{"required_status_checks":{"contexts":["legacy"],"checks":[{"context":"legacy"}]}}}`,
-		checkRuns:  `[{"id":1,"name":"ci","status":"completed","conclusion":"success"}]`,
-		statuses:   `[{"context":"legacy","state":"success"}]`,
-		compare:    retroCompare,
-	}
-	notFound := func(w http.ResponseWriter, message string) {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = fmt.Fprintf(w, `{"message":%q,"status":"404"}`, message)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
@@ -133,10 +96,7 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 				return
 			}
 		}
-		ref := r.URL.Query().Get("ref")
 		switch {
-		case path == "branches/main":
-			_, _ = io.WriteString(w, g.mainBranch)
 		case path == "pulls/42":
 			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"base":{"ref":"main"},"mergeable_state":%q,"state":%q,"merged":%t,"updated_at":%q}`,
 				g.pullHead, g.mergeableState, g.pullState, g.merged, g.pullUpdatedAt.Format(time.RFC3339))
@@ -147,43 +107,8 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 			}
 			_, _ = fmt.Fprintf(w, `[{"number":42,"state":"open","html_url":"https://github.com/%s/pull/42","body":"Dispatch: LEGION-208","head":{"ref":"legion/LEGION-208","sha":%q},"base":{"ref":"main"},"updated_at":%q}]`,
 				g.repo, g.pullHead, g.pullUpdatedAt.Format(time.RFC3339))
-		case path == "rules/branches/main":
-			if g.rulesStatus != 0 {
-				w.WriteHeader(g.rulesStatus)
-			}
-			_, _ = io.WriteString(w, g.rules)
-		case strings.HasSuffix(path, "/check-runs"):
-			_, _ = fmt.Fprintf(w, `{"total_count":%d,"check_runs":%s}`, strings.Count(g.checkRuns, `"name"`), g.checkRuns)
-		case strings.HasSuffix(path, "/status"):
-			_, _ = fmt.Fprintf(w, `{"statuses":%s}`, g.statuses)
 		case path == "pulls/42/files":
 			_, _ = io.WriteString(w, g.pullFiles)
-		case strings.HasPrefix(path, "contents/"):
-			file := strings.TrimPrefix(path, "contents/")
-			g.contentsRead = append(g.contentsRead, file+"@"+ref)
-			var listing []string
-			for name := range g.files[ref] {
-				if strings.HasPrefix(name, file+"/") {
-					listing = append(listing, fmt.Sprintf(`{"name":%q,"path":%q,"type":"file"}`, strings.TrimPrefix(name, file+"/"), name))
-				}
-			}
-			if len(listing) == 0 {
-				notFound(w, "Not Found")
-				return
-			}
-			_, _ = io.WriteString(w, "["+strings.Join(listing, ",")+"]")
-		case strings.HasPrefix(path, "compare/"):
-			basehead := strings.TrimPrefix(path, "compare/")
-			g.compareRead = append(g.compareRead, basehead)
-			answer, known := g.compareAnswers[basehead]
-			if basehead == approvedSHA+"..."+g.pullHead {
-				answer, known = g.compare, true
-			}
-			if !known {
-				notFound(w, "Not Found")
-				return
-			}
-			_, _ = io.WriteString(w, answer)
 		default:
 			http.NotFound(w, r)
 		}
@@ -193,28 +118,11 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 	return g
 }
 
-// put is content at path of commit sha.
-func (g *handoffGitHub) put(sha, path, content string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.files[sha] == nil {
-		g.files[sha] = map[string]string{}
-	}
-	g.files[sha][path] = content
-}
-
 // set changes what the fake serves, under its lock.
 func (g *handoffGitHub) set(change func(g *handoffGitHub)) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	change(g)
-}
-
-// reads is each contents read made so far, as path@ref.
-func (g *handoffGitHub) reads() []string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return append([]string(nil), g.contentsRead...)
 }
 
 // serves is each path the stand-in was asked for so far, relative to the repository.
@@ -224,23 +132,8 @@ func (g *handoffGitHub) serves() []string {
 	return append([]string(nil), g.served...)
 }
 
-// compares is each basehead READY's compare was asked for so far.
-func (g *handoffGitHub) compares() []string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return append([]string(nil), g.compareRead...)
-}
-
-// approvedSHA is the head LEGION-208's review round approved, below headSHA: what READY compares
-// retro's last push with unless a test names another.
-const approvedSHA = "a99e0000000000000000000000000000000000ff"
-
-// retroCompare is GitHub's compare of approvedSHA with headSHA as READY reads it: retro's learning
-// added, and its last commit's removal of the issue's handoffs.
-const retroCompare = `{"status":"ahead","files":[{"filename":".legion/LEGION-208/review.json","status":"removed"},{"filename":"docs/solutions/legion/retro-LEGION-208.md","status":"added"}]}`
-
 // newHandoffHarness serves the daemon's routes over a real Postgres, reading GitHub at github as
-// the implement App for READY and for the implementer's completion, with facts recording every
+// the implement App for the implementer's completion, with facts recording every
 // fact the routes apply, refused as refusal says. The issue's repository is acme/widgets, so a
 // read minted for anyone but acme shows.
 func newHandoffHarness(t *testing.T, github *handoffGitHub, grants *credential.Grants, refusal *intake.Refusal) (*harness, *factRecorder) {
@@ -317,8 +210,7 @@ func seedPullRequestAt(t *testing.T, h *harness, key, head string, at time.Time)
 }
 
 // seedReviewDecision records decision as key's review round's decision, on its reviewer's row: an
-// approval names the head READY compares the pull request's head with, and nil is a round that
-// recorded none.
+// approval names the head the round approved, and nil is a round that recorded none.
 func seedReviewDecision(t *testing.T, h *harness, key string, decision *record.ReviewDecision) {
 	t.Helper()
 	err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
@@ -568,9 +460,6 @@ func TestHandoffCompleteEnforcesRoleSpecificFieldsAndDeduplicatesTheCommit(t *te
 	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
 	assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Verdict: "pass", Commit: "bbccdd"}), http.StatusBadRequest, "VERDICT_ROLE_FORBIDDEN")
 
-	worker := newLiveClaim(t, h, "LEGION-208", claim.RoleReviewer)
-	assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: worker.grant(t), Summary: "reviewed", Ready: true, Commit: "ccddee"}), http.StatusBadRequest, "READY_ROLE_FORBIDDEN")
-
 	request := HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass", Commit: "ddeeff"}
 	completion(t, h.complete(request))
 	// A retried completion of the same phase at the same commit changes nothing, and says so.
@@ -605,9 +494,6 @@ func TestHandoffCompleteRecordsRetroAtTheCommitItStandsOn(t *testing.T) {
 	}
 	if fact, ok := got[0].(intake.HandoffComplete); !ok || fact.Summary != "retro done" || fact.Commit != "c0ffee" {
 		t.Fatalf("handoff fact = %#v, want summary %q at c0ffee", got[0], "retro done")
-	}
-	if reads := github.reads(); len(reads) != 0 {
-		t.Fatalf("contents reads = %v, want none for phases that write no file", reads)
 	}
 }
 
@@ -686,7 +572,7 @@ func TestHandoffCompleteRecordsACheckReportOfTheOpenLookWithoutACommit(t *testin
 }
 
 // A check report names its verdict: one of pass, pending or fail, and nothing else, with nothing
-// recorded otherwise. Ready stays the merger's alone, as on every other call.
+// recorded otherwise.
 func TestHandoffCompleteRefusesACheckReportWithoutOneOfTheThreeVerdicts(t *testing.T) {
 	h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
 	seedIssueAt(t, h, "LEGION-208", phase.Done)
@@ -698,7 +584,6 @@ func TestHandoffCompleteRefusesACheckReportWithoutOneOfTheThreeVerdicts(t *testi
 			t.Fatalf("refusal of verdict %q = %q, want the three named", verdict, message)
 		}
 	}
-	assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked", Verdict: "pass", Ready: true}), http.StatusBadRequest, "READY_ROLE_FORBIDDEN")
 	if got := facts.recorded(); len(got) != 0 {
 		t.Fatalf("facts = %#v, want none", got)
 	}
@@ -1027,7 +912,7 @@ func TestAConflictPassesCompletionIsTheNewPassesAndNotTheLastOnes(t *testing.T) 
 	issue.Phase, issue.Status = phase.Merging, "retro"
 	h.recordIssue(issue)
 	if result, err := intake.ApplyFact(ctx, h.store.Pool(), "github", "mergeability-conflicting", intake.PullRequestMergeability{
-		Repo: "acme/widgets", Number: 42, Base: "main", Mergeable: record.MergeabilityConflicting,
+		Repo: "acme/widgets", Number: 42, Base: "main", HeadSHA: "head", Mergeable: record.MergeabilityConflicting,
 	}, engine); err != nil || result.Refusal != nil {
 		t.Fatalf("apply the conflicting read = %+v, %v", result.Refusal, err)
 	}

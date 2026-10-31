@@ -722,7 +722,6 @@ export const LegionHandoffCompleteRequest = z.strictObject({
   grantId: nonEmptyString,
   summary: nonEmptyString,
   verdict: z.string(),
-  ready: z.boolean(),
   commit: nonEmptyString.optional(),
 });
 

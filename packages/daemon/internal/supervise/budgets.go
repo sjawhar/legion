@@ -67,16 +67,24 @@ func (m *Machine) relaunchAfterFailure(ctx context.Context) error {
 // behind it, and a root architect killed six times inside its turns was relaunched for ever
 // because each death found nothing pending. A death with no turn open and nothing pending is a
 // parked agent the environment killed, which is not counted however often it happens.
+//
+// The death ends the turn it interrupted (Claim.LastTurnEnd), which no other path does: a turn
+// records its end only when the agent ends it, so a turn whose agent died would otherwise stay
+// open for ever and every later death of the relaunched agent — idle, with nothing pending —
+// would be charged against it, failing a claim that is doing nothing wrong. Each death after
+// this one is judged on the turn it finds, as the first was.
 func (m *Machine) chargeDeath() bool {
 	if slices.Contains(unready, m.claim.State) {
 		return false
 	}
-	if m.claim.Pending == nil && !m.turnOpen() {
+	open := m.turnOpen()
+	if m.claim.Pending == nil && !open {
 		return false
 	}
 	m.claim.Budgets.Deaths++
+	m.claim.LastTurnEnd = m.deps.Clock.Now()
 	m.log.Warn("supervise: the agent died with work outstanding", "deaths", m.claim.Budgets.Deaths,
-		"limit", m.deps.Limits.LaunchFailures, "pending", pendingID(m.claim.Pending), "turnOpen", m.turnOpen())
+		"limit", m.deps.Limits.LaunchFailures, "pending", pendingID(m.claim.Pending), "turnOpen", open)
 	return m.claim.Budgets.Deaths >= m.deps.Limits.LaunchFailures
 }
 

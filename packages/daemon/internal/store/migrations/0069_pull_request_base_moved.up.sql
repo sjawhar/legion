@@ -9,7 +9,8 @@
 -- against: while it is set, the next read of the pull request is known to be needed rather than
 -- waited for.
 --
--- Every existing row takes '', which reads as "no push onto the base recorded": a base that moved
--- before this release is read again by the next two-minute pass regardless, since that pass reads
--- every open pull request, so there is nothing for the migration to derive.
+-- Every existing row takes '', which reads as "no push onto the base recorded", so no read is
+-- owed for a base push the daemon never saw. A base that moved before this release is read again
+-- at the issue's next event or handoff, and at the daemon's next start, so there is nothing for
+-- the migration to derive.
 alter table pull_requests add column base_moved text not null default '';

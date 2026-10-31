@@ -45,8 +45,8 @@ var (
 // repository, naming defaultBranch (main unless a test sets another before its first request), the
 // ref of that branch, and each create of a ref answered by answer. It records each read's path, in
 // order, and each create, with the launches the runtime had made when it came. A booted daemon's
-// required-checks pass lists the repository's open pull requests, none, and that listing is not
-// recorded as a read.
+// start lists the repository's open pull requests, none, and that listing is not recorded as a
+// read.
 type branchGitHub struct {
 	url           string
 	mu            sync.Mutex

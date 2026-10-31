@@ -10,8 +10,9 @@ sjawhar/legion.
 
 A push whose commits touch only `.legion/<issue>/` (a handoff-only push) ends its head's commit message
 with `skip-checks: true` as the last line, preceded by two empty lines, so GitHub starts no
-workflow run for it and the daemon carries the code head's verdict to it — except retro's push,
-which never carries the line whatever paths it touches, for the reason the next section gives.
+workflow run for it and the daemon carries the code head's verdict to it — except retro's push and
+the reviewer's, neither of which carries the line whatever paths it touches, for the two reasons
+the next section gives.
 GitHub honours the
 trailer only in that shape — the last line, after two empty lines; one empty line is not enough,
 and GitHub then starts every workflow as if the line were not there (a planner's handoff push did
@@ -29,8 +30,15 @@ Every other push — code, red tests, `docs/solutions/`, a forward merge, a rewr
 such line and none of GitHub's bracket keywords (`[skip ci]`, `[ci skip]`, `[no ci]`,
 `[skip actions]`, `[actions skip]`), which start no workflow wherever they stand.
 Retro's push never carries the line, whatever paths it touches, because it is the last push before the merge and a base that requires a check will not merge a head whose checks never ran.
-That is sjawhar/legion#2143's sentence, and `packages/pi-legion/src/skills-guard.test.ts` counts
-it here and in the four other texts that state it, so none of the five can drift from the rest.
+That retro sentence is sjawhar/legion#2143's, and `packages/pi-legion/src/skills-guard.test.ts`
+counts it here and in the four other texts that state it, so none of the five can drift from the
+rest.
+The reviewer's push never carries the `skip-checks: true` line, whatever paths it touches, because the daemon moves the issue to `accepting` only once GitHub reports the approved head mergeable, and a base that requires a check answers `blocked` for a head GitHub was told to skip.
+That was measured: a reviewer handoff pushed with the trailer left the approved head with no
+check run of any kind, GitHub answered `blocked` for it, and the issue stayed in reviewing after
+its approval. Carrying the earlier head's merge state forward would not have saved it, since
+GitHub computes that state for the current head alone: every later read overwrites what was
+carried with `blocked` again.
 The daemon classifies a push by the paths its commits touch, never by the
 trailer: a wrong trailer stalls the issue (a trailered code push gets no verdict carried, and a
 head with no CI is one a base that requires a check will not merge, so the merge waits and the

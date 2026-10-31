@@ -214,8 +214,8 @@ func (c *Consumers) repositories() []ghrepo.Repository {
 // only when a fact is applied, never for a message acknowledged without a transaction, so on a
 // quiet project an old position is no sign of loss: the messages between it and the stream's first
 // may have been handled by the consumer before it went missing, or may have been missed. The
-// daemon applied none of them, and the pass heals those it would have acted on. A consumer with no
-// position starts at the next message.
+// daemon applied none of them, and nothing replays them. A consumer with no position starts at the
+// next message.
 func openConsumer(ctx context.Context, stream jetstream.Stream, pool *pgxpool.Pool, logger *slog.Logger, config jetstream.ConsumerConfig) (jetstream.Consumer, error) {
 	existing, err := stream.Consumer(ctx, config.Durable)
 	if errors.Is(err, jetstream.ErrConsumerNotFound) {
@@ -254,7 +254,7 @@ func createConsumer(ctx context.Context, stream jetstream.Stream, pool *pgxpool.
 	// The stored time keeps microseconds; the stream's, nanoseconds. A start at the stream's first
 	// message itself is not before it.
 	if first := info.State.FirstTime; start.Before(first.Truncate(time.Microsecond)) {
-		logger.Warn("intake: a missing durable consumer's last applied message is older than the stream's first message; events published between may have been missed: the daemon applied none of them, and the pass heals those it would have acted on",
+		logger.Warn("intake: a missing durable consumer's last applied message is older than the stream's first message; events published between may have been missed: the daemon applied none of them, and nothing replays them, so an issue one of them would have moved waits for its next event",
 			"consumer", config.Durable, "start", start.UTC().Format(time.RFC3339Nano), "stream_first", first.UTC().Format(time.RFC3339Nano))
 	}
 	return consumer, nil
@@ -633,7 +633,7 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 // pull request, so one of any other pull request is acknowledged with no transaction under the fact
 // lock (ApplyFact) and no GitHub read, whatever the number of other pull requests a mapped
 // repository reviews and checks. A pull request recorded after this read, by a later opened, gets
-// its checks and reviews from their next event or from the pass's read.
+// its checks and reviews from their next event.
 func recordedPullRequest(ctx context.Context, spec ConsumerSpec, pool *pgxpool.Pool, fact Fact) (bool, error) {
 	var repo string
 	var number int

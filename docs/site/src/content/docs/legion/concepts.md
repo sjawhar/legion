@@ -206,20 +206,24 @@ Legion uses GitHub's own review mechanisms rather than labels:
 
 - The **reviewer** submits a GitHub review: an approval of the head by its commit, or changes
   requested. A plain comment decides nothing, and the architect is told the round is stuck. The
-  daemon hears of a review from GitHub's webhook, and it also reads every open pull request's
-  reviews with the implement App every two minutes, so a review whose webhook never arrived still
-  counts within one read. Either way the newest deciding review counts, and counts once: a review
+  daemon hears of a review from GitHub's webhook, and it also reads the pull request's reviews
+  with the implement App at its own start and after every handoff of the issue, so a review whose
+  webhook never arrived still counts at the next of those reads. Either way the newest deciding
+  review counts, and counts once: a review
   the daemon already applied, by webhook or by read, decides nothing again. A review submitted while
   no round is open (the work is being implemented or tested) decides no later round when the daemon
   reads it before the next round opens. One it first hears of after that round opened can still
   decide it, as a webhook delivered late can. An approval of a head below the pull request's head
   still counts when everything above it changed only the issue's own `.legion/<issue>/`: the
-  daemon learns that from each push's webhook, and the same two-minute read also asks GitHub to
+  daemon learns that from each push's webhook, and the same read also asks GitHub to
   compare the approved head with the head while the approval does not count, so a push webhook
   lost or late, or an approved head the record never held, sets nothing aside. Any other change
   above the approved head, another issue's `.legion/` included, or a head not built on it, sets the
-  approval aside, and only an approval of the head itself or a request for changes ends the round;
-  an approval of the head itself ends it as soon as the record reaches that head.
+  approval aside, and only an approval of the head itself or a request for changes ends the round.
+  An approval does not end it on its own: the round ends once the record reaches the approved head
+  and GitHub reports that head one the issue may advance on. A head GitHub holds blocked, on a
+  check or a review the repository requires, leaves the issue in `reviewing` until that merge
+  state comes clean.
 - **CI** on the pull request's head is information, not a verdict. When GitHub's checks settle, the
   daemon names every check GitHub reported, with the conclusion GitHub gave it, and judges none of
   them: it sends one message each to the tree's architect, the worker of the issue's current phase

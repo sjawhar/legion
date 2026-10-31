@@ -93,46 +93,265 @@ func TestTheReviewEventDecidesAndTheCompletionRecordsItsFindings(t *testing.T) {
 }
 
 // An approval moves the issue on only once GitHub reports the head one the issue may advance on
-// (record.MergeState.Mergeable). GitHub answers `mergeable: true` for a head it holds blocked on a
-// check or a review the repository requires just as it does for one it would merge now, so the
-// merge state is the only answer that tells the two apart: an approval standing on a blocked head
-// leaves the issue in reviewing, with nothing told - the round is waiting, not stuck - and the
-// read that finds the state clean is what moves it to accepting.
-func TestAnApprovalWaitsForAHeadGitHubReportsMergeable(t *testing.T) {
+// (record.MergeState.Mergeable). While GitHub has given no answer for the head - it has never been
+// read, or GitHub answers `unknown` because it is still computing the merge - the round waits
+// where it stands and nobody is told: the answer is about GitHub, not about the head, and the
+// read that finds the state clean is what moves the issue to accepting.
+func TestAnApprovalWaitsWhileGitHubHasNotAnsweredForTheHead(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state record.MergeState
+	}{
+		{"never read", record.MergeStateUnread},
+		{"GitHub still computing it", record.MergeStateUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedMergeStateRound(t, pool, tc.state)
+			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+
+			apply("approve", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head",
+				HeadSHA: "head", Author: testReviewApp, Body: "ship it"})
+			if got := issuePhase(t, pool); got != phase.Reviewing {
+				t.Fatalf("after the approval the issue is in %s, want reviewing: GitHub has not answered for the head", got)
+			}
+			if result := apply("complete", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer,
+				Claim: "review-claim", Summary: "reviewed", Commit: "review-1"}); result.Refusal != nil {
+				t.Fatalf("the reviewer's completion = %+v, want it recorded", result.Refusal)
+			}
+			if got := issuePhase(t, pool); got != phase.Reviewing {
+				t.Fatalf("after the completion the issue is in %s, want reviewing: GitHub has still not answered", got)
+			}
+			if told := reviewStuckNotices(t, pool); len(told) != 0 {
+				t.Fatalf("the architect was told the round was stuck %+v, want nothing: an approval waiting for GitHub's answer is not stuck", told)
+			}
+
+			apply("merge-state", intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", HeadSHA: "head",
+				Mergeable: record.MergeabilityMergeable, MergeState: record.MergeStateClean})
+			if got := issuePhase(t, pool); got != phase.Accepting {
+				t.Fatalf("after GitHub reported the head clean the issue is in %s, want accepting", got)
+			}
+			if told := reviewStuckNotices(t, pool); len(told) != 0 {
+				t.Fatalf("the architect was told the round was stuck %+v, want nothing", told)
+			}
+		})
+	}
+}
+
+// GitHub answers `mergeable: true` for a head it holds blocked on a check or a review the
+// repository requires just as it does for one it would merge now, so the merge state is the only
+// answer that tells the two apart. An approval standing on a head GitHub answers for with a state
+// it would not merge from moves nothing, and nothing the daemon does would ever move it: only a
+// push that earns what the base requires can. So the tree's architect is told, in the round's
+// review-stuck notice naming the pull request, the head and the state GitHub gave - once for that
+// head, however many facts ask the round again: the reviewer's completion after it, and every
+// further read of the same head that answers the same, tell nothing more. The notice names no role
+// topic: the decision is not the reviewer's to give.
+func TestAnApprovalOnAHeadGitHubWillNotMergeTellsTheArchitectOnce(t *testing.T) {
 	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{},
-		Mergeability: record.MergeabilityMergeable, MergeState: record.MergeStateBlocked})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-	seedClaimSession(t, pool, "review-claim", "")
+	seedMergeStateRound(t, pool, record.MergeStateBlocked)
 	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
 
 	apply("approve", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head",
 		HeadSHA: "head", Author: testReviewApp, Body: "ship it"})
 	if got := issuePhase(t, pool); got != phase.Reviewing {
-		t.Fatalf("after the approval of a blocked head the issue is in %s, want reviewing: GitHub has not reported the head mergeable", got)
+		t.Fatalf("after the approval of a blocked head the issue is in %s, want reviewing: GitHub would not merge the head", got)
 	}
+	told := reviewStuckNotices(t, pool)
+	if len(told) != 1 || !strings.Contains(told[0].Reason, "approved head head on pull request #42") ||
+		!strings.Contains(told[0].Reason, "GitHub reports that head blocked") || told[0].Topic != "" {
+		t.Fatalf("review-stuck notices %+v, want one naming the pull request, the head and blocked, with no role topic", told)
+	}
+
 	if result := apply("complete", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer,
 		Claim: "review-claim", Summary: "reviewed", Commit: "review-1"}); result.Refusal != nil {
 		t.Fatalf("the reviewer's completion = %+v, want it recorded", result.Refusal)
 	}
+	apply("second-read", intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", HeadSHA: "head",
+		Mergeable: record.MergeabilityMergeable, MergeState: record.MergeStateBlocked})
 	if got := issuePhase(t, pool); got != phase.Reviewing {
-		t.Fatalf("after the completion the issue is in %s, want reviewing: the head is still blocked", got)
+		t.Fatalf("after the second read the issue is in %s, want reviewing: the head is still blocked", got)
 	}
-	if told := reviewStuckNotices(t, pool); len(told) != 0 {
-		t.Fatalf("the architect was told the round was stuck %+v, want nothing: an approval waiting on the merge state is not stuck", told)
+	if again := reviewStuckNotices(t, pool); len(again) != 1 {
+		t.Fatalf("the architect was told %d times (%+v), want once for the head", len(again), again)
 	}
 
-	apply("merge-state", intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main",
+	apply("merge-state", intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", HeadSHA: "head",
 		Mergeable: record.MergeabilityMergeable, MergeState: record.MergeStateClean})
 	if got := issuePhase(t, pool); got != phase.Accepting {
 		t.Fatalf("after GitHub reported the head clean the issue is in %s, want accepting", got)
 	}
-	if told := reviewStuckNotices(t, pool); len(told) != 0 {
-		t.Fatalf("the architect was told the round was stuck %+v, want nothing", told)
+	if again := reviewStuckNotices(t, pool); len(again) != 1 {
+		t.Fatalf("the architect was told %d times (%+v), want the one notice of the blocked head", len(again), again)
+	}
+}
+
+// The notice of a head GitHub will not merge from is read by a person deciding what to push next,
+// so it names GitHub's state and every check GitHub reported on that head with its conclusion.
+// The daemon reads no repository ruleset (dispatch://INFRA-714/spec R1), so it cannot name the
+// checks the base requires: a required check that never ran has no check run at all and is simply
+// absent from the list, which the notice says in words, so a short list reads as the finding
+// rather than as the daemon leaving something out. The reviewer is told as well as the architect,
+// since it approved that head and is the role that reads the head's checks on GitHub; both are
+// told once for the head and the state.
+func TestAnApprovalOnABlockedHeadNamesTheStateAndEveryCheckGitHubReported(t *testing.T) {
+	pool := migratedPool(t)
+	seedMergeStateRound(t, pool, record.MergeStateBlocked)
+	// GitHub settled the head reporting the one check that ran. The check the base requires and
+	// that never ran has no check run of its own, so it is in nothing GitHub reported.
+	blocked := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, Cancelled: []string{},
+		Mergeability: record.MergeabilityMergeable, MergeState: record.MergeStateBlocked,
+		CheckedHead: "head", CheckRuns: []record.AttemptRun{{Name: "unit tests", ID: 1}}}
+	seedPR(t, pool, blocked)
+	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+
+	apply("approve", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head",
+		HeadSHA: "head", Author: testReviewApp, Body: "ship it"})
+
+	want := stuckMergeStateReason(blocked)
+	told := reviewStuckNotices(t, pool)
+	if len(told) != 1 || told[0].Reason != want {
+		t.Fatalf("review-stuck notices %+v, want one reading %q", told, want)
+	}
+	for _, phrase := range []string{"GitHub reports that head blocked", `"unit tests" succeeded`, "reads no ruleset", "absent from the list above"} {
+		if !strings.Contains(told[0].Reason, phrase) {
+			t.Fatalf("the notice reads %q, want it to name %q", told[0].Reason, phrase)
+		}
+	}
+	assertRoleMessages(t, pool, "LEGION-208", []record.RoleMessage{
+		{Role: treeRoleToken(t, "LEGION-208", claim.RoleReviewer), Body: "The round you approved is stuck: " + want + "."},
+	})
+
+	// A second read of the same head answering the same state tells neither of them again.
+	apply("second-read", intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", HeadSHA: "head",
+		Mergeable: record.MergeabilityMergeable, MergeState: record.MergeStateBlocked})
+	if again := reviewStuckNotices(t, pool); len(again) != 1 {
+		t.Fatalf("the architect was told %d times (%+v), want once for the head and state", len(again), again)
+	}
+	assertRoleMessages(t, pool, "LEGION-208", []record.RoleMessage{
+		{Role: treeRoleToken(t, "LEGION-208", claim.RoleReviewer), Body: "The round you approved is stuck: " + want + "."},
+	})
+
+	// GitHub answering the same head `behind` is a different finding, and is told once in its turn.
+	apply("behind", intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", HeadSHA: "head",
+		Mergeable: record.MergeabilityMergeable, MergeState: record.MergeStateBehind})
+	behind := blocked
+	behind.MergeState = record.MergeStateBehind
+	if again := reviewStuckNotices(t, pool); len(again) != 2 || again[1].Reason != stuckMergeStateReason(behind) {
+		t.Fatalf("review-stuck notices %+v, want a second naming behind", again)
+	}
+}
+
+// seedMergeStateRound seeds LEGION-208 in reviewing, its pull request at head with GitHub's
+// mergeability read mergeable and its merge state state, and its reviewer's round not yet decided.
+func seedMergeStateRound(t *testing.T, pool *pgxpool.Pool, state record.MergeState) {
+	t.Helper()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
+	pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{},
+		Mergeability: record.MergeabilityMergeable, MergeState: state}
+	if state == record.MergeStateUnread {
+		// A head GitHub has never been read for has neither answer recorded, where seedPR's
+		// default clean is for the tests that are about something else.
+		pr.Mergeability = ""
+	}
+	seedPR(t, pool, pr)
+	if state == record.MergeStateUnread {
+		if _, err := pool.Exec(t.Context(), "update pull_requests set mergeability = '', merge_state = '' where issue = $1", pr.Issue); err != nil {
+			t.Fatalf("clear GitHub's answer on the seeded pull request: %v", err)
+		}
+	}
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedClaimSession(t, pool, "review-claim", "")
+}
+
+// GitHub's answer for a head is an answer about the tree that head carries, so it is kept across
+// a push that changed only the issue's own handoffs and dropped across one that may have changed
+// code (classify's advance). The reviewer's own handoff push is the first: it carries the
+// skip-checks trailer, GitHub starts no workflow on the head it leaves and so reports it blocked
+// on the checks the base requires, and the head the reviewer approved - the one with the checks -
+// is the head GitHub answered clean for. Without the carry no approval would ever reach accepting
+// over that push. A code push is the second: it changes what GitHub would check, so the recorded
+// answer says nothing about the new head, and the round waits for GitHub's next read rather than
+// advancing on the old one.
+func TestGitHubsAnswerIsCarriedAcrossAHandoffPushAndDroppedAcrossACodePush(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		paths   string
+		want    phase.Phase
+		carried record.MergeState
+	}{
+		{name: "the reviewer's handoff push", paths: ".legion/LEGION-208/review.json", want: phase.Accepting, carried: record.MergeStateClean},
+		{name: "a code push", paths: ".legion/LEGION-208/review.json\nsrc/widget.go", want: phase.Reviewing, carried: record.MergeStateUnread},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedMergeStateRound(t, pool, record.MergeStateClean)
+			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+			truncated := "false"
+			forced := "false"
+
+			apply("push", intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "head", After: "head-2",
+				ChangedPaths: &tc.paths, Truncated: &truncated, Forced: &forced, Pusher: "legion-reviewer[bot]"})
+			apply("sync", intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-2"})
+			if got := recordedPR(t, pool, "LEGION-208"); got.MergeState != tc.carried {
+				t.Fatalf("after the push the recorded merge state is %q, want %q", got.MergeState, tc.carried)
+			}
+
+			// The approval names the head the reviewer was shown; over the handoff push it is the
+			// head before it, and over the code push it is the new head, which GitHub's recorded
+			// answer was never about.
+			approved := "head"
+			if tc.want == phase.Reviewing {
+				approved = "head-2"
+			}
+			apply("approve", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: approved,
+				HeadSHA: approved, Author: testReviewApp, Body: "ship it"})
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("after the approval the issue is in %s, want %s", got, tc.want)
+			}
+			if told := reviewStuckNotices(t, pool); len(told) != 0 {
+				t.Fatalf("the architect was told the round was stuck %+v, want nothing: GitHub answered nothing against the head", told)
+			}
+			if tc.want == phase.Accepting {
+				return
+			}
+
+			apply("merge-state", intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", HeadSHA: "head-2",
+				Mergeable: record.MergeabilityMergeable, MergeState: record.MergeStateClean})
+			if got := issuePhase(t, pool); got != phase.Accepting {
+				t.Fatalf("after GitHub answered for the new head the issue is in %s, want accepting", got)
+			}
+		})
+	}
+}
+
+// A read of GitHub's merge state is one round trip outside the record's transaction, so a push can
+// land between GitHub's answer and the apply. A read that answers for a head the record has moved
+// past is dropped whole: it records neither verdict, and it decides nothing - not even the
+// conflict that sends an issue back to implementing from any phase, since the head that conflicts
+// is not the head the branch now carries.
+func TestAMergeStateReadForAHeadTheRecordHasMovedPastIsDropped(t *testing.T) {
+	pool := migratedPool(t)
+	seedMergeStateRound(t, pool, record.MergeStateClean)
+	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+	paths, truncated, forced := ".legion/LEGION-208/review.json", "false", "false"
+	apply("push", intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "head", After: "head-2",
+		ChangedPaths: &paths, Truncated: &truncated, Forced: &forced, Pusher: "legion-reviewer[bot]"})
+	apply("sync", intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-2"})
+
+	apply("stale-read", intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "other", HeadSHA: "head",
+		Mergeable: record.MergeabilityConflicting, MergeState: record.MergeStateDirty})
+	got := recordedPR(t, pool, "LEGION-208")
+	if got.Mergeability != record.MergeabilityMergeable || got.MergeState != record.MergeStateClean || got.Base != "" {
+		t.Fatalf("after the stale read the record holds %q/%q on base %q, want GitHub's answer for the head it stands at",
+			got.Mergeability, got.MergeState, got.Base)
+	}
+	if got := issuePhase(t, pool); got != phase.Reviewing {
+		t.Fatalf("after the stale read the issue is in %s, want reviewing: the conflict was of a head the branch has left", got)
 	}
 }
 
@@ -346,7 +565,10 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "the code head's checks settle before the reviewer's handoff head, its push first", steps: []string{"green head", "approve head", "push handoff", "sync", "complete"}, want: phase.Accepting, unsettled: true},
 		{name: "the code head's checks settle under two handoff heads", steps: []string{"approve head", "sync", "push handoff", "sync head-3", "push handoff head-3", "green head", "complete"}, want: phase.Accepting, unsettled: true},
 		{name: "the checks of a head a code push replaced", steps: []string{"sync", "push code", "approve head", "green head", "complete"}, want: phase.Reviewing, unsettled: true},
-		{name: "a late settlement of a head a code push replaced leaves the head's own", steps: []string{"sync", "push code", "green", "red head", "approve", "complete"}, want: phase.Accepting, unsettled: true},
+		// The approval is of head-2, which the code push left, so GitHub's answer for the head
+		// before it says nothing about this one and the read of head-2 is what the round advances
+		// on (classify's advance, the mergeability handler).
+		{name: "a late settlement of a head a code push replaced leaves the head's own", steps: []string{"sync", "push code", "green", "red head", "read head-2", "approve", "complete"}, want: phase.Accepting, unsettled: true},
 		{name: "the checks of a head a force push replaced", steps: []string{"sync head-l", "approve head", "push handoff forced head-l", "green head", "complete"}, want: phase.Reviewing, unsettled: true},
 		// The handoff head's own settlement outranks the code head's late one
 		// (classify.SettlementFor), and neither moves the issue: the round is the reviewer's to
@@ -375,7 +597,9 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 				// author when it is not the review App (by=outsider, an account with no write access
 				// to the repository, or by=writer), the head a push replaced when the map below
 				// does not say (from=H), "forced" for a push that rewrote history, and "unmarked" for a
-				// push whose listener did not say.
+				// push whose listener did not say. A "read" step is the daemon's read of GitHub's
+				// merge state for the head it names, answering clean: the seeded record holds that
+				// answer for its first head, and a code push drops it.
 				head, id, forced, from, by := "head-2", int64(0), "false", "", ""
 				var submitted time.Time
 				var name []string
@@ -467,6 +691,9 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 				case "complete":
 					fact = intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim",
 						Summary: "reviewed", Commit: "review-1"}
+				case "read":
+					fact = intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", HeadSHA: head,
+						Mergeable: record.MergeabilityMergeable, MergeState: record.MergeStateClean}
 				}
 				result, err := intake.ApplyFact(ctx, pool, "test", fmt.Sprintf("%d-%s", i, step), fact, engine)
 				if err != nil || result.Refusal != nil {
@@ -962,6 +1189,13 @@ func TestARoundItsApprovalCannotEndTellsTheArchitect(t *testing.T) {
 	sync := func(head string) intake.Fact {
 		return intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head}
 	}
+	// A code push leaves GitHub's answer for the head before it saying nothing about the new head
+	// (classify's advance), so the round that ends on an approval of that head ends on a read of
+	// it: the daemon's own, which every push asks for (workflow's askMergeState).
+	read := func(head string) intake.Fact {
+		return intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", HeadSHA: head,
+			Mergeable: record.MergeabilityMergeable, MergeState: record.MergeStateClean}
+	}
 	push := func(from, to, paths string) intake.Fact {
 		unforced, whole := "false", "false"
 		return intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: from, After: to,
@@ -978,26 +1212,28 @@ func TestARoundItsApprovalCannotEndTellsTheArchitect(t *testing.T) {
 		// architect is told nothing.
 		told []string
 		by   string
+		// then is what ends the round, read before approved where a code push dropped GitHub's
+		// answer for the head.
 		then []intake.Fact
 		want phase.Phase
 	}{
 		{name: "a push since the approved head changed code, then an approval of the head",
 			steps: []intake.Fact{sync("head-2"), push("head", "head-2", code), approve("head"), complete},
-			told:  []string{"head-2"}, by: "the reviewer's completion", then: []intake.Fact{approve("head-2")}, want: phase.Accepting},
+			told:  []string{"head-2"}, by: "the reviewer's completion", then: []intake.Fact{read("head-2"), approve("head-2")}, want: phase.Accepting},
 		{name: "a push since the approved head changed code, then a request for changes",
 			steps: []intake.Fact{sync("head-2"), push("head", "head-2", code), approve("head"), complete},
 			told:  []string{"head-2"}, by: "the reviewer's completion", then: []intake.Fact{requestChanges}, want: phase.Implementing},
 		{name: "a push since the approved head changed another issue's handoffs",
 			steps: []intake.Fact{sync("head-2"), push("head", "head-2", otherHandoffs), approve("head"), complete},
-			told:  []string{"head-2"}, by: "the reviewer's completion", then: []intake.Fact{approve("head-2")}, want: phase.Accepting},
+			told:  []string{"head-2"}, by: "the reviewer's completion", then: []intake.Fact{read("head-2"), approve("head-2")}, want: phase.Accepting},
 		{name: "the handoff push over a code push is classified after the completion",
 			steps: []intake.Fact{sync("head-2"), push("head", "head-2", code), sync("head-3"), approve("head"), complete, push("head-2", "head-3", handoff)},
-			told:  []string{"head-3"}, by: "the reviewer's completion", then: []intake.Fact{approve("head-3")}, want: phase.Accepting},
+			told:  []string{"head-3"}, by: "the reviewer's completion", then: []intake.Fact{read("head-3"), approve("head-3")}, want: phase.Accepting},
 		{name: "a code push whose new head has not arrived",
 			steps: []intake.Fact{push("head", "head-2", code), approve("head"), complete}, want: phase.Reviewing},
 		{name: "a code push whose new head arrives after the completion",
 			steps: []intake.Fact{push("head", "head-2", code), approve("head"), complete, sync("head-2")},
-			told:  []string{"head-2"}, by: "a push", then: []intake.Fact{approve("head-2")}, want: phase.Accepting},
+			told:  []string{"head-2"}, by: "a push", then: []intake.Fact{read("head-2"), approve("head-2")}, want: phase.Accepting},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -1108,7 +1344,7 @@ func TestAHeadArrivingBeforeItsPushTellsNothingOfAStuckRound(t *testing.T) {
 // while the synchronize that brings it was still on its way - leaves the round stuck at the head the
 // record holds. That head's arrival ends the round even when its push is lost, since no push can
 // change what an approval of the head itself approves; any other head arriving without its push
-// leaves the round as it was, told nothing more, for the push or the required-checks pass's compare
+// leaves the round as it was, told nothing more, for the push or the approval carry's compare
 // to decide.
 func TestTheArrivalOfTheApprovedHeadEndsTheRoundWithoutItsPush(t *testing.T) {
 	complete := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"}

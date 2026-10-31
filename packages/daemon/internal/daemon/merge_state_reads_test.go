@@ -87,8 +87,9 @@ func TestTheMergeStateLadderReadsFiveTimesAndThenStops(t *testing.T) {
 		t.Fatalf("GitHub was read %d times, want exactly %d: the ladder stops after the fifth unknown", got, mergeStateLadderReads)
 	}
 	w.mergeStateMu.Lock()
-	wanted, running := len(w.mergeStateWanted), len(w.mergeStateRunning)
+	running := len(w.mergeStateRunning)
 	w.mergeStateMu.Unlock()
+	wanted := w.mergeStates.waiting()
 	if wanted != 0 || running != 0 {
 		t.Fatalf("%d issues are queued for a read and %d ladders are running, want none standing behind the last read", wanted, running)
 	}

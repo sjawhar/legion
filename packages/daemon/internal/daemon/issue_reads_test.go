@@ -113,7 +113,7 @@ func TestAHandoffCompletionReadsThatIssuesPullRequestAlone(t *testing.T) {
 	seedSecondIssue(t, pool)
 	github := newIssueReadStandIn(t, read)
 	w := readRuntime(pool, github.URL, quietLogger())
-	w.handedOff, w.handoffWake = map[string]bool{}, make(chan struct{}, 1)
+	w.handedOff = newWakeSet[string]()
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
 	go func() {

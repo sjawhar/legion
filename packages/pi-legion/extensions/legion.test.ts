@@ -2071,7 +2071,6 @@ describe("Legion OMP extension", () => {
             grantId: "grant-stall",
             summary: "Done.",
             verdict: "",
-            ready: false,
             commit: ROOT_COMMIT,
           },
         },

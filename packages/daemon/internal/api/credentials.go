@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -225,27 +224,6 @@ func (s *server) redeemIdentityCheck(w http.ResponseWriter, r *http.Request, bod
 		return false
 	}
 	return s.refuseIfStaleClaimFailure(w, r, machine.Claim())
-}
-
-// appLease is the GitHub App token mint every credential route needs: the token source must be
-// configured, owner must name the installation to mint for, and the mint itself must succeed.
-// logRole names the role in the error log line; it carries no secret.
-func (s *server) appLease(w http.ResponseWriter, r *http.Request, role appauth.AppRole, owner, logRole string) (appauth.Lease, bool) {
-	if s.tokens == nil {
-		writeFailure(w, http.StatusInternalServerError, "GITHUB_TOKEN_SOURCE_UNAVAILABLE", "GitHub token source is unavailable")
-		return appauth.Lease{}, false
-	}
-	if owner == "" {
-		writeFailure(w, http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED", "no repository owner is configured for GitHub App tokens")
-		return appauth.Lease{}, false
-	}
-	lease, err := s.tokens.Token(r.Context(), role, owner)
-	if err != nil {
-		s.log.Error("api: mint GitHub App token", "role", logRole, "owner", owner, "error", err)
-		writeFailure(w, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "GitHub token exchange failed")
-		return appauth.Lease{}, false
-	}
-	return lease, true
 }
 
 func (s *server) operatorAuthorized(r *http.Request) bool {

@@ -522,8 +522,11 @@ const statusWriteReads = 3
 // so nothing is dropped over it. The row reads the issue again, applies what Dispatch then shows
 // to the record as the event that made it would (applyRead) — which is how a close the daemon
 // learns of only here takes its issue out of the workflow — and writes again only while that
-// fresh read still shows the issue in the workflow and not closed (statusStillWanted). A read
-// already at the status the row carries is this write's work, done by someone else.
+// fresh read passes what the first attempt required of its own read (status): the issue still
+// shows the status the row observed, and is still in the workflow and not closed
+// (statusStillWanted). A read already at the status the row carries is this write's work, done by
+// someone else; a read at any other status is a change made after the row's read, which the row
+// never writes over, whether it took the issue out of the workflow or moved it along within one.
 func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) error {
 	for range statusWriteReads {
 		_, err := r.dispatch.SetStatusAt(ctx, read, payload.Status)
@@ -543,6 +546,11 @@ func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload 
 		if read.Status == payload.Status {
 			r.log.Info("outbox status write found Dispatch already at its status after the issue changed under it",
 				"row", row.ID, "issue", row.Issue, "status", payload.Status)
+			return nil
+		}
+		if read.Status != payload.ObservedStatus {
+			r.log.Info("outbox status write finished without writing: its issue was moved to another status after the row read it",
+				"row", row.ID, "issue", row.Issue, "status", payload.Status, "observed", payload.ObservedStatus, "dispatch", read.Status)
 			return nil
 		}
 		wanted, err := r.statusStillWanted(ctx, row, payload, read)
@@ -892,19 +900,8 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return nil
 			}
 		}
-		// The merger merges nothing while its tree's design gate is closed: a new version of the
-		// spec is with its reviewer, and what may merge is what that review decides
-		// (dispatch://INFRA-714/spec R5). The start waits on the row's backoff, as a check start
-		// waits on its look (checkLookHolds), and runs when the gate opens again — the opening
-		// tells every phase holder of the tree as well (workflow's tellGateMoved).
-		if payload.Role == claim.RoleMerger {
-			closed, err := r.designGateClosed(ctx, issue)
-			if err != nil {
-				return err
-			}
-			if closed {
-				return wait.Errorf("the merger of %s waits for the design gate of %s to open", issue.Key, issue.Tree)
-			}
+		if err := r.mergerWaitsForTheDesignGate(ctx, issue, payload.Role); err != nil {
+			return err
 		}
 		// A child carried into a tree of its own — a finished root's hand-over, or a person's label
 		// on a child its tree left mid-run — may still run a role of its old tree: one in a turn when
@@ -937,8 +934,10 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return fmt.Errorf("start %s of %s: %w", payload.Role, issue.Key, held.RuleHoldError())
 			}
 		}
-		// A start that takes the phase over from a role still at work in it (CI settled red before
-		// that role completed) does nothing — no claim, no working-copy adoption, no task — until
+		// A start that takes the phase over from a role still at work in it (the head started
+		// conflicting with its base while that role worked, or the reviewer's own review decided
+		// a round it had not completed) does nothing — no claim, no working-copy adoption, no
+		// task — until
 		// that role's turn is over (supervise.Machine.Quiesce), so the two never write the shared
 		// workspace together. A retry of a start that has already run against its claim (the claim's
 		// newest start, which StartedBy persists) is past that wait.
@@ -1444,6 +1443,24 @@ func (r *outbox) designGateClosed(ctx context.Context, issue record.Issue) (bool
 	return gate != nil && !classify.DesignGateOpen(*gate), nil
 }
 
+// mergerWaitsForTheDesignGate is the one role fence a start carries: the merger merges nothing
+// while its tree's design gate is closed, because a new version of the spec is with its reviewer
+// and what may merge is what that review decides (dispatch://INFRA-714/spec R5). It answers a
+// wait error for a merger start the gate holds, which leaves the start on the row's backoff as a
+// check start waits on its look (checkLookHolds), and nil for every other role and an open gate.
+// The gate opening releases the row's next try, and tells every phase holder of the tree as well
+// (workflow's tellGateMoved).
+func (r *outbox) mergerWaitsForTheDesignGate(ctx context.Context, issue record.Issue, role claim.Role) error {
+	if role != claim.RoleMerger {
+		return nil
+	}
+	closed, err := r.designGateClosed(ctx, issue)
+	if err != nil || !closed {
+		return err
+	}
+	return wait.Errorf("the merger of %s waits for the design gate of %s to open", issue.Key, issue.Tree)
+}
+
 // checkLookHolds is the production check a check start row still has a look to start in, nil for
 // none: its issue's production check is open, the one the row names (record.ProductionCheck.NamedBy),
 // at the look the row names, with that look open, and the issue out of the workflow. A check closed
@@ -1538,37 +1555,22 @@ func (r *outbox) checkBound(ctx context.Context, row record.OutboxRow) error {
 	return nil
 }
 
-// implementClient is a client for repository's REST API on the implement App's installation token:
-// the App every row reads an issue's own repository as, and the one the per-issue reads use
-// (workflowRuntime.implementClient). The mint failure is returned bare, so each row says in its
-// own words what it was minting the token for.
-func (r *outbox) implementClient(ctx context.Context, repository ghrepo.Repository) (githubrest.Client, error) {
-	lease, err := r.tokens.Token(ctx, appauth.Implement, repository.Owner())
-	if err != nil {
-		return githubrest.Client{}, err
-	}
-	return githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, repository)}, nil
-}
-
 // approvalCarry is the compare that carries a reviewer's approval across a handoff-only push
 // (record.ApprovalCarry), read from GitHub as the implement App. The push that left the approval
 // set aside below the pull request's head queued the row (workflow's carryApproval), because the
 // push webhook's own file list did not show the push to be handoff-only: it was truncated, forced,
-// or carried by a listener that says nothing about paths. GitHub's compare of the approved head
-// with the head is the answer (handoffPush, the same comparison the per-issue read makes), and
-// when every path it lists is under the issue's own .legion/<issue>/ the row applies the
-// intake.Push that says so, which the workflow decides as it decides the webhook's (workflow's
-// push): the approval carries to the head and the round ends.
+// or carried by a listener that says nothing about paths. The compare, and the apply of the push
+// it shows, are the daemon's one carry (daemon's carryApproval), the same the per-issue read
+// makes and under the same event id, so whichever of the two gets there first carries the
+// approval and the other applies nothing.
 //
 // The row acts only while the record still stands where the push left it: its pull request open,
-// the one the row names, at the head the row names, with the approval still not standing
-// (classify.ApprovalStands). A head that moved since has a row of its own from its own push, which
-// compares the heads that stand then; this one finishes without acting. The fact is applied under
-// an event id of the two heads, so a retried row, and a second row of the same two heads, apply it
-// once. A comparison GitHub answers that does not carry the approval finishes the row: the compare
-// of two fixed commits never changes its answer, so there is nothing to ask again. Any other
-// failure is the row's to retry on its backoff, a rate limit as every GitHub row's (noteLimit,
-// deferral).
+// the one the row names, at the head the row names, with the approval still set aside
+// (classify.ApprovalSetAside). A head that moved since has a row of its own from its own push,
+// which compares the heads that stand then; this one finishes without acting. A comparison GitHub
+// answers that does not carry the approval finishes the row: the compare of two fixed commits
+// never changes its answer, so there is nothing to ask again. Any other failure is the row's to
+// retry on its backoff, a rate limit as every GitHub row's (noteLimit, deferral).
 func (r *outbox) approvalCarry(ctx context.Context, row record.OutboxRow, payload record.ApprovalCarry) error {
 	ctx, cancel := context.WithTimeout(ctx, approvalCarryTimeout)
 	defer cancel()
@@ -1585,8 +1587,8 @@ func (r *outbox) approvalCarry(ctx context.Context, row record.OutboxRow, payloa
 			"row", row.ID, "issue", row.Issue, "pullRequest", payload.Number, "approved", payload.Approved, "head", payload.Head)
 		return nil
 	}
-	if classify.ApprovalStands(*pr, payload.Approved) {
-		r.log.Info("outbox approval carry finished without acting: the approval already stands at the head",
+	if !classify.ApprovalSetAside(*pr, payload.Approved) {
+		r.log.Info("outbox approval carry finished without acting: the approval is no longer set aside below the head",
 			"row", row.ID, "issue", row.Issue, "pullRequest", payload.Number, "approved", payload.Approved, "head", payload.Head)
 		return nil
 	}
@@ -1597,24 +1599,22 @@ func (r *outbox) approvalCarry(ctx context.Context, row record.OutboxRow, payloa
 	if err != nil {
 		return fmt.Errorf("carry the approval on %s: %w", row.Issue, err)
 	}
-	github, err := r.implementClient(ctx, repository)
+	github, err := implementClient(ctx, r.tokens, r.githubAPI, repository)
 	if err != nil {
 		return fmt.Errorf("mint implement App token: %w", err)
 	}
-	push, aside, err := handoffPush(ctx, github, *pr, payload.Approved, payload.Head)
-	if err != nil {
+	push, aside, carried, err := carryApproval(ctx, r.pool, r.dispatchProject, github, *pr, payload.Approved, r.handlers)
+	switch {
+	case err != nil && carried:
+		return fmt.Errorf("apply the handoff-only push GitHub's compare shows above %s's approved head: %w", row.Issue, err)
+	case err != nil:
 		return fmt.Errorf("compare the approved head %s of %s with its head %s: %w", payload.Approved, row.Issue, payload.Head, err)
-	}
-	if aside != "" {
+	case aside != "":
 		r.log.Info("outbox approval carry finished without acting: the reviewer's approval stays set aside below the head; only an APPROVE of the head or a REQUEST_CHANGES ends the round",
 			"row", row.ID, "issue", row.Issue, "pullRequest", payload.Number, "approved", payload.Approved, "head", payload.Head, "reason", aside)
 		return nil
 	}
-	eventID := fmt.Sprintf("approval-carry:%s:%s#%d:%s:%s", row.Issue, payload.Repo, payload.Number, payload.Approved, payload.Head)
-	if _, err := intake.ApplyFact(ctx, r.pool, "outbox", eventID, push, r.handlers...); err != nil {
-		return fmt.Errorf("apply the handoff-only push GitHub's compare shows above %s's approved head: %w", row.Issue, err)
-	}
-	r.log.Warn("outbox approval carry: only the issue's handoffs changed above the approved head, and no recorded push says so; applying the push GitHub's compare shows",
+	r.log.Warn("outbox approval carry: only the issue's handoffs changed above the approved head, and no recorded push says so; the push GitHub's compare shows is applied",
 		"row", row.ID, "issue", row.Issue, "pullRequest", payload.Number, "approved", payload.Approved, "head", payload.Head, "paths", *push.ChangedPaths)
 	return nil
 }
@@ -1658,7 +1658,7 @@ func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload
 	if err != nil {
 		return fmt.Errorf("compare %s's production check: %w", row.Issue, err)
 	}
-	github, err := r.implementClient(ctx, repository)
+	github, err := implementClient(ctx, r.tokens, r.githubAPI, repository)
 	if err != nil {
 		return fmt.Errorf("mint implement App token: %w", err)
 	}
@@ -1974,7 +1974,7 @@ func (r *outbox) createBranch(ctx context.Context, issue record.Issue) error {
 	if err != nil {
 		return err
 	}
-	github, err := r.implementClient(ctx, repo)
+	github, err := implementClient(ctx, r.tokens, r.githubAPI, repo)
 	if err != nil {
 		return fmt.Errorf("mint the implement App token for %s: %w", repo.Owner(), err)
 	}

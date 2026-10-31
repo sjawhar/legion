@@ -114,6 +114,10 @@ func (w *workflowRuntime) openRecord(ctx context.Context, pr record.PullRequest)
 // answer to a push onto its base, which GitHub recomputed the mergeability for and sent no event
 // about. A read that says what is recorded applies nothing, so a second read of an unchanged pull
 // request changes nothing.
+// The fact names the head GitHub answered for (`head.sha` of the same answer), which the engine
+// records the verdict against only while the record still stands at it: this read and the merge
+// state ladder's (daemon's readMergeState) both run outside the record's transaction, so a push
+// can land between GitHub's answer and the apply.
 // An apply that fails is logged, and the next read of the pull request applies it again.
 func (w *workflowRuntime) applyMergeability(ctx context.Context, pr record.PullRequest, pull githubPullRequest) {
 	base, mergeable, state := pull.Base.Ref, pull.mergeability(), pull.mergeState()
@@ -121,7 +125,7 @@ func (w *workflowRuntime) applyMergeability(ctx context.Context, pr record.PullR
 		return
 	}
 	eventID := fmt.Sprintf("mergeability:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())
-	fact := intake.PullRequestMergeability{Repo: pr.Repo, Number: pr.Number, Base: base, Mergeable: mergeable, MergeState: state}
+	fact := intake.PullRequestMergeability{Repo: pr.Repo, Number: pr.Number, Base: base, HeadSHA: pull.Head.SHA, Mergeable: mergeable, MergeState: state}
 	if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, fact, w.handlers...); err != nil {
 		w.log.Warn("apply whether a pull request's head can be merged into its base", "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
 	}
@@ -196,9 +200,9 @@ func (w *workflowRuntime) openPullRequestOn(ctx context.Context, repo, branch st
 	if err != nil {
 		return githubPullRequest{}, false, err
 	}
-	github, err := w.implementClient(ctx, repository)
+	github, err := implementClient(ctx, w.tokens, w.githubAPI, repository)
 	if err != nil {
-		return githubPullRequest{}, false, err
+		return githubPullRequest{}, false, fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err)
 	}
 	var pulls []githubPullRequest
 	query := url.Values{"head": {repository.Owner() + ":" + branch}, "state": {"open"}}

@@ -245,16 +245,15 @@ func (d *launchers) request(ctx context.Context, token claim.Token, podUID strin
 
 // startRefusal is a Start the launcher answered OK: false, without starting the generation: the one
 // start error after which no child of that generation can be running (stopIssuedChild). A refusal
-// over the session it was asked to resume carries the launcher's own verdict (sessionMissing,
-// storeFault) and unwraps to the sentinel the supervisor acts on, so a lost session and a store
-// that could not be asked reach it as they do from the tmux runtime (runtime.ErrSessionFileMissing,
-// runtime.ErrSessionStore).
+// over the session it was asked to resume carries the launcher's own verdict as its kind
+// (shimwire.SessionRefusal); this is the one place that kind becomes the sentinel the supervisor
+// acts on, so a lost session and a store that could not be asked reach it as they do from the tmux
+// runtime (runtime.ErrSessionFileMissing, runtime.ErrSessionStore).
 type startRefusal struct {
-	token          claim.Token
-	generation     uint64
-	reason         string
-	sessionMissing bool
-	storeFault     bool
+	token      claim.Token
+	generation uint64
+	reason     string
+	session    shimwire.SessionRefusal
 }
 
 func (e startRefusal) Error() string {
@@ -262,10 +261,10 @@ func (e startRefusal) Error() string {
 }
 
 func (e startRefusal) Unwrap() error {
-	switch {
-	case e.sessionMissing:
+	switch e.session {
+	case shimwire.SessionGone:
 		return runtime.ErrSessionFileMissing
-	case e.storeFault:
+	case shimwire.SessionStoreUnreachable:
 		return runtime.ErrSessionStore
 	}
 	return nil
@@ -281,8 +280,7 @@ func (d *launchers) start(ctx context.Context, token claim.Token, podUID string,
 		return fmt.Errorf("launcher %s start: got %T", token, answer)
 	}
 	if !result.OK {
-		return startRefusal{token: token, generation: command.Generation, reason: result.Error,
-			sessionMissing: result.SessionMissing, storeFault: result.SessionStoreFault}
+		return startRefusal{token: token, generation: command.Generation, reason: result.Error, session: result.Session}
 	}
 	// An OK answer naming another generation says the launcher started something, and not what it
 	// was asked: the Start's outcome is unknown, never a refusal, so the issued generation is stopped.

@@ -65,7 +65,7 @@ func TestASettlementMovesNothingAndTellsTheThreeRoles(t *testing.T) {
 			}
 			want := make([]record.RoleMessage, 0, len(tc.roles))
 			for _, role := range tc.roles {
-				want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody("CI settled at head: build succeeded, unit failed")})
+				want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody("CI settled at head: \"build\" succeeded, \"unit\" failed")})
 			}
 			assertRoleMessages(t, pool, "LEGION-208", want)
 		})
@@ -93,10 +93,10 @@ func TestASettlementThatSaysNothingNewTellsNobodyAgain(t *testing.T) {
 		// settled is the line the roles are told, "" when the settlement says nothing new.
 		settled string
 	}{
-		{settledAt("head", 1, "unit"), "CI settled at head: build succeeded, unit failed"},
+		{settledAt("head", 1, "unit"), "CI settled at head: \"build\" succeeded, \"unit\" failed"},
 		{settledAt("head", 2, "unit"), ""},
-		{settledAt("head", 3), "CI settled at head: build succeeded, unit succeeded"},
-		{settledAt("head", 4, "unit"), "CI settled at head: build succeeded, unit failed"},
+		{settledAt("head", 3), "CI settled at head: \"build\" succeeded, \"unit\" succeeded"},
+		{settledAt("head", 4, "unit"), "CI settled at head: \"build\" succeeded, \"unit\" failed"},
 	} {
 		applyRefusingNothing(t, pool, engine, step.fact)
 		if step.settled != "" {
@@ -145,7 +145,7 @@ func TestTheLatestAttemptOfEachCheckIsWhatTheRolesAreTold(t *testing.T) {
 			applyRefusingNothing(t, pool, engine, tc.after...)
 
 			var want []record.RoleMessage
-			for _, settled := range []string{"CI settled at code: build succeeded, unit failed", "CI settled at code: build succeeded, unit succeeded"} {
+			for _, settled := range []string{"CI settled at code: \"build\" succeeded, \"unit\" failed", "CI settled at code: \"build\" succeeded, \"unit\" succeeded"} {
 				for _, role := range []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer} {
 					want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody(settled)})
 				}
@@ -192,7 +192,7 @@ func TestACheckGitHubNeverRanIsToldLikeAnyOtherConclusion(t *testing.T) {
 	assertOutboxCount(t, pool, "supervise", 0)
 	want := []record.RoleMessage{}
 	for _, role := range []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer} {
-		want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody("CI settled at head: pr-checks-result failed, unit succeeded")})
+		want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody("CI settled at head: \"pr-checks-result\" failed, \"unit\" succeeded")})
 	}
 	assertRoleMessages(t, pool, "LEGION-208", want)
 }
@@ -309,7 +309,7 @@ func TestAReopenStartsTheCheckSettlementAfreshAndTellsItAgain(t *testing.T) {
 	want := []record.RoleMessage{}
 	for range 2 {
 		for _, role := range []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer} {
-			want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody("CI settled at head: build succeeded, unit failed")})
+			want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody("CI settled at head: \"build\" succeeded, \"unit\" failed")})
 		}
 	}
 	assertRoleMessages(t, pool, "LEGION-208", want)
@@ -391,7 +391,7 @@ func TestAConflictingHeadSendsTheIssueBackToImplementingFromEveryLaterPhase(t *t
 				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 			applyRefusingNothing(t, pool, mergingEngine(),
-				intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", Mergeable: tc.mergeable})
+				intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", HeadSHA: "head", Mergeable: tc.mergeable})
 			if got := issuePhase(t, pool); got != tc.want {
 				t.Fatalf("after the mergeability read the issue is in %s, want %s", got, tc.want)
 			}
@@ -436,7 +436,7 @@ func TestEveryConflictingReadDecidesAndTheMoveItselfStopsTheRepeat(t *testing.T)
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
 
-	conflict := intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", Mergeable: record.MergeabilityConflicting}
+	conflict := intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", HeadSHA: "head", Mergeable: record.MergeabilityConflicting}
 	applyRefusingNothing(t, pool, engine, conflict)
 	if got := issuePhase(t, pool); got != phase.Implementing {
 		t.Fatalf("after the conflicting read the issue is in %s, want implementing: the merger cannot merge a head GitHub will not", got)

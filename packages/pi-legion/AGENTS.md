@@ -471,7 +471,7 @@ uncommitted change, is missing, is not committed on this branch, is carried by a
 pane's `JJ_USER`/`JJ_EMAIL` authored, or is not yet on `legion/<issue>@origin` (push the issue
 branch, then complete again); for every other phase the commit the workspace stands on, `@-`. It
 then posts
-`POST /legion/v1/handoff/complete` (`summary`, `verdict`, `ready`, `commit`). The implementer's
+`POST /legion/v1/handoff/complete` (`summary`, `verdict`, `commit`). The implementer's
 report on a look of its closed issue's production check is the one call that finds no commit: the
 operation reads the daemon's state first, and an implementer's call on an issue in `done` whose
 `check` is open is a check report, posted with its `verdict` (`pass`, `pending` or `fail`, required
@@ -483,13 +483,8 @@ reported for its previous phase); for the implementer's completion of implementi
 pull request on `legion/<issue>` as the implement App, records one the webhook has not, and refuses
 `HANDOFF_NO_PULL_REQUEST` when there is none and the record holds none merged (naming a recorded
 pull request closed without merging, which is the architect's to decide), applying the completion
-unread when GitHub cannot be read;
-and for the merger's `ready: true` it reads the pull request's
-head on GitHub and refuses a packet the workflow must not take on, each refusal named in the
-merger's role prompt
-(`packages/daemon/internal/prompts/go/merger.md`); a refusal changed nothing, and the answer's
-`note` is the already-merged sentence, for a pull request merged before READY, or the by-hand note
-(`MANUAL_MERGE_REQUIRED:`) for a pull request a person merges. The
+unread when GitHub cannot be read; a refusal changed nothing, and an accepted completion is
+answered with an empty object, since the merger merges and the daemon submits no merge. The
 operation mints its grant in-process and posts it with the request; nothing is written to the
 pane. A predecessor's handoff is read with `read` from the issue workspace. GitHub is the pane's
 `gh` and `git`, which read the role's App tokens from the gh bundle under `LEGION_GH_OWNERS_DIR`; no

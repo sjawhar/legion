@@ -261,19 +261,7 @@ func (w *workflowRuntime) issuesInWorkflow(ctx context.Context) ([]string, error
 // the issue and wakes the read, so the route answers the agent without waiting for GitHub, and the
 // read runs on the runtime's own goroutine, outside the completion's transaction.
 func (w *workflowRuntime) handoffCompleted(issue string) {
-	if issue == "" {
-		return
-	}
-	w.handoffMu.Lock()
-	if w.handedOff == nil {
-		w.handedOff = map[string]bool{}
-	}
-	w.handedOff[issue] = true
-	w.handoffMu.Unlock()
-	select {
-	case w.handoffWake <- struct{}{}:
-	default:
-	}
+	w.handedOff.add(issue)
 }
 
 // readHandedOff reads the pull request of each issue handoffCompleted queued, until ctx ends: each
@@ -282,15 +270,10 @@ func (w *workflowRuntime) handoffCompleted(issue string) {
 // handoff, and the daemon's next start, read it again.
 func (w *workflowRuntime) readHandedOff(ctx context.Context) {
 	for {
-		select {
-		case <-ctx.Done():
+		issues, ok := w.handedOff.take(ctx)
+		if !ok {
 			return
-		case <-w.handoffWake:
 		}
-		w.handoffMu.Lock()
-		issues := slices.Sorted(maps.Keys(w.handedOff))
-		clear(w.handedOff)
-		w.handoffMu.Unlock()
 		for _, issue := range issues {
 			if ctx.Err() != nil {
 				return

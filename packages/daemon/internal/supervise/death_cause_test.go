@@ -8,6 +8,7 @@ package supervise
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -98,6 +99,39 @@ func TestADeathWithNoTurnOpenAndNothingPendingIsNotCounted(t *testing.T) {
 		h.must(StreamTurnEnd{Claim: testToken})
 	}
 	h.wantState(StateIdle)
+}
+
+// A death charged against an open turn ends that turn, so the deaths that follow are judged on
+// the turns they find. Nothing else records the end of a turn whose agent died — only the agent's
+// own turn end does — so without this an interrupted turn stayed open for ever and the parked
+// relaunched agent, idle with nothing pending, had every later death charged against it until the
+// claim failed (dispatch://INFRA-714 finding 6).
+func TestADeathEndsTheTurnItInterruptedSoLaterIdleDeathsAreNotCharged(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateIdle)
+	// A message's turn, some time after the idle claim's last one ended and running when the pod
+	// goes: the death is charged against a turn whose start is later than any recorded end.
+	h.advance(time.Minute)
+	h.must(StreamTurnStart{Claim: testToken})
+	h.advance(time.Minute)
+	h.observe(runtime.Gone)
+	h.wantBudgets(Budgets{LaunchFailures: 1, Deaths: 1})
+	h.relaunched()
+	if p := h.claim().Pending; p != nil {
+		t.Fatalf("the relaunched claim holds %+v, want nothing pending", p)
+	}
+
+	for death := 2; death <= testLimits().LaunchFailures; death++ {
+		h.observe(runtime.Gone)
+		if got := h.state(); got == StateFailed {
+			t.Fatalf("death %d of the parked agent left the claim %s with budgets %+v, want it relaunched: "+
+				"the turn the first death interrupted is over", death, got, h.budgets())
+		}
+		h.relaunched()
+	}
+
+	h.wantState(StateReady)
+	h.wantBudgets(Budgets{Deaths: 1})
 }
 
 // A start that failed leaves its cause on the claim beside the death's, since a claim that cannot

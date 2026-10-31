@@ -21,10 +21,13 @@ below, and `skill://legion-worker/references/conflicts-and-rewrites.md`).
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
   and records the verdict. The CI it reads is the checks that stand for the code under review:
   those GitHub ran for the newest push of the branch that started `pull_request` workflows, when
-  every commit above that push's head changes only `.legion/<issue>/` (GitHub starts no workflow
+  every commit above that push's head changes only `.legion/<issue>/`. GitHub starts no workflow
   run for a head whose commit message carries `skip-checks: true`, which every handoff-only push
-  before retro does; retro's push carries no such line, so its head does get GitHub's workflow runs
-  of its own). With `<o>/<r>`, `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
+  but retro's and the reviewer's does. The reviewer's push never carries the `skip-checks: true`
+  line, whatever paths it touches, because the daemon moves the issue to `accepting` only once
+  GitHub reports the approved head mergeable, and a base that requires a check answers `blocked`
+  for a head GitHub was told to skip; retro's push carries no such line for its own reason, so
+  both heads get GitHub's workflow runs of their own. With `<o>/<r>`, `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
   `gh pr view <n> --json baseRefName,headRefOid,headRefName`, four reads. The required set is the
   base branch's rulesets' required checks and its branch protection's, when it has any. Both
   branch endpoints take the base as a URL path, each segment escaped and each `/` kept (a raw `#`
@@ -96,9 +99,10 @@ below, and `skill://legion-worker/references/conflicts-and-rewrites.md`).
   `packages/daemon/internal/workflow/review.go`, and the cases "the approval, then a code push"
   and "a push since the approved head changed code, then an approval of the head" in
   `packages/daemon/internal/workflow/review_test.go`). That push carries no `skip-checks: true`
-  line, so GitHub runs the branch's workflows on it. Wait for that head's required checks to be
-  green, and approve only then: nothing but your own read catches a check your prose broke, since
-  the daemon moves the issue for no check at all. A red you
+  line, as no push of the reviewer's does, so GitHub runs the branch's workflows on it. Wait for
+  that head's required checks to be green, and approve only then: nothing but your own read
+  catches a check your prose broke, since the daemon moves the issue for no check at all. A red
+  you
   approve over reaches nobody who will act on it: the tree runs on to the merge, where GitHub
   holds the pull request under the base branch's required checks until someone reads them. A red
   there is a
@@ -110,24 +114,30 @@ A reviewer's phase ends with its completion, not with its review. Every round wr
 and takes this order: read CI as above; write, commit and push the handoff; submit the review of
 the head that push made, by its SHA; then complete. A red at the code is a `REQUEST_CHANGES`
 naming the check, never an approval. A request for changes does not wait, since it stands
-whatever CI says and the issue leaves reviewing with it. The approval waits on nothing at a
-handoff-only commit either: it ends the round whatever CI says there, since the round reads no CI
-verdict, and a settlement the daemon reads later — at that commit or any above it — moves the
-issue nowhere. The daemon names each check GitHub reported, with the conclusion GitHub gave it, in
-one message to the tree's architect, the worker of the issue's current phase and the implementer,
-and judges none of them: a red is the implementer's to fix or re-run, the architect's to decide
-on, and GitHub's to hold the merge for. So the reviewer's own read before it approves is the only
-read that decides anything. A review of a head the handoff push then replaces names a head the
-pull request no longer has. The daemon moves the issue once both are in — the decision GitHub
-reports and your completion, in either order — so a review posted without a completion leaves the
-issue in reviewing until you finish.
+whatever CI says and the issue leaves reviewing with it. The approval waits on nothing at the
+reviewer's own handoff commit either: it ends the round whatever CI says there, since the round
+reads no CI verdict, and a settlement the daemon reads later — at that commit or any above it —
+moves the issue nowhere. The daemon names each check GitHub reported, with the conclusion GitHub
+gave it, in one message to the tree's architect, the worker of the issue's current phase and the
+implementer, and judges none of them: a red is the implementer's to fix or re-run, the architect's
+to decide on, and GitHub's to hold the merge for. So the reviewer's own read before it approves is
+the only read that decides anything. A review of a head the handoff push then replaces names a
+head the pull request no longer has. The daemon moves the issue once all three are in — the
+decision GitHub reports, your completion, in either order, and GitHub's own answer that the
+approved head is one the issue may advance on — so a review posted without a completion leaves the
+issue in reviewing until you finish, and an approved head GitHub answers `blocked` for leaves it
+there until that answer comes clean. The reviewer's push never carries the `skip-checks: true`
+line, whatever paths it touches, because the daemon moves the issue to `accepting` only once
+GitHub reports the approved head mergeable, and a base that requires a check answers `blocked` for
+a head GitHub was told to skip.
 
 ## The architect's acceptance
 
 - Between the reviewer's approval and retro the issue sits in `accepting` (Dispatch status
   `needs_review`), where no worker is started: the tree's architect reads the evidence (the
   tester's handoff, the PR body's `E2E (implementer)` and `E2E (tester)` lines and the reviewer's
-  approval of the head by SHA; children still running do not hold it) and accepts with the
+  approval of the head by SHA; the daemon lets no child hold it; a parent's waits for its last
+  round, `skill://legion-architect`, section 4) and accepts with the
   `legion` tool's `sign_off`, which moves the issue to retro, or sends it back to `implementing`
   or `testing` with `request_backward_move` and a reason, which reaches the started worker's task
   as its `Reason:` line and counts a review round. The architect also reads the reviewer's own

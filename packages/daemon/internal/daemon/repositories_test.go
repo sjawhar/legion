@@ -493,7 +493,7 @@ func TestARepositoryWithoutTheWebhookAppIsServedAndNamed(t *testing.T) {
 		t.Fatalf("served acme/widgets %v, zeta/tools %v; want acme/widgets alone", served(w, "acme/widgets"), served(w, "zeta/tools"))
 	}
 	view := w.repositories.view(nil)
-	want := []api.WebhookAppGapView{{Repo: "acme/widgets", Reason: "Dispatch's GitHub App is not installed on acme/widgets: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes"}}
+	want := []api.WebhookAppGapView{{Repo: "acme/widgets", Reason: "Dispatch's GitHub App is not installed on acme/widgets: GitHub sends Legion none of its events, nothing redelivers them, and no periodic pass makes up for them, so its issues stand still until the App is installed"}}
 	if !reflect.DeepEqual(view.WithoutWebhookApp, want) {
 		t.Fatalf("state's withoutWebhookApp = %#v, want %#v", view.WithoutWebhookApp, want)
 	}

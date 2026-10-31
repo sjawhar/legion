@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,6 +56,12 @@ type Config struct {
 	// installation read): the daemon takes it into that repository's recovery whatever it resolves
 	// to by then. It keeps no state of the issue's own. Nil notes none.
 	NoteUnread func(key, resolved string)
+	// ReadMergeState is asked, on the commit of a fact that leaves a review round waiting on
+	// GitHub's merge state for the pull request's head (askMergeState), to read it: the one thing
+	// a reviewing round is owed from outside the record, and what moves an approved issue to
+	// accepting. The daemon answers it with a ladder of reads (workflowRuntime.queueMergeState);
+	// nil asks for none, which is the API-only daemon and a test that drives the reads itself.
+	ReadMergeState func(issue string)
 }
 
 // Engine interprets Table and writes only records and outbox rows through the supplied Store.
@@ -611,6 +618,11 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		}
 		row.LastHandoff = fact.Commit
 	}
+	// The round as the completion found it is what a notice is deduped against (settleRound): a
+	// round already stuck at this head before the completion was told then, and the completion
+	// adds nothing to it; a round the completion itself leaves stuck - one it completed with no
+	// decision, or with an approval of other code - was not stuck before it, and is told.
+	found := e.reviewRound(*issue, row, pr)
 	row.Claim, row.HandoffCommit, row.Verdict, row.Summary, row.CompletedAt = fact.Claim, fact.Commit, fact.Verdict, fact.Summary, e.now()
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
@@ -634,7 +646,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterPassed, "", row, pr, "")
 		}
 	case phase.Reviewing:
-		_, err := e.settleRound(ctx, tx, *issue, row, pr, round{}, byCompletion)
+		_, err := e.settleRound(ctx, tx, *issue, row, pr, found, byCompletion)
 		return intake.Result{}, err
 	case phase.Retro:
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerRetroCompleted, "", row, pr, "")
@@ -754,13 +766,19 @@ func claimCauses(fact intake.ClaimFailed) string {
 // Nothing of the issue moves — the worker is running — and nothing is held: the report is the
 // whole point, since a worker that lost its memory is otherwise indistinguishable from one that
 // is merely slow. An issue the record does not hold tells nobody.
+//
+// The detail is the runtime's own account of the failed resume, which carries a session file name
+// and a transport error from outside the daemon, and this sentence is read into an agent's
+// prompt, so it is quoted as a Go string (strconv.Quote): the quotes bound it, and a quote or a
+// newline inside it is escaped rather than closing the one around it. sessionStoreFault quotes
+// its own detail for the same reason.
 func (e *Engine) sessionLost(ctx context.Context, tx pgx.Tx, fact intake.SessionLost) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
 	told := fmt.Sprintf("The %s of %s lost the session it recorded: %s. It is running a fresh agent, which has read none of its own earlier turns; only what it pushed and committed survives.",
-		fact.Role, issue.Key, fact.Detail)
+		fact.Role, issue.Key, strconv.Quote(fact.Detail))
 	if err := e.enqueue(ctx, tx, issue.Key, record.MessagePost{Body: told}); err != nil {
 		return intake.Result{}, err
 	}
@@ -780,7 +798,7 @@ func (e *Engine) sessionStoreFault(ctx context.Context, tx pgx.Tx, fact intake.S
 		return intake.Result{}, err
 	}
 	told := fmt.Sprintf("The %s of %s cannot be started: the session store could not be asked for its session: %s. Nothing is lost and nothing is charged; the daemon tries again every minute, and no worker of this issue runs until the store answers.",
-		fact.Role, issue.Key, fact.Detail)
+		fact.Role, issue.Key, strconv.Quote(fact.Detail))
 	if err := e.enqueue(ctx, tx, issue.Key, record.MessagePost{Body: told}); err != nil {
 		return intake.Result{}, err
 	}
@@ -915,8 +933,8 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	}
 	// Two counters move here, and they count different things. Every move back to an earlier phase
 	// counts the implementer a pass: the tester's fail, a review's request for changes, a worker's
-	// backward move, and the move the daemon makes on its own for a red CI verdict or a head that
-	// conflicts with its base. The pass tells each pass through a phase from the last
+	// backward move, and the one move the daemon makes on its own, a head that conflicts with its
+	// base (TriggerConflict). The pass tells each pass through a phase from the last
 	// (api/handoff.go): a move that counted none would give a completion reporting the last pass's
 	// carrying commit that pass's key, answered as already received instead of refused as a handoff
 	// not written anew. The round is the review's alone — it counts the review rounds

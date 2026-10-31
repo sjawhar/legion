@@ -412,15 +412,15 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 	body, _ := json.Marshal(command)
 	// refuse is how a start that cannot run answers: the refusal is remembered under the command's
 	// id, so a retry of that id is answered with it rather than tried again. A refusal over the
-	// session to resume says which of the two it is, in the answer's own fields, and the remembered
-	// answer carries them too, so the retry says the same thing (shimwire.LauncherStartResult).
+	// session to resume names its kind in the answer's own field, and the remembered answer carries
+	// it too, so the retry says the same thing (shimwire.SessionRefusal).
 	refuse := func(cause error) shimwire.LauncherStartResult {
 		result := shimwire.LauncherStartResult{ID: command.ID, Error: cause.Error()}
-		switch {
-		case errors.Is(cause, ErrSessionMissing):
-			result.SessionMissing = true
-		case errors.Is(cause, ErrSessionStore):
-			result.SessionStoreFault = true
+		for _, kind := range []shimwire.SessionRefusal{shimwire.SessionGone, shimwire.SessionStoreUnreachable} {
+			if errors.Is(cause, kind) {
+				result.Session = kind
+				break
+			}
 		}
 		m.remember(command.ID, body, result)
 		return result
@@ -880,17 +880,6 @@ func endSession(proxy *sessionproxy.Proxy, dir string) {
 	_ = os.RemoveAll(dir)
 }
 
-// ErrSessionMissing is a resume whose session the session table answered it does not hold, and
-// ErrSessionStore a session table that could not be asked at all — absent, or a store that did not
-// answer. The two travel back to the daemon as the typed fields of its start answer
-// (shimwire.LauncherStartResult), because they decide different things there: a session that is
-// gone starts a fresh agent, and a store that cannot be asked is waited for
-// (runtime.ErrSessionFileMissing, runtime.ErrSessionStore).
-var (
-	ErrSessionMissing = errors.New("the session table holds no such session")
-	ErrSessionStore   = errors.New("the session store could not be asked")
-)
-
 // resumable refuses a resume of a session nothing holds, so the launcher never starts a fresh
 // agent behind the daemon's back: Oh My Pi starts a new session at a --resume path it finds empty.
 // It looks where the child's Oh My Pi will, in the session table (the runtime's
@@ -911,7 +900,7 @@ var (
 func resumable(ctx context.Context, env []string, file, clientURL string, log io.Writer) (recreated bool, conn *pgx.Conn, err error) {
 	sessions, err := newSessionDial(env, clientURL)
 	if err != nil {
-		return false, nil, fmt.Errorf("resume session %s: %w: %v", file, ErrSessionStore, err)
+		return false, nil, fmt.Errorf("resume session %s: %w: %v", file, shimwire.SessionStoreUnreachable, err)
 	}
 	written, conn, err := sessionWritten(ctx, sessions, file)
 	if err != nil {
@@ -933,8 +922,8 @@ func resumable(ctx context.Context, env []string, file, clientURL string, log io
 
 // sessionWritten is when the session a resume names was last written, read from the session table
 // the child's Oh My Pi keeps it in (resumable) through a connection sessions dials, which it returns
-// open. A table that could not be asked at all is ErrSessionStore; a session the table answers it
-// does not hold is ErrSessionMissing, refused at once.
+// open. A table that could not be asked at all is shimwire.SessionStoreUnreachable; a session the
+// table answers it does not hold is shimwire.SessionGone, refused at once.
 func sessionWritten(parent context.Context, sessions sessionDial, file string) (time.Time, *pgx.Conn, error) {
 	var written time.Time
 	var found bool
@@ -943,11 +932,11 @@ func sessionWritten(parent context.Context, sessions sessionDial, file string) (
 		return err
 	})
 	if err != nil {
-		return time.Time{}, nil, fmt.Errorf("resume session %s: %w: %v", file, ErrSessionStore, err)
+		return time.Time{}, nil, fmt.Errorf("resume session %s: %w: %v", file, shimwire.SessionStoreUnreachable, err)
 	}
 	if !found {
 		closeSessions(conn)
-		return time.Time{}, nil, fmt.Errorf("resume session %s: %w", file, ErrSessionMissing)
+		return time.Time{}, nil, fmt.Errorf("resume session %s: %w", file, shimwire.SessionGone)
 	}
 	return written, conn, nil
 }

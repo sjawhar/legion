@@ -163,10 +163,12 @@ type Claim struct {
 	// store never writes them.
 	SuspensionHeld   bool
 	SuspensionHeldBy SuspendSource
-	// SessionLost is whether this launch is a fresh agent because the session the claim recorded
-	// was found nowhere the runtime could resume it (start). It is memory only, and lives only
-	// from that discovery to the spawn it describes: the launch rebuilds its spec with it, so the
-	// new session is told its predecessor's transcript is gone, and nothing afterwards reads it.
+	// SessionLost is whether the launch this claim is being built a spec for is a fresh agent
+	// because the session the claim recorded was found nowhere the runtime could resume it
+	// (startFresh). It is an argument of that one build and of nothing else: the machine sets it
+	// on the copy of the claim it hands the spec builder (spawnSpec), never on the claim it keeps
+	// or persists, so the new session is told its predecessor's transcript is gone and nothing
+	// afterwards reads it.
 	SessionLost bool
 	// PluginContract is the contract the current registration declared: 0 means no contract has
 	// been recorded, which every claim has at the first boot on this release. It is set whenever a
@@ -1146,7 +1148,7 @@ func (m *Machine) backOff(ctx context.Context) error {
 // refusal of a Resume is a launch failure the caller charges, and the claim keeps its session: a
 // fresh agent on a claim that had one is what the same-agent refusal exists to catch.
 func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, error) {
-	spec, err := m.spawnSpec(ctx, token)
+	spec, err := m.spawnSpec(ctx, token, false)
 	if err != nil {
 		return runtime.Locator{}, err
 	}
@@ -1164,8 +1166,15 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 // spawnSpec is the launch's spec: what the daemon builds for this claim, with what only the
 // machine knows — who the claim is, the generation and the boot token this try mints. A resume
 // adds its session file; a spawn carries none.
-func (m *Machine) spawnSpec(ctx context.Context, token string) (runtime.SpawnSpec, error) {
-	spec, err := m.deps.Specs.SpawnSpec(ctx, m.claim)
+//
+// sessionLost is the one thing about this launch that is not the claim's own state: true says the
+// agent it starts is fresh because the recorded session was found nowhere (startFresh), which the
+// spec builder turns into a sentence in the agent's own prompt. It is set on the copy handed to
+// the builder and never on the claim the machine keeps, which is the claim it persists.
+func (m *Machine) spawnSpec(ctx context.Context, token string, sessionLost bool) (runtime.SpawnSpec, error) {
+	building := m.claim
+	building.SessionLost = sessionLost
+	spec, err := m.deps.Specs.SpawnSpec(ctx, building)
 	if err != nil {
 		return runtime.SpawnSpec{}, fmt.Errorf("build the launch of %s: %w", m.claim.Token, err)
 	}
@@ -1175,19 +1184,17 @@ func (m *Machine) spawnSpec(ctx context.Context, token string) (runtime.SpawnSpe
 }
 
 // startFresh spawns a new agent for a claim whose recorded session no store holds any more
-// (start). The spec is built again with the loss on the claim, so the agent that starts is told
-// its predecessor is gone rather than left to infer it from an empty transcript, and the report to
-// the issue, the architect and the controller goes only once the fresh agent is actually running:
-// a spawn that failed is a launch failure the caller charges, and says nothing yet about the
-// session.
+// (start). The spec is built again for a launch that lost its session, so the agent that starts
+// is told its predecessor is gone rather than left to infer it from an empty transcript, and the
+// report to the issue, the architect and the controller goes only once the fresh agent is
+// actually running: a spawn that failed is a launch failure the caller charges, and says nothing
+// yet about the session.
 func (m *Machine) startFresh(ctx context.Context, token string, cause error) (runtime.Locator, error) {
 	m.log.Warn("supervise: the recorded session is found nowhere the runtime can resume it, so the claim starts a fresh agent, charged nothing",
 		"session", m.claim.Session, "sessionFile", m.claim.SessionFile, "error", cause)
 	lost := m.claim.Session
 	m.forgetSession()
-	m.claim.SessionLost = true
-	spec, err := m.spawnSpec(ctx, token)
-	m.claim.SessionLost = false
+	spec, err := m.spawnSpec(ctx, token, true)
 	if err != nil {
 		return runtime.Locator{}, err
 	}

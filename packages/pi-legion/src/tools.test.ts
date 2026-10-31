@@ -118,19 +118,18 @@ const OMP_LEGION_TOOL_DESCRIPTION =
   "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " +
   "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " +
   "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " +
-  "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " +
+  "architect), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " +
   "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " +
-  "yet), `ready: true` for the merger's READY. A handoff is a committed " +
+  "yet). A handoff is a committed " +
   "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " +
   "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " +
   "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " +
   "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " +
   "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " +
-  "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff), the implementer's " +
+  "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff) and the implementer's " +
   "completion of implementing with no open pull request on `legion/<issue>` and none recorded merged (HANDOFF_NO_PULL_REQUEST: open it; one " +
-  "naming a closed pull request is the architect's to decide) and, for READY, each " +
-  "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " +
-  "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. request_backward_move returns an issue to an earlier phase (`to`, `reason`): " +
+  "naming a closed pull request is the architect's to decide); a refused completion changed nothing, so fix what it names and complete again. " +
+  "request_backward_move returns an issue to an earlier phase (`to`, `reason`): " +
   "a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which " +
   "counts a review round. sign_off is the architect's acceptance of an issue in accepting, moving it to retro; the daemon refuses it in every " +
   "other phase (SIGNOFF_OUTSIDE_ACCEPTING), and issues still running beneath it do not hold it: a root's close waits " +
@@ -219,7 +218,6 @@ const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
     decision: { type: "string", enum: ["retry", "escalate"] },
     summary: { type: "string" },
     verdict: { type: "string", enum: ["pass", "pending", "fail"] },
-    ready: { type: "boolean" },
     status: { type: "string", enum: ["todo", "backlog", "icebox"] },
     phase: { type: "string", enum: [...LEGION_PHASES] },
     settings: { type: "boolean" },
@@ -238,11 +236,7 @@ test("the legion tool's parameter schema serializes to the exact schema Oh My Pi
 
 test("a root architect's handoff_complete is refused as unavailable before its arguments are read", async () => {
   const root = toolFor(claimSession("architect"));
-  for (const parameters of [
-    {},
-    { summary: "" },
-    { summary: "x", verdict: "maybe", ready: "yes" },
-  ]) {
+  for (const parameters of [{}, { summary: "" }, { summary: "x", verdict: "maybe" }]) {
     await expect(
       root.execute("", { op: "handoff_complete", ...parameters }, undefined, undefined, context())
     ).resolves.toEqual({
@@ -598,16 +592,9 @@ const stateAt = (phase: LegionPhase) => ({
   },
 });
 
-test("handoff_complete finds the pushed commit carrying the handoff, posts it with a fresh grant, closes the phase on success, and answers the daemon's note", async () => {
+test("handoff_complete finds the pushed commit carrying the handoff, posts it with a fresh grant, and closes the phase on success", async () => {
   const completed: string[] = [];
-  const { calls, daemon } = recordingDaemon({
-    state: stateAt("implementing"),
-    answers: {
-      handoffComplete: {
-        note: "pull request #312 is already merged, so READY was published without reading its head's handoffs",
-      },
-    },
-  });
+  const { calls, daemon } = recordingDaemon({ state: stateAt("implementing") });
   const run = (
     session: LegionToolSession,
     parameters: Record<string, unknown>,
@@ -625,45 +612,32 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
 
   // The implementer at implementing: the issue's phase is read from the daemon's state, the
   // commit carrying .legion/LEGION-208/implement.json is found in the pane, and the request
-  // carries it with the wire's zero values for the verdict and READY.
+  // carries it with the wire's zero value for the verdict.
   await expect(
     run(claimSession("implementer"), { op: "handoff_complete", summary: "Done." })
-  ).resolves.toEqual({
-    content: [
-      {
-        type: "text",
-        text: '{"note":"pull request #312 is already merged, so READY was published without reading its head\'s handoffs"}',
-      },
-    ],
-    details: {
-      note: "pull request #312 is already merged, so READY was published without reading its head's handoffs",
-    },
-  });
+  ).resolves.toEqual({ content: [{ type: "text", text: "{}" }], details: {} });
   expect(calls).toEqual([
     ["state", undefined],
     [
       "grant",
       { sessionId: "ses_208", secret: "claim-secret", tree: "LEGION-208", issue: "LEGION-208" },
     ],
-    [
-      "handoffComplete",
-      { grantId: "grant-208", summary: "Done.", verdict: "", ready: false, commit: CARRYING },
-    ],
+    ["handoffComplete", { grantId: "grant-208", summary: "Done.", verdict: "", commit: CARRYING }],
   ]);
   expect(completed).toEqual(["ses_208"]);
 
   // A role that does not work the issue's phase reports the commit the workspace stands on, and
-  // the daemon refuses it naming whose phase it is: the tester at implementing, the merger's
-  // READY, and a sub-architect, each posting @-. The verdict and READY travel as given.
+  // the daemon refuses it naming whose phase it is: the tester at implementing, the merger, and a
+  // sub-architect, each posting @-. The verdict travels as given.
   await run(claimSession("tester"), { op: "handoff_complete", summary: "Red.", verdict: "fail" });
   expect(calls.at(-1)).toEqual([
     "handoffComplete",
-    { grantId: "grant-208", summary: "Red.", verdict: "fail", ready: false, commit: STANDING },
+    { grantId: "grant-208", summary: "Red.", verdict: "fail", commit: STANDING },
   ]);
-  await run(claimSession("merger"), { op: "handoff_complete", summary: "READY", ready: true });
+  await run(claimSession("merger"), { op: "handoff_complete", summary: "Merged." });
   expect(calls.at(-1)).toEqual([
     "handoffComplete",
-    { grantId: "grant-208", summary: "READY", verdict: "", ready: true, commit: STANDING },
+    { grantId: "grant-208", summary: "Merged.", verdict: "", commit: STANDING },
   ]);
   await run(claimSession("architect", "LEGION-209"), {
     op: "handoff_complete",
@@ -675,14 +649,13 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
       grantId: "grant-208",
       summary: "Children released.",
       verdict: "",
-      ready: false,
       commit: STANDING,
     },
   ]);
   expect(completed).toEqual(["ses_208", "ses_208", "ses_208", "ses_208"]);
 
   // Refused before any daemon call: a root architect, which runs no phase; a missing summary; a
-  // verdict or a ready of the wrong shape; and a phase, which the daemon knows from the grant.
+  // verdict of the wrong shape; and a phase, which the daemon knows from the grant.
   const before = calls.length;
   const refusals = [
     [claimSession("architect"), { summary: "Done." }, "root architect session"],
@@ -692,7 +665,6 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
       { summary: "x", verdict: "maybe" },
       "verdict is pass, pending or fail",
     ],
-    [claimSession("merger"), { summary: "x", ready: "yes" }, "ready is true or false"],
     [claimSession("planner"), { summary: "x", phase: "plan" }, 'does not accept field "phase"'],
   ] as const;
   for (const [session, parameters, message] of refusals) {
@@ -811,35 +783,24 @@ test("the implementer's report on its closed issue's production check carries a 
         "grant",
         { sessionId: "ses_208", secret: "claim-secret", tree: "LEGION-208", issue: "LEGION-208" },
       ],
-      [
-        "handoffComplete",
-        { grantId: "grant-208", summary: `Look 2: ${verdict}.`, verdict, ready: false },
-      ],
+      ["handoffComplete", { grantId: "grant-208", summary: `Look 2: ${verdict}.`, verdict }],
     ]);
   }
   expect(completed).toEqual(["ses_208", "ses_208", "ses_208"]);
 
-  // Refused after the record is read, with nothing minted or posted: a report with no verdict,
-  // and one sent as READY.
-  const refusals = [
-    [
-      { summary: "Looked." },
-      "handoff_complete on a production check names a verdict of pass, pending or fail",
-    ],
-    [
-      { summary: "Looked.", verdict: "pass", ready: true },
-      "handoff_complete on a production check is no READY: leave ready out",
-    ],
-  ] as const;
-  for (const [parameters, message] of refusals) {
-    const result = await run(claimSession("implementer"), {
-      op: "handoff_complete",
-      ...parameters,
-    });
-    expect(result.isError).toBe(true);
-    expect(result.content).toEqual([{ type: "text", text: message }]);
-    expect(calls.at(-1)).toEqual(["state", undefined]);
-  }
+  // Refused after the record is read, with nothing minted or posted: a report with no verdict.
+  const noVerdict = await run(claimSession("implementer"), {
+    op: "handoff_complete",
+    summary: "Looked.",
+  });
+  expect(noVerdict.isError).toBe(true);
+  expect(noVerdict.content).toEqual([
+    {
+      type: "text",
+      text: "handoff_complete on a production check names a verdict of pass, pending or fail",
+    },
+  ]);
+  expect(calls.at(-1)).toEqual(["state", undefined]);
   expect(completed).toHaveLength(3);
 
   // Only the implementer reports on the check: any other role's completion on the closed issue is
@@ -886,7 +847,7 @@ test("the implementer's report on its closed issue's production check carries a 
   expect(implementerAtDone.isError).toBeUndefined();
   expect(closedCalls.at(-1)).toEqual([
     "handoffComplete",
-    { grantId: "grant-208", summary: "Looked.", verdict: "", ready: false },
+    { grantId: "grant-208", summary: "Looked.", verdict: "" },
   ]);
 });
 

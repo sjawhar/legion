@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -176,27 +174,21 @@ type workflowRuntime struct {
 	// the fact the failed callback lost.
 	failed chan error
 	// readied is the architects claimReady recorded whose waiting notices releaseReadied has not
-	// released yet; readyWake, holding at most one wake, tells it there are some.
-	readyMu   sync.Mutex
-	readied   map[claim.Token]bool
-	readyWake chan struct{}
+	// released yet.
+	readied *wakeSet[claim.Token]
 	// handedOff is each issue whose agent's handoff the API recorded (handoffCompleted) that
-	// readHandedOff has not read the pull request of yet; handoffWake, holding at most one wake,
-	// tells it there are some. The set is what makes a second completion of the same issue, while
-	// the first is still queued, one read rather than two.
-	handoffMu   sync.Mutex
-	handedOff   map[string]bool
-	handoffWake chan struct{}
-	// mergeStateWanted is each issue a fact left waiting on GitHub's merge state (the handler
-	// mergeStateTrigger) that readMergeStates has not started a ladder for yet, and
-	// mergeStateRunning each issue whose ladder is still reading; mergeStateWake, holding at most
-	// one wake, tells the reader there are some. mergeStateRetry is how long a ladder waits
-	// between reads of a state GitHub answers `unknown` for, mergeStateLadderWait when zero, which
-	// a test shortens.
+	// readHandedOff has not read the pull request of yet, which is what makes a second completion
+	// of the same issue, while the first is still queued, one read rather than two.
+	handedOff *wakeSet[string]
+	// mergeStates is each issue a fact left waiting on GitHub's merge state (queueMergeState,
+	// the engine's Config.ReadMergeState) that readMergeStates has not started a ladder for yet,
+	// and mergeStateRunning each issue whose ladder is still reading, which is why a second fact
+	// of an issue already being read starts no second ladder. mergeStateRetry is how long a
+	// ladder waits between reads of a state GitHub answers `unknown` for, mergeStateLadderWait
+	// when zero, which a test shortens.
+	mergeStates       *wakeSet[string]
 	mergeStateMu      sync.Mutex
-	mergeStateWanted  map[string]bool
 	mergeStateRunning map[string]bool
-	mergeStateWake    chan struct{}
 	mergeStateRetry   time.Duration
 }
 
@@ -297,10 +289,10 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	w := &workflowRuntime{
 		tokens: tokens, forget: forget, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos, build: build,
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
-		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
-		handedOff: map[string]bool{}, handoffWake: make(chan struct{}, 1),
-		mergeStateWanted: map[string]bool{}, mergeStateRunning: map[string]bool{}, mergeStateWake: make(chan struct{}, 1),
-		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
+		failed: make(chan error, 1), mappingChanged: make(chan struct{}, 1),
+		readied: newWakeSet[claim.Token](), handedOff: newWakeSet[string](), mergeStates: newWakeSet[string](),
+		mergeStateRunning: map[string]bool{},
+		controllerWake:    cfg.ControllerWakeInterval, githubAPI: githubAPI,
 		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
 	}
 	log.Info("legion workflow boot stage", "stage", "dispatch")
@@ -325,7 +317,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// through the runtime, since the outbox itself is built later (attach).
 	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
 	engineCfg := engineConfig(cfg, reviewAppLogin, build)
-	engineCfg.Repositories, engineCfg.NoteUnread = w, w.noteUnread
+	engineCfg.Repositories, engineCfg.NoteUnread, engineCfg.ReadMergeState = w, w.noteUnread, w.queueMergeState
 	w.engine = workflow.New(w.records, engineCfg, log)
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
 	// The mirror runs before both deciders, and that order is load-bearing. The engine decides
@@ -333,11 +325,8 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// transaction, from the mirror's rows, so the row an event carries must already be written
 	// when they look. Neither could write it itself: the engine returns early on an event whose
 	// sequence or status it has already seen (Engine.dispatchIssue), which is exactly the
-	// blocked-by-only edit this mirror exists for, and admission runs second in any case. The
-	// merge-state trigger runs last of all and decides nothing: it reads the record the fact left
-	// to see whether the daemon owes GitHub a read of the head's merge state, and queues it for
-	// after the commit.
-	w.handlers, w.reviewAppLogin = []intake.Handler{blockers.NewMirror(w.records, cfg.Project), w.engine, w.admission, mergeStateTrigger{runtime: w}}, reviewAppLogin
+	// blocked-by-only edit this mirror exists for, and admission runs second in any case.
+	w.handlers, w.reviewAppLogin = []intake.Handler{blockers.NewMirror(w.records, cfg.Project), w.engine, w.admission}, reviewAppLogin
 	w.pool = st.Pool()
 	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, log); err != nil {
 		return nil, err
@@ -1096,13 +1085,7 @@ func (w *workflowRuntime) claimReady(c supervise.Claim) {
 	if c.Role != claim.RoleArchitect {
 		return
 	}
-	w.readyMu.Lock()
-	w.readied[c.Token] = true
-	w.readyMu.Unlock()
-	select {
-	case w.readyWake <- struct{}{}:
-	default:
-	}
+	w.readied.add(c.Token)
 }
 
 // taskConfirmed applies the fact that a role's agent took the work the daemon gave it
@@ -1169,15 +1152,10 @@ func (w *workflowRuntime) applySessionFact(c supervise.Claim, id string, fact in
 // recorded: each wake takes every architect recorded since the last one, in one release.
 func (w *workflowRuntime) releaseReadied(ctx context.Context) {
 	for {
-		select {
-		case <-ctx.Done():
+		architects, ok := w.readied.take(ctx)
+		if !ok {
 			return
-		case <-w.readyWake:
 		}
-		w.readyMu.Lock()
-		architects := slices.Collect(maps.Keys(w.readied))
-		clear(w.readied)
-		w.readyMu.Unlock()
 		if len(architects) == 0 {
 			continue
 		}

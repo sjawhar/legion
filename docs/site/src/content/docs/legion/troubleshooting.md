@@ -626,16 +626,16 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   approved <sha> on pull request #<n>, which does not approve head <sha>: a push since may have
   changed code`. The approval counts at a later head only when everything above it changed only
   the issue's own `.legion/<issue>/`; another issue's `.legion/` counts as code. The daemon
-  learns that from each push's webhook, and every two minutes, while the round sits
-  so, it also asks GitHub's compare of the approved head with the head: when the head is built on
-  the approved head and only `.legion/<issue>/` changed between them, it applies that push and the
-  round ends, logged at warn as `workflow: only the issue's handoffs changed above the approved
-  head, and no recorded push says so; applying the push GitHub's compare shows`. Any other answer
-  is logged once at info as `workflow: the reviewer's approval stays set aside below the head; …`
-  with its `reason` (a path outside `.legion/<issue>/`; a head not built on the approved one; 300
-  or no changed files; an approved head GitHub does not know), and the remedy is the reviewer's
-  approval of the head itself, which ends the round once the record reaches that head, whether or
-  not its push webhook ever arrives.
+  learns that from each push's webhook, and its read of the issue, at the daemon's start and
+  after every handoff, also asks GitHub's compare of the approved head with the head: when the
+  head is built on the approved head and only `.legion/<issue>/` changed between them, it applies
+  that push and the round ends, logged at warn as `workflow: only the issue's handoffs changed
+  above the approved head, and no recorded push says so; applying the push GitHub's compare
+  shows`. Any other answer is logged once at info as `workflow: the reviewer's approval stays set
+  aside below the head; …` with its `reason` (a path outside `.legion/<issue>/`; a head not built
+  on the approved one; 300 or no changed files; an approved head GitHub does not know), and the
+  remedy is the reviewer's approval of the head itself, which ends the round once the record
+  reaches that head, whether or not its push webhook ever arrives.
 - **The merger merges nothing.** It merges nothing while the pull request's head still carries the
   issue's handoffs, `.legion/<issue>/`, which retro's last commit removes: it tells the architect,
   who moves the issue back to `retro`, and it merges the head retro's push then makes. It merges
@@ -775,11 +775,12 @@ legion state --config legion.yaml --json | jq '.consumers[] | {name, waiting, ol
   oldest message is `unavailable` on each consumer while messages wait on it, and nothing else
   changes.
 
-While a GitHub event waits, or was lost on its way, the daemon's two-minute pass
-([Running Legion](/legion/legion/running-legion/#the-github-apps)) still records each open pull
-request GitHub lists on an issue's branch, applies a close, merge, push or review GitHub shows,
-and settles a head's CI from its check runs, so none of those waits more than one pass for the
-consumer to catch up.
+While a GitHub event waits, or was lost on its way, nothing comes round to make up for it on a
+timer. The daemon's read of an issue's pull request
+([Running Legion](/legion/legion/running-legion/#the-github-apps)) is the backstop, and it runs
+at the daemon's start and after every handoff: it records the open pull request GitHub lists on
+the issue's branch, and applies a head, a review or an approval-carrying push GitHub shows. An
+event that waits for a phase no handoff is coming for waits for the consumer to catch up.
 
 ## An architect is told `pull-request-missing`
 
@@ -813,16 +814,17 @@ notice comes once per handoff commit, from whichever read finds it first.
   Every event that consumer has not reached waits: on the GitHub consumer a pull request's opened
   or push, on the Dispatch consumer a status change. `legion state`'s `consumer` lines
   (`consumers` in `--json`) show how many wait and how old the oldest is now, and whether the
-  consumer has stalled ([GitHub events wait](#github-events-wait)). The daemon's two-minute pass
-  still records each open pull request GitHub lists, applies a lost close, merge or push, settles a
-  head's CI from its check runs and tells an architect `pull-request-missing`, so none of those
-  waits for the backlog to drain.
+  consumer has stalled ([GitHub events wait](#github-events-wait)). The daemon's read of an
+  issue's pull request, at its start and after every handoff, still records the pull request
+  GitHub lists, applies a lost head, review or approval-carrying push, and tells an architect
+  `pull-request-missing`, so an issue whose next handoff lands does not wait for the backlog to
+  drain.
 - **`webhook App missing on <repo>: <reason>`** in `legion state` (`repositories.withoutWebhookApp`
   in `--json`). Dispatch's GitHub App, the Envoy App whose webhook carries GitHub's events, is not
   known to be installed on a repository the daemon serves. With `Dispatch's GitHub App is not
   installed on <repo>: …`, GitHub sends Legion none of that repository's events and nothing
-  redelivers them: the repository is served, and only the two-minute pass brings its pull
-  requests' changes in. An operator installs Dispatch's GitHub App on the repository
+  redelivers them: the repository is served, and nothing brings its pull requests' changes in, so
+  its issues stand still. An operator installs Dispatch's GitHub App on the repository
   ([The GitHub Apps](/legion/legion/running-legion/#the-github-apps)); the line goes at the
   daemon's next read of the mapping, at a restart or the next change of the mapping in Dispatch.
   `the webhook App check failed: GITHUB_APP_UNCONFIGURED: …` is a Dispatch that holds no App key
@@ -842,7 +844,8 @@ notice comes once per handoff commit, from whichever read finds it first.
   Only an applied event moves that position, not one the daemon acknowledged without acting on, so
   on a quiet project the consumer may have handled every event between `start` and `stream_first`
   before it went missing. Any it had not reached may have been missed: the daemon applied none of
-  them, and the two-minute pass heals the pull requests of the GitHub events among them.
+  them, and nothing replays them, so an issue one of them would have moved waits for its next
+  event, or for the daemon's own read of its pull request at that issue's next handoff.
 - **`agent-secrets: the token login failed; retrying`** (an error line with the broker's answer).
   With `runtime.kubernetes.agent_secrets` set, the daemon logs in to the
   [Secrets Broker](/legion/broker/) with its own ServiceAccount token, read from `token_file`, at

@@ -24,7 +24,9 @@ import (
 // (record.Store.OpenPullRequestsOnBase), so a push to a branch Legion records no pull request on -
 // every push of the other automation a mapped repository carries - ends the transaction there,
 // having written nothing. A pull request whose recorded base is still the empty one no read has
-// filled matches no push, and is read again by the two-minute pass regardless.
+// filled matches no push: the daemon's next read of that pull request - at a handoff, at its
+// start, or for a round waiting on the merge state - fills the base, and from then on its base's
+// pushes find it.
 func (e *Engine) basePush(ctx context.Context, tx pgx.Tx, fact intake.BasePush) (intake.Result, error) {
 	open, err := e.store.OpenPullRequestsOnBase(ctx, tx, fact.Repo, fact.Branch)
 	if err != nil {
@@ -47,6 +49,12 @@ func (e *Engine) basePush(ctx context.Context, tx pgx.Tx, fact intake.BasePush) 
 		}
 		own.BaseMoved = fact.After
 		if err := e.store.PutPullRequest(ctx, tx, *own); err != nil {
+			return intake.Result{}, err
+		}
+		// A base that moved is what takes a head from clean to behind, which is the one answer
+		// that holds an approved issue in reviewing, so each pull request on it is read for
+		// (askMergeState).
+		if err := e.askMergeState(ctx, tx, own); err != nil {
 			return intake.Result{}, err
 		}
 	}

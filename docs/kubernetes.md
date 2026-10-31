@@ -6195,10 +6195,10 @@ as a fresh agent, with no error frame and no mention of the file. Under Kubernet
 file to look for and no init container that looks for one: every session is a row in the session
 database, and the pod's disk, which dies with the pod, never holds a transcript. The role's own
 launcher makes the check instead, inside the pod and before it starts the child: it looks the
-recorded session up in the table through the mounted URL file and says which of two things it met,
-in typed fields of its start answer rather than in prose. A table that holds no such session
-(`sessionMissing`) is that session gone, and the daemon starts the fresh agent above. A table that
-does not exist, or a store that does not answer (`sessionStoreFault`), is a deployment fault that
+recorded session up in the table through the mounted URL file and names which of two things it met
+in one field of its start answer, `session`, rather than in prose. A table that holds no such
+session (`gone`) is that session gone, and the daemon starts the fresh agent above. A table that
+does not exist, or a store that does not answer (`store-unreachable`), is a deployment fault that
 says nothing about the session: the claim keeps it, nothing is charged, the start is tried again
 every minute, and the issue and the controller are told at once and then hourly until the store
 answers. Should a resume reach Oh My Pi with

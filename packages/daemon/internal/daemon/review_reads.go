@@ -87,7 +87,7 @@ func (w *workflowRuntime) readReviews(ctx, read context.Context, github githubre
 	// A deciding review the pull request's record had not seen when this read looked it up: its
 	// webhook was lost, or is still on its way, and whichever copy comes second records nothing. A
 	// review an earlier read applied is not applied again.
-	eventID := w.readEventID("review-read", pr.Repo, pr.Number, strconv.FormatInt(review.ID, 10), clock(review.SubmittedAt))
+	eventID := readEventID("review-read", w.dispatchProject, pr.Repo, pr.Number, strconv.FormatInt(review.ID, 10), clock(review.SubmittedAt))
 	if !w.unapplied(ctx, eventID) {
 		return false
 	}
@@ -102,8 +102,8 @@ func (w *workflowRuntime) readReviews(ctx, read context.Context, github githubre
 // reviewToApply is the review of reviews, GitHub's list of pr's, that the workflow would hold as the
 // pull request's newest deciding review had every webhook arrived, judged by the workflow's own
 // rules rather than a copy of them: of the reviews that decide (intake.PullRequestReview.Decides)
-// and are newer (intake.PullRequestReview.Order) than the newest the pull request's record held as
-// the pass listed it (record.PullRequest.ReviewSeen), the newest the workflow lets decide
+// and are newer (intake.PullRequestReview.Order) than the newest the pull request's record holds
+// (record.PullRequest.ReviewSeen), the newest the workflow lets decide
 // (workflow.Engine.DecidesRound): the reviewer's own review-App session, told from any other
 // review-App session's by its Legion footer against the session recorded on the reviewer's claim
 // (workflow.Engine.ReviewerSession, read once per pull request that has a candidate), or an author

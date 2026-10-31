@@ -83,7 +83,10 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		return intake.Result{}, err
 	}
 	if issue.Phase != phase.Implementing {
-		return intake.Result{}, nil
+		// A reopen lands under whatever phase the issue stands in, a reviewing round with an
+		// approval standing among them, and GitHub recomputes the merge state of a pull request
+		// it reopens, so the read is asked for from here too.
+		return intake.Result{}, e.askMergeState(ctx, tx, &pr)
 	}
 	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleImplementer)
 	if err != nil || row.HandoffCommit == "" {
@@ -131,8 +134,8 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	// GitHub names the base on every pull-request event, so a synchronize is also where a base
 	// retargeted on GitHub reaches the record; one that names none (a listener that predates the
 	// field, or the daemon's own read of the head) leaves the recorded base as it is, for the
-	// two-minute pass to fill. A late redelivery that writes nothing records no base either, as it
-	// records nothing else.
+	// daemon's next read of the pull request to fill. A late redelivery that writes nothing
+	// records no base either, as it records nothing else.
 	if fact.Base != "" {
 		pr.Base = fact.Base
 	}
@@ -160,13 +163,20 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	}
 	switch issue.Phase {
 	case phase.Reviewing:
+		// A head that moved under a round whose approval still stands re-asks it; one that did
+		// not, and one whose push is still on its way, leave the round where it is. GitHub
+		// recomputes the merge state of a pull request whose head moved either way, so the read
+		// is asked for on every one of them.
 		if !moved {
-			return intake.Result{}, nil
+			return intake.Result{}, e.askMergeState(ctx, tx, pr)
 		}
 		if !classify.HeadPushKnown(prior, pr.HeadSHA) {
 			reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
-			if err != nil || reviewer.Decision == nil || reviewer.Decision.State != "approved" || reviewer.Decision.Head != pr.HeadSHA {
+			if err != nil {
 				return intake.Result{}, err
+			}
+			if reviewer.Decision == nil || reviewer.Decision.State != "approved" || reviewer.Decision.Head != pr.HeadSHA {
+				return intake.Result{}, e.askMergeState(ctx, tx, pr)
 			}
 		}
 		return intake.Result{}, e.reaskRound(ctx, tx, *issue, pr, prior)
@@ -229,8 +239,8 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 		return intake.Result{}, nil
 	}
 	// The carry is queued before the round is re-asked: a round the push leaves stuck below the
-	// approved head is told so, as it was while the two-minute pass made this compare, and the
-	// row's fact ends it once GitHub answers that nothing outside the issue's handoffs changed.
+	// approved head is told so now, and the row's fact ends it once GitHub answers that nothing
+	// outside the issue's handoffs changed.
 	if err := e.carryApproval(ctx, tx, *issue, pr); err != nil {
 		return intake.Result{}, err
 	}
@@ -246,8 +256,10 @@ func (e *Engine) reaskRound(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if err != nil {
 		return err
 	}
-	_, err = e.settleRound(ctx, tx, issue, reviewer, pr, e.reviewRound(issue, reviewer, &prior), byPush)
-	return err
+	if _, err := e.settleRound(ctx, tx, issue, reviewer, pr, e.reviewRound(issue, reviewer, &prior), byPush); err != nil {
+		return err
+	}
+	return e.askMergeState(ctx, tx, pr)
 }
 
 // merged records the pull request merged, with its merge commit, whatever the issue's phase, and

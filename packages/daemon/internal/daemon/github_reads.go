@@ -33,13 +33,15 @@ func (w *workflowRuntime) logReadFailure(err error, limited, failed string, attr
 	return false
 }
 
-// readEventID is the event id, under source "github", of a fact the daemon's own read of GitHub
-// builds about pull request number of repo: kind, the project, the pull request, and observed,
-// what the read saw - a review's id, GitHub's submitted_at. It holds no read time and no boot, so
-// one observation is one fact however many reads, boots or daemons see it, and unapplied finds it
-// applied before any transaction.
-func (w *workflowRuntime) readEventID(kind, repo string, number int, observed ...string) string {
-	return fmt.Sprintf("%s:%s:%s#%d:%s", kind, w.dispatchProject, repo, number, strings.Join(observed, ":"))
+// readEventID is the event id, under source "github", of a fact a read of GitHub builds about
+// pull request number of repo: kind, the Dispatch project, the pull request, and observed, what
+// the read saw - a review's id, GitHub's submitted_at, the two heads of a compare. It holds no
+// read time, no boot and nothing of who made the read, so one observation is one fact however
+// many reads, boots, daemons or outbox rows see it, and unapplied finds it applied before any
+// transaction. The per-issue read and the outbox row that make the same read of GitHub share
+// this id, which is what keeps them from applying one observation twice (approvalCarryEvent).
+func readEventID(kind, project, repo string, number int, observed ...string) string {
+	return fmt.Sprintf("%s:%s:%s#%d:%s", kind, project, repo, number, strings.Join(observed, ":"))
 }
 
 // clock is GitHub's time t as an event id spells it.
@@ -101,7 +103,8 @@ func (p githubPullRequest) mergeability() record.Mergeability {
 }
 
 // mergeState is the pull request's `mergeable_state` as the record keeps it: GitHub's own merge
-// state for the head, in GitHub's spelling, which the daemon records and decides nothing on yet.
+// state for the head, in GitHub's spelling, which is what an approval standing on that head
+// waits for (workflow's reviewRound).
 // An answer with no `mergeable_state` at all - a list entry, which leaves it out - is
 // record.MergeStateUnread, since the read found none, and a spelling outside the eight GitHub
 // documents is record.MergeStateUnknown, the one state that already means "GitHub has not said
@@ -128,9 +131,9 @@ func (w *workflowRuntime) readPullRequest(ctx context.Context, pr record.PullReq
 	if err != nil {
 		return githubrest.Client{}, githubPullRequest{}, err
 	}
-	github, err := w.implementClient(ctx, repository)
+	github, err := implementClient(ctx, w.tokens, w.githubAPI, repository)
 	if err != nil {
-		return githubrest.Client{}, githubPullRequest{}, err
+		return githubrest.Client{}, githubPullRequest{}, fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err)
 	}
 	var pull githubPullRequest
 	if err := github.Get(ctx, fmt.Sprintf("/pulls/%d", pr.Number), &pull); err != nil {
@@ -139,11 +142,14 @@ func (w *workflowRuntime) readPullRequest(ctx context.Context, pr record.PullReq
 	return github, pull, nil
 }
 
-// implementClient is a client for repository's REST API on the implement App's installation token.
-func (w *workflowRuntime) implementClient(ctx context.Context, repository ghrepo.Repository) (githubrest.Client, error) {
-	lease, err := w.tokens.Token(ctx, appauth.Implement, repository.Owner())
+// implementClient is the client for repository's REST API on the implement App's installation
+// token: the App every read of an issue's own repository is made as, the per-issue reads' and
+// the outbox rows' alike. The mint failure is returned bare, so each caller says in its own
+// words what it was minting the token for.
+func implementClient(ctx context.Context, tokens appauth.Tokens, githubAPI string, repository ghrepo.Repository) (githubrest.Client, error) {
+	lease, err := tokens.Token(ctx, appauth.Implement, repository.Owner())
 	if err != nil {
-		return githubrest.Client{}, fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err)
+		return githubrest.Client{}, err
 	}
-	return githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(w.githubAPI, repository)}, nil
+	return githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(githubAPI, repository)}, nil
 }

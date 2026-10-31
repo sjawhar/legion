@@ -3,16 +3,8 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"maps"
-	"slices"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
-	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/classify"
-	"github.com/sjawhar/legion/daemon/internal/intake"
-	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -23,121 +15,25 @@ import (
 // few seconds is the usual wait, so five reads half a minute apart cover it with room over.
 //
 // After the fifth `unknown` the ladder stops, and nothing stands behind it: no row waits in the
-// outbox, no timer is left armed, and no pass comes round again. The record then shows an
-// approval standing on a head GitHub has not reported mergeable, which is the state the issue's
-// architect reads and acts on.
+// outbox, no timer is left armed, and no pass comes round again. `unknown` is no answer about the
+// head, so nobody is told of it: the issue's next event, its next handoff and the daemon's next
+// start each read again. Every other answer the ladder gets is recorded, and an approval left
+// standing on a head GitHub answers with a state it would not merge from tells the tree's
+// architect and the reviewer, once for that head and state, in the review-stuck notice the round
+// writes (workflow's reviewRound, stuckMergeState).
 const (
 	mergeStateLadderReads = 5
 	mergeStateLadderWait  = 30 * time.Second
 )
 
-// mergeStateTrigger is the intake handler that decides, for each fact the workflow has just
-// applied, whether the daemon reads GitHub's merge state for the pull request's head
-// (readMergeState). It runs after the engine, so what it reads is the record the fact left.
-//
-// The merge state is read on each of the pull request's own GitHub events - an opened, a head
-// that moved, a push, a review - on each CI settlement, and on each push to the base the pull
-// request sits on, and only while an approval stands on the head: those are the moments the state
-// can have changed under an issue that is waiting on it, and the reviewing round is the one place
-// a recorded merge state moves an issue (workflow's reviewRound). An issue in any other phase, or
-// one whose reviewer has approved another head than the one the pull request stands at, is read
-// by nothing here: the per-issue read at each handoff and at the daemon's start covers it.
-type mergeStateTrigger struct{ runtime *workflowRuntime }
-
-var _ intake.Handler = mergeStateTrigger{}
-
-func (t mergeStateTrigger) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
-	records := t.runtime.records
-	// Every fact but the base push names one pull request, and the arms differ only in how the
-	// record is looked up: by the branch the fact names, or by its number.
-	var (
-		named *record.PullRequest
-		pulls []record.PullRequest
-		err   error
-	)
-	switch fact := fact.(type) {
-	case intake.PullRequestOpened:
-		named, err = records.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
-	case intake.PullRequestSynchronized:
-		named, err = records.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
-	case intake.Push:
-		named, err = records.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
-	case intake.PullRequestReview:
-		named, err = records.PullRequestByNumber(ctx, tx, fact.Repo, fact.Number)
-	case intake.PullRequestChecks:
-		named, err = records.PullRequestByNumber(ctx, tx, fact.Repo, fact.Number)
-	case intake.BasePush:
-		// One push to a base serves every pull request sitting on it, which is how the engine
-		// marked them (workflow's basePush).
-		pulls, err = records.OpenPullRequestsOnBase(ctx, tx, fact.Repo, fact.Branch)
-	default:
-		return intake.Result{}, nil
-	}
-	if err != nil {
-		return intake.Result{}, err
-	}
-	// A fact whose pull request the record does not hold is read for nothing: there is no head to
-	// ask GitHub about.
-	if named != nil {
-		pulls = []record.PullRequest{*named}
-	}
-	for _, pr := range pulls {
-		waits, err := t.runtime.approvalWaitsOnTheMergeState(ctx, tx, pr)
-		if err != nil {
-			return intake.Result{}, err
-		}
-		if !waits {
-			continue
-		}
-		issue := pr.Issue
-		intake.OnCommit(ctx, func() { t.runtime.queueMergeState(issue) })
-	}
-	return intake.Result{}, nil
-}
-
-// approvalWaitsOnTheMergeState says whether pr's issue is one GitHub's merge state would move: it
-// stands in reviewing, and its reviewer's recorded approval approves the code the head carries
-// (classify.ApprovalStands), so the only thing left between it and accepting is GitHub reporting
-// that head one the issue may advance on (record.MergeState.Mergeable).
-func (w *workflowRuntime) approvalWaitsOnTheMergeState(ctx context.Context, tx pgx.Tx, pr record.PullRequest) (bool, error) {
-	if pr.State != record.PullRequestOpen {
-		return false, nil
-	}
-	issue, err := w.records.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
-		return false, err
-	}
-	rows, err := w.records.Phases(ctx, tx, pr.Issue)
-	if err != nil {
-		return false, err
-	}
-	for _, row := range rows {
-		if row.Role != claim.RoleReviewer {
-			continue
-		}
-		return row.Decision != nil && row.Decision.State == "approved" && classify.ApprovalStands(pr, row.Decision.Head), nil
-	}
-	return false, nil
-}
-
-// queueMergeState asks readMergeStates for a ladder on issue. It only records the issue and wakes
-// the reader, so the fact's own transaction waits for no GitHub call, and a second fact of the
-// same issue queued before the reader takes it is one ladder rather than two. A runtime with no
-// reader - the API-only daemon, and a test that drives the ladder itself - queues nothing.
+// queueMergeState is what the workflow asks for when a fact leaves a review round waiting on
+// GitHub's merge state for the pull request's head (workflow's askMergeState, the engine's
+// Config.ReadMergeState): a ladder of reads for issue. It only records the issue and wakes the
+// reader, so the fact's own transaction waits for no GitHub call, and a second fact of the same
+// issue queued before the reader takes it is one ladder rather than two. A runtime with no reader
+// - the API-only daemon, and a test that drives the ladder itself - queues nothing.
 func (w *workflowRuntime) queueMergeState(issue string) {
-	if issue == "" {
-		return
-	}
-	w.mergeStateMu.Lock()
-	if w.mergeStateWanted == nil {
-		w.mergeStateWanted = map[string]bool{}
-	}
-	w.mergeStateWanted[issue] = true
-	w.mergeStateMu.Unlock()
-	select {
-	case w.mergeStateWake <- struct{}{}:
-	default:
-	}
+	w.mergeStates.add(issue)
 }
 
 // readMergeStates runs a ladder for each issue queueMergeState queued, until ctx ends: each wake
@@ -147,17 +43,14 @@ func (w *workflowRuntime) queueMergeState(issue string) {
 // would only double the reads.
 func (w *workflowRuntime) readMergeStates(ctx context.Context) {
 	for {
-		select {
-		case <-ctx.Done():
+		issues, ok := w.mergeStates.take(ctx)
+		if !ok {
 			return
-		case <-w.mergeStateWake:
 		}
 		w.mergeStateMu.Lock()
 		if w.mergeStateRunning == nil {
 			w.mergeStateRunning = map[string]bool{}
 		}
-		issues := slices.Sorted(maps.Keys(w.mergeStateWanted))
-		clear(w.mergeStateWanted)
 		started := make([]string, 0, len(issues))
 		for _, issue := range issues {
 			if w.mergeStateRunning[issue] {
@@ -219,6 +112,12 @@ func (w *workflowRuntime) mergeStateWait() time.Duration {
 // per-issue read applies), answering GitHub's merge state as that read found it. An issue whose
 // record holds no open pull request is read from nothing and answers record.MergeStateUnread: the
 // state belongs to a pull request, and there is none.
+//
+// The fact names the head GitHub answered for, which the engine records the answer against only
+// while the record still stands at it (workflow's mergeability): this ladder reads GitHub with no
+// transaction of its own, and a push can land while it waits. The ladder reads on, since what it
+// answers is GitHub's state for the head it read, and the push the record took is itself a fact
+// that asks for a read of the head it left (workflow's askMergeState).
 func (w *workflowRuntime) readMergeState(ctx context.Context, issue string) (record.MergeState, error) {
 	_, recorded, err := w.issueRecord(ctx, issue)
 	if err != nil {

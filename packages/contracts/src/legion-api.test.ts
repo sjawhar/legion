@@ -280,7 +280,7 @@ test("the state golden carries a done issue's open production check", () => {
 // The implementer's check report carries no commit (the look pushed nothing) and a verdict the
 // daemon holds to pass, pending or fail; a phase completion keeps its commit.
 test("a check report is a completion without a commit", () => {
-  const report = { grantId: "grant-207", summary: "Driven in production.", ready: false };
+  const report = { grantId: "grant-207", summary: "Driven in production." };
   for (const verdict of ["pass", "pending", "fail"]) {
     expect(LegionHandoffCompleteRequest.safeParse({ ...report, verdict }).success).toBeTrue();
   }
@@ -313,7 +313,7 @@ test("every workflow request has a strict schema", () => {
     [
       "handoff complete",
       LegionHandoffCompleteRequest,
-      { grantId: "grant-208", summary: "completed", verdict: "", ready: false, commit: "abc123" },
+      { grantId: "grant-208", summary: "completed", verdict: "", commit: "abc123" },
     ],
     [
       "issue status",
@@ -843,7 +843,7 @@ test("the state golden names each served repository without the webhook App, and
     {
       repo: "zeta/tools",
       reason:
-        "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes",
+        "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events, nothing redelivers them, and no periodic pass makes up for them, so its issues stand still until the App is installed",
     },
   ]);
   expect(

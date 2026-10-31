@@ -1,7 +1,7 @@
 package sandbox
 
 // The Kubernetes side of dispatch://INFRA-714 R8: the launcher says which of the two session
-// refusals its start met, in typed fields of its answer, and the runtime turns each into the
+// refusals its start met, as one kind on its answer, and the runtime turns each into the
 // sentinel the supervisor acts on — the same two the tmux runtime answers with.
 
 import (
@@ -21,12 +21,12 @@ func TestALauncherStartRefusalCarriesItsSessionVerdict(t *testing.T) {
 		other  error
 	}{
 		"a session the table does not hold": {
-			result: shimwire.LauncherStartResult{Error: "resume session /s.jsonl: the session table holds no such session", SessionMissing: true},
+			result: shimwire.LauncherStartResult{Error: "resume session /s.jsonl: the session table holds no such session", Session: shimwire.SessionGone},
 			want:   runtime.ErrSessionFileMissing,
 			other:  runtime.ErrSessionStore,
 		},
 		"a store that could not be asked": {
-			result: shimwire.LauncherStartResult{Error: "resume session /s.jsonl: the session store could not be asked: connection refused", SessionStoreFault: true},
+			result: shimwire.LauncherStartResult{Error: "resume session /s.jsonl: the session store could not be asked: connection refused", Session: shimwire.SessionStoreUnreachable},
 			want:   runtime.ErrSessionStore,
 			other:  runtime.ErrSessionFileMissing,
 		},
@@ -38,7 +38,7 @@ func TestALauncherStartRefusalCarriesItsSessionVerdict(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			// The refusal the runtime builds from the launcher's answer (launchers.start).
 			refused := startRefusal{token: claim.Token("legion-legion-209-tester"), generation: 4, reason: tc.result.Error,
-				sessionMissing: tc.result.SessionMissing, storeFault: tc.result.SessionStoreFault}
+				session: tc.result.Session}
 
 			if tc.want != nil && !errors.Is(refused, tc.want) {
 				t.Errorf("the refusal %v is not %v, so the supervisor cannot act on it", refused, tc.want)
@@ -56,12 +56,12 @@ func TestALauncherStartRefusalCarriesItsSessionVerdict(t *testing.T) {
 	}
 }
 
-// The two verdicts travel on the wire: a frame the launcher encodes and the daemon decodes carries
-// them, so the daemon never has to read an error's prose to tell them apart.
+// The two kinds travel on the wire: a frame the launcher encodes and the daemon decodes carries
+// the kind, so the daemon never has to read an error's prose to tell them apart.
 func TestTheStartResultCarriesItsSessionVerdictOverTheWire(t *testing.T) {
 	for _, sent := range []shimwire.LauncherStartResult{
-		{ID: "start-4", Error: "no such session", SessionMissing: true},
-		{ID: "start-4", Error: "the store did not answer", SessionStoreFault: true},
+		{ID: "start-4", Error: "no such session", Session: shimwire.SessionGone},
+		{ID: "start-4", Error: "the store did not answer", Session: shimwire.SessionStoreUnreachable},
 		{ID: "start-4", OK: true, RunningGeneration: 4},
 	} {
 		encoded, err := sent.MarshalJSON()

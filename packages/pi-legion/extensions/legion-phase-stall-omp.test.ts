@@ -335,7 +335,6 @@ test.skipIf(omp === undefined && !onActions)(
         grantId: "stall-grant-1",
         summary: "Stall proof done.",
         verdict: "",
-        ready: false,
         commit: pane.handoffCommit,
       },
     ]);

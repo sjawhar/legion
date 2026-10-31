@@ -238,11 +238,11 @@ test("posts every Stage 3 workflow request through its matching route", async ()
       "grant.json",
     ],
     // The completion names the pushed commit carrying the handoff, which the legion tool found
-    // in the pane; the daemon answers the note READY leaves for a pull request already merged.
+    // in the pane; the daemon answers an empty object.
     [
       "handoffComplete",
       "/legion/v1/handoff/complete",
-      { grantId: "grant-208", summary: "done", verdict: "", ready: false, commit: "abc123" },
+      { grantId: "grant-208", summary: "done", verdict: "", commit: "abc123" },
       "handoff-complete.json",
     ],
     [

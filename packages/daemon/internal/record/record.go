@@ -917,8 +917,9 @@ type Store interface {
 	// implementing, named on its repository as GitHub spells it, whose implementer has recorded its
 	// handoff and which has no open or merged pull request recorded, by key, each with its
 	// implementer's handoff commit: an issue whose completion waits for an open pull request record,
-	// which the required-checks pass tells the architect of when GitHub lists none on its branch. A
-	// merged record waits for none: a completion moves on it, and its merge told the architect.
+	// which the daemon's start reads GitHub for and tells the architect of when GitHub lists none
+	// on its branch. A merged record waits for none: a completion moves on it, and its merge told
+	// the architect.
 	HandedOffWithoutOpenOrMergedPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]HandedOff, error)
 	// RepoNote is what the daemon last said on issue about its repository, nil for nothing;
 	// PutRepoNote records a note it posts.

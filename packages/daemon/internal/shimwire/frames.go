@@ -200,20 +200,45 @@ type LauncherStart struct {
 // it writes them.
 func GenerationDir(generation uint64) string { return "g" + strconv.FormatUint(generation, 10) }
 
+// SessionRefusal is why a launcher refused a start over the session it was asked to resume. It is
+// one kind with two values rather than a flag for each, because a start meets at most one of them:
+// SessionGone is the session table answering that it holds no such session, a session that is
+// gone, and SessionStoreUnreachable is that table being absent or the store not answering at all,
+// which says nothing about the session. The empty value is no session problem, which every start
+// that succeeded and every refusal over anything else carries. A value is also the error the
+// launcher wraps its own refusal in, so the sentence the daemon reads and the kind it acts on are
+// the same thing said once (internal/launcher's resumable).
+type SessionRefusal string
+
+const (
+	SessionGone             SessionRefusal = "gone"
+	SessionStoreUnreachable SessionRefusal = "store-unreachable"
+)
+
+// Error is the sentence a refusal of this kind reads as, so a launcher can wrap it into the error
+// it answers with. A kind this build does not know reads as its own value, which keeps a newer
+// launcher's answer legible rather than empty.
+func (r SessionRefusal) Error() string {
+	switch r {
+	case SessionGone:
+		return "the session table holds no such session"
+	case SessionStoreUnreachable:
+		return "the session store could not be asked"
+	}
+	return string(r)
+}
+
 // LauncherStartResult is the launcher's answer to LauncherStart. A start the launcher refused over
-// the session it was asked to resume says which of the two refusals it is, so the daemon never has
-// to read an error's prose to tell them apart (runtime.ErrSessionFileMissing,
-// runtime.ErrSessionStore): SessionMissing is the session table answering that it holds no such
-// session, a session that is gone, and SessionStoreFault is that table being absent or the store
-// not answering, which says nothing about the session. Neither is set when the start succeeded,
-// and at most one is ever set; Error carries the sentence either way.
+// the session it was asked to resume names the refusal's kind, so the daemon never has to read an
+// error's prose to tell the two apart: the sandbox runtime maps the kind to the sentinel the
+// supervisor acts on (runtime.ErrSessionFileMissing, runtime.ErrSessionStore). Error carries the
+// sentence either way.
 type LauncherStartResult struct {
-	ID                string `json:"id"`
-	OK                bool   `json:"ok"`
-	RunningGeneration uint64 `json:"runningGeneration,omitempty"`
-	Error             string `json:"error,omitempty"`
-	SessionMissing    bool   `json:"sessionMissing,omitempty"`
-	SessionStoreFault bool   `json:"sessionStoreFault,omitempty"`
+	ID                string         `json:"id"`
+	OK                bool           `json:"ok"`
+	RunningGeneration uint64         `json:"runningGeneration,omitempty"`
+	Error             string         `json:"error,omitempty"`
+	Session           SessionRefusal `json:"session,omitempty"`
 }
 
 // LauncherStop stops only the child of Generation. The launcher refuses an older generation

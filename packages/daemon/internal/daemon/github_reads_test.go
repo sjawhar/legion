@@ -58,17 +58,17 @@ func mergeStateStandIn(t *testing.T, state string) *httptest.Server {
 }
 
 // readRuntime is a workflow runtime over pool whose GitHub reads go to api, logging to log. Its
-// handlers are the daemon's own order with the engine standing in for the whole workflow, so the
-// merge-state trigger judges every fact a test applies as it does in production; its queue is
-// empty and nothing reads it until a test starts readMergeStates.
+// engine stands in for the whole workflow and is given the runtime's own merge-state queue, so a
+// fact a test applies asks for the read it asks for in production; the queue is empty and
+// nothing reads it until a test starts readMergeStates.
 func readRuntime(pool *pgxpool.Pool, api string, log *slog.Logger) *workflowRuntime {
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	w := &workflowRuntime{
-		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, engine: engine,
+		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"},
 		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: log, githubAPI: api,
-		mergeStateWanted: map[string]bool{}, mergeStateRunning: map[string]bool{}, mergeStateWake: make(chan struct{}, 1),
+		mergeStates: newWakeSet[string](), mergeStateRunning: map[string]bool{},
 	}
-	w.handlers = []intake.Handler{engine, mergeStateTrigger{runtime: w}}
+	w.engine = workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories, ReadMergeState: w.queueMergeState}, log)
+	w.handlers = []intake.Handler{w.engine}
 	return w
 }
 

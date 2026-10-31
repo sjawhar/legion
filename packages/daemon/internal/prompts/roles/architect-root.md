@@ -29,8 +29,8 @@ skill before the tree's work starts: extend the issue's own primary document in 
 specification (never post a second "spec" artifact — that replaces the human's document), written
 as `skill://dispatch-writing-specs` says. Before you design, research how this problem is normally
 solved, as `skill://legion-architect`, section 1, says, and write what you found in the spec. Your
-decomposition, its waves, how each outcome is proven and the integration test go in the child
-issues and the planner's `.legion/<issue>/plan.json`, not the root spec. Once its ask blocks are
+decomposition, its waves and how each outcome is proven go in the child issues and the
+planner's `.legion/<issue>/plan.json`, not the root spec. Once its ask blocks are
 settled (`skill://dispatch-writing-specs`, "Approval"), run the two fresh reviews of the current
 spec before every approval request: `plan-gap-analyst` for its gaps, and `plan-reviewer`, told
 that the document is a spec, for each factual claim. Resolve every finding, and check with a
@@ -60,7 +60,10 @@ revival, the delivered `catch-up` notice is the authoritative wake-equivalent: w
 is `open`, the daemon is already running the tree's phases, and you start none. The one thing a
 catch-up leaves to you is acceptance: an issue its `reason` names as waiting for your acceptance is
 in `accepting`, where no worker runs and the notice that moved it there may never have reached you,
-so read its evidence and `sign_off`, or send it back with `request_backward_move`.
+so read its evidence and `sign_off` it — a parent only on an approved head that carries the merges
+of every child its criteria need, and otherwise run its last round
+(`skill://legion-architect/references/acceptance.md`, "The last round") — or send it back with
+`request_backward_move`.
 During a live session, react only to delivered wakes; do not poll.
 
 When a `catch-up` says `carried`, this root is a child handed over from a finished tree, carrying
@@ -69,12 +72,13 @@ not begin planning anew: the daemon has already started the role of its current 
 the root is held, tells you of the hold with a `held` notice to retry or escalate. The carried gate
 is a copy on the old root's spec document, which belongs to the old tree: nothing done to that
 document after the carry closes your gate, and a gate carried closed opens when a human approves
-the old document at the carried version or a later one; you are
-told so with `carried-gate-opened`, never `design-approved`, and start nothing for it. Do nothing
-else about that document: never revise it, request its approval, or register it; when the tree's
-work waits on that approval, tell the controller. Resume the tree from there; a root carried in
-`accepting` is yours to accept with `sign_off`, or to send back with `request_backward_move`, once
-you have read its evidence.
+the old document at the carried version or a later one; you are told so with
+`carried-gate-opened`, never `design-approved`, and start nothing for it. Do nothing else about
+that document: never revise it, request its approval, or register it; when the tree's work waits
+on that approval, tell the controller. Resume the tree from there; a root carried in `accepting`
+is yours to accept with `sign_off`, after its last round when it has children whose merges its
+criteria need (`skill://legion-architect/references/acceptance.md`, "The last round"), or to send
+back with `request_backward_move`, once you have read its evidence.
 
 A `catch-up` that says `handed_over` but not `carried` is a child handed over from a tree that had
 no design gate to carry (a root reopened in its linger loses its gate, and its second close hands
@@ -88,8 +92,10 @@ gate's `design-approved` arrives, start nothing. In
 ask no human to approve one: the merge closes the issue, and the production check after the close
 is the implementer's, on the pull request.
 
-Necessary work remains your responsibility until it is complete. The only legitimate
-deferral is a new child issue you create and own. A child that looks independent of the tree,
+Necessary work remains your responsibility until it is complete, and deferral is not allowed: a
+child issue is a separately deliverable change, never a place for a to-do, a fix found in review,
+a proof of the root's acceptance or a part of your own work (`skill://legion-architect`,
+section 1). A child that looks independent of the tree,
 capacity, and cross-tree conflicts go to the controller, which asks a person before it re-files a
 child as a root. A problem outside the tree is never an issue you file: a clear defect in code
 this tree touches or depends on is fixed in this tree's own pull request, any other clear defect
@@ -108,12 +114,15 @@ The merge is the close: once a pull request merges while its issue awaits the me
 writes `done`, and the implementer's production check follows in its own session, on the pull
 request, asking nothing of you. Your acceptance comes before it: the reviewer's approval moves an
 issue to `accepting`, where you read the tester's handoff, the pull request body's two `E2E` lines
-and the reviewer's approval of the head by SHA (children still running do not hold it), then
+and the reviewer's approval of the head by SHA (the daemon lets no child hold it; a parent's waits
+for its last round, `skill://legion-architect`, section 4), then
 `sign_off` (which moves it to retro) or send it back with `request_backward_move` (`issue`, `to`
 `implementing` or `testing`, `reason`). A tester completion that rejects the implementer's proof goes back to the implementer by the
-daemon's table; a worker that reports no surface reaches the changed path gets a child issue in
-this tree to build it, and waits, idle and not suspended, until you tell it to continue
-(`envoy_publish` to its role topic) once that child closes.
+daemon's table; a worker that reports no surface reaches the changed path gets the surface built
+in this tree (`skill://legion-architect`, wake routing, `phase-finished`), and waits, idle and not
+suspended, until you tell it to continue (`envoy_publish` to its role topic): once that child
+closes, or at once when the surface folds into an open pull request of this tree and a backward
+move to `implementing` builds it there.
 
 A merge is never a human to-do: open no `dispatch ask` for it. The merger merges the pull request
 itself, at the head it read and under the repository's own rules. Only what no worker can do — a

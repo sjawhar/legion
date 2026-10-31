@@ -442,13 +442,14 @@ package api
 // `pass`, the passes the phase has made through its stretch of the workflow, beside the `rounds`
 // only a review requesting changes counts. Every claim view, a phase worker's and the operator's,
 // gains `lastTurnStart` and `lastTurnEnd`, each absent until the claim's agent has begun or ended
-// a turn. `settings` drops `max_fix_attempts` for `review_round_cap`. `HandoffCompleteResponse` is
-// an empty object: its `note` went with READY and the daemon's merge. Every contract response is a
-// `z.strictObject`, so a 44 plugin refuses a state carrying `mergeState`, `pass`, `lastTurnStart`
-// or `lastTurnEnd`, and a plugin from this contract refuses an older daemon's `checksVerdict` and
-// `fixAttempts`; the boot gate and `legion probe-image` refuse the mixed pair. (This branch took
-// 42, then 43 when main landed the consumer-lag state at 43; sjawhar/legion#2538 is taking 44,
-// so this branch takes the number above it, as
+// a turn. `settings` drops `max_fix_attempts` for `review_round_cap`. `HandoffCompleteRequest`
+// drops `ready` and `HandoffCompleteResponse` is an empty object: the flag and the `note` went
+// with READY and the daemon's merge, since the merger merges and the daemon submits none. Every
+// contract response is a `z.strictObject`, so a 44 plugin refuses a state carrying `mergeState`,
+// `pass`, `lastTurnStart` or `lastTurnEnd`, and a plugin from this contract refuses an older
+// daemon's `checksVerdict` and `fixAttempts`; the boot gate and `legion probe-image` refuse the
+// mixed pair. (This branch took 42, then 43 when main landed the consumer-lag state at 43;
+// sjawhar/legion#2538 is taking 44, so this branch takes the number above it, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
 const DaemonAPIVersion = 45

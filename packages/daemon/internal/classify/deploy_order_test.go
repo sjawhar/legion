@@ -212,13 +212,14 @@ func TestAPushReplacesAnApprovalCarrierOfItsTwoHeads(t *testing.T) {
 	}
 }
 
-// The required-checks pass rebuilds a lost push with the whole list GitHub's compare gives
-// (daemon's lostPushes), and the push webhook of the same two heads can arrive after it with its
-// list cut short, none listed, or none sent: that copy changes nothing. The handoff push h0..h1
-// the pass rebuilt stays a handoff push, so once h1 has arrived an approval of h0 still stands for
-// it and h0's settlement is still carried to it. The other way round, a pass push whose list was
-// cut is replaced by the webhook's handoff push of the same two heads, as before.
-func TestALatePushWithItsPathsCutShortKeepsTheHandoffPushThePassRebuilt(t *testing.T) {
+// The daemon rebuilds a lost push from the whole list GitHub's compare gives when it carries an
+// approval across (daemon's carryApproval), and the push webhook of the same two heads can
+// arrive after it with its list cut short, none listed, or none sent: that copy changes nothing.
+// The handoff push h0..h1 the compare rebuilt stays a handoff push, so once h1 has arrived an
+// approval of h0 still stands for it and h0's settlement is still carried to it. The other way
+// round, a rebuilt push whose list was cut is replaced by the webhook's handoff push of the same
+// two heads, as before.
+func TestALatePushWithItsPathsCutShortKeepsTheHandoffPushTheCompareRebuilt(t *testing.T) {
 	rebuilt := record.ClassifiedPush{SHA: "h1", Before: "h0", HandoffOnly: true, Sender: "implementer"}
 	pr := delivered(t, redAtH0(), pushed(rebuilt), arrivesFrom("h0", "h1"))
 	if !ApprovalStands(pr, "h0") || !settled(pr) {
@@ -237,7 +238,7 @@ func TestALatePushWithItsPathsCutShortKeepsTheHandoffPushThePassRebuilt(t *testi
 	cut := record.ClassifiedPush{SHA: "h1", Before: "h0", Unknown: "changed_paths truncated", Sender: "implementer"}
 	again := delivered(t, redAtH0(), pushed(cut), arrivesFrom("h0", "h1"), pushed(rebuilt))
 	if len(again.Pushes) != 1 || again.Pushes[0] != rebuilt || !ApprovalStands(again, "h0") || !settled(again) {
-		t.Errorf("the webhook's handoff push after the pass's cut one: pushes %+v, an approval of h0 stands %v, h0's settlement carried %v, want the handoff push alone and both",
+		t.Errorf("the webhook's handoff push after the cut one: pushes %+v, an approval of h0 stands %v, h0's settlement carried %v, want the handoff push alone and both",
 			again.Pushes, ApprovalStands(again, "h0"), settled(again))
 	}
 }

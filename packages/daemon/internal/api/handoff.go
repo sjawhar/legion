@@ -29,16 +29,11 @@ import (
 // (HANDOFF_NOT_NEW). The implementer's completion of implementing is also held to an open pull
 // request on its branch, or a merged one recorded (implementationPullRequest:
 // HANDOFF_NO_PULL_REQUEST). A check report carries no commit (nothing was pushed) and a Verdict of
-// pass, pending or fail; a tester's completion a Verdict of pass or fail. Ready is the merger flag
-// the `legion` tool still sends on the merger's completion: this route refuses it from any role
-// but the merger (READY_ROLE_FORBIDDEN), and from the merger it only tells one completion's key
-// from another's (the event id below). It reaches no fact, since the merger merges and the daemon
-// merges nothing, so no workflow decision is taken on it.
+// pass, pending or fail; a tester's completion a Verdict of pass or fail.
 type HandoffCompleteRequest struct {
 	GrantID string `json:"grantId"`
 	Summary string `json:"summary"`
 	Verdict string `json:"verdict"`
-	Ready   bool   `json:"ready"`
 	Commit  string `json:"commit,omitempty"`
 }
 
@@ -66,10 +61,6 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	if grant.Controller {
 		writeFailure(w, http.StatusForbidden, "GRANT_INVALID", "grant is unavailable")
-		return
-	}
-	if req.Ready && grant.Role != claim.RoleMerger {
-		writeFailure(w, http.StatusBadRequest, "READY_ROLE_FORBIDDEN", "only a merger may report ready")
 		return
 	}
 	if s.pool == nil || s.records == nil {
@@ -125,14 +116,16 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	treeGeneration, pass := position.treeGeneration, position.pass
 	// One phase's completion is identified by where the issue stands — its generation, phase, and
-	// pass through that phase — with the role and what it reported: the commit, the verdict, and
-	// READY. A retried call for the same phase is the same fact; the next phase's completion at the
-	// same commit (the implementer's retro, standing on its implementing pass's last push) is a
-	// different one, and so is a second report of the same phase at the same commit that says
-	// something else — another verdict, or another READY — since a refusal the workflow commits is
-	// recorded as processed, and a corrected report must not be answered as that refusal's
-	// duplicate. The position is
-	// read before the fact's own transaction: should the issue move in between, the engine re-reads
+	// pass through that phase — with the role and what it reported: the commit and the verdict. A
+	// retried call for the same phase is the same fact; the next phase's completion at the same
+	// commit (the implementer's retro, standing on its implementing pass's last push) is a
+	// different one, since the phase and the role are in the key; and so is a second report of the
+	// same phase at the same commit that names another verdict — the tester's corrected pass or
+	// fail, the only field a role may report differently of one commit — since a refusal the
+	// workflow commits is recorded as processed, and a corrected report must not be answered as
+	// that refusal's duplicate. The summary is left out on purpose: a call that only rewords it is
+	// the same completion, and the first one is what the workflow took. The position is read before
+	// the fact's own transaction: should the issue move in between, the engine re-reads
 	// it there and refuses a completion whose role no longer owns the phase, or whose run is no
 	// longer the issue's (workflow's HANDOFF_STALE_GENERATION guard).
 	//
@@ -147,7 +140,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// by bumping only the root's, and restarts a child's worker in the phase it stood in, so a
 	// child's completion refused before (while the tree lingered, or while the old gate was closed)
 	// would otherwise take the new generation's key.
-	eventID := fmt.Sprintf("handoff:%s:%d:%d:%d:%s:%s:%d:%s:%s:%t", grant.Issue, treeGeneration, issue.Generation, serving, grant.Role, issue.Phase, pass, req.Commit, req.Verdict, req.Ready)
+	eventID := fmt.Sprintf("handoff:%s:%d:%d:%d:%s:%s:%d:%s:%s", grant.Issue, treeGeneration, issue.Generation, serving, grant.Role, issue.Phase, pass, req.Commit, req.Verdict)
 	if grant.Role == claim.RoleImplementer && issue.Phase == phase.Implementing && !position.lingers && req.Commit != position.lastHandoff {
 		if !s.implementationPullRequest(w, r, issue, position.pullRequest, eventID) {
 			return

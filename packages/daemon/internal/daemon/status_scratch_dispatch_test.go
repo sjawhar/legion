@@ -110,6 +110,38 @@ func TestABootStatusWriteDoesNotLandOverACloseScratchDispatchTookAfterItsRead(t 
 	}
 }
 
+// A person's move within the workflow is as much a change made after the row's read as a close
+// is: the row's first attempt writes only while Dispatch shows the status the row observed, and
+// the read it makes after the refusal is held to the same comparison. A person who moves the
+// issue to another lifecycle status in that moment keeps it, and the row finishes having written
+// nothing (dispatch://INFRA-714/spec A6).
+func TestABootStatusWriteDoesNotLandOverAPersonsMoveWithinTheWorkflow(t *testing.T) {
+	baseURL, token := startScratchDispatch(t)
+	issue := createScratchDispatchIssue(t, baseURL)
+	setDispatchStatus(t, baseURL, issue, "todo")
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	seedPlanningRoot(t, pool, records, issue)
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, Linger: time.Hour}, quietLogger())
+	bootQueuesTheWrite(t, pool, issue, engine)
+
+	client := &interleaving{Client: dispatch.New(baseURL, token), act: func() {
+		setDispatchStatus(t, baseURL, issue, "needs_review")
+	}}
+	runner := &outbox{dispatchProject: "LEGION", pool: pool, records: records, dispatch: client, handlers: []intake.Handler{engine},
+		now: time.Now, log: quietLogger()}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the boot's status write: %v", err)
+	}
+
+	if got := dispatchStatusOf(t, baseURL, token, issue); got != "needs_review" {
+		t.Fatalf("Dispatch shows %s at %q, want the person's needs_review: the daemon wrote nothing over it", issue, got)
+	}
+	if rows := statusRowsOf(t, pool, issue); rows != 0 {
+		t.Fatalf("status rows after the person's move = %d, want the boot's finished having written nothing", rows)
+	}
+}
+
 // seedPlanningRoot records key as a tree of its own that the older daemon left planning while
 // Dispatch still shows it todo: the state the boot corrects.
 func seedPlanningRoot(t *testing.T, pool *pgxpool.Pool, records record.Store, key string) {
