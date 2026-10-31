@@ -2,19 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-594",
-  "completed": "2026-10-31T02:45:00Z",
-  "round": 4,
-  "reviewedCode": "11e3586615d1 (code) under handoff head a9dc95712492",
+  "completed": "2026-10-31T14:30:00Z",
+  "round": 6,
+  "reviewedCode": "196233c090e5 (code) under handoff head 6c972822",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 1,
-  "ci": "Run 41144115048 at 11e35866 completed success: every check green (lint, typecheck, test, pr-title, envoy-go, envoy-go-race and its api/docs/pmdoc lanes, envoy-infra-go, envoy-client, pi-envoy, claude-envoy, envoy-session-stall, listener-server-change, ci-ok and the rest), worker-image / attest skipped. Compare 11e35866...a9dc9571 handoffsOnly true (10 files). GitHub reports the PR CONFLICTING with main 21b40359 (#2572, merged 01:59Z, after 11e35866).",
-  "thermonuclear": "deep review: Verdict CHANGES at 11e35866 (1 Medium, 1 Minor; Medium reproduced by two scratch variants of TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer); code quality: Verdict CHANGES at 11e35866 (same loss rated High, reproduced independently; structural cause relayAcksOnAnAttempt). I re-traced the loss in the code.",
-  "threads": "Accepted PRRT_kwDORFy7ds6yJh2N, PRRT_kwDORFy7ds6yJh2U, PRRT_kwDORFy7ds6yJh2Z, PRRT_kwDORFy7ds6yJh2d, PRRT_kwDORFy7ds6x97Ba; unresolved as still standing PRRT_kwDORFy7ds6yJh2F and PRRT_kwDORFy7ds6x97BJ (same finding).",
-  "checkedAndHolding": "stream_recreated before the answer is told once and only when the stream changed; the role-forward guard reuses storedForwardCopyIsDelivery with the same behaviour; Resolve's Relayed is used by fanoutDelivery and the lanes; merges 9d83f1c1 (bus/nats.go keeps currentConn and HookedConnectionEvents), 02e0463e (loadtest), 11e35866 (docs) keep both sides; the e2e script unsets ANTHROPIC_API_KEY again.",
+  "minor": 3,
+  "ci": "Required set now ci-ok and pr-title (ruleset 12331919). At code head 196233c0: envoy-go failed on TestAReconnectCatchesUpWhatTheListenerMissed (internal/dispatch/api), fixed on main by #2594 (3b0ae77e, 11:34Z), which this branch does not carry, so ci-ok cannot go green here; dispatch was still in progress. Compare 196233c0...6c972822 handoffsOnly true (6 files). Changes are requested, so no empty commit of mine: the implementer's next push merges main and refreshes CI.",
+  "thermonuclear": "deep review: Verdict CHANGES at 196233c0 (1 Medium, reproduced with a scratch overlay test; the serving-port fix confirmed); code quality: Verdict CHANGES at 196233c0 (Low only). I re-traced the Medium in the code.",
+  "threads": "Accepted PRRT_kwDORFy7ds6yPwVe, PRRT_kwDORFy7ds6yPwVf, PRRT_kwDORFy7ds6yPwVl, PRRT_kwDORFy7ds6yPwVo.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/cmd/listener/serve_port_workers.go:363", "description": "The in-flight push across a flip back to consumer delivery is still lost. The relay acks its consumer copy on the attempt record, irrevocably, but the worker keeps pushing only while relayAcksOnAnAttempt re-reads that record. Loss when the record expires (attemptCacheTTL 5 min from hand-over, never refreshed) or the worker hands back on servePortGone (durable redelivery then skipped since the consumer holds the sequence). Tests that must fail: TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer with attemptCache.Clear (or a clock past attemptCacheTTL) after awaitAcked; and with sessions.Delete then re-register after awaitAcked. Fix: the relay holds (NAK with delay / in progress) on followedTopicAttempted instead of acking, pushes itself once the attempt clears or expires, acks once a dedupe record appears; the worker then drops on Relayed as before."},
-    {"severity": "minor", "file": "packages/envoy/internal/session/handler.go:115", "description": "The agent path turns Relayed into Delivered+Skipped and agentSubjectDelivery records attempt and dedupe for a message only the relay delivers, against the comments at session.go:62-66 and :88-93. No loss today (control topics are never refused by the relay)."}
+    {"severity": "important", "file": "packages/envoy/cmd/listener/delivery.go:965", "description": "The reorder leaves every refusal of a consumer-relayed session to its relay, but only relayServingPort judges (session_relay.go:938-990); relayNATS, a portless session's relay, publishes every frame unjudged (session_relay.go:683-730) and the plugin publishes no exception for a malformed delivery. So a portless consumer session gets no delivery_failed exception for an unreadable mode (it did at ce082506, and on main), against AGENTS.md:2487's exception contract and this round's own AGENTS.md:3415, changelog and delivery.go:967-971 text. Test that must fail: a portless consumerRegistration session plus a second core serving-port interest on the topic, publish {\"delivery\":{\"mode\":\"bogus\"}}, awaitFanoutFinished, deliveryExceptionsFor(sid) expects one delivery_failed and gets []."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/delivery.go:1022", "description": "clearAttempt: true on every failed resolution has no test (reverting to retryable passes every subtest); also record the attempt only after Resolve succeeds, which removes the reason for this branch; each further copy for a dead session now logs ERROR 'listener delivery failed' instead of an attempt-dedupe skip, which the changelog should name."},
+    {"severity": "minor", "file": ".github/workflows/ci.yaml:1430", "description": "The fail-open reason is wrong (ci-ok.sh already fails when changes failed) and 'keep the names main's ruleset required before it required ci-ok' leaves a reader unsure whether the names matter; ci.yaml:1518-1520 still says claude-envoy 'is not required until ci-ok is', and ci-ok is required now. Workflow file: the review App may not push it."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/session_relay_test.go:1179", "description": "awaitFanoutFinished repeats awaitDurableState, and the inline exception subscription repeats exceptionProbe/subscribeExceptionLanes."}
   ]
 }
