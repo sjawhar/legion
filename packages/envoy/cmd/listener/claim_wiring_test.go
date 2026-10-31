@@ -58,6 +58,29 @@ func TestSessionEntryFromSubscribe_DefaultsHostEmpty(t *testing.T) {
 	}
 }
 
+// The plugin a session registers through and that plugin's build reach the session entry, with
+// the surrounding space a session id loses dropped too.
+func TestSessionEntryFromSubscribe_CarriesThePluginAndItsVersionTrimmed(t *testing.T) {
+	got := sessionEntryFromSubscribe(subscribeBody{
+		SessionID:     "ses_plugin",
+		Plugin:        " @sjawhar/pi-envoy\n",
+		PluginVersion: "\t11.0.0 ",
+	}, "example-listener")
+
+	if got.Plugin != "@sjawhar/pi-envoy" || got.PluginVersion != "11.0.0" {
+		t.Fatalf("expected plugin @sjawhar/pi-envoy at 11.0.0, got %+v", got)
+	}
+}
+
+func TestSessionEntryFromSubscribe_DefaultsThePluginAndItsVersionEmpty(t *testing.T) {
+	// A plugin predating the fields sends neither key; the entry invents neither.
+	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_old"}, "example-listener")
+
+	if got.Plugin != "" || got.PluginVersion != "" {
+		t.Fatalf("expected no plugin for a payload without the fields, got %+v", got)
+	}
+}
+
 func TestSessionEntryFromSubscribe_DefaultsToNonDriving(t *testing.T) {
 	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_y", Port: 34751}, "devbox-sami")
 

@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import publicUrlFixture from "../../../contracts/fixtures/dispatch-public-url.json";
 import { activeDispatchSettings, type DispatchEnvironment } from "../dispatch-config";
 import type { EnvoyHarness } from "../envoy-config";
-import { sessionConfigFile, sessionDispatchSettings } from "../session-settings";
+import {
+  sessionConfigFile,
+  sessionDispatchSettings,
+  sessionDispatchUrl,
+} from "../session-settings";
 
 function tempDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), "dispatch-config-"));
@@ -615,5 +619,47 @@ describe("activeDispatchSettings", () => {
     expect(() =>
       activeDispatchSettings(dispatchFor({ HOME: home }, { ...command, cwd: tempDir() }))
     ).toThrow(/^dispatch config: /);
+  });
+});
+
+describe("sessionDispatchUrl", () => {
+  test("is the URL Dispatch resolves to while a kept read of a `!` token is off, and runs no command", () => {
+    const home = tempDir();
+    const marker = path.join(home, "ran");
+    writeUserConfig(home, {
+      dispatch: { serverUrl: "http://dispatch.test/", token: `!touch '${marker}'; printf t` },
+    });
+    const env = { HOME: home };
+    const file = sessionConfigFile("command", env);
+    const cwd = tempDir();
+    expect(sessionDispatchSettings(file, env, { cwd, commands: "kept" }).dispatch).toMatchObject({
+      enabled: false,
+      error: expect.stringContaining("has not run"),
+    });
+    expect(sessionDispatchUrl(file, env, { cwd })).toBe("http://dispatch.test");
+    expect(existsSync(marker)).toBe(false);
+    // DISPATCH_URL names the server, as it does for the resolution itself.
+    expect(
+      sessionDispatchUrl(
+        file,
+        { ...env, DISPATCH_URL: "http://other.test/", DISPATCH_TOKEN: "v" },
+        { cwd }
+      )
+    ).toBe("http://other.test");
+  });
+
+  test("is undefined when nothing configures Dispatch, a file turns it off, or the file cannot be used", () => {
+    const cwd = tempDir();
+    const unset = { HOME: tempDir() };
+    expect(sessionDispatchUrl(sessionConfigFile("command", unset), unset, { cwd })).toBeUndefined();
+    const off = { HOME: tempDir() };
+    writeUserConfig(off.HOME, { dispatch: { enabled: false, serverUrl: "http://dispatch.test" } });
+    expect(sessionDispatchUrl(sessionConfigFile("command", off), off, { cwd })).toBeUndefined();
+    const broken = { HOME: tempDir() };
+    writeUserConfig(broken.HOME, "{not json");
+    expect(
+      sessionDispatchUrl(sessionConfigFile("command", broken), broken, { cwd })
+    ).toBeUndefined();
+    expect(sessionDispatchUrl({ path: null, error: "relative" }, unset, { cwd })).toBeUndefined();
   });
 });

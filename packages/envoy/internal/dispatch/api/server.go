@@ -16,10 +16,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
@@ -59,6 +61,13 @@ func projectKeyProblem(field, value string) string {
 // visible and filterable once it's no longer named by the project key.
 const repoLabelPrefix = "repo:"
 
+// ServiceTokenVerifier verifies a Kubernetes pod's projected service-account token.
+// *oidc.LazyVerifier is the one Dispatch serves with: until its issuer is discovered every Verify
+// fails with an error matching oidc.ErrIssuerUnavailable.
+type ServiceTokenVerifier interface {
+	Verify(ctx context.Context, raw string) (oidc.Claims, error)
+}
+
 // Deps are the API's application dependencies.
 type Deps struct {
 	Store          *store.Store
@@ -83,10 +92,12 @@ type Deps struct {
 	Architecture *architecture.Importer
 	// OIDC verifies a JWT-shaped bearer as a Kubernetes pod's projected
 	// service-account token; nil is the unconfigured deployment, where a
-	// JWT-shaped bearer is only ever an unknown personal token.
-	OIDC *oidc.Verifier
+	// JWT-shaped bearer is only ever an unknown personal token. A configured
+	// verifier stays non-nil while its issuer is undiscovered, so such a bearer
+	// is answered 503 then, never taken for a personal token.
+	OIDC ServiceTokenVerifier
 	// AgentStream relays a live session's own conversation to a human watching it; nil is a
-	// deployment with no NATS, where the viewer route answers 503 rather than hanging.
+	// deployment with no NATS, where an agent view is refused STREAM_UNAVAILABLE.
 	AgentStream agentstream.Source
 	// AgentSecrets relays the credential-request UI to the secrets broker; nil (the broker URL
 	// is unconfigured) means the feature is off: the pending list answers null, and every other
@@ -95,21 +106,25 @@ type Deps struct {
 	// Files holds uploaded files' bytes outside Postgres (cmd/dispatch: DISPATCH_FILE_STORE_BUCKET);
 	// nil keeps them in each version's row, and a row that still holds bytes is served from the
 	// row either way (files.BackfillRows moves them).
-	Files files.Store
-	// Lifetime bounds work a handler starts and does not wait for, and every event stream and
-	// delivery socket: it is the process's own context, cancelled when the server is shutting
-	// down, so a deploy stops a broadcast's remaining deliveries instead of leaving goroutines
-	// behind, and ends each open stream (streamEvents, streamAgentConversation) and closes each
-	// delivery socket with 1012 so http.Server.Shutdown is not held for its whole budget by a
-	// connection that never goes idle. The delivery hub runs on it, and GET /ws/delivery is
-	// mounted only with one. Nil means unbounded, which is what a test gets.
-	Lifetime         context.Context
+	Files            files.Store
 	TestHooksEnabled bool
-	// StreamHeartbeat is how often a server-sent event stream writes a heartbeat and resolves
-	// its caller again, a document socket and a delivery socket resolve their caller again
-	// (whileCallerResolves), each closing once the caller no longer resolves, and a delivery
-	// socket pings its page and sends it a heartbeat frame.
+	// StreamHeartbeat is how often a document socket and a live socket resolve their caller again
+	// (whileCallerResolves), each closing once the caller no longer resolves, and a live socket
+	// pings its page and sends it a heartbeat frame.
 	StreamHeartbeat time.Duration
+	// LiveSocketAge is how long a GET /ws/live socket lives before it closes with 4001 (max age),
+	// drawn as it opens. Nil draws it uniformly from [contracts.LiveSocketMinAge,
+	// contracts.LiveSocketMaxAge), so the sockets a deploy opened together do not all end
+	// together; a test returns a fixed age.
+	LiveSocketAge func() time.Duration
+	// ListenerRosterUncached is for end-to-end test processes only: every read of the listener's
+	// session list (route_status on an issue read, GET /api/v1/agents) asks the listener rather
+	// than sharing the process's five-second copy, so a test that changes the listener's sessions
+	// sees the change at its next read. A deployment leaves it false.
+	ListenerRosterUncached bool
+	// DashboardEntry is the entry chunk (`/assets/index-*.js`) of the dashboard build this process
+	// serves, "" when it serves none; GET /api/v1/dashboard/builds answers it as serving.
+	DashboardEntry string
 }
 
 // defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
@@ -133,13 +148,12 @@ type DepsInput struct {
 	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
 	Embedder embed.Embedder
 	Events   *events.Broker
-	// Lifetime is the process context background work runs on; see Deps.Lifetime.
-	Lifetime context.Context
+
 	// App is the loaded GitHub App credentials (nil when unconfigured);
 	// GitHubAPIBase overrides the GitHub API origin (DISPATCH_GITHUB_API_BASE).
 	App           *auth.AppConfig
 	GitHubAPIBase string
-	OIDC          *oidc.Verifier
+	OIDC          ServiceTokenVerifier
 	// AgentStream is the live agent conversation relay; nil where the deployment has no NATS.
 	AgentStream agentstream.Source
 	// AgentSecretsURL is the secrets broker's API base URL (DISPATCH_AGENT_SECRETS_URL); empty
@@ -150,10 +164,15 @@ type DepsInput struct {
 	// Files is the uploaded-file store; nil keeps files in Postgres. See Deps.Files.
 	Files            files.Store
 	TestHooksEnabled bool
-	// StreamHeartbeat replaces the heartbeat of the event streams and the document socket
+	// StreamHeartbeat replaces the heartbeat of the document and live sockets
 	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
 	// sets a short one.
 	StreamHeartbeat time.Duration
+	// ListenerRosterUncached is for end-to-end test processes only; see
+	// Deps.ListenerRosterUncached.
+	ListenerRosterUncached bool
+	// DashboardEntry is this process's dashboard entry chunk; see Deps.DashboardEntry.
+	DashboardEntry string
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -195,24 +214,25 @@ func NewDeps(input DepsInput) (Deps, error) {
 		heartbeat = defaultStreamHeartbeat
 	}
 	return Deps{
-		Store:            input.Store,
-		Identity:         input.Identity,
-		AgentTokens:      input.AgentTokens,
-		DefaultProject:   defaultProject,
-		ServerURL:        strings.TrimSuffix(input.ServerURL, "/"),
-		Docs:             input.Docs,
-		Embedder:         input.Embedder,
-		Envoy:            envoyClient,
-		Events:           input.Events,
-		GitHub:           github,
-		Architecture:     architecture.NewImporter(input.Store, github, input.Events),
-		OIDC:             input.OIDC,
-		AgentStream:      input.AgentStream,
-		AgentSecrets:     agentSecretsClient,
-		Files:            input.Files,
-		Lifetime:         input.Lifetime,
-		TestHooksEnabled: input.TestHooksEnabled,
-		StreamHeartbeat:  heartbeat,
+		Store:                  input.Store,
+		Identity:               input.Identity,
+		AgentTokens:            input.AgentTokens,
+		DefaultProject:         defaultProject,
+		ServerURL:              strings.TrimSuffix(input.ServerURL, "/"),
+		Docs:                   input.Docs,
+		Embedder:               input.Embedder,
+		Envoy:                  envoyClient,
+		Events:                 input.Events,
+		GitHub:                 github,
+		Architecture:           architecture.NewImporter(input.Store, github, input.Events),
+		OIDC:                   input.OIDC,
+		AgentStream:            input.AgentStream,
+		AgentSecrets:           agentSecretsClient,
+		Files:                  input.Files,
+		TestHooksEnabled:       input.TestHooksEnabled,
+		StreamHeartbeat:        heartbeat,
+		ListenerRosterUncached: input.ListenerRosterUncached,
+		DashboardEntry:         input.DashboardEntry,
 	}, nil
 }
 
@@ -242,13 +262,23 @@ func ParseRepoProjects(raw string) (map[string]string, error) {
 }
 
 type server struct {
-	deps            Deps
+	deps Deps
+	// lifetime bounds every live socket and the loops that serve them: it is the process's own
+	// context, cancelled when the server is shutting down, so a deploy closes each live socket
+	// with 1012, ending every subscription it carries, and http.Server.Shutdown is not held for
+	// its whole budget by a connection that never goes idle. The delivery hub and the event
+	// stream relay run on it. It bounds no delivery: a send a request leaves running (a
+	// broadcast's recipients) finishes across the signal, and the wait Register returns holds
+	// shutdown for it (detached). Register sets it from its lifetime parameter and refuses a nil one, since nothing would
+	// ever end the work it bounds; a test passes its own t.Context(). A server a test builds
+	// directly has none unless the test sets it (directServer sets context.Background()).
+	lifetime        context.Context
 	routeIndex      []routeIndexEntry
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
-	// suggestionTimeout overrides the allowance the suggestion step runs under; zero, which every
-	// server the deployment builds leaves it, means writeSuggestionTimeout. Only tests set it
-	// (newFailingAdviceHandler, and suggestionsBehindLock for the two lock tests), so a case's
-	// outcome is its own choice rather than its machine's speed (INFRA-56).
+	// suggestionTimeout overrides the allowance the related-item check runs under; zero, which
+	// every server the deployment builds leaves it, means relatedCheckAllowance. Only tests set it
+	// (newFailingAdviceHandler, and the check's bound tests), so a case's outcome is its own choice
+	// rather than its machine's speed.
 	suggestionTimeout time.Duration
 	// broadcastResolveBudget overrides the budget a broadcast's recipient resolution runs under;
 	// zero, which every server the deployment builds leaves it, means broadcastResolveTimeout.
@@ -256,22 +286,79 @@ type server struct {
 	// test's choice rather than a race against five seconds of wall clock (INFRA-249).
 	broadcastResolveBudget time.Duration
 	// rosters is the process's copy of the listener's live-session list that issue reads judge
-	// routes against (issue_route_status.go). Only register gives it non-zero TTLs.
+	// routes against and the agents list lists (issue_route_status.go). Only register gives it
+	// non-zero TTLs.
 	rosters rosterCache
-	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); nil on a server
-	// with no Lifetime (register), which mounts no GET /ws/delivery.
+	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); every server
+	// register mounts has one, and only a server a test builds directly (directServer) has none.
 	deliveryHub *deliveryHub
-	// deliverySockets is every open GET /ws/delivery socket, which the test hook drops.
-	deliverySockets deliverySocketSet
-	// eventRelay is the live feed every open SSE connection reads (INFRA-66), on every server
-	// register mounts: it starts its listening connection on the first connection to subscribe.
+	// liveSockets is every open GET /ws/live socket, which the test hooks close.
+	liveSockets liveSocketSet
+	// liveKinds starts a live socket's subscriptions to the views beside the delivery views, by
+	// kind (live_subscriptions.go); a kind it does not hold is refused.
+	liveKinds map[string]liveKind
+	// liveWriterBeforePick is each live socket's beforePick (live_socket.go): nil outside tests,
+	// and set by a test before the socket it drives opens.
+	liveWriterBeforePick func(socket *liveSocket, takesStream bool)
+	// agentWatchInterval is how often an agent view re-arms its session: agentStreamWatchInterval,
+	// which a test replaces.
+	agentWatchInterval time.Duration
+	// eventRelay is the live feed every events subscription reads (INFRA-66), on every server
+	// register mounts: it starts its listening connection on the first subscription.
 	eventRelay *eventStreamRelay
+	// eventHorizon is the server's one events.Horizon: the safe horizon every reader that pages
+	// the event log by a global id cursor reads up to, shared through horizon() so one
+	// observation in flight serves them all. horizonOnce builds it on first use rather than in
+	// register, which must not touch the Store.
+	horizonOnce  sync.Once
+	eventHorizon *events.Horizon
+	// bootMark closes once the server's boot mark has been taken (takeBootMark), which the marks
+	// in eventMarks begin with; nil on a server with no Store.
+	bootMark chan struct{}
+	// eventMarks is the event log marks the relay's first start and GET /auth/whoami bound the ids
+	// a writer can still hold open by (event_marks.go).
+	eventMarks eventMarks
+	// detached is everything a request started that runs on past its client: every keyed write's
+	// handler (keyedWrites, which runs it on a context the client's going away does not cancel) and
+	// every delivery a handler started and did not wait for (a broadcast's recipients, a sweep's
+	// resumed attempts). Each runs on a context the request's end does not cancel, and shutdown
+	// waits for them (waitBackground) before the database pool closes, so a deploy finishes them as
+	// http.Server.Shutdown finishes the requests in flight. A send bound to lifetime instead
+	// was cut off by SIGTERM, which cancels that context before the HTTP drain even begins.
+	detached backgroundWork
+	// requestKeyLease, requestKeyRenewal and requestKeyRunLimit replace a keyed request's lease
+	// (IdempotencyLease, a minute), how often a running handler renews it (keyedLeaseRenewal) and
+	// how long a handler runs (keyedHandlerLimit); zero, which every server the deployment builds
+	// leaves them, keeps those. Only a test sets them, so a handler that outlives its lease or its
+	// limit is the test's choice rather than minutes of wall clock.
+	requestKeyLease, requestKeyRenewal, requestKeyRunLimit time.Duration
+	// drainReadLimit replaces how long a drain waits for the rest of a request's body
+	// (bodyDrainLimit, a minute); zero, which every server the deployment builds leaves it, keeps
+	// that. Only a test sets it, so a body that stalls is the test's choice rather than a minute of
+	// wall clock.
+	drainReadLimit time.Duration
+	// repeatFoundInFlight is called when the keyed layer finds a repeat's key held by a first
+	// request still running, before it reads a byte of the repeat's body; nil, which every server
+	// the deployment builds leaves it, calls nothing. Only a test sets it, to send the rest of a
+	// body it held back once the repeat is waiting on it.
+	repeatFoundInFlight func()
+	// slowWrites is the slow-write test hook's delay for each keyed method and path it was armed
+	// for (POST /api/v1/writes/_test/slow), by "METHOD path"; it holds nothing on a server without
+	// TestHooksEnabled, which mounts no hook.
+	slowWrites sync.Map
 	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
 	// warned holds no production job or no configured apply step, so a read that judges a run again
 	// does not warn about it again. Nothing evicts an entry: the map holds one per configured job
 	// names and apply step that it has warned about, until the configuration is fixed or the process
 	// restarts.
 	warnedUnmatchedRuns sync.Map
+	// termStats is the per-project term-statistics refreshes a related-item check started
+	// (ensureSearchTermStats), keyed by project, so a project's many checks start one.
+	termStats singleflight.Group
+	// relatedRecordRetrying is how many related_checks records being retried in the background
+	// (recordRelatedChecks, run as detached work) hold or wait on a pool connection right now, at
+	// most relatedRecordRetryLimit.
+	relatedRecordRetrying atomic.Int32
 }
 
 // warnedProductionRun keys server.warnedUnmatchedRuns: one deploy run under one configured set of
@@ -302,49 +389,160 @@ type queryer interface {
 // its handler runs (refuseUnstorableParameters), as decodeJSON refuses a U+0000 in a body, and the
 // document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
 //
-// With a Lifetime, the server holds the delivery hub (LEGION-690), which starts its goroutines on
-// the first subscription and runs them until Lifetime ends, and mounts GET /ws/delivery beside the
-// document websocket, under the same wrappers; a server without one (a test's) has neither, so
-// nothing outlives the test. Every server holds the event stream relay (INFRA-66), which every
-// open SSE connection reads and which starts its own listening connection on the first of them,
-// also on Lifetime. The returned wait blocks until the hub, every delivery socket and the relay
-// have ended. Call it only after Lifetime has been cancelled and before the database pool closes.
+// Every POST and PATCH route takes an Idempotency-Key, and a repeat under one is answered from the
+// key rather than run again (keyedWrites, request_keys.go). Every write route - a POST, PATCH, PUT
+// or DELETE - that names its presser in Dispatch-Login runs only as that person
+// (refuseChangedLogin).
 //
-// That wait is for a server given a Deps.Lifetime: it returns once that context is cancelled,
-// which is what ends the relay's goroutines and the hub's. A server built without a Deps.Lifetime
-// runs its relay on context.Background() instead, so nothing ever ends that relay, and the wait
-// this returns blocks for ever once an SSE connection has started it. The delivery hub sets no
-// such trap, since it is built only with a Deps.Lifetime. Give the server a Deps.Lifetime where
-// it is built, or do not call the wait.
-func Register(mux *http.ServeMux, deps Deps) func() {
-	s := register(mux, deps)
-	return s.waitBackground
+// The server holds the delivery hub (LEGION-690), which starts its goroutines on the first
+// subscription and runs them until lifetime ends, and mounts GET /ws/live beside the document
+// websocket, under the same wrappers. It also holds the event stream relay (INFRA-66), which every
+// events subscription reads and which starts its own listening connection on the first of them,
+// also on lifetime. lifetime is the process's own context, cancelled when the server is shutting
+// down (server.lifetime says what else it ends). The returned Background's Wait blocks until every
+// keyed write's handler and every delivery a handler detached from its request (a broadcast's
+// recipients) has settled, and until the hub, every live socket (and every subscription it ran)
+// and the relay have ended. Call it only after lifetime has been cancelled and before the database
+// pool closes.
+//
+// Register panics when lifetime is nil: the hub and the relay would run on no context that ever
+// ends, so they would outlive the process's shutdown, or the test that built the server, and the
+// returned wait would block for ever once an events subscription had started the relay.
+func Register(mux *http.ServeMux, lifetime context.Context, deps Deps) Background {
+	s := register(mux, lifetime, deps)
+	return Background{Wait: s.waitBackground, ResumeDeliveries: s.resumeOwedDeliveries, EventHead: s.eventFeedHead}
 }
 
-// waitBackground waits for every delivery socket, then for the hub's goroutines and the relay's.
+// Background is the work a registered server does beside answering its requests, for the process
+// that serves it to drive.
+type Background struct {
+	// Wait is the wait Register describes, for shutdown.
+	Wait func()
+	// ResumeDeliveries is one pass of the delivery sweep (resumeOwedDeliveries): every delivery a
+	// process that died left owed is sent, once, under its own attempt number. The maintenance loop
+	// runs it (RunSuggestionOutcomeSweep).
+	ResumeDeliveries func(context.Context) error
+	// EventHead is the event_head GET /auth/whoami answers (eventFeedHead): an id at or below which
+	// every event is already final, which a page resumes its first events subscription from.
+	EventHead func(context.Context) (int64, error)
+}
+
+// waitBackground waits for every keyed handler and every delivery a request left running past
+// its client, then for every live socket and the subscriptions it ran, then for the hub's
+// goroutines and the relay's. The detached work comes first because it is the only work lifetime
+// does not stop: a keyed handler is bounded by keyedHandlerLimit, a delivery by the listener
+// client's receipt timeout per recipient, and each reads and writes through the database pool this
+// wait is holding open for it.
 func (s *server) waitBackground() {
-	if s.deliveryHub != nil {
-		s.deliverySockets.wait()
-		s.deliveryHub.wait()
-	}
+	s.detached.wait()
+	s.liveSockets.wait()
+	s.deliveryHub.wait()
 	s.eventRelay.wait()
 }
 
-// register is Register, answering the server it mounted, whose delivery hub and event stream
-// relay a test waits out before its database closes. It is also called with a zero Deps, as
-// TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap and
-// must not dial or read the nil Store: whatever reaches the database or the network starts
-// later, from a handler or the relay's first subscriber.
-func register(mux *http.ServeMux, deps Deps) *server {
-	s := &server{deps: deps, rosters: rosterCache{ttl: routeRosterTTL, silenceTTL: routeRosterSilenceTTL}}
-	s.eventRelay = newEventStreamRelay(s, s.lifetime())
-	if deps.Lifetime != nil {
-		s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})
+// backgroundWork counts the work a server runs past its requests' clients, and waits for none to
+// be left. Unlike a sync.WaitGroup, work may start while wait is already waiting: a request still
+// in flight when shutdown stops waiting for the HTTP drain starts its keyed run then, and wait
+// returns only once it sees nothing running.
+type backgroundWork struct {
+	mu      sync.Mutex
+	running int
+	// idle is closed when running last fell to zero, and replaced when work starts again.
+	idle chan struct{}
+}
+
+func (b *backgroundWork) start() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.running == 0 {
+		b.idle = make(chan struct{})
 	}
+	b.running++
+}
+
+func (b *backgroundWork) done() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.running--
+	if b.running == 0 {
+		close(b.idle)
+	}
+}
+
+// goDetached runs work on a goroutine of its own, counted until it returns.
+func (b *backgroundWork) goDetached(work func()) {
+	b.start()
+	go func() {
+		defer b.done()
+		work()
+	}()
+}
+
+func (b *backgroundWork) wait() {
+	for {
+		b.mu.Lock()
+		running, idle := b.running, b.idle
+		b.mu.Unlock()
+		if running == 0 {
+			return
+		}
+		<-idle
+	}
+}
+
+// register is Register, answering the server it mounted, whose delivery hub and event stream
+// relay a test waits out before its database closes. It is also called with an empty Deps, as
+// TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap and must
+// not dial or read the nil Store: whatever reaches the database or the network starts later, from
+// a handler, the relay's first subscriber or the hub's, or on a goroutine of its own, as the event
+// log's boot mark does (takeBootMark), for a server that has a Store.
+func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
+	if lifetime == nil {
+		panic("api.Register: the lifetime parameter is required: it is the context that ends the delivery hub, the event stream relay and every live socket (a test passes t.Context())")
+	}
+	s := &server{deps: deps, lifetime: lifetime, agentWatchInterval: agentStreamWatchInterval, rosters: rosterCache{ttl: routeRosterTTL, silenceTTL: routeRosterSilenceTTL}}
+	s.liveKinds = map[string]liveKind{
+		liveEventsView: {resumes: true, start: s.startEventsView},
+		liveAgentView:  {start: s.startAgentView},
+	}
+	s.eventRelay = newEventStreamRelay(s, lifetime)
+	s.takeBootMark()
+	s.deliveryHub = newDeliveryHub(s, lifetime, deliveryHubClock{})
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
+	replays := s.keyedReplays()
 	for _, route := range routes {
-		mux.HandleFunc(route.Method+" "+route.Pattern, accesslog.HandlerFunc(route.Pattern, trackTransactions(s.refuseUnstorableParameters(route.Pattern, route.Handler))))
+		handler := route.Handler
+		if keyedMethod(route.Method) {
+			handler = s.keyedWrites(route.Method, route.Pattern, handler, replays[route.Method+" "+route.Pattern])
+		}
+		if route.Method+" "+route.Pattern == issueUploadRoute {
+			handler = s.refuseUploadToAClosedIssue(handler)
+		}
+		if route.Method != http.MethodGet {
+			handler = s.refuseChangedLogin(handler)
+		}
+		handler = s.refuseUnstorableParameters(route.Pattern, handler)
+		if route.Method != http.MethodGet {
+			// Every layer above may answer before the body is read; the answer waits for the body.
+			//
+			// A client that asked to be told to continue before it sends its body (Expect:
+			// 100-continue) and is answered early sends none of it, and its connection closes after
+			// the answer, as long as nothing reads that body: net/http sends 100 Continue at the
+			// body's first read, and otherwise closes the connection once the answer begins rather
+			// than wait on a body that never comes. It decides from the expect-continue reader its
+			// own response keeps (go1.27's response.ecReader and reqBody), not from the request's
+			// Body, so it is not that trackTransactions hands this layer a copy of the request: the
+			// handling holds with the drain's body put on net/http's own request. What keeps the body
+			// unread is the drain's guard (drainingWriter.askedContinue) and the keyed layer's
+			// (answerDrainedRepeat), which TestAnEarlyAnswerToAClientWaitingToContinueAsksForNoBody
+			// pins: without either, the client is told to continue and the answer waits on its body.
+			handler = s.drainBeforeAnswer(route.Method, route.Pattern, handler)
+		}
+		// The access-log line is outermost, so it records what every layer answered - a keyed
+		// replay, a refused login, an early answer the drain held - and the caller the first of
+		// them resolved.
+		mux.HandleFunc(route.Method+" "+route.Pattern, accesslog.HandlerFunc(route.Pattern, trackTransactions(handler)))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
@@ -352,10 +550,8 @@ func register(mux *http.ServeMux, deps Deps) *server {
 		const pattern = "/ws/doc/{room}"
 		mux.Handle("GET "+pattern, accesslog.Handler(pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP))))))
 	}
-	if s.deliveryHub != nil {
-		const pattern = "/ws/delivery"
-		mux.Handle("GET "+pattern, accesslog.Handler(pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.serveDeliverySocket)))))
-	}
+	const livePattern = "/ws/live"
+	mux.Handle("GET "+livePattern, accesslog.Handler(livePattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(livePattern, s.serveLiveSocket)))))
 	return s
 }
 
@@ -366,13 +562,13 @@ func trackTransactions(handler http.HandlerFunc) http.HandlerFunc {
 }
 
 // whileCallerResolves serves a connection that outlives its request, a websocket, only while its
-// caller resolves: on every StreamHeartbeat it resolves the caller again, as the event streams do,
-// and once the caller no longer resolves (a logout, a membership the sign-in issuer no longer
-// confirms, a revoked token) it cancels the connection's context, on which the document server and
-// the delivery socket close the socket. The check runs beside the handler, which holds pooled
-// connections of its own while it admits the socket, so it marks a context of its own for the pool
-// (store.ErrNestedAcquire), and it resolves on a context detached from the access-log line, which
-// names the caller the socket was admitted as (accesslog.Detached).
+// caller resolves: on every StreamHeartbeat it resolves the caller again, and once the caller no
+// longer resolves (a logout, a membership the sign-in issuer no longer confirms, a revoked token)
+// it cancels the connection's context, on which the document server and the live socket close the
+// socket. The check runs beside the handler, which holds pooled connections of its own while it
+// admits the socket, so it marks a context of its own for the pool (store.ErrNestedAcquire), and
+// it resolves on a context detached from the access-log line, which names the caller the socket
+// was admitted as (accesslog.Detached).
 func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, closeConnection := context.WithCancel(r.Context())
@@ -395,13 +591,6 @@ func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc 
 		}()
 		handler(w, r.WithContext(ctx))
 	}
-}
-
-// heartbeatRequest is r for resolving a stream's caller again on a heartbeat: detached from the
-// access-log line, which names the caller the stream was admitted as, since a re-resolution that
-// reads only the bearer's credential would otherwise replace the session the request named.
-func heartbeatRequest(r *http.Request) *http.Request {
-	return r.WithContext(accesslog.Detached(r.Context()))
 }
 
 type apiError struct {
@@ -629,10 +818,49 @@ func writeAmbiguousTarget(w http.ResponseWriter, message string, candidates []pm
 	})
 }
 
+// refuseChangedLogin runs a write route's handler only for the person who pressed the write, when
+// the request names one in DispatchLoginHeader: the page sends the login of whoever was signed in
+// at the press with every write, retries included, and another tab may sign someone else in in
+// place, so a retry goes out on the new cookie before this tab knows. A request whose caller is
+// another person, or no person at all (a bearer), is answered 409 LOGIN_CHANGED before anything
+// runs - before its Idempotency-Key is read, so its key is untouched. A caller that resolves to
+// nobody (a lapsed cookie) is left to the route's own refusal, a 401, so a write a session lapsed
+// under waits for the sign-in that follows. A request without the header - the dispatch command,
+// an agent, a script - is not checked. Logins are compared as model.CanonicalLogin compares them.
+func (s *server) refuseChangedLogin(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pressed := r.Header.Values(contracts.DispatchLoginHeader)
+		if len(pressed) == 0 {
+			handler(w, r)
+			return
+		}
+		actor, human, err := s.optionalActor(r)
+		if err != nil {
+			handler(w, r)
+			return
+		}
+		// The caller is resolved once a request: the key layer and the handler read this.
+		r = r.WithContext(context.WithValue(r.Context(), resolvedCallerKey{}, resolvedCaller{actor: actor, human: human}))
+		login := strings.TrimSpace(pressed[0])
+		if len(pressed) == 1 && login != "" && human && model.CanonicalLogin(actor.ID) == model.CanonicalLogin(login) {
+			handler(w, r)
+			return
+		}
+		writeError(w, contracts.DispatchLoginChanged, http.StatusConflict, fmt.Sprintf(
+			"this write was pressed by %q and its request is not signed in as them: nothing ran; it goes only as the person who pressed it",
+			login))
+	}
+}
+
 // optionalActor resolves the request's caller. Each branch names that caller on the request's
 // access-log line (accesslog.Note), which costs the line what the authentication already
 // resolved and never a lookup of its own.
 func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
+	// A keyed write resolved its caller before its handler ran (keyedWrites); a bearer is verified
+	// once a request, and the line named the caller at that resolution.
+	if caller, ok := r.Context().Value(resolvedCallerKey{}).(resolvedCaller); ok {
+		return caller.actor, caller.human, nil
+	}
 	if token, present := auth.BearerToken(r); present {
 		if token == "" {
 			return model.Actor{}, false, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
@@ -668,9 +896,16 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 // serviceTokenActor authenticates a JWT-shaped bearer as a Kubernetes pod's
 // projected service-account token. A rejected token is a 401 of its own: it
 // never falls through to the personal-token lookup, so OIDC_TOKEN_INVALID tells
-// an operator the token was verified and refused rather than simply unknown.
+// an operator the token was verified and refused rather than simply unknown. A
+// token the verifier could not judge because its issuer has not been discovered
+// is a 503 OIDC_ISSUER_UNAVAILABLE, never a 401: the caller retries rather than
+// reads its token as refused.
 func (s *server) serviceTokenActor(r *http.Request, token string) (model.Actor, bool, error) {
 	claims, err := s.deps.OIDC.Verify(r.Context(), token)
+	if errors.Is(err, oidc.ErrIssuerUnavailable) {
+		return model.Actor{}, false, errorf(http.StatusServiceUnavailable, "OIDC_ISSUER_UNAVAILABLE",
+			"the service-account token issuer cannot be reached; try again in a minute")
+	}
 	if err != nil {
 		reason := oidc.Reason(err)
 		// The class only. The error carries the token's own unverified iss and
@@ -715,8 +950,13 @@ func bearerSessionActor(r *http.Request, authenticated model.Actor, supplied *mo
 	}, nil
 }
 
+// writeAuthenticationError answers a caller that did not resolve: 401 NO_IDENTITY, or 503
+// SIGNIN_UNAVAILABLE for a person whose lapsed confirmation the sign-in issuer could not renew,
+// as identity.WriteError renders both; anything else as writeHandlerError does. Only identity's
+// own sentinels reach identity.WriteError, so a service-account token's issuer outage
+// (serviceTokenActor's OIDC_ISSUER_UNAVAILABLE) never reads as the sign-in issuer's.
 func (s *server) writeAuthenticationError(w http.ResponseWriter, err error) {
-	if errors.Is(err, identity.ErrNoIdentity) {
+	if errors.Is(err, identity.ErrNoIdentity) || errors.Is(err, identity.ErrSignInUnavailable) {
 		identity.WriteError(w, err)
 		return
 	}
@@ -834,7 +1074,7 @@ func decodeJSON(r *http.Request, value any) error {
 	if err := decoder.Decode(value); err != nil {
 		var maxBytes *http.MaxBytesError
 		if errors.As(err, &maxBytes) {
-			return errorf(http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "request body exceeds %d bytes", maxJSONRequestBytes)
+			return errJSONTooLarge
 		}
 		return errorf(http.StatusBadRequest, "INVALID_JSON", "invalid JSON body: %v", err)
 	}

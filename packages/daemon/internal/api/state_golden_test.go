@@ -14,7 +14,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -184,6 +186,8 @@ func minimalSettingsConfig(t *testing.T) config.Config {
 func populatedState(t *testing.T) State {
 	t.Helper()
 	approvedVersion := 6
+	waitedSince := time.Date(2026, 9, 22, 8, 5, 0, 0, time.UTC)
+	answeredAt := time.Date(2026, 9, 22, 9, 21, 0, 0, time.UTC)
 	return State{
 		Daemon: DaemonInfo{
 			Project:       "legion",
@@ -298,6 +302,24 @@ func populatedState(t *testing.T) State {
 					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Rounds: 1},
 				},
 			},
+			// LEGION-212's architect asked a person a question and handed the turn back, which gave
+			// its slot up; the person has answered the question.
+			"LEGION-212": {
+				Key:           "LEGION-212",
+				Generation:    1,
+				Phase:         phase.AwaitingPerson,
+				Status:        "in_progress",
+				Repo:          "acme/widgets",
+				DefaultBranch: "main",
+				Workers:       map[claim.Role]PhaseView{},
+				WaitingOn: &WaitingOnView{
+					Kind:       "ask",
+					Ask:        "9a8fd348-55d5-4d72-a793-3cd037f75f13",
+					Since:      &waitedSince,
+					AnsweredAt: &answeredAt,
+					AnsweredBy: record.AnsweredByAsk,
+				},
+			},
 			// LEGION-207 merged and closed; its production check is open at its second look, woken by
 			// Dispatch's issue.deployed, its implementer working that look in the kept pod.
 			"LEGION-207": {
@@ -369,12 +391,25 @@ func populatedState(t *testing.T) State {
 				}},
 			},
 			Refused: []RefusedRepositoryView{{Repo: "acme/gadgets", Reason: "the review App is not installed on acme/gadgets"}},
+			// Dispatch's GitHub App is not installed on zeta/tools, which is served all the same.
+			WithoutWebhookApp: []WebhookAppGapView{{Repo: "zeta/tools", Reason: "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes"}},
 			Caches: []CacheView{{
 				Repo: "acme/legacy", Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "starting", RetainedUntil: time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC),
 			}},
 		},
 		// The resolved maximal kubernetes file, so the fixture pins every key `settings` can carry.
 		Settings: SettingsOf(settingsFixtureConfig(t)),
+		// The Dispatch consumer is caught up; the Dispatch-server consumer's info read ran out of the
+		// bound; the GitHub consumer has 412 messages waiting and has handled none for over a
+		// minute.
+		Consumers: ConsumerLagViewsOf([]intake.ConsumerLag{
+			{Name: "legion-go-LEGION-dispatch", LastHandledAt: time.Date(2026, 9, 22, 9, 17, 50, 0, time.UTC)},
+			{Name: "legion-go-LEGION-dispatch-server", Unavailable: "read the consumer's info: context deadline exceeded"},
+			{
+				Name: "legion-go-LEGION-github", Waiting: 412, OldestAt: time.Date(2026, 9, 22, 9, 5, 34, 0, time.UTC), OldestAge: 754 * time.Second,
+				LastHandledAt: time.Date(2026, 9, 22, 9, 16, 41, 0, time.UTC), Stalled: true,
+			},
+		}),
 	}
 }
 

@@ -96,6 +96,22 @@ await test('retypeBlock keeps the block id and moves a paragraph into the typed 
   }
 });
 
+await test('retypeBlock leaves a block its typed body rule refuses as it is', async () => {
+  // The ask accepts any server block as its content (relaxAskContentCheck), but its rule is
+  // `paragraph+`: a heading must not become an ask.
+  const { commands, state } = await commandsFor('# Which transport?', 1);
+  const before = state().doc;
+  const blockId = blockIdOf(before.child(0));
+  assert(blockId === 'parsed-1', `source blockId = ${blockId}`);
+  assert(!commands.retypeBlock(blockId!, 'ask'), 'retypeBlock dispatched for a heading');
+  assert(state().doc.eq(before), 'retypeBlock changed the document');
+  assert(state().doc.child(0).type.name === 'heading', `node type = ${state().doc.child(0).type.name}`);
+  assert(
+    !commands.blockMenuItems().some(({ label }) => label.startsWith('Turn into')),
+    `menu labels = ${JSON.stringify(commands.blockMenuItems().map(({ label }) => label))}`,
+  );
+});
+
 await test('undoing a retypeBlock restores the original plain block and its id', async () => {
   const { commands, state, apply } = await commandsFor('Which transport?');
   const blockId = blockIdOf(state().doc.child(0));

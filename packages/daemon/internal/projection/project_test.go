@@ -25,7 +25,8 @@ type projectionStore struct {
 	checks       []record.ProductionCheck
 	held         []record.HeldRow
 	// mirror is what Dispatch says each issue of the project waits on, as the store lists it: by
-	// key, which is the order the state's `blocked` is judged from.
+	// key, which is the order the state's `blocked` is judged from. DispatchIssuesOf serves the rows
+	// of the keys asked for and of what they wait on, as the real store does.
 	mirror []record.DispatchIssueRow
 }
 
@@ -51,8 +52,25 @@ func (projectionStore) Gate(context.Context, pgx.Tx, string) (*record.DesignGate
 func (s projectionStore) OpenProductionChecks(context.Context, pgx.Tx) ([]record.ProductionCheck, error) {
 	return s.checks, nil
 }
-func (s projectionStore) DispatchIssues(context.Context, pgx.Tx, string) ([]record.DispatchIssueRow, error) {
-	return s.mirror, nil
+func (s projectionStore) DispatchIssuesOf(_ context.Context, _ pgx.Tx, _ string, keys []string) ([]record.DispatchIssueRow, error) {
+	wanted := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		wanted[key] = true
+	}
+	for _, row := range s.mirror {
+		if wanted[row.Key] {
+			for _, blocker := range row.Blockers {
+				wanted[blocker] = true
+			}
+		}
+	}
+	var rows []record.DispatchIssueRow
+	for _, row := range s.mirror {
+		if wanted[row.Key] {
+			rows = append(rows, row)
+		}
+	}
+	return rows, nil
 }
 
 // projectedAt is the fixed instant every test here projects at.
@@ -84,6 +102,52 @@ func TestProjectShowsOnlySlotlessTodoIssuesInDispatchRankOrder(t *testing.T) {
 		t.Fatalf("projected phase = %q, want %q", got.Issues["LEGION-213"].Phase, phase.Implementing)
 	}
 	var _ api.State = got
+}
+
+// A root in awaiting_person shows what it waits on: the question, or the spec version of the gate
+// shape, when the wait began, and the answer only once a person gave one. A root in any other
+// phase shows no wait, even with a stale Awaiting on its record.
+func TestProjectShowsWhatAnAwaitingRootWaitsOn(t *testing.T) {
+	since := projectedAt.Add(-time.Hour)
+	answeredAt := projectedAt.Add(-time.Minute)
+	store := projectionStore{issues: []record.Issue{
+		{
+			Key: "LEGION-ASK", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-ASK",
+			Phase: phase.AwaitingPerson, Status: "in_progress", Rank: "A", HandedOver: true,
+			Awaiting: &record.Awaiting{
+				Ask: "ask-1", Since: record.EventMark{Seq: 9, At: since},
+				AnsweredAt: &answeredAt, AnsweredBy: record.AnsweredByReply,
+			},
+		},
+		{
+			Key: "LEGION-GATE", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-GATE",
+			Phase: phase.AwaitingPerson, Status: "in_progress", Rank: "B", HandedOver: true,
+			Awaiting: &record.Awaiting{GateVersion: 4, Artifact: "artifact-gate"},
+		},
+		{
+			Key: "LEGION-RUN", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-RUN",
+			Phase: phase.Admitted, Status: "in_progress", Rank: "C", HandedOver: true,
+			Awaiting: &record.Awaiting{Ask: "ask-2"},
+		},
+	}}
+
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	ask := got.Issues["LEGION-ASK"].WaitingOn
+	if ask == nil || ask.Kind != "ask" || ask.Ask != "ask-1" || ask.Since == nil || !ask.Since.Equal(since) ||
+		ask.AnsweredAt == nil || !ask.AnsweredAt.Equal(answeredAt) || ask.AnsweredBy != record.AnsweredByReply {
+		t.Fatalf("ask waitingOn = %#v, want ask-1 since %s answered by reply at %s", ask, since, answeredAt)
+	}
+	gate := got.Issues["LEGION-GATE"].WaitingOn
+	if gate == nil || gate.Kind != "gate" || gate.GateVersion != 4 || gate.ArtifactID != "artifact-gate" ||
+		gate.Since != nil || gate.AnsweredAt != nil || gate.AnsweredBy != "" {
+		t.Fatalf("gate waitingOn = %#v, want unanswered gate version 4 of artifact-gate with no start time", gate)
+	}
+	if run := got.Issues["LEGION-RUN"].WaitingOn; run != nil {
+		t.Fatalf("admitted root waitingOn = %#v, want none", run)
+	}
 }
 
 func TestProjectShowsOperatorSpawnedClaimsWithoutRecordIssue(t *testing.T) {

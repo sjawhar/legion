@@ -171,7 +171,7 @@ func TestDeployedEventWaitsForAShippingRun(t *testing.T) {
 
 	pass := func(what string) {
 		t.Helper()
-		written, err := RecordDeployedEvents(ctx, pool, settings, broker, time.Now())
+		written, err := RecordDeployedEvents(ctx, pool, settings, broker)
 		if err != nil {
 			t.Fatalf("%s: RecordDeployedEvents: %v", what, err)
 		}
@@ -194,10 +194,12 @@ func TestDeployedEventWaitsForAShippingRun(t *testing.T) {
 
 // TestDeployedEventIsWrittenOncePerPullRequest: a deploy run created after the merge whose
 // production job succeeded writes one issue.deployed on the pull request's issue, with the payload
-// the daemon decodes, and sets the marker to the pass's time; a second pass writes none; a pull
-// request outside the deploy repository, attributed and merged before that run, writes none.
+// the daemon decodes, and sets the marker to the database's now(), not the calling process's clock
+// (here two hours ahead of the database's); a second pass writes none and leaves the marker; a
+// pull request outside the deploy repository, attributed and merged before that run, writes none.
 func TestDeployedEventIsWrittenOncePerPullRequest(t *testing.T) {
 	pool, ctx := deliveryTestPool(t)
+	pool = laggingDatabaseClock(t, ctx, pool, 2*time.Hour)
 	settings := seedDeliverySettings(t, ctx, pool)
 	seedDeployedIssues(t, ctx, pool)
 	merged := time.Date(2024, 1, 1, 1, 0, 0, 0, time.UTC)
@@ -205,9 +207,8 @@ func TestDeployedEventIsWrittenOncePerPullRequest(t *testing.T) {
 	seedMergedPullRequest(t, ctx, pool, "acme/other", 77, merged, deployedOtherIssue)
 	seedDeployRun(t, ctx, pool, 900, merged.Add(time.Hour), merged.Add(70*time.Minute), DeliveryJobConclusionSuccess)
 	broker := events.NewBroker()
-	now := time.Date(2024, 1, 1, 3, 0, 0, 0, time.UTC)
 
-	written, err := RecordDeployedEvents(ctx, pool, settings, broker, now)
+	written, err := RecordDeployedEvents(ctx, pool, settings, broker)
 	if err != nil {
 		t.Fatalf("RecordDeployedEvents: %v", err)
 	}
@@ -215,9 +216,11 @@ func TestDeployedEventIsWrittenOncePerPullRequest(t *testing.T) {
 		t.Fatalf("wrote %d issue.deployed events, want 1", written)
 	}
 	requireDeployedEvent(t, ctx, pool, deployedIssue, "acme/widgets", 501, 900, "2024-01-01T02:10:00Z")
-	if at := deployedEventAt(t, ctx, pool, "acme/widgets", 501); at == nil || !at.Equal(now) {
-		t.Fatalf("the marker is %v, want the pass's time %v", at, now)
+	const marker = `select deployed_event_at from delivery_pull_requests where repo = 'acme/widgets' and number = 501`
+	if age := databaseAge(t, ctx, pool, marker); !justNow(age) {
+		t.Fatalf("the marker is %v before the database's now(), want a moment within its last minute", age)
 	}
+	marked := deployedEventAt(t, ctx, pool, "acme/widgets", 501)
 	if found := deployedEvents(t, ctx, pool, deployedOtherIssue); len(found) != 0 {
 		t.Fatalf("%s, whose pull request is outside the deploy repository, carries %d issue.deployed events, want none", deployedOtherIssue, len(found))
 	}
@@ -225,7 +228,7 @@ func TestDeployedEventIsWrittenOncePerPullRequest(t *testing.T) {
 		t.Fatalf("the marker of acme/other#77 is set at %v, want unset", at)
 	}
 
-	written, err = RecordDeployedEvents(ctx, pool, settings, broker, now.Add(time.Hour))
+	written, err = RecordDeployedEvents(ctx, pool, settings, broker)
 	if err != nil {
 		t.Fatalf("second RecordDeployedEvents: %v", err)
 	}
@@ -233,8 +236,8 @@ func TestDeployedEventIsWrittenOncePerPullRequest(t *testing.T) {
 		t.Fatalf("the second pass wrote %d issue.deployed events, want none", written)
 	}
 	requireDeployedEvent(t, ctx, pool, deployedIssue, "acme/widgets", 501, 900, "2024-01-01T02:10:00Z")
-	if at := deployedEventAt(t, ctx, pool, "acme/widgets", 501); at == nil || !at.Equal(now) {
-		t.Fatalf("the second pass moved the marker to %v, want the first pass's %v", at, now)
+	if at := deployedEventAt(t, ctx, pool, "acme/widgets", 501); at == nil || !at.Equal(*marked) {
+		t.Fatalf("the second pass moved the marker to %v, want the first pass's %v", at, marked)
 	}
 }
 

@@ -126,7 +126,7 @@ const session = {
   as: "agent" as const,
 };
 
-test("issue header identifies session and human creators", async ({ browser }, testInfo) => {
+test("issue header identifies session and human creators @phone", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   await setLiveSessions([
     {
@@ -189,7 +189,7 @@ test("issue header identifies session and human creators", async ({ browser }, t
   }
 });
 
-test("issue header copies its key and persists its title, status, and route", async ({
+test("issue header copies its key and persists its title, status, and route @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -365,6 +365,50 @@ test("issue pages show subscribers, external-link fallbacks, and children", asyn
   }
 });
 
+// The subscribers endpoint reads a row's own `last_seen` (the session's last heartbeat as the
+// listener still knows it) before the row's `updated_at`, which only says when the subscription
+// was last written and can lag the heartbeat by the listener's whole interest refresh age. The
+// two are hours apart here, so the chip's `<time>` says which one the page drew.
+test("a subscriber no longer live shows its last heartbeat, not its subscription's last write", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Heartbeat of a departed agent" });
+  const subscribedAt = Date.now() - 3 * 60 * 60 * 1000;
+  const lastHeartbeat = Date.now() - 60 * 60 * 1000;
+  // No live session at all: a session the registry still listed would carry its own heartbeat,
+  // which the endpoint prefers over both of these.
+  await setLiveSessions([]);
+  await setInterests([
+    {
+      last_seen: lastHeartbeat,
+      session_id: "e2e-departed-session",
+      topics: [
+        `notifications.dispatch.issue.${issue.key}`,
+        `notifications.dispatch.issue.${issue.key}.>`,
+      ],
+      updated_at: subscribedAt,
+    },
+  ]);
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("button", { name: "Subscribers: 1" }).click();
+    const subscribedAgents = page.getByRole("region", { name: "Subscribed agents" });
+    const row = subscribedAgents
+      .locator("li")
+      .filter({ has: page.locator("[title='e2e-departed-session']") });
+    await expect(row.locator("time")).toHaveAttribute(
+      "dateTime",
+      new Date(lastHeartbeat).toISOString()
+    );
+  } finally {
+    await context.close();
+  }
+});
+
 test("editing the parent line moves the issue across Children tabs live", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const oldParent = await createIssue({ project: "CORE", title: "Old parent" });
@@ -390,7 +434,8 @@ test("editing the parent line moves the issue across Children tabs live", async 
     await moverPage.getByRole("button", { name: "Save parent" }).click();
     await expect(moverPage.getByRole("link", { name: newParent.key })).toBeVisible();
 
-    // The new parent's open page hears child.added over SSE and gains the row without a reload.
+    // The new parent's open page hears child.added on the live event feed and gains the row
+    // without a reload.
     const movedRow = parentPage
       .getByRole("tabpanel")
       .getByRole("link", { name: `${mover.key} · Moving decision` });
@@ -410,7 +455,7 @@ test("editing the parent line moves the issue across Children tabs live", async 
   }
 });
 
-test("an answered ask remains in the issue conversation", async ({ browser }, testInfo) => {
+test("an answered ask remains in the issue conversation @phone", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "First decision" });
   const ask = await createAsk(
@@ -441,7 +486,7 @@ test("an answered ask remains in the issue conversation", async ({ browser }, te
   }
 });
 
-test("a quote-anchored ask identifies its document in the margin and Conversation", async ({
+test("a quote-anchored ask identifies its document in the margin and Conversation @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -489,7 +534,7 @@ test("a quote-anchored ask identifies its document in the margin and Conversatio
   }
 });
 
-test("closing an issue removes its asks from the inbox and pinning stays private", async ({
+test("closing an issue removes its asks from the inbox and pinning stays private @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -545,7 +590,7 @@ test("closing an issue removes its asks from the inbox and pinning stays private
   }
 });
 
-test("pinning survives an immediate full navigation", async ({ browser }, testInfo) => {
+test("pinning survives an immediate full navigation @phone", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Navigation-safe event pin" });
   await createMessage(issue.key, { body: "Pinned before navigation" });
@@ -694,13 +739,9 @@ async function subscribeSession(issueKey: string): Promise<void> {
   ]);
 }
 
-test("issue header keeps every control in a shared row on a phone and the whose-turn indicator in view at every width", async ({
+test("issue header keeps every control in a shared row on a phone and the whose-turn indicator in view at every width @phone", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the viewports are set explicitly in the desktop browser project"
-  );
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Header on a phone" });
   await patchIssue(issue.key, {
@@ -762,6 +803,11 @@ test("issue header keeps every control in a shared row on a phone and the whose-
     await testInfo.attach("issue header (390px)", { contentType: "image/png", path: phoneShot });
 
     await page.setViewportSize({ height: 900, width: 1280 });
+    // The shell swaps its phone bar for the sidebar, and the margin its sheet for the column, in
+    // a React commit after the media query's change event. Until then the phone DOM is laid out
+    // under the desktop CSS, which squeezes <main> to its padding at the right edge.
+    await expect(page.getByRole("navigation", { name: "Navigation" })).toBeVisible();
+    await expect(page.getByRole("complementary", { name: "Review margin" })).toBeVisible();
     await expect(indicator).toHaveText("Waiting on you (1)");
     expect(await inView(indicator, 1280)).toBe(true);
     const desktopHeader = await header.boundingBox();
@@ -816,10 +862,6 @@ test("issue header flips between Waiting on you and Waiting on agents as the new
 test("issue header gives the title the row's free space beside a short details line", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the viewports are set explicitly in the desktop browser project"
-  );
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Header keeps its title readable" });
 
@@ -899,10 +941,6 @@ test("issue header gives the title the row's free space beside a short details l
 test("issue header delivers the click that ends a title edit to the control under the pointer", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the viewports are set explicitly in the desktop browser project"
-  );
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Short title" });
 
@@ -1197,7 +1235,7 @@ test("an issue page whose mappings read fails says so and retries it, rather tha
   }
 });
 
-test("an issue's whole title wraps at every width, whether prose or one unbroken word", async ({
+test("an issue's whole title wraps at every width, whether prose or one unbroken word @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -1235,7 +1273,7 @@ test("an issue's whole title wraps at every width, whether prose or one unbroken
   }
 });
 
-test("the details rail fades its trailing edge only while it has somewhere to scroll", async ({
+test("the details rail fades its trailing edge only while it has somewhere to scroll @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the rail only overflows at a phone width");

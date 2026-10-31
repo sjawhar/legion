@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,11 +33,23 @@ type Image struct {
 	Env []string
 	// WorkDir is where the checks run.
 	WorkDir string
+	// ClaudeRoot is the claude-envoy package root the image carries, which a phase worker on the
+	// `claude` backend loads as Claude Code's plugin directory, and ClaudeCodePin the directory of
+	// the package.json and package-lock.json a pod installs Claude Code from at launch: the
+	// claude-code row's two facts (claudeCode), named by `legion probe-image --claude-root` and
+	// `--claude-code-pin`.
+	ClaudeRoot    string
+	ClaudeCodePin string
+	// SkipBrowser leaves the browser row unchecked (`probe-image --skip-browser`): an image built
+	// for a deployment that turns Oh My Pi's browser off (`browser.enabled: false`) carries no
+	// Chromium. The daemon's probe Sandbox never sets it, so a Sandbox pod's image is always
+	// checked for the browser.
+	SkipBrowser bool
 }
 
 // commandTimeout bounds each command a check runs: a `--version` or a `--check` that has not
 // answered in a minute is hanging, not slow, and the probe's own budget is not to be spent on it.
-const commandTimeout = 60 * time.Second
+var commandTimeout = 60 * time.Second
 
 // maxDetail caps a command's quoted output in a State's detail, so a chatty command cannot push
 // the table past the log tail the daemon reads back.
@@ -48,22 +61,26 @@ type imageCheck func(ctx context.Context, img Image) (detail string, ok bool)
 // imageChecks are the image rows' checks, by name. TestEveryImageRowHasACheck holds the map to
 // Table's image rows, so a row added to one is added to the other.
 var imageChecks = map[Name]imageCheck{
-	EvalJS: evalJS, EvalPython: evalPython, Browser: browser, LSP: lsp, CodeGraph: codeGraph, Skills: skills, Toolchain: toolchain,
+	EvalJS: evalJS, EvalPython: evalPython, Browser: browser, LSP: lsp, CodeGraph: codeGraph, Skills: skills, Toolchain: toolchain, ClaudeCode: claudeCode,
 }
 
 // CheckImage checks every image-site row under img and renders every row of Table, in its order:
-// image rows present or missing with their evidence, live rows reported as what each session
-// reports at its start and `legion state` renders, deployment rows reported as what the daemon
-// reports from the deployment's configuration, withheld rows with their ruling. It runs after the
-// launch probes (daemon.ProbeImage) passed: the eval-js and skills rows are present by those
-// probes, which ran Oh My Pi — its own JavaScript runtime — and resolved the prompt-named skills.
-// err is nil when every image row's check passed; otherwise it names every missing one, so one
-// rebuild of the image fixes them all rather than the first alone. A ctx that ends ends the check
-// with an error wrapping ctx's.
+// image rows present or missing with their evidence (with img.SkipBrowser, the browser row
+// unchecked and no browser run), live rows reported as what each session reports at its start
+// and `legion state` renders, deployment rows reported as what the daemon reports from the
+// deployment's configuration, withheld rows with their ruling. It runs after the launch probes
+// (daemon.ProbeImage) passed: the eval-js and skills rows are present by those probes, which ran
+// Oh My Pi — its own JavaScript runtime — and resolved the prompt-named skills. err is nil when
+// every image row's check passed; otherwise it names every missing one, so one rebuild of the
+// image fixes them all rather than the first alone. A ctx that ends ends the check with an error
+// wrapping ctx's.
 func CheckImage(ctx context.Context, img Image) ([]State, error) {
 	var absent []string
 	states, err := render(ctx, renderer{
 		image: func(row Capability) State {
+			if row.Name == Browser && img.SkipBrowser {
+				return State{Name: row.Name, Status: StatusUnchecked, Detail: "not checked (--skip-browser): the image is for a deployment that turns Oh My Pi's browser off"}
+			}
 			detail, ok := imageChecks[row.Name](ctx, img)
 			if !ok {
 				absent = append(absent, fmt.Sprintf("capability %s is missing: %s", row.Name, detail))
@@ -180,12 +197,153 @@ func lsp(_ context.Context, img Image) (string, bool) {
 	return detail, ok
 }
 
+// claudeCode: what a phase worker on the `claude` backend needs of the image, which carries no
+// Claude Code — its licence grants no redistribution and the image is public — so the row
+// measures the two facts that stand in for it, the same two the Claude lane of the launch probes
+// proved before this check (internal/daemon's verifyClaude): the image carries the claude-envoy
+// plugin that worker loads (CheckClaudePlugin), and it carries a pin a pod can install Claude Code
+// from and verify what it installed against (ReadClaudeCodePin). Beside them, npm and node on
+// PATH, as the lsp and toolchain rows find theirs: the start script's install runs npm and its
+// version check runs node (claudeCodeBlock, internal/runtime/sandbox/plugins.go). Every image
+// carries all of it whatever a deployment's worker_backends names — one image serves both
+// harnesses — so every probe of every image checks this row; whether the registry answers a
+// pod's fetch is the pod's own launch to find out, which fails loudly when it does not. Every
+// failure is named at once, as codegraph names both of its halves.
+func claudeCode(_ context.Context, img Image) (string, bool) {
+	var evidence, why []string
+	if img.ClaudeRoot == "" {
+		why = append(why, "no claude-envoy root was given to check")
+	} else if err := CheckClaudePlugin(img.ClaudeRoot); err != nil {
+		why = append(why, err.Error())
+	} else {
+		evidence = append(evidence, img.ClaudeRoot+" holds "+strings.Join(claudePluginFiles, " and "))
+	}
+	if img.ClaudeCodePin == "" {
+		why = append(why, "no Claude Code pin was given to check")
+	} else if version, err := ReadClaudeCodePin(img.ClaudeCodePin); err != nil {
+		why = append(why, err.Error())
+	} else {
+		evidence = append(evidence, fmt.Sprintf("%s pins %s %s with the sha512 integrity of %s", img.ClaudeCodePin, claudeCodePackage, version, claudeCodePlatformPackage))
+	}
+	if _, detail, ok := onPath(img, "npm", "node"); ok {
+		evidence = append(evidence, detail)
+	} else {
+		why = append(why, detail)
+	}
+	if len(why) > 0 {
+		return strings.Join(why, "; "), false
+	}
+	return strings.Join(evidence, "; "), true
+}
+
+// claudePluginFiles are the two files under the claude-envoy root a worker on the `claude` backend
+// loads (packages/daemon/internal/claudelaunch), slash-separated: the built channel server, the
+// worker's one MCP server, and the generated Legion plugin's manifest, which makes `legion/` the
+// second plugin directory Claude Code loads.
+var claudePluginFiles = []string{"dist/envoy-channel.js", "legion/.claude-plugin/plugin.json"}
+
+// CheckClaudePlugin holds the claude-envoy root to the files a worker on the `claude` backend
+// loads from it (claudePluginFiles), each a regular file: a directory at either path is no file a
+// worker could load. The error names the first that is not, and why.
+func CheckClaudePlugin(root string) error {
+	for _, name := range claudePluginFiles {
+		file := filepath.Join(root, filepath.FromSlash(name))
+		info, err := os.Stat(file)
+		if err == nil && !info.Mode().IsRegular() {
+			err = fmt.Errorf("%s is not a regular file (mode %s)", file, info.Mode())
+		}
+		if err != nil {
+			return fmt.Errorf("the claude-envoy root %s holds no %s (%v): a worker on the `claude` backend loads it as Claude Code's plugin directory",
+				root, filepath.Base(file), err)
+		}
+	}
+	return nil
+}
+
+// claudeCodePackage is the npm package the Claude Code pin pins, and claudeCodePlatformPackage the
+// per-platform package of it whose binary a pod's install runs (claudeCodeBinary,
+// internal/runtime/sandbox/plugins.go): linux-x64, as the worker image builds for linux/amd64
+// alone, and the install runs no scripts, so the package's own `bin` stays a placeholder stub.
+const (
+	claudeCodePackage         = "@anthropic-ai/claude-code"
+	claudeCodePlatformPackage = "@anthropic-ai/claude-code-linux-x64"
+)
+
+// exactVersion is a version npm resolves to itself alone: no range, tag, URL or path.
+var exactVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
+
+// ReadClaudeCodePin reads the Claude Code pin in dir — packages/daemon/docker/claude-code's
+// package.json and package-lock.json, which the image carries and a Claude role's start script
+// runs `npm ci --ignore-scripts --omit=dev` from, then holds the installed binary's --version to
+// (claudeCodeBlock) — and answers the version it pins when a pod could install and verify that
+// release from it: package.json pins claudeCodePackage at an exact version, since a range would let
+// the version check refuse a release the lockfile allowed; the lockfile records that same
+// version for the root package, as `npm ci` refuses a lockfile out of step with its package.json;
+// and it locks both claudeCodePackage and claudeCodePlatformPackage at that version, each with a
+// sha512 integrity, which is what `npm ci` holds every fetched tarball to — the checksum of the
+// binary a pod runs. Reading the pin is all it does: whether the registry still serves those
+// tarballs is a pod's launch to find, never the image's build or a boot probe's (verifyClaude,
+// internal/daemon/bootgate.go, says why). The error names the file and what it lacks.
+func ReadClaudeCodePin(dir string) (string, error) {
+	manifest, lock := filepath.Join(dir, "package.json"), filepath.Join(dir, "package-lock.json")
+	var pinned struct {
+		Dependencies map[string]string `json:"dependencies"`
+	}
+	if err := readPinFile(manifest, &pinned); err != nil {
+		return "", err
+	}
+	version := pinned.Dependencies[claudeCodePackage]
+	if !exactVersion.MatchString(version) {
+		return "", fmt.Errorf("the Claude Code pin %s pins %s at %q, not an exact version", manifest, claudeCodePackage, version)
+	}
+	var locked struct {
+		Packages map[string]struct {
+			Version      string            `json:"version"`
+			Integrity    string            `json:"integrity"`
+			Dependencies map[string]string `json:"dependencies"`
+		} `json:"packages"`
+	}
+	if err := readPinFile(lock, &locked); err != nil {
+		return "", err
+	}
+	if recorded := locked.Packages[""].Dependencies[claudeCodePackage]; recorded != version {
+		return "", fmt.Errorf("the Claude Code lockfile %s records %s at %q where %s pins %s: npm ci refuses a lockfile out of step with its package.json",
+			lock, claudeCodePackage, recorded, manifest, version)
+	}
+	for _, name := range []string{claudeCodePackage, claudeCodePlatformPackage} {
+		entry, ok := locked.Packages["node_modules/"+name]
+		switch {
+		case !ok:
+			return "", fmt.Errorf("the Claude Code lockfile %s locks no %s", lock, name)
+		case entry.Version != version:
+			return "", fmt.Errorf("the Claude Code lockfile %s locks %s at %q, not the %s %s pins", lock, name, entry.Version, version, manifest)
+		case !strings.HasPrefix(entry.Integrity, "sha512-"):
+			return "", fmt.Errorf("the Claude Code lockfile %s carries no sha512 integrity for %s (%q): npm ci would have nothing to verify its tarball against",
+				lock, name, entry.Integrity)
+		}
+	}
+	return version, nil
+}
+
+// readPinFile decodes the Claude Code pin's JSON file at path into v; the error names the file.
+func readPinFile(path string, v any) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("the Claude Code pin cannot be read: %v", err)
+	}
+	if err := json.Unmarshal(raw, v); err != nil {
+		return fmt.Errorf("the Claude Code pin %s is not JSON: %v", path, err)
+	}
+	return nil
+}
+
 // codeGraphPlugin is the Oh My Pi plugin that fronts the CodeGraph CLI.
 const codeGraphPlugin = "@bopstack/pi-codegraph"
 
 // codeGraph needs both halves: the CodeGraph CLI on PATH, and its plugin enabled in the profile's
-// plugin lock, where `omp plugin install` recorded it; a CLI without the plugin, or a plugin
-// disabled behind the CLI, gives an agent no codegraph tool. Both failures are named at once.
+// plugin lock, where the image's `omp plugin link` of its frozen install recorded it
+// (worker.Dockerfile); a CLI without the plugin, or a plugin disabled behind the CLI, gives an
+// agent no codegraph tool. Both failures are named at once.
 func codeGraph(_ context.Context, img Image) (string, bool) {
 	var evidence, why []string
 	if path, ok := lookpath.On(envValue(img.Env, "PATH"), "codegraph"); ok {

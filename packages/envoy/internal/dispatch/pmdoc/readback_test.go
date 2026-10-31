@@ -92,8 +92,9 @@ func TestRenderKeepsABackslashInsideABareURL(t *testing.T) {
 	}
 }
 
-// A fused delimiter run that reads back is written as main writes it: the parser splits it as
-// written, and the browser editor's parser reads the same bytes as the same tree.
+// A fused delimiter run that reads back is written as the writer before sjawhar/legion#1464
+// writes it: the parser splits it as written, and the browser editor's parser reads the same
+// bytes as the same tree.
 func TestRenderKeepsAFusedRunThatReadsBack(t *testing.T) {
 	assertRenders(t, []struct{ markdown, want string }{
 		{"*x**b***\n", "*x****b***\n"},
@@ -107,10 +108,11 @@ func TestRenderKeepsAFusedRunThatReadsBack(t *testing.T) {
 	})
 }
 
-// A fused run that does not read back is written again in the plain respellings, as main writes
-// it, before any spelling that keeps marks open: main's escaped bytes read back in both parsers,
-// so a keep-open spelling tried first changed a document main stores correctly.
-func TestRenderRespellsAFusedRunAsMainDoesBeforeKeepingMarksOpen(t *testing.T) {
+// A fused run that does not read back is written again in the plain respellings, as the writer
+// before sjawhar/legion#1464 writes it, before any spelling that keeps marks open: that writer's
+// escaped bytes read back in both parsers, so a keep-open spelling tried first changed a document
+// that writer stores correctly.
+func TestRenderRespellsAFusedRunPlainlyBeforeKeepingMarksOpen(t *testing.T) {
 	assertRenders(t, []struct{ markdown, want string }{
 		{"- ****1**a__1***\n", "- \\*\\*\\**1****a\\_\\_1***\n"},
 		{"****b.**(c)***(c)\n", "\\*\\*\\**b.****(c)***(c)\n"},
@@ -132,6 +134,47 @@ func TestRenderKeepsAMarkOpenWhereAFusedRunDoesNotReadBack(t *testing.T) {
 		{"x ***a** b* y\n", "x ***a** b* y\n"},
 		{"[***a** b*](https://e.com/u)\n", "[***a** b*](https://e.com/u)\n"},
 	})
+}
+
+// unreadableRun is a paragraph's text that reads back in no spelling runSpellings lists and calls
+// for every family of them (runNeeds): a tilde, a bare URL, a scheme's colon, a `www.` and an `@` in
+// text, bold whose punctuation inside it stands beside a letter outside it, a delimiter run fused
+// between nested marks, and an email link.
+const unreadableRun = "ax@y.zz</b>#!<b>_.~~a_**]-**@*&#x40;* **Which here?**Careful. http: www.q z@ http://a.bc ~x *a _b **a.**&#98; awww.q *a **b*** "
+
+// A run that reads back in no spelling is written in every one, and many write the same bytes: a
+// flag can change nothing in the run, and a writing that fails under a reader fails under it at
+// each later step too. Each markdown is read back under each reader at most once, so a write that
+// fails every spelling costs a read for each distinct writing, not for each spelling and step.
+func TestRenderReadsEachWritingBackUnderAReaderOnce(t *testing.T) {
+	const markdown = unreadableRun + "lorem ipsum\n"
+	doc, err := Parse(markdown)
+	if err != nil {
+		t.Fatalf("Parse(%q) = %v", markdown, err)
+	}
+	type read struct {
+		markdown string
+		reader   inlineReader
+	}
+	reads := map[read]int{}
+	readBackObserver = func(markdown string, reader inlineReader) { reads[read{markdown, reader}]++ }
+	defer func() { readBackObserver = nil }()
+	if _, err := Render(doc); err != nil {
+		t.Fatalf("Render(Parse(%q)) = %v", markdown, err)
+	}
+	if len(reads) <= len(readBackReaders) {
+		t.Fatalf("Render(Parse(%q)) read back %d writings under a reader, want it to try its respellings", markdown, len(reads))
+	}
+	repeated, total := 0, 0
+	for _, count := range reads {
+		total += count
+		if count > 1 {
+			repeated++
+		}
+	}
+	if repeated > 0 {
+		t.Errorf("Render(Parse(%q)) made %d read-backs of %d writings under a reader, %d of them read more than once", markdown, total, len(reads), repeated)
+	}
 }
 
 // assertRenders requires each markdown to render as want and to be stored by ParseForWrite.

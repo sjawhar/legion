@@ -1,8 +1,8 @@
-import { replaceEqualDeep, useInfiniteQuery } from "@tanstack/react-query";
+import { replaceEqualDeep, useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useMemo } from "react";
 
 import { api } from "../../api/client";
-import { type EventPages, mergeEventPages } from "../../api/sse";
+import { type EventPages, mergeEventPages } from "../../api/event-feed";
 import type { UserState } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
 import {
@@ -14,8 +14,8 @@ import {
   secondaryButtonText,
   textMutedOnCanvas,
 } from "../../theme/classes";
+import { writePin } from "../issue/pin-write";
 import { eventItemId, isPinnedEvent, stateForIssue } from "../issue/pins";
-import { usePinWrites } from "../issue/usePinWrites";
 import { AgentName, useAgentText } from "../refs/AgentName";
 import { Timestamp } from "../refs/Timestamp";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
@@ -34,7 +34,7 @@ interface ActivityTabProps {
  * filters: this is the record, not a place to write.
  */
 export function ActivityTab({ issueKey, state }: ActivityTabProps): ReactNode {
-  const pins = usePinWrites(issueKey);
+  const queryClient = useQueryClient();
   const log = useInfiniteQuery({
     initialPageParam: null as number | null,
     queryKey: ["events", issueKey],
@@ -46,7 +46,7 @@ export function ActivityTab({ issueKey, state }: ActivityTabProps): ReactNode {
     // A page can hold more than the server's 200 once streamed events sit above a full response
     // (mergeEventPages, prependEventToLog); it is still a full page with older events beneath it.
     getNextPageParam: (page) => (page.length >= 200 ? page.at(-1)?.seq : undefined),
-    // The stream (api/sse.ts) prepends events as they are published; a refetch whose read
+    // The feed (api/event-feed.ts) prepends events as they are published; a refetch whose read
     // predates one of them must not take it back.
     structuralSharing: (current, incoming) =>
       replaceEqualDeep(
@@ -74,7 +74,7 @@ export function ActivityTab({ issueKey, state }: ActivityTabProps): ReactNode {
   );
 
   const togglePin = (eventId: number) =>
-    pins.updatePins((dismissed) => ({
+    writePin(queryClient, issueKey, (dismissed) => ({
       id: eventItemId({ id: eventId }),
       op: isPinnedEvent(dismissed, eventId) ? "unpin" : "pin",
     }));
@@ -96,7 +96,6 @@ export function ActivityTab({ issueKey, state }: ActivityTabProps): ReactNode {
       item="data-event-seq"
       label="Activity"
     >
-      {pins.banner}
       <ol aria-label="Issue activity" className="flex flex-col gap-1">
         {items.map((item) => {
           if (item.kind === "day-divider" || item.kind === "unread-divider") {
@@ -148,7 +147,6 @@ export function ActivityTab({ issueKey, state }: ActivityTabProps): ReactNode {
                 />
               </span>
               <PinButton
-                disabled={pins.blocked}
                 label={pinned ? "Unpin" : "Pin"}
                 onClick={() => togglePin(item.event.id)}
                 pinned={pinned}

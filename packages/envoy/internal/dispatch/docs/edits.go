@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -167,39 +168,90 @@ func (e *ErrPreconditionFailed) Error() string {
 	return "document edit precondition failed: " + strings.Join(reasons, ", ")
 }
 
-// nodeToken hashes a canonical semantic Proof representation, including inline
-// marks but excluding stable block identity and server-owned typed attributes. The
-// representation is hashed as it is encoded (pmdoc.WriteTokenJSON), never held whole.
+// nodeToken hashes a canonical semantic Proof representation, including inline marks but excluding
+// stable block identity and server-owned typed attributes: the SHA-256 of pmdoc.EncodeTokenJSON's
+// encoding.
 func nodeToken(node *pmdoc.Node) (string, error) {
-	hash := sha256.New()
-	if err := node.WriteTokenJSON(hash); err != nil {
+	encoded, err := node.TokenJSON()
+	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("sha256:%x", hash.Sum(nil)), nil
+	return tokenHash(encoded), nil
 }
 
-func blockTokens(tree *pmdoc.Node) (map[string]string, error) {
-	tokens := make(map[string]string)
-	var visit func(*pmdoc.Node) error
-	visit = func(node *pmdoc.Node) error {
-		if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); id != "" {
-			token, err := nodeToken(node)
-			if err != nil {
-				return err
-			}
-			tokens[id] = token
-		}
-		for _, child := range node.Children {
-			if err := visit(child); err != nil {
-				return err
-			}
-		}
-		return nil
+// tokenHash is the token of an encoded token representation: "sha256:" and the lowercase hex of
+// its SHA-256.
+func tokenHash(encoded []byte) string {
+	const prefix = "sha256:"
+	sum := sha256.Sum256(encoded)
+	var buf [len(prefix) + 2*sha256.Size]byte
+	copy(buf[:], prefix)
+	hex.Encode(buf[len(prefix):], sum[:])
+	return string(buf[:])
+}
+
+// encodedTokens is tree's document token and the token of each block in it, from one encoding of
+// the tree into one buffer this call allocates and drops (spanTokens). It validates tree first
+// (pmdoc.EncodeTokenJSON), because its caller, checkEditPrecondition, holds a plain *pmdoc.Node
+// rather than a pmdoc.ValidDocument. An error is the tree's, as nodeToken(tree) returns it.
+func encodedTokens(tree *pmdoc.Node) (document string, blocks map[string]string, err error) {
+	var spans []pmdoc.TokenSpan
+	encoded, err := pmdoc.EncodeTokenJSON(tree, &spans)
+	if err != nil {
+		return "", nil, err
 	}
-	if err := visit(tree); err != nil {
-		return nil, err
+	document, blocks = spanTokens(encoded, spans)
+	return document, blocks, nil
+}
+
+// spanTokens is the document token and the block tokens of encoded, one encoding of a tree, with
+// its block spans (pmdoc.EncodeTokenJSON): the document's is the hash of the whole buffer and each
+// block's the hash of its own span. Where several nodes carry one block id, the last of them in
+// pre-order holds it, as an edit addressing the id reads.
+func spanTokens(encoded []byte, spans []pmdoc.TokenSpan) (document string, blocks map[string]string) {
+	blocks = make(map[string]string, len(spans))
+	for _, span := range spans {
+		blocks[span.ID] = tokenHash(encoded[span.Start:span.End])
 	}
-	return tokens, nil
+	return tokenHash(encoded), blocks
+}
+
+// treeTokens is a tree's document token and its block tokens, each beside its own error: a block's
+// token refuses only a value inside that block, while the document's refuses one anywhere in the
+// tree, so a tree can have every block token and no document token.
+type treeTokens struct {
+	document    string
+	documentErr error
+	blocks      map[string]string
+	blocksErr   error
+}
+
+// documentTokens is tree's tokens from one encoding of the tree, which it does not validate again
+// (pmdoc.ValidDocument.TokenJSON, spanTokens); when the whole tree cannot be encoded, the blocks
+// are encoded each on its own (nodeToken), in pre-order, and the first that cannot be is blocksErr.
+// Only a tree holding an unencodable value pays for that second pass.
+func documentTokens(tree pmdoc.ValidDocument) treeTokens {
+	var spans []pmdoc.TokenSpan
+	encoded, err := tree.TokenJSON(&spans)
+	if err == nil {
+		document, blocks := spanTokens(encoded, spans)
+		return treeTokens{document: document, blocks: blocks}
+	}
+	tokens := treeTokens{documentErr: err, blocks: make(map[string]string)}
+	pmdoc.Walk(tree.Node(), func(node *pmdoc.Node) bool {
+		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+		if id == "" {
+			return true
+		}
+		token, err := nodeToken(node)
+		if err != nil {
+			tokens.blocks, tokens.blocksErr = nil, err
+			return false
+		}
+		tokens.blocks[id] = token
+		return true
+	})
+	return tokens
 }
 
 func validateEditPrecondition(precondition model.EditPrecondition) error {
@@ -228,11 +280,11 @@ func checkEditPrecondition(tree *pmdoc.Node, precondition model.EditPrecondition
 	if err := validateEditPrecondition(precondition); err != nil {
 		return err
 	}
-	currentDocument, err := nodeToken(tree)
-	if err != nil {
-		return err
-	}
 	if precondition.Document != "" {
+		currentDocument, err := nodeToken(tree)
+		if err != nil {
+			return err
+		}
 		if precondition.Document == currentDocument {
 			return nil
 		}
@@ -244,7 +296,9 @@ func checkEditPrecondition(tree *pmdoc.Node, precondition model.EditPrecondition
 		}
 	}
 
-	current, err := blockTokens(tree)
+	// A tree with a block that cannot be encoded cannot be encoded whole either, so the document's
+	// error covers every refusal of a block's token.
+	currentDocument, current, err := encodedTokens(tree)
 	if err != nil {
 		return err
 	}
@@ -445,7 +499,7 @@ func (b editBatch) outcome(applied int) (EditOutcome, error) {
 		Changed:        after != b.before,
 		Unchanged:      b.unchanged,
 		Token:          after,
-		AskBlocksAdded: addedAskBlocks(b.beforeTree, b.tree),
+		AddedAskBlocks: addedAskBlocks(b.beforeTree, b.tree),
 	}, nil
 }
 
@@ -848,6 +902,9 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.WriteBudget
 		if code {
 			return next, refuseCodeThatReshapesItsBlock(tree, next, r, at, "with", op.With)
 		}
+		if err := refuseCodePipeInTableCell(tree, next, r, "with", "with", op.With, ""); err != nil {
+			return nil, err
+		}
 		if err := refuseUnreadableReplacement(tree, next, r, op.With); err != nil {
 			return nil, err
 		}
@@ -875,7 +932,10 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.WriteBudget
 			return nil, err
 		}
 		out, err := pmdoc.Splice(tree, r, empty)
-		return out, invalidSchemaOp("find", err)
+		if err != nil {
+			return nil, invalidSchemaOp("find", err)
+		}
+		return out, refuseCodePipeInTableCell(tree, out, r, "find", "deleting find", op.Find, "")
 	case "insert":
 		if op.Markdown == "" {
 			return nil, invalidOp("markdown")
@@ -1223,6 +1283,57 @@ func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, wit
 		"with %q is text the document reads back as another block where it lands (%v); write it inside a line of text",
 		with, reshaped,
 	)}
+}
+
+// refuseCodePipeInTableCell refuses a write that adds, to the document-level blocks it changed
+// (changedBlocks), code in a table cell whose text holds a `|` after an odd run of backslashes
+// (pmdoc.TableCodePipes): no markdown of a cell writes that code, so what the document stored would
+// read back otherwise. A replace's `with` is read as a paragraph's text, where `\|` in code is the
+// code's text, and a delete can cut code down to it. Such code a browser edit already left in those
+// blocks is no reason to refuse the write, so a document holding it still takes writes, the one
+// that rewrites that code to hold no such `|` among them; code the write adds beside it is. What
+// the blocks held before and hold after are compared by the code's text, counted, since a write can
+// move a cell to another row, and the refusal names the first code after that the blocks did not
+// hold before. field is the field the refusal names, opening the words it opens with and value
+// what the caller sent, which the refusal quotes after them, and advice what the caller can do
+// beside what pmdoc's refusal says, or "". An error from pmdoc, a panic (pmdoc.ErrPanic), is
+// pmdoc's bug, and is the error.
+func refuseCodePipeInTableCell(before, after *pmdoc.Node, match pmdoc.Range, field, opening, value, advice string) error {
+	first, last, lastAfter, err := changedBlocks(before, after, match)
+	if err != nil {
+		return err
+	}
+	var held map[string]int
+	for index := first; index <= last; index++ {
+		cells, err := pmdoc.TableCodePipes(before.Children[index])
+		if err != nil {
+			return err
+		}
+		for _, cell := range cells {
+			if held == nil {
+				held = map[string]int{}
+			}
+			held[cell.Code]++
+		}
+	}
+	for index := first; index <= lastAfter; index++ {
+		cells, err := pmdoc.TableCodePipes(after.Children[index])
+		if err != nil {
+			return err
+		}
+		for _, cell := range cells {
+			if held[cell.Code] > 0 {
+				held[cell.Code]--
+				continue
+			}
+			reason := fmt.Sprintf("%s %q leaves code the document cannot store where it lands: %v", opening, value, cell)
+			if advice != "" {
+				reason += "; " + advice
+			}
+			return &ErrInvalidOp{Field: field, Reason: reason}
+		}
+	}
+	return nil
 }
 
 // unreadableReason says why a replace left its block unreadable and what to do instead, by cause.

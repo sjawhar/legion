@@ -185,6 +185,10 @@ func TestProbeBootRunsTheDaemonsImageProbeAfterTheClusterCheck(t *testing.T) {
 	if len(built) != 1 || len(prober.probed) != 1 {
 		t.Fatalf("built %d probers and probed %d times, want 1 and 1", len(built), len(prober.probed))
 	}
+	budget, _ := ProbeBudget(cfg)
+	if got := prober.probed[0].Budget; got != budget {
+		t.Errorf("probe-boot ImageProbe.Budget = %s, want ProbeBudget(cfg) %s", got, budget)
+	}
 	opts := built[0]
 	k := cfg.Runtime.Kubernetes
 	if opts.Namespace != k.Namespace || opts.Image != k.Image || opts.DispatchURL != cfg.DispatchURL || opts.DispatchToken != "dispatch-test-token" {

@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
-# Routes a named OMP profile's model turns straight to Anthropic's own endpoint, keyed by a local
-# file: the key-file alternative to lib/install-model-gateway.sh's Hawk route, for a devbox that has
-# no Hawk gateway at all (lib/install-model-gateway.sh's own header; a devbox reaching Anthropic
-# directly runs this one instead). Mirrors the model-route pattern
+# Routes a named OMP profile's model turns straight to a model endpoint, Anthropic's own unless
+# --base-url names another (an Anthropic-compatible gateway whose key the file holds), keyed by a
+# local file: the key-file alternative to lib/install-model-gateway.sh's Hawk route, for a devbox
+# that has no Hawk gateway at all (lib/install-model-gateway.sh's own header; a devbox reaching
+# Anthropic directly runs this one instead). Mirrors the model-route pattern
 # deploy/kubernetes/operator-route/models-key-file.yml gives Stage 4a's pods: an operator-supplied
 # key, read fresh on every call, never minted and never written into the tree.
 #
-#   scripts/e2e/lib/install-key-file-model-route.sh --profile <name> --home <dir> --dest <dir> --key-dir <dir> --key-file <file>
+#   scripts/e2e/lib/install-key-file-model-route.sh --profile <name> --home <dir> --dest <dir> --key-dir <dir> --key-file <file> [--base-url <url>]
+#
+# --base-url is the anthropic provider's baseUrl in the profile's models.yml, by default
+# https://api.anthropic.com: an http:// or https:// URL with no credentials, refused as
+# lib/model-endpoint.sh's model_base_url_refusal refuses one.
 #
 # --home is the HOME Oh My Pi runs under for the profile, made by make_omp_home (lib/omp-home.sh):
 # the profile's files go under <home>/.omp/profiles/<name>, and the caller's own HOME is refused.
 #
-# --key-file names a file holding the plaintext Anthropic API key alone (one line; a trailing
-# newline is read past): refused unless it is a regular file only its owner can read (no group or
-# other permission bit). The preflight below reads it once, before any pane exists, to prove it is
-# readable; every later call reads it fresh again, so a key the caller rewrites in place (the same
-# path, new content) takes effect on the key command's very next call — re-pointing --key-file's
-# own path to a new file does nothing, since the key command is written with the resolved path
-# baked in — though Oh My Pi itself caches the value for a running agent and only re-runs the
-# command on a 401 (the profile's own models.yml comment has this).
+# --key-file names a file holding the plaintext key --base-url's endpoint takes, alone (one line;
+# a trailing newline is read past): refused unless it is a regular file only its owner can read
+# (no group or other permission bit). The preflight below reads it once, before any pane exists,
+# to prove it is readable; every later call reads it fresh again, so a key the caller rewrites in
+# place (the same path, new content) takes effect on the key command's very next call —
+# re-pointing --key-file's own path to a new file does nothing, since the key command is written
+# with the resolved path baked in — though Oh My Pi itself caches the value for a running agent and
+# only re-runs the command on a 401 (the profile's own models.yml comment has this).
 #
 # --dest and --key-dir hold different things, and the caller gives them different lifetimes:
 # --dest gets only the call record (<dest>/anthropic-key.log, <dest>/anthropic-key.calls), which
@@ -54,6 +59,8 @@ set -euo pipefail
 
 me=install-key-file-model-route
 model=anthropic/claude-opus-4-8
+# shellcheck source=lib/model-endpoint.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/model-endpoint.sh"
 
 # refuse is for arguments (exit 2); fail is for the box the run is on (exit 1).
 refuse() {
@@ -70,6 +77,7 @@ home=
 dest=
 key_dir=
 key_file=
+base_url=$anthropic_base_url
 have_profile=
 have_home=
 have_dest=
@@ -102,6 +110,11 @@ while [ $# -gt 0 ]; do
     key_file=$2 have_key_file=1
     shift 2
     ;;
+  --base-url)
+    [ $# -ge 2 ] || refuse "--base-url needs a value: the model endpoint's base URL"
+    base_url=$2
+    shift 2
+    ;;
   *) refuse "unknown argument $1" ;;
   esac
 done
@@ -110,6 +123,8 @@ done
 [ -n "$have_dest" ] || refuse "--dest is required: the directory the key command's call record is written to"
 [ -n "$have_key_dir" ] || refuse "--key-dir is required: the directory the key command's own script is written to"
 [ -n "$have_key_file" ] || refuse "--key-file is required: the file holding the plaintext Anthropic key"
+why=$(model_base_url_refusal "$base_url")
+[ -z "$why" ] || refuse "--base-url $why"
 
 # OMP reads an empty name or "default" as the profile every plain `omp` uses (the same rule as
 # install-model-gateway.sh and install-plugin-profile.sh).
@@ -245,13 +260,13 @@ unset key
 
 mkdir -p "$agent"
 cat >"$agent/models.yml" <<EOF
-# Written by scripts/e2e/lib/install-key-file-model-route.sh: anthropic through its own endpoint,
+# Written by scripts/e2e/lib/install-key-file-model-route.sh: anthropic at --base-url's endpoint,
 # keyed from --key-file. OMP caches the command's value for the process and runs it again on a 401,
 # so a key the operator rotates mid-run is picked up on the very next 401, not instantly. OMP runs a
 # !command through /bin/sh -c, so exec makes the key command the process OMP started.
 providers:
   anthropic:
-    baseUrl: https://api.anthropic.com
+    baseUrl: $base_url
     auth: apiKey
     api: anthropic-messages
     apiKey: "!exec $key_command"
@@ -259,7 +274,7 @@ providers:
       X-Api-Key: "!exec $key_command"
 EOF
 cat >"$agent/config.yml" <<EOF
-# Written by scripts/e2e/lib/install-key-file-model-route.sh. Anthropic's own endpoint is the one
+# Written by scripts/e2e/lib/install-key-file-model-route.sh. The --base-url endpoint is the one
 # model route, and Oh My Pi falls back from a failing provider without a word: with the key command
 # failing, install-model-gateway.sh measured a pane answering from
 # amazon-bedrock/us.anthropic.claude-opus-4-8 on the devbox's instance role, and a Stage 3 retro's
@@ -291,6 +306,12 @@ modelRoles:
   review: $model
   oracle: $model
   deep: $model
+# AskGate (pi-envoy, in every pane) reviews each Dispatch write inside one tool_call handler and
+# holds its deadline 5 s under this limit. At Oh My Pi's 30 s default the deadline is 25 s, a review
+# of a long session often times out, and a write whose review times out posts unreviewed
+# (packages/pi-envoy/README.md, "The time limit").
+extensionHandlers:
+  toolCallTimeoutMs: 120000
 EOF
-echo "$me: OMP profile $profile routes $model straight to Anthropic, keyed by $key_command from $key_file" >&2
+echo "$me: OMP profile $profile routes $model straight to $base_url, keyed by $key_command from $key_file" >&2
 printf '%s\n' "$key_command"

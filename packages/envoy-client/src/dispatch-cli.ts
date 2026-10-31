@@ -1,7 +1,26 @@
-import { commandHelp, commandsHelp, type ParsedCommand, parseCommand } from "./dispatch-command";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import {
+  askgateState,
+  bytesDigest,
+  consumeMarker,
+  type FileDigest,
+  fileOperands,
+  gatedWrite,
+  operandPath,
+} from "./askgate-marker";
+import { newAsks } from "./askgate-new-asks";
+import {
+  commandHelp,
+  commandName,
+  commandsHelp,
+  type ParsedCommand,
+  parseCommand,
+} from "./dispatch-command";
 import type { ActiveDispatchConfig } from "./dispatch-config";
 import type { DispatchHost } from "./dispatch-cwd";
 import { checkDispatchCall, dispatchServerUrls, executeDispatchTool } from "./dispatch-execute";
+import { DispatchWriteLandedError } from "./dispatch-http";
+import { sessionDirectory, sessionStateRoot } from "./dispatch-session-directory";
 import {
   appendResult,
   loadSessionMemory,
@@ -9,8 +28,6 @@ import {
   type ResultInput,
   readSessionTitle,
   recordOutcome,
-  sessionDirectory,
-  sessionStateRoot,
   writeLongOutput,
   writePicture,
 } from "./dispatch-session-state";
@@ -48,12 +65,20 @@ const HOSTS = ["omp", "claude", "opencode"] as const satisfies readonly Dispatch
  *  the CLI adds counted (`fitOutput`). */
 const CLAUDE_OUTPUT_MAX = 25_000;
 
+/** Why a file that changed after AskGate's review is refused or posts unreviewed. */
+const SAME_MESSAGE =
+  "AskGate reviews the calls of a message before any of them runs, so it did not review that change.";
+
 /** What the CLI prints when the call reached Dispatch but its local record could not be written. */
 const STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's state";
 
 function stateWriteFailed(problem: string): string {
   return `${STATE_WRITE_FAILED} could not be written: ${problem}`;
 }
+
+/** How a gated write gets AskGate's marker, as a refusal or a warn-mode warning tells the agent. */
+const LITERAL_FORM =
+  "AskGate reviews a Dispatch write, and lets it post, only when it is sent as one bash call of literal words: `dispatch <command> <words…>`. Each word is plain text, text in single quotes (also over more than one line), or text in double quotes with no `$`, backtick or `\\`. A `\\` at the end of a line continues the command. Before it, one `cd <path> &&` is permitted; after it, one `2>&1`, one here-document opened with a quoted delimiter (`<<'EOF'`) and one `| head -n N` or `| tail -n N`. For text with `$` or a backtick in it, use `--<field>-file - <<'EOF'`. A variable, `~`, a glob, an assignment, another redirect (`2>/dev/null`, `> file`), another pipe, another command (`;`, `&&`, `||`), a loop, xargs, `bash -c`, a script, an alias, or a process that a program or an eval cell starts carries no marker.";
 
 /** A line that refuses a call before it reaches Dispatch, each at the start of the line:
  *  `dispatch <command> was not called: …` (exit 1, `ToolInputError` and the refusals
@@ -181,7 +206,12 @@ export async function runDispatchCli(
   // The host need not be known for the session to be: a Python `subprocess.run(["dispatch", …])`
   // inherits the session id without `DISPATCH_HOST`. A ledger that cannot be written changes
   // nothing here: the refusal is already printed, and the caller is exiting.
-  const refuse = (text: string, code: number, tool?: string): number => {
+  const refuse = (
+    text: string,
+    code: number,
+    tool?: string,
+    askgate?: ResultInput["askgate"]
+  ): number => {
     print(text);
     const sessionId = env.CLAUDE_CODE_SESSION_ID ?? env.DISPATCH_SESSION_ID;
     if (sessionId !== undefined) {
@@ -189,6 +219,7 @@ export async function runDispatchCli(
         appendResult(sessionDirectory(env, sessionId), {
           tool: tool ?? "dispatch",
           error: text.trimEnd(),
+          ...(askgate === undefined ? {} : { askgate }),
         });
       } catch {
         // The session's directory is unusable; the printed refusal stands on its own.
@@ -222,7 +253,7 @@ export async function runDispatchCli(
   if (host === undefined) {
     return refuse(
       hostName === undefined
-        ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself."
+        ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell. From an agent's session, send the command as a bash call. To run dispatch by hand, set DISPATCH_HOST, and set DISPATCH_SESSION_ID to the id of your own session."
         : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`,
       USAGE,
       parsed.tool
@@ -286,6 +317,104 @@ export async function runDispatchCli(
   }
   const config: ActiveDispatchConfig = resolution;
 
+  // AskGate: a session a live Oh My Pi process records with its gate bound (its AskGate record in
+  // this directory) posts a gated write only with one marker the gate minted for this exact argv,
+  // whatever ran the CLI. A session no live process records needs none.
+  let uploadBytes: Uint8Array | undefined;
+  if (gatedWrite(parsed.tool, parsed.args)) {
+    const notCalled = `dispatch ${commandName(parsed.tool)} was not called:`;
+    try {
+      const gate = askgateState(dir);
+      if (gate.kind === "broken") {
+        return refuse(
+          `${notCalled} AskGate's record for this session, ${gate.problem}, so whether AskGate reviewed this write cannot be told.`,
+          REFUSED,
+          parsed.tool,
+          { mode: "block", why: gate.problem }
+        );
+      }
+      if (gate.kind === "on") {
+        // Each file the argv names, read once: its digest for the check, and an upload's bytes,
+        // which are then the bytes the upload sends, so nothing changes between the check and
+        // the send. Only a regular file is read; any other file has no digest, which matches no
+        // reviewed marker.
+        const files: FileDigest[] = [];
+        for (const file of fileOperands(argv)) {
+          let bytes: Buffer | undefined;
+          try {
+            const fd = openSync(
+              operandPath(io.cwd, file),
+              constants.O_RDONLY | constants.O_NONBLOCK
+            );
+            try {
+              if (fstatSync(fd).isFile()) bytes = readFileSync(fd);
+            } finally {
+              closeSync(fd);
+            }
+          } catch {
+            // Not there, or not this process's to open: no digest.
+          }
+          files.push({ ...file, sha256: bytes === undefined ? null : bytesDigest(bytes) });
+          if (file.flag === "--path" && file.operand === parsed.args.path) uploadBytes = bytes;
+        }
+        const spent = consumeMarker(gate.stores, argv, parsed.args, files, Date.now());
+        // The asks this write would open for a person, counted from the write's own text: the
+        // one number pi-envoy's record of an unmarked write carries, so a session holding a
+        // Dispatch token alone can count the asks that went out, or were refused, unreviewed.
+        // The ledger carries the count and never the ask text. An upload's asks are in its file,
+        // whose bytes are already read above, and which the dry run's arguments name only by
+        // path. A re-upload's blocks are counted again: the write carries them.
+        const asksCarried = spent.ok
+          ? 0
+          : newAsks(
+              parsed.tool,
+              uploadBytes === undefined
+                ? parsed.args
+                : { ...parsed.args, content: new TextDecoder().decode(uploadBytes) }
+            ).length;
+        if (!spent.ok && gate.mode === "block") {
+          return refuse(
+            spent.changed === undefined
+              ? `${notCalled} AskGate is on for this session, and ${spent.why}. ${LITERAL_FORM} Send the write again in that form, as a bash call of its own.`
+              : `${notCalled} AskGate is on for this session, and ${spent.why}. ${SAME_MESSAGE} Send the call again in a later message.`,
+            REFUSED,
+            parsed.tool,
+            { mode: "block", why: spent.why, asksCarried }
+          );
+        }
+        if (!spent.ok) {
+          // The ledger line that tells pi-envoy this write went out unreviewed is written before
+          // the write is sent, on its own: a ledger that cannot take it stops the write here, so
+          // no unreviewed write posts unrecorded.
+          try {
+            appendResult(dir, {
+              tool: parsed.tool,
+              askgate: { mode: "warn", why: spent.why, asksCarried },
+            });
+          } catch (error) {
+            return refuse(
+              `${notCalled} AskGate is on for this session in warn mode, and ${spent.why}. A write that posts unreviewed is first recorded in this session's ledger, and the ledger could not be written: ${messageFor(error)}.`,
+              REFUSED,
+              parsed.tool
+            );
+          }
+          print(
+            spent.changed === undefined
+              ? `dispatch: warning: AskGate is on for this session in warn mode, and ${spent.why}, so this write posts unreviewed. ${LITERAL_FORM} Send the next one in that form.`
+              : `dispatch: warning: AskGate is on for this session in warn mode, and ${spent.why}, so this write posts unreviewed. ${SAME_MESSAGE} Send a write in a later message than the call that changes its file.`
+          );
+        }
+      }
+    } catch (error) {
+      return refuse(
+        `${notCalled} AskGate's marker for this call could not be checked: ${messageFor(error)}.`,
+        REFUSED,
+        parsed.tool,
+        { mode: "block", why: messageFor(error) }
+      );
+    }
+  }
+
   // A result names an owner the session is not subscribed to, or the line that subscribes it,
   // only from the listener's record of the session's topics, read (Envoy's settings with it) once,
   // when a result first asks; with Envoy off, or no answer from it, a result says nothing about
@@ -332,6 +461,7 @@ export async function runDispatchCli(
       tool,
       args,
       cwd: io.cwd,
+      ...(uploadBytes === undefined ? {} : { uploadBytes }),
       host,
       sessionId,
       sessionTitle: env.DISPATCH_SESSION_TITLE ?? readSessionTitle(dir),
@@ -361,8 +491,16 @@ export async function runDispatchCli(
     code = OK;
   } catch (error) {
     text = messageFor(error);
-    entry = { tool, error: text };
-    code = REFUSED;
+    // The command's write landed but its answer was lost: it is done, so the call succeeded, and
+    // its one line says to read back what it made. The executor turns a landing of a write that
+    // was only a step of its command (a picture, a closing reason) into a failure of its own.
+    if (error instanceof DispatchWriteLandedError) {
+      entry = { tool, details: { landed_without_answer: error.code } };
+      code = OK;
+    } else {
+      entry = { tool, error: text };
+      code = REFUSED;
+    }
   }
   try {
     recordOutcome(dir, sessionId, follows, entry);

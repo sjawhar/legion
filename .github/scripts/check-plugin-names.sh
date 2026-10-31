@@ -11,8 +11,8 @@
 # each entry is an exact path or a directory prefix (ending in "/"), never a pattern that would
 # hide a hit in a file nobody listed, and each says why that file legitimately keeps the name. A
 # new file that records history (a changelog entry, a dated plan or solution under those
-# directories) is covered by its directory; anything else that needs the name is added here, with
-# its reason.
+# directories, a changelog fragment under an allowlisted changelog's `.changes/`) is covered by its
+# directory; anything else that needs the name is added here, with its reason.
 #
 # It scans every file git tracks, a file under an ignored path included, plus every untracked file
 # git does not ignore, so a new file is caught before it is added; the ignored `.jj/`, `.git/`,
@@ -21,8 +21,8 @@
 # non-zero exits are hits (1) and a search that failed (2).
 #
 # Run from anywhere: .github/scripts/check-plugin-names.sh
-# CI runs it over the repository in the lint job of pr-and-main.yaml, beside check-private-names.sh,
-# and its tests (check-plugin-names.test.sh) in that workflow's test job.
+# CI runs it over the repository in ci.yaml's lint job, beside check-private-names.sh, and its
+# tests (check-plugin-names.test.sh) in ci.yaml's test job.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -39,12 +39,21 @@ allowlist=(
   docs/superpowers/
   # The Envoy plugin's changelog: its history under the old name, and the entry that renames it.
   packages/pi-envoy/CHANGELOG.md
+  # Its changelog fragments: a fragment is that changelog's entry before the fold writes it in, so
+  # any line the CHANGELOG.md above may hold must be writable as its fragment.
+  packages/pi-envoy/.changes/
   # The Legion plugin's changelog: its first entry says which package it was split from.
   packages/pi-legion/CHANGELOG.md
+  # Its changelog fragments, for the same reason as packages/pi-envoy/.changes/.
+  packages/pi-legion/.changes/
   # The Claude Code plugin's changelog: entries of its time name the omp plugin as it was then.
   packages/claude-envoy/CHANGELOG.md
+  # Its changelog fragments, for the same reason as packages/pi-envoy/.changes/.
+  packages/claude-envoy/.changes/
   # The Envoy listener's changelog: entries of its time name the omp plugin as it was then.
   packages/envoy/CHANGELOG.md
+  # Its changelog fragments, for the same reason as packages/pi-envoy/.changes/.
+  packages/envoy/.changes/
   # The legacy Dispatch client comment: `SearchResult.issue` stays until no installed client built
   # before the owner-only shape remains, and the old package is one of those clients.
   packages/contracts/src/dispatch-api.ts

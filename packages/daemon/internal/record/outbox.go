@@ -285,18 +285,20 @@ func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNot
 // The controller notices no architect is told of. A triage notice's root is unrecorded, so no
 // architect owns it; a slot-free notice names the root whose slot admission released while no
 // waiting root took it. A todo notice names an issue not handed to Legion that changed in `todo`
-// while a slot stood free; the controller takes no issue for either (skill://legion-controller,
-// "Free slots"). A tick is the daemon's periodic wake, whose issue is the project key. An
-// unslotted notice names a root admission found in the workflow with neither a slot nor a place in
-// the waiting line, which it took out of the workflow; its reason names the status the root stood
-// at. When admission sends each is its rule (admit.Admission.wakeController and its callers,
-// admit's releaseUnslotted).
+// while a slot stood free. An awaiting-person notice names a root that released its slot while its
+// architect waits on a person (workflow's enterAwaiting). The controller takes no issue for any of
+// the three (skill://legion-controller, "Free slots"). A tick is the daemon's periodic wake, whose
+// issue is the project key. An unslotted notice names a root admission found in the workflow with
+// neither a slot nor a place in the waiting line, which it took out of the workflow; its reason
+// names the status the root stood at. When admission sends each is its rule
+// (admit.Admission.wakeController and its callers, admit's releaseUnslotted).
 const (
-	TriageNotice    NoticeKind = "triage"
-	SlotFreeNotice  NoticeKind = "slot-free"
-	TodoNotice      NoticeKind = "todo"
-	TickNotice      NoticeKind = "tick"
-	UnslottedNotice NoticeKind = "unslotted"
+	TriageNotice         NoticeKind = "triage"
+	SlotFreeNotice       NoticeKind = "slot-free"
+	TodoNotice           NoticeKind = "todo"
+	TickNotice           NoticeKind = "tick"
+	UnslottedNotice      NoticeKind = "unslotted"
+	AwaitingPersonNotice NoticeKind = "awaiting-person"
 )
 
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
@@ -394,6 +396,10 @@ type WorkspaceRemove struct {
 	// only while the tree lingers at that root generation: once re-admission moves the root on, the
 	// workspace there is the tree's next run's, whatever generation the issue itself keeps.
 	Linger uint64 `json:"linger"`
+	// Tree is the tree whose linger queued the removal. An issue adopted into another tree since
+	// (workflow.Engine.Adopt) works there now, so the removal finishes without acting. A row queued
+	// by an earlier release has none, and is fenced by Linger against the issue's current tree.
+	Tree string `json:"tree,omitempty"`
 }
 
 func (WorkspaceRemove) OutboxKind() OutboxKind { return OutboxKindWorkspaceRemove }
@@ -460,9 +466,10 @@ type ReadyMerge struct {
 func (ReadyMerge) OutboxKind() OutboxKind { return OutboxKindReadyMerge }
 
 // CheckCompare wakes a production check from a build or from a deploy run, whichever of Build and
-// Deploy it carries (exactly one). Build is the commit a daemon boot or a Dispatch start reported
-// itself built from: the executor runs a GitHub compare of the check's merge commit with it, as the
-// implement App, and starts the look Look when the build contains the merge. Deploy is a completed
+// Deploy it carries (exactly one). Build is the commit a daemon boot reported itself built from,
+// or Dispatch announced every server process serves (server.started): the executor runs a GitHub
+// compare of the check's merge commit with it, as the implement App, and starts the look Look when
+// the build contains the merge. Deploy is a completed
 // run attempt of a deploy workflow the project names (`projects.<KEY>.deploys`): the executor reads
 // the run and its jobs from GitHub, and wakes the check once for each job whose named step succeeded
 // after the pull request merged. Cause names what asked for it (`daemon boot`, `dispatch start`,
@@ -754,7 +761,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "merge-refused", "merge-stalled", "merge-removed", "merge-waiting", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "pull-request-missing", "merge-refused", "merge-stalled", "merge-removed", "merge-waiting", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
 		return true
 	default:
 		return false
@@ -765,7 +772,7 @@ func validNoticeKind(kind NoticeKind) bool {
 // architect's.
 func controllerOnlyNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice:
+	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice, AwaitingPersonNotice:
 		return true
 	default:
 		return false

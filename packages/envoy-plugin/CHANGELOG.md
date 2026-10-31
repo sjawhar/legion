@@ -1,8 +1,28 @@
 # Changelog
 
-## [Unreleased]
+## [12.0.1] - 2026-10-30
+
+### Changed
+
+- `dispatch-first`, which an OpenCode session reads as an instruction file, says that a result a person asked for is like a blocker: a document or artifact notifies nobody, so the document that holds the result ends with an ask block asking their next step, else a `dispatch ask`. Its rule that each ask and message stands alone is gone, since `dispatch-writing-specs` carries it where an ask is written.
+
+## [9.8.0] - 2026-10-28
 
 ### Added
+
+- Every registration names the plugin: `plugin` `@sjawhar/opencode-legion-envoy` and
+  `plugin_version` this package's version, which the listener's `GET /v1/sessions` and
+  `GET /v1/registry/<id>` show.
+
+## Before changelog fragments
+
+### Added
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by …` with the
+  options chosen and `Answer text: …`, `Closed with no answer: …`, `Closed after an answer: …` with
+  `Last answer by …`, or `Open: no answer yet.`; against a Dispatch older than this release, which
+  reports no state, `Answer state not reported by this Dispatch; open the link to read the ask.`
+  (INFRA-569).
 
 - The packaged skills gain `asd-ste100`, which OpenCode finds on the skills path the config hook
   adds: the ASD-STE100 rules (Simplified Technical English) for text a reader must not misread.
@@ -10,12 +30,6 @@
   licence and without its linter.
 
 ### Fixed
-
-- The `dispatch` command and the session's start notice name the lost `DISPATCH_URL` when
-  `DISPATCH_TOKEN_FILE` is set and nothing names the server: `DISPATCH_TOKEN_FILE is set and
-  DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export
-  DISPATCH_URL again, set to the Dispatch server that token is for`, where they named a missing
-  envoy.json.
 
 - `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to
   record every request you accept in Dispatch and read that record back before a turn ends.
@@ -31,6 +45,11 @@
 
 ### Changed
 
+- The packaged `dispatch` command carries AskGate's marker check, which reads the session's
+  AskGate record (`askgate/`) before a gated write posts. An OpenCode session's id is no Oh My Pi
+  process's record, so the check is inert under OpenCode.
+- The logged start notice names an `askgate` section in a checkout's `.envoy/envoy.json` as not
+  read, and names the session's file to set it in.
 - The packaged skills ship `dispatch-writing-specs` in place of `dispatch-brainstorming`,
   with no code change: the prepack copies all of `skills/`. The three Dispatch skills
   are under 2,000 words together; `packages/pi-envoy/CHANGELOG.md` lists what each holds. The

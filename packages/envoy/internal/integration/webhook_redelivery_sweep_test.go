@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
@@ -24,15 +25,19 @@ import (
 //   - A delivery the listener refused while starting (503) is recovered: the stream then holds it.
 //   - A delivery that reached the stream but that GitHub recorded as failed (the reply came too
 //     late) is redelivered, and the stream still holds it once.
-//   - A delivery the listener refused as malformed (400: a signed body that is not JSON) is never
-//     asked for again, and the sweep says so.
+//   - A delivery the listener refused with 400 (a build that could not read it) is asked for
+//     again like any other failure, recovered once the listener reads it, and logged recovered.
 func TestWebhookRedelivery_TheSweepRecoversFailedDeliveriesThroughTheListener(t *testing.T) {
 	env := setupTestEnv(t)
 	handler := webhook.GitHubHandler(redeliverySecret, "@legion", "", env.client, refusingRecorder{t})
-	var started atomic.Bool
+	var started, refusing atomic.Bool
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !started.Load() {
 			http.Error(w, `{"error":"service starting"}`, http.StatusServiceUnavailable)
+			return
+		}
+		if refusing.Load() {
+			http.Error(w, `{"error":"unreadable body"}`, http.StatusBadRequest)
 			return
 		}
 		handler.ServeHTTP(w, r)
@@ -76,13 +81,15 @@ func TestWebhookRedelivery_TheSweepRecoversFailedDeliveriesThroughTheListener(t 
 	}
 	late := github.Record(tooLate, "submitted", 7, http.StatusGatewayTimeout, time.Now().Add(-2*time.Minute))
 
-	malformed := githubapptest.Attempt{GUID: "delivery-malformed", Event: "push", Payload: []byte(`{"ref":"refs/heads/main",`)}
-	if code := send(malformed); code != http.StatusBadRequest {
-		t.Fatalf("malformed delivery answered %d, want 400", code)
+	refusing.Store(true)
+	unreadable := githubapptest.Attempt{GUID: "delivery-refused", Event: "pull_request_review", Payload: review}
+	if code := send(unreadable); code != http.StatusBadRequest {
+		t.Fatalf("delivery to the refusing build answered %d, want 400", code)
 	}
-	github.Record(malformed, "", 7, http.StatusBadRequest, time.Now().Add(-time.Minute))
+	rejected := github.Record(unreadable, "submitted", 7, http.StatusBadRequest, time.Now().Add(-time.Minute))
+	refusing.Store(false)
 
-	state, err := redeliver.OpenState(env.client.JS())
+	state, err := redeliver.OpenState(env.client.JS(), 1)
 	if err != nil {
 		t.Fatalf("open redelivery state: %v", err)
 	}
@@ -91,16 +98,16 @@ func TestWebhookRedelivery_TheSweepRecoversFailedDeliveriesThroughTheListener(t 
 		t.Fatalf("App client: %v", err)
 	}
 	var logs bytes.Buffer
-	sweeper := &redeliver.Sweeper{GitHub: client, State: state, Logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	sweeper := &redeliver.Sweeper{GitHub: client, Open: func() (bus.KeyValue, error) { return state, nil }, Logger: slog.New(slog.NewTextHandler(&logs, nil))}
 	if _, err := sweeper.Sweep(context.Background(), redeliver.Options{}); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 
-	if got, want := slices.Sorted(slices.Values(github.Requests())), slices.Sorted(slices.Values([]int64{refused.ID, late.ID})); !slices.Equal(got, want) {
-		t.Fatalf("redelivery requests %v, want the two 5xx deliveries %v", got, want)
+	if got, want := slices.Sorted(slices.Values(github.Requests())), slices.Sorted(slices.Values([]int64{refused.ID, late.ID, rejected.ID})); !slices.Equal(got, want) {
+		t.Fatalf("redelivery requests %v, want every failed delivery %v", got, want)
 	}
-	got := streamDedupeKeys(t, env, "notifications.github.acme.widgets.pr.7.review")
-	if want := []string{"github.delivery-too-late", "github.delivery-while-starting"}; !slices.Equal(got, want) {
+	got := slices.Sorted(slices.Values(streamDedupeKeys(t, env, "notifications.github.acme.widgets.pr.7.review")))
+	if want := []string{"github.delivery-refused", "github.delivery-too-late", "github.delivery-while-starting"}; !slices.Equal(got, want) {
 		t.Fatalf("stream holds %v on the review topic, want %v", got, want)
 	}
 	for _, row := range github.Log() {
@@ -108,7 +115,12 @@ func TestWebhookRedelivery_TheSweepRecoversFailedDeliveriesThroughTheListener(t 
 			t.Fatalf("GitHub recorded redelivery %d of %s as %d, want 200", row.ID, row.GUID, row.StatusCode)
 		}
 	}
-	if !strings.Contains(logs.String(), `msg="webhook delivery refused terminally"`) || !strings.Contains(logs.String(), "guid=delivery-malformed") {
-		t.Fatalf("no terminal refusal line for the malformed delivery:\n%s", logs.String())
+
+	// The next sweep finds GitHub's OK attempts and closes every delivery.
+	if _, err := sweeper.Sweep(context.Background(), redeliver.Options{}); err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if !strings.Contains(logs.String(), `msg="webhook delivery recovered" guid=delivery-refused`) || !strings.Contains(logs.String(), "requests=1") {
+		t.Fatalf("no recovery line for the delivery refused 400:\n%s", logs.String())
 	}
 }

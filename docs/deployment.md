@@ -12,7 +12,9 @@ reads its agent tier from local sops files and its human tier through the local 
 which asks for a YubiKey touch, and it never reads the agent-secrets broker. `agent-secrets` reads
 that broker, which is backed by a cloud Secret Manager. One key name can therefore hold different
 values in the two stores. `agent-secrets` names its store in output and every refusal; `secrets`
-names none today. This page is about `secrets`.
+names none today. This page is mostly about `secrets`; the keys of the `legion-implementer` (App ID
+5341240) and `legion-reviewer` (App ID 5341243) Apps are in the broker, and
+[their own section](#the-legion-implementer-and-legion-reviewer-apps) says how a daemon reads them.
 
 ## Current decision for the LEGION deployment
 
@@ -72,15 +74,41 @@ memory for its whole lifetime, so a grant ending never interrupts a running daem
 after it notices. A request nobody taps within 90 seconds fails with secretsd's timeout message and
 the daemon refuses to start, quoting it.
 
+## The `legion-implementer` and `legion-reviewer` Apps
+
+The `sjawhar` account owns both Apps. Their keys are in the secrets broker, not in secretsd:
+`LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier) and `GH_REVIEW_APP_PRIVATE_KEY_B64` (human tier:
+each read waits for a person's grant in Dispatch). `private_key_secret` reads secretsd only, so a
+daemon uses these Apps through `private_key_command`, as the live proofs do
+(`scripts/e2e/lib/github-apps.sh`, `app_key_command`):
+
+```yaml
+github_apps:
+  implement:
+    app_id: "5341240"
+    private_key_command: "agent-secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 --reason=legion-daemon-github-app-key -- sh -c 'printf %s \"$LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64\" | base64 -d'"
+  review:
+    app_id: "5341243"
+    private_key_command: "agent-secrets GH_REVIEW_APP_PRIVATE_KEY_B64 --reason=legion-daemon-github-app-key -- sh -c 'printf %s \"$GH_REVIEW_APP_PRIVATE_KEY_B64\" | base64 -d'"
+```
+
+The daemon passes the command's stderr through as it runs, so `agent-secrets`' line naming the
+pending request appears in the daemon's log while the review key waits for its grant.
+
+To rotate either key: in the App's GitHub settings, generate a new private key; store it with
+`base64 -w0 < key.pem | agent-secrets secret set <NAME>`; restart the daemon and confirm a fresh
+worker pane's `gh auth status` shows account `x-access-token`; only then revoke the old key in
+GitHub, for the reason step 7 below gives.
+
 ## The `private_key_secret` form
 
 ```yaml
 github_apps:
   implement:
-    app_id: "3202636"
+    app_id: "<implement App id>"
     private_key_secret: LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
   review:
-    app_id: "3202653"
+    app_id: "<review App id>"
     private_key_secret: GH_REVIEW_APP_PRIVATE_KEY_B64
 ```
 
@@ -182,6 +210,46 @@ trusted`. Put a real tmux binary first on the daemon's `PATH`
 (`mise which tmux` prints its install path), as the live proofs do with `real_bin_path`
 (`scripts/e2e/README.md`).
 
+## What a pane's Dispatch credential is
+
+A pane's Dispatch bearer is the daemon's own. The daemon reads `dispatch_token_file` once at boot
+(`readBoot`, `packages/daemon/internal/daemon/bootreads.go`) and writes the value to
+`<state_dir>/secrets/dispatch-token`, a 0600 file in a 0700 directory, with
+`WriteDispatchTokenFile` (`packages/daemon/internal/runtime/secretfiles.go`, called from
+`prepareTmux` in `packages/daemon/internal/daemon/daemon.go`). It then tells every pane
+`DISPATCH_TOKEN_FILE` naming that file (`panePairs`,
+`packages/daemon/internal/runtime/tmux/spawn.go`). The value never enters tmux's argv or a pane's
+environment. So a pane holds the daemon's own credential, not one of its own.
+
+The Envoy listener bearer reaches a pane the same way. It is a launch secret, `ENVOY_TOKEN`
+(`launchSecrets`, `packages/daemon/internal/daemon/launchsecrets.go`), and the tmux runtime writes
+every launch secret to a 0600 file of its own under `<state_dir>/secrets` and tells the pane the
+matching `<NAME>_FILE` pointer, here `ENVOY_TOKEN_FILE` (`secretFiles`, `WriteSecretFiles` and
+`panePairs`, `packages/daemon/internal/runtime/tmux/spawn.go`).
+
+When `dispatch_token_file` holds one of the deployment's shared agent tokens
+(`DISPATCH_AGENT_TOKEN`), Dispatch matches the bearer against them (`MatchesSharedAgentToken`,
+`packages/envoy/internal/dispatch/auth/agent_token.go`) and reads no person, no service and no
+project from it. Whatever the bearer, the acting session is the one the request body names
+(`bearerSessionActor`, `packages/envoy/internal/dispatch/api/server.go`). Dispatch takes any other
+bearer as a service token or a personal token (`optionalActor`, the same file), and every pane's
+session then carries that token's service or owner as well. `dispatch whoami` in a pane tells the
+two apart: for a shared agent token it answers
+`Session <id> runs under the shared token: no owner, …`
+(`packages/envoy-client/src/dispatch-execute.ts`). A pod's side of this is in `docs/kubernetes.md`,
+"Anatomy of a Sandbox pod". A person's own session on the same box uses a personal token instead,
+minted from Dispatch's Settings → Agent tokens
+(`docs/site/src/content/docs/dispatch/for-agents.md`).
+
+The agent-secrets helper holds a credential of its own: the machine login a person approves for
+`agent-secrets machine login`. The helper spends that credential on the broker's own routes
+(`packages/envoy/internal/broker/helper/broker.go`) and asks the broker for no Dispatch token. The
+broker can exchange such a login's access token for one (`docs/kubernetes.md`, "The Dispatch
+identity the broker can issue"), and nothing on this box does that at this release.
+`dispatch://INFRA-267` is where the daemon and its workers get Dispatch tokens of their own, a dev
+box session writing under an approved machine login included, and `dispatch://INFRA-264` is where
+Dispatch accepts a broker token.
+
 ## Phase workers on Claude Code
 
 `worker_backends` in `legion.yaml` runs a role on another agent harness than Oh My Pi:
@@ -195,16 +263,19 @@ Each key is an issue role (`architect`, `planner`, `implementer`, `tester`, `rev
 and each value `omp` or `claude`; a role left out runs on Oh My Pi. What each harness may run is
 one table, `runtime.Backends` (`packages/daemon/internal/runtime/backend.go`): Claude Code runs the
 phase workers alone, since an architect is woken by notices on its Envoy role topic and Claude
-Code's print mode delivers no channel notification, and only under `runtime: tmux`, since the
-worker image carries no Claude Code. The loader refuses a role on a harness that does not run it,
-naming both, a role named twice, any other value, and `claude` under `runtime: kubernetes`. The
+Code's print mode delivers no channel notification, and it runs them under either runtime — a tmux
+pane here, and an issue pod under `runtime: kubernetes`, whose worker image carries the
+claude-envoy plugin and Claude Code's pin, from which the pod installs and verifies the pinned
+Claude Code at every launch (`docs/kubernetes.md`). The loader refuses a role on a harness that does
+not run it, naming both, a role named twice, and any other value. The
 controller always runs on Oh My Pi.
 
 For such a role the pane's shim runs `legion claude-bridge -- claude -p --input-format stream-json
 --output-format stream-json --verbose --permission-mode bypassPermissions --strict-mcp-config …`.
 The claim's own Claude Code directory, `<state_dir>/claude/<claim token>`, is the pane's
 `CLAUDE_CONFIG_DIR`: it holds the transcript, the MCP configuration the daemon writes (one server,
-`legion`, running claude-envoy's `dist/envoy-channel.js` on bun) and the bridge's phase-stall state,
+`legion`, running claude-envoy's `dist/envoy-channel.js` on bun) and that server's phase-reminder
+state file, one per session,
 and it outlives every launch of the claim. A fresh launch passes `--session-id <new id>`; a
 relaunch passes `--resume <id>`, read from the transcript the claim registered, so a killed pane
 comes back as the same Claude Code session. A role moved to Claude Code since its session was
@@ -215,37 +286,60 @@ session header is missing or malformed. The file was not modified.`, and leaves 
 were, so the launch fails loudly rather than starting a fresh agent
 (`packages/daemon/internal/runtime/tmux/resume_omp_test.go` holds the real binary to this).
 
-Boot resolves three things from the daemon's environment, and `legion start --check-config` makes
-the same refusals:
+tmux's boot resolves three things from the daemon's environment, and `legion start --check-config`
+makes the same refusals:
 
 - `LEGION_CLAUDE_PATH`, the `claude` executable, else the first `claude` on `PATH`;
 - `LEGION_BUN_PATH`, the `bun` the MCP server runs on, else the first `bun` on `PATH`;
 - `LEGION_CLAUDE_PLUGIN_DIR`, the absolute path of a built `packages/claude-envoy`: it must hold
-  `dist/envoy-channel.js` and the generated Legion plugin's `legion/.claude-plugin/plugin.json`
-  (`bun run build` in that package writes both). No workflow releases this package, so build it
-  from a checkout of a commit on `main`, never of a branch (`AGENTS.md`, "Deploys come only from
-  main").
+  `dist/envoy-channel.js` and the generated Legion plugin's `legion/.claude-plugin/plugin.json`.
+  A checkout of a commit on `main`, never of a branch, already holds both (`AGENTS.md`, "Deploys
+  come only from main"): main's Rebuild Claude Envoy plugin workflow commits them after each merge.
+  `bun run check-dist` in that package confirms them. A checkout taken after a merge and before a
+  rebuild of it lands (at most one run of that workflow behind its inputs, its runner queues
+  included) holds an earlier build: build the plugin from it with `bun scripts/build.ts --out
+  <dir>` in that package, into a directory outside the checkout, and point
+  `LEGION_CLAUDE_PLUGIN_DIR` at `<dir>` until the rebuild commit lands. That leaves the checkout's
+  tracked files as they are, so its next `git pull` fast-forwards.
 
-A missing one refuses the boot, naming every gap in one line. The daemon names no model for Claude
-Code. Its key reaches it the way an Oh My Pi pane's does: `provider_keys` (for example
+A missing one refuses the boot, naming every gap in one line. The three are tmux's alone: a pod
+resolves nothing. Its bun and its claude-envoy root are the worker image's, at fixed paths
+(`/usr/local/bin/bun`, `/opt/legion/claude-envoy`), which the runtime treats as image-owned so no
+operator mount can hide them. Its `claude` is not the image's: the image carries Claude Code's pin,
+`/opt/legion/claude-code`, and no Claude Code, since its licence grants no redistribution and the
+image is public, so the pod's start script installs the pinned release at every launch into the
+generation's own directory on the issue's volume, holds it to the lockfile's integrity and the
+pinned version, and fails the launch, loudly, when the fetch fails or does not verify. The launch
+shapes both runtimes build from those paths — the agent command, the session id and transcript
+rules, the MCP document and Claude Code's own variables — are one package,
+`packages/daemon/internal/claudelaunch`; the pod's side of it is in `docs/kubernetes.md`.
+
+The daemon names no model for Claude Code under either runtime. In a pane its key reaches it the
+way an Oh My Pi pane's does: `provider_keys` (for example
 `ANTHROPIC_API_KEY: <secretsd key>`) is exported by the shim into `legion claude-bridge`'s
 environment, which Claude Code inherits, and into every Oh My Pi pane's as well. A key meant for the
 Claude Code roles alone goes in the claim's directory instead, before the claim first launches: a
 `settings.json` there whose `apiKeyHelper` prints the key, as `scripts/e2e/claude-backend-tmux.sh`,
-the live proof, writes it.
+the live proof, writes it. In a pod the route is the operator's the same way: `provider_keys`
+carries `ANTHROPIC_API_KEY`, and `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL`, which are not
+credentials, go in `runtime.kubernetes.pod.env` (`docs/kubernetes.md`, "Configuration").
 
 ### How a harness plugs in
 
 Every harness runs behind `legion worker-shim`, which speaks Oh My Pi's RPC frames to it
 (`legion claude-bridge` translates them for Claude Code), so the worker stream and supervision do
-not know which harness a pane runs. A harness is three pieces in the daemon:
+not know which harness a process runs. A harness is four pieces in the daemon:
 
 - its row in `runtime.Backends`: the roles it runs, the runtimes that launch it, the daemon prompt
   part its launches are told after their role's parts (Claude Code's is
   `internal/prompts/go/claude-mechanics.md`);
 - a `Launcher` in `internal/runtime/tmux`: the command the shim runs, the extra `-e` pairs of its
   pane, and the marker its pane's command line holds;
-- a boot resolver in `internal/daemon/launchers.go`, which finds what its launch needs on the host.
+- a boot resolver in `internal/daemon/launchers.go`, which finds what its launch needs on the host;
+- the Kubernetes runtime's own branch in `internal/runtime/sandbox`, which builds the same launch
+  from the worker image's paths instead: the pod's agent command, the files its launcher writes,
+  the variables its start command tells the role, and the rule for the session a replacement pod
+  resumes.
 
 Boot resolves a launch for each harness `worker_backends` uses (`legion start --check-config` makes
 the same refusals), and the tmux runtime refuses a launch on a harness it has no launcher for. A
@@ -253,9 +347,151 @@ pane is its recorded process only while its root process's command line, `sh -c`
 command, holds a configured harness's marker: `omp` for Oh My Pi, ` claude-bridge -- ` for Claude
 Code. A daemon with no `worker_backends` has Oh My Pi's launcher alone and checks for `omp` alone.
 
-## Rotating the App keys
+## The `runtime.tmux` block
 
-When a shared-box deployment rotates its keys under the human-tier boundary, rotation is pointless
+`runtime: tmux` (or no `runtime` key) runs every pane with what the runtime tells it and the
+allow-listed part of the daemon's environment (`HOME`, `OMP_PROFILE`, `PATH`, locale, proxies). The
+mapping form adds the host's own needs:
+
+```yaml
+runtime:
+  tmux:
+    pane_env:                       # plain variables every pane gets, after the runtime's own
+      ELAN_HOME: /opt/elan
+      DISPATCH_PUBLIC_URL: https://dispatch.example.com
+      LEDGER_DSN_FILE: /etc/ledger/dsn   # a _FILE pointer names a file and is allowed
+    pi_config_files:                # Oh My Pi overlays, in order, in every pane's PI_CONFIG_FILES
+      - /etc/legion-operator/overlay.yml
+    take_over: kubernetes           # only while moving a project onto tmux (below)
+provider_keys:
+  ANTHROPIC_API_KEY: file:/etc/legion/providers/ANTHROPIC_API_KEY
+  OPENAI_API_KEY: OPENAI_API_KEY_PROD    # a secretsd key, as before
+```
+
+- **`pane_env`** refuses `PATH` (the runtime composes it), every name the runtime sets on a pane
+  (its own `LEGION_*` names, the XDG directories, the gh variables, `PI_CONFIG_FILES`,
+  `LEGION_CONTROLLER`, `LEGION_SLACK_CHANNELS`), the variables it sets on every Claude Code pane
+  (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, `CLAUDE_CODE_DISABLE_CRON`), the git
+  identity a launch sets (`JJ_USER`, `GIT_AUTHOR_NAME`, …), the pointers to the secrets every launch
+  gets as a file of its own (`ENVOY_TOKEN_FILE`, `NATS_NKEY_SEED_FILE`), the variables that place
+  the session a resume reads (`OMP_SESSION_STORAGE`, `OMP_SESSION_SQL_DSN`,
+  `OMP_SESSION_SQL_DSN_FILE`, `PI_CODING_AGENT_DIR`, `PI_CONFIG_DIR`), a provider key or its
+  `_FILE` pointer, any credential-shaped name (`…_TOKEN`, `…_KEY`, `…_SECRET`, `…_SEED`,
+  `…_PASSWORD`, `…_PAT`, `…_GRANT`, `…_CREDENTIALS`, `PRIVATE_KEY`), and any value holding a URL
+  with a password in it (`scheme://user:password@…`). A value on tmux's command line is readable by
+  every process of the host, so a secret reaches a pane as a file. The loader refuses these at load
+  and the runtime again at boot, naming the variable and never its value. A launch whose own
+  variable or secret pointer collides with a `pane_env` name is refused.
+- **`pi_config_files`** paths resolve against `legion.yaml`'s directory and may not hold `:`.
+  The runtime's turn-scope overlay stays last, so its two keys outrank the operator's overlays. The
+  boot plugin gate probes Oh My Pi under the same overlays and variables.
+- **`role_config_files`**, a top-level key beside the block, gives one role's panes overlays no
+  other role's get (`role_config_files: {implementer: [/etc/legion-operator/fallback.yml]}`, the
+  controller's pane under `controller: daemon` too): such a pane's `PI_CONFIG_FILES` is
+  `pi_config_files`, then the role's own in order, then the turn-scope overlay, still last. Each
+  path must be absolute; boot and `legion start --check-config` refuse one the host does not hold
+  as a file the daemon's user can read, naming the role and the path, and a pane of a role the key
+  leaves out is told what it was told without it. After the plugin gate passes, the boot gate runs
+  `omp config get retry.modelFallback --json` under each named role's list and on each of its files
+  alone, and refuses the boot when Oh My Pi exits non-zero (`boot gate: role_config_files.<role>:
+  the <role>'s Oh My Pi would not start: Oh My Pi refuses <file>: error: …`), rather than letting
+  every launch of that role fail. `docs/kubernetes.md` ("Operator configuration") has the rest of
+  the key's rules. Every pane runs as the daemon's Unix user, so each role can read every role's
+  overlay file; only loading is per role, so never put a secret in one.
+- **`take_over: kubernetes`** lets this daemon take over the claims a daemon running the project
+  under `runtime: kubernetes` recorded on the same store ([Moving a project onto
+  tmux](#moving-a-project-onto-tmux)). `kubernetes` is the only accepted value. Without the key, a
+  claim whose recorded process is a pod is refused, naming the claim and the key, and the boot does
+  not start: two daemons must never drive one store's claims at once.
+- **`provider_keys`** values of the form `file:/abs/path` are read once at boot, as the daemon,
+  into the same daemon-held 0600 files a secretsd key lands in. The file is read by the rules every
+  other secret file the daemon reads follows: one that cannot be read, is not a regular file, holds
+  nothing, or is readable by its group or others refuses the boot, naming the variable and the
+  file. Kubernetes refuses the form: a file on the daemon's disk reaches no pod.
+- **`controller: daemon`** works under tmux too: the daemon launches the controller in a pane of
+  its own window, `controller`, working in `<state_dir>/controller`, told `LEGION_CONTROLLER=1` and
+  an empty `LEGION_SLACK_CHANNELS`, and supervises it like a root architect. It needs
+  `dispatch_url`. A project with no GitHub owner to mint for runs it with gh acting as nobody, its
+  gh directory empty.
+
+## How workspaces are provisioned on the host
+
+Each repository has one shared jj clone at `<state_dir>/repos/github.com/<owner>/<repo>`, and each
+issue a jj workspace of it at `<state_dir>/workspaces/<owner>/<repo>/<issue, lowercased>`, on the
+bookmark `legion/<ISSUE>`. The first provision of a repository clones it with the implement App's
+installation token, handed to git through a one-shot 0600 credential helper under the state
+directory. Every launch first makes sure its issue's workspace is there: a claim resumed,
+relaunched or recovered, as well as a new one, is provisioned when its directory is missing or its
+checkout never finished (it holds no sparse pattern, read with `jj sparse list
+--ignore-working-copy`; a workspace an agent narrowed keeps its patterns), checking out
+`legion/<ISSUE>` when GitHub has it. A launch waits for a provision or removal of the same issue
+that is under way.
+
+Provisions of different issues run side by side. Everything a provision does to the shared clone
+runs under the clone's one store lock: a fetch of the default branch and the issue's branch alone,
+the workspace's registration with no files (`jj workspace add --sparse-patterns empty`), its
+bookmark, and the clone's git configuration. The checkout of the working copy (`jj sparse reset`
+in the new workspace) writes only that workspace and runs with the lock released; at most 16
+checkouts run at once, and a provision waiting on its repository's store lock holds no place
+among them. A workspace whose checkout never finished is checked out by its next provision, which
+its next launch runs. A removal takes the issue's turn and holds the store lock only for its jj
+commands on the clone and the move of the workspace aside to `<dir>.removing`; the directory is
+deleted after the lock is released, and a `<dir>.removing` a crash left is cleared by the issue's
+next removal.
+
+A store may be made before the daemon's first boot, with the same jj the daemon uses, as the
+daemon's user: a colocated `jj git clone https://github.com/<owner>/<repo>` into the clone path,
+then `jj -R <clone> --ignore-working-copy config set --repo git.abandon-unreachable-commits false`.
+A directory there without `.jj` is removed and cloned again; one without `.git` is not a store.
+Boot rewrites every store's credential helper to `legion git-credential`.
+
+## Moving a project onto tmux
+
+A tmux daemon can take over the store of a daemon that ran the project under `runtime: kubernetes`,
+when its `legion.yaml` sets `runtime.tmux.take_over: kubernetes`. Without that key it refuses every
+claim whose recorded process is a pod, and does not start. Nothing else stops two daemons from
+driving one store at once — the instance lock is a file on each machine, and claim records are
+written by whichever daemon wrote last — so the order matters:
+
+1. Stop the Kubernetes daemon. Its issue pods outlive it: push every issue's unpushed work, then
+   delete the project's Sandboxes (`kubectl -n <namespace> delete sandbox -l
+   'legion.dev/project=<project>'`), which takes each pod and each pod's disk, and wait until none
+   of the project's Sandboxes or pods is left. A pod still running beside the tmux daemon is a
+   second agent on the same claim and branch.
+2. Put each claim's session file where its pane's Oh My Pi keeps sessions, in a folder one level
+   down, under its recorded file name (`<timestamp>_<session id>.jsonl`): either at the recorded
+   path itself, or in the pane's own sessions directory. That directory is
+   `<HOME>/.omp/agent/sessions`, or `<HOME>/.omp/profiles/<profile>/agent/sessions` when the
+   daemon's environment or `pane_env` sets `OMP_PROFILE` or `PI_PROFILE`, or
+   `<state_dir>/home/.local/share/omp[/profiles/<profile>]/sessions` when that directory already
+   exists; a profile named only inside `omp_launch_prefix` is not read. A session the Kubernetes
+   runtime kept in its session database (`runtime.kubernetes.session_store`) is not carried: no
+   command writes its row out as a file, so its claim starts a fresh agent from the issue's pushed
+   branch and committed handoffs.
+3. Set `runtime.tmux.take_over: kubernetes` and boot the tmux daemon with the same Postgres. Each
+   claim whose recorded process is a pod is reported gone, displaced, and relaunched in a pane,
+   charged nothing, on its session when step 2 put its file in one of those places, searched by
+   file name or session id. While `take_over` is set, a session found nowhere starts a fresh agent,
+   uncharged, which registers a session of its own, whatever the claim's last process was and
+   wherever the session was recorded: a claim the Kubernetes daemon left suspended carries no
+   process, and a host built from the worker image records its own sessions at the paths a pod
+   used, so neither tells the two apart. That is what the key buys and what it costs: in this
+   window a session of this host's own that has gone missing starts fresh too. Each workspace is
+   provisioned before its first launch.
+4. Retry what failed to launch meanwhile, once the cause is gone: `legion claims retry --failed`
+   (an architect relaunches on its session; a phase worker whose issue is held for its own role
+   retries that phase).
+5. Remove `take_over` once no claim can still wake on a session a pod recorded: every claim that
+   was running has relaunched in a pane, and no claim the Kubernetes daemon suspended (a
+   production check waiting for its deploy among them) is left to wake. From then on a session
+   found nowhere is refused again, and a tmux daemon pointed at a store a Kubernetes daemon still
+   drives refuses to start rather than take its claims.
+
+## Rotating App keys held in secretsd
+
+This runbook is for a shared-box deployment whose App keys are in secretsd under the human-tier
+boundary (the `legion-implementer` and `legion-reviewer` keys are in the broker; rotate those as
+[their section](#the-legion-implementer-and-legion-reviewer-apps) says). Rotation is pointless
 while panes can still read the keys, so the order is:
 
 1. Deploy the pane fix from LEGION-74 ("Every Legion pane inherits the daemon's GitHub App private
@@ -289,3 +525,24 @@ while panes can still read the keys, so the order is:
 
 Record the rotation on LEGION-74 as its spec asks (dates and key fingerprints only; never key
 material).
+
+## Serving on a socket the harness holds
+
+`legion start` binds legion.yaml's `bind` and `port` for its API. With `LEGION_LISTEN_FD=<n>` in
+its environment, it serves the API on descriptor `<n>` instead, a listening TCP socket it inherited
+from whatever started it, and binds nothing. A test harness opens that socket on port 0, so the
+kernel chooses the port, and holds it until the daemon serves on it; no other program can take the
+port in between. A shared-box deployment leaves the variable unset.
+
+- The file's `bind` and `port` must name the socket's address: `bind` an IP literal equal to the
+  socket's IP (`0.0.0.0` matches only a socket on every IPv4 interface, and a host name matches
+  nothing), `port` its port. The registry entry, the default `daemon_url` and `legion state` dial
+  them. A socket they do not name, or a descriptor that is not a listening TCP socket, refuses the
+  start before it takes the team or opens the store, naming `LEGION_LISTEN_FD` and the setting:
+  `legion start: legion.yaml: port=8081 does not match LEGION_LISTEN_FD=3, a socket listening on 127.0.0.1:8080`.
+- The daemon takes the socket over before it runs anything, the configuration's key commands
+  included, and serves on a close-on-exec copy, then unsets the variable: no process it starts, its
+  panes and tmux server among them, holds the socket or inherits the variable.
+- The boot line `legion daemon started` names the address the daemon serves on, as it does when it
+  binds.
+- `legion start --check-config` binds nothing and never reads the variable.

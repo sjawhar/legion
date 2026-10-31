@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // logBuffer is a log sink the server's goroutines may write while the test reads it.
@@ -38,9 +39,7 @@ func (l *logBuffer) String() string {
 func captureLog(t *testing.T) *logBuffer {
 	t.Helper()
 	logged := &logBuffer{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logged, nil))
 	return logged
 }
 

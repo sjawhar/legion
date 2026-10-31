@@ -3,6 +3,7 @@ package dispatch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -22,19 +23,25 @@ func MessageBodyLength(body string) int {
 
 // Client is the Dispatch surface the workflow needs. It deliberately exposes only the reads and
 // writes the daemon owns; callers preserve the order ListIssues returns when deciding admission.
-// BuildCommit is the one read of Dispatch itself rather than of its issues: the build commit it
-// reports on /healthz, which the boot compares against the open production checks of the
-// repository the daemon is built from.
+// BuildCommit is the one read of Dispatch itself rather than of its issues: the build its server
+// fleet serves, as its /healthz reports it, which the boot compares against the open production
+// checks of the repository the daemon is built from.
 type Client interface {
 	ListIssues(ctx context.Context, project string, statuses []string) ([]IssueSummary, error)
 	GetIssue(ctx context.Context, key string) (Issue, error)
-	SetStatus(ctx context.Context, key, status string) error
+	SetStatus(ctx context.Context, key, status string) (Issue, error)
 	HandOver(ctx context.Context, issue Issue, status string) error
 	PostMessage(ctx context.Context, key, body string) error
 	MessageBodiesSince(ctx context.Context, key string, since time.Time) ([]string, error)
+	// EventsAfter is the issue's event log after a sequence, oldest first, each event as Dispatch
+	// serves it: the boot catch-up's read of what a root's durable stream may not have delivered.
+	EventsAfter(ctx context.Context, key string, after int64) ([]json.RawMessage, error)
 	Approval(ctx context.Context, artifactID string) (Approval, error)
 	BuildCommit(ctx context.Context) (string, error)
 	ListRepoProjects(ctx context.Context) ([]RepoProject, error)
+	// WebhookAppInstalled is whether Dispatch's GitHub App, the one GitHub sends a repository's
+	// webhook events through, is installed on repo (owner/name).
+	WebhookAppInstalled(ctx context.Context, repo string) (bool, error)
 }
 
 // RepoProject is one mapping of a GitHub repository (owner/name) to a Dispatch project, and
@@ -89,6 +96,19 @@ type IssueSummary struct {
 	// nor anyone the daemon can name, so the read says nothing of the claim.
 	ClaimedBy   string
 	ClaimUnread bool
+}
+
+// Issue is the summary as an Issue, for a reader that has only Dispatch's listing of the issue:
+// every field the listing carries, the claim from its holder (Claim.Holder's `<kind>:<id>`). A
+// summary carries no project, no labels beyond the hand-over and no primary document, so those are
+// empty.
+func (s IssueSummary) Issue() Issue {
+	var claim *Claim
+	if kind, id, ok := strings.Cut(s.ClaimedBy, ":"); ok {
+		claim = &Claim{Kind: kind, ID: id}
+	}
+	return Issue{Key: s.Key, Title: s.Title, Status: s.Status, Parent: s.Parent, Rank: s.Rank, HandedOver: s.HandedOver,
+		LastSeq: s.LastSeq, ResolvedRepo: s.ResolvedRepo, BlockedBy: s.BlockedBy, Claim: claim, ClaimUnread: s.ClaimUnread}
 }
 
 // Issue is the workflow data from Dispatch's issue-detail route. HandedOver is resolved here, at

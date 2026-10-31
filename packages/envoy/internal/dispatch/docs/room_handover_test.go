@@ -284,7 +284,7 @@ func TestARoomLoadedOntoAKeptRecordTakesTheStoredEditSource(t *testing.T) {
 	}
 	state.mu.Lock()
 	lastActor := state.lastActor
-	credit := settlementAuthors(state, map[string]model.Actor{actorKey(alice): alice})
+	credit := settlementAuthors(state, map[string]model.Actor{actorKey(alice): alice}, nil)
 	state.mu.Unlock()
 	if lastActor != nil {
 		t.Fatalf("the reloaded room keeps %+v as the latest edit source, want none, as the stored row names", lastActor)

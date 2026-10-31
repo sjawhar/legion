@@ -25,14 +25,33 @@ import (
 // NAK, since the owning listener delivers the message.
 var ErrWrongMachine = errors.New("session belongs to a different machine")
 
+// ErrNoSessionRecord is returned when no session entry was resolved for the session a delivery
+// names: as far as the resolution that produced it could tell, no record of that session exists.
+// A caller that resolved the entry from a cache alone cannot conclude the session is gone from
+// this - the cache trails the bucket it follows - which is why the two causes are separate
+// errors: only this one says nothing of the session was found at all, and an operator reading a
+// give-up acts on the two differently.
+var ErrNoSessionRecord = errors.New("no session record")
+
+// ErrNoPushTarget is returned when a session entry exists and carries nothing this listener can
+// push to: no serve port, and not self-subscribed. That is the record a session writes when it
+// registers before its server has bound its serve port, and binding the port rewrites it, so
+// re-reading it answers the same thing only until that write lands - a caller may wait the port
+// out rather than give the message up, and the listener's delivery does, deferring such a message
+// for its whole retry window (cmd/listener/unplaceable_delivery.go).
+var ErrNoPushTarget = errors.New("no reachable push target")
+
 var foreignSessionID = regexp.MustCompile(`\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
 
+// Deliverer pushes a notification to the session a delivery resolved, over that session's serve
+// port. It holds no session source of its own: every caller resolves the entry it delivers
+// through and hands it over (DeliverWithResultForEntry), so the record delivery acts on is the
+// one that caller read.
 type Deliverer struct {
 	MachineID    string
 	HostBridge   string
 	RequestLimit time.Duration
 	HTTPClient   *http.Client
-	Sessions     SessionLookup
 }
 
 // DeliveryResult describes a completed delivery attempt.
@@ -40,33 +59,19 @@ type DeliveryResult struct {
 	Skipped bool
 }
 
-func (d Deliverer) Deliver(item contracts.Envelope, interest store.Interest) error {
-	_, err := d.DeliverWithResult(item, interest)
-	return err
-}
-
-func (d Deliverer) DeliverWithResult(item contracts.Envelope, interest store.Interest) (DeliveryResult, error) {
-	if d.Sessions == nil {
-		return DeliveryResult{}, fmt.Errorf("no session registry configured")
-	}
-	entry, err := d.Sessions.Get(interest.SessionID)
-	if err != nil {
-		return d.DeliverWithResultForEntry(item, interest, nil)
-	}
-	return d.DeliverWithResultForEntry(item, interest, &entry)
-}
-
 // DeliverWithResultForEntry delivers through the session entry resolved for
-// this attempt. A nil entry produces the same unavailable-session result as a
-// failed lookup, so a caller can avoid a second registry read.
+// this attempt. A nil entry produces ErrNoSessionRecord, the same result a
+// failed lookup produces, so a caller can avoid a second registry read.
 func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest store.Interest, entry *SessionEntry) (DeliveryResult, error) {
 	if entry == nil {
-		return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
+		return DeliveryResult{}, fmt.Errorf("%w for session %s", ErrNoSessionRecord, interest.SessionID)
 	}
 	text := d.Text(item)
 
 	if entry.SelfSubscribed && entry.Port == 0 {
-		// The session consumes its own NATS subscription; there is nothing to push to.
+		// The session consumes its own NATS subscription; there is nothing to push to. This is a
+		// delivered outcome, not ErrNoPushTarget: the message reaches the session over its own
+		// subscription, and only the push this listener would have made is skipped.
 		return DeliveryResult{Skipped: true}, nil
 	}
 	if entry.Port > 0 {
@@ -88,7 +93,7 @@ func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest s
 		}
 		return DeliveryResult{}, d.prompt(*entry, interest.SessionID, text)
 	}
-	return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
+	return DeliveryResult{}, fmt.Errorf("%w for session %s", ErrNoPushTarget, interest.SessionID)
 }
 
 func (d Deliverer) Text(item contracts.Envelope) string {

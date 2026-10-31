@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -159,33 +158,40 @@ func TestAPersonsCommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 			map[string]any{"body": "A second look.", "anchor": passage(projectDocument, "the review")}, reviewer)
 		expect(t, other, false)
 	})
-	t.Run("a reply reaches its thread's author and not the document's writers", func(t *testing.T) {
+	t.Run("a reply reaches its thread's author and the document's writers", func(t *testing.T) {
 		root := comment(t, "/api/v1/artifacts/"+projectDocument+"/comments",
 			map[string]any{"body": "Is Friday firm?", "anchor": passage(projectDocument, "ships on Friday")}, reviewer)
 		expect(t, root, false)
 		reply := comment(t, "/api/v1/artifacts/"+projectDocument+"/comments",
 			map[string]any{"body": "Yes, Friday.", "reply_to": root}, "alice")
-		expect(t, reply, true, contracts.AgentSubject("session-reviewer"))
+		expect(t, reply, true, contracts.AgentSubject("session-reviewer"),
+			contracts.AgentSubject("session-writer"), contracts.AgentSubject("session-editor"))
 	})
 	t.Run("an author the comment mentions hears it once, from the mention", func(t *testing.T) {
 		id := comment(t, "/api/v1/artifacts/"+projectDocument+"/comments", map[string]any{
 			"body": "@writer, is the day firm?", "anchor": passage(projectDocument, "The plan"),
 			"mentions": []map[string]any{{"target": "session:session-writer"}},
 		}, "alice")
-		var suppressed []string
-		if err := database.Pool.QueryRow(context.Background(), `
-			select payload->'suppressed_authors' from events where type = 'comment.created' and payload->>'id' = $1
-		`, id).Scan(&suppressed); err != nil {
-			t.Fatalf("read the comment's suppressed authors: %v", err)
-		}
-		if !slices.Equal(suppressed, []string{"session-writer"}) {
-			t.Fatalf("suppressed_authors = %v, want the mentioned author alone", suppressed)
-		}
 		expect(t, id, true, contracts.AgentSubject("session-editor"))
 		sendsMu.Lock()
 		defer sendsMu.Unlock()
 		if sends["session-writer"] != 1 || sends["session-editor"] != 0 {
 			t.Fatalf("mention sends = %v, want one to session-writer", sends)
+		}
+	})
+	t.Run("a session a reply mentions hears it once, from the mention", func(t *testing.T) {
+		root := comment(t, "/api/v1/artifacts/"+projectDocument+"/comments",
+			map[string]any{"body": "Which day?", "anchor": passage(projectDocument, "Friday, after")}, reviewer)
+		expect(t, root, false)
+		reply := comment(t, "/api/v1/artifacts/"+projectDocument+"/comments", map[string]any{
+			"body": "@editor, is the day firm?", "reply_to": root,
+			"mentions": []map[string]any{{"target": "session:session-editor"}},
+		}, "alice")
+		expect(t, reply, true, contracts.AgentSubject("session-reviewer"), contracts.AgentSubject("session-writer"))
+		sendsMu.Lock()
+		defer sendsMu.Unlock()
+		if sends["session-editor"] != 1 {
+			t.Fatalf("mention sends = %v, want one to session-editor", sends)
 		}
 	})
 }

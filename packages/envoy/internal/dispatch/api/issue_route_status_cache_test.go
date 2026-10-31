@@ -37,6 +37,13 @@ func sreReach(roster routeRoster) string {
 // machine takes to release the fetch, it reads no timeout as unknown and no expiry calls again.
 func heldRosterServer(t *testing.T) (served *server, calls *atomic.Int32, release func()) {
 	t.Helper()
+	return heldRosterMux(t, http.NewServeMux(), Deps{})
+}
+
+// heldRosterMux is heldRosterServer mounted on mux over deps, whose Envoy it sets to the held
+// listener's client: a test that serves requests through mux gives deps a Store and an Identity.
+func heldRosterMux(t *testing.T, mux *http.ServeMux, deps Deps) (served *server, calls *atomic.Int32, release func()) {
+	t.Helper()
 	calls = &atomic.Int32{}
 	gate := make(chan struct{})
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +60,8 @@ func heldRosterServer(t *testing.T) (served *server, calls *atomic.Int32, releas
 	// Release before the close, which waits for every request in flight to finish.
 	t.Cleanup(listener.Close)
 	t.Cleanup(release)
-	served = register(http.NewServeMux(), Deps{Envoy: envoy.New(listener.URL, envoy.WithTimeout(time.Minute))})
+	deps.Envoy = envoy.New(listener.URL, envoy.WithTimeout(time.Minute))
+	served = register(mux, t.Context(), deps)
 	served.rosters.ttl, served.rosters.timeout = time.Minute, time.Minute
 	return served, calls, release
 }
@@ -75,7 +83,7 @@ func awaitCalls(t *testing.T, calls *atomic.Int32, want int32) {
 // by routeRosterTimeout, no test's override. It reads the server register mounts, the only one a
 // deployment runs.
 func TestTheDeploymentsRosterCacheKeepsAnAnswerAndASilenceFiveSeconds(t *testing.T) {
-	rosters := &register(http.NewServeMux(), Deps{}).rosters
+	rosters := &register(http.NewServeMux(), t.Context(), Deps{}).rosters
 	if rosters.ttl != 5*time.Second || rosters.silenceTTL != 5*time.Second {
 		t.Fatalf("the server a deployment runs keeps an answer %s and a silence %s, want 5s and 5s", rosters.ttl, rosters.silenceTTL)
 	}
@@ -229,7 +237,7 @@ func timedRosterServer(t *testing.T, delay time.Duration, hang bool) (*server, *
 	// Cleanups run last first: the gate opens, then the close waits for the requests it freed.
 	t.Cleanup(listener.Close)
 	t.Cleanup(func() { close(gate) })
-	return register(http.NewServeMux(), Deps{Envoy: envoy.New(listener.URL, envoy.WithTimeout(time.Minute))}), calls
+	return register(http.NewServeMux(), t.Context(), Deps{Envoy: envoy.New(listener.URL, envoy.WithTimeout(time.Minute))}), calls
 }
 
 // An answer's TTL counts from the moment its call was sent, so a slow listener cannot stretch the
@@ -279,8 +287,9 @@ func TestAShutdownEndsAFetchInFlight(t *testing.T) {
 	served, _ := timedRosterServer(t, 0, true)
 	lifetime, shutdown := context.WithCancel(context.Background())
 	defer shutdown()
-	// Set after register, which with a Lifetime would also build the delivery hub on a nil store.
-	served.deps.Lifetime = lifetime
+	// Set after register, which runs the server on the test's own context, so the fetch runs on
+	// a lifetime this test ends itself.
+	served.lifetime = lifetime
 	served.rosters.timeout = time.Minute
 	answer := make(chan routeRoster, 1)
 	go func() { answer <- served.readRouteRoster(context.Background()) }()

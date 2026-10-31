@@ -189,6 +189,22 @@
           "rounds": 1
         }
       }
+    },
+    "LEGION-212": {
+      "key": "LEGION-212",
+      "generation": 1,
+      "phase": "awaiting_person",
+      "status": "in_progress",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {},
+      "waitingOn": {
+        "kind": "ask",
+        "ask": "9a8fd348-55d5-4d72-a793-3cd037f75f13",
+        "since": "2026-09-22T08:05:00Z",
+        "answeredAt": "2026-09-22T09:21:00Z",
+        "answeredBy": "ask"
+      }
     }
   },
   "pendingStatusWrites": [],
@@ -298,6 +314,11 @@
       "detail": "checked by the daemon's probe of the worker image, which passed"
     },
     {
+      "name": "claude-code",
+      "status": "present",
+      "detail": "checked by the daemon's probe of the worker image, which passed"
+    },
+    {
       "name": "resource-limits",
       "status": "open",
       "detail": "no CPU and memory requests and limits under runtime.kubernetes.resources for the issue pod",
@@ -362,6 +383,12 @@
       {
         "repo": "acme/gadgets",
         "reason": "the review App is not installed on acme/gadgets"
+      }
+    ],
+    "withoutWebhookApp": [
+      {
+        "repo": "zeta/tools",
+        "reason": "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes"
       }
     ],
     "caches": [
@@ -539,6 +566,34 @@
     },
     "worker_backends": {
       "tester": "omp"
+    },
+    "role_config_files": {}
+  },
+  "consumers": [
+    {
+      "name": "legion-go-LEGION-dispatch",
+      "waiting": 0,
+      "oldestAt": null,
+      "oldestAgeSeconds": null,
+      "lastHandledAt": "2026-09-22T09:17:50Z",
+      "stalled": false
+    },
+    {
+      "name": "legion-go-LEGION-dispatch-server",
+      "waiting": 0,
+      "oldestAt": null,
+      "oldestAgeSeconds": null,
+      "lastHandledAt": null,
+      "stalled": false,
+      "unavailable": "read the consumer's info: context deadline exceeded"
+    },
+    {
+      "name": "legion-go-LEGION-github",
+      "waiting": 412,
+      "oldestAt": "2026-09-22T09:05:34Z",
+      "oldestAgeSeconds": 754,
+      "lastHandledAt": "2026-09-22T09:16:41Z",
+      "stalled": true
     }
-  }
+  ]
 }

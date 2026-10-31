@@ -9,7 +9,7 @@ tags:
   - bun-version
   - ci-filters
 date: 2026-10-25
-status: active
+status: superseded in part by sjawhar/legion#2423 — a skills change no longer carries a regenerated `legion/` or a rebuilt `dist/`, and a pull request runs no `check-dist`; main's Rebuild Claude Envoy plugin workflow commits both after each merge, and `bun scripts/build.ts --out <dir>` builds a copy to read; never editing `legion/` by hand, the build rewriting both trees in one run, and only pi-legion's partition being mirrored still stand
 module: packages/claude-envoy
 related_issues:
   - "INFRA-227"

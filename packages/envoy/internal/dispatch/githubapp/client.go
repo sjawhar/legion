@@ -306,6 +306,19 @@ func (c *Client) DeliveryPermissions(ctx context.Context, owner, repo string) (I
 	return installation, nil
 }
 
+// Installed says whether the App is installed on owner/repo, from the same installation lookup
+// Installation and DeliveryPermissions make, with no permission check: GitHub's 404 is false. A
+// nil client is ErrNoAppKey; any other failure of the lookup is returned as it is.
+func (c *Client) Installed(ctx context.Context, owner, repo string) (bool, error) {
+	if _, err := c.installation(ctx, owner, repo); err != nil {
+		if errors.Is(err, ErrNoInstallation) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 func (c *Client) installation(ctx context.Context, owner, repo string) (Installation, error) {
 	if c == nil {
 		return Installation{}, ErrNoAppKey
@@ -503,10 +516,16 @@ func listInstallationRepositories(ctx context.Context, c *Client, token string) 
 // Read performs GET path (an API path with its query, under the API origin) with an
 // installation token, returning GitHub's complete answer when it fits within the response limit.
 func (c *Client) Read(ctx context.Context, token, path string) ([]byte, int, http.Header, error) {
+	return c.ReadWithin(ctx, token, path, responseLimit)
+}
+
+// ReadWithin is Read with the caller's own body limit, for a caller that keeps only part of a
+// large answer; a body past limit is a *ResponseTooLargeError.
+func (c *Client) ReadWithin(ctx context.Context, token, path string, limit int64) ([]byte, int, http.Header, error) {
 	if c == nil {
 		return nil, 0, nil, ErrNoAppKey
 	}
-	return c.request(ctx, http.MethodGet, c.base+path, "Bearer "+token, mediaTypeJSON, nil, responseLimit)
+	return c.request(ctx, http.MethodGet, c.base+path, "Bearer "+token, mediaTypeJSON, nil, limit)
 }
 
 // GraphQL posts query/variables to the API origin's /graphql endpoint with an installation token,

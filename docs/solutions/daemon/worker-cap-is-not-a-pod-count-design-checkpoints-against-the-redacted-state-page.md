@@ -10,7 +10,7 @@ tags:
   - smoke-rig
   - kind-smoke
 date: 2026-09-15
-status: active
+status: superseded — worker_cap and worker_idle_retire_seconds no longer exist; a worker of an open issue stays live and is never retired or suspended for idleness
 module: packages/daemon/src/daemon/api/state.ts, worker-admission.ts, k8s-manifests.ts; scripts/kind-smoke/checkpoints.sh
 applies_when:
   - Writing a check that reads `GET /legion/v1/state` or `kubectl get pod` instead of the daemon's internals

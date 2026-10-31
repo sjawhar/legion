@@ -17,6 +17,7 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { AgentName, AskResolutionLine } from "../refs/AgentName";
+import { askResolutionBadge, askResolutionReason } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -223,6 +224,7 @@ function ResolvedAsk({
   frame: AskFrame;
 }): ReactNode {
   const { resolution } = ask;
+  const reason = askResolutionReason(resolution);
   return (
     <article
       className={`rounded-xl p-4 text-sm ${frame === "block" ? "mt-3" : ""} ${card}`}
@@ -238,7 +240,7 @@ function ResolvedAsk({
         className={`mt-2 inline-block rounded-full px-2.5 py-1 text-xs font-medium ${badgeLow.bg} ${badgeLow.text}`}
         data-testid="ask-resolution-badge"
       >
-        {resolution.kind === "retracted" ? "Retracted" : "Resolved"}
+        {askResolutionBadge(resolution)}
       </span>
       <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
         <AgentName actor={ask.author} inline />
@@ -251,8 +253,13 @@ function ResolvedAsk({
       <AskOptionList options={ask.options} selected={[]} />
       <AskEditHistory ask={ask} edits={edits} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
-        Asked <Timestamp at={ask.created_at} /> · <AskResolutionLine resolution={resolution} /> -{" "}
-        <MarkdownBody markdown={resolution.reason} variant="inline" />
+        Asked <Timestamp at={ask.created_at} /> · <AskResolutionLine resolution={resolution} />
+        {reason === undefined ? null : (
+          <>
+            {" "}
+            - <MarkdownBody markdown={reason} variant="inline" />
+          </>
+        )}
       </p>
     </article>
   );

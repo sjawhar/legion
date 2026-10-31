@@ -39,23 +39,19 @@ type carriedAsk struct {
 // milliseconds, so a test waits for the version that write settles into rather than racing it.
 func approvalCarryHandler(t *testing.T) http.Handler {
 	t.Helper()
-	return settlingCarryHandler(t, 20*time.Millisecond)
-}
-
-// settlingCarryHandler is approvalCarryHandler settling settle after a live write. A test that
-// needs two writes in one version - two humans' answers, an answer and an agent's edit - uses a
-// window wide enough that both land in it.
-func settlingCarryHandler(t *testing.T, settle time.Duration) http.Handler {
-	t.Helper()
-	handler, _, _ := settlingCarryDocuments(t, settle)
+	handler, _, _ := settlingCarryDocuments(t, 20*time.Millisecond)
 	return handler
 }
 
-// settlingCarryDocuments is settlingCarryHandler with the store and the document service it
-// serves, for a test that writes a document as the server's own code does, beside the routes.
-func settlingCarryDocuments(t *testing.T, settle time.Duration) (http.Handler, *store.Store, docs.API) {
+// settlingCarryDocuments serves documents as approvalCarryHandler does, settling settle after a
+// live write, and answers the store and the document service beside the handler, for a test that
+// writes a document as the server's own code does or settles it at once. A test that needs two
+// writes in one version - two humans' answers, an answer and an agent's edit - uses a window wide
+// enough that both land in it, and settles the document at once (docs.SettleNow) wherever it needs
+// no window, rather than waiting each window out.
+func settlingCarryDocuments(t *testing.T, settle time.Duration) (http.Handler, *store.Store, *docs.Service) {
 	t.Helper()
-	var documentService docs.API
+	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		service := docs.New(docs.Deps{Store: database, Settle: settle})
 		t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
@@ -238,10 +234,18 @@ func carrySentence(from int) string {
 }
 
 // insertDecisionBlocks inserts markdown, holding the ask blocks named by blocks (id to question),
-// at the end of the document as the asking agent, which versions the document to number in the
-// edit's own transaction; it then waits for settlement to index every block and returns each
-// block's ask id by block id.
+// at the end of the document as the asking agent (insertDecisionMarkdown); it then waits for
+// settlement to index every block and returns each block's ask id by block id.
 func insertDecisionBlocks(t *testing.T, handler http.Handler, issueKey, artifactID, markdown string, number int, blocks map[string]string) map[string]string {
+	t.Helper()
+	insertDecisionMarkdown(t, handler, artifactID, markdown, number)
+	return indexedDecisionBlocks(t, handler, issueKey, artifactID, blocks)
+}
+
+// insertDecisionMarkdown inserts markdown at the end of the document as the asking agent, which
+// versions the document to number in the edit's own transaction, and waits until that version
+// reads.
+func insertDecisionMarkdown(t *testing.T, handler http.Handler, artifactID, markdown string, number int) {
 	t.Helper()
 	inserted := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits", map[string]any{
 		"actor": sessionActor(),
@@ -251,7 +255,6 @@ func insertDecisionBlocks(t *testing.T, handler http.Handler, issueKey, artifact
 		t.Fatalf("insert the decision blocks: status=%d body=%s", inserted.Code, inserted.Body.String())
 	}
 	waitForArtifactVersion(t, handler, artifactID, number)
-	return indexedDecisionBlocks(t, handler, issueKey, artifactID, blocks)
 }
 
 // indexedDecisionBlocks waits for settlement to index each block of blocks (id to question) on the
@@ -441,9 +444,10 @@ func TestAnAnswerThatIsTheWholeChangeSinceHisApprovalCarriesIt(t *testing.T) {
 // human's answer still waiting for its settlement lands in that version too. The edit is inside a
 // second, still-open block's body, which the comparison leaves out: the version carries.
 func TestAnAnswerCarriesWhenAnAgentEditInsideAnotherBlockLandsInItsVersion(t *testing.T) {
-	handler := settlingCarryHandler(t, time.Second)
+	handler, _, documents := settlingCarryDocuments(t, time.Second)
 	issue := createInteractionIssue(t, handler, "TEST", "Answer beside an edit", "Context\n")
-	asks := insertDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, waveAsk+"\n"+regionAsk, 2,
+	insertDecisionMarkdown(t, handler, issue.PrimaryArtifactID, waveAsk+"\n"+regionAsk, 2)
+	asks := settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID,
 		map[string]string{"wave": "How many regions take the first wave?", "region": "Which region goes first?"})
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
 
@@ -477,13 +481,14 @@ func versionMarkdown(t *testing.T, handler http.Handler, artifactID string, numb
 // carried. Settlement then writes the decided wording back, and that version - the one he approved
 // plus his answer to the second block - carries.
 func TestARewordOfAnAnsweredBlockInTheAnswersVersionDoesNotCarry(t *testing.T) {
-	handler := settlingCarryHandler(t, time.Second)
+	handler, _, documents := settlingCarryDocuments(t, time.Second)
 	issue := createInteractionIssue(t, handler, "TEST", "Reword under the answer", "Context\n\n"+regionAsk)
-	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
+	asks := settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
 	answerDecisionBlock(t, handler, asks["region"], "alice", []string{"East"}, "", nil)
-	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+	settledVersion(t, handler, documents, issue.PrimaryArtifactID, 2)
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
-	for id, ask := range insertDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, waveAsk, 3, map[string]string{"wave": "How many regions take the first wave?"}) {
+	insertDecisionMarkdown(t, handler, issue.PrimaryArtifactID, waveAsk, 3)
+	for id, ask := range settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID, map[string]string{"wave": "How many regions take the first wave?"}) {
 		asks[id] = ask
 	}
 
@@ -495,7 +500,7 @@ func TestARewordOfAnAnsweredBlockInTheAnswersVersionDoesNotCarry(t *testing.T) {
 	}
 	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
 
-	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 5)
+	settledVersion(t, handler, documents, issue.PrimaryArtifactID, 5)
 	restored := versionMarkdown(t, handler, issue.PrimaryArtifactID, 5)
 	if strings.Count(restored, `answered_by="alice"`) != 2 || !strings.Contains(restored, "Which region goes first?") || strings.Contains(restored, "goes last?") {
 		t.Fatalf("version 5 = %s, want settlement to have written the decided wording back under both answers", restored)
@@ -533,11 +538,12 @@ func TestAForgedServerAttributeOnADecidedBlockCarriesNothing(t *testing.T) {
 		t.Run(tc.attribute, func(t *testing.T) {
 			handler, database, documents := settlingCarryDocuments(t, time.Second)
 			issue := createInteractionIssue(t, handler, "TEST", "Forged "+tc.attribute+" under the answer", "Context\n\n"+regionAsk)
-			asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
+			asks := settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
 			answerDecisionBlock(t, handler, asks["region"], "alice", []string{"East"}, "", nil)
-			waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+			settledVersion(t, handler, documents, issue.PrimaryArtifactID, 2)
 			reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
-			for id, ask := range insertDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, waveAsk, 3, map[string]string{"wave": "How many regions take the first wave?"}) {
+			insertDecisionMarkdown(t, handler, issue.PrimaryArtifactID, waveAsk, 3)
+			for id, ask := range settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID, map[string]string{"wave": "How many regions take the first wave?"}) {
 				asks[id] = ask
 			}
 
@@ -561,14 +567,14 @@ func TestAForgedServerAttributeOnADecidedBlockCarriesNothing(t *testing.T) {
 				// Settlement takes the forged attribute off the live block, but a repair no rendering
 				// writes changes no markdown, so it versions nothing: the approval stays stale and the
 				// forgery costs the carry, which the human's next approval replaces. Nothing is approved.
-				time.Sleep(3 * time.Second)
+				settledWithoutVersion(t, database, documents, issue.PrimaryArtifactID)
 				if latest := readApproval(t, handler, issue.PrimaryArtifactID).Approval.LatestVersion; latest != 4 {
 					t.Fatalf("latest version = %d, want settlement's repair of %s to write none", latest, tc.attribute)
 				}
 				requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
 				return
 			}
-			waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 5)
+			settledVersion(t, handler, documents, issue.PrimaryArtifactID, 5)
 			restored := versionMarkdown(t, handler, issue.PrimaryArtifactID, 5)
 			if strings.Count(restored, `answered_by="alice"`) != 2 || !strings.Contains(restored, `selected="[&#x22;East&#x22;]"`) || (tc.rendered != "" && strings.Contains(restored, tc.rendered)) {
 				t.Fatalf("version 5 = %s, want settlement to have written the row back over the forged %s under both answers", restored, tc.attribute)
@@ -597,6 +603,46 @@ func setLiveBlockAttributes(t *testing.T, database *store.Store, documents docs.
 	}
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit the attribute write: %v", err)
+	}
+}
+
+// settledVersion settles the document at once and waits until version number reads: the version a
+// write's settlement writes, without waiting out the settle window the write armed.
+func settledVersion(t *testing.T, handler http.Handler, documents *docs.Service, artifactID string, number int) {
+	t.Helper()
+	documents.SettleNow(artifactID)
+	waitForArtifactVersion(t, handler, artifactID, number)
+}
+
+// settledDecisionBlocks settles the document at once and returns its blocks' ask ids as
+// indexedDecisionBlocks does, once settlement has indexed them.
+func settledDecisionBlocks(t *testing.T, handler http.Handler, documents *docs.Service, issueKey, artifactID string, blocks map[string]string) map[string]string {
+	t.Helper()
+	documents.SettleNow(artifactID)
+	return indexedDecisionBlocks(t, handler, issueKey, artifactID, blocks)
+}
+
+// settledWithoutVersion settles the document at once, for a document whose settlement is owed,
+// and waits until that settlement has committed: its pending-settlement row, which a live write
+// leaves and only a settlement's commit clears, is gone. It fails t when the document owes no
+// settlement, since then there would be nothing to wait for.
+func settledWithoutVersion(t *testing.T, database *store.Store, documents *docs.Service, artifactID string) {
+	t.Helper()
+	owed := func() bool {
+		var pending bool
+		if err := database.Pool.QueryRow(context.Background(), `select exists(select 1 from doc_settlements_pending where artifact_id = $1)`, artifactID).Scan(&pending); err != nil {
+			t.Fatalf("read the document's pending settlement: %v", err)
+		}
+		return pending
+	}
+	if !owed() {
+		t.Fatal("the document owes no settlement, want the live write's settlement still owed")
+	}
+	documents.SettleNow(artifactID)
+	for deadline := time.Now().Add(5 * time.Second); owed(); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the document's settlement never committed")
+		}
 	}
 }
 
@@ -883,15 +929,15 @@ func TestAnotherHumansAnswerHeApprovedStaysOutOfTheCarrysTest(t *testing.T) {
 // Stale: two humans answered two blocks in one version, so the version is not one person's
 // answer and carries nobody's approval.
 func TestTwoHumansAnswersInOneVersionDoNotCarry(t *testing.T) {
-	handler := settlingCarryHandler(t, time.Second)
+	handler, _, documents := settlingCarryDocuments(t, time.Second)
 	issue := createInteractionIssue(t, handler, "TEST", "Two answerers", "Context\n\n"+waveAsk+"\n"+regionAsk)
-	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID,
+	asks := settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID,
 		map[string]string{"wave": "How many regions take the first wave?", "region": "Which region goes first?"})
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
 
 	answerDecisionBlock(t, handler, asks["wave"], "alice", []string{"Two"}, "", nil)
 	answerDecisionBlock(t, handler, asks["region"], "bob", []string{"East"}, "", nil)
-	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+	settledVersion(t, handler, documents, issue.PrimaryArtifactID, 2)
 	markdown := versionMarkdown(t, handler, issue.PrimaryArtifactID, 2)
 	if !strings.Contains(markdown, `answered_by="alice"`) || !strings.Contains(markdown, `answered_by="bob"`) {
 		t.Fatalf("version 2 = %s, want both answers in it", markdown)

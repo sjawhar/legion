@@ -80,22 +80,7 @@ func (c *HTTPClient) GetIssue(ctx context.Context, key string) (Issue, error) {
 	if err := c.request(ctx, http.MethodGet, "/api/v1/issues/"+url.PathEscape(key), nil, &response); err != nil {
 		return Issue{}, err
 	}
-	return Issue{
-		Key:               response.Key,
-		Project:           response.Project,
-		Title:             response.Title,
-		Status:            response.Status,
-		Parent:            response.Parent,
-		Rank:              response.Rank,
-		Labels:            response.Labels,
-		HandedOver:        CarriesLegionLabel(response.Labels),
-		PrimaryArtifactID: response.PrimaryArtifactID,
-		LastSeq:           response.LastSeq,
-		ResolvedRepo:      deref(response.ResolvedRepo),
-		BlockedBy:         response.BlockedBy,
-		Claim:             response.Claim.claim(),
-		ClaimUnread:       response.Claim.unread(),
-	}, nil
+	return response.issue(), nil
 }
 
 // ListRepoProjects reads GET /api/v1/settings/repo-projects: every project's repository mappings,
@@ -112,6 +97,20 @@ func (c *HTTPClient) ListRepoProjects(ctx context.Context) ([]RepoProject, error
 	return mappings, nil
 }
 
+// WebhookAppInstalled reads GET /api/v1/github/app-installation/{owner}/{repo}: whether
+// Dispatch's GitHub App, the one GitHub sends repo's webhook events through to Envoy, is installed
+// on repo (owner/name). A Dispatch older than the route answers 404, an *Error Missing reports.
+func (c *HTTPClient) WebhookAppInstalled(ctx context.Context, repo string) (bool, error) {
+	owner, name, _ := strings.Cut(repo, "/")
+	var response struct {
+		Installed bool `json:"installed"`
+	}
+	if err := c.request(ctx, http.MethodGet, "/api/v1/github/app-installation/"+url.PathEscape(owner)+"/"+url.PathEscape(name), nil, &response); err != nil {
+		return false, err
+	}
+	return response.Installed, nil
+}
+
 func deref(value *string) string {
 	if value == nil {
 		return ""
@@ -119,12 +118,19 @@ func deref(value *string) string {
 	return *value
 }
 
-// SetStatus updates an issue through PATCH /api/v1/issues/{key}.
-func (c *HTTPClient) SetStatus(ctx context.Context, key, status string) error {
-	return c.request(ctx, http.MethodPatch, "/api/v1/issues/"+url.PathEscape(key), daemonWrite{
+// SetStatus updates an issue through PATCH /api/v1/issues/{key} and returns the issue as Dispatch
+// answers the write: as the write left it, at the sequence of the event the write made
+// (issue.updated, or issue.closed for done). Dispatch appends that event for every status it is
+// sent, the issue's own status included.
+func (c *HTTPClient) SetStatus(ctx context.Context, key, status string) (Issue, error) {
+	var response issueResponse
+	if err := c.request(ctx, http.MethodPatch, "/api/v1/issues/"+url.PathEscape(key), daemonWrite{
 		Status: status,
 		Actor:  daemonActor(key),
-	}, nil)
+	}, &response); err != nil {
+		return Issue{}, err
+	}
+	return response.issue(), nil
 }
 
 // HandOver writes issue's status for its hand-over to Legion, on the issue's sequence as the client
@@ -148,6 +154,39 @@ func (c *HTTPClient) PostMessage(ctx context.Context, key, body string) error {
 		Body:  body,
 		Actor: daemonActor(key),
 	}, nil)
+}
+
+// EventsAfter reads the issue's Dispatch event log after sequence after, oldest first, through GET
+// /api/v1/issues/{key}/events?after=…, every page of it: each event as Dispatch serves it, which is
+// the shape its durable stream carries, so the boot catch-up applies each through the live
+// decoder, with its own sequence.
+func (c *HTTPClient) EventsAfter(ctx context.Context, key string, after int64) ([]json.RawMessage, error) {
+	events := []json.RawMessage{}
+	for {
+		query := url.Values{}
+		query.Set("after", fmt.Sprint(after))
+		query.Set("limit", fmt.Sprint(eventPageLimit))
+		var page []json.RawMessage
+		if err := c.request(ctx, http.MethodGet, "/api/v1/issues/"+url.PathEscape(key)+"/events?"+query.Encode(), nil, &page); err != nil {
+			return nil, err
+		}
+		for _, raw := range page {
+			var event struct {
+				Seq int64 `json:"seq"`
+			}
+			if err := json.Unmarshal(raw, &event); err != nil {
+				return nil, fmt.Errorf("page issue events for %s: %w", key, err)
+			}
+			if event.Seq <= after {
+				return nil, fmt.Errorf("page issue events for %s: non-ascending sequence %d after %d", key, event.Seq, after)
+			}
+			after = event.Seq
+			events = append(events, raw)
+		}
+		if len(page) < eventPageLimit {
+			return events, nil
+		}
+	}
 }
 
 const eventPageLimit = 200
@@ -240,24 +279,38 @@ func (c *HTTPClient) Approval(ctx context.Context, artifactID string) (Approval,
 	return approved, nil
 }
 
-// BuildCommit reads GET /healthz and returns the build commit Dispatch reports itself built from
-// (its `commit`), "" when it reports none: null, from a build that stamped no commit
-// (packages/envoy/cmd/dispatch's buildCommit). The route is served above Dispatch's API and
-// needs no bearer; the client sends its own as on every call. A Dispatch that answers other than
-// 2xx — its own 503 while its database or NATS is down included — is an *Error as every other
-// call's, and one that does not answer a TransientError, so the caller tells "reported none" from
-// "could not be asked".
+// BuildCommit reads GET /healthz and returns the build Dispatch's server fleet serves: its
+// `fleet_commit`, the commit of Dispatch's latest announcement that every live server process
+// serves one build (the same announcement its server.started carries, intake.ServerStarted), ""
+// when that is null, since no fleet-wide build has been announced. A body without the field is a
+// Dispatch older than the announcement, and its `commit` is read instead, the build of the one
+// process that answered, "" when that is null, from a build that stamped no commit
+// (packages/envoy/cmd/dispatch's buildCommit). The fleet's build, not the answering process's,
+// because the request goes through the Service, which mid-roll is any process's answer. The route
+// is served above Dispatch's API and needs no bearer; the client sends its own as on every call. A
+// Dispatch that answers other than 2xx — its own 503 while its database is down included — is an
+// *Error as every other call's, and one that does not answer a TransientError, so the caller tells
+// "reported none" from "could not be asked".
 func (c *HTTPClient) BuildCommit(ctx context.Context) (string, error) {
 	var response struct {
 		Commit *string `json:"commit"`
+		// FleetCommit is the field as sent, so a null one is told from one never sent.
+		FleetCommit json.RawMessage `json:"fleet_commit"`
 	}
 	if err := c.request(ctx, http.MethodGet, "/healthz", nil, &response); err != nil {
 		return "", err
 	}
-	if response.Commit == nil {
+	commit := response.Commit
+	if response.FleetCommit != nil {
+		commit = nil
+		if err := json.Unmarshal(response.FleetCommit, &commit); err != nil {
+			return "", fmt.Errorf("decode Dispatch /healthz fleet_commit: %w", err)
+		}
+	}
+	if commit == nil {
 		return "", nil
 	}
-	return *response.Commit, nil
+	return *commit, nil
 }
 
 func (c *HTTPClient) request(ctx context.Context, method, path string, body, into any) error {
@@ -375,6 +428,26 @@ type issueResponse struct {
 	ResolvedRepo      *string        `json:"resolved_repo"`
 	BlockedBy         []string       `json:"blocked_by"`
 	Claim             *claimResponse `json:"claim"`
+}
+
+// issue is the response as Issue: Dispatch's issue detail, and the issue its PATCH answers with.
+func (r issueResponse) issue() Issue {
+	return Issue{
+		Key:               r.Key,
+		Project:           r.Project,
+		Title:             r.Title,
+		Status:            r.Status,
+		Parent:            r.Parent,
+		Rank:              r.Rank,
+		Labels:            r.Labels,
+		HandedOver:        CarriesLegionLabel(r.Labels),
+		PrimaryArtifactID: r.PrimaryArtifactID,
+		LastSeq:           r.LastSeq,
+		ResolvedRepo:      deref(r.ResolvedRepo),
+		BlockedBy:         r.BlockedBy,
+		Claim:             r.Claim.claim(),
+		ClaimUnread:       r.Claim.unread(),
+	}
 }
 
 // claimResponse is an issue's claim as Dispatch's issue reads serve it (null for none).

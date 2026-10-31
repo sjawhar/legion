@@ -69,7 +69,50 @@ Each start also logs `envoy nats stream keeps subjects this binary does not comp
 naming (`subjects`) the deployed subjects it kept without knowing them. That is the list the retire
 step below works from. Both lines are written only after the stream carries the reconciled list.
 
-`MaxAge` and the duplicate window still take the starting binary's values.
+`MaxAge` and the duplicate window still take the starting binary's values. The rest of an update
+starts from the deployed configuration too: the replicas become the deployed count or
+`ENVOY_NATS_REPLICAS`, whichever is more; the byte limit becomes the deployed one or
+`ENVOY_STREAM_MAX_BYTES`, whichever is more, the setting on a stream with none, and stays as
+deployed when the setting is unset; discard is `DiscardNew`, so a full stream refuses a new
+publish (`bus.ErrStreamFull`, which its sender retries) and keeps every stored message until it is
+72 hours old; and the metadata, `envoy_stream_id` included, and every field Envoy does not own
+(`MaxMsgsPerSubject`, `MaxMsgSize`, placement, compression and the rest) stay as they are. A
+start's own write therefore never lowers the copies or the limit it read, so an operator's raise
+of either stands, and programs with different `ENVOY_NATS_REPLICAS` or `ENVOY_STREAM_MAX_BYTES` do
+not fight: the most copies and the largest limit stand. A clustered deployment still sets both
+alike in every envoy-listener and in the Dispatch server. JetStream's stream update has no
+compare-and-swap: a start with other or no settings, or another subject list, that reads the
+stream before another start's write and writes after it puts the old subjects, copies, limit and
+metadata back.
+
+So every program that owns the stream runs a keeper (`internal/bus/keeper.go`): every 30 seconds
+it reads the stream again and writes it back (`keepStream`, `keptStream`) with copies below its
+`ENVOY_NATS_REPLICAS` raised, a byte limit below its `ENVOY_STREAM_MAX_BYTES`, or none, raised to
+it (when set), a missing `envoy_stream_id` added, the 72-hour age and duplicate window and
+`DiscardNew` put back (constants every release compiles alike), and each subject its binary
+compiles that the stream lacks added, unless it overlaps a subject the stream carries or captures
+a role lane (`keptSubjects`). It logs `envoy nats keeper restored the stream` at WARN with, for
+example,
+`restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
+Like a start, the keeper never lowers the copies or the limit (`ownedStream`): an operator who
+raises a full stream's limit (`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>`) is not
+undone 30 seconds later. The keeper only adds subjects: it removes and replaces none, since a
+keeper that reconciled subjects as a start does would have two releases with different subject
+lists switch the stream back and forth every period. Its write still carries the rest of the list
+as it read it, so a start's write that lands between the keeper's read and its write loses its new
+subject again, and that release's own keeper adds it back a period later. One case does not
+recover that way: when the write that lands puts back an overlapping subject the start had
+replaced, that release's keeper skips its own subject while the overlapping one is there
+(`keptSubjects`), so only that release's next start replaces it again. A stream that still
+carries a role-lane subject the keeper leaves to a start, which moves the role lanes off before it
+removes them: while such a stream needs anything, the keeper sends nothing and logs
+`envoy nats keeper could not restore the stream`, so a stale read never puts a role lane back.
+With mixed settings during a rollout the stream can sit below the setting for up to one period
+after the last start. Lowering the replicas and lowering or removing the limit are operator steps
+that need every program's setting changed first, or the keeper puts them back:
+`nats stream edit ENVOY_NOTIFICATIONS --replicas=<n>` and
+`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>` (`-1` for none). A retired subject (below)
+is added back within 30 seconds by the keeper of any running binary that still compiles it.
 
 An earlier version of this page described the opposite behaviour, which was true until
 sjawhar/legion's fix for LEGION-208 Stage 3: `ensureStreamWithConfig` called `UpdateStream` with
@@ -91,15 +134,22 @@ listener then answered `500 {"error":"nats: no response from stream"}`.
   publish that only the other shape covers answers `no response from stream` until a binary with
   that shape starts again. Move every writer to the new shape in one rollout.
 - **Retiring a subject is an operator step.** Remove it from `streamSubjects`, wait until no
-  deployment compiled with it can start again (every writer moved past it, rollback anchors
-  included), then edit the live stream by hand: `nats stream edit ENVOY_NOTIFICATIONS
-  --subjects=<the list without it> -f`. Start-up never does it for you. A writer built after
-  the removal names the subject in its `keeps subjects this binary does not compile` line on every
-  start until the edit, so that line is where to find what is left to retire.
-- **Two starts in the same instant can still lose a subject.** JetStream's stream update has no
-  compare-and-swap: if two writers with different lists both read the stream before either
-  writes, the second write omits the first writer's addition. It takes two process starts within
-  one read-update round trip; the next start of the writer that lost its subject puts it back.
+  deployment compiled with it runs or can start again (every writer moved past it, rollback
+  anchors included, since a running writer's keeper adds it back within 30 seconds), then edit the
+  live stream by hand: `nats stream edit ENVOY_NOTIFICATIONS --subjects=<the list without it> -f`.
+  Start-up never does it for you. A writer built after the removal names the subject in its
+  `keeps subjects this binary does not compile` line on every start until the edit, so that line
+  is where to find what is left to retire.
+- **Two starts in the same instant can still drop a subject, for up to one keeper period, or
+  until the next start when the dropped subject had replaced an overlapping one.**
+  JetStream's stream update has no compare-and-swap: if two writers with different lists both read
+  the stream before either writes, the second write omits the first writer's addition. It takes
+  two process starts within one read-update round trip, and a keeper write that lands after a
+  start's can do the same; the keeper of the writer that lost its subject adds it back within 30
+  seconds (`TestEachReleasesKeeperAddsBackItsOwnSubjectAConcurrentWriteTookAway`), as does that
+  writer's next start. A subject that start had put in place of an overlapping one is the
+  exception: the keeper skips it while the subject it replaced is back (`keptSubjects`), so only
+  that writer's next start puts it back.
 - The outbox's `published_at` gate is why a missing subject stalls Dispatch events rather than
   losing them: `scanBatch` sets `published_at` only after a successful publish to the issue-topic
   subject (`packages/envoy/internal/dispatch/outbox/publisher.go`), and a failed publish schedules
@@ -123,6 +173,9 @@ codebase ensures from more than one binary. It does not apply to consumer filter
 - `packages/envoy/internal/bus/stream_config_test.go`
   `TestConnectOwningStreamKeepsTheSubjectsAnotherDeploymentOfTheStreamNeeds`: a real NATS, a second
   deployment with a different subject list, both starting in turn.
+- `packages/envoy/internal/bus/keeper_test.go`: the keeper's add-only subjects under a forced
+  interleaving of a start's write between the keeper's read and write, two releases' keepers with
+  different subject lists, and a role lane a start moved off the stream.
 - `packages/envoy/internal/bus/publish_only_test.go`: the publish-only connect against a deployed
   stream and against a server with none.
 - `sjawhar/legion#826`, which first named this risk when `notifications.dispatch.>` was added.

@@ -179,32 +179,13 @@ func mergeReadyPolicy(ctx context.Context, github githubrest.Client, rules confi
 }
 
 // pullRequestPaths is every path pull request number's change touches, both names of a renamed
-// file among them (changedPaths), and how many files GitHub listed.
+// file among them (githubrest.ChangedPaths), and how many files GitHub listed.
 func pullRequestPaths(ctx context.Context, github githubrest.Client, number int) ([]string, int, error) {
-	files, err := githubrest.GetPages[changedFile](ctx, github, fmt.Sprintf("/pulls/%d/files", number))
+	files, err := githubrest.GetPages[githubrest.ChangedFile](ctx, github, fmt.Sprintf("/pulls/%d/files", number))
 	if err != nil {
 		return nil, 0, err
 	}
-	return changedPaths(files), len(files), nil
-}
-
-// changedFile is one file GitHub lists in a change, a pull request's or a compare's.
-type changedFile struct {
-	Filename         string `json:"filename"`
-	PreviousFilename string `json:"previous_filename"`
-}
-
-// changedPaths is every path files touch: each file's name, and a renamed file's old name too,
-// since moving a file out of a path changes that path.
-func changedPaths(files []changedFile) []string {
-	paths := make([]string, 0, len(files))
-	for _, file := range files {
-		paths = append(paths, file.Filename)
-		if file.PreviousFilename != "" {
-			paths = append(paths, file.PreviousFilename)
-		}
-	}
-	return paths
+	return githubrest.ChangedPaths(files), len(files), nil
 }
 
 // shortSHA is sha as a refusal names it, its first twelve characters.
@@ -234,12 +215,6 @@ func headCarries(ctx context.Context, github githubrest.Client, dir, head string
 // reads nothing inside it.
 func handoffDir(issue string) string { return ".legion/" + issue }
 
-// compareFilesLimit is the most changed files GitHub's compare of two commits lists: "it includes
-// up to 300 changed files for the entire comparison" (REST API, Compare two commits,
-// https://docs.github.com/en/rest/commits/commits#compare-two-commits). A comparison that reaches
-// it may change a path the list never shows.
-const compareFilesLimit = 300
-
 // unreviewedChangeNamed is how many paths READY_UNREVIEWED_CHANGE names before it counts the rest.
 const unreviewedChangeNamed = 10
 
@@ -251,12 +226,11 @@ const unreviewedChangeNamed = 10
 // Otherwise GitHub's compare of approved with head, as the implement App, must show approved to be
 // head's ancestor ("ahead", or "identical" for a READY at the approved head itself; "diverged" or
 // "behind" is not the approved code plus anything), list its files, and list fewer than
-// compareFilesLimit; every path it lists, a rename's old name included, must be retro's. Anything
-// else is refused READY_UNREVIEWED_CHANGE, naming what it found, and the remedy for each is the
-// same: the reviewer reviews this head as a new round. An approved head
-// GitHub does not know is refused the same way; any other failure of the read is GitHub's, to
-// retry. The compare asks for one commit a page: the file list and status cover the whole
-// comparison on its first page whatever the page size, and a smaller page reads less.
+// githubrest.CompareFilesLimit; every path it lists, a rename's old name included, must be retro's.
+// Anything else is refused READY_UNREVIEWED_CHANGE, naming what it found, and the remedy for each is
+// the same: the reviewer reviews this head as a new round. An approved head GitHub does not know is
+// refused the same way; any other failure of the read (githubrest.Client.Compare) is GitHub's, to
+// retry.
 func unreviewedChange(ctx context.Context, github githubrest.Client, issue string, number int, approved, head string) *refusal {
 	const remedy = "the head goes back to reviewing, so the reviewer reviews it; tell the architect"
 	if approved == "" {
@@ -265,11 +239,7 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 	unreviewed := func(format string, args ...any) *refusal {
 		return &refusal{http.StatusConflict, "READY_UNREVIEWED_CHANGE", fmt.Sprintf(format, args...) + "; " + remedy}
 	}
-	var compare struct {
-		Status string         `json:"status"`
-		Files  *[]changedFile `json:"files"`
-	}
-	err := github.Get(ctx, "/compare/"+approved+"..."+head+"?per_page=1", &compare)
+	compare, err := github.Compare(ctx, approved, head)
 	approvedAt := fmt.Sprintf("%s, the head %s's review round approved", shortSHA(approved), issue)
 	var answer *githubrest.Answer
 	if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
@@ -288,7 +258,7 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 	files := *compare.Files
 	handoffs := handoffDir(issue) + "/"
 	var outside []string
-	for _, path := range changedPaths(files) {
+	for _, path := range githubrest.ChangedPaths(files) {
 		if !strings.HasPrefix(path, "docs/solutions/") && !strings.HasPrefix(path, handoffs) {
 			outside = append(outside, path)
 		}
@@ -300,7 +270,7 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 		}
 		return unreviewed("head %s of pull request #%d changes %s since %s: only retro's commits, to docs/solutions/ and %s, may sit above it, so no review approved that change", shortSHA(head), number, named, approvedAt, handoffs)
 	}
-	if len(files) >= compareFilesLimit {
+	if len(files) >= githubrest.CompareFilesLimit {
 		return unreviewed("%s lists %d changed files, the most it lists, so a path past them is unread and may be one no review approved", compared, len(files))
 	}
 	return nil

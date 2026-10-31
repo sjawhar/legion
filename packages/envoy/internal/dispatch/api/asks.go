@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -19,7 +20,7 @@ import (
 )
 
 const (
-	maxAskQuestion16 = 800
+	maxAskQuestion16 = contracts.AskQuestionMax
 	maxAskOptions    = 8
 )
 
@@ -241,18 +242,21 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	events := []model.Event{}
+	appended := []model.Event{}
 	if snapshot != nil {
 		snapshotEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		events = append(events, snapshotEvent)
+		appended = append(appended, snapshotEvent)
 	}
-	event, err := s.appendEvent(r.Context(), tx, owner.event(
-		"ask.opened", actor, model.NewAskEventPayload(ask, askChanges),
-	))
+	openedPayload, err := events.AskEventPayload(r.Context(), tx, ask, askChanges)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	event, err := s.appendEvent(r.Context(), tx, owner.event("ask.opened", actor, openedPayload))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -262,7 +266,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	ask.OpenedEventID = &event.ID
-	events = append(events, event)
+	appended = append(appended, event)
 	var advice *writeAdvice
 	if owner.IssueKey != nil && status != nil {
 		advice = s.writeAdvice(
@@ -273,33 +277,20 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(events...)
-	// LEGION-550. An ask on an issue searches that issue's project and, normally, rides its
-	// suggestions on the issue's own advice; one on an unlinked project document searches the
-	// document's and has no issue state to report, so its advice carries the suggestions alone.
-	// computeAndPersistSuggestions resolves the project itself (empty here) under its own
-	// deadline, so that lookup can no longer block this response past writeSuggestionTimeout the
-	// way it did when it ran here, before the call, on the request's unbounded context.
+	s.publish(appended...)
+	// The related-item check. An ask on an issue searches that issue's project and, normally, rides its check's
+	// result on the issue's own advice; one on an unlinked project document searches the
+	// document's and has no issue state to report, so its advice carries the result alone, as does
+	// an issue ask whose write-advice read failed. The check resolves the project itself under its
+	// own deadline, so that lookup cannot hold this response past relatedAllowance.
 	source := suggestionSource{kind: "ask", askID: ask.ID, actor: actor}
 	if owner.IssueKey != nil {
 		source.issueKey = *owner.IssueKey
 	} else if owner.ArtifactID != nil {
 		source.artifactID = *owner.ArtifactID
 	}
-	suggestions := s.computeAndPersistSuggestions(r.Context(), "", ask.Question, source)
-	// advice is nil both for a document owner and for an issue owner whose write-advice query
-	// itself failed (writeAdvice swallows that); either way, suggestions already computed and
-	// persisted ride along as suggestionsOnlyAdvice rather than being dropped on the floor.
-	if advice != nil {
-		advice.Suggestions = suggestions
-		WriteJSON(w, http.StatusCreated, withAdvice(ask, advice))
-		return
-	}
-	if suggestions != nil {
-		WriteJSON(w, http.StatusCreated, withRawAdvice(ask, suggestionsOnlyAdvice{Suggestions: suggestions}))
-		return
-	}
-	WriteJSON(w, http.StatusCreated, ask)
+	suggestions := s.relatedCheck(r.Context(), relatedInput{text: ask.Question, title: ask.Question, source: source, record: true})
+	WriteJSON(w, http.StatusCreated, withSuggestions(ask, advice, suggestions))
 }
 
 func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
@@ -442,7 +433,19 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ask.Question = stored.Question
-		ask.Options = stored.Options
+		// The row keeps the options it held where the write left a block no parse reads as a
+		// decision, whose joined options a row must not take for the reason
+		// docs.AskBlockText.SeveralOptionLists holds. It keeps them whichever fields the
+		// request named: a request that sends the question and options together sends those
+		// joined options, since a block holding two lists is refused any others
+		// (docs.SetAskBlockText), so taking the request's own would write that same reading
+		// into the row. The next edit of a block that reads as a decision writes the options
+		// it sends.
+		if stored.SeveralOptionLists {
+			ask.Options = previous.Options
+		} else {
+			ask.Options = stored.Options
+		}
 		ask.Multiple = stored.Multiple
 		ask.Urgency = stored.Urgency
 	}
@@ -462,7 +465,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ask.EditedAt = timestampPtr(&editedAt)
-	askChanges, err := s.replaceReferences(documentCtx, tx, "ask", ask.ID, ask.Question)
+	askChanges, err := s.replaceEditedReferences(documentCtx, tx, "ask", ask.ID, previous.Question, ask.Question)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -707,7 +710,7 @@ func (s *server) attachIssueAskThreads(ctx context.Context, rows []issueAskRow) 
 	for index := range rows {
 		askIDs[index] = rows[index].ID
 	}
-	threads, err := s.loadAskThreads(ctx, s.deps.Store.Pool, askIDs)
+	threads, err := s.loadAskThreads(ctx, askIDs)
 	if err != nil {
 		return err
 	}
@@ -788,13 +791,19 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	reaches, err := s.loadAskReaches(r.Context(), []string{ask.ID})
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// The single-ask read is a thread with the ask beside it, so it and every Inbox or ask-list
+	// thread serialise through one definition and carry the same keys.
 	WriteJSON(w, http.StatusOK, struct {
-		Ask       model.Ask           `json:"ask"`
-		Replies   []model.Comment     `json:"replies"`
-		Edits     []model.AskEdit     `json:"edits"`
-		Answers   []model.AskAnswer   `json:"answers"`
-		Followers []model.AskFollower `json:"followers"`
-	}{Ask: ask, Replies: replies, Edits: edits, Answers: answers, Followers: followers})
+		Ask model.Ask `json:"ask"`
+		askThread
+	}{Ask: ask, askThread: askThread{
+		Replies: replies, Edits: edits, Answers: answers, Followers: followers, askReach: reaches[ask.ID],
+	}})
 }
 
 // loadAskEdits reads every rewording of an ask back from its ask.edited events,
@@ -926,8 +935,9 @@ func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, 
 }
 
 // pgx caches prepared plans by query text. State and ownership each have a fixed
-// query so the partial open-ask index remains eligible under generic plans.
-const (
+// query so the partial open-ask index remains eligible under generic plans. They are vars, not
+// consts, because askReadFrom builds its anchor join from store.CastableUUID.
+var (
 	listIssueAsksQueryAll = `select ` + askReadColumns + ` ` + askReadFrom + `
 		where a.issue_key = $1 order by a.created_at, a.id`
 	listIssueAsksQueryOpen = `select ` + askReadColumns + ` ` + askReadFrom + `

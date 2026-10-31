@@ -92,7 +92,13 @@ func recordedRoot(t *testing.T, pool *pgxpool.Pool) record.Issue {
 // An ask's events are mirrored whatever order they arrive in: its kind and whether the root's tree
 // opened it are kept from its opening, the person's act on it from every event that carries one,
 // its state and its newest close are the close's, and its turn is the newest turn any event gave
-// it. The mirror decides nothing: the root's record and the outbox are as they were.
+// it. The mirror starts nothing by itself: the only part of the root's record it moves is the
+// hand-back its architect made (DeclaredSeq, which admission decides on), and the outbox is as it
+// was. The architect's reply leaving the question with the person at 7 is that hand-back whenever
+// the question's opening, which says the root's tree asked it, arrived before it: its turn is the
+// newest the row holds, though the close at 8 is newer. A reply that arrives before the opening
+// cannot tell its question is the tree's, and the opening, older than the reply's turn, hands
+// nothing back.
 func TestAsksOfARootAreMirroredWhateverTheirOrder(t *testing.T) {
 	events := []intake.Fact{
 		intake.DispatchAskOpened{Key: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, AuthorSession: askArchitect.ID, Mark: askSeq(5)},
@@ -102,7 +108,11 @@ func TestAsksOfARootAreMirroredWhateverTheirOrder(t *testing.T) {
 	}
 	want := record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: false, Seq: 8, WaitingOn: "human", WaitingOnSeq: 7,
 		ClosedBy: record.ClosedByTree, ClosedSeq: 8, ByTree: true, PersonSeq: 6}
-	for _, order := range [][]int{{0, 1, 2, 3}, {3, 2, 1, 0}, {1, 3, 0, 2}} {
+	for _, tc := range []struct {
+		order    []int
+		declared int64
+	}{{[]int{0, 1, 2, 3}, 7}, {[]int{3, 2, 1, 0}, 0}, {[]int{1, 3, 0, 2}, 7}} {
+		order := tc.order
 		t.Run(fmt.Sprint(order), func(t *testing.T) {
 			pool, apply := askRig(t)
 			before := recordedRoot(t, pool)
@@ -116,8 +126,13 @@ func TestAsksOfARootAreMirroredWhateverTheirOrder(t *testing.T) {
 			if *got != want {
 				t.Fatalf("mirror row = %#v, want %#v", *got, want)
 			}
-			if after := recordedRoot(t, pool); !reflect.DeepEqual(after, before) {
-				t.Fatalf("the root's record moved on ask events: %#v, want %#v", after, before)
+			after := recordedRoot(t, pool)
+			if after.DeclaredSeq != tc.declared {
+				t.Fatalf("declared_seq = %d, want %d", after.DeclaredSeq, tc.declared)
+			}
+			after.DeclaredSeq = before.DeclaredSeq
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("the root's record moved on ask events beyond its hand-back: %#v, want %#v", after, before)
 			}
 			if rows := outboxRows(t, pool); rows != 0 {
 				t.Fatalf("ask events queued %d outbox rows, want none", rows)
@@ -165,7 +180,9 @@ const gateDoc = "artifact-208"
 // another document than the gate's, a resolution of a request of the gate's document, and a reply
 // that does not leave the ask with the person, a comment on a closed ask among them. A person's
 // answer of a request of the gate's document is a review, recorded through its own artifact event;
-// a person's reply on their own turn and a session's act are no person's act.
+// a person's reply on their own turn and a session's act are no person's act. The live answer of a
+// root waiting on the person reads the same rule against the gate's document: the act answers the
+// wait exactly when the mirror records it.
 func TestAPersonsActIsRecordedWhereverItWouldAnswer(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -185,6 +202,8 @@ func TestAPersonsActIsRecordedWhereverItWouldAnswer(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool, apply := askRig(t)
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: gateDoc, LatestVersion: 2})
+			seedIssue(t, pool, awaitingRoot(15))
 			apply("act", tc.act)
 			got := mirroredAsk(t, pool, "ask-x")
 			if got == nil {
@@ -192,6 +211,9 @@ func TestAPersonsActIsRecordedWhereverItWouldAnswer(t *testing.T) {
 			}
 			if acted := got.PersonActSeq(gateDoc) == 20; acted != tc.acted {
 				t.Fatalf("%s left the newest person's act at %d, want a person's act recorded: %t", tc.name, got.PersonActSeq(gateDoc), tc.acted)
+			}
+			if answered := recordedRoot(t, pool).Awaiting.AnsweredAt != nil; answered != tc.acted {
+				t.Fatalf("%s answered the root's wait: %t, want %t", tc.name, answered, tc.acted)
 			}
 		})
 	}

@@ -45,6 +45,7 @@
     "owners": [],
     "mapped": [],
     "refused": [],
+    "withoutWebhookApp": [],
     "caches": []
   },
   "settings": {
@@ -85,6 +86,8 @@
     "capabilities": {
       "decided": {}
     },
-    "worker_backends": {}
-  }
+    "worker_backends": {},
+    "role_config_files": {}
+  },
+  "consumers": []
 }

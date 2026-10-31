@@ -30,7 +30,7 @@ import (
 
 // lockEffect is a lock a function's own statements, or the functions it calls, take in the
 // transaction they run in: a project's copy lock (docs.lockProjectCopies), a
-// doc_settlements_pending row, or the events' commit-order lock an event append takes.
+// doc_settlements_pending row, or the event owner's row an event append locks.
 type lockEffect uint8
 
 const (
@@ -44,11 +44,23 @@ var (
 	eventInsert     = regexp.MustCompile(`\binsert into events\b`)
 )
 
+// ownTransactionFunctions are the functions that run in a transaction of their own, never their
+// caller's, and commit it before they return (see TestCopyLockComesBeforeEveryPendingRowAndEvent):
+// each settlement settleOwedNow runs opens and commits its own, and SettleIssueDocuments, which
+// settleIssueBeforeClose calls, refuses a joined context; sweepClosedIssueAsks begins and commits
+// its own.
+var ownTransactionFunctions = []string{
+	"docs.Service.settleOwedNow",
+	"api.server.settleIssueBeforeClose",
+	"api.server.sweepClosedIssueAsks",
+}
+
 // TestCopyLockComesBeforeEveryPendingRowAndEvent enforces the order the copy lock's deadlock
 // freedom rests on (docs.lockProjectCopies): no transaction takes a project's copy lock after it
 // has written a doc_settlements_pending row or appended an event. A holder of the copy lock goes
-// on to take other documents' pending rows and the events' commit-order lock, so a transaction
-// waiting on the copy lock while holding either could close a cycle with it.
+// on to take other documents' pending rows and to append events, each of which locks its event
+// owner's row (events.Broker.Append), so a transaction waiting on the copy lock while holding a
+// pending row, or an owner row an append of its own took, could close a cycle with it.
 //
 // It type-checks the Dispatch server's packages of this module from source, the packages they
 // import from their export data (go list -export), and finds each lock from the SQL that takes
@@ -77,7 +89,12 @@ var (
 // that took either; a statement is ordered only through a function of its own, as
 // markSettlementPending, clearSettlementPending, lockProjectCopies and events.Broker.Append each
 // run theirs. Nor does it tell transactions apart, so a function that commits one transaction and
-// takes the copy lock in the next reads as one; none does.
+// takes the copy lock in the next reads as one, except across a call of a function
+// ownTransactionFunctions lists: that function runs in a transaction of its own and commits it, so
+// what it takes does not order its caller's later calls. Its own body is checked as every other is,
+// and a call of it that takes the copy lock is still refused after its caller took a pending row or
+// appended an event, whose transaction can still be open while it waits. The guard fails when a
+// listed name no longer names a function, so a rename cannot drop it from the list unseen.
 // TestCopyLockOrderGuardFollowsTheLockTakers holds the resolution to the chains this rule is about,
 // so the check cannot pass by losing them.
 func TestCopyLockComesBeforeEveryPendingRowAndEvent(t *testing.T) {
@@ -156,11 +173,16 @@ type lockFunction struct {
 	source moduleSource
 	seeds  lockEffect
 	reach  lockEffect
+	// ownTransaction marks a function ownTransactionFunctions lists.
+	ownTransaction bool
 }
 
 type lockGraph struct {
-	root      string
-	info      *types.Info
+	root string
+	info *types.Info
+	// constants is the module's string constants (stringConstants), which a statement's SQL is
+	// read through.
+	constants map[string]string
 	functions []*lockFunction
 	named     map[string]*lockFunction
 	declared  map[*types.Func]*lockFunction
@@ -295,6 +317,7 @@ func buildCopyLockGraph() (*lockGraph, error) {
 	graph := &lockGraph{
 		root:            root,
 		info:            modules.info,
+		constants:       constants,
 		named:           map[string]*lockFunction{},
 		declared:        map[*types.Func]*lockFunction{},
 		literals:        map[*ast.FuncLit]*lockFunction{},
@@ -314,6 +337,13 @@ func buildCopyLockGraph() (*lockGraph, error) {
 	}
 	for _, source := range modules.sources {
 		graph.addFile(source)
+	}
+	for _, name := range ownTransactionFunctions {
+		fn := graph.named[name]
+		if fn == nil {
+			return nil, fmt.Errorf("%s, which ownTransactionFunctions lists as running in a transaction of its own, is gone: point the list at its replacement", name)
+		}
+		fn.ownTransaction = true
 	}
 	for _, source := range modules.sources {
 		graph.addStored(source)
@@ -792,16 +822,21 @@ func (c *orderCheck) evaluate(node ast.Node) {
 }
 
 func (c *orderCheck) call(call *ast.CallExpr) {
-	var effect lockEffect
+	// held leaves out what a function running in a transaction of its own takes: that
+	// transaction has committed once the call returns.
+	var effect, held lockEffect
 	for _, callee := range c.graph.callees(call) {
 		effect |= callee.reach
+		if !callee.ownTransaction {
+			held |= callee.reach
+		}
 	}
 	callee := types.ExprString(call.Fun)
 	if effect&takesCopyLock != 0 && c.now.effect&(takesPendingRow|appendsEvent) != 0 {
 		c.offences = append(c.offences, fmt.Sprintf("%s: %s calls %s, which takes the copy lock, after %s",
 			c.graph.line(c.fn.source, call), c.fn.name, callee, c.now.first))
 	}
-	if held := effect &^ takesCopyLock; held != 0 {
+	if held &^= takesCopyLock; held != 0 {
 		if c.now.first == "" {
 			c.now.first = fmt.Sprintf("%s, which takes %s (%s)", callee, held, c.graph.line(c.fn.source, call))
 		}

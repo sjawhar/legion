@@ -16,6 +16,13 @@ what the human decides, each as a [decision block](skill://dispatch/SKILL.md#ask
 Never post a second "spec" artifact beside it: `dispatch artifact` with the primary document's name
 replaces the human's document.
 
+On your first pass over the spec, cut each requirement carried over from an earlier issue's spec or
+decisions that no source of this issue states: those were decided for that issue. This issue's
+sources are the words a person wrote in it, and its `Filed for` line with what that line cites: the
+answer, Slack message or direct message of a `Filed for <person> at their request:` line, or the
+evidence of a controller's `Filed for Legion from <role> on <issue>:` line
+([The `Filed for` line](skill://legion-controller/references/finding-asks.md#the-filed-for-line)).
+
 ## Which gate runs
 
 The approval step runs only when the `Design gate policy` sentence of your `Legion addressing` line
@@ -51,12 +58,13 @@ When the gate is armed, run this exact sequence before the tree's work starts:
    them to answer: give such a point its own decision block first, or take it out of the spec.
 
    ```bash
-   dispatch request-approval --issue <root issue> --summary '<what the human is approving> Reviews: <gap result>, <claim result>.'
+   dispatch request-approval --issue <root issue> --summary '<what the human is approving> Reviews: <gap result>, <claim result>; <what they do not show>.'
    ```
 
    `--summary` says in one to three sentences what the human is approving and nothing else (no
-   commentary and no open question), then one sentence with both reviews' results, for example
-   `Reviews: no open gap, 14 of 14 claims verified.` The primary document is the default; the
+   commentary and no open question), then one sentence with both reviews' results and what they do
+   not show, for example `Reviews: no open gap, 14 of 14 claims verified; neither shows that the
+   design works once built.` The primary document is the default; the
    command prints `Approval requested for spec.md (document id <UUID>) at version <N> (ask <id>)`.
 5. Register that document version with the daemon:
 
@@ -95,9 +103,17 @@ Facts about the request:
   never wrote is no registration: the gate is as it was. Read the document's latest version, check
   it is the spec the human is asked to approve, and `register_gate` that version.
 
-Then end your turn. Release no wave until a delivered wake shows `design-approved` on the root. On
-`design-changes-requested`: revise the spec as the human's reason asks, run step 3's two reviews on
-the new version, resolve every finding, request approval again and end your turn. A
+Then end your turn. The registration hands the spec to the human: when nothing else holds the
+slot, the root returns its admission slot and waits on its design gate (`awaiting_person`), as a
+root question handed to the human does ("Every turn" in `skill://legion-architect/SKILL.md`). Stay
+live to read the human's comments and replies. Their approval or changes request delivers your next
+task, and so does a newer spec version once Dispatch shows the request back on your turn. While the
+root waits on a question instead, the human's approval or changes request of the spec answers that
+wait too, and the task says how the spec stands. Release no wave until a delivered wake shows
+`design-approved` on the root, or a task says its design gate is open: the daemon sends a root
+waiting on a person no `design-approved` notice, and "this resume is your design-approved wake" is
+that wake. On `design-changes-requested`: revise the spec as the human's reason asks, run step 3's
+two reviews on the new version, resolve every finding, request approval again and end your turn. A
 `design-changes-requested` may name a version below the latest, or arrive after another for the
 same version: it is a request the human made that reached the daemon late, and no approval came
 after it. Each request arrives once. The gate is as the newest review left it; still read the

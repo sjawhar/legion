@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
@@ -14,6 +14,7 @@ import {
   settingsMonoInput,
   settingsSubmitButton,
 } from "../settings/classes";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 /** The characters that separate the entries of a list field, as a character class's body: line
  *  breaks, and commas or spaces too, since neither a GitHub login nor an `owner/repo` can hold
@@ -154,8 +155,11 @@ function DeliverySettingsFields({ record }: { record: DeliverySettings | null })
     staging_apply_job_name: record?.staging_apply_job_name ?? "",
     staging_e2e_job_name: record?.staging_e2e_job_name ?? "",
   }));
-  const save = useMutation({
-    mutationFn: (input: DeliverySettingsInput) => api.putDeliverySettings(input),
+  // The form shows its own refusal, under the fields it was refused over.
+  const save = useKeyedWrite({
+    write: (input: DeliverySettingsInput, bounds) => api.putDeliverySettings(input, bounds),
+    inline: true,
+    label: () => "Delivery settings saved",
     onSettled: () => submitGuard.release(),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: deliverySettingsQuery().queryKey });

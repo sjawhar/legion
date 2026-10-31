@@ -198,9 +198,11 @@ function inertLinks(root: HTMLElement): Map<HTMLElement, HTMLElement> {
  * heading, a list, a second paragraph) collapses onto one run of inline content as
  * `MarkdownBody`'s `inline` variant does. The clamp is CSS on the rendered element, after the
  * parse, so a cut never leaves half a mark: the reader sees `**held**` as bold "held" cut by
- * an ellipsis where it overflows, never a stray `**`. The source itself is never truncated
- * before the parse, which would do exactly that. A Dispatch picture shows as its thumbnail beside
- * its caption (`DispatchPicture`'s `inline`), as `MarkdownBody`'s `inline` variant shows it.
+ * an ellipsis where it overflows, never a stray `**`. MarkdownPreview never truncates its source
+ * before the parse, which would do exactly that; a caller that cuts one first balances the cut,
+ * as the palette's ask hit does with `markdownHead` (`markdown-fragment.ts`) to hold a long
+ * answer to its start. A Dispatch picture shows as its thumbnail beside its caption
+ * (`DispatchPicture`'s `inline`), as `MarkdownBody`'s `inline` variant shows it.
  *
  * Every surface a preview sits in is one control already, so its links and references read as
  * links but are not ones (`inertLinks`): the host is what a click follows. A host whose own

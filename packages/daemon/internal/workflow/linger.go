@@ -44,6 +44,9 @@ import (
 // them.
 func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, status string) error {
 	e.logOnCommit(ctx, "workflow: issue left the workflow", "issue", issue.Key, "tree", issue.Tree, "status", status)
+	if err := e.untellUnresumedChanges(ctx, tx, issue); err != nil {
+		return err
+	}
 	if claim.IsTreeRoot(issue.Key, issue.Tree) {
 		if issue.Lingers() {
 			return nil
@@ -144,7 +147,7 @@ func (e *Engine) operatorHoldsTree(ctx context.Context, tx pgx.Tx, root record.I
 func (e *Engine) leaveUnderOperator(ctx context.Context, tx pgx.Tx, root record.Issue, status string) error {
 	e.logOnCommit(ctx, "workflow: a waiting root left the workflow while the operator runs a tree under its key; the operator's tree is left alone",
 		"issue", root.Key, "tree", root.Tree, "status", status)
-	root.Phase, root.Hold, root.ReadyPendingVersion = phase.Done, nil, nil
+	root.Phase, root.Hold, root.Awaiting, root.ReadyPendingVersion = phase.Done, nil, nil, nil
 	return e.store.PutIssue(ctx, tx, root)
 }
 
@@ -216,7 +219,7 @@ func InWorkflow(issue record.Issue) bool {
 func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) error {
 	until := e.lingerAt()
 	root.LingerUntil = &until
-	root.Phase, root.Hold = phase.Done, nil
+	root.Phase, root.Hold, root.Awaiting = phase.Done, nil, nil
 	if err := e.store.PutIssue(ctx, tx, root); err != nil {
 		return err
 	}
@@ -256,28 +259,30 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 // is handed over, so that a child whose blockers outlive its tree is not parked for good but comes
 // back as a root of its own once they close. A never-gated child of a finishing tree, which waits
 // on nothing, would instead take an admission slot for work its tree's design never opened. The
-// mirror is loaded by the first member that reaches that exception and then read for the rest
-// (blockers.Load), so the ordinary finishing tree — whose members all left admitted long ago —
-// loads nothing: record.Issue.CarriesRun is false at phase.Admitted, so the new root carries no
-// run, and its re-admission is another tree's work arriving rather than its own coming back, so
-// it is no tree taken back either — it is checked, which is what the blocked-root rule reads when
-// the child comes up for admission (blockers.Exempt).
+// mirror rows of the admitted members are loaded once, before any is judged (blockers.Load), so
+// the ordinary finishing tree — whose members all left admitted long ago — loads nothing:
+// record.Issue.CarriesRun is false at phase.Admitted, so the new root carries no run, and its
+// re-admission is another tree's work arriving rather than its own coming back, so it is no tree
+// taken back either — it is checked, which is what the blocked-root rule reads when the child comes
+// up for admission (blockers.Exempt).
 func (e *Engine) settleUnfinished(ctx context.Context, tx pgx.Tx, root record.Issue, members []record.Issue) error {
-	var rows map[string]blockers.Row
+	var unfinished, admitted []record.Issue
 	for _, member := range members {
 		if member.Key == root.Key || record.OutOfWorkflow(member.Status) {
 			continue
 		}
+		unfinished = append(unfinished, member)
 		if member.Phase == phase.Admitted {
-			if rows == nil {
-				var err error
-				if rows, err = blockers.Load(ctx, tx, e.store, e.cfg.Project); err != nil {
-					return err
-				}
-			}
-			if len(blockers.Holds(rows, member)) == 0 {
-				continue
-			}
+			admitted = append(admitted, member)
+		}
+	}
+	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project, blockers.Judged(admitted, nil))
+	if err != nil {
+		return err
+	}
+	for _, member := range unfinished {
+		if member.Phase == phase.Admitted && len(blockers.Holds(rows, member)) == 0 {
+			continue
 		}
 		if err := e.handOver(ctx, tx, root, member); err != nil {
 			return err
@@ -336,7 +341,7 @@ func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.Linge
 				return intake.Result{}, err
 			}
 		}
-		if err := e.enqueue(ctx, tx, member.Key, record.WorkspaceRemove{Linger: issue.Generation}); err != nil {
+		if err := e.enqueue(ctx, tx, member.Key, record.WorkspaceRemove{Linger: issue.Generation, Tree: member.Tree}); err != nil {
 			return intake.Result{}, err
 		}
 	}

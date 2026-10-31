@@ -12,6 +12,7 @@ import {
 } from "../../theme/classes";
 import type { ComposerAnchor, ComposerKind, ComposerOwner } from "../conversation/composer-model";
 import { MentionComposer } from "../conversation/MentionComposer";
+import type { SaveCommentEdit } from "../conversation/send-request";
 import { AskCard } from "../inbox/AskCard";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
 import { marginComposeSendKey } from "./margin-context";
@@ -52,7 +53,7 @@ interface CommentsTabProps {
   markPlacements: ReadonlyMap<string, MarkPlacement>;
   needsYou: Ask[];
   onAction: (id: string, action: MarginItemAction) => void;
-  onEdit: (id: string, body: string) => Promise<unknown>;
+  onEdit: SaveCommentEdit;
   onRetryAction: () => void;
   onRetryAnsweredAsk: (() => void) | undefined;
   onRetryComments: () => void;
@@ -61,7 +62,7 @@ interface CommentsTabProps {
   onToggleResolved: () => void;
   pendingActionIds: ReadonlySet<string>;
   resolvedThreads: Thread[];
-  retractedAskCount: number;
+  foldedAskCount: number;
   selectedItemId: string | undefined;
   showResolved: boolean;
   threads: Thread[];
@@ -187,7 +188,7 @@ export function CommentsTab({
   onToggleThread,
   pendingActionIds,
   resolvedThreads,
-  retractedAskCount,
+  foldedAskCount,
   selectedItemId,
   showResolved,
   threads,
@@ -267,7 +268,7 @@ export function CommentsTab({
               pendingActionIds={pendingActionIds}
               resolvedThreads={resolvedThreads}
               selectedItemId={selectedItemId}
-              retractedAskCount={retractedAskCount}
+              foldedAskCount={foldedAskCount}
               showResolved={showResolved}
               owner={owner}
               threads={threads}

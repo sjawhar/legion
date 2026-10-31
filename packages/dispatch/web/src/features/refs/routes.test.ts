@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 
+import { artifactVersionPath } from "../../api/client";
+import type { DispatchReferenceRoute } from "./routes";
 import {
   buildDispatchReference,
   buildInboxPath,
@@ -10,18 +12,20 @@ import {
   documentRoute,
   issueTabForRoute,
   itemRoute,
+  nodeRouteFromHref,
   parseAgentArtifactPath,
   parseDispatchReference,
   parseInboxSearch,
   parseIssuePath,
+  parseNodeReference,
   parseProjectPath,
   pictureReference,
   referenceRouteFromHref,
-  referenceTargetKind,
   routeHasMargin,
   routeProjectOf,
   shortForm,
 } from "./routes";
+import { referenceTargetKind } from "./target-id";
 
 function browserPath(path: string): string {
   const url = new URL(path, "https://dispatch.test/");
@@ -36,6 +40,58 @@ test("artifact references normalize to the plural browser route", () => {
     throw new Error("artifact reference did not parse as an artifact route");
   }
   expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/artifacts/design?v=3"));
+});
+
+// The target bound holds text alone: a long-named document's reference is no citation in text,
+// but the graph returns it as a node's own reference, and the dashboard opens and previews that
+// node by it, a block of it too.
+test("a long-named document's own reference is its node, though text past the bound cites nothing", () => {
+  const slug = "a".repeat(2683);
+  const document = `dispatch://CORE-1/artifact/${slug}`;
+  expect(parseDispatchReference(document)).toBeUndefined();
+  expect(parseNodeReference(document)).toEqual({ key: "CORE-1", kind: "artifact", slug });
+  expect(parseNodeReference(`${document}#b-p1`)).toEqual({
+    block: { id: "p1" },
+    key: "CORE-1",
+    kind: "artifact",
+    slug,
+  });
+  // A search hit or a copied-from link the server returned is read the same way, its page too.
+  const origin = "https://dispatch.test";
+  const page = `/issues/CORE-1/artifacts/${slug}`;
+  expect(referenceRouteFromHref(page, origin)).toBeUndefined();
+  expect(nodeRouteFromHref(page, origin)).toEqual({ key: "CORE-1", kind: "artifact", slug });
+  expect(nodeRouteFromHref(`${page}#b-p1`, origin)).toEqual({
+    block: { id: "p1" },
+    key: "CORE-1",
+    kind: "artifact",
+    slug,
+  });
+  expect(nodeRouteFromHref(document, origin)).toEqual({ key: "CORE-1", kind: "artifact", slug });
+});
+
+// A block id past the 256 bytes the graph keys a block by, counted in UTF-8 bytes (`é` is two),
+// is cited by no text: the reference names nothing and its page is the document. The server's
+// own reference to such a block, and its page, still name the block.
+test("a block id past the bound is no citation in text, but the server's reference reads it", () => {
+  const origin = "https://dispatch.test";
+  const atBound = "é".repeat(128);
+  for (const [id, cited] of [
+    [atBound, true],
+    [`${atBound}a`, false],
+    [`${"a".repeat(3200)}é`, false],
+  ] as const) {
+    const block = { block: { id }, key: "CORE-1", kind: "spec" as const };
+    const reference = buildDispatchReference(block);
+    const page = buildReferencePath(block);
+    expect(parseDispatchReference(reference)).toEqual(cited ? block : undefined);
+    expect(referenceRouteFromHref(page, origin)).toEqual(
+      cited ? block : { key: "CORE-1", kind: "spec" }
+    );
+    expect(parseNodeReference(reference)).toEqual(block);
+    expect(parseNodeReference(`${reference}@v2`)).toEqual({ ...block, block: { id, pin: "2" } });
+    expect(nodeRouteFromHref(page, origin)).toEqual(block);
+  }
 });
 
 test("dispatch references reject plural artifact paths", () => {
@@ -78,6 +134,267 @@ test("an item's document path names the document it belongs to, never the issue'
   expect(documentItemPath(projectDocument, { id: "c3", kind: "comment" })).toBe(
     "/projects/CORE/documents/handbook-md?comment=c3"
   );
+});
+
+test("every block link writes its id as encodeBlockId does, so `_` is %5F", () => {
+  const notes = {
+    issue_key: "CORE-1",
+    kind: "doc" as const,
+    primary: false,
+    project: "CORE",
+    slug: "notes-md",
+  };
+  expect(documentItemPath(notes, { blockID: "ship_it", id: "a1", kind: "ask" })).toBe(
+    "/issues/CORE-1/artifacts/notes-md#b-ship%5Fit"
+  );
+  const block = { block: { id: "ship_it" }, key: "CORE-1", kind: "spec" as const };
+  expect(buildDispatchReference(block)).toBe("dispatch://CORE-1/spec#b-ship%5Fit");
+  expect(buildReferencePath(block)).toBe("/issues/CORE-1/spec#b-ship%5Fit");
+  // Read back with any percent-encoding, the reference and the page name the same block.
+  expect(parseDispatchReference("dispatch://CORE-1/spec#b-ship_it")).toEqual(block);
+  expect(
+    referenceRouteFromHref("/issues/CORE-1/spec#b-ship%5Fit", "https://dispatch.test")
+  ).toEqual(block);
+});
+
+test("a pinned block reference round-trips with its pin, and opens the version it pins", () => {
+  const pinned = parseDispatchReference("dispatch://CORE-1/artifact/notes-md#b-ship%5Fit@v2");
+  expect(pinned).toEqual({
+    block: { id: "ship_it", pin: "2" },
+    key: "CORE-1",
+    kind: "artifact",
+    slug: "notes-md",
+  });
+  if (pinned === undefined) throw new Error("the pinned reference did not parse");
+  expect(buildDispatchReference(pinned)).toBe("dispatch://CORE-1/artifact/notes-md#b-ship%5Fit@v2");
+  expect(referenceTargetKind(pinned)).toBe("block");
+  expect(shortForm(pinned)).toBe("CORE-1 notes-md block v2");
+  // A version's stored text holds no block ids, so a pinned block opens the version itself.
+  expect(buildReferencePath(pinned)).toBe("/issues/CORE-1/artifacts/notes-md?v=2");
+
+  const document = parseDispatchReference("dispatch://CORE/artifact/handbook-md#b-p1@v7");
+  if (document === undefined) throw new Error("the pinned project reference did not parse");
+  expect(buildDispatchReference(document)).toBe("dispatch://CORE/artifact/handbook-md#b-p1@v7");
+  expect(buildReferencePath(document)).toBe("/projects/CORE/documents/handbook-md?version=7");
+
+  // A spec keeps its versions under its own slug: with it, the version; without it, the live spec
+  // at the block.
+  const spec = parseDispatchReference("dispatch://CORE-1/spec#b-p1@v3");
+  if (spec === undefined) throw new Error("the pinned spec reference did not parse");
+  expect(buildDispatchReference(spec)).toBe("dispatch://CORE-1/spec#b-p1@v3");
+  expect(buildReferencePath(spec, "core-1-md")).toBe("/issues/CORE-1/artifacts/core-1-md?v=3");
+  expect(buildReferencePath(spec)).toBe("/issues/CORE-1/spec#b-p1");
+
+  // Unpinned, a block opens the live document at the block.
+  const live = parseDispatchReference("dispatch://CORE-1/spec#b-p1");
+  if (live === undefined) throw new Error("the block reference did not parse");
+  expect(buildReferencePath(live, "core-1-md")).toBe("/issues/CORE-1/spec#b-p1");
+  expect(referenceTargetKind(live)).toBe("block");
+});
+
+test("a pin past what a number holds exactly is written back digit for digit, as the server reads it", () => {
+  // 2^63 - 1, the largest pin the server's Go `int` holds; as a number it would print 2^63.
+  const reference = "dispatch://CORE-1/spec#b-p1@v9223372036854775807";
+  const pinned = parseDispatchReference(reference);
+  if (pinned === undefined) throw new Error("the largest pin did not parse");
+  expect(buildDispatchReference(pinned)).toBe(reference);
+  expect(shortForm(pinned)).toBe("CORE-1 spec block v9223372036854775807");
+  expect(buildReferencePath(pinned, "core-1-md")).toBe(
+    "/issues/CORE-1/artifacts/core-1-md?v=9223372036854775807"
+  );
+  const document = parseDispatchReference(
+    "dispatch://CORE/artifact/handbook-md#b-p1@v9223372036854775807"
+  );
+  if (document === undefined) throw new Error("the largest project pin did not parse");
+  expect(buildReferencePath(document)).toBe(
+    "/projects/CORE/documents/handbook-md?version=9223372036854775807"
+  );
+  // One more names nothing, nor does a pin a number would print as `1e+21`.
+  expect(
+    parseDispatchReference("dispatch://CORE-1/spec#b-p1@v9223372036854775808")
+  ).toBeUndefined();
+  expect(
+    parseDispatchReference("dispatch://CORE-1/spec#b-p1@v1000000000000000000000")
+  ).toBeUndefined();
+});
+
+test("a block names nothing on a versioned document, an ask, an issue or a malformed pin", () => {
+  for (const reference of [
+    "dispatch://CORE-1/artifact/notes-md@v2#b-p1",
+    "dispatch://CORE/artifact/handbook-md/ask/a1#b-p1",
+    "dispatch://CORE-1#b-p1",
+    "dispatch://CORE-1/ask/a1#b-p1",
+    "dispatch://CORE-1/spec#b-p1@v",
+    "dispatch://CORE-1/spec#b-p1@v0",
+    "dispatch://CORE-1/spec#b-p1@v01",
+    "dispatch://CORE-1/spec#b-a@b",
+    "dispatch://CORE-1/spec#b-",
+  ]) {
+    expect(parseDispatchReference(reference)).toBeUndefined();
+  }
+  // A page's raw `@` is no pin, and a version page or an item page is the page whatever its
+  // fragment.
+  const origin = "https://dispatch.test";
+  expect(referenceRouteFromHref("/issues/CORE-1/spec#b-p1@v2", origin)).toEqual({
+    key: "CORE-1",
+    kind: "spec",
+  });
+  expect(referenceRouteFromHref("/issues/CORE-1/artifacts/notes-md?v=2#b-p1", origin)).toEqual({
+    key: "CORE-1",
+    kind: "artifact",
+    slug: "notes-md",
+    version: 2,
+  });
+  expect(referenceRouteFromHref("/issues/CORE-1/spec?comment=c1#b-p1", origin)).toEqual({
+    id: "c1",
+    key: "CORE-1",
+    kind: "comment",
+  });
+  expect(referenceRouteFromHref("/issues/CORE-1/spec?ask=a1#b-p1", origin)).toEqual({
+    id: "a1",
+    key: "CORE-1",
+    kind: "ask",
+  });
+  expect(referenceRouteFromHref("/issues/CORE-1/asks/a1#b-p1", origin)).toEqual({
+    id: "a1",
+    key: "CORE-1",
+    kind: "ask",
+  });
+  // A version of the spec is the spec's artifact at that version, as the server and `dispatch
+  // read` read the page, and names no block; a malformed version is the spec, with no block.
+  for (const read of [referenceRouteFromHref, nodeRouteFromHref]) {
+    expect(read("/issues/CORE-1/spec?v=2#b-p1", origin)).toEqual({
+      key: "CORE-1",
+      kind: "artifact",
+      slug: "spec",
+      version: 2,
+    });
+    expect(read("/issues/CORE-1/spec?v=x#b-p1", origin)).toEqual({ key: "CORE-1", kind: "spec" });
+  }
+});
+
+// A block of a comment or an issue message is named under its item, by a `dispatch://` reference
+// or the issue item's page, and its target id is `<item kind>/<item id>#<block id>`: a comment
+// block can be pinned to a revision of its comment, and opens the live comment at the block; a
+// message never changes, so a pinned message block names nothing. A document page's `#b-` names a
+// block of the document, so a `?comment=` page names the comment whatever its fragment, and a
+// project document's comment block opens its comment with no fragment.
+test("a block of a comment or a message is named under its item, as the server reads it", () => {
+  const origin = "https://dispatch.test";
+  const comment = "11111111-1111-4111-8111-111111111111";
+  const message = "33333333-3333-4333-8333-333333333333";
+  const commentBlock: DispatchReferenceRoute = {
+    block: { id: "b2" },
+    id: comment,
+    key: "CORE-1",
+    kind: "comment",
+  };
+  const commentReference = `dispatch://CORE-1/comment/${comment}#b-b2`;
+  expect(parseDispatchReference(commentReference)).toEqual(commentBlock);
+  expect(referenceRouteFromHref(`/issues/CORE-1/comments/${comment}#b-b2`, origin)).toEqual(
+    commentBlock
+  );
+  // A document page's `?comment=` names the comment, never its block, at any version of the
+  // document: the dashboard writes a document block's fragment there.
+  for (const read of [referenceRouteFromHref, nodeRouteFromHref]) {
+    expect(read(`/issues/CORE-1/spec?v=2&comment=${comment}#b-b2`, origin)).toEqual({
+      id: comment,
+      key: "CORE-1",
+      kind: "comment",
+    });
+  }
+  expect(buildDispatchReference(commentBlock)).toBe(commentReference);
+  expect(buildReferencePath(commentBlock)).toBe(`/issues/CORE-1/comments/${comment}#b-b2`);
+  expect(referenceTargetKind(commentBlock)).toBe("block");
+  expect(shortForm(commentBlock)).toBe("CORE-1 comment block");
+
+  const pinned = parseDispatchReference(`${commentReference}@v1`);
+  expect(pinned).toEqual({ ...commentBlock, block: { id: "b2", pin: "1" } });
+  if (pinned === undefined) throw new Error("the pinned comment block did not parse");
+  expect(buildDispatchReference(pinned)).toBe(`${commentReference}@v1`);
+  expect(buildReferencePath(pinned)).toBe(`/issues/CORE-1/comments/${comment}#b-b2`);
+  expect(shortForm(pinned)).toBe("CORE-1 comment block v1");
+
+  const messageBlock: DispatchReferenceRoute = {
+    block: { id: "b2" },
+    id: message,
+    key: "CORE-1",
+    kind: "message",
+  };
+  const messageReference = `dispatch://CORE-1/message/${message}#b-b2`;
+  expect(parseDispatchReference(messageReference)).toEqual(messageBlock);
+  expect(referenceRouteFromHref(`/issues/CORE-1/messages/${message}#b-b2`, origin)).toEqual(
+    messageBlock
+  );
+  expect(buildReferencePath(messageBlock)).toBe(`/issues/CORE-1/messages/${message}#b-b2`);
+  expect(parseDispatchReference(`${messageReference}@v1`)).toBeUndefined();
+  expect(parseNodeReference(`${messageReference}@v1`)).toBeUndefined();
+
+  const projectBlock: DispatchReferenceRoute = {
+    block: { id: "b2" },
+    item: { id: comment, kind: "comment" },
+    kind: "document",
+    project: "CORE",
+    slug: "handbook-md",
+  };
+  const projectReference = `dispatch://CORE/artifact/handbook-md/comment/${comment}#b-b2`;
+  expect(parseDispatchReference(projectReference)).toEqual(projectBlock);
+  expect(parseDispatchReference(`${projectReference}@v3`)).toEqual({
+    ...projectBlock,
+    block: { id: "b2", pin: "3" },
+  });
+  const projectComment: DispatchReferenceRoute = {
+    item: { id: comment, kind: "comment" },
+    kind: "document",
+    project: "CORE",
+    slug: "handbook-md",
+  };
+  for (const read of [referenceRouteFromHref, nodeRouteFromHref]) {
+    expect(read(`/projects/CORE/documents/handbook-md?comment=${comment}#b-b2`, origin)).toEqual(
+      projectComment
+    );
+    expect(
+      read(`/projects/CORE/documents/handbook-md?version=3&comment=${comment}#b-b2`, origin)
+    ).toEqual({ ...projectComment, version: 3 });
+  }
+  // Its link opens the comment on its document's page, with no fragment that would name a block
+  // of the document; a pinned one opens the live comment too.
+  expect(buildReferencePath(projectBlock)).toBe(
+    `/projects/CORE/documents/handbook-md?comment=${comment}`
+  );
+  const projectPinned = parseDispatchReference(`${projectReference}@v3`);
+  if (projectPinned === undefined)
+    throw new Error("the pinned project comment block did not parse");
+  expect(buildReferencePath(projectPinned)).toBe(
+    `/projects/CORE/documents/handbook-md?comment=${comment}`
+  );
+  expect(shortForm(projectBlock)).toBe("CORE/handbook-md comment block");
+  // No block of a versioned document's comment reference, nor of a project document's message.
+  expect(
+    parseDispatchReference(`dispatch://CORE/artifact/handbook-md@v3/comment/${comment}#b-b2`)
+  ).toBeUndefined();
+  expect(
+    parseDispatchReference(`dispatch://CORE/artifact/handbook-md/message/${message}#b-b2`)
+  ).toBeUndefined();
+
+  // A block id past the bound is cited by no text: the comment's page names the comment.
+  const long = "a".repeat(257);
+  expect(parseDispatchReference(`dispatch://CORE-1/comment/${comment}#b-${long}`)).toBeUndefined();
+  expect(referenceRouteFromHref(`/issues/CORE-1/comments/${comment}#b-${long}`, origin)).toEqual({
+    id: comment,
+    key: "CORE-1",
+    kind: "comment",
+  });
+  expect(nodeRouteFromHref(`/issues/CORE-1/comments/${comment}#b-${long}`, origin)).toEqual({
+    ...commentBlock,
+    block: { id: long },
+  });
+  // A page's raw `@` is no pin: the page names the comment.
+  expect(referenceRouteFromHref(`/issues/CORE-1/comments/${comment}#b-b2@v1`, origin)).toEqual({
+    id: comment,
+    key: "CORE-1",
+    kind: "comment",
+  });
 });
 
 test("artifact route parser accepts the plural and singular browser paths", () => {
@@ -417,6 +734,36 @@ test("a picture is a Dispatch reference only when its source parses as one, capt
     ...pinned,
     caption: "shot-png",
   });
+});
+
+// An author names a picture's source and a link's target explicitly, and drawing or opening the
+// node is a read, so a document whose name is past the bound text is held to (2683 characters,
+// which a new upload's reference key still holds) is drawn from its version's bytes and linked to
+// its page all the same, though the same string as bare text cites nothing.
+test("a picture and an explicit link naming a long-named document are that document", () => {
+  const slug = "a".repeat(2683);
+  const source = `dispatch://CORE-1/artifact/${slug}@v1`;
+  const picture = pictureReference({ alt: "shot", src: source });
+  expect(picture).toEqual({
+    caption: "shot",
+    named: { owner: { issue: "CORE-1" }, slug, version: 1 },
+    route: { key: "CORE-1", kind: "artifact", slug, version: 1 },
+    source,
+  });
+  const named = picture?.named;
+  expect(
+    named?.version === undefined
+      ? undefined
+      : artifactVersionPath(named.owner, named.slug, named.version)
+  ).toBe(`/api/v1/issues/CORE-1/artifacts/${slug}/versions/1`);
+
+  const target = `dispatch://CORE-1/artifact/${slug}`;
+  expect(parseDispatchReference(target)).toBeUndefined();
+  const link = nodeRouteFromHref(target, "https://dispatch.test");
+  expect(link).toEqual({ key: "CORE-1", kind: "artifact", slug });
+  expect(link === undefined ? undefined : buildReferencePath(link)).toBe(
+    `/issues/CORE-1/artifacts/${slug}`
+  );
 });
 
 test("a dashed key is never a project route and a bare project is never an issue route", () => {

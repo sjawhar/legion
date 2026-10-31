@@ -56,8 +56,8 @@ func referenceExcerptHandler(t *testing.T) (http.Handler, *store.Store, *docs.Se
 }
 
 // renderedMentionExcerpt is the excerpt the references route cut before it stored one: the
-// document the caller sees rendered with its blocks, and the first block, in their order, whose
-// byte range holds the mention.
+// document the caller sees rendered with its blocks, and the innermost block, the one with the
+// tightest byte range, that holds the mention.
 func renderedMentionExcerpt(t *testing.T, service *docs.Service, artifactID, reference string) model.GraphExcerpt {
 	t.Helper()
 	markdown, blocks, err := service.TextWithBlocks(context.Background(), artifactID)
@@ -68,19 +68,25 @@ func renderedMentionExcerpt(t *testing.T, service *docs.Service, artifactID, ref
 	if offset < 0 {
 		t.Fatalf("%s does not hold %s:\n%s", artifactID, reference, markdown)
 	}
-	for _, block := range blocks {
-		if block.From <= offset && offset < block.To {
-			return model.GraphExcerpt{BlockID: block.ID, Text: text.HeadRunes(markdown[block.From:block.To], refs.BlockExcerptRunes)}
+	holder := -1
+	for index, block := range blocks {
+		if block.From <= offset && offset < block.To && (holder < 0 || block.To-block.From <= blocks[holder].To-blocks[holder].From) {
+			holder = index
 		}
 	}
-	t.Fatalf("no block of %s holds %s at %d: %#v", artifactID, reference, offset, blocks)
-	return model.GraphExcerpt{}
+	if holder < 0 {
+		t.Fatalf("no block of %s holds %s at %d: %#v", artifactID, reference, offset, blocks)
+	}
+	block := blocks[holder]
+	return model.GraphExcerpt{BlockID: block.ID, Text: text.HeadRunes(markdown[block.From:block.To], refs.BlockExcerptRunes)}
 }
 
-func documentMention(t *testing.T, handler http.Handler, reference, artifactID string) model.GraphEdge {
+// documentMention is the mention of reference written by the document artifactID, whose ref_key
+// is refKey: listed from the document itself, or from the block of it that holds the mention.
+func documentMention(t *testing.T, handler http.Handler, reference, artifactID, refKey string) model.GraphEdge {
 	t.Helper()
 	for _, edge := range graphEdges(t, handler, url.Values{"to": {reference}, "kind": {"mentions"}}).Edges {
-		if edge.Node.Kind == "artifact" && edge.Node.ID == artifactID {
+		if edge.Node.Kind == "artifact" && edge.Node.ID == artifactID || edge.Node.Kind == "block" && strings.HasPrefix(edge.Node.ID, refKey+"#") {
 			return edge
 		}
 	}
@@ -104,7 +110,7 @@ func TestReferencesServeTheStoredExcerptWithoutReadingTheDocument(t *testing.T) 
 	}
 
 	counted.reads.Store(0)
-	mention := documentMention(t, handler, reference, design.ID)
+	mention := documentMention(t, handler, reference, design.ID, design.RefKey)
 	if reads := counted.reads.Load(); reads != 0 {
 		t.Fatalf("the references route read a document %d times; want none, the excerpt is stored", reads)
 	}
@@ -131,13 +137,14 @@ func TestAnIndexedExcerptIsTheBlockTheRouteServedForEachBlockKind(t *testing.T) 
 	if response.Code != http.StatusCreated {
 		t.Fatalf("create issue with spec: status=%d body=%s", response.Code, response.Body.String())
 	}
-	citing := decodeBody[model.Issue](t, response).PrimaryArtifactID
+	issue := decodeBody[model.Issue](t, response)
+	citing, citingKey := issue.PrimaryArtifactID, issue.Key+"/spec"
 	assertExcerpts := func(stage string) {
 		t.Helper()
 		for _, reference := range []string{heading, item, paragraph} {
 			want := renderedMentionExcerpt(t, service, citing, reference)
 			counted.reads.Store(0)
-			got := documentMention(t, handler, reference, citing).Excerpt
+			got := documentMention(t, handler, reference, citing, citingKey).Excerpt
 			if counted.reads.Load() != 0 {
 				t.Fatalf("%s: the references route read a document for %s", stage, reference)
 			}
@@ -157,14 +164,15 @@ func TestAnIndexedExcerptIsTheBlockTheRouteServedForEachBlockKind(t *testing.T) 
 		t.Fatalf("edit the spec: status=%d body=%s", edited.Code, edited.Body.String())
 	}
 	assertExcerpts("edited version")
-	if got := documentMention(t, handler, paragraph, citing).Excerpt; got == nil || !strings.Contains(got.Text, "tomorrow") {
+	if got := documentMention(t, handler, paragraph, citing, citingKey).Excerpt; got == nil || !strings.Contains(got.Text, "tomorrow") {
 		t.Fatalf("excerpt after the edit = %#v; want the edited paragraph", got)
 	}
 }
 
 // A mention indexed before excerpts were stored (every row migration 0092 found) holds none, so
 // the route answers it with the document's name until the reconciliation stores the excerpt the
-// rendered document gives it; once stored, a tick finds nothing to do.
+// rendered document gives it; once stored, a tick finds nothing to do. The document's blocks are
+// left unindexed, as the block index has not reached it, so the document's own mention is listed.
 func TestTheReconciliationStoresTheExcerptOfAMentionIndexedWithout(t *testing.T) {
 	handler, database, service, _ := referenceExcerptHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
@@ -172,18 +180,21 @@ func TestTheReconciliationStoresTheExcerptOfAMentionIndexedWithout(t *testing.T)
 	reference := "dispatch://" + createReferenceAPIIssue(t, handler, "CORE").Key
 	design := createProjectDocument(t, handler, "OPS", "Design notes", "# Design\n\n- See "+reference+" for the plan\n")
 	want := renderedMentionExcerpt(t, service, design.ID, reference)
+	if _, err := database.Pool.Exec(context.Background(), `delete from block_refs where artifact_id = $1`, design.ID); err != nil {
+		t.Fatalf("leave the document's blocks unindexed: %v", err)
+	}
 	if _, err := database.Pool.Exec(context.Background(),
 		`update refs set excerpt_block_id = null, excerpt_text = null, excerpt_version = null where from_id = $1`, design.ID); err != nil {
 		t.Fatalf("clear the stored excerpts: %v", err)
 	}
-	if got := documentMention(t, handler, reference, design.ID).Excerpt; got == nil || got.BlockID != "" || got.Text != "Design notes" {
+	if got := documentMention(t, handler, reference, design.ID, design.RefKey).Excerpt; got == nil || got.BlockID != "" || got.Text != "Design notes" {
 		t.Fatalf("excerpt with none stored = %#v; want the document's name", got)
 	}
 	documents, full, err := service.ReconcileReferenceExcerpts(context.Background())
 	if err != nil || documents < 1 || full {
 		t.Fatalf("reconcile = %d documents, full %v, err %v; want the document reconciled", documents, full, err)
 	}
-	if got := documentMention(t, handler, reference, design.ID).Excerpt; got == nil || *got != want {
+	if got := documentMention(t, handler, reference, design.ID, design.RefKey).Excerpt; got == nil || *got != want {
 		t.Fatalf("excerpt after the reconciliation = %#v; want %#v", got, want)
 	}
 	if documents, _, err := service.ReconcileReferenceExcerpts(context.Background()); err != nil || documents != 0 {
@@ -194,7 +205,8 @@ func TestTheReconciliationStoresTheExcerptOfAMentionIndexedWithout(t *testing.T)
 // A version written by the binary a deploy replaces stores no excerpt, so its mentions keep the
 // previous version's block until MarkStaleExcerpts marks them owed. The references route must not
 // serve that stale payload: it falls back to the document's name until the reconciliation records
-// the edited document's block.
+// the edited document's block. That older binary indexes no blocks either, so the document's own
+// mention is listed.
 func TestAnOwedEditedExcerptFallsBackToTheDocumentNameUntilReconciled(t *testing.T) {
 	handler, database, service, _ := referenceExcerptHandler(t)
 	ctx := context.Background()
@@ -203,7 +215,7 @@ func TestAnOwedEditedExcerptFallsBackToTheDocumentNameUntilReconciled(t *testing
 	reference := "dispatch://" + createReferenceAPIIssue(t, handler, "CORE").Key
 	design := createProjectDocument(t, handler, "OPS", "Design notes",
 		"# Design\n\nThe old plan is "+reference+".\n")
-	previous := documentMention(t, handler, reference, design.ID).Excerpt
+	previous := documentMention(t, handler, reference, design.ID, design.RefKey).Excerpt
 	if previous == nil || !strings.Contains(previous.Text, "old plan") {
 		t.Fatalf("excerpt before the edit = %#v; want the old plan", previous)
 	}
@@ -219,8 +231,11 @@ func TestAnOwedEditedExcerptFallsBackToTheDocumentNameUntilReconciled(t *testing
 	if !strings.Contains(want.Text, "new plan") {
 		t.Fatalf("rendered edited excerpt = %#v; want the new plan", want)
 	}
-	// The older binary wrote the edit's version without touching the excerpt columns, so the row
-	// still holds the version before it.
+	// The older binary indexes no blocks, and wrote the edit's version without touching the
+	// excerpt columns, so the row still holds the version before it.
+	if _, err := database.Pool.Exec(ctx, `delete from block_refs where artifact_id = $1`, design.ID); err != nil {
+		t.Fatalf("leave the edited document's blocks unindexed: %v", err)
+	}
 	if _, err := database.Pool.Exec(ctx, `
 		update refs set excerpt_block_id = $2, excerpt_text = $3, excerpt_version = excerpt_version - 1
 		where from_kind = 'artifact' and from_id = $1
@@ -230,14 +245,14 @@ func TestAnOwedEditedExcerptFallsBackToTheDocumentNameUntilReconciled(t *testing
 	if marked, err := refs.MarkStaleExcerpts(ctx, database.Pool); err != nil || marked != 1 {
 		t.Fatalf("mark stale excerpts = %d, %v; want the edited document's mention", marked, err)
 	}
-	if got := documentMention(t, handler, reference, design.ID).Excerpt; got == nil || got.BlockID != "" || got.Text != "Design notes" {
+	if got := documentMention(t, handler, reference, design.ID, design.RefKey).Excerpt; got == nil || got.BlockID != "" || got.Text != "Design notes" {
 		t.Fatalf("excerpt while owed = %#v; want the document's name", got)
 	}
 	documents, full, err := service.ReconcileReferenceExcerpts(ctx)
 	if err != nil || documents < 1 || full {
 		t.Fatalf("reconcile = %d documents, full %v, err %v; want the edited document reconciled", documents, full, err)
 	}
-	if got := documentMention(t, handler, reference, design.ID).Excerpt; got == nil || *got != want {
+	if got := documentMention(t, handler, reference, design.ID, design.RefKey).Excerpt; got == nil || *got != want {
 		t.Fatalf("excerpt after reconciliation = %#v; want %#v", got, want)
 	}
 }
