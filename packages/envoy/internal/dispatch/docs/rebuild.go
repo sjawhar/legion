@@ -47,9 +47,9 @@ func historyScans(state []byte) (uint64, bool) {
 // nearACap reports whether doc, a document's decoded history or its live room, stands so near a
 // cap that it must be rebuilt, and why. Near the decode cap means a write's smallest replacement
 // would carry it past the cap: its struct total as a load decodes it (countRoomStructs) and
-// smallestReplacementAdds pass maxUpdateItems, so refuseUndecodable refuses every write that
-// changes the text, as it refuses the write of a document no room holds by the count of its fork,
-// a decode of the same history (leavesRoomPastDecodeCap). Near the scan total means a re-scan of
+// smallestReplacementAdds pass maxUpdateItems, so refuseUndecodable refuses every write that adds
+// a struct, as it refuses the write of a document no room holds by the count of its fork, a
+// decode of the same history (leavesRoomPastDecodeCap). Near the scan total means a re-scan of
 // its state (historyScans) scans at least roomScanTotal less honestHandoffScans items. Both tests
 // read the one encode of doc's state below, taken after its parked structs as countRoomStructs
 // takes them, so neither pays an encode of its own and both answer for the same state.
@@ -77,10 +77,14 @@ func nearACap(doc *crdt.Doc) (why string, near bool) {
 // refused unchanged, and one that is rebuilt keeps those edits, since what it is built from is its
 // own tree.
 //
-// A document near a cap cannot be trimmed by anyone: a write is refused, a browser's edit is
-// refused by the room's totals, and only a rebuild leaves it small. Supplied markdown does not
-// widen this: a history further from both caps is refused with or without it, and is trimmed by a
-// write.
+// A document near a cap cannot be grown by anyone: a write that adds a struct is refused, a
+// browser's edit is refused by the room's totals, and only a rebuild leaves it small. A write
+// that only deletes can land, since a delete range splits an item only where one of its ends
+// falls inside that item, so a range covering whole items splits none of them and adds no struct
+// (sjawhar/ygo v1.51.3-sami.7, crdt/yarray.go:827-844), and it leaves the state as large as it
+// was: the document's own text is what a trim shortens, not its history. Supplied markdown does
+// not widen this: a history further from both caps is refused with or without it, and is trimmed
+// by a write.
 //
 // Every refusal comes before the first write: a room resident in this server whose document is far
 // from both caps, a history that loads and is not near a cap, a closed issue (for supplied

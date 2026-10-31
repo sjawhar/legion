@@ -127,14 +127,21 @@ func closeResidentRoom(t *testing.T, service *Service, artifactID string) {
 // (agentRewrittenState): past what one test of the package's unit run may take.
 const agentRewritesEnv = "DISPATCH_REBUILD_AGENT_REWRITES"
 
-// A document whose history loads but stands at the decode cap can be changed by no one: a write
-// that trims it is refused by the decode cap (refuseUndecodable), and a browser's edit by the
-// room's struct total. A rebuild takes it, from its own text: the two documents a room keeps at
-// the cap - one an agent rewrote whole through the API until the cap refused a write, and the
+// A document whose history loads but stands at the decode cap can be grown by no one: a write
+// that adds a paragraph is refused by the decode cap (refuseUndecodable), and a browser's edit by
+// the room's struct total. A rebuild takes it, from its own text: the two documents a room keeps
+// at the cap - one an agent rewrote whole through the API until the cap refused a write, and the
 // long-edited 5 KiB document typed on until its state reached the cap - each rebuild to no more
 // structs than a fresh document of the same text and its list of retired clients, read the same
-// text, and take the trimming write that was refused. The long-edited document's case takes about
+// text, and take the write that was refused. The long-edited document's case takes about
 // 22 s here; the agent's runs with DISPATCH_REBUILD_AGENT_REWRITES=1, about 215 s.
+//
+// The write is one that adds, not one that trims: a write trimming the long-edited document's
+// last line lands on it at the cap, since a delete range splits an item only where one of its
+// ends falls inside that item, so a range covering whole items splits none of them and adds no
+// struct (sjawhar/ygo v1.51.3-sami.7, crdt/yarray.go:827-844), and the document stays at the cap
+// it was already at, as logPastDecodeCap's comment allows for. What no document at the cap takes
+// is a write that adds a struct, and that is what a rebuild has to make room for.
 func TestRebuildingADocumentAtTheDecodeCapLeavesItSmallAndReadingTheSame(t *testing.T) {
 	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	for _, row := range []struct {
@@ -164,9 +171,9 @@ func TestRebuildingADocumentAtTheDecodeCapLeavesItSmallAndReadingTheSame(t *test
 				t.Fatal(err)
 			}
 			structs, _, _ := structsAndRendering(t, state)
-			trimmed := before[:strings.LastIndex(strings.TrimRight(before, "\n"), "\n")+1]
-			if _, err := joinedReplaceText(service, artifactID, trimmed, agent); !errors.Is(err, ErrDocumentTooLarge) || !strings.Contains(err.Error(), "items ygo decodes") {
-				t.Fatalf("a write trimming the %d-struct document was answered %v, want the decode cap's refusal", structs, err)
+			grown := before + "\nA paragraph the write adds.\n"
+			if _, err := joinedReplaceText(service, artifactID, grown, agent); !errors.Is(err, ErrDocumentTooLarge) || !strings.Contains(err.Error(), "items ygo decodes") {
+				t.Fatalf("a write adding a paragraph to the %d-struct document was answered %v, want the decode cap's refusal", structs, err)
 			}
 			closeResidentRoom(t, service, artifactID)
 
@@ -196,8 +203,8 @@ func TestRebuildingADocumentAtTheDecodeCapLeavesItSmallAndReadingTheSame(t *test
 			if rebuilt > fresh+retired {
 				t.Fatalf("the rebuilt document holds %d structs, want no more than the %d of a fresh document of its text and its %d retired clients", rebuilt, fresh, retired)
 			}
-			if _, err := joinedReplaceText(service, artifactID, trimmed, agent); err != nil {
-				t.Fatalf("the trimming write after the rebuild: %v", err)
+			if _, err := joinedReplaceText(service, artifactID, grown, agent); err != nil {
+				t.Fatalf("the growing write after the rebuild: %v", err)
 			}
 		})
 	}
@@ -646,9 +653,12 @@ func oneClientAtCapState(t *testing.T) []byte {
 // client's, at the decode cap, and the browser's own client sorts before it, so the message the
 // browser hands back - its own unsent edits, then the history - is refused by the walk at the
 // history's header, the group that passes the cap, with no struct of the history read. Left
-// connected on that refusal the browser would be answered SyncStatus(0), and every later edit of
-// it, naming the old history's items, would park. The room closes it with the document's own close
-// and DOC_NEEDS_REBUILD; it reconnects from a fresh read of the rebuilt document, as the editor's
+// connected on that refusal the browser would be answered SyncStatus(0) and keep every later
+// edit of it, naming the old history's items, parked: the walk's refusal is a plain error rather
+// than a *websocket.PeerClose, and ygo closes a peer whose update the hook refused only for a
+// PeerClose (sjawhar/ygo v1.51.3-sami.7, provider/websocket/peer.go:254-260, over the
+// Hocuspocus framing service.go:659 sets). The room closes it with the document's own close and
+// DOC_NEEDS_REBUILD; it reconnects from a fresh read of the rebuilt document, as the editor's
 // 4413 path does, not with its old state; and a new edit from it is applied and stored.
 func TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughTheWalkRefusesItBeforeReadingAnyOfIt(t *testing.T) {
 	const browserClient crdt.ClientID = 1
