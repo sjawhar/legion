@@ -403,19 +403,11 @@ func (s *supervision) openPodUpdate(ctx context.Context, issue string, group []s
 	if opened == nil {
 		return
 	}
-	if deaf := cannotAnswer(blocking); len(deaf) > 0 {
-		// A running process whose plugin predates PodUpdateContract can never answer: the op is a
-		// closed enum compiled into its plugin, and a Claude Code role's plugin is its image's
-		// own, never installed. Nothing is replaced, and the operator drains the pod by hand.
-		s.tellUpdateStalled(ctx, updateStall{
-			issue: issue, round: round, pod: pod, reasons: reasons, group: group,
-			waiting: waitingOf(round, deaf),
-			reason: fmt.Sprintf("a worker's plugin predates daemon contract %d, so it can never answer the update task",
-				supervise.PodUpdateContract),
-			message: cannotAnswerMessage(reasons, deaf),
-		})
-		return
-	}
+	// A worker whose plugin has no ready_for_update op is asked all the same, and the end of the
+	// turn its task started is its answer (askForUpdate, turnEnded in internal/supervise). Such a
+	// round finishes by itself, so nothing is told to the operator for that cause and a contract
+	// change needs no drain: the pod is replaced like any other, and the claim comes back in its
+	// own session on the new image.
 	if now.Sub(*opened) >= s.cfg.PodUpdateNotice {
 		s.tellUpdateStalled(ctx, updateStall{
 			issue: issue, round: round, pod: pod, reasons: reasons, group: group,
@@ -483,25 +475,16 @@ func (s *supervision) reconcilePluginUpdate(ctx context.Context, c supervise.Cla
 	s.supervisor.post(c.Token, supervise.PodUpdateOpen{
 		Claim: c.Token, Round: round, Reasons: c.UpdateReasons, Task: supervise.UpdateTask(round, c.UpdateReasons),
 	})
-	deaf := supervise.CannotAnswerUpdate(c)
 	late := c.UpdateOpenedAt != nil && now.Sub(*c.UpdateOpenedAt) >= s.cfg.PodUpdateNotice
-	if c.UpdateToldAt != nil || !(deaf || late) {
+	if c.UpdateToldAt != nil || !late {
 		return
 	}
-	stall := updateStall{
+	s.tellUpdateStalled(ctx, updateStall{
 		issue: c.Issue, round: round, reasons: c.UpdateReasons, group: []supervise.Claim{c},
 		waiting: waitingOf(round, []supervise.Claim{c}),
-	}
-	switch {
-	case deaf:
-		stall.reason = fmt.Sprintf("the worker's plugin predates daemon contract %d, so it can never answer the update task",
-			supervise.PodUpdateContract)
-		stall.message = cannotAnswerMessage(c.UpdateReasons, []supervise.Claim{c})
-	default:
-		stall.reason = fmt.Sprintf("the plugin round has waited %s for its worker to answer",
-			now.Sub(*c.UpdateOpenedAt).Round(time.Minute))
-	}
-	s.tellUpdateStalled(ctx, stall)
+		reason: fmt.Sprintf("the plugin round has waited %s for its worker to answer",
+			now.Sub(*c.UpdateOpenedAt).Round(time.Minute)),
+	})
 }
 
 // updateStall is one round the sweep cannot finish, as the operator's side is told of it: the
@@ -762,19 +745,6 @@ func workingClaims(group []supervise.Claim) []string {
 	return working
 }
 
-// cannotAnswer is every claim of those given whose worker can never answer an update task, by the
-// one statement of that rule (supervise.CannotAnswerUpdate): its process runs now, and the
-// registration that process made declared a plugin contract below the one that introduced the op.
-func cannotAnswer(claims []supervise.Claim) []supervise.Claim {
-	var deaf []supervise.Claim
-	for _, c := range claims {
-		if supervise.CannotAnswerUpdate(c) {
-			deaf = append(deaf, c)
-		}
-	}
-	return deaf
-}
-
 // podProcess is the process the round's pod is ended through: the first claim of the group that
 // records a process in that round's own pod. The pod is what the filter is on, not merely a
 // recorded process: a claim the sweep relaunched while the round ran records the pod that
@@ -790,8 +760,7 @@ func podProcess(group []supervise.Claim, round string) (runtime.Known, bool) {
 }
 
 // waitingOf is the claims as the controller's notice lists them, so it can retry one claim or ask
-// the operator. Each is marked with whether its worker can answer at all, by the one rule
-// supervise.CannotAnswerUpdate states, and with whether it has already answered this round.
+// the operator. Each is marked with whether it has already answered this round.
 //
 // Answered is what keeps the controller's playbook from undoing the round. The notice of a round
 // that is waiting on a turn or on a failing replacement lists claims that have every one of them
@@ -803,8 +772,7 @@ func waitingOf(round string, claims []supervise.Claim) []record.UpdateWaiting {
 	for i, c := range claims {
 		waiting[i] = record.UpdateWaiting{
 			Claim: string(c.Token), Role: c.Role, State: string(c.State),
-			CannotAnswer: supervise.CannotAnswerUpdate(c),
-			Answered:     answered(c, round),
+			Answered: answered(c, round),
 		}
 	}
 	return waiting
@@ -826,34 +794,6 @@ func roleStates(claims []supervise.Claim) string {
 		named[i] = fmt.Sprintf("%s (%s)", c.Role, c.State)
 	}
 	return strings.Join(named, ", ")
-}
-
-// cannotAnswerMessage is what the issue is told when its pod cannot be replaced at all: one of its
-// workers runs a plugin that has no ready_for_update op, so the round can never complete and an
-// operator must drain the pod. Another agent reads it, so it follows ASD-STE100: one instruction
-// per sentence, active voice, and no word that has a second reading.
-//
-// The steps it names are the ones that truly end the pod: the operator deletes the issue's
-// Sandbox, as docs/kubernetes.md's drain does. Suspending each role and starting it again does
-// not — Runtime.Suspend never changes the issue Sandbox's own mode, and a resume into a live pod
-// keeps that pod, so a role on an image's own plugin would come back on that same plugin and
-// still be unable to answer. The message says that much, because it is the move the reader would
-// otherwise make.
-func cannotAnswerMessage(reasons string, deaf []supervise.Claim) string {
-	return fmt.Sprintf(`The daemon must replace the pod that runs this issue's roles. The reasons are: %s.
-
-The daemon cannot replace the pod now. These roles run a plugin that is older than daemon contract %d: %s. A plugin that old has no `+"`ready_for_update`"+` operation. These roles can never answer the daemon's update task.
-
-An operator must replace the pod by hand. The operator does these three steps:
-
-1. Tell each role of this issue to push its work.
-2. Read the issue branch at origin. Confirm that it holds the work of each role.
-3. Delete this issue's Sandbox. The section "Upgrading a deployment with running trees" in docs/kubernetes.md gives the commands.
-
-Step 3 ends the pod. The pod's disk goes with the pod. The daemon then starts each role again. The new processes run on a pod that the daemon builds from the current configuration.
-
-Do not suspend the roles and start them again. That procedure keeps the pod, and the roles come back on the same plugin.`,
-		reasons, supervise.PodUpdateContract, roleStates(deaf))
 }
 
 // podWentMessage is what the issue is told when its pod went before its round was over: the pod

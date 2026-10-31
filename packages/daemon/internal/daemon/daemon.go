@@ -1222,21 +1222,17 @@ func (s *supervision) start(boot context.Context, settle func() error) error {
 // which no install reaches, so the launch keeps the pod the claim already runs in, the process
 // comes back on that same plugin, registers the old contract again, and the next registration is
 // the second relaunch in a row — which staleRegistration charges, until the launch budget fails
-// the claim. A failed claim cannot push, and pushing is step 1 of the drain the daemon itself
-// writes on the issue. Nothing here can take such a worker past the contract; a new image can,
-// which is what the pod round replaces the pod for. So it is left running, and the round that
-// covers it is what carries it: the round marks it as unable to answer and names it in the
-// update-stalled notice, which is the drain (reconcilePodUpdates' cannotAnswer). Outside a round
-// there is nothing to post either — the relaunch would loop exactly the same way — and a drifted
-// pod opens the round that tells the operator at the next sweep. staleRegistration accepts such
-// a registration and charges it nothing, for the same reason (supervise.Deps.NoPluginInstall).
+// the claim. Nothing here can take such a worker past the contract; a new image can, which is
+// what the pod round replaces the pod for. So it is left running and answers its round like any
+// other worker, by ending the turn the round's task starts (supervise's turnEnded).
+// staleRegistration accepts such a registration and charges it nothing, for the same reason
+// (supervise.Deps.NoPluginInstall).
 //
-// A claim in an update round whose worker can answer is skipped too: the round is carrying it,
+// A claim in an update round is skipped, whatever contract it records: the round is carrying it,
 // and the process is replaced when the round ends (reconcilePodUpdates), so a StalePlugin post
 // would start the round's clock again at every sweep, or relaunch mid-turn a claim the round is
-// waiting on. A claim in a round that cannot answer and whose launch does install a plugin is
-// posted: the relaunch keeps the pod and the disk, so the round loses nothing by it and gains
-// the one worker it was blocked on.
+// waiting on. The round reaches a worker that cannot call ready_for_update too, so there is no
+// longer a claim a round holds and this lane must rescue.
 //
 // A daemon that cannot relaunch onto a plugin (PluginRelaunchable false, LEGION-164's degraded
 // Kubernetes mode) posts nothing; it logs one Error line per stale claim at boot only — a sweep's
@@ -1250,7 +1246,7 @@ func (s *supervision) refreshStalePlugins(claims []supervise.Claim, trigger stri
 		if supervise.CannotAnswerUpdate(c) && s.noPluginInstall(c) {
 			continue
 		}
-		if c.UpdateRound != "" && !supervise.CannotAnswerUpdate(c) {
+		if c.UpdateRound != "" {
 			continue
 		}
 		if !s.plan.pluginRelaunchable {

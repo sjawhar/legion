@@ -49,16 +49,17 @@ finishing.
 It names the round (`round`: `pod:<pod uid>` for the whole pod, `plugin:<daemon contract>` for
 one claim's own process), the pod it was opened over (`pod`, absent for a claim's own plugin
 round), the drift the task states (`reasons`), the one line that says why it is stuck (`reason`),
-and every claim the round is blocked on (`waiting`, each with its `claim` token, `role`, `state`,
-`cannotAnswer` and `answered`). One round wakes you once, however many sweeps find it open, so
-handle it when it arrives. Read `read_state` and the issue first, as for every wake: a round that
-finished since needs nothing.
+and every claim the round is blocked on (`waiting`, each with its `claim` token, `role`, `state`
+and `answered`). A worker whose plugin is too old to call `ready_for_update` is no entry of its
+own kind: it answers by ending the turn the task starts, so the daemon needs nothing of you for
+it. One round wakes you once, however many sweeps find it open, so handle it when it arrives.
+Read `read_state` and the issue first, as for every wake: a round that finished since needs
+nothing.
 
 Take each `waiting` entry by its shape:
 
 | Entry | What it is | What you do |
 |---|---|---|
-| `cannotAnswer: true` | Its plugin is older than the contract that added `ready_for_update`, so it can never answer and this round can never finish. The daemon has already written the drain steps on the issue. | Only an operator can drain the pod. Open a finding ask naming the issue, the pod, the roles and `reasons`, and quote what the daemon wrote on the issue. |
 | `answered: true` | It has already answered this round. The round is blocked on the daemon's own side: a turn that has not ended, or a pod replacement the cluster keeps refusing. `reason` names which. | Send it nothing. A message to it starts a turn, and a turn after its answer takes that answer back, which puts the round further from finishing. Open a finding ask naming the issue, the round and `reason`, with the turn or the `ReplacePod` error it names, so an operator reads the pod. |
 | `state: "failed"` | Its launches or prompts ran out. Nobody can say whether its workspace holds unpushed work, so the round waits for it. | It answers once it runs again. When the issue's `phase` is `held`, `envoy_publish` to the tree's architect role and ask it to `retry_or_escalate` that role. Otherwise the retry is the operator's (`legion claims retry`), so open a finding ask. |
 | `state: "suspended"` | An operator's own suspension holds it: the daemon revives a suspension of its own for the task. The claim already holds the task and takes it on the resume. | Open a finding ask naming the issue and the role, so the operator resumes it. |

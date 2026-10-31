@@ -1,0 +1,11 @@
+kind: Fixed
+body: |-
+    An image or configuration roll no longer needs an operator's drain for a worker whose plugin
+    is older than the contract that added `ready_for_update`. Such a worker gets the update task
+    like any other, and the task tells it what to do without the operation: push, and end the
+    turn. The daemon reads the end of that turn as the answer, records it with no head, replaces
+    the pod, and brings the worker back in its own session on the new image. Nothing is written on
+    the issue and the controller is told nothing for that cause, the `update-stalled` notice no
+    longer marks a claim `cannotAnswer`, and the stale-plugin lane relaunches no claim an update
+    round already covers.
+time: 2026-10-31T22:26:47Z

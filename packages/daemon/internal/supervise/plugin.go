@@ -8,17 +8,20 @@ import (
 )
 
 // PodUpdateContract is the daemon contract that introduced ready_for_update (api/version.go's
-// 44). A claim whose registration declared a contract below it cannot answer an update task: the
-// op list is a closed enum compiled into the plugin, and a Claude Code role's plugin is its
-// image's own, never installed. Such a claim is never asked — an update round records itself on
-// it and sends it nothing (openPodUpdate) — and the stale-plugin lane relaunches it once its turn
-// ends (refreshPlugin, holdStaleRelaunch), which keeps the pod and the disk and so loses nothing.
+// 44). A claim whose registration declared a contract below it has no op to answer an update
+// task with: the op list is a closed enum compiled into the plugin, and a Claude Code role's
+// plugin is its image's own, never installed. Such a claim is asked all the same, and the end of
+// the turn its task starts is its answer (askForUpdate, answerByTurnEnd), so a round over it
+// completes and its pod is replaced like any other. The stale-plugin lane relaunches it once its
+// turn ends where no round covers it (refreshPlugin, holdStaleRelaunch), which keeps the pod and
+// the disk and so loses nothing.
 //
 // That relaunch is what takes a worker of the release before this one past the constant: it
 // installs this daemon's plugin, and the registration that follows records this daemon's
-// contract, so the claim can answer the round it is in. What it cannot take past the constant is
-// a plugin an install never reaches — a Claude Code role's, which is its pod image's own — so
-// that is the one case an operator drains by hand (internal/daemon's cannotAnswer).
+// contract. What it cannot take past the constant is a plugin an install never reaches — a
+// Claude Code role's, which is its pod image's own — and that claim needs none: a new image
+// carries it, and the round over its pod is what brings the new image in, with no operator and
+// no drain.
 //
 // It lives here rather than beside DaemonAPIVersion because internal/api imports this package.
 // internal/api's own test holds it to that version, so a later contract bump can never leave this
@@ -30,21 +33,19 @@ const PodUpdateContract = 44
 // CannotAnswerUpdate, which adds the running process the rule also needs.
 func CanAnswerUpdate(c Claim) bool { return c.PluginContract >= PodUpdateContract }
 
-// CannotAnswerUpdate says whether c's worker can never answer the update task it is given: its
-// process runs now (HoldsCapability) and the registration that process made declared a plugin
-// contract below the one that introduced the op. It is the one statement of that rule, read by
-// the round's own ask (askForUpdate), by the stale-plugin lane (refreshPlugin), and by the
-// daemon's sweep, which names the claims a round can never finish on, keeps the stale-plugin
-// relaunch for the ones it can relaunch, and marks each in the controller's notice
-// (internal/daemon's cannotAnswer, refreshStalePlugins, waitingOf).
+// CannotAnswerUpdate says whether c's worker has no ready_for_update op to answer its update task
+// with: its process runs now (HoldsCapability) and the registration that process made declared a
+// plugin contract below the one that introduced the op. It is the one statement of that rule,
+// read by the turn's end, which is such a worker's answer (answerByTurnEnd), by the stale-plugin
+// lane (refreshPlugin) and by the daemon's own pass, which posts no relaunch for a claim no
+// install can carry (internal/daemon's refreshStalePlugins).
 //
 // The running process is half the rule, and the half a reading of the contract alone would get
 // wrong. A claim with none — suspended, failed, launching, or still queued — records the contract
 // of a process that has ended, and the one its next launch starts speaks this daemon's: a claim
 // relaunched onto the current plugin a moment ago registers at this contract, and a suspended
-// claim the round revives comes back on it. Reading those records as "this claim can never
-// answer" would tell the operator to drain a pod at every roll of this deployment, minutes before
-// the claim answers.
+// claim the round revives comes back on it. Reading those records as "this claim has no op" would
+// take the answer of a worker that is about to make the call itself.
 func CannotAnswerUpdate(c Claim) bool { return HoldsCapability(c.State) && !CanAnswerUpdate(c) }
 
 // refreshPlugin is the claim's process found to speak a plugin contract this daemon does not: at
@@ -231,16 +232,16 @@ func refreshStalePlugin(m *Machine, ctx context.Context, ev Event) error {
 // back, and land here again with PluginRelaunchFor already naming this daemon, which is the
 // charged path: the claim would walk its launch budget down to failed for a plugin no launch of
 // this deployment can change. A failed claim cannot push its work, and pushing is step 1 of the
-// drain an operator must run for such a pod, so the process is left running and answered as any
-// other. What replaces it is a new image, which the update round over its pod is opened for: the
-// round marks the claim as unable to answer and names it to the operator (internal/daemon's
-// cannotAnswer, refreshStalePlugins, which posts no relaunch for it either).
+// update task such a worker still answers, by ending the turn the task starts (answerByTurnEnd),
+// so the process is left running and answered as any other. What replaces it is a new image,
+// which the update round over its pod is opened for and which that answer completes
+// (internal/daemon's refreshStalePlugins, which posts no relaunch for it either).
 func (m *Machine) staleRegistration(ctx context.Context, got int) error {
 	if got == m.deps.PluginContract {
 		return m.endCurrentPluginRound(ctx)
 	}
 	if m.deps.NoPluginInstall != nil && m.deps.NoPluginInstall(m.claim) && got < PodUpdateContract {
-		m.log.Warn("supervise: this claim's launch installs no plugin, and its process speaks a contract with no ready_for_update; the registration stands and an operator's drain replaces the pod",
+		m.log.Warn("supervise: this claim's launch installs no plugin, and its process speaks a contract with no ready_for_update; the registration stands and the update round over its pod brings the new image",
 			"pluginContract", got, "daemonApiVersion", m.deps.PluginContract, "updateContract", PodUpdateContract)
 		return nil
 	}

@@ -268,23 +268,71 @@ func TestPodUpdateAsksAnUnansweredClaimAgainUnderANewDeliveryID(t *testing.T) {
 	}
 }
 
-// A claim whose registration declared a contract below PodUpdateContract cannot answer at all, so
-// the round records itself on it and asks it nothing. The round blocks on that claim until an
-// operator drains it.
-func TestPodUpdateNeverAsksAClaimBelowTheContract(t *testing.T) {
+// A claim whose registration declared a contract below PodUpdateContract has no ready_for_update
+// op to answer with. The round asks it all the same, and the end of the turn that task starts is
+// its answer, recorded with no head, so the round completes and the pod is replaced like any
+// other.
+func TestPodUpdateTakesTheTurnsEndAsTheAnswerOfAClaimBelowTheContract(t *testing.T) {
 	h := updateHarness(t, PodUpdateContract-1)
 	h.reach(StateReady)
 
 	h.openUpdate(testRound, testReasons)
 
-	h.wantPrompts(0)
-	h.wantState(StateReady)
+	h.wantPrompts(1)
 	c := h.wantRound(testRound)
-	if c.UpdateTaskedAt != nil {
-		t.Errorf("UpdateTaskedAt = %v, want nil: this claim's plugin cannot answer", c.UpdateTaskedAt)
+	if c.UpdateTaskedAt == nil {
+		t.Error("UpdateTaskedAt is nil; a claim with no op to answer with is asked like any other")
 	}
-	if c.PluginContract >= PodUpdateContract {
-		t.Fatalf("PluginContract = %d, want below PodUpdateContract (%d)", c.PluginContract, PodUpdateContract)
+	if c.UpdateSignalledAt != nil {
+		t.Errorf("UpdateSignalledAt = %v before any turn ran, want nil", c.UpdateSignalledAt)
+	}
+
+	h.must(StreamTurnStart{Claim: h.token})
+	h.must(StreamTurnEnd{Claim: h.token})
+
+	c = h.claim()
+	if c.UpdateSignalledAt == nil {
+		t.Fatal("the end of the update task's turn recorded no answer for a claim that cannot call the op")
+	}
+	if c.UpdateHead != "" {
+		t.Errorf("UpdateHead = %q, want none: a turn's end reports no head", c.UpdateHead)
+	}
+	if stored := h.store.load(h.token); stored.UpdateSignalledAt == nil {
+		t.Error("the answer the turn's end gave was not persisted")
+	}
+}
+
+// The turn's end is the answer of a claim that cannot call the op, and of no other claim. A
+// worker whose plugin has ready_for_update answers by calling it: it ends a turn for every
+// reason there is, and reading one of those as "my work is pushed" would delete a disk holding
+// work nobody pushed.
+func TestPodUpdateTakesNoTurnsEndAsTheAnswerOfAClaimThatCanCallTheOp(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract)
+	h.reach(StateReady)
+
+	h.openUpdate(testRound, testReasons)
+	h.wantPrompts(1)
+	h.must(StreamTurnStart{Claim: h.token})
+	h.must(StreamTurnEnd{Claim: h.token})
+
+	if c := h.claim(); c.UpdateSignalledAt != nil {
+		t.Errorf("UpdateSignalledAt = %v, want nil: this worker answers by calling ready_for_update", c.UpdateSignalledAt)
+	}
+}
+
+// A turn that read none of the round's words answers nothing, whatever the claim's contract. An
+// Envoy delivery or a person's steer starts such a turn, and it says nothing about the branch.
+func TestPodUpdateTakesNoForeignTurnsEndAsTheAnswerBelowTheContract(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract-1)
+	h.reach(StateReady)
+
+	h.openUpdate(testRound, testReasons)
+	h.wantPrompts(1)
+	h.must(StreamTurnStart{Claim: h.token, DeliveryID: "a-turn-the-daemon-sent-nothing-for"})
+	h.must(StreamTurnEnd{Claim: h.token})
+
+	if c := h.claim(); c.UpdateSignalledAt != nil {
+		t.Errorf("UpdateSignalledAt = %v, want nil: this turn never read the round's task", c.UpdateSignalledAt)
 	}
 }
 

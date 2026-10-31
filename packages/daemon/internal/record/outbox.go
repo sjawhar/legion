@@ -234,9 +234,12 @@ type UpdateStalled struct {
 
 // UpdateWaiting is one claim an update round is blocked on: its token, the role it holds, the
 // state it is in (supervise.ClaimState — a `failed` or operator-suspended claim waits for the
-// operator), CannotAnswer for a claim whose running process holds a plugin that predates
-// supervise.PodUpdateContract, which can never answer and which only an operator's drain
-// releases, and Answered for a claim that has already answered this round.
+// operator), and Answered for a claim that has already answered this round.
+//
+// The contract the claim's plugin records is not here. A plugin with no ready_for_update op
+// answers by ending the turn its update task started (supervise's askForUpdate and turnEnded),
+// so such a claim is one the round is waiting on like any other, and the controller has nothing
+// of its own to do about it.
 //
 // Answered is what tells the controller which claims are its to prompt. Its playbook publishes
 // the update task to a claim that has not answered, and that publish starts a turn, which takes
@@ -244,11 +247,10 @@ type UpdateStalled struct {
 // answered, it would undo the answers of exactly the round the daemon is stuck carrying
 // (skill://legion-controller/references/escalation.md).
 type UpdateWaiting struct {
-	Claim        string     `json:"claim"`
-	Role         claim.Role `json:"role,omitempty"`
-	State        string     `json:"state"`
-	CannotAnswer bool       `json:"cannotAnswer,omitempty"`
-	Answered     bool       `json:"answered,omitempty"`
+	Claim    string     `json:"claim"`
+	Role     claim.Role `json:"role,omitempty"`
+	State    string     `json:"state"`
+	Answered bool       `json:"answered,omitempty"`
 }
 
 // MarshalJSON keeps `waiting` an array on the wire, empty rather than `null`: the plugin's strict

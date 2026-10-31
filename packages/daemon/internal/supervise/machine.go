@@ -384,8 +384,9 @@ type Deps struct {
 	// relaunched by the stale-plugin lane and never charged for its stale registration
 	// (staleRegistration): the relaunch would keep the pod, bring the same plugin back and charge
 	// the claim toward failed, and a failed claim cannot push its work. Such a claim is left
-	// running for the operator's drain, which the update round over its pod asks for
-	// (internal/daemon's refreshStalePlugins, cannotAnswer).
+	// running, and the update round over its pod is what carries it: it is asked like any other
+	// worker and answers by ending the turn the task starts (askForUpdate, answerByTurnEnd), and
+	// the replacement brings it up on a new image (internal/daemon's refreshStalePlugins).
 	NoPluginInstall func(c Claim) bool
 	// TaskConfirmed is told of each claim whose pending delivery a turn has just confirmed: the
 	// agent took the work the daemon gave it. The workflow decides what a root still owes its

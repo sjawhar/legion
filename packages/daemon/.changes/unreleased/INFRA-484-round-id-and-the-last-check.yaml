@@ -5,7 +5,7 @@ body: |-
     The replacement asks once more under the pod's own lock, from the issue's claims as the store
     holds them then, so a claim created since the sweep read its list and a turn that starts while
     the replacement waits both stop it. A Claude Code worker below the contract, whose plugin no
-    install can reach, is relaunched by nothing and carried by the round's `update-stalled` notice
-    instead. A round that ends having replaced nothing releases each worker that answered, and the
-    notice for a round with no pod names only the workers that have not.
+    install can reach, is relaunched by nothing, and the round over its pod is what carries it. A
+    round that ends having replaced nothing releases each worker that answered, and the notice for
+    a round with no pod names only the workers that have not.
 time: 2026-10-30T21:40:00Z
