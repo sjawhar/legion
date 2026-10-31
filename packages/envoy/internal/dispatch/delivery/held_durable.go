@@ -425,15 +425,18 @@ func startingAt(config natsgo.ConsumerConfig, start uint64) natsgo.ConsumerConfi
 // durable's start, and that must not give up the consumer lease with the durable deleted.
 //
 // takeOverFinishWithin bounds the whole of it, from its first step to its last try. It is under
-// intakeHoldTTL - intakeHoldMargin (13 s), how long a hold lasts on its last renewal: a hold taken
-// just before the take-over (takeHold) therefore holds through all 10 s of the steps, even when
-// every renewal after it fails. A take-over that runs again after a check found the durable
-// delivering elsewhere (check) begins at any point in the renewal cycle of a hold this intake
-// already held, so up to intakeHoldRenew (5 s) after its last renewal: with the renewals from
-// there on failing, about 8 s of the hold are left against the 10 s bound, and retryHeld stops at
-// the hold's deadline. That exit is the safe one -- no step acts once another process can take the
-// hold, and the next attempt takes the durable over again. takeOverFinishWithin is also well
-// inside stopGrace (cmd/dispatch), since a stop that comes meanwhile waits for it to end.
+// intakeHoldTTL - intakeHoldMargin (13 s), how long a hold lasts from its taking or its last
+// renewal. A hold takeHold just took is 13 s old at most when attempt reaches these steps, less
+// the lookup of the durable (lookupDurable, up to 5 s), the consumer lease (duty.Exclusive) and
+// takeOver's read of the durable before them: with every renewal after the taking failing, the
+// hold covers most of the 10 s of the steps, not always all of them. A take-over that runs again
+// after a check found the durable delivering elsewhere (check) begins at any point in the renewal
+// cycle of a hold this intake already held, so up to intakeHoldRenew (5 s) after its last renewal:
+// with the renewals from there on failing, about 8 s of the hold are left against the 10 s bound.
+// In both cases retryHeld stops at the hold's deadline. That exit is the safe one -- no step acts
+// once another process can take the hold, and the next attempt takes the durable over again.
+// takeOverFinishWithin is also well inside stopGrace (cmd/dispatch), since a stop that comes
+// meanwhile waits for it to end.
 //
 // takeOverCallTimeout bounds each try of each step, so that one call that draws no answer -- a
 // JetStream request during a leader change, or one the server denies and never answers -- leaves
