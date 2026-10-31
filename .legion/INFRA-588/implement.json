@@ -2,59 +2,60 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "completed": "2026-10-31T05:16:00Z",
-  "round": "test round 11 failed: daemon fragments removed, fold-plan refuses unlisted fragments, conflicts README laid out",
+  "completed": "2026-10-31T05:52:58Z",
+  "round": "test round 12 failed: fold on main warns instead of refusing; fold-orphans in ci.yaml lint (required via ci-ok); one package list file",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2411",
-  "head": "7fbb983fcc991a780a4e8f1893df458525c90bbd",
+  "head": "ea39694f1145d08301ba216cf2e5e45ac0796783",
   "proofComment": "posted after the push",
-  "reviewAnswered": "Tester round 11 failure (daemon fragment never folds) and architect Envoy 86d49bda: (1) delete the PR daemon fragment, (2) delete main three orphan daemon fragments, (3) gate in the existing fragment check with a test, (4) lay out scripts/conflicts/README.md with the note",
+  "reviewAnswered": "Tester round 12 failures (A) gate not in a required check, (B) orphan on main stops the fold (red test a26683995f0f); architect Envoy b977310a",
   "proof": [
     {
-      "criterion": "fold-plan refuses a fragment of a package CHANGELOG_PACKAGES does not list, naming it and the list",
-      "surface": "release-push.sh fold-plan over changelog-fold.yaml CHANGELOG_PACKAGES, in throwaway git worktrees of the head",
-      "command": "bash $TMPDIR/i588/gate-proof.sh <head>",
-      "observed": "as it stands: exit 0, 23 plan lines; a committed packages/daemon/.changes/unreleased/pr-1-proof.yaml: exit 1, no plan, one ::error:: naming the file and the seven specs; a committed packages/envoy fragment: exit 0, 23 plan lines",
-      "headSha": "7fbb983fcc991a780a4e8f1893df458525c90bbd",
-      "negativeControl": "main 3f7b3e753f85 with main own release-push.sh: the daemon fragment gives exit 0 (no refusal); main tree with this head script: exit 1 naming main three daemon orphans"
+      "criterion": "a PR adding a file under the .changes/ of an unlisted package turns a job ci-ok needs red, naming the file and the list",
+      "surface": "ci.yaml lint step run text (extracted from the workflow file at the head) in throwaway worktrees of the head",
+      "command": "bash $TMPDIR/i588/gate-proof2.sh <head>",
+      "observed": "as it stands: lint step exit 0; with packages/daemon/.changes/unreleased/x.yaml: exit 1, ::error::release-push.sh fold-orphans naming the file and the seven specs; with an envoy fragment: exit 0. lint is in ci-ok needs; ruleset requires ci-ok",
+      "headSha": "ea39694f1145d08301ba216cf2e5e45ac0796783",
+      "negativeControl": "at 7fbb983f the refusal ran only in fold_build, not a required context (tester round 12 evidence)"
     },
     {
-      "criterion": "the gate is tested",
-      "surface": "release-push.test.sh and changelog-fold.test.sh (CI test job steps Test release scripts, Test the changelog fold with changie)",
-      "command": "bash .github/scripts/release-push.test.sh; bash .github/scripts/changelog-fold.test.sh (changie v1.26.0)",
-      "observed": "628 passed 0 failed, including fold-orphan cases: daemon fragment refused by name with the specs, passes once removed, working-tree-only file not refused, .changes/header.tpl.md refused; fold test 12 passed",
-      "headSha": "7fbb983fcc991a780a4e8f1893df458525c90bbd",
-      "negativeControl": "the daemon-fragment case fails against main release-push.sh, which plans and exits 0"
+      "criterion": "on main an orphan never blocks the fold",
+      "surface": "changelog-fold.yaml Plan the fold run text in worktrees",
+      "command": "bash $TMPDIR/i588/gate-proof2.sh <head>; bash $TMPDIR/i588/gate-proof2.sh <main 5330bcb24984> <head>",
+      "observed": "head tree with a daemon fragment: exit 0, 23 fragments of 7 packages, one ::warning:: naming the file; main tree holding 3 daemon orphans with this head scripts: exit 0, plans its 2 fragments of 2 packages, warning names the 3",
+      "headSha": "ea39694f1145d08301ba216cf2e5e45ac0796783",
+      "negativeControl": "7fbb983f fold-plan with the same daemon fragment: exit 1, no plan (earlier gate-proof run; tester round 12)"
     },
     {
-      "criterion": "no daemon fragment remains; README and AGENTS.md layout",
-      "surface": "the head tree; scripts/semantic-line-breaks.ts",
-      "command": "git ls-tree HEAD packages/daemon/.changes; bun scripts/semantic-line-breaks.ts AGENTS.md scripts/conflicts/README.md; bun test scripts/semantic-line-breaks.guides.test.ts",
-      "observed": "no packages/daemon/.changes at HEAD; both exit 0; guides test 3 pass; README word sequence equals the old one plus the note, minus the table header",
-      "headSha": "7fbb983fcc991a780a4e8f1893df458525c90bbd",
-      "negativeControl": "scripts/conflicts/README.md at 710f02a2: semantic-line-breaks exit 1 (R1 at lines 4, 15, 19, ...)"
+      "criterion": "red test passes unmodified; existing tests pass",
+      "surface": "release-push.test.sh, changelog-fold.test.sh",
+      "command": "bash .github/scripts/release-push.test.sh; changelog-fold.test.sh with changie v1.26.0",
+      "observed": "635 passed 0 failed incl. the red check; fold test 12 passed; the red check and its comment identical to a26683995f0f",
+      "headSha": "ea39694f1145d08301ba216cf2e5e45ac0796783",
+      "negativeControl": "the red check failed at 4ee7760f (628 passed, 1 failed, tester)"
     },
     {
-      "criterion": "nothing else regressed",
+      "criterion": "one package list both read; other checks",
       "surface": "repository checks",
-      "command": "check-ci-filters.sh; check-release-credentials.sh; shellcheck release-push.sh release-push.test.sh against the previous files; check-private-names.sh; biome scripts/conflicts",
-      "observed": "all pass; shellcheck findings identical before and after (3 pre-existing)",
-      "headSha": "7fbb983fcc991a780a4e8f1893df458525c90bbd",
+      "command": "check-release-credentials.sh and its test, check-ci-filters.sh, check-image-trigger-paths.sh, shellcheck, semantic-line-breaks AGENTS.md",
+      "observed": "all pass; shellcheck findings identical to before (3 pre-existing); no CHANGELOG_PACKAGES list left in any workflow",
+      "headSha": "ea39694f1145d08301ba216cf2e5e45ac0796783",
       "negativeControl": "none needed: unchanged-result checks"
     }
   ],
   "filesChanged": [
-    "packages/daemon/.changes/unreleased/{pr-2411-migration-timestamps,fix-open-roles-live,pr-2542-daemon-silent-cut,squash-commit-message}.yaml deleted",
-    "scripts/conflicts/README.md: one sentence per line, file-head note, flags table as a list, no word changed",
-    "release-push.sh: refuse_unlisted, called by the fold-plan command after fold_plan; header paragraph",
-    "release-push.test.sh: template nolog fragment dropped, order and empty cases pass every fragment-holding spec, new fold-orphan repository with 5 assertions",
-    "changelog-fold.yaml: pull_request.paths gains packages/*/.changes/**; two comments",
-    "AGENTS.md: one sentence after the packages/daemon has-no-fold sentence"
+    ".github/changelog-packages (new): the seven specs, the one list the fold and the check read",
+    ".github/scripts/release-push.sh: check_specs and package_dir_re shared; unlisted_files + unlisted_message; fold-plan warns and exits 0; new fold-orphans subcommand refuses; header and usage",
+    ".github/scripts/release-push.test.sh: fold-orphan block: fold-plan warning checks, fold-orphans checks (refused, removed, working tree, header.tpl.md, no spec); red test unchanged",
+    ".github/workflows/changelog-fold.yaml: CHANGELOG_PACKAGES env removed, each step reads .github/changelog-packages; pull_request.paths: .github/changelog-packages in, packages/*/.changes/** out; comments",
+    ".github/workflows/ci.yaml: lint step running fold-orphans over .github/changelog-packages",
+    "AGENTS.md: the list file and the lint gate in the fragment convention"
   ],
   "trickyParts": [
-    "refuse_unlisted runs only in the fold-plan command, after fold_plan, so every existing fold_plan refusal fires first; fold-notes and push-fold do not repeat it because the Plan step runs first in fold_build and fold_publish needs fold_build"
+    "fold-orphans reads only HEAD tree, so the lint job shallow checkout without tags is enough",
+    "the two checks before the red test assert on the same orphan_run result, so they run no command"
   ],
   "deviations": [
-    "changelog-fold.yaml pull_request.paths gains packages/*/.changes/** (no new step or job): without it no pull-request check runs fold-plan on a fragment, so the gate would act only on main after the merge. fold_build is not a required check (main requires ci-ok and pr-title), so a red fold_build shows on the pull request but does not block its merge by itself."
+    "changelog-fold.yaml: the previous round packages/*/.changes/** pull_request trigger is reverted, since the gate now runs in ci.yaml lint."
   ],
   "openQuestions": [],
   "discoveredComplexity": []
