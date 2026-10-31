@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-727",
+  "completed": "2026-10-31T13:50:00Z",
+  "round": 10,
+  "head": "a78a3cc2499e (the pull request's head and the intended merge head: the code commit ba82ad08, the merge of main d7ff72b0266c and this handoff went in one push)",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran its own command at that head: `cd packages/dispatch && bun run e2e -- compose-wait` → 15 passed (10.2m), its new hard-break row among them. I did not re-run the whole Chromium project it reports (941 passed, 0 failed), which the architect's cap for this round did not call for, and I read its fingerprint claim rather than recomputing it."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "The important finding of review round 4: a newline is not a block edge, so a line inside another paragraph or inside a fenced code block cannot take a comment whose own block is gone",
+      "surface": "Dispatch's web app in Chromium through Playwright, against the real Go server and PostgreSQL 17.11 with pgvector, on the pod harness /legion/scratch/harness",
+      "command": "cd packages/dispatch && bun run e2e -- compose-wait ; and the code-block shape driven through a throwaway spec, deleted after the run (`-g 'probe V5'`)",
+      "observed": "15 rows pass, including the implementer's row for the reviewers' own reproduction - a whole-block selection whose words also read on a hard-break line of the next paragraph. I drove the other shape of the same finding, which no row covers: the words read again as a line inside a fenced code block. The reader selects the whole paragraph, their tab goes away past the sweep's TTL so the mark is taken, a second reader deletes that paragraph in the editor (no doc-edit target can tell the paragraph from the identical code line), and Send refuses with 'The text you selected is still in the document, but no longer where you selected it', keeps the draft, creates no comment and leaves no mark anywhere - nothing lands in the code block.",
+      "headSha": "a78a3cc2499e",
+      "negativeControl": "The four reader-facing refusals I drive each round are the control for the new rule's blast radius, and all four are unchanged and still answer their own case: words deleted give 'was changed or deleted'; one reading left in another paragraph gives 'still in the document, but no longer where you selected it'; an edited prefix word gives 'The text around the words you selected changed'; two readings surrounded alike give 'read in more than one place with the same text around them'. Each created no comment and kept the draft."
+    }
+  ],
+  "readNotDriven": [
+    "The limit the architect accepted in round 4 is unchanged by this round, and I did not spend a sweep measuring it again: the same-block fallback it lives in (`readings.count === 1 && placement?.readings === 1`, record-mark-retype.ts:511) is untouched by this round's diff, which rewrites only how an edge is tested in `surroundedBy` and what the scans are given. I measured the limit itself at the previous head in round 9, where it still attached the comment to the replacement sentence silently.",
+    "Minors 2 and 3 - the pending report on both outcomes of a row's write, and the 're-attaching' sentence standing until the retry answers - have no surface the page gives a reliable hold on; I said so in rounds 8 and 9 after trying, and the implementer's margin and document tests drive both, including a row that holds `whenSent` open across its assertions. Minor 4 is a prose deletion."
+  ],
+  "ci": "Read on GitHub, never re-run and never waited for, judged by ci-ok: NOT YET. The run at the head a78a3cc2499e was created at 13:30Z and was still queued at 13:49Z, so no ci-ok and no lane exists there - `changes` and `pr-title` are queued beside it. Nothing red, nothing green. The architect's standing reading for whoever sees that run settle (its message of 13:31Z): main's flaky-test fix #2594 landed as 3b0ae77e after this merge head was made, so it is not in it; a ci-ok that fails only on TestAReconnectCatchesUpWhatTheListenerMissed is that flake and is answered by merging main once more, while any other red is a finding. My handoff push carries the skip-checks trailer, starts no run and cancels none, which I have confirmed on this branch three times.",
+  "environment": "The pod harness survived this round: /legion/scratch/harness/setup.sh with env.sh beside it, idempotent, rebuilding Postgres with pgvector, Playwright's Chromium, the workspace install and the contracts build in about 80 s from an empty volume. Check `pg_isready -h 127.0.0.1 -p 55432` before starting that Postgres, and run a throwaway probe file one row at a time with -g.",
+  "notes": [
+    "A probe lesson worth keeping for whoever drives this area next: where the reader's own words read identically somewhere else, no `dispatch doc-edit` target can tell the two apart (the API answers TARGET_AMBIGUOUS), so the way to take the reader's copy away is a second reader deleting it in the editor, which is also what a person would actually do."
+  ]
+}

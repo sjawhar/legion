@@ -647,17 +647,24 @@ func (s *Service) creditContentChange(room string, origin any, hold *roomHold) *
 func (s *Service) addConnection(room string, id uint64, actor model.Actor) {
 	state := s.lockState(room)
 	state.connected[id] = actor
+	forgetMarkAuthorDeparture(state, actor)
 	s.unlockState(room, state)
 }
 
 // removeConnection forgets a browser that left room, and with the last one, once ygo has retired
 // the room, the room's state (releaseIfUnusedLocked). A document without state has none to forget.
+// The departure of the last browser of an actor is when the unrecorded marks that actor wrote
+// start to age (sweepUnrecordedMarks).
 func (s *Service) removeConnection(room string, id uint64) {
 	state := s.lockExistingState(room)
 	if state == nil {
 		return
 	}
+	actor, registered := state.connected[id]
 	delete(state.connected, id)
+	if registered {
+		recordMarkAuthorDeparture(state, actor, s.now())
+	}
 	s.unlockState(room, state)
 }
 

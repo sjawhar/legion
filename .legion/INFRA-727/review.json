@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-727",
+  "completed": "2026-10-31T10:49:43Z",
+  "round": 4,
+  "reviewedCodeHead": "bc29f804bf68 (merge afd9b551 changes none of the PR's files; f6c0eb89 and 40be840f are handoffs)",
+  "scope": "The INFRA-512 architect's round cap: round 3's seven findings and any new defect their fixes introduced.",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 4,
+  "ci": "Required set read 10:44Z from main's rulesets: ci-ok, pr-title. At code head f6c0eb89: the CI run created 10:22Z is still queued with no ci-ok, and pr-title is pending. A request for changes does not wait on it. This handoff push carries skip-checks: true and cancels nothing.",
+  "mergeCheck": "For every file the PR changes, afd9b551 is byte-identical to bc29f804, so the merge of main brings in main's changes alone.",
+  "thermonuclear": "deep-review and code-quality were both run at bc29f804. Both returned CHANGES with the same important finding, which each reproduced on the real editor.",
+  "roundThreeItems": {
+    "1 block edges": "fixed in the reader's-block step. In the document-wide step any newline counts as a block edge, which is a new defect",
+    "2 Retry during bridge wait": "fixed: recovering marker before the wait, cleared in finally, store entry re-read, one-mark test",
+    "3 countsEveryRow": "fixed: removed, and a stale count is skipped (a failed row write leaves no follow-up report: minor)",
+    "4-6 prose": "fixed except record-mark-retype.test.ts:674",
+    "7 no-bind test": "fixed: fake-timer row asserts DOCUMENT_CLOSED_REFUSAL, no mark, draft kept"
+  },
+  "keyFindings": [
+    {"severity": "important", "file": "packages/proof-editor/src/record-mark-retype.ts:309", "description": "In the document-wide step (acrossBlocks), surroundedBy takes any '\\n' for a block edge. documentText reads a hard break (Milkdown hardbreak leafText '\\n') and a code block's own line breaks as '\\n' too. So a whole-block or short-edge selection whose block is deleted still moves silently onto a line of another paragraph or code block. Reproduced by both reviewers: 'Ship it now.' / 'Notes:<br>Ship it now.<br>Later text here.', first block deleted -> mark on the second paragraph. This also makes false the PR body claim that the round-4 limit is the only case where a record reaches a passage the reader did not select. Fix: test edges against documentText's blocks offsets, not a character."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/doc/pending-sync.ts:334", "description": "A skipped stale count relies on the row's write to report again, but the rejection branch (:383-385) only logs. So a failed IndexedDB write leaves the toolbar on the old count and a whenSent wait runs to its bound. Report on both outcomes."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/margin/margin-context.tsx:410", "description": "setAnchorRefusal(undefined) before the 5 s whenSent wait puts the server's 'anchor mark is not in the document' back on screen between 'Re-attaching…' and the retry. Keep REANCHOR_IN_PROGRESS under the new mark id until the retry's outcome."},
+    {"severity": "minor", "file": "packages/proof-editor/tests/record-mark-retype.test.ts:674", "description": "'and their words never moved' for a case whose paragraph was deleted (dropParagraph)."},
+    {"severity": "minor", "file": "packages/proof-editor/tests/record-mark-retype.test.ts", "description": "No row for the document-wide two-readings case after a whole-block deletion (now unplaceable), and none for the hard-break and code-block cases."}
+  ],
+  "proseFixedByReviewer": "None committed (the architect's rule: no prose push while CI at the implementer's head runs). PR body 'Not proven / risk' updated to round 4."
+}
