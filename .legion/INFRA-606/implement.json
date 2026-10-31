@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-31T01:11:29Z",
+  "completed": "2026-10-31T02:29:16Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -244,6 +244,14 @@
       "observed": "ok (50 of 50 each), and 50 of 50 without -race; the related hub, live, relay, mention, sweep and claim groups pass.",
       "headSha": "72a07b4954ff7f3191d375d898a3b6a7f8b3246f",
       "negativeControl": "At ed9b6759 the tester measured 4 of 20 failures for each (the relay feed's seed recompute in the count; the hook ageing the map's claim while a refresh had already moved the row)."
+    },
+    {
+      "criterion": "Tester round 18: the conflict with main resolved by a forward merge (confirmation round: only docs and a test differ), with the tester's refreshHeldClaims regression test committed.",
+      "surface": "internal/dispatch/api and cmd/listener against Postgres at the merged head",
+      "command": "go test -p 2 -parallel 4 ./internal/dispatch/api/ -run 'Mention|Refresh|Lane|Keyed|Sweep|Fallback|Routes|Hub|Live' -count=1; go test ./cmd/listener/...; go test ./internal/dispatch/api/ -run TestARefreshThatLosesToAKeyedRepeatKeepsTheRepeatsClaim -count=10",
+      "observed": "All pass; the regression test passes 10 of 10.",
+      "headSha": "783a30cc69908f4fea54a798c54a8c495a7f765b",
+      "negativeControl": "With refreshHeldClaims' old record condition (any refreshed key still waiting), the regression test fails 3 of 3: the sender holds the refresh's claim while the row carries the repeat's."
     }
   ],
   "filesChanged": [
@@ -285,6 +293,7 @@
     "packages/envoy/internal/dispatch/api/comment_delivery_sender_test.go",
     "packages/envoy/internal/dispatch/api/comment_delivery_supersede_test.go",
     "packages/envoy/internal/dispatch/api/comment_document_authors_test.go",
+    "packages/envoy/internal/dispatch/api/comment_mention_refresh_race_test.go",
     "packages/envoy/internal/dispatch/api/comment_mention_sender.go",
     "packages/envoy/internal/dispatch/api/comment_mentions_test.go",
     "packages/envoy/internal/dispatch/api/comments_test.go",
@@ -387,7 +396,8 @@
     "Forward merge at afab3fdc (main d126b19d): main's #2483 took 0148, so the fallback table is 0149_comment_fallback_copies; route pin 148.",
     "Forward merges at 8f68d44d (main 6fa26c74, #2392's event horizon: the relay, bounded resume, overflow catch-up and the events-log route read only up to the horizon; the hub keeps #2392's asynchronous feed take, costing one seed recompute per hub generation start) and ed9b6759 (main 4ca6415a, #2466's load-test replay beside the restart scenario); fallback table 0150_comment_fallback_copies.",
     "Four hub tests (main's) settle the relay feed's seed before measuring (57c4a697), because this PR starts a hub generation at the first subscribe; no assertion weakened.",
-    "refreshHeldClaims records a refreshed claim only over the one it snapshotted (a test-exposed race, not a product defect: the row's claim only moves forward, so no sweep sees a live queued attempt as free)."
+    "refreshHeldClaims records a refreshed claim only over the one it snapshotted (a test-exposed race, not a product defect: the row's claim only moves forward, so no sweep sees a live queued attempt as free).",
+    "Forward merge at ae4d4fee (main 21b40359): AGENTS.md and cmd/dispatch/README.md take #2422's one sentence per line with this PR's content; round-shape.py lists docs and one test only (confirmation round)."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -396,7 +406,7 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 18,
-  "answersTest": "0bd0f6a8eeff0126ff79b492c05ae669ed965f72",
+  "round": 19,
+  "answersTest": "870b53ba671895c219dc85ca9f3641f86ea976ed",
   "answersReview": "d8b5a38fcddc4e3a4c504d787c6371812805bec0"
 }
