@@ -2,53 +2,31 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-557",
-  "completed": "2026-10-30T22:55:00Z",
-  "round": 17,
-  "testedHead": "a14ba02f6f85a6f55d2c9fc4f2db9e5d7e30fd8e",
-  "handoffHead": "e1a60f04cdafe2616176b04453f15e8f4ef4a774",
-  "scope": "Architect 20:47Z and 20:47:59Z: the forward merge with main's #2542 (fast hub-loss detection) by fingerprint; on real binaries a kill, a clean graceful hand-over on the mark, a hub that stops answering under the holder; all multiprocess rows; ci-ok and the four required checks. Plus: cut only the active pod's receive connection and measure until a standby delivers, for INFRA-14.",
+  "completed": "2026-10-31T02:30:00Z",
+  "round": 18,
+  "testedHead": "ff705a787c7e",
+  "handoffHead": "f33da395f6f1928c80449d69baf15f9a2872f7cc",
+  "scope": "The round-17 risk fix (580089b5: release the lease when the receive connection is down past leaseReceiveLost) and the two merges of main (6c38d745 with #2517, ff705a78 with #2422).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `cd packages/envoy && go test -tags multiprocess -count=1 -timeout 40m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener` at a14ba02f: 29 rows PASS, ok 636.387s."
+    "how": "Re-ran the whole multiprocess suite at the head: go test -tags multiprocess -count=1 -timeout 40m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener -> 31 PASS, ok 670.056s, including TestTwoPodsReceiveConnectionLostHandsOverWithin15s and TestTwoPodsReceiveConnectionBackInsideTheBoundKeepsTheLease. The receive-lost row's relay closes reconnects at their CONNECT frame, so it does not reach the case in the failure below."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "The approved diff plus only the conflict resolution",
-      "surface": "the branch's diff",
-      "command": "unchanged-diff fingerprints at 18194add, 62f9a352 and a14ba02f; per-file branch-side diff before (merge-base..62f9a352) and after (a14ba02f^2..a14ba02f)",
-      "observed": "18194add and 62f9a352 both fe6e72c1 (the approved diff unchanged through retro); a14ba02f b4fed072; only cmd/listener/live_topics.go (the branch's stream-subject follow beside #2542's WithSilentCutDetection client) and #2542's silent_cut_test.go and cut_rewatch_test.go differ, which is the conflict resolution",
-      "headSha": "a14ba02f6f85a6f55d2c9fc4f2db9e5d7e30fd8e",
-      "negativeControl": "any other file with a changed branch-side diff would have meant a wider round; there were none"
-    },
-    {
-      "criterion": "A hub that stops answering while a pod holds the lease: the holder gives up and a standby takes over, in order, with #2542's detection",
-      "surface": "real cmd/listener processes built at a14ba02f under the rendered ListenerPermissions nkey grant on a real nats-server 2.10.29; pod-a behind a relay; both of its links frozen (sockets open); a send every 100 ms through pod-b",
-      "command": "python3 $TMPDIR/infra557-test/cut.py $TMPDIR/infra557-test/listener-head17 head17-hub hub 60",
-      "observed": "pod-a 'envoy nats disconnected name=\"envoy-listener pod-a\"' 2.13 s after the freeze, lease lapsed 3.80 s; pod-b took the expired lease 4.94 s, settle hold ended 10.94 s; 239 messages, 0 missing, in order, the first sent after the cut reached its session 10.95 s after it",
-      "headSha": "a14ba02f6f85a6f55d2c9fc4f2db9e5d7e30fd8e",
-      "negativeControl": "the 18194add binary (no #2542): no disconnect line, the same take-over through the lease at 4.93 s, first delivery 10.94 s"
-    },
-    {
-      "criterion": "Kill 40 of 40 in order; clean graceful hand-over within 10 s on the mark",
-      "surface": "as above",
-      "command": "python3 $TMPDIR/infra557-test/health.py <head> h17-kill kill; python3 $TMPDIR/infra557-test/cut.py <head> head17-term term",
-      "observed": "SIGKILL after message 15: 40 of 40 in send order, last 6.16 s after the kill. SIGTERM: pod-a hand_back_marked true; pod-b took the lease 0.42 s and its hold ended 2.42 s after the SIGTERM; 155 messages, 0 missing, in order, slowest 2.40 s",
-      "headSha": "a14ba02f6f85a6f55d2c9fc4f2db9e5d7e30fd8e",
-      "negativeControl": "as machine box-other's NATS user: put lease.listener-box-smoke and handback.listener-box-smoke.999 refused with a permissions violation; lease.listener-box-other accepted"
+      "criterion": "INFRA-14 risk from round 17: when only the holder's receive connection is lost, a standby takes over and delivers within the 15 s hard bound (the fix's design: release after leaseReceiveLost, 3 s down).",
+      "evidence": "Red test TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s (packages/envoy/cmd/listener/multiprocess_takeover_test.go, with mpLaneRelay.blackholeNew in multiprocess_harness_test.go, commit 'test(envoy-listener): red row for a receive connection lost to a route that drops its packets'). Command: cd packages/envoy && go test -tags multiprocess -count=3 -timeout 20m -run '^TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s$' -v ./cmd/listener -> FAIL 3 of 3 at ff705a78 (twice '10 of 150 messages reached their session later than 15s', first at 15.966s; once 'pod-a never released the lease for its lost receive connection'). Real-binary run (cut.py recv, 7 runs): the standby takes the EXPIRED lease at 7.94 s in 5 runs, with first delivery 13.95 s after the cut; in 2 runs the lease is released only at 9.85 s, with first delivery at 15.95 s. Cause, from a SIGQUIT goroutine dump of pod-a 5.5 s into the cut: lease.step -> receiveDown -> durableReceiver.receiveUp -> bus.Client.Connected -> nats.Conn.Status blocks on the connection RWMutex, which nats.go doReconnect -> processConnectInit holds while it waits for the INFO of a reconnect that never answers. So the lease loop, renewals included, stalls whenever the receive connection's reconnect dials hang (a route that drops packets, a blackholed hub address)."
     }
   ],
-  "measurement": {
-    "what": "Only the active pod's receive (bus) connection cut silently, its lease connection up; time until a standby delivers (for INFRA-14)",
-    "command": "python3 $TMPDIR/infra557-test/cut.py $TMPDIR/infra557-test/listener-head17 head17-recvlong recv 780",
-    "result": "cut -> standby takes the lease 602.4 s; its settle hold ended 602.7 s and it handled the durable's backlog at once. The holder noticed the cut at 2.0-2.5 s (#2542) and answered /healthz 503 from 2.8 s, but kept renewing the lease on its live lease connection; the take-over came only when self-health reached its threshold (20 consecutive failed probes 30 s apart) and terminated the process, which released the lease. No pod delivered from the durable during those 10 minutes.",
-    "control": "18194add: no disconnect noticed and no take-over within the 300 s bound",
-    "caveat": "After the take-over, deliveries failed with 'no session record for session ses_c' because the throwaway script registered the session once and its 5-minute record lapsed; ordering after this run is unverified."
-  },
-  "risks": [
-    "A silent cut of only the holder's receive connection, with its lease connection up, stalls delivery for about 10 minutes (602 s), until self-health terminates the holder: the lease is renewed on a connection the receive loop does not depend on. A frozen hub or a lost node cuts both connections and takes over in about 5 s (11 s to first delivery). Sent to the architect to decide whether this is acceptable or the holder must give up the lease when its receive connection is lost."
+  "failed": 1,
+  "observations": [
+    "Receive connection cut for 2 s: not noticed, the lease is kept, all 230 messages in order, slowest 1.97 s.",
+    "Receive connection cut 3.2 s (noticed at 2.1 s, then healed): the lease is kept, but order breaks because messages pushed to the old connection come back at the 6 s ack wait. The 18194add control breaks the same way, so this round did not cause it.",
+    "SIGKILL of the active pod after message 15: 40 of 40 in send order, the last 6.11 s after the kill.",
+    "Clean graceful hand-over: hand_back_marked true, first delivery 2.42 s after the SIGTERM, in order. Frozen hub under the holder: pod-b takes the lease at 4.93 s, first delivery 10.94 s after the cut, in order.",
+    "Negative control: as machine box-other's NATS user, puts to lease.listener-box-smoke and handback.listener-box-smoke.999 were refused (nats: timeout), and a put to its own lease.listener-box-other was accepted.",
+    "Merge 6c38d745 changed the branch-side diff in cmd/listener/main.go, internal/store/kv.go, healthz_role_view_test.go, ci.yaml and docs (#2517's role-claim-view check). Merge ff705a78 changed only packages/envoy/AGENTS.md. Every run used the merged binary.",
+    "Required checks at ff705a78, read 02:23Z: changes and pr-title queued; not green."
   ],
-  "ci": "Required checks at a14ba02f, read 22:50Z: changes and pr-title queued; lint, typecheck, test and ci-ok not run. Not green yet; not waited on.",
-  "notes": ["Throwaway scripts in $TMPDIR/infra557-test (cut.py, health.py, probe); not committed.", "Evidence: https://github.com/sjawhar/legion/pull/2404#issuecomment-6535168335"]
+  "evidence": "https://github.com/sjawhar/legion/pull/2404#issuecomment-6537750668",
+  "notes": "Throwaway scripts in $TMPDIR/infra557-test (cut.py, health.py), not committed."
 }
