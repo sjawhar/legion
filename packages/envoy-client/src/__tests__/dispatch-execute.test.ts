@@ -2560,6 +2560,70 @@ describe("executeDispatchTool", () => {
     expect(agentCalls).toHaveLength(3);
   });
 
+  // The line an agent reads before it decides whether to take an issue. A holder that has
+  // missed its heartbeats has not ended and still holds the claim, so "not running" would send
+  // the reader to take work that is being done; what it needs instead is both times - since
+  // when the holder has been silent, and from when the server lets anyone else take it
+  // (dispatch://INFRA-392).
+  test("an unresponsive holder's claim says since when it is silent and when it becomes takeable", async () => {
+    const serve = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/agents") {
+        return response([{ session_id: "session-stalled", title: "Live registry title" }]);
+      }
+      if (target.pathname === "/api/v1/issues/DSP-1") {
+        return response({
+          key: "DSP-1",
+          title: "Claimed work",
+          status: "todo",
+          priority: null,
+          assignee: null,
+          claim: {
+            actor: { kind: "session", id: "session-stalled", origin: { session_title: "Stamped" } },
+            at: "2026-09-24T06:00:00Z",
+          },
+          holder_state: "unresponsive",
+          last_seen: "2026-09-24T06:30:00Z",
+          takeable_at: "2026-09-24T06:50:00Z",
+          components: {
+            mode: "inherit",
+            ids: [],
+            unknown: [],
+            reason: null,
+            inherited_from: null,
+          },
+          route: null,
+          repo: null,
+          resolved_repo: null,
+          external_links: [],
+          open_asks: [],
+          last_seq: 0,
+          labels: [],
+        });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-1/events") return response([]);
+      if (target.pathname === "/api/v1/issues/DSP-1/references") {
+        return response({ members: [], truncated: false });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("issue"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+    const stalled = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { issue: "DSP-1" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: serve as typeof fetch,
+    });
+    expect(stalled.text).toContain(
+      "Claimed by: Live registry title since 2026-09-24T06:00:00Z · unresponsive since 2026-09-24T06:30:00Z, takeable at 2026-09-24T06:50:00Z\n"
+    );
+    expect(stalled.text).not.toContain("not running");
+  });
+
   test("dispatch_issues passes each optional filter through, omits absent ones, and returns the documented row shape", async () => {
     const requests: URL[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
@@ -2659,6 +2723,7 @@ describe("executeDispatchTool", () => {
           route: "role:sre",
           route_status: "no_holder",
           route_holder: null,
+          route_status_reason: null,
           updated_at: "2026-09-13T00:00:00Z",
           progress: { tasks: { done: 3, total: 7 }, children: { done: 2, total: 5 } },
         },
@@ -2666,6 +2731,59 @@ describe("executeDispatchTool", () => {
       total: 1,
       offset: 0,
       limit: 50,
+    });
+  });
+
+  test("dispatch_issues tells a route whose listener is refilling from one whose listener did not answer", async () => {
+    const row = (key: string, reason: string | null) => ({
+      key,
+      title: key,
+      status: "todo",
+      priority: null,
+      rank: "a",
+      labels: [],
+      parent: null,
+      assignee: null,
+      updated_at: "2026-09-13T00:00:00Z",
+      last_seq: 1,
+      open_asks: 0,
+      progress: { tasks: null, children: null },
+      claim: null,
+      route: "role:sre",
+      route_status: "unknown",
+      route_holder: null,
+      route_status_reason: reason,
+    });
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+      response({
+        issues: [row("ACME-1", "refilling"), row("ACME-2", "unreachable"), row("ACME-3", null)],
+        total: 3,
+        limit: 50,
+        offset: 0,
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "ACME" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text.split("\n").slice(1)).toEqual([
+      "ACME-1 [todo] ACME-1 · route role:sre (the Envoy listener's agent list is refilling, so whether it reaches anyone is unknown; try again in a moment)",
+      "ACME-2 [todo] ACME-2 · route role:sre (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
+      "ACME-3 [todo] ACME-3 · route role:sre (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
+    ]);
+    expect(result.details).toMatchObject({
+      issues: [
+        { key: "ACME-1", route_status_reason: "refilling" },
+        { key: "ACME-2", route_status_reason: "unreachable" },
+        { key: "ACME-3", route_status_reason: null },
+      ],
     });
   });
 
@@ -2732,9 +2850,33 @@ describe("executeDispatchTool", () => {
     expect(gone.text).toContain(
       "Route: session:ses-gone (that session is not running right now)\n"
     );
-    const blind = await read({ route: "role:sre", route_status: "unknown", route_holder: null });
+    const blind = await read({
+      route: "role:sre",
+      route_status: "unknown",
+      route_holder: null,
+      route_status_reason: "unreachable",
+    });
     expect(blind.text).toContain(
       "Route: role:sre (the Envoy listener did not answer, so whether it reaches anyone is unknown)\n"
+    );
+    // A server that gives no reason reads as one whose listener did not answer.
+    const unexplained = await read({
+      route: "role:sre",
+      route_status: "unknown",
+      route_holder: null,
+    });
+    expect(unexplained.text).toContain(
+      "Route: role:sre (the Envoy listener did not answer, so whether it reaches anyone is unknown)\n"
+    );
+    // A listener whose agent list is refilling did answer: the route is unknown only for now.
+    const refilling = await read({
+      route: "role:sre",
+      route_status: "unknown",
+      route_holder: null,
+      route_status_reason: "refilling",
+    });
+    expect(refilling.text).toContain(
+      "Route: role:sre (the Envoy listener's agent list is refilling, so whether it reaches anyone is unknown; try again in a moment)\n"
     );
     // A held role names its holder the way a claim does: by the live registry's title.
     const held = await read({ route: "role:sre", route_status: "live", route_holder: "ses-sre" });

@@ -43,7 +43,7 @@ func TestEveryBucketIsCreatedAtThreeCopiesOnAThreeCopyDeployment(t *testing.T) {
 		t.Fatalf("open the CI store: %v", err)
 	}
 	t.Cleanup(ci.StopWatch)
-	if _, err := redeliver.OpenState(js, replicas); err != nil {
+	if _, err := redeliver.OpenState(conn, js, replicas); err != nil {
 		t.Fatalf("open the webhook redelivery state: %v", err)
 	}
 

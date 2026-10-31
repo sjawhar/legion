@@ -97,15 +97,23 @@ Each item below names a task and where its code is, then notes on it.
 
   hot delivery via prompt_async
 
-- **Interest storage**: `internal/store/kv.go`
+- **Interest storage**: `internal/store/kv.go`, `internal/store/interest_cache.go`, `internal/store/interest_reads.go`, `internal/store/interest_writes.go`, `internal/store/roles.go`, `internal/store/reaper.go`, `internal/store/interest_markers.go`
 
-  JetStream KV subscriptions
+  JetStream KV subscriptions and role claims:
+  the registry, its buckets and its watcher (`kv.go`);
+  the interest cache its watcher feeds (`interest_cache.go`);
+  read-through, `Match` and `List` (`interest_reads.go`);
+  upsert and removal (`interest_writes.go`);
+  role claims (`roles.go`); the interest and role-claim reapers (`reaper.go`); and the delete-marker collector (`interest_markers.go`)
 
-- **KV cache watchers**: `internal/kvwatch/kvwatch.go`, `internal/kvwatch/scan.go`, `internal/bus/kvresume.go`
+- **KV cache watchers**: `internal/kvwatch/kvwatch.go`, `internal/kvwatch/options.go`, `internal/kvwatch/serving.go`, `internal/kvwatch/stream.go`, `internal/kvwatch/repair.go`, `internal/kvwatch/shutdown.go`, `internal/kvwatch/copy.go`, `internal/kvwatch/marks.go`, `internal/kvwatch/scan.go`, `internal/kvwatch/entry.go`
 
-  the interest, role claim, session and CI caches' one watch lifecycle:
-  first start, readiness, whether the current watcher's first scan delivered every key (`Complete`, and `WithRescan`, which scans again after a scan nats.go's idle timer ended), rewatch (resuming after the last revision applied, `bus.KeyValue.WatchAllFrom`), recreated buckets, stop;
-  and the one-shot scan of a bucket's existing keys (`ScanExistingKeys`); `kvwatchtest` fakes nats.go's scan idle timeout
+  the interest, session and CI caches' one watch lifecycle:
+  first start, readiness, rewatch and the read protocol's core (`kvwatch.go`, its options in `options.go`), recreated buckets (the stream probe, the confirmation gate and `Check`, `stream.go`), the watcher's own re-read and the unrepaired-stop ERROR (`repair.go`), stop and end (`shutdown.go`);
+  the read every watch starts (`Cache`: `BeginRead`, `Apply`, `CompleteRead`), whose rows, revision fence, marks and read epoch one `Copy` keeps per cache (`copy.go`, `marks.go`), so a re-read keeps a cache's rows and removes only what a completed read did not find;
+  whether a copy can be served (`Servable`, `Following`, `NeedsRead`, `Disconnected`, the stale bound;
+  `serving.go`); and the one-shot scan of a bucket's existing keys (`ScanExistingKeys`);
+  every watch through nats.go's `jetstream` watcher with kvwatch's own scan idle timer, and `Entry`, the one record type the caches apply
 
 - **Topic matching**: `internal/routing/match.go`
 
@@ -986,7 +994,7 @@ the transaction then re-reads under its own lock whatever the resolution depende
 its callers are `api/comment_create.go` (the mention and route resolution behind `suppress_route`), `api/comment_delivery.go` and `api/message_delivery.go` (a delivery's recipient, its claim and its settle) and `api/issue_claim.go` (the holder's liveness, on both the claim and the release route).
 Three of those decisions now read one session by id rather than scanning the live list:
 a comment mention's `session:` target, each selected recipient of a broadcast (`resolveBroadcastSessions`, eight reads in flight under one five-second budget) and whether an issue's claim holder is still working (`fetchHolderLiveness`).
-A list is one listener's cache of the session registry, so only the per-session read tells a session that ended from one that cache has not refilled yet, and a read that did not answer never reports the session gone:
+A list is one listener's cache of the session registry, so only the per-session read tells a session that ended from one that cache does not hold yet, and a read that did not answer never reports the session gone:
 a broadcast and a claim are refused `503
 ENVOY_UNAVAILABLE`, the broadcast with nothing written, while a mention's comment is still created `201` and that mention's delivery is recorded `failed` with the listener's own `envoy
 listener: …` text.
@@ -2275,6 +2283,11 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   it first commits `subscription.remove_requested` with `pending: true`, which the outbox does not publish.
   After idempotent listener removal succeeds, Dispatch appends `subscription.removed` with the `request_event_id` it settles and routes that notice directly to the unsubscribed session's `notifications.agent.<session_id>` topic in addition to the owner topic.
 
+- Dispatch never turns a listener list it could not read into an absent agent.
+  While the listener refuses `GET /v1/sessions` or `GET /v1/interests/` as refilling (its `503` with code `refilling`, which `envoy.Client` returns as `envoy.RefillingError`, `errors.Is` `envoy.ErrRefilling`), `GET /api/v1/agents`, both subscriber reads and a `route_status=live|no_holder` issue filter answer `503 ENVOY_REFILLING` with the listener's `Retry-After` (5 when it sends none, `writeEnvoyRefilling`), and any other failed read stays `503 ENVOY_UNAVAILABLE`.
+  Every issue read gives a routed issue whose roster it could not read `route_status: "unknown"` with `route_status_reason`, `refilling` or `unreachable` (`readRouteRoster`), never `no_holder`;
+  the reason is null with every other status.
+
 - The Dispatch API describes itself.
   `internal/dispatch/api/routes_table.go` is the one list of `/api/v1` routes (`apiRoute{Method, Pattern, Auth, Description, Handler}`, `Auth` one of `public`, `any`, `human`, `bearer`);
   `Register` mounts that table and public `GET /api/v1` serves it as `{routes: [{method, path, auth, description}], docs: "skills/dispatch/SKILL.md"}` sorted by path then method.
@@ -2406,14 +2419,19 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   `liveSessionEntry` bounds the session read), and no second attempt starts after it, so a role store that does not answer is reported inside the caller's attempt, as the bus-unavailable 503 with `Retry-After: 1` (a role send's later attempt that runs out of the window is its 504).
   That read is a direct get, so the listener's NATS user needs publish on `$JS.API.DIRECT.GET.KV_envoy_sessions.>`.
   A session-addressed send and an agent delivery read the session they name through the same read-through (`liveSessionEntry`), each under its own bound - `sendSessionReadTimeout` (1 s, inside the send's own budget) and `deliverySessionReadTimeout` (2 s) - so neither needs any NATS permission beyond that same direct get.
+  The interest reaper decides a session's death the same way:
+  it asks each candidate's liveness outside every lock (`sessionMayBeLive`:
+  a session cache hit, or else a read of the session's own key) and deletes only the interests of a session the bucket does not hold;
+  a read that does not answer keeps the interest for the next cycle with a WARN.
+  So a session the session cache has not read yet, before its first read or while it reads its bucket again, keeps its subscriptions.
 
-- The interest reaper (`Registry.Reap`, `internal/store/kv.go`) deletes a dead session's interest only once its row was last written more than the grace window plus `store.InterestRefreshAge` (5 minutes) ago;
+- The interest reaper (`Registry.Reap`, `internal/store/reaper.go`) deletes a dead session's interest only once its row was last written more than the grace window plus `store.InterestRefreshAge` (5 minutes) ago;
   the listener passes `store.InterestReapGrace` (10 minutes), so a dead session's interest stays 15 minutes after its row's last write, and a row exactly that old is kept.
   The refresh allowance exists because a build that skips rewriting an unchanged interest row younger than `InterestRefreshAge` lets the row's `UpdatedAt` lag the session's last heartbeat by up to that age;
   adding it keeps a paused session's grace at least `InterestReapGrace` after its last heartbeat.
   Release order follows from it: no build that skips unchanged interest writes may run while any listener on the shared `envoy_interests` bucket still reaps at 10 minutes, and this build is one that skips them (`Registry.UpsertWithin`).
 
-- `store.Open` snapshots the revision of every stored claim (`roleRevisions`, `internal/store/kv.go`) so a restored claim keeps its grace only while the bucket still holds the revision the restart read.
+- `store.Open` snapshots the revision of every stored claim (`roleRevisions`, `internal/store/roles.go`) so a restored claim keeps its grace only while the bucket still holds the revision the restart read.
   It takes that snapshot from one watch over the bucket's existing keys, as the interest, session and CI caches read theirs (`internal/kvwatch`), so listener readiness costs one pass over the bucket rather than a round trip per claim (LEGION-360).
   A scan that does not reach the end of the bucket fails the start rather than restoring part of it:
   nats.go ends one early both by closing the updates channel and, on its own idle timeout, by sending the same nil marker a complete scan ends with, so the snapshot reads `Error()` at the marker.
@@ -2566,12 +2584,12 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   it answers `204` reading nothing, so a liveness or startup probe never restarts a process for a slow or unreachable dependency, and readiness stays on `/healthz`.
   `/healthz` returns `degraded` for a JetStream/KV probe that answered with a transient failure and `unhealthy` for NATS loss, a JetStream check that did not answer within its budget, a stopped interest, role claim, session or CI KV watcher, a missing durable consumer, or a durable consumer `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves.
 
-- A role claim view whose scan has simply not completed is neither of those:
-  nothing is wrong with the bucket or the watcher, and `/healthz` reports it as `200` with `"status":"degraded"` and `"error":"role claim view unavailable: the role claim view is not complete: ..."` (`store.Registry.RoleViewErr`, the state `RolesHeldBy` itself reads, so the report and the routes cannot disagree) while `GET /v1/sessions` and `GET /v1/registry/<session_id>` answer their 503.
+- A role claim view whose copy no read of the bucket has made servable yet is neither of those:
+  nothing is wrong with the bucket or the watcher, and `/healthz` reports it as `200` with `"status":"degraded"` and `"error":"role claim view unavailable: the role claim view cannot be served: ..."` (`store.Registry.RoleViewErr`, the state `RolesHeldBy` itself reads, so the report and the routes cannot disagree) while `GET /v1/sessions` and `GET /v1/registry/<session_id>` answer their 503.
   That check runs last, after every check that can answer `unhealthy`, so it hides none of them, and its answer keeps the healthy answer's fields (`session_cache_*`, `ci_cache`, `live_topics`, `num_pending`, `num_ack_pending`);
   a transient KV or durable info failure's `degraded` answer carries `status` and `error` alone and returns before the checks after it.
   It is `degraded` and no part of `Ping` or `WatchErr` on purpose:
-  the view fills itself through that watcher's own rescan, so neither the load balancer nor the self-health monitor, which restarts the listener over a terminal failure its rebuilds do not clear, is to act on a state no rebuild completes a scan for.
+  the view fills itself through that watcher's own re-read, so neither the load balancer nor the self-health monitor, which restarts the listener over a terminal failure its rebuilds do not clear, is to act on a state no rebuild completes a read for.
   A rewatch that keeps failing after a reconnect ends no watcher and clears no cache, so none of those checks finds it:
   the handler reads the bus client's `HookStall` too, and a rebuild of the KV watches that has been due for `bus.RepairGrace` (a minute) with no run that succeeded is `200 {"status":"degraded","error":"KV watch rebuild unavailable: <last rewatch error> (no rebuild has succeeded for 1m0s)"}`, the stall alone when no run has failed behind it.
   That answer is a 200 and not a refusal because the probes act on `/healthz` itself - the ECS container health check is `curl -sf` of it every 30 s with 3 retries on a service of one task, and GKE's readiness probe reads it too - so a refusal would replace, or unroute, the only listener there is, and its replacement would rebuild into the same failing rewatch with cold caches that warm up empty, whose fanout then acknowledges general-topic messages as unmatched and loses them, while the running task still serves from the caches it holds, stale but not empty;
@@ -2609,7 +2627,8 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   Re-subscribing holds no lock across a bind's request, so a reconnect that lands while a bind is in flight, such as the listener's bind attempt, whose lookup the reconnect can lose for JetStream to wait out for 10 s, restores and runs the hooks without waiting for it:
   a registration has one bind at a time, so the restore leaves that registration to its bind, and the recovery the reconnect starts binds it should that bind fail.
   Nothing has failed there, so the restore logs it at INFO, `envoy nats resubscribe left to the bind in flight` with the `subject`, and `envoy nats resubscribe failed` and `envoy nats recovery resubscribe failed` stay ERRORs for binds that failed.
-  While NATS is connected, the self-health monitor also rebuilds those watchers and a missing durable consumer when a probe finds a stopped watcher, a closed KV handle or a lost consumer.
+  A disconnect runs the disconnect hooks (`bus.Client.AddDisconnectHook`, from nats.go's `DisconnectedErrCB`), and the listener's calls `Disconnected` on every cache, since nats.go keeps a watcher's subscription open through an outage and nothing else would say its copy stopped following the bucket.
+  While NATS is connected, the self-health monitor also rebuilds those watchers and a missing durable consumer when a probe finds a stopped watcher, a closed KV handle, a lost consumer, or a cache whose copy does not follow its bucket with no read under way to make it (`NeedsRead`, as when the reconnect hook's Rewatch failed while the old watcher survived).
   All four watchers share one lifecycle (`internal/kvwatch`), and the listener keeps its caches as one list (`listenerCaches`, which holds the CI cache only on a listener that mounts the GitHub webhook route;
   the interest registry's entry covers its interest and role claim watchers), which rewatch, self-health, `/healthz` and shutdown each loop over.
   The first start runs in the background.
@@ -2617,15 +2636,30 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   when a Rewatch's watcher is current, it does neither, and that watcher releases readiness once it has delivered every existing key.
 
 - A rewatch opens the bucket on the connection it is given, so a store bound to a replaced connection moves to the new one.
-  A rewatch onto a bucket whose stream was deleted and created again empties the cache and its revision fence before the new watcher fills them.
-  A bucket recreated under a watcher that did not end (nats.go's ordered consumer can reset onto the new stream without delivering its first revisions) is caught by each store's `Ping`, which the self-health probe runs:
-  it records a terminal watcher error, so the next tick rebuilds the watcher.
-  A watch whose stream is older than a running, healthy watcher's (it read the bucket before a newer watch switched to a recreated one) is discarded, and read and dropped until it ends;
+  Every watcher a watch installs reads the whole bucket again, and nothing empties the cache first (`kvwatch.Cache`):
+  the cache keeps every row through the read, each delivered record replaces its row as it arrives, and only a read that delivered every record removes the rows it found no evidence of (`kvwatch.Copy`;
+  a removed session row keeps its last heartbeat for `LastSeen`).
+  A read of a bucket whose stream was deleted and created again drops the revision fence, since the new bucket's revisions number from 1 again, and keeps the rows;
+  a write, read-through or delete made through a handle of the earlier incarnation (`Handle`, `Epoch`) is not applied to the cache.
+  A read that times out or ends before its end marker removes nothing:
+  kvwatch reads a timed-out one again itself 5 s later (`rereadDelay`), and the reconnect hook or the self-health rebuild starts the read after a watcher that ended.
+  Whether a copy can be served is kvwatch's (`Servable`):
+  never before its first complete read, and not once the copy has stopped following its bucket (a new read, an ended watcher, a recreated or deleted bucket, a disconnect) for longer than the stale bound, 2 minutes or half the bucket's `MaxAge` when that is shorter, one stale episode spanning every failed read until one completes.
+  The session registry prunes rows past their TTL only while its copy follows the bucket, since a copy that does not cannot see the heartbeats that renewed them, though `Get` answers such a row not-found.
+  `packages/envoy/scripts/e2e-refill.sh` proves the re-read, an interrupted read, a bucket recreated under a running listener and the refusal on the real listener and a NATS of its own (`packages/envoy/scripts/README.md`).
+
+- A bucket recreated under a watcher that did not end (nats.go's ordered consumer can reset onto the new stream without ending, resuming past the sequences the old stream covered) is found by the watcher itself, within about 2 s:
+  it reads its bucket's stream every 2 s (`streamProbeInterval`;
+  one `STREAM.INFO` per watcher, so 1.5 a second for a listener with all three), holds a record delivered on a confirmation of the stream older than 4 s (`streamConfirmMaxAge`) for the read of the stream already in flight, or for one of its own when none is and none ended within the probe interval, so a slow or failing `STREAM.INFO` holds delivery back by one read at most, and reads the stream before a read completes.
+  Reads that keep failing for longer than the stale bound stop the copy following, and the watcher reads its bucket again once the stream answers (WARN `<cache> could not read its bucket's stream for longer than its stale bound; ...`).
+  A new stream stops the copy following and starts the read of the new bucket at once, in a new epoch (INFO `<cache> bucket was recreated under its watcher; ...`, then the read's own `<cache> bucket was recreated; ...`);
+  a missing one stops the copy following until the bucket is created again (`<cache> bucket was deleted under its watcher; ...`).
+  Each store's `Ping`, which the self-health probe runs, is the fallback (`kvwatch.Watcher.Check`):
+  it records a terminal watcher error for a stream other than the one the watcher reads, so the next tick rebuilds the watcher.
+
+- A watch whose stream is older than a running, healthy watcher's (it read the bucket before a newer watch switched to a recreated one) is discarded, and read and dropped until it ends;
   against an ended or flagged watcher it installs as usual, since a restored or clock-stepped bucket can have an older creation time.
   Only the current watcher releases readiness, at the end of its scan or when it ends on its own; a replaced watcher's end-of-scan releases nothing.
-  Readiness is one-way, and completeness (`Complete`) is not:
-  it holds only while the current watcher runs and its own first scan delivered every key, so a new generation (a rewatch, a rescan, a recreated bucket's reset) clears it until that watcher's scan completes, and a scan nats.go's idle timer ended never sets it.
-  The role claim view answers only while it is complete (`store.Registry.RolesHeldBy`; the role claim view bullet below).
   An entry from a watcher already replaced is dropped.
   A watcher that ends on its own records the terminal error `/healthz` and self-health read.
   A stopped watcher arms nothing, and one armed while the stop ran is read and dropped until the shutdown ends it (the shutdown bullet below).
@@ -2634,41 +2668,34 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   the shutdown deletes each watcher's consumer itself before the connection drains, so a delete nats.go's drain reports belongs to a watcher nothing ended, and an ordered consumer nats.go failed to recreate wraps the error.
 
 - Every cache warm-up logs one line when its initial scan ends
-  — `<cache> cache warm-up` with the bucket, `elapsed_ms`, `entries`, `delete_markers` and `outcome` — at INFO when the scan delivered every existing key (`outcome: "completed"`) or a resumed watch delivered what was written since the revision it resumed after (`outcome: "resumed"`), and at WARN when nats.go's idle timer gave up on it (`outcome: "timed out"`, `internal/kvwatch`).
+  — `<cache> cache warm-up` with the bucket, `elapsed_ms`, `entries`, `delete_markers` and `outcome` — at INFO when the scan delivered every existing key and at WARN when kvwatch's own idle wait gave up on it, no entry for `ScanIdleTimeout` (10 s) (`outcome: "timed out"`, `internal/kvwatch`).
   The two counts are disjoint: `entries` is the live keys the scan delivered, `delete_markers` what it streamed past to find them;
   a cache can hold fewer keys than `entries`, since it evicts a value it cannot decode.
 
-- A `Rewatch` (the reconnect hook's and the self-health rebuild's) resumes after the last revision the cache's watcher applied, delete and purge markers included (the stores' own write-through revisions never count), through `bus.KeyValue.WatchAllFrom`, which opens the bucket with nats.go's `jetstream` package because the legacy KV API has no resume option.
-  Its line's counts are then what was written since:
-  the puts, and the delete and purge markers, after that revision, so a rewatch of a large bucket costs what changed rather than the bucket.
-  A first `Start` still reads the bucket in full, since no applied revision survives the process, and so does a `WithRescan` rescan, which repeats a scan that did not complete;
-  a `Rewatch` reads in full instead of resuming when no generation completed (no revision applied yet, or the current watcher has not reached its end-of-scan marker, or reached it only through the idle timer), when the bucket was recreated (its stream's creation time changed, and the cache is emptied first), when the stream's `LastSeq` is below the last revision applied (a restore of an older snapshot), or when another watch emptied the cache for a recreated bucket after this one read where to resume.
-  It also reads in full, in the same `Rewatch`, when the resuming watcher cannot be created:
-  nats.go holds that watcher's consumer create to the legacy JetStream context's 5 s default, where the full read's requests get 10 s, so a server slow enough to fail the resume still gets the full read rather than a failed repair, and the rewatch logs `<cache> watcher could not resume; the bucket is read in full` at WARN, with the bucket and the error, before the full read's own warm-up line.
-  A resumed watch has no idle timer, so it never logs `timed out`, and it completes at its own end-of-scan marker, which makes its cache complete for `kvwatch.Watcher.Complete` as a full scan's marker does:
-  the one flag that says a generation reached its marker decides both.
-  Each bucket keeps one revision per key, so a resume delivers at most one message per key that still has one.
-  A delete marker the interest marker collector purged while the watcher was away, and a value `MaxAge` expired, leave no message, so a resume cannot see them, exactly as the same-bucket full `WatchAll` it replaces could not: that replay does no reset either.
-  The watcher being replaced can apply more entries after the resume point is read and before the switch;
-  the new one delivers them again, which is harmless because every store fences its cache by revision.
-
-- The line, like every line a cache watcher writes (a failed first start, a recreated bucket, a resume that could not be created, its own end), goes through the logger its store hands it (`store.WithLogger`, `session.WithSessionLogger`, and the CI store's own), so in the listener it is a JSON record with `machine_id`, as `internal/store`'s lines are.
-  A timed-out scan is logged and never recorded as the watcher's error, because the watcher is still running and its cache still follows the bucket:
+- The line, like every line a cache watcher writes (a failed first start, a recreated bucket, its own end), goes through the logger its store hands it (`store.WithLogger`, `session.WithSessionLogger`, and the CI store's own), so in the listener it is a JSON record with `machine_id`, as `internal/store`'s lines are.
+  A timed-out scan is logged and never recorded as the watcher's error, because the watcher is still running and reads its bucket again itself (`rereadDelay`):
   `Err`, `Ping`, `/healthz` and the self-health rebuild must keep meaning "this watcher is dead".
-  Reading the timeout consumes nats.go's single buffered error, so a watcher that later ends after a timed-out scan records `<cache> watcher stopped` rather than the timeout;
-  `internal/kvwatch` reads that error in one place (`idleTimeout`), for the warm-up, a watcher's terminal error and the one-shot `ScanExistingKeys`, which refuses a scan the timer ended.
-  A watcher that ends on its own writes that end as two lines, not one:
-  `<cache> watcher stopped` at WARN when the stop happens, and one ERROR, `<cache> watcher was not repaired` with the bucket, the recorded error and a `reason` of `no repair within 1m0s`, only once no repair has run within a minute (`unrepairedDelay`, which is `bus.RepairGrace`), because an ERROR at the stop itself is noise whenever the self-health rebuild repairs it a moment later.
+  Every watch of a bucket goes through the nats.go `jetstream` package's KV watcher (`bus.KeyValue.WatchKeys`;
+  a key's history through `bus.KeyValue.ReadHistory` and a stream read through `bus.KeyValue.ReadStreamState`, held to `bus.RequestTimeout`, both on the same jetstream handle), never nats.go's legacy watcher, which its legacy `Watch`, `History` and `Keys` run:
+  the legacy watcher arms an init timer while its scan is pending whose callback can send on the channels the subscription's end has just closed, a `send on closed channel` panic that kills the process whenever a subscription ends mid-scan (our stop, nats.go's own unsubscribe, a connection close or drain;
+  nats.go v1.50.0 kv.go:1145-1172, unfixed through v1.55.0).
+  The jetstream watcher has no such timer, so the scan's idle bound is kvwatch's:
+  the cache's read arms its own wait through the injectable AfterFunc, and the one-shot `ScanExistingKeys` holds its own timer and refuses a scan it ended (`ErrScanTimedOut`).
+  Each watch runs in a context of its own that kvwatch cancels once the watcher is stopped or has ended, since nats.go ties the subscription's life to that context and parks a goroutine on it, and a stopped watcher is read until it closes (`bus.DrainWatcher`).
+  Every legacy handle is opened with its connection (`bus.EnsureKeyValue`, `bus.OpenKeyValue`, `bus.WrapKeyValue`), because a legacy handle cannot name it and the jetstream handle needs it.
+  `bus.KeyValue` holds the legacy handle unexported and forwards only the calls it checks, so nothing reaches the legacy `Watch`, `WatchAll`, `WatchFiltered`, `History`, `Keys` or `ListKeys` through it (a call to one does not compile), and a test that injects faults builds its handle with `bus.NewKeyValue`.
   A `Rewatch` that fails reports nothing of its own, since a repair follows it either way:
   the bus arms one within seconds while its hooks are due after a connection event (`internal/bus/recovery.go`, `recoverUntilHealthy`), and a watcher that stopped while the hooks are current is rewatched by the listener's self-health rebuild on the monitor's tick (`cmd/listener/main.go`, `rewatchListenerKVWatchers`, called from `rebuildListenerDependencies`); so that wait is the stop's one report.
-  A repair that lands first clears the wait, so a repaired stop leaves the WARN alone, and the ERROR is logged at most once.
+  A watcher that ends on its own writes that end as two lines, not one:
+  `<cache> watcher stopped` at WARN when the stop happens, and one ERROR, `<cache> watcher was not repaired` with the bucket, the recorded error and a `reason` of `repair failed` or `no repair within 1m0s`, only once a repair has failed or no repair has run within a minute (`unrepairedDelay`, which is `bus.RepairGrace`), because an ERROR at the stop itself is noise whenever the self-health rebuild repairs it a moment later.
+  A repair that lands first clears the wait, so a repaired stop leaves the WARN alone, and the ERROR is logged at most once however a failed repair and the wait race.
 
 - The session cache (`internal/session`) keeps each entry until its deadline, one registry TTL (the session bucket's `MaxAge`) after the write:
   the revision's creation time, or `updated_at` for the listener's own write-through, because JetStream delivers no event when `MaxAge` expires a key.
   Reads (`Get`, `List`, `LastSeen`, and `LiveCount`, which the `envoy_active_sessions` gauge counts with, without copying the cache) take the shared lock and change nothing:
   an entry past its deadline reads as absent.
-  The entry leaves the cache at that deadline, from a deadline heap one `time.AfterFunc` timer serves (`expireDue`), not on a read, and its final heartbeat moves to the `last_seen` record for the registry's last-seen retention (`session.WithLastSeenRetention`, one TTL by default and never less), so `LastSeen` answers the same before and after the removal.
-  The listener keeps that record until the interest reaper's grace has passed, `store.InterestReapGrace` + `store.InterestRefreshAge` after the session left the cache, so `/v1/interests/` can give a dead session's last heartbeat for every row the reaper still holds.
+  The entry leaves the cache at that deadline, from a deadline heap one `time.AfterFunc` timer serves (`expireDue`), not on a read, and its final heartbeat moves to the `last_seen` record for the registry's last-seen retention (`session.WithLastSeenRetention`, `session.LastSeenMemory` (2 hours) by default and never less than one TTL), so `LastSeen` answers the same before and after the removal.
+  That default outlasts the gone horizon, so a caller told a session is gone can still say when it was last seen; the listener sets its own retention instead, the interest reaper's grace (`store.InterestReapGrace` + `store.InterestRefreshAge` after the session left the cache), so `/v1/interests/` can give a dead session's last heartbeat for every row the reaper still holds.
   An id's revision fence leaves with that record, the retention after the id left the cache, expired or deleted, so the fence map holds only live ids and ids that left within the retention;
   since the retention is at least one TTL, a late delivery of an older revision then has a deadline already passed and is not cached.
   A non-positive TTL schedules nothing.
@@ -2677,13 +2704,12 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   a write that lands after that check makes JetStream refuse the delete, and the interest is kept.
   Each pass logs `reaper cycle` with `reaped` and `elapsed_ms`.
 
-- The role claim view (`store.Registry.RolesHeldBy`, which `GET /v1/sessions`, `GET /v1/registry/<session_id>` and a send's `sender.roles` read) answers only while it is complete (`kvwatch.Watcher.Complete`):
-  the current role claim watcher's first scan delivered every claim, its nil marker not the idle timer's, and after a recreated bucket's reset only once the refill's own scan has.
+- The role claim view (`store.Registry.RolesHeldBy`, which `GET /v1/sessions`, `GET /v1/registry/<session_id>` and a send's `sender.roles` read) answers only while the role claim watcher's copy can be served (`kvwatch.Watcher.Servable`):
+  its first read of the bucket completed, and the copy has followed the bucket since, within the stale bound.
   Until then it returns `store.ErrRoleViewNotReady`, a read that did not answer:
   the two session routes answer the bus-unavailable 503 with `Retry-After: 1`, never a holder listed without its role, and a send leaves `sender.roles` out rather than refusing.
-  A first scan nats.go's idle timer ended is scanned again a second later on the same handle, and again until one completes (`kvwatch.WithRescan`, which only the role claim watcher sets), so a timed-out warm-up cannot leave the view refusing for good.
-  The view is read between two readings of the watcher's generation and answers only when both name the same one, since a reset empties it only under a new generation;
-  within one generation every update is fenced by revision (`setRoleHolder`), the registry's own claim writes included, so none undoes a later one.
+  A read kvwatch's own idle wait ended is read again 5 s later (`rereadDelay`), so a timed-out warm-up cannot leave the view refusing for good.
+  Within one read epoch every update is fenced by revision (`setRoleHolder`), the registry's own claim writes included, so none undoes a later one, and a read of a recreated bucket starts a new epoch rather than emptying the view under the old one.
 
 - Each listener collects the interest bucket's delete markers, because nothing else does:
   every delete path leaves one (the reaper for each dead session, an unsubscribe-all, the admin delete), the bucket has no `MaxAge` and keeps one message per subject, and each marker is replayed by every restart's cache warm-up before that listener serves, so uncollected markers grow every restart's time with no deliveries (LEGION-374).
@@ -2720,6 +2746,8 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   The other is a client that reads as not connected (RECONNECTING or CLOSED) for twenty consecutive probes, ten minutes at the production thirty-second interval:
   a rebuild never runs while disconnected, since there is nothing live to rebuild against, and nats.go's own in-place reconnect (the reconnect bullet above) has no bound of its own, so without this the listener can sit disconnected indefinitely over a transport that never truly comes back (a tunnel that keeps accepting local connections without forwarding them anywhere, say), with nothing asking its runtime for a fresh process.
   The two counts are independent: a failure the first count tolerates while connected (an unclassified JetStream timeout) never advances the second, and the reverse holds too, so neither bound is reached by mixing the other's failures in.
+  A cache copy that does not follow its bucket with no read under way (`kvCache.NeedsRead`, for instance after the reconnect hook's Rewatch failed while the old watcher survived) is a terminal failure too:
+  its Ping answers, so `checkSelfHealth` reports it by name and the next connected tick's rebuild reads its bucket again.
 
 - Shutdown stops HTTP first (up to ten seconds), waits within that window for a self-health rebuild still running and for a pass of the two reapers or the interest marker collector still running (each lists its bucket through a watcher whose consumer nats.go creates and deletes;
   `a KV bucket pass still running at shutdown` at WARN when the window ends first), drains the live topics lane's client when `ENVOY_SUBSCRIBE_ALL_TOPICS` opened one (up to three seconds, before the main client, since a live delivery still in its handler publishes its exception through it;
@@ -2760,6 +2788,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
 
 - During a rolling deploy the replacement serves `/v1` and its role lane while the old task still holds the durable:
   `/v1` opens once NATS is connected and the interest and session caches are warm (`envoy-listener /v1 open`, with `since_listening_ms`), and the role lane is a core-NATS queue subscription in the machine's group, `envoy-listener-<machine id>`, which NATS hands each role message to one member of, so the overlap forwards no message twice.
+  Until then the closed `/v1` gate answers `503 service starting`, except to the two list reads, `GET /v1/sessions` and `GET /v1/interests/`, which get the refilling answer their routes give while a copy cannot be served (`writeListRefilling`), so a caller reads one answer for "the list is not ready" whichever gives it.
   The durable's bind is polled every 2 s (`subscribe failed, retrying`, logged at the first refusal and then once per 30 s), so it binds within 2 s of the old task's exit (`durable bound`, with `attempts` and `waited_ms`);
   a durable still held after 135 s ends the start with `subscribe failed after max attempts, shutting down`, as the backoff it replaced did.
   `/healthz` answers 200 `starting` until the bind, so `starting` no longer means `/v1` is closed.
@@ -3171,21 +3200,19 @@ Each item below names an endpoint and its method, then its contract, and an item
   falling back to `machine_id` for a session whose plugin predates the field), and `plugin` and `plugin_version` (the plugin the session registered through and its build;
   neither key is present for a session whose plugin predates them).
   A row's `roles` are the roles whose claims in `envoy_roles` name the session, read from the registry's watched view of that bucket (`store.Registry.RolesHeldBy`), whatever role topics its interest record carries and with no record at all;
-  a view that is not complete (`store.ErrRoleViewNotReady`:
-  its watcher's first scan has not delivered every claim, nats.go's idle timer ended that scan and the rescan has not completed, a recreated bucket's refill is still running, or the watcher has ended) ends the list with the 503 below, never a row missing a role its holder has.
-  The rows come from this listener's cache of the session registry, and a list cannot be made authoritative key by key:
-  while that cache refills, a working session is simply missing from it, and a caller cannot tell that from a session that ended.
+  a view that cannot be served (`store.ErrRoleViewNotReady`) ends the list with the refilling `503` below, never a row missing a role its holder has.
+  The rows come from this listener's copy of the session registry, joined with its copy of the interests alone (`store.Registry.Cached`, no bucket read per row, which over a slow KV leader would hold the answer for seconds per row).
+  The listener answers the list only while it can stand behind both copies (`listedSessions`):
+  before a copy's first complete read of its bucket, and once a copy has not followed its bucket for longer than the stale bound (2 minutes, or half the bucket's `MaxAge` when that is shorter), it answers `503`, `Retry-After: 5`, `{"error":"envoy: the agent list is refilling; try again in a moment","code":"refilling"}` (`writeListRefilling`), and so does the closed `/v1` start gate.
+  `envoy_active_sessions` counts the same listing (`listedSessions`) and has no sample while it refuses, so `0` is only ever a complete empty copy.
+  A list cannot be made authoritative key by key even so:
+  the copy trails the bucket, so a session another listener registered a moment ago is missing from a 200, and a caller cannot tell that from a session that ended.
   A caller holding one session id asks `/v1/registry/<session_id>` instead.
-  An interest record the cache misses is read from the bucket, every such read within one 3.5 s budget.
-  A read counts as answered only for its named answers:
-  no key for the session (no `topics`), a record the bus holds but this build cannot decode (`store.ErrMalformedInterest`), which the registry logs as `registry read an interest record it cannot decode` at WARN with its `session_id`, and an id the interest bucket refuses as a key (`bus.ErrRefused`:
-  an earlier listener's id past `envoy_interests`' 3,974-byte get bound that `envoy_sessions` still lists, or one outside nats.go's key alphabet), which the route logs as `session listed with no topics: its interest record could not be read` at WARN with its `session_id` and `error`.
-  The last two list that session with no `topics`: the bus answered, so the list is not refused for one session.
-  Every other error is a read that did not answer, whatever it names (its cap or the budget running out, a nats.go connection error, or the raw socket error nats.go passes through from a broken connection), and ends the list with `503 {"error":"envoy: the message bus did not answer: <reason>"}` and `Retry-After: 1`, never a row with no topics or roles.
 
 - `/v1/interests/` (GET)
 
-  Lists persisted interests.
+  Lists persisted interests, or the refilling `503` `/v1/sessions` gives while the interest copy cannot be served;
+  `envoy_active_interests` counts the same listing and has no sample then.
   Each row carries `last_seen` (Unix ms): its session's last heartbeat as this listener's session cache knows it, the live entry's `updated_at` while the session is live, else the final heartbeat the cache keeps after it left, omitted when unknown (a session that died before this listener started).
   The row's own `updated_at` can lag that heartbeat by up to `store.InterestRefreshAge`.
 
@@ -3201,7 +3228,7 @@ Each item below names an endpoint and its method, then its contract, and an item
 
   The authoritative answer for one session: is it live, and how is it named?
   The read goes through this listener's cache to the session bucket, so a session the cache does not hold yet
-  — the bucket was recreated and the watcher is still refilling it, or another listener registered the session — is still found.
+  — the watcher has not yet read it from a recreated bucket, or another listener registered the session — is still found.
   A 200 carries the same body a row of `GET /v1/sessions` does (`session_id`, `machine_id`, `host`, `dir`, `port`, `title`, `capabilities`, `self_subscribed`, `topics`, `roles`, `updated_at`, `last_seen`, and `plugin` and `plugin_version` when the session's registration sent them), its `roles` read from the claims as that row's are.
   A live session whose id only the interest bucket refuses as a key (an earlier listener's id past `envoy_interests`' get bound that `envoy_sessions` still serves, or one outside nats.go's key alphabet) is a 200 with no `topics`, as `GET /v1/sessions` lists it, logged `session answered with no topics: its interest record could not be read` at WARN with its `session_id` and `error`:
   Dispatch's envoy client reads a 413 or 400 here as a session that cannot exist.

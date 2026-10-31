@@ -75,6 +75,7 @@ function thread(ask: Ask, answers: AskAnswer[] = ask.answer === null ? [] : [ask
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
   };
 }
 

@@ -20408,6 +20408,7 @@ async function executeDispatchTool(input) {
         route: row.route ?? null,
         route_status: row.route_status ?? null,
         route_holder: row.route_holder ?? null,
+        route_status_reason: row.route_status_reason ?? null,
         updated_at: row.updated_at,
         progress: row.progress
       }));

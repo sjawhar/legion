@@ -36,8 +36,9 @@ func breakInterestReads(t *testing.T, registry *store.Registry) {
 	t.Helper()
 	field := reflect.ValueOf(registry).Elem().FieldByName("watcher")
 	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
-	broken := bus.KeyValue{KeyValue: brokenPipeReadKV{KeyValue: watcher.Interface().(*kvwatch.Watcher).KV().KeyValue}}
-	watcher.Set(reflect.ValueOf(kvwatch.New("interest registry", broken, func(nats.KeyValueEntry) {}, func() {})))
+	current := watcher.Interface().(*kvwatch.Watcher).KV()
+	broken := bus.NewKeyValue(brokenPipeReadKV{KeyValue: current.Legacy()}, current.WatchHandle(), current.Streams())
+	watcher.Set(reflect.ValueOf(kvwatch.New("interest registry", broken, feedsNothing{})))
 }
 
 // An interest read is answered only by its named answers: no key, a record this build cannot

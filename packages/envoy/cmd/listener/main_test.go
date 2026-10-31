@@ -205,13 +205,34 @@ func TestFullMux_StartingState(t *testing.T) {
 		}
 	})
 
-	t.Run("v1 sessions returns 503", func(t *testing.T) {
-		rr := httptest.NewRecorder()
-		mux.ServeHTTP(rr, httptest.NewRequest("GET", "/v1/sessions", nil))
-		if rr.Code != http.StatusServiceUnavailable {
-			t.Fatalf("expected 503, got %d", rr.Code)
-		}
-	})
+	// The two list reads get the refilling answer the routes give while their copies cannot be
+	// served: before /v1 opens no copy has been read.
+	for _, path := range []string{"/v1/sessions", "/v1/interests/"} {
+		t.Run("GET "+path+" answers refilling", func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+			assertListRefilling(t, rr.Result())
+		})
+	}
+
+	// Every other request keeps "service starting", a write or a single read on a list path too.
+	for _, request := range []struct{ method, path string }{
+		{http.MethodPost, "/v1/sessions"},
+		{http.MethodDelete, "/v1/sessions/ses_x"},
+		{http.MethodGet, "/v1/interests/ses_x"},
+		{http.MethodPost, "/v1/interests/subscribe"},
+	} {
+		t.Run(request.method+" "+request.path+" answers service starting", func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest(request.method, request.path, nil))
+			if body := rr.Body.String(); rr.Code != http.StatusServiceUnavailable || body != "{\"error\":\"service starting\"}\n" {
+				t.Fatalf("status %d body %q, want 503 service starting", rr.Code, body)
+			}
+			if retryAfter := rr.Header().Get("Retry-After"); retryAfter != "" {
+				t.Fatalf("Retry-After = %q, want none", retryAfter)
+			}
+		})
+	}
 }
 
 func TestPublishHandler_RejectsAgentTopics(t *testing.T) {
@@ -1023,7 +1044,7 @@ func TestDeleteSessionHandler_IsIdempotent(t *testing.T) {
 			t.Fatalf("delete %d: expected 200, got %d (body: %s)", i+1, rr.Code, rr.Body.String())
 		}
 	}
-	if isSessionLive(sessions, "ses_closed") {
+	if _, err := sessions.Get("ses_closed"); err == nil {
 		t.Fatal("deleted session remains live")
 	}
 }
@@ -1397,7 +1418,8 @@ func setupInterestLastSeenTest(t *testing.T, interests []string, options ...sess
 		}
 	}
 	waitFor(t, 5*time.Second, "the interest cache to hold every row", func() bool {
-		return len(registry.List()) == len(interests)
+		listed, err := registry.List()
+		return err == nil && len(listed) == len(interests)
 	})
 	return registry, sessions
 }
@@ -1512,6 +1534,7 @@ func setupSessionsTest(t *testing.T, interests map[string][]string, ports map[st
 	if err != nil {
 		t.Fatalf("failed to create session registry: %v", err)
 	}
+	waitForSessions(t, sessions)
 	// Each session's row is written to the interest bucket as stored, not through Upsert, which
 	// drops a topic reaching a private stream subject: a test seeding one models a row an earlier
 	// build stored.
@@ -1578,6 +1601,19 @@ func waitForRegistry(t *testing.T, registry *store.Registry) {
 	defer cancel()
 	if err := registry.WaitForCacheReady(ctx); err != nil {
 		t.Fatalf("wait for the registry's caches: %v", err)
+	}
+}
+
+// waitForSessions is waitForRegistry for the session registry: GET /v1/sessions answers the
+// refilling 503 until the session copy has completed a read of its bucket, so a test that seeds
+// rows with Put and then lists them waits here first. A test that asserts the refusal itself puts
+// the copy where it cannot answer after this wait, never before it.
+func waitForSessions(t *testing.T, sessions *session.SessionRegistry) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := sessions.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("wait for the session registry's cache: %v", err)
 	}
 }
 
@@ -1659,6 +1695,7 @@ func TestSessionsHandler_IncludesTitle(t *testing.T) {
 		t.Fatalf("failed to put session entry: %v", err)
 	}
 	waitForRegistry(t, registry)
+	waitForSessions(t, sessions)
 
 	handler := sessionsHandler(registry, sessions)
 	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
@@ -2772,7 +2809,13 @@ func TestListenerDeliveryHandler_RoleReleasedByReplacementHasNoHolder(t *testing
 	}
 	assertDeliveryException(t, probe, item, "no_holder")
 }
-func TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException(t *testing.T) {
+
+// A role-lane delivery whose holder is not answering reports the delivery failed and leaves the
+// claim exactly as it is: the role lane is one more reader of a session's state, and the one
+// caller that ends a claim is the role reaper, once the holder is gone. Dropping it here took the
+// role away from a holder stalled for a minute, and every message for that role then reached
+// nobody until it claimed again.
+func TestListenerDeliveryHandler_ExpiredRoleKeepsTheClaimAfterItsException(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "expired-holder"
 	if _, err := harness.registry.SetRole("ses_expired", "test-machine", role, false); err != nil {
@@ -2797,8 +2840,8 @@ func TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException(t *testing.
 		t.Fatalf("publish role delivery: %v", err)
 	}
 	assertDeliveryException(t, probe, item, "delivery_failed")
-	if holder, err := harness.registry.RoleHolder(role); err != nil || holder != "" {
-		t.Fatalf("expired role claim = %q, %v; want removed", holder, err)
+	if holder, err := harness.registry.RoleHolder(role); err != nil || holder != "ses_expired" {
+		t.Fatalf("the claim after the failed delivery = %q, %v; want ses_expired's, left for the reaper", holder, err)
 	}
 }
 
@@ -4333,7 +4376,11 @@ func TestRunSelfHealthMonitor_MovesADeadInterestRegistryToTheLiveConnection(t *t
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		found := false
-		for _, interest := range registry.List() {
+		interests, err := registry.List()
+		if err != nil {
+			t.Fatalf("list interests: %v", err)
+		}
+		for _, interest := range interests {
 			found = found || interest.SessionID == "ses_after_move"
 		}
 		if found {

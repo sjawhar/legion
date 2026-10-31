@@ -3019,11 +3019,18 @@ jobs:
   # while it was cut off once, replayed. They run only with LEGION_E2E_ENVOY_STACK=1, which only
   # this job sets, so the envoy-client, pi-envoy and claude-envoy jobs, which set up no Go, skip
   # them.
+  #
+  # The session state rig (dispatch://INFRA-392) runs on the same stack and needs no agent: it
+  # SIGSTOPs a child process carrying envoy-client's own registration and heartbeat and holds the
+  # listener to `unresponsive` — the role claim kept, the send stored — until the gone horizon.
+  # It takes about five minutes of real time on its own, because the role claim reaper's pass,
+  # which the last property waits out, is fixed at five minutes in the listener
+  # (StartRoleClaimReaper, packages/envoy/cmd/listener/main.go); hence the raise from 15 minutes.
   envoy-session-stall:
     needs: changes
     if: needs.changes.outputs.envoy_session_stall == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       LEGION_E2E_ENVOY_STACK: "1"
     steps:
@@ -3052,6 +3059,11 @@ jobs:
         working-directory: packages/contracts
       - name: Stall test of envoy-client's NATS connection options
         run: bun test src/__tests__/nats-stall.test.ts
+        working-directory: packages/envoy-client
+      # A path, not a filter: bun test discovers only names holding ".test" or ".spec", and takes
+      # this one as a file because of the leading "./".
+      - name: Session state rig of a stalled session
+        run: bun test ./test/session-stall.ts
         working-directory: packages/envoy-client
       - name: Stall test of pi-envoy
         run: bun test extensions/envoy.test.ts -t "NATS path freezes"

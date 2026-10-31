@@ -33,10 +33,6 @@ const (
 	// two say different things about the claim behind it.
 	outcomeRoleUnclaimed requestOutcome = "role_unclaimed"
 	outcomeRoleLapsed    requestOutcome = "role_lapsed"
-	// outcomeRoleHolderChanged is the publish route's lost race for a role's claim
-	// (errRoleHolderChanged): every bus read answered, so it is deliberately not
-	// outcomeBusUnavailable, which keeps its meaning of a bus that did not answer.
-	outcomeRoleHolderChanged requestOutcome = "role_holder_changed"
 	// outcomeRoleClaimUnreadable is the publish route's role claim record that the bus answered
 	// and no read can decode (store.ErrMalformedRoleClaim): a 500, not outcomeBusUnavailable,
 	// since the bus did answer and retrying reads the same record.
@@ -134,16 +130,6 @@ func (rec *requestRecord) refuseBusUnavailable(w http.ResponseWriter, err error)
 		outcome = outcomePublishDenied
 	}
 	rec.write(status, outcome)
-}
-
-// refuseRoleHolderChanged answers a publish whose role claim moved under the resolution
-// (errRoleHolderChanged) with the 503, Retry-After and body writeRoleHolderChanged writes for both
-// routes that resolve a role, and records it under its own outcome rather than bus_unavailable:
-// every bus read answered, so naming it bus_unavailable would send an operator after an outage
-// that never happened, and the route's record is where "never attempted" is told from "attempted
-// and refused" afterwards.
-func (rec *requestRecord) refuseRoleHolderChanged(w http.ResponseWriter, role string) {
-	rec.write(writeRoleHolderChanged(w, role, "publish"), outcomeRoleHolderChanged)
 }
 
 // refuseRoleClaimUnreadable answers a publish whose role claim record cannot be decoded

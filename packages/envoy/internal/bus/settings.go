@@ -4,14 +4,17 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
-// ReplicasEnvVar and StreamMaxBytesEnvVar are the deployment settings WithReplicas and
-// WithStreamMaxBytes carry. Each program reads them itself and hands the bus their values; the bus
-// names them in a server's refusal of a stream or a bucket that carries one (refusedSettings).
+// ReplicasEnvVar, StreamMaxBytesEnvVar and SessionMaxAgeEnvVar are the deployment settings
+// WithReplicas, WithStreamMaxBytes and the session registry's maximum age carry. Each program
+// reads them itself and hands the bus their values; the bus names them in a server's refusal of a
+// stream or a bucket that carries one (refusedSettings).
 const (
 	ReplicasEnvVar       = "ENVOY_NATS_REPLICAS"
 	StreamMaxBytesEnvVar = "ENVOY_STREAM_MAX_BYTES"
+	SessionMaxAgeEnvVar  = "ENVOY_SESSION_MAX_AGE"
 )
 
 // MaxReplicas is the most copies NATS keeps of a stream or a bucket, and so the largest
@@ -54,4 +57,28 @@ func ParseStreamMaxBytes(raw string) (int64, error) {
 		return 0, fmt.Errorf("invalid %s %q: want a positive whole number of bytes, or unset for no limit", StreamMaxBytesEnvVar, value)
 	}
 	return limit, nil
+}
+
+// ParseSessionMaxAge reads SessionMaxAgeEnvVar, how long the session bucket keeps a registration
+// record: unset or blank is 0, which leaves the deployed bucket's own maximum age exactly as it
+// is, and otherwise a positive Go duration ("90m", "2h"). 0, a negative duration or a word is
+// refused naming the variable and the value, at load rather than as a server's refusal at the
+// bucket. envoy-listener (config.Load) reads the setting through it.
+//
+// A deployment sets it because the bucket's age is the backstop a record is dropped at, and a
+// record dropped before the gone horizon leaves an unresponsive session reading gone: with the
+// 5-minute default and a 1-hour horizon, a session stalled for six minutes loses the record that
+// says it is only unresponsive. The listener applies the value at open and on every pass of its
+// session reaper (session.SessionRegistry), so a raise reaches a running deployment within one
+// pass.
+func ParseSessionMaxAge(raw string) (time.Duration, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, nil
+	}
+	maxAge, err := time.ParseDuration(value)
+	if err != nil || maxAge <= 0 {
+		return 0, fmt.Errorf("invalid %s %q: want a positive Go duration such as 90m, or unset to leave the bucket's own maximum age", SessionMaxAgeEnvVar, value)
+	}
+	return maxAge, nil
 }

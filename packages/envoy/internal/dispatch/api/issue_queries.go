@@ -249,6 +249,12 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	if routed := slices.ContainsFunc(issues, func(issue model.IssueSummary) bool { return issue.Route != nil }); routed {
 		roster := s.readRouteRoster(r.Context())
 		if routeStatus != "" && routeStatus != model.RouteUnknown && !roster.answered {
+			// No route can be judged, so a filter for a judged state refuses rather than answer
+			// a list that would read as "every route reaches someone" (or "nobody's does").
+			if roster.reason == model.RouteReasonRefilling {
+				writeEnvoyRefilling(w, roster.retryAfter)
+				return
+			}
 			writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable,
 				"the Envoy listener did not answer, so Dispatch cannot tell which routes reach a live session; route_status=unknown lists the routed issues")
 			return
@@ -338,13 +344,22 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// One roster read serves both answers beside the issue: where its route reaches, and what
+	// state the session holding its claim is in. An issue with neither costs no listener call.
 	var reach model.IssueRouteReach
-	if issue.Route != nil {
-		reach = s.readRouteRoster(r.Context()).reach(issue.Route)
+	var liveness model.IssueClaimLiveness
+	if issue.Route != nil || issueClaimSession(issue.Claim) != "" {
+		roster := s.readRouteRoster(r.Context())
+		reach = roster.reach(issue.Route)
+		liveness = roster.claimLiveness(issue.Claim, time.Now())
 	}
 	WriteJSON(w, http.StatusOK, struct {
 		model.Issue
 		model.IssueRouteReach
+		// IssueClaimLiveness sits beside the issue rather than inside its claim: model.IssueClaim
+		// is the payload of issue.claimed and issue.released, and a state read at this moment
+		// must never be stored in one (model.IssueClaimLiveness carries the rest of the reason).
+		model.IssueClaimLiveness
 		Progress  model.IssueProgress `json:"progress"`
 		Artifacts []model.Artifact    `json:"artifacts"`
 		OpenAsks  []issueOpenAsk      `json:"open_asks"`
@@ -354,13 +369,14 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 		// its own; the edges themselves are read only when the reader opens the panel.
 		ReferencedByCount int `json:"referenced_by_count"`
 	}{
-		Issue:             issue,
-		IssueRouteReach:   reach,
-		Progress:          progress,
-		Artifacts:         artifacts,
-		OpenAsks:          openAsks,
-		Children:          children,
-		ReferencedByCount: counts[issue.Key],
+		Issue:              issue,
+		IssueRouteReach:    reach,
+		IssueClaimLiveness: liveness,
+		Progress:           progress,
+		Artifacts:          artifacts,
+		OpenAsks:           openAsks,
+		Children:           children,
+		ReferencedByCount:  counts[issue.Key],
 	})
 }
 

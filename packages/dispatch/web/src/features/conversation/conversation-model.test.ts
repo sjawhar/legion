@@ -49,6 +49,7 @@ function askRow(ask: Partial<Ask> = {}, replies: Comment[] = []): IssueAskThread
       route: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
     },
   };
 }

@@ -373,7 +373,7 @@ func TestTheSummaryLoopSleepsWhileNothingChanges(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		store.mu.RLock()
-		applied := store.cacheRevisions[marker] == revision
+		applied := store.cache.FenceFor(store.watcher.Epoch(), marker) == revision
 		store.mu.RUnlock()
 		if applied {
 			break

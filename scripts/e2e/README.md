@@ -118,6 +118,20 @@ Each item below names a script, then what it proves.
   A session on the released pi-envoy shows the restart notice.
   A switch is stored under the person who sent it
 
+- `envoy-session-states.sh`
+
+  a session is live, unresponsive or gone by its registration record's age alone (INFRA-392), run in a Legion pod against a listener and a NATS of its own and real sessions of all three plugin hosts
+  — Oh My Pi on this checkout's `@sjawhar/pi-envoy`, Claude Code on its `packages/claude-envoy`, and OpenCode on its `@sjawhar/opencode-legion-envoy`:
+  a `SIGSTOP`ped session reads `unresponsive` with its own `last_seen`, is left out of the default list and answered the old `no live session` 404, is listed by `include=unresponsive`, and is read the same by a second listener and across a restart, `SIGCONT` returning it to `live`;
+  two stalled sessions keep their role claim and their issue claim across a three-minute bus outage;
+  a send to a stalled self-subscribed session is accepted `recipient_state: unresponsive` and a send to a stalled OpenCode session's serving port is refused `404` naming that state, while a stored mention and message each reach the session once when it answers again, with nothing on `notifications.envoy.exceptions.*`;
+  five lookups, two publishes and a reaper pass leave `envoy_roles` holder and `claimed_at` untouched and each answer `holder_lapsed` with `claim_released: false`, and only a soft claim takes the role;
+  another agent's `dispatch claim` and release are refused naming the state and since when, which `dispatch read --issue` prints with the takeable time;
+  a `SIGKILL`ed session is `unresponsive` until a 90-second gone horizon and then `gone`, the latency measured and printed, its role claim released only then, while a clean stop, `/clear`, `/new` and `session.deleted` are `gone` at once and `claude --resume` gets its topics back;
+  each host shows its model the peer's state and `last_seen`;
+  and a listener of the run's own raising `ENVOY_SESSION_MAX_AGE` to 2 h reaches both running listeners' `/healthz`, a session stalled seven minutes after that raise reading `unresponsive` where the shipping five minutes would already have dropped its key, and the rollback reaching both the same way.
+  Legion pod only
+
 - `claude-backend-tmux.sh`
 
   `worker_backends` on tmux: an implementer the daemon runs on Claude Code (`legion claude-bridge -- claude -p`) registers its Claude Code transcript as its session, takes its phase, is reminded by Claude Code's own `Stop` hook when a turn of its ends with that phase still open, completes it through the `legion` MCP tool's `handoff_complete` with a pushed `.legion/<issue>/` handoff commit, and, its pane killed, relaunches with `claude --resume` into the same session id, its earlier turns unchanged on disk and in its context.

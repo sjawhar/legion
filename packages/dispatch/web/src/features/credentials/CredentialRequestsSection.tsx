@@ -39,7 +39,7 @@ export function CredentialRequestsSection({
 }: {
   credentials: CredentialRequests;
 }): ReactNode {
-  const { agents, isError, isPending } = useAgents(
+  const { agents, isError, isPending, refilling } = useAgents(
     requests.some((row) => credentialSessionNamesAnyone(row.session)),
     true
   );
@@ -76,6 +76,7 @@ export function CredentialRequestsSection({
                 agents={agents}
                 isError={isError}
                 isPending={isPending}
+                refilling={refilling}
                 session={row.session}
               />
             </div>

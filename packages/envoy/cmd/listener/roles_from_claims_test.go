@@ -16,7 +16,6 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
-	"github.com/sjawhar/envoy/internal/kvwatch/kvwatchtest"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -206,26 +205,34 @@ func TestAClaimsViewThatCannotAnswerIsTheBusNotAnsweringOnTheSessionRoutes(t *te
 	}
 }
 
-// timeOutRoleClaimScan puts registry's role claim view where a listener start leaves it when
-// nats.go's idle timer ends the view's first scan of raw: the watcher feeding the view is replaced
-// by one whose first scan times out at once and that applies nothing. The holders the old watcher
-// delivered stay in the view, which is the hard case: an answer read from them would name the
-// holder's role, so only the view's completeness can refuse it. The holders are left alone because
-// the stopped watcher may still be applying under the registry's lock, which this goroutine does
-// not hold. Package store's own tests drive the registry's real watcher through the same timeout;
-// from here the watcher field is reached the way api_test.go reaches the session registry's.
-func timeOutRoleClaimScan(t *testing.T, registry *store.Registry, raw natsgo.KeyValue) {
+// refuseRoleClaimView puts registry's role claim view where a listener start leaves it before its
+// first complete read of the bucket: the watcher feeding the view is replaced by one that has read
+// nothing, so the copy cannot be served (kvwatch.Watcher.Servable) and RolesHeldBy refuses. The
+// holders the old watcher delivered stay in the view, which is the hard case: an answer read from
+// them would name the holder's role, so only the copy's own servability can refuse it. The
+// replacement feeds nothing, so it never touches those holders, which the stopped watcher may
+// still be applying under the registry's lock this goroutine does not hold. Package store's own
+// tests drive the registry's real watcher through the same state; from here the watcher field is
+// reached the way api_test.go reaches the session registry's.
+func refuseRoleClaimView(t *testing.T, registry *store.Registry) {
 	t.Helper()
 	fields := reflect.ValueOf(registry).Elem()
 	field := fields.FieldByName("roleWatcher")
 	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
-	watcher.Interface().(*kvwatch.Watcher).Stop()
-	timedOut := kvwatch.New("role claims", bus.KeyValue{KeyValue: kvwatchtest.TimingOut(raw, 0)}, func(natsgo.KeyValueEntry) {}, func() {})
-	watcher.Set(reflect.ValueOf(timedOut))
-	t.Cleanup(timedOut.Stop)
-	timedOut.Start()
-	waitFor(t, 5*time.Second, "the role claim scan to time out", timedOut.Ready)
+	current := watcher.Interface().(*kvwatch.Watcher)
+	current.Stop()
+	refilling := kvwatch.New("role claims", current.KV(), feedsNothing{})
+	watcher.Set(reflect.ValueOf(refilling))
+	t.Cleanup(refilling.Stop)
 }
+
+// feedsNothing is a kvwatch.Cache that keeps nothing: the replacement watcher must leave the
+// registry's own view as the stopped watcher left it (refuseRoleClaimView).
+type feedsNothing struct{}
+
+func (feedsNothing) BeginRead(kvwatch.Read)            {}
+func (feedsNothing) Apply(kvwatch.Entry, kvwatch.Read) {}
+func (feedsNothing) CompleteRead(kvwatch.Read)         {}
 
 // requireRolesOrUnanswered fails the test unless recorder answers 200 with the session's rows
 // (rolesOf reads them) holding exactly want, or the role claim view's own bus-unavailable 503
@@ -267,11 +274,7 @@ func TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes(t
 	if got := decodeSessionInfo(t, sessionEntryRoute(t, state, holder)).Roles; !slices.Equal(got, []string{"reviewer"}) {
 		t.Fatalf("control: GET /v1/registry/%s reports roles %v, want [reviewer]", holder, got)
 	}
-	raw, err := client.JS().KeyValue(bus.RoleClaimBucket)
-	if err != nil {
-		t.Fatalf("open the role bucket: %v", err)
-	}
-	timeOutRoleClaimScan(t, registry, raw)
+	refuseRoleClaimView(t, registry)
 
 	for _, route := range []struct {
 		path    string

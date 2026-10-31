@@ -21,16 +21,33 @@ const requestTimeout = 10 * time.Second
 const refusalBodyLimit = 4096
 
 // ErrNoHolder is a role publish the listener refused because no live session holds the role: nobody
-// claimed it, or its holder's registration lapsed (writeRoleHolderError,
+// claimed it, or its holder's registration lapsed past the gone horizon (writeRoleHolderError,
 // packages/envoy/cmd/listener/api.go). Every listener release answers it, 404 with one of
 // roleHolderReasons. It is the ordinary state before a role's session claims it, not a broken
 // publish path, so a caller can hold what it published until one does.
 var ErrNoHolder = errors.New("no live session holds the role")
 
+// ErrHolderUnresponsive is a role publish the listener refused 404 `holder_lapsed` naming a holder
+// whose `holder_state` is `unresponsive`: its last registration is past the listener's live window
+// but still inside its gone horizon, so the session is not dead. It keeps its role claim and its
+// issue claims, nothing is released for it and no replacement is started, and a box under load is
+// the ordinary cause (dispatch://INFRA-392). The caller holds what it published and sends it
+// again rather than acting on a death: the session answers for itself once its heartbeats land.
+var ErrHolderUnresponsive = errors.New("the role's holder is unresponsive")
+
 // roleHolderReasons are the reasons the listener's 404 names for a role with no live holder
 // (roleHolderUnclaimed, roleHolderLapsed). A 404 without one of them is some other refusal — a route
 // an older listener lacks — and never ErrNoHolder.
-var roleHolderReasons = []string{"unclaimed", "holder_lapsed"}
+var roleHolderReasons = []string{"unclaimed", reasonHolderLapsed}
+
+// reasonHolderLapsed is the listener's 404 reason for a role whose holder is past its live window,
+// and stateUnresponsive the `holder_state` it carries while that holder is inside the gone horizon
+// (writeRoleHolderError, packages/envoy/cmd/listener/api.go). A 404 that names no `holder_state` is
+// an older listener's, whose lapsed holder is no holder at all.
+const (
+	reasonHolderLapsed = "holder_lapsed"
+	stateUnresponsive  = "unresponsive"
+)
 
 // The reasons of a role publish the listener answers 504 (ErrNotDelivered). ReasonReceiptTimeout
 // says the last forward reached the NATS server and the holder's session sent no receipt for it,
@@ -180,15 +197,18 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 		body, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
 		refusal := fmt.Errorf("publish notice to %s: listener returned %s: %s", topic, response.Status, strings.TrimSpace(string(body)))
 		var answer struct {
-			Error   string `json:"error"`
-			Reason  string `json:"reason"`
-			Holder  string `json:"holder"`
-			EventID string `json:"event_id"`
+			Error       string `json:"error"`
+			Reason      string `json:"reason"`
+			Holder      string `json:"holder"`
+			HolderState string `json:"holder_state"`
+			EventID     string `json:"event_id"`
 		}
 		if json.Unmarshal(body, &answer) != nil {
 			return refusal
 		}
 		switch {
+		case response.StatusCode == http.StatusNotFound && answer.Reason == reasonHolderLapsed && answer.HolderState == stateUnresponsive:
+			return fmt.Errorf("%w: %w", refusal, ErrHolderUnresponsive)
 		case response.StatusCode == http.StatusNotFound && slices.Contains(roleHolderReasons, answer.Reason):
 			return fmt.Errorf("%w: %w", refusal, ErrNoHolder)
 		case response.StatusCode == http.StatusGatewayTimeout && (answer.Reason == ReasonReceiptTimeout || answer.Reason == ReasonDeliveryFailed):

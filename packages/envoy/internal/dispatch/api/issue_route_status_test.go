@@ -5,22 +5,28 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/envoy"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // fakeRoster is the live-session list a route-status test's listener answers: session id to
 // the roles that session holds. A test edits it between reads to start a session, have one
-// claim a role, or end one.
+// claim a role, or end one, and sets down or refilling to have the listener refuse the list.
 type fakeRoster struct {
-	mu       sync.Mutex
-	sessions map[string][]string
-	lookups  atomic.Int32
-	down     atomic.Bool
+	mu        sync.Mutex
+	sessions  map[string][]string
+	lookups   atomic.Int32
+	down      atomic.Bool
+	refilling atomic.Bool
 }
 
 func (r *fakeRoster) set(sessionID string, roles ...string) {
@@ -39,7 +45,8 @@ func (r *fakeRoster) end(sessionID string) {
 }
 
 // routeStatusServer is a Dispatch server whose listener answers GET /v1/sessions from roster,
-// counting every call, and answers 503 while roster.down is set. Its roster cache keeps no
+// counting every call, answers a plain 503 while roster.down is set, and the listener's
+// refilling answer with Retry-After 7 while roster.refilling is set. Its roster cache keeps no
 // answer (both TTLs zero), so every read asks the listener and a test that edits roster between
 // two reads sees the edit at the second; cachedRouteStatusServer is the server a deployment runs.
 func routeStatusServer(t *testing.T, roster *fakeRoster) (http.Handler, *store.Store) {
@@ -63,6 +70,10 @@ func cachedRouteStatusServer(t *testing.T, roster *fakeRoster) (http.Handler, *s
 			http.Error(w, "listener restarting", http.StatusServiceUnavailable)
 			return
 		}
+		if roster.refilling.Load() {
+			answerListRefilling(w, "7")
+			return
+		}
 		roster.mu.Lock()
 		rows := make([]map[string]any, 0, len(roster.sessions))
 		for id, roles := range roster.sessions {
@@ -78,10 +89,11 @@ func cachedRouteStatusServer(t *testing.T, roster *fakeRoster) (http.Handler, *s
 
 // routedIssue is the part of an issue read (detail or list row) a route-status test asserts on.
 type routedIssue struct {
-	Key         string  `json:"key"`
-	Route       *string `json:"route"`
-	RouteStatus *string `json:"route_status"`
-	RouteHolder *string `json:"route_holder"`
+	Key               string  `json:"key"`
+	Route             *string `json:"route"`
+	RouteStatus       *string `json:"route_status"`
+	RouteHolder       *string `json:"route_holder"`
+	RouteStatusReason *string `json:"route_status_reason"`
 }
 
 // reachText is a route's reach as the tests compare it, "<route_status> <route_holder>", each
@@ -96,6 +108,8 @@ func reachText(status, holder *string) string {
 	return text(status) + " " + text(holder)
 }
 
+// routedIssueKey creates an issue in project TEST, routed when route is not empty, and pins it
+// for alice so requireReach can read it from her pinned list too.
 func routedIssueKey(t *testing.T, handler http.Handler, route string) string {
 	t.Helper()
 	project := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -117,13 +131,16 @@ func routedIssueKey(t *testing.T, handler http.Handler, route string) string {
 			t.Fatalf("route %s to %s: status=%d body=%s", key, route, routed.Code, routed.Body.String())
 		}
 	}
+	if pinned := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/issues/"+key+"/state", map[string]bool{"pinned": true}, "alice"); pinned.Code != http.StatusOK {
+		t.Fatalf("pin %s: status=%d body=%s", key, pinned.Code, pinned.Body.String())
+	}
 	return key
 }
 
-// requireReach reads one issue both ways Dispatch serves it - the detail and its row in the
-// project list - and requires each to show the route in the given state (status "" is null) with
-// the given holder ("" is null).
-func requireReach(t *testing.T, handler http.Handler, key, status, holder string) {
+// requireReach reads one issue every way Dispatch serves it - the detail, its row in the
+// project list and its row in alice's pinned list - and requires each to show the route in the
+// given state (status "" is null) with the given holder and reason ("" is null).
+func requireReach(t *testing.T, handler http.Handler, key, status, holder, reason string) {
 	t.Helper()
 	orNull := func(value string) string {
 		if value == "" {
@@ -131,29 +148,38 @@ func requireReach(t *testing.T, handler http.Handler, key, status, holder string
 		}
 		return value
 	}
-	want := orNull(status) + " " + orNull(holder)
+	text := func(value *string) string {
+		if value == nil {
+			return "null"
+		}
+		return *value
+	}
+	want := "route_status=" + orNull(status) + " route_holder=" + orNull(holder) + " route_status_reason=" + orNull(reason)
+	reads := func(issue routedIssue) string {
+		return "route_status=" + text(issue.RouteStatus) + " route_holder=" + text(issue.RouteHolder) +
+			" route_status_reason=" + text(issue.RouteStatusReason)
+	}
 	detail := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil, "alice")
 	if detail.Code != http.StatusOK {
 		t.Fatalf("read %s: status=%d body=%s", key, detail.Code, detail.Body.String())
 	}
-	issue := decodeBody[routedIssue](t, detail)
-	if got := reachText(issue.RouteStatus, issue.RouteHolder); got != want {
+	if got := reads(decodeBody[routedIssue](t, detail)); got != want {
 		t.Fatalf("GET /issues/%s reads %s, want %s", key, got, want)
 	}
-	list := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST", nil, "alice")
-	if list.Code != http.StatusOK {
-		t.Fatalf("list issues: status=%d body=%s", list.Code, list.Body.String())
-	}
-	for _, row := range decodeBody[[]routedIssue](t, list) {
-		if row.Key != key {
-			continue
+	for _, listing := range []string{"project=TEST", "pinned=true"} {
+		list := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?"+listing, nil, "alice")
+		if list.Code != http.StatusOK {
+			t.Fatalf("list issues ?%s: status=%d body=%s", listing, list.Code, list.Body.String())
 		}
-		if got := reachText(row.RouteStatus, row.RouteHolder); got != want {
-			t.Fatalf("the list row for %s reads %s, want %s", key, got, want)
+		rows := decodeBody[[]routedIssue](t, list)
+		row := slices.IndexFunc(rows, func(issue routedIssue) bool { return issue.Key == key })
+		if row < 0 {
+			t.Fatalf("?%s has no row for %s", listing, key)
 		}
-		return
+		if got := reads(rows[row]); got != want {
+			t.Fatalf("the ?%s row for %s reads %s, want %s", listing, key, got, want)
+		}
 	}
-	t.Fatalf("list has no row for %s", key)
 }
 
 func TestRoleRouteReadsNoHolderUntilASessionClaimsTheRole(t *testing.T) {
@@ -162,14 +188,14 @@ func TestRoleRouteReadsNoHolderUntilASessionClaimsTheRole(t *testing.T) {
 	handler, _ := routeStatusServer(t, roster)
 	key := routedIssueKey(t, handler, "role:sre")
 
-	requireReach(t, handler, key, "no_holder", "")
+	requireReach(t, handler, key, "no_holder", "", "")
 
 	roster.set("ses-sre", "sre")
-	requireReach(t, handler, key, "live", "ses-sre")
+	requireReach(t, handler, key, "live", "ses-sre", "")
 
 	// The holder's session ends: the listener no longer lists it, so nobody holds the role.
 	roster.end("ses-sre")
-	requireReach(t, handler, key, "no_holder", "")
+	requireReach(t, handler, key, "no_holder", "", "")
 }
 
 func TestSessionRouteReadsLiveOnlyWhileTheSessionIsListed(t *testing.T) {
@@ -178,10 +204,10 @@ func TestSessionRouteReadsLiveOnlyWhileTheSessionIsListed(t *testing.T) {
 	handler, _ := routeStatusServer(t, roster)
 	key := routedIssueKey(t, handler, "session:ses-worker")
 
-	requireReach(t, handler, key, "live", "ses-worker")
+	requireReach(t, handler, key, "live", "ses-worker", "")
 
 	roster.end("ses-worker")
-	requireReach(t, handler, key, "no_holder", "")
+	requireReach(t, handler, key, "no_holder", "", "")
 }
 
 func TestRouteStatusIsUnknownWhenTheListenerDoesNotAnswer(t *testing.T) {
@@ -189,16 +215,33 @@ func TestRouteStatusIsUnknownWhenTheListenerDoesNotAnswer(t *testing.T) {
 	roster.set("ses-sre", "sre")
 	handler, _ := routeStatusServer(t, roster)
 	key := routedIssueKey(t, handler, "role:sre")
-	requireReach(t, handler, key, "live", "ses-sre")
+	requireReach(t, handler, key, "live", "ses-sre", "")
 
 	roster.down.Store(true)
-	requireReach(t, handler, key, "unknown", "")
+	requireReach(t, handler, key, "unknown", "", "unreachable")
+}
+
+// While the listener refuses its list as refilling, the role's holder is still running: the
+// route reads unknown with the reason, never no_holder, and reads live again once the list is
+// back.
+func TestRouteStatusIsUnknownWhileTheListenerRefills(t *testing.T) {
+	roster := &fakeRoster{}
+	roster.set("ses-sre", "sre")
+	handler, _ := routeStatusServer(t, roster)
+	key := routedIssueKey(t, handler, "role:sre")
+	requireReach(t, handler, key, "live", "ses-sre", "")
+
+	roster.refilling.Store(true)
+	requireReach(t, handler, key, "unknown", "", "refilling")
+
+	roster.refilling.Store(false)
+	requireReach(t, handler, key, "live", "ses-sre", "")
 }
 
 func TestRouteStatusIsUnknownWithoutAConfiguredListener(t *testing.T) {
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	key := routedIssueKey(t, handler, "role:sre")
-	requireReach(t, handler, key, "unknown", "")
+	requireReach(t, handler, key, "unknown", "", "unreachable")
 }
 
 func TestUnroutedIssueHasNoRouteStatusAndCostsNoListenerCall(t *testing.T) {
@@ -207,7 +250,7 @@ func TestUnroutedIssueHasNoRouteStatusAndCostsNoListenerCall(t *testing.T) {
 	key := routedIssueKey(t, handler, "")
 	before := roster.lookups.Load()
 
-	requireReach(t, handler, key, "", "")
+	requireReach(t, handler, key, "", "", "")
 	if calls := roster.lookups.Load() - before; calls != 0 {
 		t.Fatalf("reading an unrouted issue made %d listener calls, want 0", calls)
 	}
@@ -278,7 +321,11 @@ func TestRouteStatusFilterListsOnlyOpenIssuesInThatState(t *testing.T) {
 		t.Fatalf("close %s: status=%d body=%s", closed, response.Code, response.Body.String())
 	}
 
-	keys := func(filter string) []string {
+	type filtered struct {
+		keys    []string
+		reasons map[string]int
+	}
+	list := func(filter string) filtered {
 		t.Helper()
 		before := roster.lookups.Load()
 		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST&route_status="+filter, nil, "alice")
@@ -288,15 +335,24 @@ func TestRouteStatusFilterListsOnlyOpenIssuesInThatState(t *testing.T) {
 		if calls := roster.lookups.Load() - before; calls != 1 {
 			t.Fatalf("filter %s made %d listener calls, want 1", filter, calls)
 		}
-		var got []string
+		got := filtered{reasons: map[string]int{}}
 		for _, row := range decodeBody[[]routedIssue](t, response) {
 			if row.RouteStatus == nil || *row.RouteStatus != filter {
 				t.Fatalf("filter %s returned %s", filter, row.Key)
 			}
-			got = append(got, row.Key)
+			got.keys = append(got.keys, row.Key)
+			reason := "null"
+			if row.RouteStatusReason != nil {
+				reason = *row.RouteStatusReason
+			}
+			got.reasons[reason]++
 		}
-		sort.Strings(got)
+		sort.Strings(got.keys)
 		return got
+	}
+	keys := func(filter string) []string {
+		t.Helper()
+		return list(filter).keys
 	}
 	want := []string{unheld, gone}
 	sort.Strings(want)
@@ -316,10 +372,153 @@ func TestRouteStatusFilterListsOnlyOpenIssuesInThatState(t *testing.T) {
 	// rather than answering an empty list that reads as "every route reaches someone".
 	roster.down.Store(true)
 	blind := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST&route_status=no_holder", nil, "alice")
-	if blind.Code != http.StatusServiceUnavailable {
-		t.Fatalf("route_status=no_holder with the listener down: status=%d body=%s, want 503", blind.Code, blind.Body.String())
+	if blind.Code != http.StatusServiceUnavailable || !strings.Contains(blind.Body.String(), `"code":"ENVOY_UNAVAILABLE"`) {
+		t.Fatalf("route_status=no_holder with the listener down: status=%d body=%s, want 503 ENVOY_UNAVAILABLE", blind.Code, blind.Body.String())
 	}
-	if got := keys("unknown"); len(got) != 3 {
-		t.Fatalf("route_status=unknown with the listener down returned %v, want the three open routed issues", got)
+	if got := list("unknown"); len(got.keys) != 3 || got.reasons["unreachable"] != 3 {
+		t.Fatalf("route_status=unknown with the listener down returned %v, want the three open routed issues, each unreachable", got)
+	}
+
+	// A refilling listener refuses the same filters, with its own code and its Retry-After.
+	roster.down.Store(false)
+	roster.refilling.Store(true)
+	for _, filter := range []string{"no_holder", "live"} {
+		refused := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST&route_status="+filter, nil, "alice")
+		requireEnvoyRefilling(t, refused, "7")
+	}
+	if got := list("unknown"); len(got.keys) != 3 || got.reasons["refilling"] != 3 {
+		t.Fatalf("route_status=unknown while the listener refills returned %v, want the three open routed issues, each refilling", got)
+	}
+}
+
+// stateRosterServer is a Dispatch server whose listener answers GET /v1/sessions from rows, and
+// answers the live rows alone to a read that did not ask for the unresponsive ones - which is
+// what the listener does. A roster built from the live-only answer is the bug
+// dispatch://INFRA-392 is about: every stalled session reads as ended.
+func stateRosterServer(t *testing.T, rows []map[string]any) *server {
+	t.Helper()
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sessions" {
+			http.NotFound(w, r)
+			return
+		}
+		answer := rows
+		if r.URL.Query().Get("include") != "unresponsive" {
+			answer = nil
+			for _, row := range rows {
+				if row["state"] == "live" {
+					answer = append(answer, row)
+				}
+			}
+		}
+		_ = json.NewEncoder(w).Encode(answer)
+	}))
+	t.Cleanup(listener.Close)
+	return &server{deps: Deps{Envoy: envoy.New(listener.URL)}, lifetime: context.Background()}
+}
+
+// A session past its live window still holds its role and still receives: what is sent to it is
+// stored and waits. So a route to it reads holder_unresponsive, naming that holder, and neither
+// live (which would promise a session that answers now) nor no_holder (which the owner audit
+// reads as "nobody is working this", and which would have a person hand the work to someone
+// else). Both kinds of route answer the same way, since both reach one session.
+func TestRouteReachNamesAnUnresponsiveHolderRatherThanDroppingIt(t *testing.T) {
+	served := stateRosterServer(t, []map[string]any{
+		{"session_id": "ses-live", "state": "live", "last_seen": 1700000000000, "roles": []string{"legion-merger"}},
+		{"session_id": "ses-stalled", "state": "unresponsive", "last_seen": 1699999000000, "roles": []string{"legion-planner"}},
+	})
+	roster := served.listRouteRoster(context.Background())
+	if !roster.answered {
+		t.Fatalf("the roster did not answer: %v", roster.err)
+	}
+	for _, tc := range []struct {
+		route  string
+		status string
+		holder string
+	}{
+		{route: "session:ses-stalled", status: "holder_unresponsive", holder: "ses-stalled"},
+		{route: "role:legion-planner", status: "holder_unresponsive", holder: "ses-stalled"},
+		{route: "session:ses-live", status: "live", holder: "ses-live"},
+		{route: "role:legion-merger", status: "live", holder: "ses-live"},
+		{route: "session:ses-ended", status: "no_holder", holder: "null"},
+		{route: "role:legion-nobody", status: "no_holder", holder: "null"},
+	} {
+		reach := roster.reach(&tc.route)
+		if got, want := reachText(reach.RouteStatus, reach.RouteHolder), tc.status+" "+tc.holder; got != want {
+			t.Errorf("%s reaches %s, want %s", tc.route, got, want)
+		}
+	}
+}
+
+// The route_status filter takes the new state by name, so a reader can list exactly the issues
+// whose holder has stopped answering - and no_holder, which is the filter an audit uses to find
+// unworked issues, keeps excluding them.
+func TestRouteStatusFilterTakesHolderUnresponsive(t *testing.T) {
+	for _, value := range []string{"live", "holder_unresponsive", "no_holder", "unknown", ""} {
+		if got, err := parseRouteStatusFilter(value); err != nil || got != value {
+			t.Errorf("route_status=%q: %q, %v; want it accepted", value, got, err)
+		}
+	}
+	_, err := parseRouteStatusFilter("unresponsive")
+	if err == nil || !strings.Contains(err.Error(), "holder_unresponsive") {
+		t.Fatalf("route_status=unresponsive: %v, want a refusal naming holder_unresponsive", err)
+	}
+}
+
+// What an issue read says about the session holding its claim. The read's source is this
+// roster, so it answers for a holder the roster lists (live or unresponsive) and reads one it
+// does not list as gone; takeable_at is the instant another agent may take the claim without a
+// person, which is only ever answered for a holder that will come free.
+func TestClaimLivenessDatesWhenAnUnresponsiveHoldersClaimComesFree(t *testing.T) {
+	const lastSeen = 1700000000000
+	served := stateRosterServer(t, []map[string]any{
+		{"session_id": "ses-live", "state": "live", "last_seen": lastSeen},
+		{"session_id": "ses-stalled", "state": "unresponsive", "last_seen": lastSeen},
+	})
+	roster := served.listRouteRoster(context.Background())
+	now := time.UnixMilli(lastSeen).Add(7 * time.Minute).UTC()
+	claim := func(kind, id string) *model.IssueClaim {
+		return &model.IssueClaim{Actor: model.Actor{Kind: kind, ID: id}, At: now}
+	}
+	text := func(liveness model.IssueClaimLiveness) string {
+		part := func(value *time.Time) string {
+			if value == nil {
+				return "null"
+			}
+			return value.UTC().Format(time.RFC3339)
+		}
+		state := "null"
+		if liveness.HolderState != nil {
+			state = *liveness.HolderState
+		}
+		return state + " " + part(liveness.LastSeen) + " " + part(liveness.TakeableAt)
+	}
+	seen := time.UnixMilli(lastSeen).UTC().Format(time.RFC3339)
+	for _, tc := range []struct {
+		name  string
+		claim *model.IssueClaim
+		want  string
+	}{
+		// A live holder's claim is not takeable by waiting, so there is no instant to name.
+		{name: "a live holder", claim: claim("session", "ses-live"), want: "live " + seen + " null"},
+		// Twenty minutes past the heartbeat it was last seen at, and not before.
+		{name: "an unresponsive holder", claim: claim("session", "ses-stalled"),
+			want: "unresponsive " + seen + " " + time.UnixMilli(lastSeen).Add(20*time.Minute).UTC().Format(time.RFC3339)},
+		// No record at all: gone, takeable as of this read.
+		{name: "a holder the registry has no record of", claim: claim("session", "ses-ended"),
+			want: "gone null " + now.Format(time.RFC3339)},
+		// A person holds it until a person releases it; there is no session state to read.
+		{name: "a human holder", claim: claim("user", "alice@example.com"), want: "null null null"},
+		{name: "nobody", claim: nil, want: "null null null"},
+	} {
+		if got := text(roster.claimLiveness(tc.claim, now)); got != tc.want {
+			t.Errorf("%s: holder_state/last_seen/takeable_at = %s, want %s", tc.name, got, tc.want)
+		}
+	}
+	// A listener that gave no list cannot judge the holder, and an issue read still answers:
+	// unknown, never gone, which would read as a free claim.
+	silent := routeRoster{reason: model.RouteReasonUnreachable}
+	if got := text(silent.claimLiveness(claim("session", "ses-live"), now)); got != "unknown null null" {
+		t.Fatalf("with no list to judge by: %s, want unknown null null", got)
 	}
 }

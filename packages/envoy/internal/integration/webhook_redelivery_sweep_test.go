@@ -89,7 +89,7 @@ func TestWebhookRedelivery_TheSweepRecoversFailedDeliveriesThroughTheListener(t 
 	rejected := github.Record(unreadable, "submitted", 7, http.StatusBadRequest, time.Now().Add(-time.Minute))
 	refusing.Store(false)
 
-	state, err := redeliver.OpenState(env.client.JS(), 1)
+	state, err := redeliver.OpenState(env.client.Conn, env.client.JS(), 1)
 	if err != nil {
 		t.Fatalf("open redelivery state: %v", err)
 	}

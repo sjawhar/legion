@@ -74,10 +74,14 @@ sent to the controller.
 
 The controller topic is a live wake: a message published while no controller runs reaches nobody,
 and no controller reads it later. `envoy_publish`'s own answer tells you whether one took it. A
-publish to a role answers with its live `holder`. With no live controller it fails instead, with
-`no holder for role legion-<project>-controller` or a holder that lapsed, and the listener delivers
-nothing (`packages/envoy/cmd/listener`, the test "unheld role returns 404 without publishing").
-Then make the finding an ask, as [What the ask says](#what-the-ask-says) spells it, on the first
+publish to a role answers with its live `holder`. It fails with
+`no holder for role legion-<project>-controller` when no session holds the role at all, and the
+listener delivers nothing (`packages/envoy/cmd/listener`, the test "unheld role returns 404
+without publishing"). It fails with a receipt timeout, naming the holder and its `holder_state`,
+when a controller holds the role and its session has not answered: an `unresponsive` controller is
+not a stopped one, so release nothing, take nothing from it, and publish no second copy.
+Either way the finding has not been taken yet, so make it an ask, as
+[What the ask says](#what-the-ask-says) spells it, on the first
 of these that holds, so a person sees it and the controller finds it when it returns:
 
 1. **The report issue is open:** ask there, the question opening `Clear defect from <your role

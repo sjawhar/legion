@@ -13,40 +13,30 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
-// Heartbeat is the pi-envoy plugin's registration heartbeat (`DEFAULT_HEARTBEAT_MS`,
-// packages/envoy-client/src/envoy-settings.ts): what refreshes a session's `last_seen` in the Envoy
-// listener's role lookup.
-const Heartbeat = 90 * time.Second
-
 // probeTimeout bounds one role lookup, so a hung listener answers Unknown rather than holding the
 // caller.
 const probeTimeout = 10 * time.Second
 
-// LivenessWindow is how stale the controller holder's `last_seen` may be before the controller
-// counts as gone: four heartbeats at least, since one would flap on every tick, and never less
-// than the boot timeout — 360 s at the defaults.
-//
-// Four rather than three: three heartbeats is 270 s, short of the 300 s a live holder's
-// `last_seen` can reach, since that is the listener's own session record lifetime
-// (OpenSessionRegistry's default ttl, packages/envoy/internal/session/registry.go). Four is 360 s,
-// still wider than the 240 s this replaced, so a pane that has not restarted and still refreshes
-// every 120 s stays live and no release ordering is forced.
-func LivenessWindow(bootTimeout time.Duration) time.Duration {
-	return max(bootTimeout, 4*Heartbeat)
-}
+// stateUnresponsive is the `holder_state` the listener names in its 404 for a holder whose last
+// registration is past the live window but still inside the gone horizon (writeRoleHolderError,
+// packages/envoy/cmd/listener/api.go): the session is stalled, not dead — it keeps its role claim,
+// nothing is released for it, and it answers for itself once its heartbeats land. A probe of such
+// a holder is never a death verdict (dispatch://INFRA-392).
+const stateUnresponsive = "unresponsive"
 
 // Liveness is what the Envoy listener says of the registered controller session.
 type Liveness string
 
 const (
-	// Alive: the listener names the session as the controller role's holder and saw it within
-	// the liveness window.
+	// Alive: the listener names the session as the controller role's holder, which it does only
+	// for a holder inside its live window.
 	Alive Liveness = "alive"
-	// Gone: the role is unheld or expired, held by another session, or its holder was last seen
-	// at or beyond the window.
+	// Gone: the role is unheld or expired, held by another session, or its holder reached the
+	// listener's gone horizon.
 	Gone Liveness = "gone"
 	// Unknown: the listener could not answer — unreachable, a refusal other than 404, or a body
-	// the probe cannot read. Never a death verdict.
+	// the probe cannot read — or it named a holder that is only unresponsive. Never a death
+	// verdict.
 	Unknown Liveness = "unknown"
 )
 
@@ -56,10 +46,6 @@ type ProberOptions struct {
 	EnvoyURL, EnvoyToken string
 	// Project is the project token (claim.ProjectToken): the lookup is its controller token.
 	Project string
-	// BootTimeout sets the liveness window (LivenessWindow).
-	BootTimeout time.Duration
-	// Now is the clock `last_seen` is aged against; nil is time.Now.
-	Now func() time.Time
 	// Log receives each non-alive verdict's reason; nil is slog.Default().
 	Log *slog.Logger
 }
@@ -68,11 +54,13 @@ type ProberOptions struct {
 // either `controller` mode: the one record of the operator's controller the daemon can read, since
 // its session is on the operator's own machine with no process of the daemon's to probe, and the
 // role the daemon's own controller must hold to take its wakes.
+//
+// The listener owns the windows: it answers the lookup only for a holder inside its live window
+// (`ENVOY_SESSION_LIVE_WINDOW`), and names the holder's state in the 404 it answers for any
+// other, so the daemon keeps no staleness window of its own to drift from it.
 type Prober struct {
 	lookup string
 	token  string
-	window time.Duration
-	now    func() time.Time
 	log    *slog.Logger
 	client *http.Client
 }
@@ -82,13 +70,8 @@ func NewProber(opts ProberOptions) *Prober {
 	p := &Prober{
 		lookup: strings.TrimRight(opts.EnvoyURL, "/") + "/v1/roles/" + url.PathEscape(string(claim.ControllerToken(opts.Project))),
 		token:  opts.EnvoyToken,
-		window: LivenessWindow(opts.BootTimeout),
-		now:    opts.Now,
 		log:    opts.Log,
 		client: &http.Client{Timeout: probeTimeout},
-	}
-	if p.now == nil {
-		p.now = time.Now
 	}
 	if p.log == nil {
 		p.log = slog.Default()
@@ -104,9 +87,19 @@ type roleHolder struct {
 	LastSeen *int64 `json:"last_seen"`
 }
 
+// roleRefusal is the listener's 404 for a role it will not name a holder of (writeRoleHolderError,
+// packages/envoy/cmd/listener/api.go): `reason` is `unclaimed` when nobody holds the role and
+// `holder_lapsed` when its holder is past the live window, and `holder_state` is that holder's
+// state, `unresponsive` or `gone`. A listener of an earlier release names neither.
+type roleRefusal struct {
+	Reason      string `json:"reason"`
+	HolderState string `json:"holder_state"`
+	LastSeen    *int64 `json:"last_seen"`
+}
+
 // Probe says whether session — the one registered with the current controller capability — is
 // alive: Gone and Unknown each log why, naming the listener and, where the listener named them,
-// both sessions or the holder's age.
+// both sessions or the holder's state.
 func (p *Prober) Probe(ctx context.Context, session string) Liveness {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.lookup, nil)
 	if err != nil {
@@ -122,8 +115,19 @@ func (p *Prober) Probe(ctx context.Context, session string) Liveness {
 		return Unknown
 	}
 	defer response.Body.Close()
+	body, readErr := io.ReadAll(response.Body)
 	if response.StatusCode == http.StatusNotFound {
-		p.log.Info("controller liveness: the controller role has no live holder; the controller is gone", "url", p.lookup, "session", session)
+		var refusal roleRefusal
+		if readErr == nil {
+			_ = json.Unmarshal(body, &refusal)
+		}
+		if refusal.HolderState == stateUnresponsive {
+			p.log.Info("controller liveness: the controller role's holder is unresponsive, not gone; the controller is left as it is",
+				"url", p.lookup, "session", session, "reason", refusal.Reason, "lastSeen", refusal.LastSeen)
+			return Unknown
+		}
+		p.log.Info("controller liveness: the controller role has no live holder; the controller is gone",
+			"url", p.lookup, "session", session, "reason", refusal.Reason, "holderState", refusal.HolderState)
 		return Gone
 	}
 	if response.StatusCode != http.StatusOK {
@@ -134,21 +138,14 @@ func (p *Prober) Probe(ctx context.Context, session string) Liveness {
 		p.log.Warn("controller liveness: "+reason, "url", p.lookup, "status", response.StatusCode)
 		return Unknown
 	}
-	body, err := io.ReadAll(response.Body)
 	var answer roleHolder
-	if err != nil || json.Unmarshal(body, &answer) != nil || answer.Holder == "" || answer.LastSeen == nil {
+	if readErr != nil || json.Unmarshal(body, &answer) != nil || answer.Holder == "" || answer.LastSeen == nil {
 		p.log.Warn("controller liveness: the Envoy listener answered the controller role lookup with an unreadable body", "url", p.lookup)
 		return Unknown
 	}
 	if answer.Holder != session {
 		p.log.Info("controller liveness: another session holds the controller role; the recorded controller is gone",
 			"holder", answer.Holder, "session", session)
-		return Gone
-	}
-	age := p.now().Sub(time.UnixMilli(*answer.LastSeen))
-	if age >= p.window {
-		p.log.Info("controller liveness: the controller session was last seen outside the liveness window; it is gone",
-			"session", session, "ageSeconds", int64(age/time.Second), "windowSeconds", int64(p.window/time.Second))
 		return Gone
 	}
 	return Alive

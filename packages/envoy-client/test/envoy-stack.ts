@@ -27,6 +27,17 @@ export interface EnvoyStack {
   stop(): Promise<void>;
 }
 
+/** What a caller may change about the stack it starts. */
+export interface EnvoyStackOptions {
+  /**
+   * Environment for the listener process, merged over the stack's own, so a caller can add a
+   * setting or replace one of these. The session-stall rig (test/session-stall.ts) shortens the
+   * session windows (`ENVOY_SESSION_LIVE_WINDOW`, `ENVOY_SESSION_GONE_HORIZON`) with it, which
+   * is the only way to cross them in a test's seconds rather than the deployment's hour.
+   */
+  readonly listenerEnv?: Readonly<Record<string, string>>;
+}
+
 const ENVOY_MODULE = path.resolve(import.meta.dir, "../../envoy");
 const READY_TIMEOUT_MS = 60_000;
 const STOP_GRACE_MS = 10_000;
@@ -122,7 +133,7 @@ async function stopProcess(child: Subprocess): Promise<void> {
  * /healthz answers healthy and natsd holds the `ENVOY_NOTIFICATIONS` stream. Throws, naming why,
  * when `go` is missing, a build fails or either process does not come up.
  */
-export async function startEnvoyStack(): Promise<EnvoyStack> {
+export async function startEnvoyStack(options: EnvoyStackOptions = {}): Promise<EnvoyStack> {
   const { PATH = "" } = process.env;
   const work = mkdtempSync(path.join(os.tmpdir(), "envoy-stack-"));
   const processes: Subprocess[] = [];
@@ -179,6 +190,7 @@ export async function startEnvoyStack(): Promise<EnvoyStack> {
         ENVOY_LISTEN_HOST: "127.0.0.1",
         ENVOY_MACHINE_ID: `envoy-stack-${process.pid}`,
         NATS_URLS: natsUrl,
+        ...options.listenerEnv,
       },
       stdout: listenerOut,
       stderr: listenerOut,

@@ -63,6 +63,44 @@ export function UnreachableRouteMarker({
   return <UnreachableRoute route={issue.route} showRoute={showRoute} />;
 }
 
+/**
+ * The marker for a route whose session - the routed session, or the role's holder - has missed
+ * its heartbeats without ending (`route_status: holder_unresponsive`). It is neither of the
+ * other two: the route does reach that session, because the listener stores what is sent while
+ * it is silent, so this is not the warning `UnreachableRouteMarker` paints, and it is not the
+ * `unknown` of a listener that could not judge the route either - the listener judged it and
+ * said the session is stalled. It therefore shares the warning chip's shape, to sit in the same
+ * row, in the muted tone a state that needs no action wears (dispatch://INFRA-392).
+ */
+export function UnresponsiveRouteMarker({
+  issue,
+  showRoute = false,
+}: {
+  issue: RoutedIssue;
+  showRoute?: boolean;
+}): ReactNode {
+  const text = useAgentText();
+  if (issue.route === null || issue.route_status !== "holder_unresponsive") {
+    return null;
+  }
+  const holder = issue.route_holder;
+  const named =
+    holder === null || holder === undefined ? "That session" : text.sessionText(holder, undefined);
+  const explanation = `${named} has missed its heartbeats without ending, so it still holds this route: what is sent to this issue is stored for it and waits until it answers. Nothing has to be done about it unless it stays this way - a session past the listener's gone horizon leaves the role unheld, and the route then reads as reaching nobody.`;
+  return (
+    <span
+      className={`inline-flex min-w-0 max-w-full items-center gap-1 text-xs ${textMutedOnSurface}`}
+      data-testid="issue-route-unresponsive"
+      style={{ flexShrink: showRoute ? 1 : 0 }}
+      title={explanation}
+    >
+      {showRoute ? <span className="min-w-0 truncate">{issue.route}:</span> : null}
+      <span className="shrink-0">Unresponsive, still reached</span>
+      <span className="sr-only">. {explanation}</span>
+    </span>
+  );
+}
+
 function UnreachableRoute({ route, showRoute }: { route: string; showRoute: boolean }): ReactNode {
   const text = useAgentText();
   const sessionId = sessionOfAddress(route);

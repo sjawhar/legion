@@ -77,7 +77,7 @@ func resolveThenLock[R, T any](
 	return zero, stale
 }
 
-// resolveDeliveryTarget is the listener read behind every delivery: which live session a route
+// resolveDeliveryTarget is the listener read behind every delivery: which session a route
 // names right now, what the listener calls it, and why it cannot receive this mode. It is the
 // resolve half above, so it runs with nothing held.
 //
@@ -90,9 +90,16 @@ func resolveThenLock[R, T any](
 // answers that question, and a read the message bus did not answer arrives here as an error
 // instead of as an absence.
 //
-// Only ErrNotFound - no record under that id - is "no live session <id>", the text
-// comment_delivery.go tests the prefix of and the dashboard prints verbatim. Every other failure
-// takes the error path, so an unreachable listener never reads as an ended session.
+// What the record then says is the session's state, and only a session the registry calls gone
+// is no target. An unresponsive one - past the live window, inside the gone horizon - is
+// resolved like any other, for a role route as much as a session route: the listener stores the
+// frame and hands it over when the session answers again, so a message to a session that missed
+// its heartbeats waits for it rather than being dropped (dispatch://INFRA-392).
+//
+// Only ErrNotFound - no record under that id - and a record the registry calls gone are "no
+// live session <id>", the text comment_delivery.go tests the prefix of and the dashboard prints
+// verbatim. Every other failure takes the error path, so an unreachable listener never reads as
+// an ended session.
 func (s *server) resolveDeliveryTarget(ctx context.Context, route model.Route, delivery string) (string, string, string) {
 	if s.deps.Envoy == nil {
 		return "", "", "envoy listener: ENVOY_URL is not configured"
@@ -109,6 +116,9 @@ func (s *server) resolveDeliveryTarget(ctx context.Context, route model.Route, d
 	}
 	if err != nil {
 		return "", "", deliveryErrorText(err)
+	}
+	if target.State == dispatchenvoy.StateGone {
+		return target.SessionID, target.Title, "no live session " + target.SessionID
 	}
 	if !hasCapability(target.Capabilities, delivery) {
 		return target.SessionID, target.Title,

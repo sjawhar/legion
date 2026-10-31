@@ -14,6 +14,7 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
     resolved_repo: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
     key: "CORE-1",
     labels: [],
     last_seq: 0,
@@ -133,7 +134,13 @@ test("marks only the rows whose route reaches nobody", async () => {
       route_status: "live",
       route_holder: "ses-po",
     }),
-    issue({ key: "CORE-4", title: "Unjudged route", route: "role:sre", route_status: "unknown" }),
+    issue({
+      key: "CORE-4",
+      title: "Unjudged route",
+      route: "role:sre",
+      route_status: "unknown",
+      route_status_reason: "unreachable",
+    }),
     issue({ key: "CORE-5", title: "Unrouted" }),
   ]);
 

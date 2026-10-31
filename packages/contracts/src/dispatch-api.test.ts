@@ -375,6 +375,7 @@ test("models answer changes, ask answer history, and the answers page", () => {
     route: "role:reviewer",
     route_status: "live",
     route_holder: "session-reviewer",
+    route_status_reason: null,
   } satisfies AskRead;
   const thread = {
     replies: [],
@@ -385,6 +386,7 @@ test("models answer changes, ask answer history, and the answers page", () => {
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
   } satisfies AskThread;
   const page = {
     rows: [

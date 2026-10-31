@@ -249,7 +249,11 @@ test("unfollowing a follower while a role route's holder is unknown says the rou
   const page = await alice.newPage();
   // The listener answering nothing is forced on the real reads: the issue, the ask's thread and
   // the Inbox rows keep every other field the server sent.
-  const unknownReach = { route_holder: null, route_status: "unknown" };
+  const unknownReach = {
+    route_holder: null,
+    route_status: "unknown",
+    route_status_reason: "unreachable",
+  };
   await page.route(`**/api/v1/issues/${issue.key}`, async (route) => {
     const response = await route.fetch();
     const body = (await response.json()) as Record<string, unknown>;

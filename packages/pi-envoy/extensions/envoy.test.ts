@@ -2995,12 +2995,14 @@ describe("envoy OMP extension", () => {
         expects_reply: "required",
         expires_at: 1_788_956_000_000,
       });
+    // The listener named no recipient_state, which reads as live.
     expect(sent?.content[0]?.text).toBe(
-      "sent evt_1 to ses_target (recipient unconfirmed by listener)"
+      "sent evt_1 to ses_target (live) (recipient unconfirmed by listener)"
     );
     expect(sent?.details).toMatchObject({
       event_id: "evt_1",
       recipient: "ses_target",
+      recipient_state: "live",
       confirmed: false,
     });
     await fixture.tools
@@ -15525,6 +15527,129 @@ console.log(JSON.stringify(args));
 
     deletion.reject(new Error("listener cleanup failed"));
     await shutdown;
+  });
+
+  // A registration still on the wire when the session ends lands after the DELETE and writes the
+  // record back: the session is registered again with nobody heartbeating it, and peers read it
+  // as live for the live window and as unresponsive for an hour after (dispatch://INFRA-392).
+  test("session_shutdown holds the deregistration until a registration in flight settles", async () => {
+    const requests: string[] = [];
+    const registration = Promise.withResolvers<Response>();
+    let registrationPending = false;
+    let registrationPendingAtDelete: boolean | undefined;
+    let registrations = 0;
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(input.toString()).pathname;
+      requests.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/v1/replay") return emptyReplay(init);
+      if (path === "/v1/sessions/ses_shutdown") {
+        registrationPendingAtDelete = registrationPending;
+        return response({});
+      }
+      if (path === "/v1/interests/subscribe") {
+        registrations += 1;
+        // The session's own start registers as usual; the one the tool below sends hangs.
+        if (registrations === 1) return responseWithRegistration(input, init, []);
+        registrationPending = true;
+        const answer = await registration.promise;
+        registrationPending = false;
+        return answer;
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?shutdown-settles-registration");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_shutdown"));
+    const subscribing = fixture.tools
+      .find((tool) => tool.name === "envoy_subscribe")
+      ?.execute("", { topics: ["notifications.github.sjawhar.legion.pr.1.>"] });
+    // Real time, briefly: the registration has to reach the wire, and the shutdown has to be
+    // given the chance to send the DELETE early, which is the failure this test is here for.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const shutdown = fixture.handlers.get("session_shutdown")?.({}, sessionContext("ses_shutdown"));
+    if (shutdown === undefined) throw new Error("session_shutdown handler was not registered");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // The negative case: the DELETE must not be on the wire while the registration is.
+    expect(requests).not.toContain("DELETE /v1/sessions/ses_shutdown");
+
+    registration.resolve(
+      response({
+        session_id: "ses_shutdown",
+        machine_id: "test",
+        dir: "/tmp",
+        topics: ["notifications.agent.ses_shutdown"],
+      })
+    );
+    await shutdown;
+    await subscribing;
+
+    expect(requests).toContain("DELETE /v1/sessions/ses_shutdown");
+    expect(registrationPendingAtDelete).toBe(false);
+  });
+
+  // A `/new`, a fork or a branch mints a new id, and nothing heartbeats the old one from then on:
+  // left registered it reads as live, and then as unresponsive, for an hour of peers' sends.
+  test("a session id switch deregisters the id this process left", async () => {
+    const requests: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      requests.push(`${init?.method ?? "GET"} ${new URL(input.toString()).pathname}`);
+      return responseWithRegistration(input, init, []);
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?switch-deregisters-old-id");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_before"));
+    await fixture.handlers.get("session_switch")?.({ reason: "new" }, sessionContext("ses_after"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(requests).toContain("DELETE /v1/sessions/ses_before");
+    expect(requests).not.toContain("DELETE /v1/sessions/ses_after");
+  });
+
+  // The list is what an agent reads before it decides a peer is dead: a stalled session must be
+  // asked for, and must arrive with the state and the heartbeat that say it is only stalled.
+  test("envoy_sessions asks for the unresponsive sessions and renders each one's state and last_seen", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      urls.push(`${url.pathname}${url.search}`);
+      if (url.pathname !== "/v1/sessions") return responseWithRegistration(input, init, []);
+      return response([
+        {
+          session_id: "ses_stalled",
+          machine_id: "test",
+          dir: "/tmp",
+          port: 0,
+          title: "Reviewer",
+          topics: [],
+          self_subscribed: true,
+          last_seen: 1_700_000_000_000,
+          state: "unresponsive",
+        },
+      ]);
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?sessions-render-state");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_lister"));
+    const listed = await fixture.tools
+      .find((tool) => tool.name === "envoy_sessions")
+      ?.execute("", {});
+
+    expect(urls).toContain("/v1/sessions?include=unresponsive");
+    const rows = JSON.parse(listed?.content[0]?.text ?? "[]") as readonly Record<string, unknown>[];
+    expect(rows[0]).toMatchObject({
+      session_id: "ses_stalled",
+      state: "unresponsive",
+      last_seen: 1_700_000_000_000,
+    });
+    expect(listed?.details).toMatchObject({ count: 1, unresponsive: 1 });
   });
 
   test("/whoami reads the live session ID when the session was created after session_start", async () => {

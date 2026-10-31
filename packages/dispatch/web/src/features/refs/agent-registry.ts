@@ -1,7 +1,7 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 
-import { api } from "../../api/client";
+import { api, isAgentListRefilling } from "../../api/client";
 import type { Agent } from "../../api/types";
 
 /**
@@ -16,9 +16,13 @@ import type { Agent } from "../../api/types";
  */
 
 /** A session's running state, from the registry only. `running`: listed by the latest
- *  successful read. `not-running`: the latest read succeeded and does not list it. `unknown`:
- *  no successful read yet, or the latest read failed. */
-export type AgentState = "running" | "not-running" | "unknown";
+ *  successful read, with the listener calling it live. `unresponsive`: listed, but past the
+ *  listener's live window and inside its gone horizon - it has missed heartbeats, it has not
+ *  ended, and it keeps its roles and claims (dispatch://INFRA-392). `not-running`: the latest
+ *  read succeeded and does not list it. `unknown`: no successful read yet, or the latest read
+ *  failed. A row from a server that names no state is `running`, which is what membership alone
+ *  ever meant. */
+export type AgentState = "running" | "unresponsive" | "not-running" | "unknown";
 
 /** The poller's cadence while anything shows an agent. */
 export const AGENT_REGISTRY_POLL_MS = 15_000;
@@ -110,6 +114,12 @@ export interface AgentRegistry {
   lastSeen(sessionId: string): number | undefined;
   /** Every listed session's registry title, for the contracts naming functions. */
   readonly titles: ReadonlyMap<string, string>;
+  /** The latest read failed: every state is `unknown`, and a view that would judge an absence
+   *  says it could not check instead. */
+  readonly isError: boolean;
+  /** The failed read's reason was Envoy answering that its agent list is refilling
+   *  (`isAgentListRefilling`), which a view says in place of an unreachable listener. */
+  readonly refilling: boolean;
 }
 
 /**
@@ -119,7 +129,7 @@ export interface AgentRegistry {
  */
 export function useAgentRegistry(enabled: boolean): AgentRegistry {
   useRegistryPolling(enabled);
-  const { data, isError, isPending } = useQuery({
+  const { data, error, isError, isPending } = useQuery({
     ...agentsQuery(),
     enabled,
     refetchOnMount: false,
@@ -128,17 +138,27 @@ export function useAgentRegistry(enabled: boolean): AgentRegistry {
   // A failed refetch keeps the last response's data, so the state goes back to unknown while
   // the cached titles go on naming agents.
   const known = !(isPending || isError);
+  const refilling = isError && isAgentListRefilling(error);
   return useMemo(
     () => ({
+      isError,
       lastSeen: (sessionId: string) => lookup.byId.get(sessionId)?.last_seen,
-      state: (sessionId: string): AgentState =>
-        !known ? "unknown" : lookup.byId.has(sessionId) ? "running" : "not-running",
+      refilling,
+      // A listed row's own `state` decides: the listener judged it from the session's last
+      // registration, which is the one thing a list's membership cannot say, since the list
+      // carries the unresponsive sessions beside the live ones.
+      state: (sessionId: string): AgentState => {
+        if (!known) return "unknown";
+        const agent = lookup.byId.get(sessionId);
+        if (agent === undefined) return "not-running";
+        return agent.state === "unresponsive" ? "unresponsive" : "running";
+      },
       title: (sessionId: string) => {
         const title = lookup.byId.get(sessionId)?.title.trim();
         return title === undefined || title === "" ? undefined : title;
       },
       titles: lookup.titles,
     }),
-    [known, lookup]
+    [isError, known, lookup, refilling]
   );
 }
