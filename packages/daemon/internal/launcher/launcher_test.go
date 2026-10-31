@@ -938,12 +938,15 @@ func TestTheReaperSparesEveryManagersGenerationAndReapsTheRest(t *testing.T) {
 	}
 	tester, reviewer := start("exit 7"), start("exit 9")
 	orphan := start("exit 0")
+	// The launcher's own child, the test database's script, which its own wait reads (pidGuard).
+	guarded := start("exit 5")
 	managers := []*manager{
 		{role: "tester", namespaced: true, log: &roleLog{}, child: &child{pid: tester.Process.Pid}},
 		{role: "reviewer", namespaced: true, log: &roleLog{}, child: &child{pid: reviewer.Process.Pid}},
 	}
+	guard := &pidGuard{pids: map[int]bool{guarded.Process.Pid: true}}
 	// Every one has exited and waits as a zombie for whoever reaps it.
-	for _, cmd := range []*exec.Cmd{tester, reviewer, orphan} {
+	for _, cmd := range []*exec.Cmd{tester, reviewer, orphan, guarded} {
 		deadline := time.Now().Add(5 * time.Second)
 		for !zombie(cmd.Process.Pid) {
 			if time.Now().After(deadline) {
@@ -955,7 +958,7 @@ func TestTheReaperSparesEveryManagersGenerationAndReapsTheRest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	signals := make(chan os.Signal, 1)
 	done := make(chan struct{})
-	go func() { reapOrphans(ctx, signals, managers); close(done) }()
+	go func() { reapOrphans(ctx, signals, managers, guard); close(done) }()
 	signals <- syscall.SIGCHLD
 	// A reaped process is gone from the process table; a zombie still takes signal 0.
 	deadline := time.Now().Add(5 * time.Second)
@@ -967,7 +970,7 @@ func TestTheReaperSparesEveryManagersGenerationAndReapsTheRest(t *testing.T) {
 	}
 	cancel()
 	<-done
-	for cmd, want := range map[*exec.Cmd]int{tester: 7, reviewer: 9} {
+	for cmd, want := range map[*exec.Cmd]int{tester: 7, reviewer: 9, guarded: 5} {
 		if err := cmd.Wait(); cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != want {
 			t.Errorf("a manager's generation reads %v (%v), want its own exit %d: the reaper took it", cmd.ProcessState, err, want)
 		}

@@ -48,6 +48,9 @@ const (
 	ghVolume        = "gh"
 	roleHomesVolume = "role-homes"
 	roleProbeVolume = "role-probe"
+	// testPGVolume is the disk emptyDir an issue pod keeps its own test PostgreSQL's cluster on
+	// (TestPGDir), when the deployment sets runtime.kubernetes.test_postgres.
+	testPGVolume = "testpg"
 )
 
 // The agent-secrets volumes: agentSecretsTokenVolume alone carries the projected token for the
@@ -108,6 +111,10 @@ var runtimeOwned = func() map[string]bool {
 		"UV_PYTHON_INSTALL_DIR": true, "UV_CACHE_DIR": true, "UV_LINK_MODE": true,
 		"CLAUDE_CONFIG_DIR": true, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": true, "CLAUDE_CODE_DISABLE_CRON": true,
 		claudelaunch.SessionVariable: true, ompsessions.StorageVariable: true, ompsessions.DSNFileVariable: true,
+		// The pod's own test database, which an issue pod's roles are told where the deployment
+		// serves one (runtime.kubernetes.test_postgres): owned in every pod, since a spec or an
+		// operator's pod env naming another server would point every test of the pod at it.
+		launcher.TestPGVariable: true,
 	}
 	// GIT_CONFIG_COUNT and each GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> gitConfigEnv sets.
 	for _, entry := range gitConfigEnv() {
@@ -139,13 +146,14 @@ const providersDSNFile = ProvidersDir + "/" + ompsessions.DSNFileName
 var sessionProxyFlagNames = [3]string{"--session-instance", "--session-database", "--session-user"}
 
 // legionVolumeNames are the volumes Legion puts in a pod, an issue pod's, the controller's or the
-// probe's, whose names the operator's volumes may not take: the shared ones, the role homes, and
-// each launcher role's private ones. The agent-secrets volumes are reserved whether or not this
-// deployment enrolls: an operator's pod may never claim them. Every launcher role, the
-// controller's included, has a key volume when the pod enrolls and a gh volume always.
+// probe's, whose names the operator's volumes may not take: the shared ones, the role homes, the
+// test database's, and each launcher role's private ones. The agent-secrets volumes are reserved
+// whether or not this deployment enrolls, and the test database's whether or not it sets
+// `runtime.kubernetes.test_postgres`: an operator's pod may never claim them. Every launcher role,
+// the controller's included, has a key volume when the pod enrolls and a gh volume always.
 func legionVolumeNames() []string {
 	names := []string{
-		issueVolume, provisionVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume, roleHomesVolume, roleProbeVolume,
+		issueVolume, provisionVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume, roleHomesVolume, roleProbeVolume, testPGVolume,
 	}
 	for _, role := range launcherRoles {
 		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role), roleVolume(ghVolume, role),
@@ -694,7 +702,7 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 	volume := corev1.Volume{Name: issueVolume, VolumeSource: disk}
 	config := corev1.Volume{Name: configVolume, VolumeSource: memory}
 	return slices.Concat([]corev1.Volume{volume}, l.kind.initVolumes(l), []corev1.Volume{config}, roleVolumes,
-		l.kind.mainVolumes(), r.agentSecretsVolumes(l.roles), providers, r.pod.Volumes)
+		l.kind.mainVolumes(r), r.agentSecretsVolumes(l.roles), providers, r.pod.Volumes)
 }
 
 // agentSecretsVolumes are, for a pod the runtime enrolls with the secrets broker
@@ -1169,6 +1177,13 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	if l.enrolls(r) {
 		add("AGENT_SECRETS_URL", r.agentSecrets.URL)
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
+	}
+	// The pod's own test database, when the deployment serves one (runtime.kubernetes.test_postgres):
+	// an issue pod's roles alone, whose launcher serves it before it accepts a role start
+	// (launcher's testpg.go). The controller's pod runs no tests and serves none. The name is the
+	// runtime's (podVariables), so no operator's pod env can point it elsewhere.
+	if _, issue := l.kind.(issuePod); issue && r.testPostgres {
+		add(launcher.TestPGVariable, launcher.TestPGDSN)
 	}
 	if spec.Role == claim.RoleController {
 		add(slackChannelsVariable, r.slackChannelsValue())

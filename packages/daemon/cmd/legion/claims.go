@@ -24,14 +24,15 @@ import (
 // held phase; with --failed, every failed claim. close is the tree's close, through its root claim,
 // for a tree no workflow issue backs: the root, then every other claim of the tree.
 var claimsCommands = map[string]command{
-	"spawn":   runClaimsSpawn,
-	"deliver": runClaimsDeliver,
-	"suspend": runClaimsSuspend,
-	"resume":  claimRequest("resume"),
-	"stop":    claimRequest("stop"),
-	"retry":   runClaimsRetry,
-	"close":   claimRequest("close"),
-	"list":    runClaimsList,
+	"spawn":          runClaimsSpawn,
+	"deliver":        runClaimsDeliver,
+	"suspend":        runClaimsSuspend,
+	"resume":         claimRequest("resume"),
+	"stop":           claimRequest("stop"),
+	"retry":          runClaimsRetry,
+	"forget-session": runClaimsForgetSession,
+	"close":          claimRequest("close"),
+	"list":           runClaimsList,
 }
 
 func runClaims(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -193,6 +194,23 @@ func claimRequest(request string) command {
 		}
 		return c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(*token)+"/"+request, nil, printClaim)
 	}
+}
+
+// runClaimsForgetSession clears the recorded session of a stopped claim. The operator must name
+// the session being abandoned, so it cannot clear a newly registered session by mistake.
+func runClaimsForgetSession(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	c := newClaimsCall("forget-session", stdout, stderr)
+	token := c.flags.String("claim", "", "the claim's token (required)")
+	session := c.flags.String("session", "", "the claim's recorded session to abandon (required)")
+	if code, ok := c.parse(args, "claim", "session"); !ok {
+		return code
+	}
+	op, ok := c.connect()
+	if !ok {
+		return 1
+	}
+	return c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(*token)+"/forget-session",
+		api.ForgetSessionRequest{Session: *session}, printClaim)
 }
 
 // runClaimsRetry retries --claim, or with --failed every claim the daemon holds failed, in the
