@@ -1913,9 +1913,12 @@ func TestDispatchProtectsItsInstanceServerSide(t *testing.T) {
 	}
 }
 
-// databaseQueryInsights turns on Query Insights with each query's application tags and client
-// address, and changes nothing else the instance registers. Unset or false, the settings carry no
-// insightsConfig at all, so an instance deployed before the input existed sees no change.
+// databaseQueryInsights set either way renders insightsConfig, and changes nothing else the
+// instance registers: true turns Query Insights on with each query's application tags and client
+// address, false turns all three off. The false case must render the block, since the bridged
+// provider declares it Optional and Computed and omitting it would leave Query Insights on
+// wherever it is on, making the input one-way. Unset, the settings carry no insightsConfig at
+// all, so an instance deployed before the input existed sees no change.
 func TestDispatchDatabaseQueryInsights(t *testing.T) {
 	instanceSettings := func(t *testing.T, args *gcp.DispatchArgs) map[string]any {
 		t.Helper()
@@ -1926,18 +1929,18 @@ func TestDispatchDatabaseQueryInsights(t *testing.T) {
 	defaults := instanceSettings(t, dispatchArgs())
 	require.NotContains(t, defaults, "insightsConfig")
 
-	off := dispatchArgs()
-	off.DatabaseQueryInsights = pulumi.BoolRef(false)
-	require.Equal(t, defaults, instanceSettings(t, off))
-
-	on := dispatchArgs()
-	on.DatabaseQueryInsights = pulumi.BoolRef(true)
-	got := instanceSettings(t, on)
-	require.Equal(t, map[string]any{
-		"queryInsightsEnabled": true, "recordApplicationTags": true, "recordClientAddress": true,
-	}, got["insightsConfig"])
-	delete(got, "insightsConfig")
-	require.Equal(t, defaults, got)
+	for _, on := range []bool{true, false} {
+		t.Run(fmt.Sprintf("%t", on), func(t *testing.T) {
+			args := dispatchArgs()
+			args.DatabaseQueryInsights = pulumi.BoolRef(on)
+			got := instanceSettings(t, args)
+			require.Equal(t, map[string]any{
+				"queryInsightsEnabled": on, "recordApplicationTags": on, "recordClientAddress": on,
+			}, got["insightsConfig"])
+			delete(got, "insightsConfig")
+			require.Equal(t, defaults, got)
+		})
+	}
 }
 
 // The instance runs the major databaseVersion names, and POSTGRES_18 when it is unset; the

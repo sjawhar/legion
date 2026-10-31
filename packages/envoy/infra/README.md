@@ -607,11 +607,18 @@ defaults to `POSTGRES_18`, `databaseTier` to `db-custom-4-15360`, `namespace` to
 replacement from deleting the database first.
 `databaseQueryInsights`, unset by default, set to `true` turns on Cloud SQL
 [Query Insights](https://cloud.google.com/sql/docs/postgres/using-query-insights) for the
-instance, with each query's application tags and client address recorded
-(`insightsConfig` `queryInsightsEnabled`, `recordApplicationTags` and `recordClientAddress`).
-Unset or `false`, the instance's settings carry no `insightsConfig`, as before the input existed.
-The component owns the instance's settings, so an update of an instance whose Query Insights was
-turned on by hand in the console, with this input unset, plans to turn it off; set it first.
+instance, with each query's application tags and client address recorded (`insightsConfig`
+`queryInsightsEnabled`, `recordApplicationTags` and `recordClientAddress`, all `true`). Set to
+`false` it turns the same three off, the block rendered with every field `false` rather than left
+out: the bridged Terraform provider declares `settings.insights_config` Optional and Computed, so
+a block absent from the configuration leaves the instance's own in place, and an input that only
+added the block could never turn Query Insights off again. Unset, the instance's settings carry
+no `insightsConfig` and the component leaves Query Insights as the instance has it, console-set
+or never turned on, which is what an instance deployed before the input existed needs. Turning it
+on needs no restart on PostgreSQL maintenance version `20250302.00_RC31` or later, where instance
+operations stay available; it restarts the instance only on `20250302.00_RC30` or earlier, and
+only for Query Insights for Cloud SQL Enterprise Plus edition
+([Enable query insights](https://cloud.google.com/sql/docs/postgres/using-query-insights#enable-insights)).
 `existingNamespace`, `false` by default, makes the component use
 the namespace as it exists in the cluster rather than create it, for a deployment where another
 program owns the namespace. On a stack that has already applied, turning it on removes the

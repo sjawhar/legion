@@ -219,8 +219,10 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 	require.Equal(t, "integer", dispatch.InputProperties["pprofPort"].Type)
 	require.False(t, dispatch.InputProperties["pprofPort"].Secret)
 	require.NotContains(t, dispatch.RequiredInputs, "pprofPort")
-	// Query Insights is an optional plain boolean.
+	// Query Insights is an optional plain boolean: the component reads it to decide whether it
+	// renders insightsConfig at all, so it is never another resource's output.
 	require.Equal(t, "boolean", dispatch.InputProperties["databaseQueryInsights"].Type)
+	require.True(t, dispatch.InputProperties["databaseQueryInsights"].Plain)
 	require.False(t, dispatch.InputProperties["databaseQueryInsights"].Secret)
 	require.NotContains(t, dispatch.RequiredInputs, "databaseQueryInsights")
 	// The app pod's container sizes, envoy-dispatch's and cloud-sql-proxy's, are six optional

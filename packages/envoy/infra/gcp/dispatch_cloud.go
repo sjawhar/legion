@@ -169,11 +169,18 @@ func newDispatchDatabase(ctx *pulumi.Context, comp *Dispatch, name string, args 
 		IpConfiguration:     &sql.DatabaseInstanceSettingsIpConfigurationArgs{Ipv4Enabled: pulumi.Bool(false), PrivateNetwork: network.ID(), SslMode: pulumi.String("ENCRYPTED_ONLY")},
 		BackupConfiguration: &sql.DatabaseInstanceSettingsBackupConfigurationArgs{Enabled: pulumi.Bool(true), PointInTimeRecoveryEnabled: pulumi.Bool(true), StartTime: pulumi.String("08:00"), TransactionLogRetentionDays: pulumi.Int(7), BackupRetentionSettings: &sql.DatabaseInstanceSettingsBackupConfigurationBackupRetentionSettingsArgs{RetainedBackups: pulumi.Int(14)}},
 	}
-	// Unset, the settings carry no insightsConfig, so an instance deployed before the input
-	// existed sees no change.
-	if s.databaseQueryInsights {
+	// The block is rendered for either value, because the bridged Terraform provider declares
+	// settings.insights_config Optional and Computed (terraform-provider-google-beta v8.6.0,
+	// google-beta/services/sql/resource_sql_database_instance.go:899-902) and
+	// terraform-plugin-sdk/v2's diffList returns no diff for such a block that is in state and
+	// absent from the configuration (helper/schema/schema.go:1351-1353). Omitting the block for
+	// false would leave Query Insights on wherever it is already on, so the input would be
+	// one-way. Unset, the settings carry no insightsConfig and the instance keeps whatever it
+	// has, which is what an instance deployed before the input existed needs.
+	if s.databaseQueryInsights != nil {
+		on := *s.databaseQueryInsights
 		settings.InsightsConfig = &sql.DatabaseInstanceSettingsInsightsConfigArgs{
-			QueryInsightsEnabled: pulumi.Bool(true), RecordApplicationTags: pulumi.Bool(true), RecordClientAddress: pulumi.Bool(true),
+			QueryInsightsEnabled: pulumi.Bool(on), RecordApplicationTags: pulumi.Bool(on), RecordClientAddress: pulumi.Bool(on),
 		}
 	}
 	// AvailabilityType is databaseAvailabilityType. The bridged Terraform provider declares

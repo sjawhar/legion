@@ -198,9 +198,10 @@ type DispatchArgs struct {
 	DatabaseVersion    *string `pulumi:"databaseVersion,optional"`
 	DatabaseTier       *string `pulumi:"databaseTier,optional"`
 	DeletionProtection *bool   `pulumi:"deletionProtection,optional"`
-	// DatabaseQueryInsights turns on Cloud SQL Query Insights for the instance, recording each
-	// query's application tags and client address too. Unset or false, the instance's settings
-	// carry no insightsConfig, as before the input existed.
+	// DatabaseQueryInsights turns Cloud SQL Query Insights on (true) or off (false) for the
+	// instance, recording each query's application tags and client address with it. Unset, the
+	// instance's settings carry no insightsConfig and the component leaves Query Insights as the
+	// instance has it, since the bridged provider declares the block Optional and Computed.
 	DatabaseQueryInsights *bool `pulumi:"databaseQueryInsights,optional"`
 	// DatabaseAvailabilityType is the Cloud SQL instance's availability type: ZONAL, one zone and
 	// the default, or REGIONAL, a standby in a second zone that Cloud SQL fails over to. Switching
@@ -441,7 +442,7 @@ type dispatchSettings struct {
 	appClientID, appID                          string
 	appKeySecretName, appKeySecretKey           string
 	deletionProtection, existingNamespace       bool
-	databaseQueryInsights                       bool
+	databaseQueryInsights                       *bool
 	replicas                                    int
 	frontDoorReplicas, listenerReplicas         int
 	natsInCluster                               bool
@@ -971,9 +972,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		}
 		s.databaseTier = *args.DatabaseTier
 	}
-	if args.DatabaseQueryInsights != nil {
-		s.databaseQueryInsights = *args.DatabaseQueryInsights
-	}
+	s.databaseQueryInsights = args.DatabaseQueryInsights
 	s.databaseAvailabilityType = dispatchAvailabilityZonal
 	if args.DatabaseAvailabilityType != nil {
 		switch availability := *args.DatabaseAvailabilityType; availability {
