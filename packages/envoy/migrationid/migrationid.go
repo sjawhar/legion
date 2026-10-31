@@ -53,12 +53,14 @@ var closings = []struct {
 	{series: "Dispatch (packages/envoy/internal/dispatch/store/migrations)", file: "0149_event_horizon.up.sql", closedAt: 149},
 }
 
-// Check holds one runner's set to the rule, the runner found by the closing file the set holds
-// (closings): exactly one must match, so a set is checked against its own series' closing number
-// and never against another's or a guess. It refuses a set that holds no closing file, which a
-// set from before this rule or a mistyped closing entry would be, and one that holds two. Every
-// other problem is CheckClosedAt's.
-func Check(versions map[int]string) error {
+// ClosedAt is the number the numbered series of this set closed at, the series found by the
+// closing file the set holds (closings): exactly one must match, so a set is read against its own
+// series' closing number and never against another's or a guess. It refuses a set that holds no
+// closing file, which a set from before this rule or a mistyped closing entry would be, and one
+// that holds two. A caller that only needs where the numbers end, such as a test taking the
+// numbered migrations of a set its runner keeps adding timestamped ones to, reads it here rather
+// than writing the number down a second time.
+func ClosedAt(versions map[int]string) (int, error) {
 	var matched []int
 	for i, closing := range closings {
 		if versions[closing.closedAt] == closing.file {
@@ -67,16 +69,27 @@ func Check(versions map[int]string) error {
 	}
 	switch len(matched) {
 	case 1:
-		return CheckClosedAt(versions, closings[matched[0]].closedAt)
+		return closings[matched[0]].closedAt, nil
 	case 0:
-		return errors.New("the migration set holds none of the files a numbered series closed at, so it is no runner's set this rule knows: a runner whose migrations moved to timestamps records its closing file in migrationid's closings, and a crafted set is checked with CheckClosedAt")
+		return 0, errors.New("the migration set holds none of the files a numbered series closed at, so it is no runner's set this rule knows: a runner whose migrations moved to timestamps records its closing file in migrationid's closings, and a crafted set is checked with CheckClosedAt")
 	default:
 		names := make([]string, 0, len(matched))
 		for _, i := range matched {
 			names = append(names, closings[i].file)
 		}
-		return fmt.Errorf("the migration set holds the closing files of %d series (%v), so it belongs to none of them alone", len(matched), names)
+		return 0, fmt.Errorf("the migration set holds the closing files of %d series (%v), so it belongs to none of them alone", len(matched), names)
 	}
+}
+
+// Check holds one runner's set to the rule, against the closing number ClosedAt finds for it, so
+// a set that names no series or two is refused there rather than guessed at. Every other problem
+// is CheckClosedAt's.
+func Check(versions map[int]string) error {
+	closedAt, err := ClosedAt(versions)
+	if err != nil {
+		return err
+	}
+	return CheckClosedAt(versions, closedAt)
 }
 
 // CheckClosedAt reports every way the identifiers of one set break the rule, each problem naming

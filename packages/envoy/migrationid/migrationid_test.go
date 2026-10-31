@@ -231,3 +231,31 @@ func TestCheckFindsTheSeriesByItsClosingFile(t *testing.T) {
 		}
 	}
 }
+
+// ClosedAt answers where one set's numbers end, found the way Check finds it: a set holding a
+// series' closing file and a timestamp past it reads as that series, and a set holding no closing
+// file or the closing files of two is refused rather than given a number.
+func TestClosedAtIsTheClosingNumberOfTheSeriesTheSetHolds(t *testing.T) {
+	for _, closing := range closings {
+		versions := set(t, closing.file, "20261030120000_later.up.sql")
+		closedAt, err := ClosedAt(versions)
+		if err != nil {
+			t.Fatalf("%s's set with a timestamp after it: %v", closing.series, err)
+		}
+		if closedAt != closing.closedAt {
+			t.Errorf("%s's set closed at %d, want %d", closing.series, closedAt, closing.closedAt)
+		}
+	}
+	if closedAt, err := ClosedAt(set(t, "0001_a.up.sql", "0002_b.up.sql")); err == nil {
+		t.Errorf("a set holding no closing file was read as closing at %d", closedAt)
+	}
+	if len(closings) > 1 {
+		both := map[int]string{}
+		for _, closing := range closings {
+			both[closing.closedAt] = closing.file
+		}
+		if closedAt, err := ClosedAt(both); err == nil {
+			t.Errorf("a set holding two series' closing files was read as closing at %d", closedAt)
+		}
+	}
+}

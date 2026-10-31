@@ -7,6 +7,8 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/sjawhar/envoy/migrationid"
+
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 )
 
@@ -31,17 +33,38 @@ insert into %s default values;`, table, table),
 	}
 }
 
-// embeddedWith is the set a daemon carrying extra migrations would embed: the
-// shipped ones and the extras, in version order, as migrations.Load returns.
-func embeddedWith(t *testing.T, extra ...migrations.Migration) []migrations.Migration {
+// numberedWith is the set these tests migrate: the daemon's numbered
+// migrations — the embedded ones at or below the number migrationid says its
+// series closed at — and the extras, in version order, as migrations.Load
+// returns. The daemon's own timestamped migrations are left out, and the
+// closing number is read rather than written down here so that adding one
+// changes neither: a shipped timestamp would otherwise stand above t2 as the
+// set's highest version, or widen schema_version.version before any crafted
+// migration reached it, and these tests would be reading the daemon's
+// migrations rather than the ones they applied.
+func numberedWith(t *testing.T, extra ...migrations.Migration) []migrations.Migration {
 	t.Helper()
 	all, err := migrations.All()
 	if err != nil {
 		t.Fatalf("read the embedded migrations: %v", err)
 	}
-	all = append(slices.Clone(all), extra...)
-	slices.SortFunc(all, func(a, b migrations.Migration) int { return cmp.Compare(a.Version, b.Version) })
-	return all
+	versions := make(map[int]string, len(all))
+	for _, m := range all {
+		versions[m.Version] = m.Name
+	}
+	closedAt, err := migrationid.ClosedAt(versions)
+	if err != nil {
+		t.Fatalf("find the number the daemon's numbered series closed at: %v", err)
+	}
+	set := make([]migrations.Migration, 0, len(all)+len(extra))
+	for _, m := range all {
+		if m.Version <= closedAt {
+			set = append(set, m)
+		}
+	}
+	set = append(set, extra...)
+	slices.SortFunc(set, func(a, b migrations.Migration) int { return cmp.Compare(a.Version, b.Version) })
+	return set
 }
 
 func countRows(t *testing.T, store *Store, table string) int {
@@ -85,7 +108,7 @@ func TestMigrateAppliesATimestampedMigrationMergedAfterALaterOne(t *testing.T) {
 	t1 := craftedMigration(t1Version, "first_written", "timestamped_first_written")
 	t2 := craftedMigration(t2Version, "merged_first", "timestamped_merged_first")
 
-	withT2 := embeddedWith(t, t2)
+	withT2 := numberedWith(t, t2)
 	applied, err := store.migrate(ctx, withT2)
 	if err != nil {
 		t.Fatalf("migrate with the later timestamp alone: %v", err)
@@ -94,7 +117,7 @@ func TestMigrateAppliesATimestampedMigrationMergedAfterALaterOne(t *testing.T) {
 		t.Fatalf("the first migrate applied %d migrations, want all %d", applied, len(withT2))
 	}
 
-	withBoth := embeddedWith(t, t1, t2)
+	withBoth := numberedWith(t, t1, t2)
 	applied, err = store.migrate(ctx, withBoth)
 	if err != nil {
 		t.Fatalf("migrate with the earlier timestamp added: %v", err)
@@ -135,7 +158,7 @@ func TestMigrateAppliesEveryTimestampedMigrationOnceOnAFreshDatabase(t *testing.
 	store := emptyStore(t)
 	t1 := craftedMigration(t1Version, "first_written", "timestamped_first_written")
 	t2 := craftedMigration(t2Version, "merged_first", "timestamped_merged_first")
-	all := embeddedWith(t, t1, t2)
+	all := numberedWith(t, t1, t2)
 
 	applied, err := store.migrate(ctx, all)
 	if err != nil {
@@ -170,13 +193,16 @@ func TestMigrateAppliesEveryTimestampedMigrationOnceOnAFreshDatabase(t *testing.
 // nothing.
 func TestTheFirstTimestampedMigrationWidensTheVersionColumn(t *testing.T) {
 	ctx := context.Background()
-	store := migratedStore(t)
+	store := emptyStore(t)
+	if _, err := store.migrate(ctx, numberedWith(t)); err != nil {
+		t.Fatalf("migrate through the numbered set: %v", err)
+	}
 	if dataType := schemaVersionColumnType(t, store); dataType != "integer" {
 		t.Fatalf("schema_version.version is %s on a database migrated through the numbered set, want integer", dataType)
 	}
 
 	t1 := craftedMigration(t1Version, "first_written", "timestamped_first_written")
-	applied, err := store.migrate(ctx, embeddedWith(t, t1))
+	applied, err := store.migrate(ctx, numberedWith(t, t1))
 	if err != nil {
 		t.Fatalf("migrate with a timestamped migration: %v", err)
 	}
@@ -195,7 +221,7 @@ func TestTheFirstTimestampedMigrationWidensTheVersionColumn(t *testing.T) {
 	}
 
 	t2 := craftedMigration(t2Version, "merged_first", "timestamped_merged_first")
-	applied, err = store.migrate(ctx, embeddedWith(t, t1, t2))
+	applied, err = store.migrate(ctx, numberedWith(t, t1, t2))
 	if err != nil {
 		t.Fatalf("migrate with a second timestamped migration: %v", err)
 	}
