@@ -1154,7 +1154,7 @@ func serveArmable(t *testing.T, g *armableGitHub) *armableGitHub {
 			if g.queued {
 				entry = `{"enqueuedAt":"2026-10-11T00:05:00Z"}`
 			}
-			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"autoMergeAllowed":true,"pullRequest":{"id":"PR_42","state":%q,"headRefOid":"ready-head","mergeStateStatus":%q,"updatedAt":%q,"isMergeQueueEnabled":%t,"autoMergeRequest":%s,"mergeQueueEntry":%s}}}}`,
+			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"autoMergeAllowed":true,"pullRequest":{"id":"PR_42","state":%q,"title":"feat(daemon): merge the accepted READY head","headRefOid":"ready-head","mergeStateStatus":%q,"updatedAt":%q,"isMergeQueueEnabled":%t,"autoMergeRequest":%s,"mergeQueueEntry":%s}}}}`,
 				g.state, g.mergeState, time.Now().UTC().Format(time.RFC3339), g.queueRequired, autoMerge, entry)
 		}
 	}))
@@ -1644,7 +1644,7 @@ func pullJSON(state, head, mergeState string) string {
 // pullJSONAt is pullJSON with GitHub's last change to the pull request (its updatedAt) made at
 // updated.
 func pullJSONAt(state, head, mergeState string, updated time.Time) string {
-	return fmt.Sprintf(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":%q,"headRefOid":%q,"mergeStateStatus":%q,"updatedAt":%q,"isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`,
+	return fmt.Sprintf(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":%q,"title":"feat(daemon): merge the accepted READY head","headRefOid":%q,"mergeStateStatus":%q,"updatedAt":%q,"isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`,
 		state, head, mergeState, updated.UTC().Format(time.RFC3339))
 }
 

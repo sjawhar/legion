@@ -91,6 +91,7 @@ jobs:
     # .github/scripts/check-image-trigger-paths.sh admits this call-mode term.
     if: ${{ inputs.attest_digest == '' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     # Job-level (not workflow-level): this file is a called workflow, and job-level concurrency
     # behaves identically for its two triggers, `workflow_call` and `workflow_dispatch`.
     # A pull request's runs share one group per PR number. A new head's run cancels the build of the
@@ -167,10 +168,11 @@ jobs:
           # the mechanism behind the job-log leak the env block below already guards against.
           # provenance: false keeps this build's own attestation empty, but not that; false here
           # too is what actually stops the event payload reaching a predicate at all. image= is the
-          # driver's own default BuildKit image, through the mirror.
+          # driver's own default BuildKit image: ghcr.io/sjawhar/legion/ci, the copy of
+          # moby/buildkit:buildx-stable-1 (.github/ci-images.yaml).
           driver-opts: |
             provenance-add-gha=false
-            image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+            image=ghcr.io/sjawhar/legion/ci@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -275,6 +277,7 @@ jobs:
     needs: build
     if: ${{ !cancelled() && github.event_name != 'pull_request' && !inputs.skip_attest && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.attest_digest != '')) }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # id-token: write is the OIDC token Sigstore issues the signing certificate for; attestations:
     # write stores the attestation with GitHub.
     permissions:

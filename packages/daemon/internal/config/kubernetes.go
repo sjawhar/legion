@@ -728,16 +728,17 @@ func readPodVolumes(value *yaml.Node) ([]corev1.Volume, error) {
 			return nil, fmt.Errorf("%s must set exactly one of %s", field, strings.Join(volumeSources, ", "))
 		}
 		named[volume.Name] = true
-		var name string
-		var items []corev1.KeyToPath
+		var source objectSource
 		switch {
 		case fields["secret"] != nil:
-			if name, items, err = readObjectSource(fields["secret"], field+".secret"); err == nil {
-				volume.Secret = &corev1.SecretVolumeSource{SecretName: name, Items: items}
+			if source, err = readObjectSource(fields["secret"], field+".secret", true); err == nil {
+				volume.Secret = &corev1.SecretVolumeSource{SecretName: source.name, Items: source.items, DefaultMode: source.mode}
 			}
 		case fields["config_map"] != nil:
-			if name, items, err = readObjectSource(fields["config_map"], field+".config_map"); err == nil {
-				volume.ConfigMap = &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Items: items}
+			if source, err = readObjectSource(fields["config_map"], field+".config_map", true); err == nil {
+				volume.ConfigMap = &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: source.name}, Items: source.items, DefaultMode: source.mode,
+				}
 			}
 		case fields["projected"] != nil:
 			volume.Projected, err = readProjected(fields["projected"], field+".projected")
@@ -853,47 +854,92 @@ func setCount(fields map[string]*yaml.Node, names ...string) int {
 	return count
 }
 
-// readObjectSource is a Secret or ConfigMap source: its name, and the keys it projects, each with
-// the file it becomes; every key, each a file of its own name, when it lists none.
-func readObjectSource(value *yaml.Node, key string) (string, []corev1.KeyToPath, error) {
+// objectSource is a Secret or ConfigMap source as `pod.volumes` names it: the object, the keys it
+// projects, each with the file it becomes (every key, each a file of its own name, when it lists
+// none), and the mode of every file, nil for the API server's default (0644).
+type objectSource struct {
+	name  string
+	items []corev1.KeyToPath
+	mode  *int32
+}
+
+// readObjectSource is a Secret or ConfigMap source. A volume's own source (withMode) also takes
+// default_mode; a projected volume's source does not, since Kubernetes sets the mode of a projected
+// volume's files for the whole volume, never per source.
+func readObjectSource(value *yaml.Node, key string, withMode bool) (objectSource, error) {
 	if value.Kind != yaml.MappingNode {
-		return "", nil, fmt.Errorf("%s must be a mapping", key)
+		return objectSource{}, fmt.Errorf("%s must be a mapping", key)
 	}
-	fields, err := members(value, key, "name", "items")
-	if err != nil {
-		return "", nil, err
+	known := []string{"name", "items"}
+	if withMode {
+		known = append(known, "default_mode")
 	}
-	name, err := requiredString(fields["name"], key+".name", "")
+	fields, err := members(value, key, known...)
 	if err != nil {
-		return "", nil, err
+		return objectSource{}, err
+	}
+	var source objectSource
+	if source.name, err = requiredString(fields["name"], key+".name", ""); err != nil {
+		return objectSource{}, err
+	}
+	if mode := fields["default_mode"]; mode != nil {
+		if source.mode, err = readFileMode(mode, key+".default_mode"); err != nil {
+			return objectSource{}, err
+		}
 	}
 	items := fields["items"]
 	if items == nil {
-		return name, nil, nil
+		return source, nil
 	}
 	if items.Kind != yaml.SequenceNode {
-		return "", nil, fmt.Errorf("%s.items must be an array", key)
+		return objectSource{}, fmt.Errorf("%s.items must be an array", key)
 	}
-	var projected []corev1.KeyToPath
 	for index, entry := range items.Content {
 		field := fmt.Sprintf("%s.items[%d]", key, index)
 		if entry.Kind != yaml.MappingNode {
-			return "", nil, fmt.Errorf("%s must be a mapping", field)
+			return objectSource{}, fmt.Errorf("%s must be a mapping", field)
 		}
 		item, err := members(entry, field, "key", "path")
 		if err != nil {
-			return "", nil, err
+			return objectSource{}, err
 		}
 		var one corev1.KeyToPath
 		if one.Key, err = requiredString(item["key"], field+".key", ""); err != nil {
-			return "", nil, err
+			return objectSource{}, err
 		}
 		if one.Path, err = requiredString(item["path"], field+".path", ""); err != nil {
-			return "", nil, err
+			return objectSource{}, err
 		}
-		projected = append(projected, one)
+		source.items = append(source.items, one)
 	}
-	return name, projected, nil
+	return source, nil
+}
+
+// readFileMode is a volume's default_mode: octal digits after YAML 1.1's leading 0 (kubectl's
+// spelling) or YAML 1.2's 0o, from 0 to 0777, the bits the API server admits, written as a YAML
+// integer or as a string ("0440", the one octal spelling a block written as JSON can carry). A
+// mode written in decimal is refused rather than read, quoted or not: `440` is 0670, which would
+// let the file's group write it.
+func readFileMode(value *yaml.Node, key string) (*int32, error) {
+	digits, octal := strings.CutPrefix(value.Value, "0o")
+	if !octal {
+		if digits, octal = strings.CutPrefix(value.Value, "0"); octal && digits == "" {
+			digits = "0"
+		}
+	}
+	mode, err := strconv.ParseUint(digits, 8, 32)
+	if value.Kind != yaml.ScalarNode || (value.Tag != "!!int" && value.Tag != "!!str") || !octal || err != nil || mode > 0o777 {
+		got := strconv.Quote(value.Value)
+		switch value.Kind {
+		case yaml.MappingNode:
+			got = "a mapping"
+		case yaml.SequenceNode:
+			got = "a sequence"
+		}
+		return nil, fmt.Errorf(`%s must be a file mode in octal digits with a leading 0 or 0o, from 0 to 0777, such as 0440 or "0440"; got %s`, key, got)
+	}
+	bits := int32(mode)
+	return &bits, nil
 }
 
 // readProjected is a projected volume: one or more sources, each exactly one of a ServiceAccount
@@ -927,18 +973,17 @@ func readProjected(value *yaml.Node, key string) (*corev1.ProjectedVolumeSource,
 			return nil, fmt.Errorf("%s must set exactly one of service_account_token, secret, config_map", field)
 		}
 		var source corev1.VolumeProjection
-		var name string
-		var items []corev1.KeyToPath
+		var object objectSource
 		switch {
 		case kinds["service_account_token"] != nil:
 			source.ServiceAccountToken, err = readTokenProjection(kinds["service_account_token"], field+".service_account_token")
 		case kinds["secret"] != nil:
-			if name, items, err = readObjectSource(kinds["secret"], field+".secret"); err == nil {
-				source.Secret = &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Items: items}
+			if object, err = readObjectSource(kinds["secret"], field+".secret", false); err == nil {
+				source.Secret = &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: object.name}, Items: object.items}
 			}
 		default:
-			if name, items, err = readObjectSource(kinds["config_map"], field+".config_map"); err == nil {
-				source.ConfigMap = &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Items: items}
+			if object, err = readObjectSource(kinds["config_map"], field+".config_map", false); err == nil {
+				source.ConfigMap = &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: object.name}, Items: object.items}
 			}
 		}
 		if err != nil {

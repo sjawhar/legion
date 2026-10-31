@@ -31,6 +31,14 @@ func dispatchConstructInputs() map[string]property.Value {
 		"tailnetService":      property.New("svc:example-dispatch"),
 		"signInClientId":      property.New("example-client-id"),
 		"signInDomain":        property.New("example.com"),
+		// The three NATS settings, so every Construct test decodes them through the plugin, where a
+		// value the plugin could not decode would refuse the Construct: the pods dial the hub in
+		// their own cluster, with three copies of every stream and a 64 MiB limit. What they render
+		// is asserted on the direct path (dispatch_test.go's natsInCluster tests). natsUrl stays the
+		// tailnet name each test sets, which is remote either way.
+		"natsInCluster":  property.New(true),
+		"natsReplicas":   property.New(float64(dispatchNatsReplicas)),
+		"streamMaxBytes": property.New(float64(dispatchStreamMaxBytes)),
 	}
 }
 
@@ -256,6 +264,12 @@ var azureConstructForms = []struct {
 func appEnv(t *testing.T, m *pulumitest.Mocks) map[string]any {
 	t.Helper()
 	return containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch"), "envoy-dispatch"))
+}
+
+// listenerEnv is the listener's envoy-listener container's environment, appEnv's counterpart.
+func listenerEnv(t *testing.T, m *pulumitest.Mocks) map[string]any {
+	t.Helper()
+	return containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch-listener"), "envoy-listener"))
 }
 
 // The endpoint, the deployment and either credential are Inputs, typically an Azure resource's or
@@ -500,4 +514,33 @@ func TestConstructRefusesADispatchInputWithClusterOnly(t *testing.T) {
 	require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: natsUrl configures Dispatch, "+
 		"which clusterOnly does not build: unset it, or unset clusterOnly")
 	require.Empty(t, m.Types())
+}
+
+// A sandbox reaches the plugin over the same wire a consumer's pulumi up uses: the nine inputs of
+// the two groups are absent from the call, as an SDK leaves out what the program never set, and
+// not sent as empty values. tailnetAuthKey and signInClientSecret arrive as nothing at all there,
+// so the component reads neither as an Input it could resolve, and answers with the in-cluster
+// address and a declaration holding no front-door resource at all, as dispatchSandboxFrontDoor
+// names them.
+func TestConstructDispatchSandbox(t *testing.T) {
+	inputs := dispatchConstructInputs()
+	// The nine inputs of the two groups, from the groups' own lists, so a group that gains an
+	// input leaves it out of this call too.
+	for _, group := range [][]dispatchInput{dispatchSandboxTailnetGroup, dispatchSandboxSignInGroup} {
+		for _, in := range group {
+			delete(inputs, in.input)
+		}
+	}
+	inputs["allowedNamespaces"] = property.New(property.NewArray([]property.Value{property.New("legion")}))
+	inputs["natsUrl"] = property.New(inClusterNatsURL)
+	inputs["natsSeedSecret"] = property.New("projects/example-project/secrets/example-nats-seed")
+
+	m, response, err := constructDispatch(t, inputs, false)
+	require.NoError(t, err)
+	url, ok := response.State.GetOk("url")
+	require.True(t, ok)
+	require.Equal(t, dispatchSandboxURL, url.AsString())
+	for _, registration := range m.Registrations() {
+		require.NotContains(t, dispatchSandboxFrontDoor, registration.Type+" "+registration.Name, "a front door's resource registered")
+	}
 }

@@ -22,6 +22,7 @@ require (
 	github.com/googleapis/gax-go/v2 v2.23.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/klauspost/compress v1.18.7
 	github.com/nats-io/nats-server/v2 v2.10.29
 	github.com/nats-io/nats.go v1.50.0
 	github.com/nats-io/nkeys v0.4.15
@@ -90,7 +91,6 @@ require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
-	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/magiconair/properties v1.8.10 // indirect
 	github.com/minio/highwayhash v1.0.3 // indirect
