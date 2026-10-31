@@ -619,11 +619,14 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 // under that id can by then be another process's live registration, which the handoff must leave
 // alone instead of clearing the predecessor its claim is then weighed against. Such a request
 // answers {"deleted":true} for a registration that is gone and {"deleted":false} with a reason for
-// one that stayed, both 200: the deregistering client has nothing to retry either way. A request
-// naming no instance id removes the registration whoever wrote it, and answers 200 with no body,
-// as this route always has. The delete runs within sendRequestBudget of the request's own context,
-// so one the bus does not answer is the bus-unavailable 503 with Retry-After: 1 inside the caller's
-// attempt (writeStoreError).
+// one that stayed, both 200: the deregistering client has nothing to retry either way. Each of
+// DeleteIfInstance's two kept outcomes gets its own reason, because only one of them knows that
+// another client instance owns the registration: a delete that lost both compare-and-swaps read
+// an entry this very instance may own and says only that the registration changed under it. A
+// request naming no instance id removes the registration whoever wrote it, and answers 200 with
+// no body, as this route always has. The delete runs within sendRequestBudget of the request's
+// own context, so one the bus does not answer is the bus-unavailable 503 with Retry-After: 1
+// inside the caller's attempt (writeStoreError).
 func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
@@ -646,18 +649,28 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		deleted, err := sessions.DeleteIfInstance(ctx, sessionID, instanceID)
+		outcome, err := sessions.DeleteIfInstance(ctx, sessionID, instanceID)
 		if err != nil {
 			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}
-		if !deleted {
+		switch outcome {
+		case session.EntryDeleted:
+			writeJSON(w, http.StatusOK, deleteSessionResponse{Deleted: true})
+		case session.EntryKeptForAnotherInstance:
 			writeJSON(w, http.StatusOK, deleteSessionResponse{
 				Reason: "the registration belongs to another client instance",
 			})
-			return
+		default:
+			// session.EntryKeptAfterLostRace: the entry matched and both conditional deletes
+			// lost to a write that landed under them, this client instance's own heartbeat
+			// among the likeliest, so the only true thing to say is that it stayed and
+			// changed. session.EntryUnanswered never reaches here: it comes with the error
+			// answered above.
+			writeJSON(w, http.StatusOK, deleteSessionResponse{
+				Reason: "the registration changed while it was being removed",
+			})
 		}
-		writeJSON(w, http.StatusOK, deleteSessionResponse{Deleted: true})
 	}
 }
 
@@ -1177,14 +1190,13 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 		var supersedable []string
 		if body.Soft {
 			// The registry sees only interest rows; liveness is the session
-			// bucket's call (liveSessionEntry). A holder whose session entry
-			// has aged out (5m TTL) is dead and may be superseded. The
-			// claimant's own declared predecessor is read from the bucket
-			// itself (bucketSessionEntry) and gives up the role only when it
-			// has no live entry there, when that entry carries this claimant's
-			// client instance id, or when either side carries no instance id;
-			// a predecessor still live in another client instance keeps the
-			// role, as does any other live holder.
+			// bucket's call. A holder whose session entry has aged out (5m
+			// TTL) is dead and may be superseded, and the claimant's own
+			// declared predecessor is weighed on the client instance it
+			// belongs to as well: roleSupersessionVerdict reads both from the
+			// bucket and answers the three cases this switch words — the role
+			// is taken from its holder, it stays with it, or a read did not
+			// answer and nothing is taken from anyone.
 			claim, err := d.registry.RoleClaim(ctx, body.Role)
 			if err != nil {
 				writeStoreError(ctx, w, fmt.Errorf("read role holder: %w", err), http.StatusServiceUnavailable)
@@ -1193,34 +1205,24 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 			holder := claim.HolderSessionID
 			previous = strings.TrimSpace(body.PreviousSessionID)
 			if holder != "" && holder != body.SessionID {
-				if previous != "" && holder == previous {
-					// The cache cannot decide who keeps a role: it trails the bucket, so an
-					// entry it still holds can name an instance that session has since left.
-					predecessor, readErr := bucketSessionEntry(ctx, d.sessions, holder, roleHolderReadTimeout)
-					switch {
-					case errors.Is(readErr, nats.ErrKeyNotFound):
-						// The bucket's word that the predecessor is gone.
-						supersedable = append(supersedable, holder)
-					case readErr != nil:
-						// A read that did not answer takes nothing from a holder.
-						writeBusUnavailable(w, fmt.Errorf("read role predecessor registration: %w", readErr))
-						return
-					case session.InstanceMatches(predecessor.ClientInstanceID, claimantInstanceID):
-						if predecessor.ClientInstanceID == "" || claimantInstanceID == "" {
-							logger.Info("listener role taken from a live predecessor because one side carries no client instance id",
-								slog.String("role", body.Role),
-								slog.String("session_id", body.SessionID),
-								slog.String("previous_session_id", holder))
-						}
-						supersedable = append(supersedable, holder)
-					}
-					// A live predecessor of another client instance leaves supersedable empty,
-					// and store.Registry.SetRoleWithPrevious answers the 409 that names it.
-				} else if _, liveErr := liveSessionEntry(ctx, d.sessions, holder, roleHolderReadTimeout, registered); errors.Is(liveErr, nats.ErrKeyNotFound) {
-					supersedable = append(supersedable, holder)
-				} else if liveErr != nil {
-					writeBusUnavailable(w, fmt.Errorf("read role holder liveness: %w", liveErr))
+				verdict, readErr := roleSupersessionVerdict(ctx, d.sessions, holder, previous, claimantInstanceID)
+				switch verdict {
+				case roleHolderUnread:
+					// A read that did not answer takes nothing from a holder.
+					writeBusUnavailable(w, readErr)
 					return
+				case roleTakenFromUnidentifiedPredecessor:
+					logger.Info("listener role taken from a live predecessor because one side carries no client instance id",
+						slog.String("role", body.Role),
+						slog.String("session_id", body.SessionID),
+						slog.String("previous_session_id", holder))
+					supersedable = append(supersedable, holder)
+				case roleTakenFromHolder:
+					supersedable = append(supersedable, holder)
+				case roleStaysWithHolder:
+					// A live holder keeps the role, a predecessor still live inside another
+					// client instance among them, and store.Registry.SetRoleWithPrevious
+					// answers the 409 that names it.
 				}
 			}
 		}
