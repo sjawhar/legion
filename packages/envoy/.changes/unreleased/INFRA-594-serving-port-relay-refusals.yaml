@@ -13,13 +13,19 @@ body: |-
   already has. The fan-out reads the session's entry for every judgement it makes, so that rule
   covers its own refusals too: a message whose delivery mode cannot be read -- a mode no session
   can be shown to advertise, which any publisher can send on a followed topic -- is left to the
-  relay of that session's consumer, which acks it with one `delivery_failed` exception, rather
-  than being reported twice and leaving that relay, and the session's later messages behind it,
-  stalled for five minutes on a record of a push nobody was making. An attempt the fan-out records
-  before its own resolution of the recipient fails is cleared whatever the failure, a session with
-  no record among them. The other side of that rule: an attempt record is a push in flight, not a
-  delivery, so the relay holds a message another path is pushing -- unacked in its consumer, kept
-  in progress, judged again every second -- rather than acking it, and acks it only once the
+  relay of a serving-port session's consumer, which acks it with one `delivery_failed` exception,
+  rather than being reported twice and leaving that relay, and the session's later messages
+  behind it, stalled for five minutes on a record of a push nobody was making. A refusal is left
+  to a relay only where that relay judges what it sends: a portless session's relay publishes
+  every frame unjudged, and the plugin drops a frame whose delivery mode it cannot read without a
+  word, so the fan-out publishes that session's `delivery_failed` itself, recording no attempt
+  for it. The fan-out records an attempt only once its resolution of the recipient succeeds, so a
+  resolution that fails leaves nothing behind for a relay to hold a later copy of that message
+  under; each further copy of an event for a session whose record is gone is reported as a failed
+  delivery rather than skipped as an attempt already made. The other side of that rule: an
+  attempt record is a push in flight, not a delivery, so the relay holds a message another path
+  is pushing -- unacked in its consumer, kept in progress, judged again every second -- rather
+  than acking it, and acks it only once the
   dedupe key that push's 204 records says the session has it. A push that ends without landing,
   because the worker reads the session's flipped entry, hands the push back, or lets its attempt
   record expire, leaves the message to the relay, which pushes it itself: delivery rests on the

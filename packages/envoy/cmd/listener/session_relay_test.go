@@ -1105,14 +1105,7 @@ func TestServePortRelayRefusesAnUnadvertisedModeTheFanoutAlsoRefused(t *testing.
 				}
 				return listenerDeliveryResponse(http.StatusNoContent), nil
 			})}
-			exceptions, err := rig.harness.client.Conn.SubscribeSync(bus.ExceptionTopicPrefix + topic)
-			if err != nil {
-				t.Fatalf("subscribe to the topic's exception lane: %v", err)
-			}
-			t.Cleanup(func() { _ = exceptions.Unsubscribe() })
-			if err := rig.harness.client.Conn.Flush(); err != nil {
-				t.Fatalf("flush the exception probe: %v", err)
-			}
+			exceptions := exceptionProbe(t, rig.harness.client)
 
 			// The session under test: a serving port on consumer delivery, following the topic,
 			// which advertises no delivery mode at all.
@@ -1173,25 +1166,13 @@ func TestServePortRelayRefusesAnUnadvertisedModeTheFanoutAlsoRefused(t *testing.
 	}
 }
 
-// awaitFanoutFinished waits for the durable the test bound to have acknowledged the message stored
-// at seq, which the fan-out does once it has decided every interest of it (fanoutDelivery). A test
-// that then starts a relay orders the two paths rather than racing them.
+// awaitFanoutFinished waits for the durable the test bound to have acknowledged the message
+// stored at seq with nothing left pending, which the fan-out leaves it once it has decided every
+// interest of that message (fanoutDelivery). A test that then starts a relay orders the two
+// paths rather than racing them.
 func awaitFanoutFinished(t *testing.T, rig *relayRig, durable string, seq uint64) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		info, err := rig.harness.client.JS().ConsumerInfo(bus.Stream, durable)
-		if err != nil {
-			t.Fatalf("read the durable %s: %v", durable, err)
-		}
-		if info.AckFloor.Stream >= seq {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the durable %s never acknowledged the message stored at %d: its ack floor is %d", durable, seq, info.AckFloor.Stream)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	awaitDurableState(t, rig.harness.client, durable, 0, seq)
 }
 
 // deliveryExceptionsFor reads the delivery exceptions for sessionID that arrive on exceptions
