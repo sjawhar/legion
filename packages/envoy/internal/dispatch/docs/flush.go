@@ -176,9 +176,7 @@ func foldAppended(base int64, versions []persistence.Version) int64 {
 // before its own append. The classes are read under that lock, and every writer marks what it
 // stored before the lock passes on, so no update is stored twice. Every class is measured before
 // the first append: between its appends it renders and decodes nothing, so it is the lock, the
-// read of the room's queue, the measures, and the appends. The one caller that takes the lock at
-// the first append here instead is the block-id backfill, a command whose service serves no
-// browser, so nothing commits into its rooms between the two (backfillBlockIDs).
+// read of the room's queue, the measures, and the appends.
 func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *RoomFlush, through uint64) error {
 	state := s.lockExistingState(flush.room)
 	if state == nil {

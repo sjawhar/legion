@@ -22,17 +22,17 @@ import (
 // their rooms, and publishes the writes to their rooms, in that order. Discard, which callers
 // defer right after Join, drops whatever a transaction that did not commit left behind.
 //
-// Settlement's operations run in a transaction of its own, which no caller joined, so its ledger
-// carries no `tx` and marks itself `settling` instead. Those are the only two ledgers there are:
-// every operation that writes a document either joins its caller's transaction or is
-// settlement's own.
+// A writer that runs its operations in a transaction of its own, which no caller joined, carries
+// no `tx` and marks its ledger `ownTx` instead: a settlement (settleRoomWithin) and the block-id
+// backfill (backfillBlockIDs) are the two. Those are the ledgers there are: every operation that
+// writes a document either joins its caller's transaction or runs in one of those two writers'.
 type Ledger struct {
 	service *Service
 	tx      pgx.Tx
-	// settling marks settlement's ledger, whose operations run inside settlement's own
-	// transaction although no caller joined it.
-	settling bool
-	events   []model.Event
+	// ownTx marks a ledger whose operations run inside a transaction of the writer's own,
+	// which no caller joined: a settlement's and the block-id backfill's.
+	ownTx  bool
+	events []model.Event
 	// live holds, per document, the writes this transaction made to it; order is the order it
 	// first wrote them in.
 	live     map[string]*liveWrite
@@ -85,13 +85,13 @@ func (s *Service) Join(ctx context.Context, tx pgx.Tx) (context.Context, *Ledger
 }
 
 // inTransaction reports whether the operations recording into l run inside an open database
-// transaction that this ledger knows about: one a caller joined, or settlement's own. Such an
-// operation fails on a failed room rather than waiting for its recovery (awaitRoomRecovery). An
-// operation that runs inside a transaction without joining it is invisible here and still
-// waits, which is the hang this rule exists to stop, so a handler joins (Docs.Join) and passes
-// the context Join returned.
+// transaction that this ledger knows about: one a caller joined, or a writer's own, a
+// settlement's or the block-id backfill's. Such an operation fails on a failed room rather than
+// waiting for its recovery (awaitRoomRecovery). An operation that runs inside a transaction
+// without joining it is invisible here and still waits, which is the hang this rule exists to
+// stop, so a handler joins (Docs.Join) and passes the context Join returned.
 func (l *Ledger) inTransaction() bool {
-	return l != nil && (l.tx != nil || l.settling)
+	return l != nil && (l.tx != nil || l.ownTx)
 }
 
 func withLedger(ctx context.Context, ledger *Ledger) context.Context {
@@ -233,22 +233,27 @@ func (l *Ledger) commit(ctx context.Context) error {
 // (an operation's flush, its append, the next operation's flush), so the instance takes one run
 // of both, in version order (RoomFlush.appended): a cursor advances only by the version after
 // the one it stands at. A write whose room is not the flushed instance - a cold write, or one
-// whose room was replaced since its fork - takes in its own versions alone.
+// whose room was replaced since its fork - takes in its own versions alone. Which of the two a
+// write is is decided in one place, the loop over the writes below: a flush of that write's
+// document made on the instance it wrote takes the write's versions in with its own, and a
+// flush no write of this transaction shares an instance with takes in its own alone.
 func (l *Ledger) takeRoomCursors() {
-	for _, flush := range l.flushes {
-		var own []persistence.Version
-		if write := l.live[flush.room]; write != nil && write.point.cursor == flush.cursor {
-			own = write.versions
-		}
-		advanceRoomCursorThrough(flush.cursor, flush.appended(own))
-	}
+	taken := make(map[*RoomFlush]bool, len(l.flushes))
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
-		if flush := l.flushFor(artifactID); flush == nil || flush.cursor != write.point.cursor {
+		if flush := l.flushFor(artifactID); flush != nil && flush.cursor == write.point.cursor {
+			taken[flush] = true
+			advanceRoomCursorThrough(flush.cursor, flush.appended(write.versions))
+		} else {
 			advanceRoomCursorThrough(write.point.cursor, write.versions)
 		}
 		for _, version := range write.versions {
 			l.service.tookResidentVersion(artifactID, version)
+		}
+	}
+	for _, flush := range l.flushes {
+		if !taken[flush] {
+			advanceRoomCursorThrough(flush.cursor, flush.appended(nil))
 		}
 	}
 }

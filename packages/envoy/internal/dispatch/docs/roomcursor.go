@@ -196,9 +196,12 @@ type roomCursor struct {
 // reach the instance the repair was written into and no other. Crediting a room load in flight
 // with the version would say a document holds an update it does not, and the first durable
 // write rendered from it would be written over text this process never saw - the whole point of
-// the gate (refuseRoomBehindHead). Such a room is behind the head and has to be: the refusal
-// fails it, and the reload reads the repair from the store
-// (TestARoomLoadingWhileAStampCommitsStandsBehindTheHeadAndReloads).
+// the gate (refuseRoomBehindHead). No room of this process loads in that window: the repair's
+// writer holds the document's advisory lock from before it reads the room until it commits, and
+// a failed room's eviction compacts under that lock
+// (TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt). A room of the other process can
+// stand behind the head all the same, and the refusal fails it, the reload reading the repair
+// from the store (TestARoomBehindTheHeadIsReloadedAndWritesAgain).
 //
 // A nil cursor is a document no room instance holds, whose writes no cursor gates.
 func advanceRoomCursor(cursor *roomCursor, version persistence.Version) {
@@ -299,8 +302,10 @@ func roomCursorFrom(ctx context.Context) *roomCursor {
 // flush is passed by the appends of a flush alone (AppendRoomUpdateTx), and is the only way the
 // room's own persistence worker reaches its flush here: its transaction has no ledger, so the
 // cursor its context carries is the instance's alone, one version behind the head from the flush's
-// second append on. A joined transaction's flush is on its ledger, which the room-cursor branch
-// reads.
+// second append on. A joined transaction's flush appends pass it too - Service.flushThrough passes
+// flush to every append it makes - so the flush branch decides those as well. What the ledger
+// lookup in the room-cursor branch is for is the transaction's other appends of that instance, the
+// repairs storeRepair stores through AppendUpdateTx, which the flush's versions gate.
 //
 // A transaction's write decides for itself: a cold write, whose fork came from the store because
 // no room of this process held the document (coldFork), carries no cursor and is not gated. The

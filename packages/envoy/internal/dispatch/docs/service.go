@@ -1437,7 +1437,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	generation = state.roomGeneration
 	s.unlockState(room, state)
 
-	ledger := &Ledger{service: s, settling: true}
+	ledger := &Ledger{service: s, ownTx: true}
 	// The cursor of the instance this settlement holds (doc), which gates the room updates it
 	// stores and its repairs, and takes them in once they are stored (commitSettlement). Its own
 	// first gate is the comparison below, before it reads the document at all.
@@ -2340,25 +2340,26 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	if err := s.srv.BroadcastUpdate(backfillCtx, artifactID, update); err != nil {
 		return abandon(fmt.Errorf("broadcast identity update: %w", err))
 	}
-	// The stamp is stored the way a settlement stores its own: every update of the room instance
-	// this process has not stored yet first, in the room's commit order, then the stamp, with the
-	// class the room measured for it (storeRepair), and the commit takes that instance through
-	// the versions the transaction appended (commitSettlement). The ledger is settlement's shape,
-	// a transaction no caller joined, because this one is the backfill's own.
-	//
-	// The transaction takes the document's advisory lock at its first append rather than before
-	// it reads the room's queue, which is the one way this writer is not the settlement: the
-	// backfill is a command, and the service its subcommand builds serves no browser
-	// (cmd/dispatch/subcommands.go), so no room of this process commits between the two. The
-	// window that leaves is the one
-	// TestARoomLoadingWhileAStampCommitsStandsBehindTheHeadAndReloads holds open.
-	ledger := &Ledger{service: s, settling: true}
+	// The stamp is stored the way a settlement stores its own: under the document's advisory
+	// lock, every update of the room instance this process has not stored yet first, in the
+	// room's commit order, then the stamp, with the class the room measured for it (storeRepair),
+	// and the commit takes that instance through the versions the transaction appended
+	// (commitSettlement). The lock is taken before the room's queue is read, as every durable
+	// writer of a document takes it: a room's own worker that has committed an update and not
+	// marked it stored yet holds that lock until it has (AppendRoomFlush), so a reader that takes
+	// the lock first never reads a stored update as one still to store and stores it a second
+	// time. The ledger is settlement's shape, a transaction no caller joined, because this one is
+	// the backfill's own.
+	ledger := &Ledger{service: s, ownTx: true}
 	storeCtx := withRoomCursor(withLedger(ctx, ledger), cursor)
 	tx, err := s.store.Pool.Begin(storeCtx)
 	if err != nil {
 		return abandon(fmt.Errorf("begin document transaction: %w", err))
 	}
 	defer tx.Rollback(storeCtx)
+	if err := lockDocumentRoom(storeCtx, tx, artifactID); err != nil {
+		return abandon(fmt.Errorf("lock document room: %w", err))
+	}
 	if err := ledger.storeRepair(storeCtx, tx, artifactID, cursor, update); err != nil {
 		return abandon(fmt.Errorf("append identity update: %w", err))
 	}
