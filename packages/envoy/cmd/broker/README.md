@@ -22,10 +22,20 @@ The broker takes no flags and reads its configuration from `BROKER_*` environmen
 (`BROKER_SECRETS_STORE`: AWS Secrets Manager, or Google Cloud Secret Manager under Application
 Default Credentials): every secret under `BROKER_SECRETS_PREFIX`, carrying `owner` and `tier` (AWS
 tags, or Secret Manager annotations) and encrypted with the agent-secrets key
-(`BROKER_SECRETS_KMS_KEY_ARN`, or `BROKER_SECRETS_KMS_KEY_NAME`). The docs site's "Operating the broker" page
+(`BROKER_SECRETS_KMS_KEY_ARN`, or `BROKER_SECRETS_KMS_KEY_NAME`). It also needs its own OpenID
+Connect client, through which a person signs in to the approval page: `BROKER_SIGNIN_ISSUER`,
+`BROKER_SIGNIN_CLIENT_ID`, `BROKER_SIGNIN_CLIENT_SECRET_FILE` and `BROKER_SIGNIN_DOMAIN` are all
+required, and a broker missing any of them refuses to start, naming the missing ones.
+`GET /signin/status` reports what that sign-in has done, for an operator or a production check.
+The docs site's "Operating the broker" page
 (`docs/site/src/content/docs/broker/operate.md`) gives a minimal production configuration and
 everything the broker depends on, and its generated configuration reference lists every variable
 with its default.
+
+`envoy-broker` with no argument serves. Its one subcommand,
+`envoy-broker end-sessions <login>`, ends every browser session that login holds on the approval
+page and prints how many it ended; it reads the same configuration, binds no listener and applies
+no migration.
 
 For a local stack (Postgres in Docker, or one you run named by `DEV_BROKER_POSTGRES_URL`, a fake
 secrets file standing in for Secrets Manager, and the clients), run

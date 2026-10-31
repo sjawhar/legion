@@ -7,8 +7,9 @@ sidebar:
 
 `packages/envoy/scripts/dev-broker.sh` creates a Postgres database of its own, builds the broker,
 its clients and `dev-oidc-issuer`, writes a fake secrets file, which stands in for Secrets Manager,
-starts `dev-oidc-issuer`, which stands in for a cluster's ServiceAccount token issuer, and starts
-the broker on a free port, trusting that issuer. It needs Go, and a Postgres server: by default it
+starts `dev-oidc-issuer`, which stands in both for a cluster's ServiceAccount token issuer and for
+the identity provider a person signs in to the broker at, and starts the broker on a free port,
+trusting that issuer for both. It needs Go, and a Postgres server: by default it
 starts one in Docker through `packages/envoy/scripts/dev-postgres.sh` (a container named
 `dispatch-pg`, reused when it is there; one made from another image than that script's is
 refused, with the commands that move its data onto the right one). Without Docker, run Postgres
@@ -21,29 +22,33 @@ With Docker the command is the script alone; this run used a Postgres of its own
 
 ```console
 $ DEV_BROKER_POSTGRES_URL='postgres://broker:<password>@127.0.0.1:5433/postgres?sslmode=disable' packages/envoy/scripts/dev-broker.sh
-dev-broker: workdir /tmp/agent-secrets-dev.Tp2tQV
-dev-broker: created isolated database dev_broker_tp2tqv
+dev-broker: workdir /tmp/agent-secrets-dev.zCDU4L
+dev-broker: created isolated database dev_broker_zcdu4l
 dev-broker: building broker, dev-oidc-issuer, agent-secrets, agent-secrets-helper and agent-secrets-devrelay...
 dev-broker: starting dev-oidc-issuer...
-dev-oidc-issuer: /tmp/agent-secrets-dev.Tp2tQV/account-token holds system:serviceaccount:example-ns:example-dispatch's token for audience legion-broker-pod (pod f3b3a12a-56ff-4e89-ac85-889b20d971a9)
-dev-oidc-issuer: /tmp/agent-secrets-dev.Tp2tQV/exchange-token holds system:serviceaccount:example-ns:example-worker's token for audience legion-broker-exchange (pod a829f93b-ad87-4efb-8d03-74b51e97c810)
-dev-oidc-issuer: issuer listening url=http://127.0.0.1:36930
+dev-oidc-issuer: /tmp/agent-secrets-dev.zCDU4L/account-token holds system:serviceaccount:example-ns:example-dispatch's token for audience legion-broker-pod (pod ddc9060f-aed0-419d-8204-52933355eaa6)
+dev-oidc-issuer: /tmp/agent-secrets-dev.zCDU4L/exchange-token holds system:serviceaccount:example-ns:example-worker's token for audience legion-broker-exchange (pod 69589abd-2150-4c9b-a5a6-de0935cf06e0)
+dev-oidc-issuer: code flow serves client dev-broker; an authorization with none queued at /_dev/sign-in-as signs in ada@example.com
+dev-oidc-issuer: issuer listening url=http://127.0.0.1:23524
 dev-broker: starting broker...
-2026/10/25 10:49:22 INFO database sign-in method=password
-2026/10/25 10:49:22 INFO secret store store=aws-secrets-manager credentials="fake secrets file"
-2026/10/25 10:49:22 INFO broker listening addr=127.0.0.1:62083
-2026/10/25 10:49:22 INFO token exchange state=on kubernetes=true github=false accounts=1 workflows=0
+2026/10/31 08:44:37 INFO broker stop budget drain=0s shutdown=60s total=60s
+2026/10/31 08:44:37 INFO database sign-in method=password
+2026/10/31 08:44:37 INFO approval sign-in on issuer=http://127.0.0.1:23524 client_id=dev-broker domain=example.com
+2026/10/31 08:44:37 INFO secret store store=aws-secrets-manager credentials="fake secrets file"
+2026/10/31 08:44:37 INFO broker: listening for the other pods' secret rereads channel=broker_secret_reread
+2026/10/31 08:44:37 INFO broker listening addr=127.0.0.1:40915
+2026/10/31 08:44:37 INFO token exchange state=on kubernetes=true github=false accounts=1 workflows=0
 
 dev-broker: ready.
 
-  export AGENT_SECRETS_URL=http://127.0.0.1:62083
-  export AGENT_SECRETS_ACCOUNT_TOKEN_FILE=/tmp/agent-secrets-dev.Tp2tQV/account-token
+  export AGENT_SECRETS_URL=http://127.0.0.1:40915
+  export AGENT_SECRETS_ACCOUNT_TOKEN_FILE=/tmp/agent-secrets-dev.zCDU4L/account-token
   export AGENT_SECRETS_APPROVER=ada@example.com
-  export AGENT_SECRETS_HELPER_SOCK=/tmp/agent-secrets-dev.Tp2tQV/helper.sock
-  export AGENT_SECRETS_OPERATOR_FILE=/tmp/agent-secrets-dev.Tp2tQV/operator
-  export AGENT_SECRETS_MACHINE_FILE=/tmp/agent-secrets-dev.Tp2tQV/machine.json
-  export DEV_BROKER_DIR=/tmp/agent-secrets-dev.Tp2tQV
-  export PATH=/tmp/agent-secrets-dev.Tp2tQV/bin:$PATH
+  export AGENT_SECRETS_HELPER_SOCK=/tmp/agent-secrets-dev.zCDU4L/helper.sock
+  export AGENT_SECRETS_OPERATOR_FILE=/tmp/agent-secrets-dev.zCDU4L/operator
+  export AGENT_SECRETS_MACHINE_FILE=/tmp/agent-secrets-dev.zCDU4L/machine.json
+  export DEV_BROKER_DIR=/tmp/agent-secrets-dev.zCDU4L
+  export PATH=/tmp/agent-secrets-dev.zCDU4L/bin:$PATH
 ...
 ```
 
@@ -118,18 +123,20 @@ AWS Secrets Manager. No session's line names the broker's host or the store's ac
 since an agent's output is often quoted; `agent-secrets secret show` names the account and region
 its key ARN carries.
 
-The last command waits for approval, and names who approves it (`waiting for ada@example.com to
-approve it under Credential requests in their Dispatch Inbox`). In the third shell, list what waits
-on the approver and approve it ([approving a request](/legion/broker/guides/approve-a-request/#without-dispatch)
-shows the output), and the command runs:
+The last command waits for approval, and names who approves it and where (`waiting for
+ada@example.com to approve it on the secrets broker: <broker>/approve/<record>`). Open that
+address in a browser on this machine: the broker sends you to `dev-oidc-issuer`, which signs you
+in as `ada@example.com` with no page to fill in, and brings you back to the request, where
+**Approve** grants it ([approving a request](/legion/broker/guides/approve-a-request/#without-dispatch)
+covers the page), and the command runs:
 
 ```console
 deploying with a 18-character key
 ```
 
-A request has two ids: the request id `agent-secrets` prints, and the record id the approver's list
-shows and `agent-secrets-devrelay` takes. `agent-secrets request NAME --json` prints both, and
-`agent-secrets-devrelay deny --record <record id>` denies a request.
+A request has two ids: the request id `agent-secrets` prints and takes, and the record id the
+approval page's address ends in. `agent-secrets request NAME --json` prints both. **Deny** on the
+same page denies the request, and `agent-secrets` then exits 77.
 
 Each grant so far lasts until the session ends (`agent-secrets self` lists it `until this session
 ends`). A request may ask for less with `--ttl`, and the grant then ends on its own once that has
@@ -255,11 +262,14 @@ $ curl -s -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" 
 
 ## What is real and what is not
 
-The broker, its database, its policy and every client are the real ones. Three things stand in for
-production: `agent-secrets-devrelay` plays Dispatch's server (it presents the caller token and
-names the approver itself); `dev-oidc-issuer` plays the cluster's ServiceAccount token issuer
-(the Go tests' own local issuer, `internal/oidc/oidctest`, served on a loopback port: it publishes
-a key it holds in memory and mints the two token files, each bound to a pod of its own); and the
+The broker, its database, its policy, its approval page and every client are the real ones. Three
+things stand in for production: `agent-secrets-devrelay` plays Dispatch's machine-login relay
+alone (it presents the caller token and names the decider itself; it cannot decide a secret
+request, and neither can Dispatch); `dev-oidc-issuer` plays both the cluster's ServiceAccount
+token issuer and the Workspace a person signs in to the broker at (the Go tests' own local issuer,
+`internal/oidc/oidctest`, served on a loopback port: it publishes a key it holds in memory, mints
+the two token files, each bound to a pod of its own, and signs every authorization in as
+`ada@example.com` with no page to fill in); and the
 fake secrets file (`BROKER_FAKE_SECRETS_FILE`: each secret's name, key, tags and value, as JSON)
 plays Secrets Manager and KMS. The broker reads that file again on every call it makes to it, so
 editing it is how you write a secret here.

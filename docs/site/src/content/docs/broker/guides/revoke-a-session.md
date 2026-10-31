@@ -257,3 +257,12 @@ machine login ends both, and its row stays on the machine-login page while eithe
 `expired, sessions still running` once the login has expired. Without Dispatch, end each box with
 `agent-secrets unenroll --helper --enrollment <id>`, run against a helper logged in as the box's
 operator, or stop its `agent-secrets renew`, after which it lapses within `BROKER_LEASE_SECONDS`.
+
+## End a person's sign-in to the broker
+
+The sessions above are agents'. A person's own sign-in to the broker's approval page is separate:
+it lasts a day at most, is never extended, and ends when they sign out. Nobody ends someone
+else's from a page; an operator ends every browser session one login holds by running the
+broker's own subcommand in a broker pod, `envoy-broker end-sessions <login>`
+([Ending a person's sessions](/legion/broker/operate/#ending-a-persons-sessions)). Revoking a
+grant or a machine login does not need a broker sign-in and never ends one.

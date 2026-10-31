@@ -21,9 +21,9 @@
 #
 # A secret request is approved on the broker's own page, <broker>/approve/<record>, by a person
 # signed in to the broker (BROKER_SIGNIN_*). The same issuer process stands in for that person's
-# identity provider: it serves the broker's sign-in client, whose secret this script generates
-# into WORK_DIR, and signs a person in as the request's login_hint (the approver) with no page to
-# fill in, so a browser on this machine approves a secret request on that page.
+# identity provider: --code-flow serves the broker's sign-in client, whose secret this script
+# generates into WORK_DIR, and --sign-in-as signs every authorization in as APPROVER_LOGIN with
+# no page to fill in, so a browser on this machine approves a secret request on that page.
 #
 # Each invocation creates and drops its own isolated Postgres database (named from this run's own
 # WORK_DIR, below) and binds an OS-assigned ephemeral port (BROKER_LISTEN_ADDR=127.0.0.1:0), so two
@@ -92,11 +92,12 @@ EXCHANGE_PROJECT="EXAMPLE"
 ACCOUNT_TOKEN_FILE="$WORK_DIR/account-token"
 EXCHANGE_TOKEN_FILE="$WORK_DIR/exchange-token"
 # The broker's own sign-in client at that issuer (BROKER_SIGNIN_*), through which a person signs in
-# to the broker's approval page, the file holding its secret (generated below), and the domain
-# every signed-in person's hd claim names, the approver's own.
+# to the broker's approval page, and the file holding its secret (generated below). The issuer
+# takes no domain of its own: it puts each signed-in person's own email domain in their hd claim,
+# so the domain the broker holds them to is APPROVER_LOGIN's.
 SIGNIN_CLIENT_ID="dev-broker"
 SIGNIN_SECRET_FILE="$WORK_DIR/signin-client-secret"
-SIGNIN_DOMAIN="example.com"
+SIGNIN_DOMAIN="${APPROVER_LOGIN#*@}"
 # This instance's own database, named from WORK_DIR's mktemp-generated random suffix (already
 # unique per invocation). Postgres unquoted identifiers fold to lowercase anyway, but lowercase
 # explicitly rather than rely on that.
@@ -199,17 +200,15 @@ echo "$APPROVER_LOGIN" >"$OPERATOR_FILE"
 # --- Start the local issuer, teed like the broker below. It writes both token files before it
 # logs its URL, so once that line is in ISSUER_LOG the files are there for devrelay and a pod to
 # read, and the URL is the issuer the broker discovers at boot, for ServiceAccount tokens and for
-# a person's sign-in alike. A sign-in that names no login_hint (a shared secret's, whose approver
-# is anyone signed in) signs in as APPROVER_LOGIN. ---
+# a person's sign-in alike. Every sign-in it serves signs APPROVER_LOGIN in: nothing here queues
+# another person at its POST /_dev/sign-in-as control route. ---
 echo "dev-broker: starting dev-oidc-issuer..." >&2
 : >"$ISSUER_LOG"
 "$ISSUER_BIN" \
   --token "$BROKER_AUDIENCE=$API_ACCOUNT=$ACCOUNT_TOKEN_FILE" \
   --token "$EXCHANGE_AUDIENCE=$EXCHANGE_ACCOUNT=$EXCHANGE_TOKEN_FILE" \
-  --sign-in-client "$SIGNIN_CLIENT_ID" \
-  --sign-in-client-secret-file "$SIGNIN_SECRET_FILE" \
-  --sign-in-domain "$SIGNIN_DOMAIN" \
-  --sign-in-default "$APPROVER_LOGIN" \
+  --code-flow "$SIGNIN_CLIENT_ID=$SIGNIN_SECRET_FILE" \
+  --sign-in-as "$APPROVER_LOGIN" \
   > >(trap '' TERM INT; exec tee -a "$ISSUER_LOG" >&2) 2>&1 &
 ISSUER_PID=$!
 ISSUER_URL=""
@@ -340,7 +339,7 @@ dev-broker: ready.
 
   To approve a pending request for DEMO_API_KEY, open the approve_url agent-secrets prints for
   it (${PUBLIC_URL}/approve/<record>) in a browser: the broker sends you to sign in at
-  dev-oidc-issuer, which signs you in as the request's approver ($APPROVER_LOGIN) with no page to
+  dev-oidc-issuer, which signs you in as $APPROVER_LOGIN with no page to
   fill in, and brings you back to the record's page, where you Approve or Deny it.
 
   The broker lists the caller token's account as its caller "dispatch" (BROKER_API_ACCOUNTS) and

@@ -553,8 +553,7 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
       );
       // B2: the request in the Inbox, its page on the broker, and the approval there. The context
       // holds no broker session yet, so the row's link passes through the rig issuer's sign-in,
-      // which signs the operator in by the record's login_hint with no page, and lands on the
-      // request's page.
+      // which signs the operator in with no page to fill in, and lands on the request's page.
       await browserSection(
         browser,
         "b2-approve.webm",

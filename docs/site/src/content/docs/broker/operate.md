@@ -53,8 +53,9 @@ answered `403 ACCOUNT_NOT_LISTED`. Through those routes Dispatch lists what wait
 relays a person's machine-login decisions and revokes; it decides no secret request
 ([Network and trust](#network-and-trust)).
 
-The four `BROKER_SIGNIN_*` settings turn on the page where a person approves a secret request,
-signed in to the broker itself ([Approval sign-in](#approval-sign-in)).
+The four `BROKER_SIGNIN_*` settings are required, and a broker started without one of them exits
+naming the missing ones. They are the page where a person approves a secret request, signed in to
+the broker itself ([Approval sign-in](#approval-sign-in)).
 
 `BROKER_SECRETS_STORE` picks the secret store: `aws-secrets-manager`, the default when it is unset,
 as above, or `gcp-secret-manager`, which takes the Google Cloud forms of the namespace and the key
@@ -158,8 +159,8 @@ nothing refreshes it.
 A person approves or denies a secret request on the broker's own page,
 `<BROKER_PUBLIC_URL>/approve/<record>`, signed in to the broker with OpenID Connect through an
 OAuth client of the broker's own; Dispatch's Inbox only links there, and no route a service calls
-decides a secret request ([Concepts](/legion/broker/concepts/#approvals)). Four settings turn the
-sign-in on, all of them or none:
+decides a secret request ([Concepts](/legion/broker/concepts/#approvals)). Four settings are the
+sign-in, and every one of them is required:
 
 | Setting | What it is |
 | --- | --- |
@@ -167,12 +168,13 @@ sign-in on, all of them or none:
 | `BROKER_SIGNIN_CLIENT_ID` | The broker's own OAuth client at that provider. Not Dispatch's: a token or code made for Dispatch's client signs no one in to the broker. |
 | `BROKER_SIGNIN_CLIENT_SECRET_FILE` | A file holding that client's secret, read at startup and trimmed; mount it from a Kubernetes Secret. The broker refuses to start while `BROKER_SIGNIN_CLIENT_SECRET` is set, so the secret is never in its environment. |
 | `BROKER_SIGNIN_DOMAIN` | The Google Workspace domain a person must belong to: the ID token's `hd` claim must name it, and its email must be verified. A person's login is their lowercased email, the form a secret's `owner` tag names. |
-| `BROKER_SIGNIN_SESSION_SECONDS` | Optional. How long a sign-in lasts, counted from the moment it is made and never extended: 86400 (24 hours), the default, at most. Signing out ends it at once. A person whose Workspace account is suspended keeps approving until their session's expiry. The broker refuses it while sign-in is off. |
+| `BROKER_SIGNIN_SESSION_SECONDS` | Optional. How long a sign-in lasts, counted from the moment it is made and never extended: 86400 (24 hours), the default, at most. Signing out ends it at once. A person whose Workspace account is suspended keeps approving until their session's expiry, which `broker end-sessions` ends sooner ([Ending a person's sessions](#ending-a-persons-sessions)). |
 
-Some but not all of the four set refuses to start, naming the missing ones. None set starts with
-approvals off: the broker logs `approval sign-in off: BROKER_SIGNIN_* unset; no person can approve a
-secret request`, the page answers `503` naming the four settings, and no other route decides a
-secret request either, so requests that need a person wait until they expire.
+A broker missing any of the four refuses to start, naming the ones it is missing: `broker: fatal
+error="the broker's approval page needs BROKER_SIGNIN_ISSUER, BROKER_SIGNIN_CLIENT_ID,
+BROKER_SIGNIN_CLIENT_SECRET_FILE, BROKER_SIGNIN_DOMAIN; missing BROKER_SIGNIN_DOMAIN"`. There is
+no broker that serves machines but approves nothing: a deployment either signs people in or does
+not run.
 
 On Google, create the client once, in the Google Cloud project whose OAuth consent screen is the
 Workspace's **Internal** one (APIs & Services → Credentials → Create credentials → OAuth client ID,
@@ -186,6 +188,64 @@ asks for no offline access and keeps no refresh token, and sends the request's a
 Deploy the broker with these settings before the Dispatch release whose Inbox links the page. In
 between, an open Dispatch tab's **Approve** on a secret request gets the broker's
 `403 DECIDE_ON_BROKER_PAGE` naming the page, and nothing is approved on Dispatch's word.
+
+### What the sign-in is doing
+
+`GET /signin/status` answers what this deployment's sign-in has done, read from Postgres on every
+call, so every pod answers the same thing. It takes no credential, and every word in it is one of
+two sets the broker itself chose: no provider's message, no login and no secret reaches it.
+
+```json
+{
+  "client_check": "ready",
+  "client_checked_at": "2026-03-04T09:00:11Z",
+  "last_sign_in_at": "2026-03-04T08:41:02Z",
+  "last_failed_sign_in_at": null,
+  "last_failed_sign_in_reason": null,
+  "last_decision_at": "2026-03-04T08:41:40Z"
+}
+```
+
+A fact that has never happened is `null`, so a deployment nobody has signed in to yet is not a
+deployment whose sign-in broke. What an operator reads from each field:
+
+- `client_check` and `client_checked_at`: what the broker's own client was found to be at the
+  provider, and when. Each pod checks it at startup and every hour after, by asking the token
+  endpoint to redeem an invalid code with the broker's client credentials. `ready` is the provider
+  accepting the client, `client_rejected` is the provider refusing it (nobody can sign in: the
+  client id, its secret or its registration is wrong), and `issuer_unreachable` is a provider that
+  could not be asked, which says nothing about the client. A check neither answers a person nor
+  stops the broker: it writes this row and, when it did not find `ready`, the log line `broker: the
+  sign-in client check`.
+- `last_sign_in_at`: when a person last finished signing in. Long silence on a deployment people
+  use is the signal, read beside `last_decision_at`.
+- `last_failed_sign_in_at` and `last_failed_sign_in_reason`: when a sign-in last failed at the code
+  exchange or at the ID-token check, and why, as one of `invalid_client`, `unauthorized_client`,
+  `redirect_uri_mismatch`, `invalid_grant`, `issuer_unreachable`, `bad_issuer`, `bad_audience`,
+  `bad_signature`, `bad_nonce`, `not_in_domain` and `email_not_verified`. The first three are the
+  client's registration, `not_in_domain` and `email_not_verified` are the person rather than the
+  deployment, and a failure none of the eleven names leaves the row alone and is logged instead.
+- `last_decision_at`: when a person last approved or denied a request on the page.
+
+### Ending a person's sessions
+
+A broker session lasts `BROKER_SIGNIN_SESSION_SECONDS` from the moment it was made and is never
+extended, so a person whose Workspace account is suspended can still approve until it expires. To
+end every browser session one login holds, wherever and whenever it was made, run the subcommand
+in a broker pod:
+
+```sh
+kubectl exec deploy/broker -- envoy-broker end-sessions ada@example.com
+end-sessions: ended 2 sessions of ada@example.com
+```
+
+It reads the same configuration the serving process does, so it reaches the same database and
+signs in to it the same way, binds no listener and applies no migration: an image older than the
+servers cannot migrate the database behind them on its way to ending a session. The person's next
+visit to a request's page signs them in again, if the provider still lets them; to stop that, take
+them out of the Workspace or out of `BROKER_SIGNIN_DOMAIN` first. It is the only subcommand the
+broker takes: anything else is refused with a usage line, and `envoy-broker` with no argument
+serves.
 
 ## Signing in to RDS by IAM token
 
@@ -243,7 +303,7 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 | Kind secrets | A `github-app` secret needs outbound HTTPS access to `api.github.com`, and a `github-owners` tag naming the GitHub accounts it mints for, which the deployment sets when it creates the secret. A `google-login` secret needs outbound HTTPS access to `oauth2.googleapis.com`. The broker reads the stored value for each release, as it reads any secret, and returns only the minted token. It needs no IAM permission to mint these values. A mint GitHub or Google refuses answers the session `502 MINT_FAILED`, naming their reason, and logs `broker: mint failed` (below). A narrowing the secret cannot serve, an account its tag does not list or one GitHub refuses, answers `403 NARROWING_OWNER_NOT_LISTED` or `422 NARROWING_REFUSED` instead and logs `broker: narrowing refused`. |
 | A local stand-in (development only) | `BROKER_FAKE_SECRETS_FILE` names a JSON file the broker reads in place of the store, in Secrets Manager's shape whatever `BROKER_SECRETS_STORE` says, each secret's `kms_key_id` naming the agent-secrets key as the selected store configures it (`BROKER_SECRETS_KMS_KEY_ARN`, or `BROKER_SECRETS_KMS_KEY_NAME` with the GCP store); the [configuration reference](/legion/broker/reference/config/#variables-the-broker-reads) gives its format. |
 | Dispatch | Dispatch's server calls the broker's account routes as its own ServiceAccount: it lists the requests and machine logins waiting on the signed-in person, each secret request with its page on the broker (`approve_url`), which its Inbox links to, and relays a person's machine-login decisions and revokes. Set Dispatch's `DISPATCH_AGENT_SECRETS_URL` to the broker's URL and `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` to the path of its projected token for `BROKER_K8S_OIDC_AUDIENCE`, and list that account in the broker's `BROKER_API_ACCOUNTS`. Without the URL, Dispatch hides its credential pages. Deploy a broker with the approval page before a Dispatch whose Inbox links it ([Approval sign-in](#approval-sign-in)). |
-| The sign-in provider | With `BROKER_SIGNIN_*` set, a person's browser signs in to the broker at the provider (Google, under the Workspace's internal consent screen) and the broker reaches its discovery document, token endpoint and keys over HTTPS at the first sign-in after it starts. A failed discovery answers the page `503` naming the issuer and logs `approval sign-in: discover the provider`; machines are served as before. |
+| The sign-in provider | A person's browser signs in to the broker at the provider (Google, under the Workspace's internal consent screen), and the broker reaches its discovery document, token endpoint and keys over HTTPS at the first sign-in after it starts and at each hourly client check. A failed discovery answers the page `503` naming the issuer and logs `approval sign-in: discover the provider`; machines are served as before, and `GET /signin/status` reports `issuer_unreachable` ([What the sign-in is doing](#what-the-sign-in-is-doing)). |
 | Kubernetes (optional) | To enroll pods, and to let a service log in with its token (`BROKER_SERVICE_LOGINS`), `BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` name the cluster's service-account token issuer and the audience the pods' and the services' projected tokens carry. The broker fetches the issuer's discovery document at startup and refuses to start if it cannot. |
 | Envoy (optional) | With `BROKER_ENVOY_URL`, the broker tells a waiting agent session, best effort, when its pending request expires. |
 
@@ -416,8 +476,8 @@ The broker logs text lines to stderr. The ones worth alerting or searching on:
 | `broker stop budget drain=<drain> shutdown=60s total=<their sum>` | The first line of the run, before the database or the secret store is reached for: the whole budget a stop spends, `BROKER_DRAIN_SECONDS` and the 60 seconds in-flight requests get after it. `total` is what a deployment's `terminationGracePeriodSeconds` has to cover, and with the defaults the line reads `drain=5s shutdown=60s total=65s` ([Running more than one pod](#running-more-than-one-pod)). |
 | `database sign-in method=<method>` | At startup, before the broker reaches for AWS or its database: `rds-iam` when each connection signs in with an RDS IAM token the broker mints, `password` when it signs in as `BROKER_DATABASE_URL` and libpq's defaults say (a password in the URL, `PGPASSWORD`, a passfile, or none for a server that trusts it). |
 | `secret store store=<store> credentials=<source>` | At startup, once the store is built: `aws-secrets-manager` under the AWS SDK's credential chain (`aws-sdk`), `gcp-secret-manager` under Application Default Credentials (`application-default`), or either name over `BROKER_FAKE_SECRETS_FILE` (`fake secrets file`). |
-| `approval sign-in on issuer=<issuer> client_id=<client id>` | At startup: the approval page signs people in through that client ([Approval sign-in](#approval-sign-in)). The client's secret is never logged. |
-| `approval sign-in off: BROKER_SIGNIN_* unset; no person can approve a secret request` | At startup, with no sign-in settings: every request that needs a person waits until it expires. |
+| `approval sign-in on issuer=<issuer> client_id=<client id> domain=<domain>` | At startup: the approval page signs people in through that client, holding each person to that Workspace domain ([Approval sign-in](#approval-sign-in)). The client's secret is never logged. |
+| `broker: the sign-in client check state=<state> issuer=<issuer> error=…` | At WARN, from the check each pod takes at startup and every hour after: the provider refused the broker's client (`state=client_rejected`, so nobody can sign in) or could not be asked (`state=issuer_unreachable`). A check that found the client ready logs nothing; every check writes its answer to `GET /signin/status`. |
 | `approval sign-in login=<email>` / `approval sign-out login=<email>` | A person signed in to, or out of, the approval page. |
 | `approval sign-in refused …` | At WARN: a sign-in made no session, the line saying why: the provider refused it, its state or return path was not the sign-in's, the code exchange or ID token failed, or the person is outside `BROKER_SIGNIN_DOMAIN` or unverified. |
 | `approval page decision login=<email> record=<record id> decision=<approve or deny> outcome=<outcome>` | A person decided a secret request on the page; `outcome` is what became of it (`granted`, for one). |

@@ -3745,13 +3745,13 @@ One key name can hold different values in the two stores.
 `agent-secrets` names its store in output and every refusal; `secrets` names none today.
 `agent-secrets secret` forms are how a person manages the agent secrets themselves, in the broker's own store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in (below); the broker writes no secret.
 The broker holds no Dispatch credential and opens no Dispatch ask anywhere.
-Every human decision — approving or denying a secret request, approving or denying a machine login, revoking a grant, ending a machine login
-— made in Dispatch reaches the broker's approval routes from its server, carrying Dispatch's own projected Kubernetes ServiceAccount token and the deciding person's Dispatch login, their email, in the body's `approver` field.
+A **secret request** is decided on the broker's own approval page alone (`internal/broker/approval`, below), by the person signed in to the broker itself; `POST /v1/credential-requests/{record}/approve` and `/deny` answer `403 DECIDE_ON_BROKER_PAGE` for every caller when the record is a secret request, before any credential is checked, so no service's token decides one and Dispatch's Inbox only links the page (`handlers_requests.go`).
+Every other human decision — approving or denying a **machine login**, revoking a grant, ending a machine login — made in Dispatch reaches those routes from its server, carrying Dispatch's own projected Kubernetes ServiceAccount token and the deciding person's Dispatch login, their email, in the body's `approver` field.
 The token says only which service is calling:
 the broker verifies it against `BROKER_K8S_OIDC_ISSUER` and reads the caller's name off `BROKER_API_ACCOUNTS` (`accountAuth`, below), and then takes the approver on that caller's word
 — Dispatch fills it from its own signed-in session, never from the browser, and the broker checks it against the record's approver and records it on the decision event.
-Reaching those routes is therefore reaching an approval credential, and keeping Dispatch's ServiceAccount and its identity closed to agents is the deployment's job;
-dispatch://INFRA-314 is what replaces that trust with a credential the approver's own session holds.
+A revoke and a machine login's typed code only take power away or need the code, so they stay on that word; a secret request's approval does not, which is why it moved to the broker's page.
+Reaching those routes is therefore reaching a machine login's approval credential, and keeping Dispatch's ServiceAccount and its identity closed to agents is the deployment's job.
 A person's own machine ends their machine logins and grants through the operator routes instead (below), under its machine login.
 `internal/broker/enroll` turns a launcher credential into a leased enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a projected service-account token).
 An operator credential's enrollment is its operator's, the email of the person who approved its machine login:
@@ -3802,6 +3802,7 @@ Other session routes map a not-live proof to `PROOF_INVALID` as before.
 `internal/broker/policy` decides who may have which secret from the secret's own tags (below);
 `internal/broker/proof` authenticates a session's or a launcher's signed request against its live enrollment or credential;
 `internal/broker/machine` decides typed-code machine logins, logs services in with their Kubernetes tokens, and mints the launcher credentials both issue;
+`internal/broker/approval` is the broker's own approval page and the sign-in behind it (below);
 and `internal/broker/secrets` is the secret store:
 `secrets.Store`, the one interface the policy lists and describes agent secrets through and a grant's value is read through (`List`, `Describe`, `Read`, `ValidName`), with `secrets.AWS` over AWS Secrets Manager and KMS, `secrets.GCP` over Google Cloud Secret Manager, and, for local development, `secrets.Local`, an in-memory stand-in for the AWS calls.
 
@@ -4162,15 +4163,33 @@ Both lists print a table; `--json` prints the broker's body verbatim:
 `grant list`'s is byte-identical to the body Dispatch's Live grants page reads for the same person, and `machine list`'s holds that person's own machines' rows of Dispatch's machine-login page, byte for byte, without the service logins that page also lists (`machine_linux_test.go` drives both commands against a real helper and broker).
 A machine with no helper has no machine login to act as, so the commands refuse with exit 2 naming the socket they looked for.
 
+`internal/broker/approval` is the page a person approves a secret request on, and the only place one is approved:
+`GET /approve/{record}`, `POST /approve`, `GET /signin/callback`, `POST /signin/logout`, `GET /signin/status` and `GET /approve/assets/approve.css` (`routes_table.go`).
+A person signs in to the broker itself with OpenID Connect through the broker's own client (authorization code, PKCE S256, nonce and state, `openid email profile`, no offline access and no refresh token kept: `internal/oidc/codeflow.go`), and the broker keeps that sign-in as a session of its own in Postgres (`store.browser_sessions`, migration 0020, which holds only the SHA-256 of the cookie's secret), for `BROKER_SIGNIN_SESSION_SECONDS` from the moment it was made, never extended.
+Nothing there trusts SameSite: the broker and Dispatch are sibling hosts under one public suffix, so both cookies are `__Host-` cookies (`__Host-broker-session` and `__Host-broker-signin`, the second a sign-in in progress, so a visitor who never signs in writes no row and any replica finishes any sign-in), every POST must come from `BROKER_PUBLIC_URL`'s exact origin, and every answer is `html/template` output with no script, framed by nothing.
+A decision carries a page token, an HMAC under the session's own secret over the page's expiry and the exact record ids it printed, so a form from another sign-in, from a page more than an hour old, or naming a record its page did not print, decides nothing.
+`GET /signin/status` is public and reads one upserted Postgres row (`store.signin_status`, migration 0021): the client check's state and time, the last successful sign-in, the time and coded reason of the last failed sign-in, and the last decision made on the page.
+Both vocabularies are closed by that migration's own check constraints, which is why no provider's message, login or secret can reach a route that takes no credential; a failed sign-in the eleven codes do not name leaves the row alone and is logged instead (`approval/status.go`).
+The row is written best effort: a sign-in that worked has its session and a decision is already in the record's event chain, so a write that fails is a WARN, never the loss of the thing it reports.
+`cmd/broker` checks the sign-in client at startup and every hour after (`runClientChecks`, `oidc.CheckClient`), by asking the token endpoint to redeem an invalid code with the broker's client credentials: `invalid_grant` is `ready`, `invalid_client` is `client_rejected`, and anything else, a discovery or transport failure included, is `issuer_unreachable`, a check with no verdict.
+A check neither answers a person nor stops the broker.
+`cmd/broker end-sessions <login>` is the one subcommand the binary takes: it loads the same configuration, opens the same database (the RDS IAM minter included), deletes every browser session of that login and prints how many; it binds no listener and runs no migration, so an older image cannot migrate the database behind the servers on its way to ending a session.
+`cmd/agent-secrets-devrelay` keeps `machine-approve` alone and has no secret-request subcommand, the broker refusing every route a service calls to decide one.
+
 `config.Load` (`internal/broker/config/config.go`) reads the broker's `BROKER_*` environment:
 `BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required, and the only database variable:
 nothing is substituted into it; a URL naming a user and no password whose host ends in `.rds.amazonaws.com`, for which `pgconn.ParseConfig` finds no password (none in the URL, `PGPASSWORD` or a passfile), sets `Config.DatabaseIAM` and must read as that one host with `sslmode=verify-full` and an `sslrootcert` file's pool (not `sslrootcert=system`), or `Load` refuses naming the host and never the URL;
 `cmd/broker` then loads the AWS config once, before `store.Open`, and passes `store.WithTokenMinter(rdsAuthTokens(awsCfg))` (`cmd/broker/rdsauth.go`, so `internal/broker/store` imports no AWS SDK), whose pool `BeforeConnect` mints an RDS IAM token per new connection), `BROKER_PUBLIC_URL` (required;
-absolute URL, no path — the broker's own address, the request object's `aud` and the launcher proof's `htu`), `BROKER_MACHINE_LOGIN_URL` (required;
-absolute http(s) URL — Dispatch's `/credentials/machine` page, the device grant's `verification_uri`, where a person types a machine login's code), `BROKER_API_ACCOUNTS` (optional;
+absolute URL, no path — the broker's own address, the request object's `aud` and the launcher proof's `htu`), `BROKER_MACHINE_LOGIN_URL` (required, and unchanged by the approval page;
+absolute http(s) URL — Dispatch's `/credentials/machine` page, the device grant's `verification_uri`, where a person types a machine login's code), `BROKER_SIGNIN_ISSUER` / `BROKER_SIGNIN_CLIENT_ID` / `BROKER_SIGNIN_CLIENT_SECRET_FILE` / `BROKER_SIGNIN_DOMAIN` (all four required, `config.SignInSettings` in that order;
+the broker's own OpenID Connect client, through which a person signs in to the approval page, and the Workspace domain an ID token's `hd` must name beside a verified email.
+The issuer is an absolute `https` URL, or `http` only to a loopback host for a run on one machine, and its discovery document is read at the first sign-in and at each client check rather than at startup, so a provider outage never stops the broker serving machines.
+The secret is read from the file at startup and trimmed, through the `_FILE` convention below; a bare `BROKER_SIGNIN_CLIENT_SECRET` is one of the removals `Load` refuses, so the secret is never in the environment.
+`parseSignIn` collects every missing one and refuses with all of them named, `the broker's approval page needs <the four>; missing <those unset>`, so a half-configured deployment learns the whole gap at once), `BROKER_SIGNIN_SESSION_SECONDS` (default 86400, min 1, max 86400;
+how long one sign-in lasts from the moment it is made, never extended — `broker end-sessions <login>` is what ends them sooner), `BROKER_API_ACCOUNTS` (optional;
 whitespace-separated `<caller>=<service account>` entries, such as `dispatch=system:serviceaccount:example-ns:example-dispatch`:
 the ServiceAccounts that reach the routes `accountAuth` authenticates
-— the approval routes Dispatch's server calls on a person's behalf, and the introspection route a resource server reads an access token back through.
+— the machine-login and revoke routes Dispatch's server calls on a person's behalf, the lists it reads, and the introspection route a resource server reads an access token back through.
 Each caller presents its own projected token for `BROKER_K8S_OIDC_AUDIENCE`, verified against `BROKER_K8S_OIDC_ISSUER` as every other ServiceAccount token is, so this needs that pair;
 a token living longer than an hour from its issue is refused, as a service login's is.
 The caller's name (lowercase letters, digits and hyphens, at most 64) is only what the log calls it when it acts.
@@ -4240,7 +4259,7 @@ behind one — this broker's documented production shape, the shared internal AL
 `<NAME>_FILE`, when set, names a file whose trimmed contents win over a bare `<NAME>` — with both set, the file wins silently, nothing is refused
 — and a named-but-unreadable or empty file is a startup error naming the file, never a silent fallback to an unset value.
 `config.Load` refuses to start naming a stale removal still set in the environment
-— the removed `BROKER_UI_TOKEN[_FILE]` (the approval routes take the calling service's own ServiceAccount token, so its account goes in `BROKER_API_ACCOUNTS` instead of a bearer shared with Dispatch's server), `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`, `BROKER_DISPATCH_PROJECT` and `BROKER_ASK_POLL_SECONDS` (the broker holds no Dispatch credential and asks/issues nothing), `BROKER_UI_ORIGIN` (approval is by Dispatch login, so the broker checks no WebAuthn origin), `BROKER_DATABASE_PASSWORD` (on RDS the broker signs in by IAM token, and any other database's password goes in the URL itself;
+— the removed `BROKER_UI_TOKEN[_FILE]` (the routes Dispatch calls take the calling service's own ServiceAccount token, so its account goes in `BROKER_API_ACCOUNTS` instead of a bearer shared with Dispatch's server), `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`, `BROKER_DISPATCH_PROJECT` and `BROKER_ASK_POLL_SECONDS` (the broker holds no Dispatch credential and asks/issues nothing), `BROKER_UI_ORIGIN` (a person approves on the broker's own page, signed in to the broker through `BROKER_SIGNIN_*`, so the broker checks no WebAuthn origin), `BROKER_SIGNIN_CLIENT_SECRET` (the sign-in client's secret is read only from the file `BROKER_SIGNIN_CLIENT_SECRET_FILE` names, so it is never in the environment), `BROKER_DATABASE_PASSWORD` (on RDS the broker signs in by IAM token, and any other database's password goes in the URL itself;
 a `BROKER_DATABASE_URL` still naming its `${BROKER_DATABASE_PASSWORD}` placeholder is refused for the same reason, rather than tried as a literal password), and `BROKER_RULES_FILE`, `BROKER_RULES_S3_URI` and `BROKER_RULES_RELOAD_SECONDS` (each secret's own tags are the policy, so there is no rules file)
 — so a stale deployment fails loudly rather than silently running on configuration that means nothing any more.
 It also refuses: a missing required variable;
@@ -4257,7 +4276,7 @@ each VM refusal of the paragraph above; and a `_SECONDS` variable that isn't a w
 credentials=aws-sdk|application-default|fake secrets file`;
 the AWS config is loaded only for the AWS store or an RDS-form database URL), and reads one thing `config.Load` does not:
 `BROKER_FAKE_SECRETS_FILE`, which makes the run a local one (above), the only kind that may set a `BROKER_PUBLIC_URL` on port 0.
-The broker takes no flags, and refuses any flag it is given.
+The broker takes no flags, and refuses any flag it is given; its one argument is the subcommand `end-sessions <login>` (above), and anything else is a usage line and exit 2.
 
 `cmd/broker`'s stop is a drain and then a shutdown, and it logs the whole budget at boot, before anything else:
 `broker stop budget drain=<BROKER_DRAIN_SECONDS> shutdown=60s total=<their sum>` (`wholeSeconds`, whole seconds because its reader is a deployment's `terminationGracePeriodSeconds`).
@@ -4287,13 +4306,13 @@ It also checks where those codes are produced:
 every helper `Response` literal that is not `OK: true` must name its fields and set `Code` to a documented `Code*` constant, and every `int`-returning function in `cmd/agent-secrets` (and every `os.Exit` there) may return only `0`, `1`, a documented `exit*` constant or another such function's result.
 The CLI reference is the built binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 30 HTTP routes
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 36 HTTP routes
 — a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the contract for every row is the broker's design overview.
-Each row's handler is wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `renewAuth`, `accountAuth`), which fixes both the credential `server.authenticate` checks and the caller the handler receives (a launcher `enroll.Credential`, an enrollment id, or, for an `accountAuth` route, the name `BROKER_API_ACCOUNTS` gives the calling service
+Each row's handler is wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `renewAuth`, `accountAuth`, `signInAuth`), which fixes both the credential `server.authenticate` checks and the caller the handler receives (a launcher `enroll.Credential`, an enrollment id, the `approval.Session` a `signInAuth` row's page reads, or, for an `accountAuth` route, the name `BROKER_API_ACCOUNTS` gives the calling service
 — which is all that credential says, so every such handler takes its subject from the path or body:
 a decision or a revoke names the deciding human in `approver`, and a list the person it lists for in `?approver=`, which Dispatch filled from its own session;
 an empty one is `400 APPROVER_REQUIRED`.
-Taking the approver on the caller's word is what dispatch://INFRA-314 replaces, and each of those rows says so), so a handler cannot be wired to the wrong kind of caller.
+That word is good for a machine login's decision and a revoke alone; a secret request's approve and deny refuse every caller `403 DECIDE_ON_BROKER_PAGE`, and the person decides it on a `signInAuth` row instead), so a handler cannot be wired to the wrong kind of caller.
 A bad credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or, for `accountAuth`, `ACCOUNT_TOKENS_OFF` on a broker that trusts no Kubernetes issuer, `ACCOUNT_TOKEN_EXPIRED`, `ACCOUNT_TOKEN_INVALID` and `ACCOUNT_TOKEN_TOO_LONG_LIVED` for a token that names no `iat` or whose `exp` lies more than `machine.MaxTokenLoginLifetime` plus the proof skew past it, with the one 403, `ACCOUNT_NOT_LISTED`, for a sound token of an account `BROKER_API_ACCOUNTS` does not name:
 the credential is good and it is the broker's list that refuses, and no refusal repeats the token.
 `accountCaller` is the check a service's token login makes (`machine.Service.VerifyServiceToken`), against the same verifier and with the same taxonomy);
@@ -4623,16 +4642,17 @@ Every client-facing lane's own test mounts the real broker handlers (`api.Regist
 — `internal/broker/api/api_test.go`, `internal/broker/e2e/e2e_test.go`, and `cmd/agent-secrets-devrelay/main_test.go` all wire real `enroll.Service`/`requests.Machine`/`machine.Service` behind an `httptest.Server`;
 `cmd/agent-secrets/main_test.go`'s hand-rolled `fakeBroker` and `secret_test.go`'s `secretBroker` (settings and reread alone) are the sanctioned exceptions, since they exist to test the CLI binary's own request-building and response-parsing logic, not broker behavior;
 `secret_e2e_test.go` runs the same forms against the real rig.
-`packages/envoy/scripts/dev-broker.sh`, `cmd/agent-secrets-devrelay` (a stand-in for Dispatch's relay:
-it presents a listed caller's ServiceAccount token, read from `--account-token-file` / `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, and a login, as Dispatch sends its own token and a login when a signed-in human clicks Approve) and `cmd/dev-oidc-issuer` (a stand-in for a cluster's ServiceAccount token issuer, and for the identity provider a person signs in to Dispatch at) run a whole local broker stack by hand for manual smoke testing, with no cluster and no Docker beyond the Postgres below;
+`packages/envoy/scripts/dev-broker.sh`, `cmd/agent-secrets-devrelay` (a stand-in for Dispatch's machine-login relay, `machine-approve` its one subcommand:
+it presents a listed caller's ServiceAccount token, read from `--account-token-file` / `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, and a login, as Dispatch sends its own token and a login when a signed-in human types a machine login's code and clicks Approve; it has no secret-request subcommand, the broker refusing every route a service calls to decide one) and `cmd/dev-oidc-issuer` (a stand-in for a cluster's ServiceAccount token issuer, and for the identity provider a person signs in to Dispatch, or to the broker's own approval page, at) run a whole local broker stack by hand for manual smoke testing, with no cluster and no Docker beyond the Postgres below;
 none ships in `docker/Dockerfile`, which builds exactly `envoy-listener`, `envoy-dispatch`, `envoy-broker`, and `agent-secrets`.
 `dev-oidc-issuer` serves `internal/oidc/oidctest`'s issuer, the Go tests' own, on a loopback port (a process `oidctest.TB` whose `Fatalf` exits), and keeps each `--token
 <audience>=<service account>=<file>` in its file, minted for `machine.MaxTokenLoginLifetime`, bound to a pod uid of its own, and rewritten by rename at four fifths of that life, as a kubelet rewrites a projected token;
 it logs `issuer listening url=<url>` once every file is written.
 Its key lives in its memory alone, so its tokens stop verifying when it stops.
 `dev-broker.sh` starts it with two tokens, `account-token` for `system:serviceaccount:example-ns:example-dispatch` (the broker's `BROKER_API_ACCOUNTS` caller `dispatch`) and `exchange-token` for `system:serviceaccount:example-ns:example-worker`'s pod at the exchange audience (its `BROKER_EXCHANGE_ACCOUNTS` entry, project `EXAMPLE` for `ada@example.com`, no fixed session), points the broker's `BROKER_K8S_OIDC_ISSUER` at it, and stops it on exit.
+The same issuer process is the broker's sign-in provider: `dev-broker.sh` generates the client secret into its workdir under umask 077, starts the issuer with `--code-flow dev-broker=<that file>` and `--sign-in-as ada@example.com`, and gives the broker `BROKER_SIGNIN_ISSUER`, `BROKER_SIGNIN_CLIENT_ID`, `BROKER_SIGNIN_CLIENT_SECRET_FILE` and `BROKER_SIGNIN_DOMAIN` (the approver's own domain), which it cannot start without, so a browser on that machine approves a secret request at `<broker>/approve/<record>` with no page to fill in.
 It prints the exports a second shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, `AGENT_SECRETS_APPROVER`, the helper's `AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE` and `AGENT_SECRETS_MACHINE_FILE`, all in its workdir, where it writes the operator file, and `DEV_BROKER_DIR`, the workdir itself).
-The docs rig (`docs/site/media/broker/rig.sh`) starts the same issuer for Dispatch's own token.
+The docs rig (`docs/site/media/broker/rig.sh`) starts the same issuer the same way, for Dispatch's own token and for the broker's sign-in client `docs-broker`.
 With `--code-flow <client id>=<client secret file>` it also serves the authorization code flow for that one confidential client (the values `DISPATCH_SIGNIN_CLIENT_ID` and `DISPATCH_SIGNIN_CLIENT_SECRET` take, the secret the file's content less surrounding whitespace), so a browser signs in to a local Dispatch with no Google:
 each authorization signs in the next person queued at `POST <issuer URL>/_dev/sign-in-as`, whose body is the JSON object of that person's ID token claims and which answers loopback callers alone (`403` otherwise);
 with none queued it signs in `--sign-in-as <email>`'s person, and without that flag it refuses the authorization.
@@ -4640,7 +4660,7 @@ That person carries both claim shapes Dispatch reads:
 a Google Workspace account of the email's domain, and a Cognito pool user federated from `DevIdP`, a member of `--sign-in-group <group>`'s group when that flag is given.
 Dispatch accepts `DISPATCH_SIGNIN_DOMAIN` only under Google's issuer, so a local Dispatch signs in through this issuer with `DISPATCH_SIGNIN_GROUP` set to that group.
 Each `dev-broker.sh` run creates and drops its own isolated database, on the shared `dispatch-pg` container, which it boots through `dev-postgres.sh` (so a `dispatch-pg` off that script's pinned image is refused before anything is created), or, with `DEV_BROKER_POSTGRES_URL` set, through `psql` on the server that URL names (no Docker), so concurrent instances never see each other's enrollments, requests or grants, and listens on the port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`), so concurrent instances can never collide on a shared port either.
-`dev-broker.test.sh` proves both kinds of isolation, and that each instance's broker trusts the issuer that instance started, lists its dev caller, exports the caller token that issuer wrote and stops the issuer on exit, with fakes (no real Postgres or network) and runs in CI's `envoy-go` job.
+`dev-broker.test.sh` proves both kinds of isolation, and that each instance's broker trusts the issuer that instance started, lists its dev caller, exports the caller token that issuer wrote, shares one sign-in client with that issuer through a 0600 secret file it never prints, names its own approval page in its banner, and stops the issuer on exit, with fakes (no real Postgres or network) and runs in CI's `envoy-go` job.
 
 `.github/workflows/release-envoy-listener.yaml` runs on a `main` push that touches a file the image builds from, and by hand (`workflow_dispatch`) from any branch.
 Every run builds and smoke-tests each platform on a native runner of its own, with no emulation (`docker (amd64)` on `ubuntu-24.04`, `docker (arm64)` on `ubuntu-24.04-arm`), and pushes it by digest, with no tag;

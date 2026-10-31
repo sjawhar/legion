@@ -792,9 +792,12 @@ names its count. The full vocabulary, with the reason each call beat its alterna
 
 ## Credential requests
 
-`features/credentials/` renders the whole secrets-broker credential-request approval surface —
-directed, signature-verified, immutable-record requests the broker owns and decides; Dispatch
-relays, renders, and names the deciding human. The feature is off — the inbox section and the
+`features/credentials/` renders the secrets-broker credential surface Dispatch still owns —
+directed, signature-verified, immutable-record requests the broker owns and decides. A **machine
+login** is decided here, by its typed code, and Dispatch relays, renders and names the deciding
+human for it and for every revoke; a **secret request** is not: the broker decides one on its own
+page alone, and Dispatch links there (`brokerPage.ts`, below). The feature is off — the inbox
+section and the
 Settings grants section hidden — whenever `DISPATCH_AGENT_SECRETS_URL` is unset on the server, and
 the SPA learns so from the pending list itself, never a separate capability flag: there it answers
 `200` with `null` (every other credential route answers `404 FEATURE_OFF`), since every page reads
@@ -813,9 +816,13 @@ mounts in `features/inbox/Inbox.tsx`, above the ask sections and outside its
 roving-focus/`ViewportAnchor` mechanism (it is not an ask row): each pending row shows a kind
 badge ("Secret request" for `agent_secret`, "Machine login" for `launcher_credential`), the
 requested identifiers, and a
-relative `Timestamp`, linking to `/credentials/:recordId` — except a machine-kind row, which links
-to `/credentials/machine` instead, since only the typed code selects a machine login (a
-direct record link can never approve a machine login) — then, below that link, the session the
+relative `Timestamp`. A machine-kind row links to `/credentials/machine`, since only the typed
+code selects a machine login (a direct record link can never approve one). A secret-request row
+is an `<a>` to the broker's own page, the `approve_url` the broker names on the pending row and
+`brokerPage.ts` takes only as an absolute `http:` or `https:` URL (anything else, a
+`javascript:` URL among them, reads as absent, since the body is the broker's word relayed
+verbatim); a broker too old to name one leaves the row unlinked, reading "Decided on the secrets
+broker." Below that link each row shows the session the
 broker's `session` field names (LEGION-587: `{request, enrollment}`, either null): each id as an
 `AgentName` - its name, its running state and its live link - followed by the full id in text,
 because the id is an unsigned claim (`session.ts`) and `session:<8>…` alone would let another id
@@ -835,7 +842,14 @@ the one reading of that list - `listed` (empty under `null`), `loading` or `fail
 the section, the Inbox's empty state, its `Blocked on you` banner and both `Needs you N` badges
 all read it, so a request one of them counts is one the section lists.
 
-`CredentialRecordPage.tsx` (`/credentials/:recordId`) and `MachineLoginPage.tsx`
+`CredentialRecordPage.tsx` (`/credentials/:recordId`) sends the browser to the broker's own page
+whenever the record's answer names one: `brokerPage.ts` reads `approve_url` off the record, and
+an effect (never a render, which would repeat the side effect) calls `window.location.replace`,
+so the back button returns where the person came from; until the browser leaves, and for good if
+it never does, the page is one line and a link to the request's page there. What follows is what
+a record the broker names no page for still renders, and what the machine page always renders.
+That record page and its read routes go in step 3 of this rollout.
+`CredentialRecordPage.tsx` and `MachineLoginPage.tsx`
 (`/credentials/machine`) share `CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
 a pod enrollment's worker slot when it has one, session (the same resolution the Inbox row's
 own line uses), lifetime, requested/expiry timestamps, policy

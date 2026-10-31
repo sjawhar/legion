@@ -5903,7 +5903,11 @@ issue's pod (every role of it alike) and the image probe's.
   the token, and the daemon enrolls the pod under its own won credential once the agent has
   registered — naming the pod UID it recorded at spawn (the enrollment carries no issue or
   approver at all; each secret's owner and tier tags pick the approver for the pod's later
-  credential requests at request time) — hands the enrollment id back to the shim, and revokes it
+  credential requests at request time, and that person decides each on the broker's own page,
+  `<broker>/approve/<record>`, signed in to the broker itself, which the agent's output names and
+  that person's Dispatch Inbox links to; Dispatch decides no secret request, and a broker that is
+  not given the four `BROKER_SIGNIN_*` settings does not start) — hands the enrollment id back to
+  the shim, and revokes it
   wherever it lets the pod go (a death, the registration deadline, a suspension, a stop, the
   tree's close). The shim's renewer, `agent-secrets renew --pod-token-file <the projected token>`,
   sends the pod's current token with every renewal, and the broker refuses a renewal whose token

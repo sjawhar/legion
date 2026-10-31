@@ -25,9 +25,10 @@
 # instance's broker actually answered; (e) the two concurrent instances bind two different
 # ports; (f) each instance's broker trusts the dev-oidc-issuer that instance started, lists
 # its dev caller and exchange account, exports the caller token that issuer wrote, and stops the
-# issuer on exit; and (g) that same issuer signs people in for the broker's own sign-in client,
-# the broker's BROKER_SIGNIN_* naming that issuer, client, domain and a 0600 secret file in the
-# run's workdir, and the banner names the broker's own approval page.
+# issuer on exit; and (g) that same issuer serves the code flow for the broker's own sign-in
+# client and signs the approver in, the broker's BROKER_SIGNIN_* naming that issuer, client,
+# domain and a 0600 secret file in the run's workdir, and the banner names the broker's own
+# approval page.
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -113,9 +114,10 @@ chmod +x "${fake_bin_dir}/psql"
 # own PID as a stand-in for the kernel-assigned port a real Listen would report, since two
 # concurrently running stub processes always have distinct PIDs — and then stays alive as the
 # backgrounded "server" process dev-broker.sh waits on and kills during cleanup. The
-# dev-oidc-issuer stub writes each --token's file, logs the sign-in client it was given and the
-# mode of the secret file it would read, then logs "issuer listening url=..." as the real one
-# does, its own PID standing in for its port the same way, and stays alive until cleanup kills it. ---
+# dev-oidc-issuer stub writes each --token's file, logs the --code-flow client, the mode of the
+# secret file it would read and the --sign-in-as person, then logs "issuer listening url=..." as
+# the real one does, its own PID standing in for its port the same way, and stays alive until
+# cleanup kills it. ---
 cat >"${fake_bin_dir}/go" <<'EOF'
 #!/usr/bin/env bash
 out=""
@@ -138,17 +140,18 @@ DEVRELAY
   */dev-oidc-issuer)
     cat >"$out" <<'ISSUER'
 #!/usr/bin/env bash
-client="" secret_file="" domain="" default=""
+client="" secret_file="" sign_in_as=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --token)
       account_and_file="${2#*=}"
       printf 'fake-token-for-%s\n' "${account_and_file%%=*}" >"${account_and_file#*=}"
       ;;
-    --sign-in-client) client="$2" ;;
-    --sign-in-client-secret-file) secret_file="$2" ;;
-    --sign-in-domain) domain="$2" ;;
-    --sign-in-default) default="$2" ;;
+    --code-flow)
+      client="${2%%=*}"
+      secret_file="${2#*=}"
+      ;;
+    --sign-in-as) sign_in_as="$2" ;;
     *)
       echo "fake dev-oidc-issuer: unexpected argument $1" >&2
       exit 2
@@ -156,12 +159,13 @@ while [[ $# -gt 0 ]]; do
   esac
   shift 2 || exit 2
 done
-# The real issuer reads the sign-in secret at startup, so the file must be there by now.
+# The real issuer reads the code flow's client secret as it parses --code-flow, and refuses a
+# file it cannot read or one holding nothing but whitespace, so the file must be there by now.
 secret_mode="empty-or-missing"
 if [[ -s "$secret_file" ]]; then
   secret_mode="$(stat -c %a "$secret_file")"
 fi
-echo "fake issuer: sign-in client=$client secret-file=$secret_file secret-mode=$secret_mode domain=$domain default=$default" >&2
+echo "fake issuer: code-flow client=$client secret-file=$secret_file secret-mode=$secret_mode sign-in-as=$sign_in_as" >&2
 echo "dev-oidc-issuer: issuer listening url=http://127.0.0.1:$$" >&2
 exec sleep 999999
 ISSUER
@@ -353,15 +357,17 @@ assert_instance_isolated() {
     exit 1
   fi
   printf 'PASS: %s trusts its own issuer (%s), lists its caller, and exports the caller token that issuer wrote\n' "$label" "$issuer"
-  # The same issuer process signs people in for the broker's own client: the issuer and the broker
-  # name the same client, domain and secret file, a file in this run's own workdir that was there,
-  # non-empty and readable by its owner alone, before the issuer started; the secret itself is
-  # never printed; and the banner tells a person to approve a secret on this broker's own page.
+  # The same issuer process signs people in for the broker's own client: the issuer serves the
+  # code flow for the client and secret file the broker names, a file in this run's own workdir
+  # that was there, non-empty and readable by its owner alone, before the issuer started, and
+  # signs in the approver whose own domain the broker holds a signed-in person to; the secret
+  # itself is never printed; and the banner tells a person to approve a secret on this broker's
+  # own page.
   local workdir signin_file
   workdir="$(grep -o 'dev-broker: workdir [^ ]*' "$log_file" | head -n1 | cut -d' ' -f3 || true)"
   signin_file="${workdir}/signin-client-secret"
   if [[ -z "$workdir" ]] \
-    || ! grep -qF "fake issuer: sign-in client=dev-broker secret-file=${signin_file} secret-mode=600 domain=example.com default=ada@example.com" "$log_file" \
+    || ! grep -qF "fake issuer: code-flow client=dev-broker secret-file=${signin_file} secret-mode=600 sign-in-as=ada@example.com" "$log_file" \
     || ! grep -qF "fake broker: sign-in issuer=${issuer} client=dev-broker secret-file=${signin_file} domain=example.com" "$log_file"; then
     cat "$log_file" >&2
     echo "FAIL: $label's issuer and broker do not share one sign-in client with a 0600 secret in ${workdir:-its workdir}" >&2

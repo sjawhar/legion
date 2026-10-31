@@ -43,8 +43,8 @@ test("the pages a person approves broker requests on", async ({ browser }) => {
 
   // A secret request from a session on that machine: its Inbox row, its page on the broker, its
   // approval there. The operator signs in to the broker first, as one who approved anything that
-  // day has, so the row opens the page at once: the rig's issuer signs her in by the record's
-  // login_hint and returns her to the page.
+  // day has, so the row opens the page at once: the rig's issuer signs her in with no page to
+  // fill in and returns her to the page.
   const request = await startSecretRequest(rig.agentExec);
   await page.goto(request.approveUrl);
   await expect(broker.signedIn(page)).toBeVisible();

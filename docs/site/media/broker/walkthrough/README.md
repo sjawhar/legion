@@ -166,7 +166,7 @@ marks and the frames read):
 
 | At | Narration | On screen |
 | --- | --- | --- |
-| 0.1 s | This command just got a key that a person approved. | The request command, its line `waiting for alice@example.com to approve it in Dispatch: …`, and `DEMO_API_KEY reached this command: 31 characters, ending in 7f3a`, one still to 4.3 s. The key arrives live at 65.8 s. |
+| 0.1 s | This command just got a key that a person approved. | The request command, its line `waiting for alice@example.com to approve it …`, which named the Dispatch record page that take approved on, and `DEMO_API_KEY reached this command: 31 characters, ending in 7f3a`, one still to 4.3 s. The key arrives live at 65.8 s. |
 | 4.3 s | First, the machine logs in, and prints a code to enter in Dispatch. | `agent-secrets machine login` typed from 5.6 s; `machine login code: DVDE-3B5A` and `enter it at http://127.0.0.1:25187/credentials/machine` by 8.5 s. |
 | 12.0 s | There, alice types it into the machine login page. | Enter machine login code, with Needs you 1 beside Inbox; the code typed from 13.2 s; the sidebar reads Signed in as alice@example.com. |
 | 17.0 s | It names example-host-build. She approves it. | The record by 16.4 s: Identifiers example-host-build, Lifetime 7 days, Approver alice@example.com. Approve clicked at 21.0 s. |
@@ -174,7 +174,7 @@ marks and the frames read):
 | 27.2 s | Next, it registers a session for an agent. | `agent-secrets register --wait 10 --exec -- bash` typed from 27.3 s. |
 | 32.2 s | The broker calls this session an enrollment; its operator is alice. | `agent-secrets self` typed from 32.5 s; `enrollment_id: 91964d34-…`, `kind: session` and `operator: alice@example.com` by 34.3 s. |
 | 39.0 s | Now the session asks for the demo API key to run one command, and says why. | The request typed from 39.2 s with `--reason "Publish the docs preview for PR 42 with the demo API" -- ./check-demo-key.sh`. |
-| 48.4 s | Now it waits for a person. | `request b581a809-… is waiting for approval; waiting up to 30m0s` and `waiting for alice@example.com to approve it in Dispatch: http://127.0.0.1:25187/credentials/cb7e4384…`, by 48.1 s. |
+| 48.4 s | Now it waits for a person. | `request b581a809-… is waiting for approval; waiting up to 30m0s` and `waiting for alice@example.com to approve it …: http://127.0.0.1:25187/credentials/cb7e4384…`, that take's Dispatch record page, by 48.1 s. |
 | 51.1 s | The request is in alice's Inbox. | Inbox, Credential requests: Secret request DEMO_API_KEY just now, Needs you 1, from the clip's first frame. |
 | 55.0 s | Its page shows the enrollment, the lifetime, and the agent's reason. | The request page by 55.2 s: Enrollment `session · example-host-build:2881325:39550474 · alice@example.com`, Lifetime Until the session ends, Approver alice@example.com, the agent's stated reason. |
 | 62.3 s | She approves it. | Approve clicked at 63.0 s; `Approved just now`, the sidebar's count gone. |

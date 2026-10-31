@@ -138,7 +138,7 @@ which act under this machine's login. A usage error exits 2; every other failure
 | `no such machine login (NOT_FOUND)` or `no such grant (NOT_FOUND)` | No login or grant has that id, or the login is a service's, which `machine revoke` neither lists nor ends. | Copy the id from `machine list` or `grant list`. Revoke a service's login on Dispatch's machine-login page. |
 | `launcher credential ids are UUIDs (CREDENTIAL_ID_INPUT)` or `grant ids are UUIDs (GRANT_ID_INPUT)` | The id is not a UUID. | Copy the id from `machine list` or `grant list`. |
 
-## Approving and logging in, in Dispatch
+## Approving a request and logging a machine in
 
 | Message | Cause | Fix |
 | --- | --- | --- |
@@ -151,3 +151,15 @@ which act under this machine's login. A usage error exits 2; every other failure
 | `confirmation code does not match` (`CODE_MISMATCH`) | The decision carried a different code from the login it names. | Look the code up again and decide from that page. |
 | `this machine login's key already holds a live launcher credential` (`KEY_HOLDS_LIVE_CREDENTIAL`) | The machine signed two logins with one key, and one is already approved. | Deny this one; the machine is already logged in. |
 | No **Credential requests** section and no **Live grants** | Dispatch has no broker connected (`DISPATCH_AGENT_SECRETS_URL` is unset). | See [Operating the broker](/legion/broker/operate/#what-it-depends-on). |
+
+A secret request is decided on the broker's own page, signed in to the broker; these are what
+that page says when it refuses.
+
+| Message | Cause | Fix |
+| --- | --- | --- |
+| **Sign-in unavailable**: `The secrets broker could not reach its sign-in provider, …` (503) | The broker could not read the provider's discovery document. Machines are served as before. | Try again shortly. An operator reads `GET /signin/status`, whose `client_check` says `issuer_unreachable` ([What the sign-in is doing](/legion/broker/operate/#what-the-sign-in-is-doing)). |
+| **Sign-in refused**: `Only an account of the … Workspace may sign in to the secrets broker.` or `Your account's email address is not verified, …` | The account signed in is outside `BROKER_SIGNIN_DOMAIN`, or its email is unverified. | Sign in with your Workspace account. |
+| **Page expired**: `This page is more than an hour old, so nothing was decided. Open the request again.` | A decision is accepted for an hour from the moment the page was drawn. | Open the request again and decide it there. |
+| **Refused**: `This form was not made for your sign-in, …` or `This form names a request its page did not print, …` | The form came from another sign-in, another browser, or a page that never printed that request. | Open the request again and decide it there. |
+| **Not signed in**: `Your sign-in to the secrets broker has ended, so nothing was decided.` | The session lapsed (a day at most), was signed out, or an operator ran `broker end-sessions` for the login. | Sign in again from the request's page. |
+| `DECIDE_ON_BROKER_PAGE` (403), from a Dispatch tab's **Approve** or **Deny** on a secret request | Only the broker's own page decides a secret request; the refusal names that page. | Open the page the refusal names. A tab older than the Dispatch release whose Inbox links it can be reloaded. |

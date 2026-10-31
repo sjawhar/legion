@@ -27,13 +27,13 @@ DATABASE_URL=<url> bash docs/site/media/broker/rig.sh
 It builds the broker, `dev-oidc-issuer`, `agent-secrets` and `agent-secrets-helper`; creates the
 broker's database beside `DATABASE_URL`'s; starts `dev-oidc-issuer`, the local stand-in for a
 cluster's ServiceAccount token issuer, which keeps Dispatch's own token in a file, and for the
-Workspace's identity provider, serving the broker's sign-in client (whose secret the rig generates
-into its workdir) and signing in a request's approver, `alice@example.com`, with no page to fill
-in; starts the broker
+Workspace's identity provider, serving the broker's sign-in client through `--code-flow` (whose
+secret the rig generates into its workdir) and signing every authorization in as the request's
+approver, `alice@example.com`, through `--sign-in-as`, with no page to fill in; starts the broker
 on its development secrets file, which stands in for Secrets Manager and tags `DEMO_API_KEY`
 `owner=alice@example.com`, `tier=human`, with grants lasting until their session ends, trusting
-that issuer for tokens and sign-in (`BROKER_SIGNIN_*`) and listing Dispatch's account as its
-caller; starts the Dispatch e2e harness's three
+that issuer for tokens and sign-in (`BROKER_SIGNIN_*`, which the broker requires) and listing
+Dispatch's account as its caller; starts the Dispatch e2e harness's three
 servers on `DATABASE_URL` with the server pointed at the broker
 (`packages/dispatch/e2e/run-server.sh`'s `DISPATCH_E2E_AGENT_SECRETS_URL`, with Dispatch's token
 file in `DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), and empties its database; and starts the
