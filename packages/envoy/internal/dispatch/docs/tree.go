@@ -341,7 +341,7 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 
 // renderedReplica is the copy of a room's document its update observer renders and the room's
 // reads walk (readLive). ygo fires the observer after the transaction has released the document's
-// lock (sjawhar/ygo v1.51.3-sami.4, crdt/doc.go, transactInternal), and a walk of the live tree
+// lock (sjawhar/ygo v1.54.1-sami.2, crdt/doc.go, transactInternal), and a walk of the live tree
 // takes no lock (crdt/yxml.go), so a render or read of the live tree can walk it while another
 // transaction writes it: a torn walk reads a healthy document as one outside the schema, logs a
 // false WARN and counts the update as a content change. Only a holder of mu writes or walks the
@@ -502,6 +502,13 @@ func (r *renderedReplica) lockForUpdate() {
 // so the room's own record of what each update introduced moves forward in commit order. The
 // observer is the one holder of mu that waits for it, and the one that drains the log: every
 // committed update is classified exactly once, by whichever observer reaches the log first.
+//
+// Each update is applied with what its commit parked beside it (crdt.LoggedUpdate.Parked): the
+// structs and deletions the commit left waiting for something the room lacks, which ygo leaves
+// out of the update its observers are handed, as Yjs does. The replica is the room's copy, which
+// every read walks and which holds the room's state until the room is evicted, so it holds those
+// too: one that took the update alone has lost a peer's edit the room still holds, and shows the
+// document without it once the update that fills the gap arrives.
 func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedUpdate, changed bool, asks *observedAsks)) {
 	r.lockForUpdate()
 	defer r.mu.Unlock()
@@ -514,7 +521,7 @@ func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedU
 			r.recover(room, updates[i:], classify)
 			return
 		}
-		if err := crdt.ApplyUpdateV1(r.doc, update.Update, nil); err != nil {
+		if err := r.apply(update); err != nil {
 			slog.Error("dispatch: apply a committed update to the document's rendered copy", "room", room, "error", err)
 			r.recover(room, updates[i:], classify)
 			return
@@ -525,6 +532,19 @@ func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedU
 			classify(update, changed, asks)
 		}
 	}
+}
+
+// apply moves the replica through one logged commit: what the commit integrated, and then what it
+// parked, so the replica parks exactly what the room parked and integrates it when the room does.
+// The caller holds mu.
+func (r *renderedReplica) apply(update crdt.LoggedUpdate) error {
+	if err := crdt.ApplyUpdateV1(r.doc, update.Update, nil); err != nil {
+		return err
+	}
+	if len(update.Parked) == 0 {
+		return nil
+	}
+	return crdt.ApplyUpdateV1(r.doc, update.Parked, nil)
 }
 
 // changedBy classifies the update the replica has just applied and counted (consumed), published

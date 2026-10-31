@@ -168,7 +168,7 @@ func deltaTextNode(insert any, attributes crdt.Attributes, copyAttrs bool) (*Nod
 }
 
 // readUnsharedText is text's nodes as readLiveText reads them, without ygo's ToDelta: it is
-// ToDelta's loop (crdt/ytext.go, YText.ToDelta, sjawhar/ygo v1.51.3-sami.4) with its state, the
+// ToDelta's loop (crdt/ytext.go, YText.ToDelta, sjawhar/ygo v1.54.1-sami.2) with its state, the
 // buffered run's text and attribute snapshot, attrsDirty and the live attribute set, emitting each
 // delta ToDelta would emit as its node (deltaTextNode) instead, in the same order, so the first
 // node refused is the one readLiveText refuses. It takes no lock: its caller holds the only

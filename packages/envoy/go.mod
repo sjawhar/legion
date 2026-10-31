@@ -133,20 +133,37 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 )
 
-// The sjawhar/ygo fork is upstream ygo v1.51.2 plus fixes Dispatch depends on while each waits in
-// an upstream pull request (reearth/ygo #258, #260, #263, #266, #268, #269, #291, #331, #332; the fork
-// carries #258's fix as its own closed duplicate, #262): an iterative delete cascade and nested
-// reads, so the stack a delete or read needs does not grow with a tree a peer nested; the
-// transactional GC range search; a whole document state resolves its own dependencies before the
-// pending cap, through a dependency worklist rather than a re-scan per step; items merge only when
-// their right origins match, so a re-encoded document keeps its text order; the bundled stores keep
-// a large incremental update, and BroadcastUpdate and the cluster relay check one with the stores'
-// check rather than refusing it past a pending cap; Apply stamps a room with no peer idle when it
-// returns, so the idle sweep evicts a room only the API touched; a Hocuspocus-framed connection is
-// answered one SyncStatus for each SyncStep2 or Update it sends, so the browser's provider learns
-// which of its edits the room took; CloseRoom closes a browser that connects while it runs,
-// which it used to leave on the room it removed, where no later edit reached it; and a document
-// logs each committed transaction's update in commit order under its own lock (UpdateLog), so the
-// room's update observer measures each update against the room the commit before it left. A merged
-// update's skip parking the items after it (reearth/ygo#257) is upstream since v1.51.0.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.4
+// The sjawhar/ygo fork is upstream ygo v1.54.0 (composed on upstream main 201d3bc7) plus changes
+// Dispatch depends on while each waits in an upstream pull request (reearth/ygo #331, #332, #333,
+// #334, #335, #336, #338, #339, #340, #341, #342, #343, #344, #351) or has no pull request opened
+// yet (the fork's own feat/integrate-scan-budget, fix/crdt-clock-bounds and
+// fix/relay-parked-landed): a document logs each committed transaction's update in commit order
+// under its own lock (UpdateLog), and beside it what that commit parked, so the room's update
+// observer measures each update against the room the commit before it left, and a reader that
+// applies a logged update and then what it parked holds the room as that commit left it (#332); a
+// document can bound the conflict scans of a remote update, one bound for the document (#333) or
+// an allowance asked per update (feat/integrate-scan-budget), and then applies every remote update
+// whole or not at all; a transaction names the shared types it changed, and every shared type its
+// parent (#336); the pending cap can be lifted on a document already made, so a stored state over
+// it still loads, parked delete ranges are capped as parked items are, and a client's parked
+// ranges are retried only once its structs reach them (#334); a per-peer bound on the bytes
+// waiting in a peer's write queue (#342); CloseRoom closes a browser that connects while it runs,
+// which it used to leave on the room it removed (#331); an observed YText whose format value is a
+// map no longer panics with the document lock held (#335); awareness keeps its sender connected
+// (#338); a failed write closes the peer's connection (#339); the pending cap refuses an update
+// before it changes the document, and an apply that fails after part of it integrated drains the
+// pending queue on that part (#340); a struct sent again while it waits in the pending queue is
+// parked once (#344); Inject rebroadcasts the part of a relay update its room integrated (#341),
+// the structs that part parked with it (fix/relay-parked-landed); a peer the server closes while
+// its read loop runs has its buffered input dropped (#343); an update can no longer leave a
+// document holding a clock past 2^53-1 or a client past 2^55-1, which the state encodings cannot
+// carry, and a stored document that holds one is refused when it loads (fix/crdt-clock-bounds);
+// and OnTokenAuthContext is OnTokenAuth with the connection's request context, so two connections
+// to one room that send the same token are told apart (#351). The 1.51.3-sami.N line this
+// replaces was built on upstream v1.51.2, and the changes it carried that are not listed above -
+// an iterative delete cascade and nested reads, the transactional GC range search, the dependency
+// worklist a whole document state resolves through, items merging only when their right origins
+// match, the bundled stores' check of a large incremental update, Apply stamping a room with no
+// peer idle, and a SyncStatus for each SyncStep2 or Update a Hocuspocus-framed connection sends -
+// are upstream as of v1.54.0.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.54.1-sami.2
