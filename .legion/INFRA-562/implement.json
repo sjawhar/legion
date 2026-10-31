@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-562",
-  "completed": "2026-10-31T11:31:12Z",
+  "completed": "2026-10-31T14:12:21Z",
   "proof": [
     {
       "criterion": "Items 1 and 2: a message or mention whose request is cancelled after commit reaches its recipient without a retry; pending attempts a killed process left are sent by the other process under their own key",
@@ -227,6 +227,14 @@
       "observed": "The merge's only conflict was claims_doc_test.go: this branch's copy (sha256 8e06e83b\u2026) equals #2598's as merged (1a9095e6), and main's #2601 then changed it (431d7598\u2026). Main's file taken whole: `jj diff --from main@origin` on it is empty, so the PR no longer touches it. TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries PASS; both migration guard tests PASS (main's highest is still 0149_event_horizon, this PR's 0150-0153 unchanged); check-ci-filters 28 gates; go build, go vet and gofmt clean. delivery_live_hub_test.go keeps #2594's content, since #2594 is still open.",
       "headSha": "14e833d4c21d",
       "negativeControl": "Before the resolution the merge reported `packages/envoy/internal/broker/oauth/claims_doc_test.go 2-sided conflict` and nothing else (jj resolve --list); after it no conflict remains."
+    },
+    {
+      "criterion": "Review round 16: the head merges with main ff93d6c4 (text-only conflict in packages/envoy/cmd/dispatch/AGENTS.md; #2594 now on main), keeping both sides, so typecheck and pr-title get a fresh merge ref",
+      "surface": "the merged tree: a word-level diff of cmd/dispatch/AGENTS.md against main, the Dispatch migration guard on a rootless Postgres 17, check-ci-filters, and the unchanged-diff fingerprint",
+      "command": "git diff --no-index --word-diff=plain <(jj file show -r main@origin packages/envoy/cmd/dispatch/AGENTS.md) packages/envoy/cmd/dispatch/AGENTS.md; cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra562_merge?sslmode=disable go test -count=1 -v -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/; uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh",
+      "observed": "The one conflict held the branch's five test-hook rows (quiesce, disconnect, rotate, publish, slow) and main's change to the `/ws/doc/{room}` row beside them; the resolution keeps the branch's five rows and main's new `/ws/doc` row. The file's word-level diff against main has 29 changed lines, the same 29 the branch had against its fork point, so only the branch's own edits remain. delivery_live_hub_test.go now equals main's (#2594 landed), so it leaves the diff, and the fingerprint (61825754\u2026) equals the one at a8c1b638, before either borrowed test file. Both migration guard tests PASS (main's highest is still 0149, #2411 not landed, 0150-0153 kept); check-ci-filters 28 gates; go build, go vet and gofmt clean.",
+      "headSha": "0b95c3c74545",
+      "negativeControl": "Before the resolution jj resolve --list reported `packages/envoy/cmd/dispatch/AGENTS.md 2-sided conflict` and nothing else; after it none."
     }
   ],
   "filesChanged": [
@@ -236,7 +244,6 @@
     "merge with #2366 (7ac06a53): model/model.go conflict, api/comment_create.go wait predicate (claimant, ask followers, primary-document session authors), deliveryaudit_test.go compile fix; three tests in comment_mention_takeover_test.go (c63149d0)",
     "packages/dispatch/e2e/{message-agent,mention-composer,broadcast,agent-view-settings}.e2e.ts (the 12 s take-over window)",
     "packages/envoy/cmd/dispatch/{main.go,redeliver.go,settings.go,README.md,AGENTS.md}",
-    "packages/envoy/internal/dispatch/api/delivery_live_hub_test.go",
     "packages/envoy/internal/dispatch/api/{messages.go,message_delivery.go,comment_create.go,comment_delivery.go,broadcasts.go,envoy_resolve.go,delivery_resume.go (new),issue_route_status.go,test_hooks_fanout.go (new),events.go,delivery_live_socket.go,artifacts.go,agent_stream.go,routes_table.go,server.go,delivery.go,issue_claim.go,ask_transitions.go,ask_snooze.go}",
     "packages/envoy/internal/dispatch/store/migrations/0121_message_delivery_urgency, 0122_route_roster, 0123_github_rate_limits, 0124_delivery_run_warnings (.up.sql + .census.sql)",
     "packages/envoy/internal/dispatch/{envoy/client.go,redeliver/sweep.go,architecture/importer.go,githubapp/client.go,githubapp/deliveries.go,githubapp/ratelimit/ratelimit.go (new),githubapi/proxy.go,docs/approval_carry.go,docs/copied_asks.go,duty/exclusive.go,routes/router.go,store/pool.go,model/model.go}",
