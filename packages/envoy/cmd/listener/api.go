@@ -1105,11 +1105,14 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 //
 // A claim that carries if_claim_revision is conditional: it lands only while the role's claim
 // record is still at that revision, the one GET /v1/roles/<role> reported as claim_revision, and
-// 0 names a role with no record at all. A revision the bucket no longer holds is a 409 of its own
+// 0 names a role with no record at all. A revision the bucket no longer holds - when the claim is
+// read, or by the time its conditional write reaches the bucket - is a 409 of its own
 // (store.ErrRoleClaimRevisionMismatch), naming the role, the revision the bucket does hold as
-// claim_revision and its holder, and nothing is written. It is how a scheduler turns a read of a
-// role and the claim that follows into one decision, which neither last-claim-wins nor a soft
-// claim can do.
+// claim_revision and its holder. No claim record is written, so the role keeps the holder the
+// standing claim gave it; the claimant's own session registration is refreshed before any of
+// this, as it is on every claim this route takes, conditional or not. It is how a scheduler
+// turns a read of a role and the claim that
+// follows into one decision, which neither last-claim-wins nor a soft claim can do.
 //
 // logger is registerV1Routes's own. One decision of this route is logged with it: a soft claim that
 // takes a role from the predecessor it names because the claimant's entry or the predecessor's
@@ -1147,12 +1150,13 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 			// ignored otherwise.
 			PreviousSessionID string `json:"previous_session_id"`
 			// The revision GET /v1/roles/<role> reported as claim_revision when this
-			// claimant read the role, which makes the claim conditional on nothing
-			// having claimed the role since: the role bucket still holding that very
-			// revision. 0 names a role with no claim record at all, so a claim with
-			// if_claim_revision: 0 lands only while none exists. Any other revision in
-			// the bucket, a record where this names none, or none where this names one
-			// is 409 and writes nothing. Omitted (null), the claim is weighed by the
+			// claimant read the role. The claim lands only while the role bucket still
+			// holds that very revision, and 0 names a role with no claim record at all,
+			// so a claim with if_claim_revision: 0 lands only while none exists. Any
+			// other revision in the bucket, a record where this names none, or none
+			// where this names one is 409, and so is a claim that lost the race to a
+			// claim landing between this claimant's read and its write; no claim record
+			// is written. Omitted (null), the claim is weighed by the
 			// soft and last-claim-wins rules alone, exactly as before this field.
 			IfClaimRevision *uint64 `json:"if_claim_revision"`
 		}

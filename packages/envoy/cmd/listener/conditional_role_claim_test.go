@@ -30,6 +30,7 @@ import (
 type conditionalClaimRig struct {
 	t        *testing.T
 	registry *store.Registry
+	sessions *session.SessionRegistry
 	roleKV   nats.KeyValue
 	set      http.Handler
 	get      http.Handler
@@ -60,6 +61,7 @@ func newConditionalClaimRig(t *testing.T, sessionIDs ...string) *conditionalClai
 	return &conditionalClaimRig{
 		t:        t,
 		registry: registry,
+		sessions: sessions,
 		roleKV:   roleKV,
 		set:      roleSetHandler(deps, "test-machine", logging.New("test")),
 		get:      roleGetHandler(deps),
@@ -318,5 +320,42 @@ func TestARoleClaimWithNoIfClaimRevisionIsUnchanged(t *testing.T) {
 	}
 	if got := rig.holder(soft); got != holder {
 		t.Fatalf("role %s is held by %q after the refused soft claim, want %q", soft, got, holder)
+	}
+}
+
+// The lapsed holder, which is what a scheduler meets after a session exits cleanly and its
+// registration is gone: the lookup releases the claim and reports no revision, and a claim at
+// `if_claim_revision: 0` then takes the role, because that is the state the lookup described.
+func TestALookupThatReleasesALapsedClaimReportsNoRevisionAndZeroThenClaims(t *testing.T) {
+	const (
+		role     = "conditional-lapsed"
+		lapsed   = "ses_cond_lapsed"
+		claimant = "ses_cond_successor"
+	)
+	rig := newConditionalClaimRig(t, lapsed, claimant)
+
+	if recorder := rig.claim(fmt.Sprintf(`{"session_id":%q,"role":%q}`, lapsed, role)); recorder.Code != http.StatusOK {
+		t.Fatalf("the lapsing holder's claim: status %d, body %s; want 200", recorder.Code, recorder.Body.String())
+	}
+	if err := rig.sessions.Delete(context.Background(), lapsed); err != nil {
+		t.Fatalf("deregister %s: %v", lapsed, err)
+	}
+
+	status, body := rig.lookup(role)
+	if status != http.StatusNotFound || body["reason"] != "holder_lapsed" {
+		t.Fatalf("GET /v1/roles/%s with its holder deregistered: status %d, body %v; want 404 holder_lapsed", role, status, body)
+	}
+	if revision, ok := body["claim_revision"].(float64); !ok || revision != 0 {
+		t.Errorf("the lapsed answer reports claim_revision %v, want 0 for the claim it released", body["claim_revision"])
+	}
+	if got := rig.bucketRevision(role); got != 0 {
+		t.Fatalf("the role bucket still holds %s's claim at revision %d after the lookup released it", role, got)
+	}
+
+	if recorder := rig.claim(fmt.Sprintf(`{"session_id":%q,"role":%q,"if_claim_revision":0}`, claimant, role)); recorder.Code != http.StatusOK {
+		t.Fatalf("a claim at revision 0 of the released role: status %d, body %s; want 200", recorder.Code, recorder.Body.String())
+	}
+	if got := rig.holder(role); got != claimant {
+		t.Fatalf("role %s is held by %q, want %q", role, got, claimant)
 	}
 }

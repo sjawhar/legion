@@ -953,13 +953,15 @@ func (e *ErrRoleHeld) Error() string {
 	return fmt.Sprintf("role %s is held by %s", e.Role, e.Holder)
 }
 
-// ErrRoleClaimRevisionMismatch reports a conditional claim whose precondition the role bucket
-// refused: the caller named the revision it had read the role's claim at (SetRoleWithPrevious's
-// ifClaimRevision) and the bucket holds another one. Expected is the revision the caller named,
-// Actual the revision the claim was read at here - zero on either side names no claim record at
-// all - and Holder the session the stored claim names, empty when there is none. Nothing was
-// written: the precondition is weighed before the claimant's interest record is touched, so a
-// caller that retries reads a bucket this call left exactly as it found it.
+// ErrRoleClaimRevisionMismatch reports a conditional claim the role bucket did not hold the
+// revision for: the caller named the revision it had read the role's claim at
+// (SetRoleWithPrevious's ifClaimRevision) and the bucket holds another one, either when the claim
+// was read or by the time its conditional write reached the bucket. Expected is the revision the
+// caller named, Actual the revision the bucket holds as this call last read it - zero on either
+// side names no claim record at all - and Holder the session the stored claim names, empty when
+// there is none. No claim record was written: the role is left exactly as the claim that stands
+// left it, and a claim that lost the write's compare-and-swap rolled its own topic back unless
+// the winning claim names the claimant itself.
 type ErrRoleClaimRevisionMismatch struct {
 	Role     string
 	Expected uint64
@@ -1009,10 +1011,16 @@ func (r *Registry) SetRole(sessionID, machineID, role string, soft bool, superse
 // ifClaimRevision, when it is not nil, is the revision the caller read the role's claim at, and
 // this call takes the role only while the bucket still holds that very revision: another one, a
 // record where the caller expected none (ifClaimRevision 0), or none where it expected one is
-// *ErrRoleClaimRevisionMismatch and writes nothing at all, not even the claimant's interest
-// record. It is the precondition a scheduler needs that last-claim-wins and the soft rules cannot
-// give it: a read of the role and the claim that follows are one decision, and a claim that landed
-// between them refuses this one rather than overwriting it. A nil ifClaimRevision claims as before.
+// *ErrRoleClaimRevisionMismatch, and so is a claim that passed that check and then lost the
+// write's own compare-and-swap to a claim that landed in between. It writes no claim record
+// either way, so the role is left exactly as the claim that stands left it: the precondition is
+// weighed before the claimant's interest record is touched, and a claim that lost the
+// compare-and-swap rolls that record's topic back unless the winning claim names that same
+// session, whose record then keeps the lane topic of the role it now holds. It is the
+// precondition a scheduler needs that last-claim-wins and the
+// soft rules cannot give it: a read of the role and the claim that follows are one decision, and
+// a claim that landed between them refuses this one rather than being overwritten by it. A nil
+// ifClaimRevision claims as before.
 func (r *Registry) SetRoleWithPrevious(ctx context.Context, sessionID, machineID, role, previousSessionID string, soft bool, ifClaimRevision *uint64, supersedable ...string) (Interest, error) {
 	roleTopic := contracts.RoleTopicPrefix + role
 	oldClaim, entry, err := r.roleClaim(ctx, role)
@@ -1067,14 +1075,37 @@ func (r *Registry) SetRoleWithPrevious(ctx context.Context, sessionID, machineID
 	if err != nil {
 		current, holderErr := r.RoleClaim(ctx, role)
 		holder := current.HolderSessionID
-		if holderErr == nil && holder == sessionID {
+		// A conditional claim that lost the write's own compare-and-swap (nats.ErrKeyExists)
+		// lost it to a claim that landed after the read this call weighed its precondition on:
+		// the precondition failing a moment later, not a storage failure, and the caller is
+		// told exactly that rather than reading an unexplained failure or another session's
+		// name. A winner naming the claimant itself is no exception here, where it is one for
+		// an unconditional claim just below: the revision the caller sequenced its decision on
+		// is gone either way, and the claim that stands is not the one it made.
+		heldByClaimant := holderErr == nil && holder == sessionID
+		conditionalLoss := ifClaimRevision != nil && holderErr == nil && errors.Is(err, nats.ErrKeyExists)
+		if heldByClaimant && !conditionalLoss {
 			return item, nil
 		}
-		if rollbackErr := r.removeInterestTopics(ctx, sessionID, []string{roleTopic}); rollbackErr != nil {
-			return Interest{}, errors.Join(err, holderErr, rollbackErr)
+		// The topic goes back only where the role did not end up with this session. A
+		// conditional claim refused because the claim that won named the claimant itself
+		// leaves that record alone: it carries the lane topic of the role that session now
+		// holds, and taking it out would stop the fan-out to the holder.
+		if !heldByClaimant {
+			if rollbackErr := r.removeInterestTopics(ctx, sessionID, []string{roleTopic}); rollbackErr != nil {
+				return Interest{}, errors.Join(err, holderErr, rollbackErr)
+			}
 		}
 		if holderErr != nil {
 			return Interest{}, errors.Join(err, holderErr)
+		}
+		if conditionalLoss {
+			return Interest{}, &ErrRoleClaimRevisionMismatch{
+				Role:     role,
+				Expected: *ifClaimRevision,
+				Actual:   current.Revision,
+				Holder:   holder,
+			}
 		}
 		// A soft claim that lost the CAS race lost to a concurrent claimant;
 		// report that as held rather than as a storage failure.
