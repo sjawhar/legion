@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-314",
-  "completed": "2026-10-31T19:40:00Z",
+  "completed": "2026-10-31T23:05:00Z",
   "proof": [
     {
       "criterion": "A1, A2, A3, A4, A9, A10, A11: the broker serves its own approval page with a sign-in on its own origin; only the signed-in approver decides, and the decision is bound to what the page showed; nothing Dispatch holds decides; the four sign-in settings are required; a sign-in crosses processes and restarts",
@@ -99,6 +99,14 @@
       "observed": "ok. A pageAnswerers table names WriteRateLimited and the approval package, collect records such a call with that directory, and resolve reads it in that package's graph, so the 429 comes out of the method's own WriteHeader as a page answer. api.md's Authentication row for the broker sign-in session class reads '429 (an HTML page)<br>500 (an HTML page)' where it read 'none'; diff -r against the reference generated at 9558f6ed is that one cell and nothing else. errors.md is unchanged, deliberately: an HTML refusal carries no code, so RATE_LIMITED keeps the routes and classes that answer it, GET /signin/status among them. The docs site builds 43 pages with every internal link valid. The fake broker's 409 RECORD_TERMINAL is deleted and the browser suite is 53 passed, 1 pre-existing skip.",
       "headSha": "fcbb5469d6b0f57340c48f436515e0597adb61c3",
       "negativeControl": "TestTheSignInClassRefusesPastTheRateLimit, with routes.go and pages.go reverted and the test kept, fails with 'the Broker sign-in session class refuses [], want the approval page's 429' and the rendered-row assertion red beside it; both files restored, ok. That is the review's point that nothing in refgen's tests caught the loss."
+    },
+    {
+      "criterion": "The defect retro's second reading found in round 6's own delta: cmd/broker-refgen gained a sixth parsed directory (pageAnswerers sends it into internal/broker/approval, routes.go:34 and :664), while .github/scripts/ci_job_reads.py named five, so check-ci-filters.sh no longer proved the docs filter's approval glob is required, against the rule the check's own header states at :108-110",
+      "surface": "the repository's own CI filter gate, run over the working tree, and the gate's own test suite",
+      "command": "cd \"$LEGION_WORKSPACE\" && bash .github/scripts/check-ci-filters.sh ; then bash .github/scripts/check-ci-filters.test.sh",
+      "observed": "The gate passes: 'every ci.yaml filter matches every file its job reads (28 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)', with docs-pages.yaml's on.push.paths equal to the docs filter's 167 patterns. Its own test suite is 139 passed, 0 failed. BROKER_REFGEN_DIRS now holds internal/broker/approval, so cmd/broker-refgen/auth_test.go's readAPI rule covers it, and the docs job's static reads carry the matching entry citing routes.go:34,664, the two lines that name and resolve the cross-package answerer. ci.yaml's docs-filter comment names the sixth directory.",
+      "headSha": "130911b16c93",
+      "negativeControl": "With '- packages/envoy/internal/broker/approval/**' cut from the docs filter, the same gate exits 1 with 'docs: 3414 files, 12 uncovered (filter docs)' and 13 problems, each naming a file of that directory, among them docs-pages.yaml's own on.push.paths mismatch; the line restored, the gate passes again and jj diff shows ci.yaml differing from the base only in the comment."
     }
   ],
   "filesChanged": [
@@ -125,11 +133,13 @@
   "deviations": [
     "Spec v24, written during this round, dropped the broker's machine-login page: machine logins stay exactly as they are on main. Plan items W2 and W3 and the Settings move of W9 are not in this head, W4 refuses a secret request only, and agent-secrets-devrelay keeps machine-approve.",
     "packages/dispatch gets no changelog fragment: it has no .changie.yaml, so nothing folds one.",
-    "The narrated walkthrough is not re-recorded and no screenshot was retaken. The rig refuses to run in a Legion pod (sudo is absent, unshare is refused, and agent-secrets machine login answers PEER_UNIDENTIFIED on SO_PEERPIDFD), and the three broker-page screenshots already show the new page. rig.sh could not have worked before this change either, since it gave the broker no BROKER_SIGNIN_*; it is fixed here for a machine that can record."
+    "The narrated walkthrough is not re-recorded and no screenshot was retaken. The rig refuses to run in a Legion pod (sudo is absent, unshare is refused, and agent-secrets machine login answers PEER_UNIDENTIFIED on SO_PEERPIDFD), and the three broker-page screenshots already show the new page. rig.sh could not have worked before this change either, since it gave the broker no BROKER_SIGNIN_*; it is fixed here for a machine that can record.",
+    "Round 7 is a retro finding, not a review one: the retro's second reading found the stale read model, the architect sent the issue back to implementing for it (Envoy 84786d6e), and the round is narrowed to those three edits, the gate and its negative control. The retro's learning documents are not written yet; retro runs again after this round."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "Two packages cannot run in a Legion pod and are CI's at this head: internal/broker/helper (needs SO_PEERPIDFD, which gVisor refuses) and internal/broker/store's TestOpenSignsEveryNewConnectionInWithAFreshlyMintedToken (needs a Postgres with IAM authentication).",
     "Two forward merges were needed, not one: the first for the conflict GitHub reported, the second for the migration number main took. The second's only conflict was docs/kubernetes.md, where main's one-sentence-per-line reflow met this branch's paragraph; main's text was taken and the sentence re-authored on it."
-  ]
+  ],
+  "previousHandoff": "9b711caca07a14ef6d4f0e40d6a8458578ab8c4d"
 }
