@@ -2,49 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-557",
-  "completed": "2026-10-31T14:05:00Z",
-  "round": 20,
-  "testedHead": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
-  "handoffHead": "ca7de7a3499fa952188e792cd96dbd7872f63c64",
-  "scope": "Review round 13's fixes in 581c5f4b. The receive signal compares the term against the bus client's installed connection (ConnectedConn). The reconnect work runs on a goroutine of the client's, so a disconnect no longer waits behind the hooks. Also the four minor changes: README and changelog worst case 14.5 s, the never-installed clear removed, lease.go standDown with owesAckWait and no dead guard, and connectCallbacks.",
+  "completed": "2026-10-31T18:20:00Z",
+  "round": 21,
+  "testedHead": "f08b5cc2c5d0d5d65dc705bdaec6cf5cbd63a521",
+  "handoffHead": "5b597d6af1e7c1a4e0dd9362c2788c2fa347783e",
+  "scope": "The merge of main bringing #2592 (a soft claim takes a role only within one client instance). It conflicted in cmd/listener/api.go, internal/session/registry.go, registry_test.go and .dispatch/architecture/envoy-listener.md, and changed the branch-side diff, so this was a full round.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran each of the implementer's proofs. (1) TestAReplacedConnectionBehindAFailingHookReadsDownAndReleasesTheLease and TestConnectedReadsDownAtACutWhileTheReconnectHooksRun fail against 9c247139 ('reads up 50ms after the client replaced the connection'; 'still reads connected 1.003s after the link was cut while its reconnect hooks run') and pass 3 of 3 at 581c5f4b. For the listener test the 9c247139 tree needed a one-line ConnectedConn accessor, added to the control tree only. (2) The packet-dropping row passes 7 of 7 at 581c5f4b, slowest 12.005 s. (3) Multiprocess ok 737.232s (33 PASS, my new row included); internal/bus -race ok 366.090s; untagged ./cmd/listener ok 875.169s."
+    "how": "I re-ran the implementer's commands at f08b5cc2. Multiprocess ok 743.600s (33 PASS); untagged ./cmd/listener ok 887.727s; go test ./internal/session/... ok; CGO_ENABLED=1 go test -race ./internal/bus/... ok 362.723s. I also read the conflict resolutions with git show --remerge-diff f08b5cc2."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "A holder whose receive connection is cut while its reconnect hooks still run (the KV rewatch hook hanging and failing) releases the lease, and a standby delivers within the 15 s hard bound (review round 13, defect 2, on real processes).",
-      "surface": "two real envoy-listener processes signed in as the machine's nkey user under the rendered grant, on a real nats-server. pod-a's receive connection runs through the lane relay, which drops '$JS.API.STREAM.INFO.KV_envoy_roles' requests on it. That connection is cut until pod-a notices and then healed, so nats.go reconnects in place. One second later it is cut again with every new dial held (a route that drops packets). The row checks that the hooks had not failed when the second cut landed and had failed by its end.",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=7 -timeout 40m -run '^TestTwoPodsReceiveConnectionLostWhileItsReconnectHooksHangHandsOverWithin15s$' -v ./cmd/listener",
-      "observed": "7 of 7 PASS. pod-b took the lease 6.189-7.089 s after the second cut; in the 7-run batch the slowest message per run was 12.182, 12.448, 13.091, 12.208, 12.184, 13.055 and 12.175 s; a single run before the batch gave 12.162 s. Every message arrives once, and the messages after the second cut arrive in publish order.",
-      "headSha": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
-      "negativeControl": "The same row on 9c247139, -count=3: FAIL 3 of 3, '34 of 173', '34 of 173' and '43 of 181 messages reached their session later than 15s', slowest 18.2-19.1 s. There the disconnect waits behind the hanging hooks on nats.go's callback goroutine."
+      "criterion": "The merge keeps #2592's client-instance rule for soft claims, end to end with real clients, on this branch's listener.",
+      "surface": "#2592's own live smoke: natsd and the listener built from this working copy, with real Oh My Pi Envoy extension processes and real Claude Code channel servers.",
+      "command": "bun install --frozen-lockfile && cd packages/pi-envoy && bash scripts/smoke-role-takeover.sh",
+      "observed": "SMOKE ROLE TAKEOVER PASS: all 10 rows held against the listener built from this working copy (exit 0). The rows: R8 1 (reload and restart keep the role), 2 (fork), 3 (move), 4 (/clear hand-off), 5 (fork, move and hand-off refused 409 after another process resumed the predecessor), and A5 (the refused process stays registered and takes the role after the holder exits).",
+      "headSha": "f08b5cc2c5d0d5d65dc705bdaec6cf5cbd63a521",
+      "negativeControl": "Within the smoke, row 5's claims are refused 409 naming the predecessor, and A5's heartbeat re-assertion is refused 409 too."
     },
     {
-      "criterion": "On a route that drops packets, the round-18 row, unchanged, still hands over within 15 s.",
-      "surface": "two real envoy-listener processes; pod-a's receive connection cut and its new dials held (mpLaneRelay.blackholeNew).",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=7 -run '^TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s$' -v ./cmd/listener",
-      "observed": "7 of 7 PASS; slowest message per run 12.005, 11.95, 11.955, 11.944, 11.953, 11.971 and 11.952 s.",
-      "headSha": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
-      "negativeControl": "Round 19: on 7494c07d, before 6828bbb3, it fails 2 of 2 ('pod-a never released the lease…'; '11 of 151 messages … later than 15s')."
+      "criterion": "Every pod of one machine weighs a soft claim alike, also after a take-over (#2592's id is the client's, kept in the shared bucket).",
+      "surface": "two real envoy-listener processes of one machine under the rendered grant, on a real nats-server (throwaway multiprocess probe, not committed).",
+      "command": "GOWORK=off go test -tags multiprocess -count=1 -run '^TestR21Probe' -v ./cmd/listener (in a copy of f08b5cc2 with the probe file added)",
+      "observed": "Register ses_p1 (instance X) and claim r1 through pod-a: 200. ses_c1 (X) soft-claims r1 through pod-b: 200, and pod-a reads holder ses_c1. ses_c2 (Y) soft-claims r2 from ses_p2 (X) through pod-b: 409 'role r2 is held by ses_p2', and the holder stays ses_p2. SIGKILL pod-a, pod-b takes the lease, then ses_c3y (Y) soft-claims r3 from ses_p3, which registered through the dead pod: 409. ses_c3x (X): 200, holder ses_c3x.",
+      "headSha": "f08b5cc2c5d0d5d65dc705bdaec6cf5cbd63a521",
+      "negativeControl": "An unregistered session's soft claim of r3 through pod-b: 404 {\"error\":\"session is not registered\"}."
     },
     {
-      "criterion": "No regression: SIGKILL take-overs, the refused-reconnect row and the reconnect-inside-the-bound row, every multiprocess row, internal/bus under -race, and the listener suite.",
+      "criterion": "This PR's take-overs still hold after the merge: the packet-dropping row and the hung-rewatch-hook row, the whole multiprocess suite, internal/bus under -race, and the listener suite.",
       "surface": "real listener binaries (multiprocess); the package suites.",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 40m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; CGO_ENABLED=1 go test -race -count=1 ./internal/bus/...; DISPATCH_TEST_DATABASE_URL=<private Postgres 17 + pgvector on the issue volume> go test -count=1 ./cmd/listener",
-      "observed": "Multiprocess: 33 PASS, ok 737.232s, including TestTwoPodsReceiveConnectionLostHandsOverWithin15s, ...BackInsideTheBoundKeepsTheLease, ...LostToADroppingRoute... and ...WhileItsReconnectHooksHang..., and the SIGKILL rows; in TestTwoPodsSIGKILLHandsOverInOrderWithin15s all 31 messages arrive within 15 s and in order, slowest 6.19 s. Bus -race: ok 366.090s. Listener: ok 875.169s.",
-      "headSha": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
-      "negativeControl": "The two new unit tests fail against 9c247139: 'the client still reads connected 1.003s after the link was cut while its reconnect hooks run, want the cut read within 1s'; 'the receive signal reads up 50ms after the client replaced the connection the term is subscribed on'."
+      "command": "cd packages/envoy && go test -tags multiprocess -count=3 -run '^TestTwoPodsReceiveConnectionLost(WhileItsReconnectHooksHangHandsOverWithin15s|ToADroppingRouteReleasesTheLeaseWithin15s)$' -v ./cmd/listener; go test -tags multiprocess -count=1 -timeout 40m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; CGO_ENABLED=1 go test -race -count=1 ./internal/bus/...; DISPATCH_TEST_DATABASE_URL=<private Postgres 17 + pgvector on the issue volume> go test -count=1 ./cmd/listener",
+      "observed": "Packet-dropping row 3 of 3, slowest message 11.942/11.954/11.961 s. Hung-rewatch-hook row 3 of 3, take-over 6.165-6.246 s, slowest message 12.145/12.237/12.198 s. Multiprocess 33 PASS, ok 743.600s; in the main SIGKILL row all 32 messages arrive within 15 s and in order, slowest 6.181 s. Bus -race ok 362.723s. Listener ok 887.727s.",
+      "headSha": "f08b5cc2c5d0d5d65dc705bdaec6cf5cbd63a521",
+      "negativeControl": "Rounds 18-20: both rows fail before their fixes (7494c07d and 9c247139)."
     }
   ],
   "observations": [
-    "Fingerprint against 9c247139: one code commit (581c5f4b) and no merge of main. It touches only internal/bus (connect.go, nats.go, recovery.go, export_test.go, the new connected_cut_during_hooks_test.go, drain_test.go and five call-site test updates), cmd/listener (receive.go, lease.go, receive_signal_test.go, receive_test.go), README.md, AGENTS.md and the changie fragment. The round-18 row's code is unchanged.",
-    "The new row is committed in its own test commit above the code head, with mpLaneRelay.dropRequests and a frame-aware forward in the harness. That push carries test files, so it has no skip-checks line, and CI runs again at the new head.",
-    "The new row's slowest message, 13.09 s, leaves about 1.9 s of margin under 15 s. The take-over came at about 6.2 s in 5 runs and about 7.1 s in 2 runs, which fits the holder reading the signal once a renewal, as the 14.5 s worst case in the docs says.",
-    "Required checks at 581c5f4b, read 13:58Z: CI run 41204652777 has changes success and lint, typecheck, test, listener-multiprocess and 26 other lanes queued; ci-ok has no check run yet. pr-title succeeded in run 41204721295, and three earlier runs were cancelled. Not green when read."
+    "Merge fingerprint: the branch-side diff changed in api.go, registry.go, the architecture doc, AGENTS.md, api_pods_test.go and pods_address_test.go. Each resolution keeps both sides. roleSetHandler takes #2592's bucket read and claimantInstanceID, then this branch's Amend, which changes only MachineID and SelfSubscribed, so the client instance id stays. DeleteIfInstance uses decodeSessionEntry, which returns a zero entry on an error, as #2592 intended. Main's interest-reaper paragraph is not lost: the branch already carries it, extended, at line 13. The new test TestASoftClaimThroughAnotherPodWeighsTheClientInstanceNotThePod covers the two-pod case. Nothing else was added.",
+    "Required checks at f08b5cc2, read 18:17Z: CI run 41225608453 has changes queued, so no lane has started and ci-ok has no check run yet; PR Title run 41225701721 is queued, and two earlier runs were cancelled. Not green when read."
   ],
-  "evidence": "https://github.com/sjawhar/legion/pull/2404#issuecomment-6544324561",
-  "notes": "The control tree is in $TMPDIR/r20, not committed. The private Postgres in $TMPDIR/pg was stopped after the run."
+  "evidence": "https://github.com/sjawhar/legion/pull/2404#issuecomment-6547324574",
+  "notes": "The throwaway probe is in $TMPDIR/r21, not committed. bun install ran in the workspace (node_modules, ignored). The private Postgres was stopped after the run."
 }
