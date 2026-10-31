@@ -2,19 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-872",
-  "completed": "2026-10-31T07:48:30Z",
-  "round": 3,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "3df4b6201acc287d15ebefc4596488c47ff8e3ea",
+  "completed": "2026-10-31T14:58:00Z",
+  "round": 4,
+  "decision": "approved",
+  "reviewedCodeHead": "776e511c9c2dffe661853daa82d9e6b7349819b8",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/broker/oauth/claims_doc_test.go", "description": "The required check ci-ok is red at 3df4b620 (CI run 41170299514) because envoy-go fails TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries. Main broke it: the test fails at main d7e1daaaa (#2474, docs/kubernetes.md one sentence per line) and passes at d7e1daaaa~1. Not a defect of this change. Per the architect's route: take sjawhar/legion#2598's copy of this file byte for byte (head 930cad24) and change nothing else, or merge main if #2598 has merged; push once without skip-checks."}
-  ],
-  "proseFixPushed": "3df4b620: README step 1 and the changelog fragment say protect: false in the program (an apply writes the program's protect back to state, so a prior pulumi state unprotect does not last); the Go comment cites registerResource at context.go:1832-1835.",
-  "threads": "All 12 threads answered and resolved; the five round-2 threads accepted by reply at 3df4b620.",
-  "thermo": "Round 3 pair at b7b62c89 (code b6a02fb9): deep review and code quality found the protect step and the SDK citation, both fixed in 3df4b620; no other finding.",
-  "nextRound": "Check only that claims_doc_test.go equals #2598's (or that a main merge brings it), then approve once ci-ok and pr-title are green at the code head, naming the run.",
-  "ci": "Run 41170299514 at 3df4b620: pr-title, lint, test, envoy-infra-go, dispatch jobs green; envoy-go failure; ci-ok failure."
+  "keyFindings": [],
+  "mergeChecks": {
+    "branchDiffOnly": "The merge of main (776e511c, main parent cc3a30bb #2601) carries the same change set as 51bbfc8d's diff against its main parent for every code and doc file; claims_doc_test.go drops out of the diff because it now equals main's; the only other differences are the .legion/INFRA-872 handoffs.",
+    "claimsTest": "packages/envoy/internal/broker/oauth/claims_doc_test.go at 776e511c is byte-identical to main@origin's (after #2601).",
+    "mergeable": "GitHub reports MERGEABLE (mergeStateStatus BLOCKED only on the review).",
+    "aboveCodeHead": "776e511c..c8d79672 changes only .legion/INFRA-872/implement.json and test.json."
+  },
+  "ci": "Run 41197695346 attempt 1 at 776e511c: ci-ok success (14:56:33Z), envoy-go success, pr-title success (run 41197695519). No rerun was needed; TestAppendsOnDifferentIssuesDoNotWaitForEachOther passed in envoy-go.",
+  "threads": "All 12 review threads answered and resolved."
 }
