@@ -26,8 +26,9 @@ export interface ChannelConnectionStatus {
   readonly type: string
 }
 
-/** The NATS connection surface used by a channel session. */
-export interface ChannelForwarderConnection {
+/** The NATS connection surface a channel session holds. */
+export interface ChannelConnection {
+  /** Subscribes one subject; the session's relay subject is the only one it opens. */
   subscribe(subject: string): ChannelTopicSubscription
   publish(subject: string, data: Uint8Array): void
   flush(): Promise<void>
@@ -44,7 +45,7 @@ export interface ChannelForwarderConnection {
  * (`ConsumerDelivery`), so a topic is followed by registering it, and the only subscription the
  * process holds is that consumer's relay subject.
  */
-export interface ChannelForwarder {
+export interface ChannelTopics {
   /** Start following a topic; one already followed is left alone. */
   follow(topic: string): void
   /** Stop following the given topics, or every topic when the list is empty. */
@@ -57,7 +58,7 @@ export interface ChannelForwarder {
   close(): Promise<void>
 }
 
-export interface ChannelForwarderOptions {
+export interface ChannelTopicsOptions {
   /** How long close waits for a broker drain before closing outright. */
   readonly drainTimeoutMs?: number
 }
@@ -97,10 +98,10 @@ function report(what: string, error: unknown): void {
  * listener relays all of them from the session's own consumer, so nothing here subscribes: the
  * set is what a registration advertises and what the relay is filtered on.
  */
-export function createChannelForwarder(
-  connection: ChannelForwarderConnection,
-  options: ChannelForwarderOptions = {},
-): ChannelForwarder {
+export function createChannelTopics(
+  connection: ChannelConnection,
+  options: ChannelTopicsOptions = {},
+): ChannelTopics {
   const following = new Set<string>()
   const drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS
 

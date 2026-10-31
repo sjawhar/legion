@@ -1,7 +1,9 @@
 import { agentSubject } from "@legion/contracts";
 import { z } from "zod";
 import { type DedupeIdentity, DedupeIdentitySchema, renderInbound } from "./delivery";
-import { type DeliveryLedger, envoyNoticeText, subjectsOverlap } from "./delivery-ledger";
+import { type DeliveryLedger, envoyNoticeText } from "./delivery-ledger";
+import { messageFor } from "./errors";
+import { subjectsOverlap } from "./stream-topics";
 import {
   type DeliveryAnswer,
   type DeliveryRequest,
@@ -57,7 +59,7 @@ export const FOLLOW_CLOCK_ALLOWANCE_MS = 2_000;
 
 /**
  * How many deliveries of one frame may fail in the host (its `deliver` threw) before the frame is
- * answered `done` and its failure notice shown (`ReplayEngine.liveFailed`) instead of `nak`: a
+ * answered `done` and its failure notice shown (`DeliveryLedger.liveFailed`) instead of `nak`: a
  * frame the host can never show must not come back every second forever.
  */
 const RELAY_ATTEMPTS_BEFORE_FAILED = 3;
@@ -263,8 +265,6 @@ export interface ConsumerDelivery {
    * session once. Persists the snapshot when it changed.
    */
   answered(answer: DeliveryAnswer): void;
-  /** Whether a registration has been answered since the relay was opened or last closed. */
-  relaying(): boolean;
   /**
    * Whether the session followed `topic` before a frame stored at `storedAtMs`: a frame the
    * stream kept while the session was away acts on a topic only when it predates nothing
@@ -350,8 +350,6 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
   // A retention gap the registration answer told: the next frame's `Envoy-Gap` is the same one.
   let gapTold = false;
   let closed = false;
-  // Whether a registration has been answered since this relay was opened or last closed.
-  let relaying = false;
   // The snapshot the host last wrote (`persist`): an unchanged one is not offered again. A new
   // delivery holds nothing, which is what a host with no snapshot of its own stored.
   let persisted = JSON.stringify({ follows: {} } satisfies ConsumerDeliverySnapshot);
@@ -601,7 +599,6 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
       };
     },
     answered(answer) {
-      relaying = true;
       if (answer.stream_id !== "" && answer.stream_id !== streamID) {
         // The stream the registration asked to resume on is not the one the listener answered:
         // that stream was replaced, the consumer starts at the new stream's end, and what the
@@ -617,7 +614,6 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
       }
       persist();
     },
-    relaying: () => relaying,
     followedBefore(topic, storedAtMs) {
       const at = follows.get(topic);
       return at !== undefined && storedAtMs >= at - FOLLOW_CLOCK_ALLOWANCE_MS;
@@ -649,7 +645,6 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     },
     close() {
       closed = true;
-      relaying = false;
       queue.length = 0;
       for (const entry of [...entries.values()]) settle(entry, "nak");
       blocking = undefined;
@@ -691,4 +686,37 @@ export function inboundUnavailableNoticeText(why: string): string {
     detail:
       "The listener gave this session no durable consumer, which is the only path an Envoy message reaches it by, so it receives none. Everything else works, and the session registers again at every heartbeat; what the stream stored meanwhile arrives once a registration is accepted.",
   });
+}
+
+/** One session's outage report (`inboundUnavailable`). */
+export interface InboundUnavailable {
+  /**
+   * A registration was refused or failed: tells the session, through the host's `tell`, unless
+   * this outage already told it.
+   */
+  refused(error: unknown): void;
+  /** A registration was accepted: the next outage tells the session again. */
+  accepted(): void;
+}
+
+/**
+ * Says once per outage that the session receives nothing. The listener refuses a registration it
+ * can give no consumer, and the host registers again at every heartbeat, so a host that told the
+ * session each time would tell it every tick for as long as the outage lasts; one that never told
+ * it again would leave a second outage silent. `tell` takes the listener's own message
+ * (`messageFor`), which each host words with `inboundUnavailableNoticeText` and shows where it
+ * shows a gap notice.
+ */
+export function inboundUnavailable(tell: (why: string) => void): InboundUnavailable {
+  let told = false;
+  return {
+    refused(error) {
+      if (told) return;
+      told = true;
+      tell(messageFor(error));
+    },
+    accepted() {
+      told = false;
+    },
+  };
 }

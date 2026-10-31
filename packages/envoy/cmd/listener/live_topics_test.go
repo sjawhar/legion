@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -186,6 +187,20 @@ func publish(t *testing.T, client *bus.Client, item contracts.Envelope) {
 	}
 	if err := client.Conn.Flush(); err != nil {
 		t.Fatalf("flush the publish of %s: %v", item.Topic, err)
+	}
+}
+
+// publishTo publishes item to subject over core NATS and flushes, as a router that forwards an
+// envelope while it keeps its own topic does (bus.Client.PublishCoreContext).
+func publishTo(t *testing.T, client *bus.Client, subject string, item contracts.Envelope) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.PublishCoreContext(ctx, subject, item); err != nil {
+		t.Fatalf("publish %s to %s: %v", item.Topic, subject, err)
+	}
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush the publish to %s: %v", subject, err)
 	}
 }
 
@@ -517,9 +532,7 @@ func TestALiveLaneDropsAnInvalidEnvelope(t *testing.T) {
 	if err := publisher.Conn.Publish(topic, encoded); err != nil {
 		t.Fatalf("publish an envelope the wire rules refuse: %v", err)
 	}
-	if err := publisher.PublishCoreTo(topic, newEnvelope("agent", other, "an envelope naming another topic")); err != nil {
-		t.Fatalf("publish an envelope naming another topic: %v", err)
-	}
+	publishTo(t, publisher, topic, newEnvelope("agent", other, "an envelope naming another topic"))
 	valid := newEnvelope("agent", topic, "a valid envelope after them")
 	publish(t, publisher, valid)
 
@@ -545,9 +558,7 @@ func TestSessionConsumerRelaySubjectIsNotFannedOutByTheLiveLane(t *testing.T) {
 	seedUncapturedTopics(t, listener, uri, machineID, serving.sessionID, relayed, live)
 	publisher := connectPublisher(t, uri)
 
-	if err := publisher.PublishCoreTo(relayed, newEnvelope("agent", relayed, "a relay frame")); err != nil {
-		t.Fatalf("publish a frame on the relay subject: %v", err)
-	}
+	publishTo(t, publisher, relayed, newEnvelope("agent", relayed, "a relay frame"))
 	valid := newEnvelope("agent", live, "a live envelope after it")
 	publish(t, publisher, valid)
 

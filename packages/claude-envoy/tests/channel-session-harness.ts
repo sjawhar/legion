@@ -14,10 +14,10 @@ import { sessionConfigFile } from "@legion/envoy-client/session-settings"
 import type { EnvoyClient, SubscribeResult } from "@legion/envoy-client/transport"
 import type {
   ChannelBrokerMessage,
+  ChannelConnection,
   ChannelConnectionStatus,
-  ChannelForwarderConnection,
   ChannelTopicSubscription,
-} from "../src/channel-forwarder"
+} from "../src/channel-topics"
 import {
   CHANNEL_CAPABILITIES,
   type ChannelNotification,
@@ -34,7 +34,7 @@ interface Queue {
   closed: boolean
 }
 
-export class FakeNats implements ChannelForwarderConnection {
+export class FakeNats implements ChannelConnection {
   readonly published: Array<{ readonly subject: string; readonly data: Uint8Array }> = []
   readonly order: string[] = []
   readonly unsubscribed: string[] = []

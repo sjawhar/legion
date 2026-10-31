@@ -62,8 +62,8 @@ type listenerDeps struct {
 	// session it confirms in its dedupeCache (so the handlers do not push that key to it again), and
 	// writes each send's delivery line and delivery_status count through its logger and
 	// messagesDelivered, reading as the role lane's do, beside the route's own request record
-	// (request_record.go). The route never reads that dedupeCache, since the handlers also
-	// record a self-subscribed session whose push they skipped without hearing from it.
+	// (request_record.go). The route never reads that dedupeCache, since the handlers write it
+	// for pushes of their own, which are not the route's forwards.
 	delivery *listenerDeliveryHandlerConfig
 	// confirmed is the publish route's own record of each (dedupe key, session) the route stored a
 	// forward for, which only the route writes. A send skips a holder or recipient recorded there,

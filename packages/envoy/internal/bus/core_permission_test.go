@@ -54,8 +54,9 @@ func roleEnvelope(topic string) contracts.Envelope {
 
 // A core publish the server denies returns the denial, naming the subject, where core NATS itself
 // reports nothing to the publisher; a granted one after it is still accepted and delivered, so
-// the connection's recorded violation does not fail every later publish.
-func TestPublishCoreReportsAPublishNATSDenies(t *testing.T) {
+// the connection's recorded violation does not fail every later publish. Publish takes the core
+// transport for these role lanes (bus.UsesCoreTransport).
+func TestPublishReportsACorePublishNATSDenies(t *testing.T) {
 	client, subscriber := grantedClient(t)
 	received, err := subscriber.SubscribeSync(grantedRole)
 	if err != nil {
@@ -65,7 +66,7 @@ func TestPublishCoreReportsAPublishNATSDenies(t *testing.T) {
 		t.Fatalf("flush subscription: %v", err)
 	}
 
-	err = client.PublishCore(roleEnvelope(deniedRole))
+	err = client.Publish(roleEnvelope(deniedRole))
 	if !errors.Is(err, bus.ErrPublishDenied) || !errors.Is(err, natsgo.ErrPermissionViolation) {
 		t.Fatalf("denied publish returned %v, want ErrPublishDenied wrapping the permissions violation", err)
 	}
@@ -73,7 +74,7 @@ func TestPublishCoreReportsAPublishNATSDenies(t *testing.T) {
 		t.Fatalf("denied publish error %q does not carry the server's violation for %s", err, deniedRole)
 	}
 
-	if err := client.PublishCore(roleEnvelope(grantedRole)); err != nil {
+	if err := client.Publish(roleEnvelope(grantedRole)); err != nil {
 		t.Fatalf("granted publish after a denial returned %v", err)
 	}
 	if _, err := received.NextMsg(5 * time.Second); err != nil {
@@ -178,17 +179,17 @@ func TestAWindowWithSeveralDenialsConfirmsEveryGrantedSend(t *testing.T) {
 	}
 }
 
-// A role-lane forward the server denies returns the denial at once, never ErrReceiptTimeout,
-// which the listener treats as delivered to a live holder.
-func TestRequestCoreToReportsAForwardNATSDenies(t *testing.T) {
+// A role-lane forward the server denies returns the denial at once, before any wait: the listener
+// reports it delivery_failed rather than holding the role send open for its whole window.
+func TestStartRequestStoredToReportsAForwardNATSDenies(t *testing.T) {
 	client, _ := grantedClient(t)
 	started := time.Now()
-	err := client.RequestCoreTo(deniedRole, roleEnvelope(deniedRole), 2*time.Second)
-	if !errors.Is(err, bus.ErrPublishDenied) || errors.Is(err, bus.ErrReceiptTimeout) {
+	_, err := client.StartRequestStoredTo(deniedRole, roleEnvelope(deniedRole), 2*time.Second)
+	if !errors.Is(err, bus.ErrPublishDenied) {
 		t.Fatalf("denied forward returned %v, want ErrPublishDenied", err)
 	}
 	if elapsed := time.Since(started); elapsed >= 2*time.Second {
-		t.Fatalf("denied forward waited %s, the whole receipt window", elapsed)
+		t.Fatalf("denied forward waited %s, the whole forward window", elapsed)
 	}
 }
 

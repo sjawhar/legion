@@ -144,7 +144,7 @@ describe("the frames a session was shown", () => {
     expect(ledger.delivered({ event_id: "evt-elsewhere" })).toBe(false);
   });
 
-  test("come back from a restore, without the entries 72 hours old", () => {
+  test("come back from a restore, without the entries 72 hours old", async () => {
     ledger.restore({
       state: { topics: [AGENT, ISSUE] },
       ledger: [
@@ -155,7 +155,11 @@ describe("the frames a session was shown", () => {
 
     expect(ledger.delivered({ event_id: "evt-fresh" })).toBe(true);
     expect(ledger.delivered({ event_id: "evt-stale" })).toBe(false);
-    expect(ledger.state()).toEqual({ topics: [AGENT, ISSUE] });
+    // The restored state is the ledger's own now: with the host following those same topics,
+    // the next followed change writes no state again.
+    host.followed = [AGENT, ISSUE];
+    await ledger.followedChanged();
+    expect(host.writes.at(-1)?.state).toBeUndefined();
   });
 });
 

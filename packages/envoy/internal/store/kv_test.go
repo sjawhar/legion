@@ -189,7 +189,7 @@ func TestMergeForUpsert_SuccessfulGetMergesTopics(t *testing.T) {
 	}
 	item := Interest{SessionID: "ses_x", MachineID: "m1", Dir: "/workspace"}
 
-	result, err := mergeForUpsert(cur, nil, item, []string{"topic.c"}, 42, nil)
+	result, err := mergeForUpsert(cur, nil, item, 42, InterestPlan{Topics: []string{"topic.c"}})
 	if err != nil {
 		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestMergeForUpsert_ErrKeyNotFoundCreatesNewEntry(t *testing.T) {
 		Dir:       "/workspace",
 	}
 
-	result, err := mergeForUpsert(Interest{}, natsgo.ErrKeyNotFound, item, []string{"topic.fresh"}, 100, nil)
+	result, err := mergeForUpsert(Interest{}, natsgo.ErrKeyNotFound, item, 100, InterestPlan{Topics: []string{"topic.fresh"}})
 	if err != nil {
 		t.Fatalf("ErrKeyNotFound must be treated as new entry, not propagated: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestMergeForUpsert_TransientErrorRefusesToWrite(t *testing.T) {
 		Dir:       "/workspace",
 	}
 
-	_, err := mergeForUpsert(Interest{}, transient, item, []string{"topic.heartbeat"}, 99, nil)
+	_, err := mergeForUpsert(Interest{}, transient, item, 99, InterestPlan{Topics: []string{"topic.heartbeat"}})
 	if err == nil {
 		t.Fatal("transient KV error MUST be returned, not silently swallowed")
 	}
@@ -261,7 +261,7 @@ func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) 
 	// listener config and matches cur, but heartbeat body sends only agent topic.
 	item := Interest{SessionID: "ses_x", MachineID: "example-host-mx", Dir: "/home/ubuntu/example-repo/rl-eval/default"}
 
-	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.agent.ses_x"}, 200, nil)
+	result, err := mergeForUpsert(cur, nil, item, 200, InterestPlan{Topics: []string{"notifications.agent.ses_x"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestMergeForUpsert_DropsStoredTopicsReachingAPrivateStreamSubject(t *testin
 		"another project's":        {roles: []string{"legion-OTHER-controller"}, want: kept},
 		"the project's controller": {roles: []string{"legion-ACME-controller"}, want: append(slices.Clone(kept), "notifications.legion.ACME.controller")},
 	} {
-		result, err := mergeForUpsert(cur, nil, item, registered, 7, tc.roles)
+		result, err := mergeForUpsert(cur, nil, item, 7, InterestPlan{Roles: tc.roles, Topics: registered})
 		if err != nil {
 			t.Fatalf("%s: mergeForUpsert returned unexpected error: %v", name, err)
 		}
@@ -1178,6 +1178,61 @@ func TestRemove_ColdCacheReadsFromKV(t *testing.T) {
 	}
 	if len(item.Topics) != 2 || item.Topics[0] != "topic.a" || item.Topics[1] != "topic.c" {
 		t.Fatalf("expected [topic.a topic.c], got %v", item.Topics)
+	}
+}
+
+// A heartbeat whose body leaves out the controller notice lane its row holds keeps that lane in
+// both the plan and the row written from it: PlanInterest reads the session's roles for the
+// stored row as well as for the topics the registration names, so the filter the listener builds
+// from the plan and the row its write stores are one set. Until INFRA-771's review the route read
+// the roles for the body's topics alone, so such a heartbeat dropped the lane from the filter
+// while the write, reading them again for the row, kept it in the row.
+func TestPlanInterestKeepsTheControllerLaneAHeartbeatOmits(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	reg, err := Open(conn, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	const (
+		sessionID = "ses_controller"
+		role      = "legion-acme-controller"
+		lane      = "notifications.legion.acme.controller"
+	)
+	own := contracts.AgentSubject(sessionID)
+	if _, err := reg.SetRole(sessionID, "m1", role, false); err != nil {
+		t.Fatalf("SetRole: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		held, err := reg.RolesHeldBy(sessionID)
+		return err == nil && slices.Contains(held, role)
+	})
+	ctx := context.Background()
+	registered, err := reg.PlanInterest(ctx, sessionID, []string{lane, own})
+	if err != nil {
+		t.Fatalf("plan the registration that names the lane: %v", err)
+	}
+	if !slices.Contains(registered.Topics, lane) {
+		t.Fatalf("planned topics %v, want the lane %s the holder registered", registered.Topics, lane)
+	}
+	if _, err := reg.UpsertPlanned(ctx, Interest{SessionID: sessionID, MachineID: "m1"}, registered); err != nil {
+		t.Fatalf("write the registration: %v", err)
+	}
+
+	heartbeat, err := reg.PlanInterest(ctx, sessionID, []string{own})
+	if err != nil {
+		t.Fatalf("plan the heartbeat that omits the lane: %v", err)
+	}
+	if !slices.Contains(heartbeat.Topics, lane) {
+		t.Fatalf("planned topics %v after a heartbeat that omits the lane, want it kept: they are the consumer's filter", heartbeat.Topics)
+	}
+	stored, err := reg.UpsertPlanned(ctx, Interest{SessionID: sessionID, MachineID: "m1"}, heartbeat)
+	if err != nil {
+		t.Fatalf("write the heartbeat: %v", err)
+	}
+	if !slices.Equal(stored.Topics, heartbeat.Topics) {
+		t.Fatalf("stored topics %v, want the planned %v: the row and the filter built from the plan must name one set", stored.Topics, heartbeat.Topics)
 	}
 }
 

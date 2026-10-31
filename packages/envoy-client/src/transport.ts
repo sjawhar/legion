@@ -2,6 +2,7 @@ import { type Envelope, EnvelopeSchema } from "@legion/contracts";
 import { z } from "zod";
 import { normalizeEnvoyUrl } from "./envoy-settings";
 import { machineID } from "./machine";
+import { streamDeliversNothing } from "./stream-topics";
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const RETRY_DELAY_MS = 250;
@@ -106,11 +107,16 @@ export type Interest = z.infer<typeof InterestWireSchema>;
 export type DeliveryAnswer = z.infer<typeof DeliveryAnswerWireSchema>;
 
 /**
- * The registration's answer: the interest, and the delivery it was given. Every answer carries
- * one; a registration the listener can give no consumer is refused, never answered
- * (`parseSubscribeAnswer`).
+ * The registration's answer: the interest, and the consumer the listener gave the session. A
+ * registration that names no serving port carries one or is refused (`parseSubscribeAnswer`);
+ * only a serving-port registration the listener could give no consumer is answered without one,
+ * its messages pushed to its port instead (`sessionDelivery.register` in
+ * packages/envoy/cmd/listener), which is the shape `subscribeServingPort` answers.
  */
 export type SubscribeResult = Interest & { readonly delivery: DeliveryAnswer };
+
+/** What a serving-port registration is answered (`subscribeServingPort`). */
+export type ServingPortSubscribeResult = Interest & { readonly delivery?: DeliveryAnswer };
 
 /** Where a session's stream sequence was up to: what a new consumer may be seeded from. */
 export interface ResumePoint {
@@ -166,6 +172,20 @@ export function parseSubscribeAnswer(body: unknown): SubscribeResult {
 }
 
 /**
+ * Reads a serving-port registration's answer, which the listener pushes to rather than relays:
+ * it carries the consumer this listener could give the session, and none when it could give it
+ * none, where every other registration would have been refused. A `delivery` field this build
+ * cannot read is still a failure: the listener answered something about delivery that this build
+ * would act on wrongly.
+ */
+export function parseServingPortSubscribeAnswer(body: unknown): ServingPortSubscribeResult {
+  const raw =
+    typeof body === "object" && body !== null && "delivery" in body ? body.delivery : undefined;
+  if (raw === undefined || raw === null) return InterestWireSchema.parse(body);
+  return parseSubscribeAnswer(body);
+}
+
+/**
  * Live NATS subscriptions and the listener's registry can disagree after a reconnect or a
  * human removal; this reports both, and which side knows each topic. Registry topics come
  * first in insertion order, then the live-only ones.
@@ -208,11 +228,26 @@ export type SubscribeInput = {
   readonly plugin: { readonly name: string; readonly version: string };
 };
 
+/**
+ * A registration of a session the listener pushes to on a serving port (`port` above 0). It asks
+ * for a consumer like any other, and is answered one when this listener can give it one, but it
+ * is not refused when it cannot: the port is the session's other way in
+ * (`subscribeServingPort`).
+ */
+export type ServingPortSubscribeInput = SubscribeInput & { readonly port: number };
+
 export type UnsubscribeInput = {
   readonly sessionID: string;
   readonly topics: readonly string[];
 };
 
+/**
+ * The concrete subjects a registration carries for each topic: a `<base>.>` wildcard, and its
+ * base as a subject of its own when the stream stores a publish to that base. A base no stream
+ * subject captures is left out: nothing can be published on it, and a registration naming it is
+ * refused whole by the listener (`streamDeliversNothing`), which would leave the session with no
+ * interest at all.
+ */
 export function expandSubscriptionTopics(topics: readonly string[]): readonly string[] {
   const expanded = new Set<string>();
   for (const topic of topics) {
@@ -227,7 +262,7 @@ export function expandSubscriptionTopics(topics: readonly string[]): readonly st
         `cannot expand Envoy wildcard topic "${topic}": its concrete base must have at least two non-empty segments`
       );
     }
-    expanded.add(base);
+    if (!streamDeliversNothing(base)) expanded.add(base);
     expanded.add(topic);
   }
   return [...expanded];
@@ -348,6 +383,12 @@ export class EnvoyApiError extends Error {
 
 export type EnvoyClient = {
   readonly subscribe: (input: SubscribeInput) => Promise<SubscribeResult>;
+  /** Registers a session the listener pushes to on its serving port
+   *  (`ServingPortSubscribeInput`), which is answered a consumer only when this listener can
+   *  give it one. */
+  readonly subscribeServingPort: (
+    input: ServingPortSubscribeInput
+  ) => Promise<ServingPortSubscribeResult>;
   readonly unsubscribe: (input: UnsubscribeInput) => Promise<void>;
   readonly getInterest: (sessionID: string) => Promise<Interest>;
   readonly send: (input: SendInput) => Promise<SendResult>;
@@ -419,37 +460,39 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       options
     );
 
+  // What POST /v1/interests/subscribe carries. Both registrations send the same body and differ
+  // only in how strictly they read the answer (`parseServingPortSubscribeAnswer`).
+  const subscribeBody = (input: SubscribeInput) => ({
+    session_id: input.sessionID,
+    dir: input.directory,
+    topics: expandSubscriptionTopics(input.topics),
+    port: input.port,
+    title: input.title,
+    ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
+    driving: input.driving,
+    ...(input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed }),
+    delivery: input.delivery,
+    // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
+    // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
+    // re-subscribes on each tick). The listener stores it separately from the registering
+    // listener's own machine_id, and the session's owner reaches a serve-port session at
+    // it unless the session runs on the owner's machine (registered through it, or this
+    // value is the owner's machine id) and the owner has a host bridge.
+    // The owner is the listener the session's stored subscription names, else the one it
+    // registered through; only the owner delivers to the session, and any other listener
+    // leaves inbox messages to it silently. With a port, a value that is not a host name
+    // or IP address is refused with 400 (expected: ["host"]).
+    host: machineID(),
+    plugin: input.plugin.name,
+    plugin_version: input.plugin.version,
+  });
+
   return {
     subscribe: async (input) =>
-      parseSubscribeAnswer(
-        JSON.parse(
-          await post("/v1/interests/subscribe", {
-            session_id: input.sessionID,
-            dir: input.directory,
-            topics: expandSubscriptionTopics(input.topics),
-            port: input.port,
-            title: input.title,
-            ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
-            driving: input.driving,
-            ...(input.selfSubscribed === undefined
-              ? {}
-              : { self_subscribed: input.selfSubscribed }),
-            delivery: input.delivery,
-            // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
-            // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
-            // re-subscribes on each tick). The listener stores it separately from the registering
-            // listener's own machine_id, and the session's owner reaches a serve-port session at
-            // it unless the session runs on the owner's machine (registered through it, or this
-            // value is the owner's machine id) and the owner has a host bridge.
-            // The owner is the listener the session's stored subscription names, else the one it
-            // registered through; only the owner delivers to the session, and any other listener
-            // leaves inbox messages to it silently. With a port, a value that is not a host name
-            // or IP address is refused with 400 (expected: ["host"]).
-            host: machineID(),
-            plugin: input.plugin.name,
-            plugin_version: input.plugin.version,
-          })
-        )
+      parseSubscribeAnswer(JSON.parse(await post("/v1/interests/subscribe", subscribeBody(input)))),
+    subscribeServingPort: async (input) =>
+      parseServingPortSubscribeAnswer(
+        JSON.parse(await post("/v1/interests/subscribe", subscribeBody(input)))
       ),
     unsubscribe: async (input) => {
       await post("/v1/interests/unsubscribe", {

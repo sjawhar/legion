@@ -332,8 +332,9 @@ readonly session_port
       const raw = codec.decode(message.data);
       appendFileSync(output, `${raw}\n`);
       // The fake session holds the role below, and the publish route answers a role message only
-      // once its holder confirms the forward to its agent subject with an empty receipt, as the
-      // plugins do for a frame whose envelope names another topic (envoy-client expectsLaneReceipt).
+      // once its holder confirms the forward to its agent subject with an empty receipt. No
+      // released plugin answers one any more (INFRA-771: a session takes its messages from its
+      // own consumer), so this capture stands in for the holder the route waits on.
       if (message.reply && message.subject.startsWith("notifications.agent.")) {
         let topic;
         try {

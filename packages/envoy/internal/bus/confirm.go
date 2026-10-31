@@ -138,7 +138,7 @@ func observe(conn *nats.Conn) connState {
 // between the two observations. nats.go exposes no error counter to tell that from no change. Both
 // connections that publish on core subjects carry subscriptions: Dispatch's carries its JetStream
 // reply inboxes and the webhook sweeper's KV watch, and the listener's carries its notification
-// stream consumer and the receipt inboxes of its role forwards. The role-lane subscription whose
+// stream consumer and the reply inboxes of its role forwards. The role-lane subscription whose
 // handler forwards runs on a connection of its own under limits far above any backlog its handler
 // can build (ConnectRoleLane), so it reports a slow consumer only under a flood no measured load
 // comes near; every other subscription keeps nats.go's defaults (500,000 messages, 64 MiB per

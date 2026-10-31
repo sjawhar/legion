@@ -1,10 +1,4 @@
-import {
-  AGENT_TOPIC_PREFIX,
-  DELIVERY_DUPLICATE_WINDOW_MS,
-  dedupeKeyNamesItsEvent,
-  LEGION_NOTICE_TOPIC_PREFIX,
-  ROLE_TOPIC_PREFIX,
-} from "@legion/contracts";
+import { DELIVERY_DUPLICATE_WINDOW_MS, dedupeKeyNamesItsEvent } from "@legion/contracts";
 import { encode } from "@toon-format/toon";
 import { z } from "zod";
 import {
@@ -15,7 +9,6 @@ import {
 } from "./delivery";
 import { subscriptionRemovedTopics } from "./dispatch-subscribe";
 import { messageFor } from "./errors";
-import { EXCEPTION_TOPIC_PREFIX } from "./stream-topics";
 
 /**
  * How long the ledger remembers a frame, from when it recorded it. The stream keeps a message no
@@ -188,8 +181,6 @@ export interface DeliveryLedger {
    * back after longer still follows its topics. Work in flight for before is dropped.
    */
   restore(snapshot: LedgerSnapshot): void;
-  /** The current state, as the next write would persist it. */
-  state(): LedgerState;
 }
 
 interface Ledger {
@@ -357,7 +348,6 @@ export function createDeliveryLedger(options: DeliveryLedgerOptions): DeliveryLe
       writtenState = snapshot.state === undefined ? undefined : stateJSON();
       unwritten = [];
     },
-    state: () => JSON.parse(stateJSON()) as LedgerState,
   };
 }
 
@@ -396,91 +386,16 @@ export function envoyNoticeText(fields: Readonly<Record<string, string>>): strin
   return encode({ envoy: fields });
 }
 
-/**
- * The stream subjects whose topics carry one agent session's private payload: each session's
- * inbox, the Legion daemon's notices for a project's controller, and a failed delivery's report
- * on a session's subject (a session's own lane included).
- */
-const PRIVATE_STREAM_SUBJECTS = [
-  `${AGENT_TOPIC_PREFIX}>`,
-  `${LEGION_NOTICE_TOPIC_PREFIX}>`,
-  `${EXCEPTION_TOPIC_PREFIX}${AGENT_TOPIC_PREFIX}>`,
-];
-
-/** Whether some subject matches both patterns, under NATS wildcard rules. */
-export function subjectsOverlap(a: string, b: string): boolean {
-  const aTokens = a.split(".");
-  const bTokens = b.split(".");
-  for (let index = 0; index < aTokens.length && index < bTokens.length; index += 1) {
-    const aToken = aTokens[index];
-    const bToken = bTokens[index];
-    if (aToken === ">" || bToken === ">") return true;
-    if (aToken !== "*" && bToken !== "*" && aToken !== bToken) return false;
-  }
-  return aTokens.length === bTokens.length;
-}
-
-/**
- * Whether a topic reaches a private stream subject other than `ownAgentSubject`: it overlaps one
- * under NATS wildcard rules, so another session's agent subject, a failed-delivery lane
- * (`notifications.envoy.exceptions.notifications.agent.<id>`, the session's own included), the
- * Legion controller lane (`notifications.legion.>`), and every wildcard reaching any of them
- * (`notifications.agent.*`, `notifications.>`, `notifications.*.<x>`, `notifications.envoy.>`)
- * count, and it is not the session's own agent subject as one literal subject. This mirrors the
- * listener's rule, `privateStreamSubjects` and `ReachesPrivateStreamSubject` in
- * packages/envoy/internal/bus/stream.go: the listener stores no such interest, since it would
- * read another session's private payload, so a host never registers one.
- */
-export function reachesPrivateStreamSubject(ownAgentSubject: string, topic: string): boolean {
-  if (!PRIVATE_STREAM_SUBJECTS.some((subject) => subjectsOverlap(topic, subject))) return false;
-  // A session id holding `*` or `>` makes a wildcard of its "own" agent subject, no session's alone.
-  return topic !== ownAgentSubject || /[*>]/.test(ownAgentSubject);
-}
-
-/**
- * The subjects a session follows, which are what it registers with the listener: its own agent
- * subject, then every topic it follows but a role's and one reaching a private stream subject.
- * Role messages stay live only, whether on a role lane or on a subject the host holds for a role
- * (`heldForRole`); another session's agent subject (a fork's parent, until the host closes it), a
- * failed-delivery lane, the Legion controller lane, or a wildcard reaching one of them, is not
- * this session's to follow, and the listener would refuse it (`reachesPrivateStreamSubject`).
- */
-export function replayFollowedSubjects(
-  ownAgentSubject: string,
-  topics: Iterable<string>,
-  heldForRole: (topic: string) => boolean = () => false
-): string[] {
-  const followed = [...topics].filter(
-    (topic) =>
-      !topic.startsWith(ROLE_TOPIC_PREFIX) &&
-      !reachesPrivateStreamSubject(ownAgentSubject, topic) &&
-      !heldForRole(topic)
-  );
-  return [...new Set([ownAgentSubject, ...followed])];
-}
-
-/**
- * The topics a persisted state says the session followed that a restore follows again, so a
- * session back after the listener reaped its interests still follows them and takes what its
- * consumer kept for them: every subject of the state but agent subjects (the host opens its own,
- * and another's is not its to follow) and role lanes (live only, held through a role's claim). An
- * unfollowed topic is absent from the newest state, so it stays unfollowed.
- */
-export function rememberedTopics(state: LedgerState | undefined): string[] {
-  return (state?.topics ?? []).filter(
-    (topic) => !topic.startsWith(AGENT_TOPIC_PREFIX) && !topic.startsWith(ROLE_TOPIC_PREFIX)
-  );
-}
-
 /** What `closeReplayedRemoval` asks of the host. */
 export interface ReplayedRemovalHost {
   /** The session the frame is delivered for: a removal naming another session closes nothing. */
   readonly sessionID: string;
   /**
-   * Whether the session followed `topic` before this frame was stored
-   * (`ConsumerDelivery.followedBefore`), so a removal stored before a later follow closes nothing.
+   * The relay delivering the frame, when it is the one open for `sessionID`; undefined when the
+   * host holds none for it, which closes every topic the removal names: with no follow times to
+   * read, nothing says the session followed a topic only after the frame was stored.
    */
-  followedBefore(topic: string): boolean;
+  readonly relay: RelayFollowClock | undefined;
   /** Stops following `topic`; false when the session did not follow it, so nothing closed. */
   close(topic: string): boolean;
   /**
@@ -493,22 +408,27 @@ export interface ReplayedRemovalHost {
   followedChanged(): Promise<void>;
 }
 
+/** What the removal reads from the session's relay (`ConsumerDelivery.followedBefore`). */
+export interface RelayFollowClock {
+  followedBefore(topic: string, storedAtMs: number): boolean;
+}
+
 /**
  * Acts on a `subscription.removed` naming the session, and answers the topics it closed. A topic
  * closes only when the frame was stored after the session started following it
- * (`followedBefore`), so a removal the stream kept while the session was away never closes a
- * topic followed again since. The closed topics leave the ledger's followed subjects, and the
- * listener's registry too: a resumed session registered them again before this frame arrived, and
- * the registry, which only ever adds a registered topic, would have the next restart follow them
- * again. The registry write starts first, so a registration the host queues meanwhile cannot
- * advertise them again.
+ * (`ConsumerDelivery.followedBefore`), so a removal the stream kept while the session was away
+ * never closes a topic followed again since. The closed topics leave the ledger's followed
+ * subjects, and the listener's registry too: a resumed session registered them again before this
+ * frame arrived, and the registry, which only ever adds a registered topic, would have the next
+ * restart follow them again. The registry write starts first, so a registration the host queues
+ * meanwhile cannot advertise them again.
  */
 export async function closeReplayedRemoval(
-  frame: { readonly data: string },
+  frame: { readonly data: string; readonly storedAtMs: number },
   host: ReplayedRemovalHost
 ): Promise<readonly string[]> {
   const closed = (subscriptionRemovedTopics(frame.data, host.sessionID) ?? []).filter(
-    (topic) => host.followedBefore(topic) && host.close(topic)
+    (topic) => host.relay?.followedBefore(topic, frame.storedAtMs) !== false && host.close(topic)
   );
   if (closed.length === 0) return closed;
   const unregistering = host.unregister(closed);

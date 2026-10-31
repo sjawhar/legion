@@ -1,5 +1,5 @@
 kind: Changed
-body: 'The MCP server registers for consumer delivery and keeps no core receive path: it holds its session''s relay subject and nothing else, publishes no lane receipt, and a registration the listener refuses leaves the session running with one notice naming the reason, asked again at each heartbeat. The replay sweep is deleted with POST /v1/replay.'
+body: 'The MCP server registers for consumer delivery and keeps no core receive path: it holds its session''s relay subject and nothing else, publishes no lane receipt, and a registration the listener refuses leaves the session running with one notice naming the reason, asked again at each heartbeat. A subscription of a topic no stream subject captures is refused rather than followed, and channel-forwarder.ts is channel-topics.ts, holding the followed set and the one connection. Listeners deploy first: this plugin needs a listener carrying #2446 and the session-consumer grant, since one that answers no delivery leaves the session deaf. The replay sweep is deleted with POST /v1/replay.'
 time: 2026-10-31T15:03:30.582071698Z
 custom:
     Issue: pr2603

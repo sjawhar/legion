@@ -36,11 +36,13 @@ var ErrWrongMachine = errors.New("session belongs to a different machine")
 var ErrNoSessionRecord = errors.New("no session record")
 
 // ErrNoPushTarget is returned when a session entry exists and carries nothing this listener can
-// push to: no serve port, and not self-subscribed. That is the record a session writes when it
-// registers before its server has bound its serve port, and binding the port rewrites it, so
-// re-reading it answers the same thing only until that write lands - a caller may wait the port
-// out rather than give the message up, and the listener's delivery does, deferring such a message
-// for its whole retry window (cmd/listener/unplaceable_delivery.go).
+// push to: no serve port, and no consumer of its own holding this message
+// (SessionEntry.ConsumerRelaysStored). That is the record a session writes when it registers
+// before its server has bound its serve port, and binding the port rewrites it, so re-reading it
+// answers the same thing only until that write lands - a caller may wait the port out rather than
+// give the message up, and the listener's delivery does, deferring such a message for its whole
+// retry window (cmd/listener/unplaceable_delivery.go). It is also the record of a session an
+// earlier build left on the deleted core receive path, which no path reaches now.
 var ErrNoPushTarget = errors.New("no reachable push target")
 
 var foreignSessionID = regexp.MustCompile(`\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b`)

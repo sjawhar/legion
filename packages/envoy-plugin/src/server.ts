@@ -33,6 +33,15 @@ const PACKAGE_NAME = "@sjawhar/opencode-legion-envoy";
 /** The plugin every registration names: this package and the version its manifest carries. */
 const PLUGIN = { name: PACKAGE_NAME, version };
 
+/**
+ * What every registration this plugin makes asks the listener for: a session consumer, under one
+ * epoch per process. A session this plugin registers serves a port, so the listener pushes to it
+ * and does not refuse a registration it can give no consumer; the epoch is still sent, so the
+ * listener's record names the process the registration came from (`sessionDelivery.register` in
+ * packages/envoy/cmd/listener).
+ */
+const DELIVERY_REQUEST = { consumer: true, epoch: crypto.randomUUID() } as const;
+
 /** The package root: the nearest directory above `from` whose package.json names this package.
  *  The packed server.js sits in dist/src/, the repo's server.ts in src/. A manifest on the way up
  *  that is missing, unreadable or not JSON is passed over. */
@@ -90,13 +99,14 @@ function envoyTools(
       async execute(args, ctx) {
         ctx.metadata({ title: "Envoy subscribe" });
         return JSON.stringify(
-          await client.subscribe({
+          await client.subscribeServingPort({
             sessionID: ctx.sessionID,
             directory: ctx.directory,
             topics: args.topics as string[],
             port: port() ?? 0,
             title: title() ?? "",
             driving: true,
+            delivery: DELIVERY_REQUEST,
             plugin: PLUGIN,
           })
         );
@@ -305,13 +315,14 @@ export default async (input: { serverUrl: URL }) => {
     driving: boolean
   ) =>
     client
-      .subscribe({
+      .subscribeServingPort({
         sessionID,
         directory: cwd,
         topics: [agentSubject(sessionID)],
         port,
         title: title ?? "",
         driving,
+        delivery: DELIVERY_REQUEST,
         plugin: PLUGIN,
       })
       .catch(() => {});

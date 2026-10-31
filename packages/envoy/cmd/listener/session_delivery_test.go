@@ -285,6 +285,44 @@ func TestSessionConsumerFiltersOnTheControllerNoticeLaneOfTheRoleItHolds(t *test
 	rig.awaitPending(t, sessionID, 1)
 }
 
+// A heartbeat that leaves the lane out of its body keeps it in the consumer's filter and in the
+// stored row alike: one read of the session's roles, for the body's topics and the row's
+// together, decides both (store.Registry.PlanInterest, UpsertPlanned). A plugin sends such a
+// heartbeat whenever its registration carries only what the session subscribed to in this
+// process, and the lane dropped from a filter takes every notice published after it with it.
+func TestSessionConsumerKeepsTheControllerNoticeLaneAHeartbeatOmits(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const (
+		sessionID = "ses_controller_heartbeat"
+		role      = "legion-ACME-controller"
+		lane      = "notifications.legion.ACME.controller"
+	)
+	claimRoles(t, rig.harness.registry, sessionID, role)
+	awaitRoles(t, rig.harness.registry, sessionID, role)
+	rig.subscribe(t, `{"session_id":"ses_controller_heartbeat","self_subscribed":true,
+		"topics":["notifications.legion.ACME.controller"],"delivery":{"consumer":true,"epoch":"e"}}`)
+
+	rig.subscribe(t, `{"session_id":"ses_controller_heartbeat","self_subscribed":true,
+		"topics":[],"delivery":{"consumer":true,"epoch":"e"}}`)
+
+	stored, err := rig.harness.registry.Get(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("read the stored interest row: %v", err)
+	}
+	if !slices.Contains(stored.Topics, lane) {
+		t.Fatalf("stored topics %v, want the lane %s the holder registered", stored.Topics, lane)
+	}
+	// The row holds the session's own agent subject, which sessionConsumerFilter names anyway,
+	// and the consumer keeps each subject once (bus.SessionConsumers).
+	want := slices.Compact(slices.Sorted(slices.Values(sessionConsumerFilter(sessionID, stored.Topics))))
+	if got := rig.filters(t, sessionID); !slices.Equal(got, want) {
+		t.Fatalf("consumer filters %v, want %v: the filter and the stored row must name one set after a heartbeat that omits the lane", got, want)
+	}
+	// A notice published after that heartbeat is the consumer's to deliver.
+	rig.store(t, lane)
+	rig.awaitPending(t, sessionID, 1)
+}
+
 func TestSessionConsumerOverlappingFollowsAreAccepted(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 	const sessionID = "ses_overlap"

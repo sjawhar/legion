@@ -2777,7 +2777,7 @@ func TestListenerDeliveryHandler_RoleReleasedByReplacementHasNoHolder(t *testing
 		t.Fatalf("flush subscriptions: %v", err)
 	}
 
-	if err := harness.client.PublishCore(item); err != nil {
+	if err := harness.client.Publish(item); err != nil {
 		t.Fatalf("publish released controller role: %v", err)
 	}
 	assertDeliveryException(t, probe, item, "no_holder")
@@ -2803,7 +2803,7 @@ func TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException(t *testing.
 		t.Fatalf("flush role subscriptions: %v", err)
 	}
 
-	if err := harness.client.PublishCore(item); err != nil {
+	if err := harness.client.Publish(item); err != nil {
 		t.Fatalf("publish role delivery: %v", err)
 	}
 	assertDeliveryException(t, probe, item, "delivery_failed")

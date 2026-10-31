@@ -75,12 +75,24 @@ func dropPrivateStreamTopics(sessionID string, roles []string, topics []string) 
 // MergedTopics is the topic set an upsert of topics into a row of sessionID holding cur stores:
 // their union (Merge), without a topic reaching a private stream subject that is not the session's
 // own (dropPrivateStreamTopics), sorted. mergeForUpsert stores exactly this, and the listener's
-// registration route builds the session consumer's filter from it before the write
-// (cmd/listener's subscribeHandler), so the filter and the row it stores name one set: a filter
-// naming a topic the row does not would carry that topic into a session no interest of its own
-// follows.
+// registration route filters the session's consumer on it before the write (cmd/listener's
+// subscribeHandler, through Registry.PlanInterest), so the filter and the row it stores name one
+// set: a filter naming a topic the row does not would carry that topic into a session no interest
+// of its own follows, and a row holding one the filter does not would say a session follows a
+// topic its consumer never delivers.
 func MergedTopics(sessionID string, roles []string, cur []string, topics []string) []string {
 	merged := dropPrivateStreamTopics(sessionID, roles, Merge(Interest{Topics: cur}, topics).Topics)
 	slices.Sort(merged)
 	return merged
+}
+
+// InterestPlan is one registration's whole decision about a session's topics: the topics its
+// interest row will hold, which are its session consumer's filter too, and the roles read to
+// decide them, which name the one private stream subject a session registers beside its own agent
+// subject (dropPrivateStreamTopics). Registry.PlanInterest reads the roles once and merges once;
+// the listener's registration route builds the filter from the plan and hands the same plan back
+// to Registry.UpsertPlanned, so no second read can decide the row differently from the filter.
+type InterestPlan struct {
+	Roles  []string
+	Topics []string
 }

@@ -242,9 +242,9 @@ func (s *roleSend) timedOut() {
 // recorded capability_refused as sendHandler records it.
 //
 // The dedupe check reads the route's own record (listenerDeps.confirmed), not the delivery
-// handlers' cache: agentSubjectDelivery and fanoutDelivery record a key there for a self-subscribed
-// session whose push they skipped, having heard nothing from it, so a role send under a key one of
-// them saw would be answered 200 for a holder the route never forwarded it to.
+// handlers' cache: agentSubjectDelivery and fanoutDelivery record a key there for every push
+// they make or hand over, so a role send under a key one of them saw would be answered 200 for a
+// holder the route never forwarded it to.
 func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 	verdict := beforeForward(s.item, s.holder, entry, s.d.confirmed.Seen)
 	switch verdict.kind {

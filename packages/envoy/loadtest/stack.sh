@@ -138,14 +138,13 @@ base_env=(
 )
 
 # loadgen_env adds what loadgen needs: the root, the go toolchain for `loadgen tables`
-# (`go tool pprof`), and LOADTEST_SESSION_DELIVERY when it is set (`loadgen run -session-delivery`).
+# (`go tool pprof`), and LOADTEST_NO_RESUME when it is set.
 loadgen_env() {
   local gobin
   gobin=$(command -v go || true)
   local path="$BIN:/usr/local/bin:/usr/bin:/bin"
   [ -n "$gobin" ] && path="$(dirname -- "$gobin"):$path"
   printf '%s\n' "${base_env[@]:1}" "PATH=$path" "LOADTEST_ROOT=$ROOT"
-  [ -z "${LOADTEST_SESSION_DELIVERY:-}" ] || printf '%s\n' "LOADTEST_SESSION_DELIVERY=$LOADTEST_SESSION_DELIVERY"
   [ -z "${LOADTEST_NO_RESUME:-}" ] || printf '%s\n' "LOADTEST_NO_RESUME=$LOADTEST_NO_RESUME"
 }
 

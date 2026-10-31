@@ -37,9 +37,10 @@ body: |-
   within 4.1 to 9.9 s of its restart (median 5.7 s with resume points, 6.6 s without). The
   durable path skips a session whose
   entry records consumer delivery, so a stored message waits in its consumer, for up to 72 hours,
-  while the session restarts, its connection is down, or its owning listener restarts. Without the
-  grant below the listener answers `core` and delivery works as before: the session's own
-  subscriptions, the durable's `Skipped`, `/v1/replay`. Any rollout order works: a plugin of an
-  earlier release sends no `delivery` and stays on the core path, and a plugin of this release
-  reads an earlier listener's answer, which has no `delivery`, as `core`. No stream setting
-  changes (INFRA-594).
+  while the session restarts, its connection is down, or its owning listener restarts. Without
+  the grant below a listener answers no consumer, and the change that ships beside this one
+  (INFRA-771) refuses such a registration rather than fall back, so that session receives
+  nothing: the grant is part of the rollout. Rollout order matters with it: the listeners go
+  first, since a plugin of this release throws on a listener that answers no `delivery` -- one
+  built before these changes, or one whose NATS user lacks the grant -- and its session is then
+  deaf. No stream setting changes (INFRA-594).

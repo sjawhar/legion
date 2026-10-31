@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { connect } from "nats"
-import { createChannelForwarder, deliveryIdentity } from "../src/channel-forwarder"
+import { createChannelTopics, deliveryIdentity } from "../src/channel-topics"
 import { FakeNatsServer } from "./fake-nats-server"
 
 const THREAD = "notifications.github.acme-org.example-repo.issue.3.>"
@@ -39,20 +39,20 @@ test("keeps each valid dedupe identity when a sibling identity field is empty", 
 test("subscribes nothing for a followed topic, and closes the connection at shutdown", async () => {
   const broker = new FakeNatsServer()
   const connection = await connect({ servers: broker.url })
-  const forwarder = createChannelForwarder(connection)
+  const followed = createChannelTopics(connection)
 
   try {
-    forwarder.follow(THREAD)
+    followed.follow(THREAD)
     // The session receives only what its own consumer's relay pushes, so a followed topic is a
     // registration entry and nothing more: this process opens no subscription for it.
-    expect(forwarder.topics()).toEqual([
+    expect(followed.topics()).toEqual([
       "notifications.github.acme-org.example-repo.issue.3",
       THREAD,
     ])
     expect(broker.subscribed).toEqual([])
 
-    await forwarder.close()
-    expect(forwarder.topics()).toEqual([])
+    await followed.close()
+    expect(followed.topics()).toEqual([])
     expect(connection.isClosed()).toBe(true)
   } finally {
     await broker.stop()
@@ -62,14 +62,14 @@ test("subscribes nothing for a followed topic, and closes the connection at shut
 test("unfollow drops a topic from topics() at once", async () => {
   const broker = new FakeNatsServer()
   const connection = await connect({ servers: broker.url })
-  const forwarder = createChannelForwarder(connection)
+  const followed = createChannelTopics(connection)
 
   try {
-    forwarder.follow(COMMENT)
-    forwarder.unfollow([COMMENT])
-    expect(forwarder.topics()).toEqual([])
+    followed.follow(COMMENT)
+    followed.unfollow([COMMENT])
+    expect(followed.topics()).toEqual([])
   } finally {
-    await forwarder.close()
+    await followed.close()
     await broker.stop()
   }
 })

@@ -582,13 +582,6 @@ describe("gaps", () => {
 });
 
 describe("what the registration resumes at", () => {
-  const CONSUMER = {
-    mode: "consumer",
-    subject: deliverSubject(SESSION),
-    stream_id: STREAM,
-    gap: false,
-  } as const;
-
   test("nothing before the session has taken a frame: the consumer starts at the stream's end", () => {
     const { delivery } = setup();
 
@@ -601,18 +594,6 @@ describe("what the registration resumes at", () => {
     handed[0]?.done();
 
     expect(delivery.registration().resume).toEqual({ stream_id: STREAM, seq: 20 });
-  });
-
-  test("an answer makes the relay relaying, and closing it stops", () => {
-    const { delivery } = setup();
-
-    expect(delivery.relaying()).toBe(false);
-    delivery.answered(CONSUMER);
-    expect(delivery.relaying()).toBe(true);
-
-    delivery.close();
-
-    expect(delivery.relaying()).toBe(false);
   });
 
   // A removal the stream kept while the session was away must not close a topic the session

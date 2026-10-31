@@ -734,12 +734,12 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			sendToRole(ctx, w, record, d, item, role, arrived)
 			return
 		}
-		// Every other topic the stream does not capture is refused by name. A session reads only
-		// what its own consumer holds, so such a publish would reach nobody, now or later;
+		// Every other topic that would deliver to no session is refused by name: a session reads
+		// only what its own consumer holds, so such a publish would reach nobody, now or later;
 		// nothing retries into success, so it is the 400 the refusals above answer rather than a
 		// 504. Team topics are the namespace an agent names itself and the stream stores them
-		// (bus.StreamSubjects).
-		if bus.UsesCoreTransport(request.Topic) {
+		// (bus.StreamSubjects). The role lanes bus.ReachesNoSession excepts are forwarded above.
+		if bus.ReachesNoSession(request.Topic) {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest,
 				"no stream subject captures "+request.Topic+", so no session would receive it; publish to a notifications.team.<name> topic instead", "topic")
 			return
@@ -1391,81 +1391,68 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir), slog.String("plugin", body.Plugin), slog.String("plugin_version", body.PluginVersion))
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
-		// The roles this session holds decide one topic of the registration: its own project's
-		// controller notice lane (notifications.legion.<project>.controller, the daemon's
-		// notify.ControllerTopic), which its holder registers because a Legion controller
-		// receives that lane from its own consumer now and from no core subscription of its own
-		// (INFRA-771). The view is read only when a registration names such a lane, so no other
-		// registration is refused while it cannot answer (store.ErrRoleViewNotReady), and one
-		// that does is refused the bus-unavailable 503 rather than stored without the lane: the
-		// stored topics are the consumer's filter, and a notice published while the lane is out
-		// of it reaches the controller on no later path.
-		var roles []string
-		if bus.NamesControllerNoticeLane(body.Topics) {
-			held, err := d.registry.RolesHeldBy(body.SessionID)
-			if err != nil {
-				logger.Warn("listener read of the session's roles failed",
-					slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
-				writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
-				return
-			}
-			roles = held
+		// One read and one merge decide this registration's topics, which are both the row it
+		// stores and the filter of the session's own consumer (store.Registry.PlanInterest). The
+		// roles the session holds are read for the topics the body names and for the row it
+		// already holds together, since either may name its own project's controller notice lane
+		// (notifications.legion.<project>.controller, the daemon's notify.ControllerTopic),
+		// which its holder registers because a Legion controller receives that lane from its own
+		// consumer now and from no core subscription of its own (INFRA-771): a heartbeat whose
+		// body leaves the lane out therefore keeps it in the filter and in the row alike, and
+		// the write below stores this plan rather than deciding it a second time
+		// (store.Registry.UpsertPlanned).
+		//
+		// The roles are read only when one of the two names such a lane, so no other
+		// registration is refused while that view cannot answer (store.ErrRoleViewNotReady), and
+		// one that does is refused the bus-unavailable 503 rather than stored without the lane:
+		// the stored topics are the consumer's filter, and a notice published while the lane is
+		// out of it reaches the controller on no later path. The row's own read is the registry
+		// cache's on every heartbeat, and one that fails refuses the registration as the write
+		// it precedes would.
+		requested := append(slices.Clone(body.Topics), contracts.AgentSubject(body.SessionID))
+		plan, err := d.registry.PlanInterest(ctx, body.SessionID, requested)
+		if err != nil {
+			logger.Warn("listener could not plan the session's interest row",
+				slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
+			writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
+			return
 		}
 		// A topic reaching a private stream subject that is not this session's (another session's
 		// inbox, a failed-delivery lane, another project's controller notice lane;
-		// bus.ReachesPrivateStreamSubject) is left out and named in a warning, the rest of the
-		// registration stored: the topics stored here drive the listener's fan-out to serve-port
-		// sessions (`store.Registry.Match`) and the filters of the session's own consumer
-		// (`sessionConsumerFilter`), and such a topic would hand this session messages meant for
-		// another session or for another project's controller. A registration naming one is not
-		// refused whole, since a released pi-envoy registers every subject it has open, a fork
-		// parent's agent subject and any topic its envoy_subscribe took included. The registry
-		// drops such a topic from the stored row too (`store.Registry.Upsert`), so a row an
-		// earlier build stored with one, and the lane of a session that has since lost the
-		// controller role, are cleaned by this registration.
+		// bus.ReachesPrivateStreamSubject) is out of the plan (store.MergedTopics) and named in a
+		// warning here, the rest of the registration stored: the topics stored drive the
+		// listener's fan-out to serve-port sessions (`store.Registry.Match`) and the filters of
+		// the session's own consumer (`sessionConsumerFilter`), and such a topic would hand this
+		// session messages meant for another session or for another project's controller. A
+		// registration naming one is not refused whole, since a released pi-envoy registers every
+		// subject it has open, a fork parent's agent subject and any topic its envoy_subscribe
+		// took included. The plan drops such a topic from the stored row too, so a row an earlier
+		// build stored with one, and the lane of a session that has since lost the controller
+		// role, are cleaned by this registration.
 		warnings := make([]string, 0)
-		topics := make([]string, 0, len(body.Topics)+1)
-		for _, topic := range append(body.Topics, contracts.AgentSubject(body.SessionID)) {
-			if bus.ReachesPrivateStreamSubject(body.SessionID, topic, roles) {
+		for _, topic := range requested {
+			if bus.ReachesPrivateStreamSubject(body.SessionID, topic, plan.Roles) {
 				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches a private stream subject (another session's inbox, a failed-delivery lane, or a Legion controller notice lane), and of those a session registers only its own agent subject, %s, and the notice lane of a project whose controller role it holds",
 					topic, contracts.AgentSubject(body.SessionID)))
 				continue
 			}
-			// A notifications. topic no stream subject captures, and that is no role lane, is
-			// refused by name with the whole registration: a session receives only what its own
-			// consumer holds, which is what the stream stored, so such an interest would be
-			// stored and deliver nothing, and the plugin that asked for it would never learn
-			// why. It is the registration and not the topic alone, unlike a private-subject
-			// topic above, because no live caller names one: a census of production on
-			// 2026-10-30 read all 596 interest rows and found every uncaptured non-role topic
-			// in use to be a notifications.team.* topic, which this build stores. A role lane is
-			// registered by its holder (POST /v1/roles/set) and still travels over core NATS.
-			if bus.UsesCoreTransport(topic) && !strings.HasPrefix(topic, contracts.RoleTopicPrefix) {
+			// A topic that would deliver to no session (bus.ReachesNoSession) is refused by name
+			// with the whole registration: such an interest would be stored and deliver nothing,
+			// and the plugin that asked for it would never learn why. It is the registration and
+			// not the topic alone, unlike a private-subject topic above, because no live caller
+			// names one: a census of production on 2026-10-30 read all 596 interest rows and
+			// found every uncaptured non-role topic in use to be a notifications.team.* topic,
+			// which this build stores.
+			if bus.ReachesNoSession(topic) {
 				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("no stream subject captures %s, so nothing would be delivered to %s on it; follow a notifications.team.<name> topic instead",
 					topic, body.SessionID), "topics")
 				return
 			}
-			topics = append(topics, topic)
 		}
 		if len(warnings) > 0 {
 			logger.Warn("listener subscribe refused topics reaching private stream subjects",
 				slog.String("session_id", body.SessionID), slog.Any("refused", warnings))
 		}
-		// The session's consumer is filtered on the topics its interest row will hold, so the
-		// write's own merge is computed here, before the write: store.Registry.UpsertWithin adds
-		// these topics to the row it holds and drops every topic reaching a private stream subject
-		// (store.MergedTopics), and a filter naming a topic the row does not would carry into this
-		// session messages no interest of its own follows. The read is the registry cache's on
-		// every heartbeat; a read that fails refuses the registration, as the write it precedes
-		// would.
-		stored, err := storedInterestTopics(ctx, d.registry, body.SessionID)
-		if err != nil {
-			logger.Warn("listener read of the session's interest row failed",
-				slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
-			writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
-			return
-		}
-		topics = store.MergedTopics(body.SessionID, roles, stored, topics)
 		// The delivery decision comes before both writes: a session is delivered to through its
 		// own consumer alone, so a registration this listener cannot give one is refused and must
 		// leave no interest row and no session entry behind - the row would make the listener
@@ -1473,18 +1460,18 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// receives nothing. The consumer is created, or has its filter set to the topics about to
 		// be stored, before the registration answers, so a message published on a newly followed
 		// stored topic after the answer is the consumer's to deliver.
-		delivery, refusal := d.consumers.register(r.Context(), body, topics)
+		delivery, refusal := d.consumers.register(r.Context(), body, plan.Topics)
 		if refusal != nil {
 			logger.Warn("listener refused a registration it can give no session consumer",
 				slog.String("session_id", body.SessionID), slog.String("reason", refusal.Reason), slog.Int("status", refusal.status))
 			writeJSON(w, refusal.status, refusal)
 			return
 		}
-		item, err := d.registry.UpsertWithin(ctx, store.Interest{
+		item, err := d.registry.UpsertPlanned(ctx, store.Interest{
 			SessionID: body.SessionID,
 			MachineID: machineID,
 			Dir:       body.Dir,
-		}, topics)
+		}, plan)
 		if err != nil {
 			logger.Warn("listener upsert failed",
 				slog.String("session_id", body.SessionID),

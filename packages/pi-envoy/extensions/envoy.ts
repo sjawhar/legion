@@ -31,6 +31,7 @@ import {
   type ConsumerGapNotice,
   createConsumerDelivery,
   gapNoticeText,
+  inboundUnavailable,
   inboundUnavailableNoticeText,
 } from "@legion/envoy-client/consumer-delivery";
 import {
@@ -52,8 +53,6 @@ import {
   envoyNoticeText,
   failureNoticeFields,
   ledgerIdentity,
-  reachesPrivateStreamSubject,
-  replayFollowedSubjects,
   storedText,
 } from "@legion/envoy-client/delivery-ledger";
 import { commandName } from "@legion/envoy-client/dispatch-command";
@@ -93,6 +92,11 @@ import {
   sessionSettings,
 } from "@legion/envoy-client/session-settings";
 import { postSlackReply } from "@legion/envoy-client/slack-post";
+import {
+  reachesPrivateStreamSubject,
+  replayFollowedSubjects,
+  streamDeliversNothing,
+} from "@legion/envoy-client/stream-topics";
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -549,9 +553,12 @@ class SessionLeftError extends Error {}
 // former warrants a `"reregistered"` regain on the next healthy tick.
 class RegistrationError extends Error {}
 
-// The agent subject would not open (NATS unavailable) in a pass that still registered the session
-// and settled its role over HTTP, as `decided` says: a bridge call goes on with its claim, a
-// heartbeat counts the registration, and the next pass opens the subject.
+// A subject this pass could not open (NATS unavailable). The registration needs the relay
+// subject, so a pass that opened none fails its registration too and reports that instead
+// (`RegistrationError`); this is left for a subject opened beside it, the agent-stream control
+// subject, in a pass that did register the session and settle its role, as `decided` says: a
+// bridge call goes on with its claim, a heartbeat counts the registration, and the next pass
+// opens the subject.
 class InboundError extends Error {
   readonly decided: boolean;
   constructor(message: string, decided: boolean, options: ErrorOptions) {
@@ -1689,9 +1696,9 @@ export default function envoyExtension(pi: PiApi): void {
     if (inbox.length > 50) inbox.pop();
   };
 
-  // What the session registers, and what its consumer therefore relays
-  // (`replayFollowedSubjects`): its own agent subject and every followed topic not held for a
-  // role.
+  // What the ledger persists, so a restart follows it again (`replayFollowedSubjects`): the
+  // session's own agent subject and every followed topic that is not a role's. A role's topic is
+  // the role claim's to open again, which a restored process without the role never does.
   const followedSubjects = (): string[] => {
     if (sessionID === "") return [];
     return replayFollowedSubjects(agentSubject(sessionID), followed, isRoleBound);
@@ -1704,12 +1711,11 @@ export default function envoyExtension(pi: PiApi): void {
   // session was away never closes a topic followed again since. Registered again without them,
   // the session's consumer stops relaying them at once.
   const closeRemovedSubscriptions = async (raw: string, storedAtMs: number): Promise<void> => {
-    const open = relay?.sessionID === sessionID ? relay : undefined;
     const closed = await closeReplayedRemoval(
-      { data: raw },
+      { data: raw, storedAtMs },
       {
         sessionID,
-        followedBefore: (topic) => open?.delivery.followedBefore(topic, storedAtMs) !== false,
+        relay: relay?.sessionID === sessionID ? relay.delivery : undefined,
         close: unfollow,
         unregister: async (topics) => {
           await active?.client.unsubscribe({ sessionID, topics }).catch((error: unknown) =>
@@ -1941,10 +1947,10 @@ export default function envoyExtension(pi: PiApi): void {
   // closed, changes nothing.
   const takeDeliveryAnswer = (
     registeredSession: string,
-    asked: Relay | undefined,
+    asked: Relay,
     result: SubscribeResult
   ): void => {
-    if (sessionID !== registeredSession || asked === undefined || relay !== asked) return;
+    if (sessionID !== registeredSession || relay !== asked) return;
     asked.delivery.answered(result.delivery);
   };
 
@@ -2167,13 +2173,28 @@ export default function envoyExtension(pi: PiApi): void {
   });
 
   // The session stops holding its role: close the notice subjects it took for it, so a holder
-  // another session replaced stops taking the role's wakes.
+  // another session replaced stops taking the role's wakes. They were registered while the role
+  // stood — a notice lane reaches a session from its own consumer alone — and the listener's
+  // registry only ever adds a registered topic, so they are taken out of it here too, which
+  // takes them out of the session's consumer filter. Best-effort: the controller notice lane
+  // among them also leaves the stored row at the first registration after the role ended (the
+  // listener keeps that lane only for the role's holder), and a failure is logged.
   const endRole = (): void => {
+    const held = claimedRoleSessionID ?? sessionID;
+    const closed = [...roleNoticeSubjects];
     claimedRoleTopic = undefined;
     claimedRoleSessionID = undefined;
     roleEnds += 1;
-    for (const subject of roleNoticeSubjects) unfollow(subject);
+    for (const subject of closed) unfollow(subject);
     roleNoticeSubjects.clear();
+    if (closed.length === 0 || held === "") return;
+    void active?.client.unsubscribe({ sessionID: held, topics: closed }).catch((error: unknown) =>
+      logger.warn("envoy: a role's notice subjects were not taken out of the registry", {
+        topics: closed,
+        sessionID: held,
+        error: messageFor(error),
+      })
+    );
   };
 
   // Ends the role this process holds and hands its hold back at the listener, so the listener
@@ -2240,23 +2261,23 @@ export default function envoyExtension(pi: PiApi): void {
   // `invalid_session_id`, carried in the error's message), which
   // `inboundUnavailableNoticeText` words for every host, and the heartbeat registers again
   // every tick until one is accepted.
-  let inboundUnavailableTold = false;
-  const tellInboundUnavailable = (error: unknown): void => {
-    if (inboundUnavailableTold) return;
-    inboundUnavailableTold = true;
-    const why = messageFor(error);
+  const inboundOutage = inboundUnavailable((why) => {
     logger.warn(`envoy: this session receives nothing: ${why}`);
     activeSessionContext?.ui.notify(
       `envoy: inbound messages are unavailable (${why}); registering again every heartbeat`,
       "warning"
     );
     unwritten.sendNotice(inboundUnavailableNoticeText(why));
-  };
+  });
 
   // The listener delivers nothing to a self-subscribed session (its own consumer's relay does),
-  // so the registered topics are what that consumer is filtered on; a role-bound subject stays
-  // out of them, and so does one reaching another session's agent subject (a fork parent's,
-  // until a pass closes it, or a wildcard over them), which the listener refuses to store.
+  // so the registered topics are what that consumer is filtered on: every subject the session
+  // follows, a role-bound one included, since a notice lane reaches this session from its own
+  // consumer and from nowhere else (INFRA-771). One reaching another session's agent subject (a
+  // fork parent's, until a pass closes it, or a wildcard over them) stays out, as the listener
+  // refuses to store it; so does the controller notice lane of a project whose controller role
+  // this session does not hold, which the listener reads from its own role claims, so the lane
+  // leaves the stored row at the first registration after the role ends.
   // A registration moves the session's `last_seen` at the listener, even one
   // whose answer is lost, so every hold this process abandoned under that session is its own again
   // first: a pending hand-back under that session's id, under the same key, which the next pass
@@ -2277,12 +2298,12 @@ export default function envoyExtension(pi: PiApi): void {
       abandonedHolds.delete(key);
       pendingHandBacks.set(key, { topic: hold.topic, id: sessionID });
     }
+    const role = heldRole();
+    const roles = role === undefined ? [] : [role];
     const topics = [
       ...new Set([
         own,
-        ...[...followed].filter(
-          (subject) => !isRoleBound(subject) && !reachesPrivateStreamSubject(own, subject)
-        ),
+        ...[...followed].filter((subject) => !reachesPrivateStreamSubject(own, subject, roles)),
       ]),
     ];
     const asking =
@@ -2291,7 +2312,7 @@ export default function envoyExtension(pi: PiApi): void {
       const refused = new Error(
         "this session holds no relay subject, so the listener can give it no consumer and it can receive nothing"
       );
-      tellInboundUnavailable(refused);
+      inboundOutage.refused(refused);
       return Promise.reject(refused);
     }
     asking.delivery.setFollowed(topics);
@@ -2317,7 +2338,7 @@ export default function envoyExtension(pi: PiApi): void {
         (result) => {
           registeredFor = registeringFor;
           registeredAt = Date.now();
-          inboundUnavailableTold = false;
+          inboundOutage.accepted();
           takeDeliveryAnswer(registeringFor, asking, result);
           return result;
         },
@@ -2325,7 +2346,7 @@ export default function envoyExtension(pi: PiApi): void {
           // A registration the listener refused leaves the session with no consumer at all
           // (`503 consumer_error|no_grant`, `409 not_requested|invalid_session_id`), so the
           // session is told once and the heartbeat asks again.
-          tellInboundUnavailable(error);
+          inboundOutage.refused(error);
           throw error;
         }
       );
@@ -2922,10 +2943,12 @@ export default function envoyExtension(pi: PiApi): void {
       ensureHeartbeat(context);
       return true;
     }
-    // Only the relay subject and the agent-stream control subject need NATS. The registration
-    // and the role go over HTTP, so a NATS outage stops neither (a Legion claim through the
-    // bridge included): the pass reports it once they are settled, and the next pass opens the
-    // relay. A steady pass touches no NATS.
+    // The relay subject and the agent-stream control subject are what need NATS, and the
+    // registration needs the relay: a session is delivered to through its own consumer alone, so
+    // a registration asks for one and the listener refuses one it cannot give (INFRA-771). A
+    // NATS outage therefore stops the registration, and with it the role claim that registers
+    // first (a Legion claim through the bridge included); the pass reports it, and the next pass
+    // opens the relay and registers again. A steady pass touches no NATS.
     let inboundFailure: unknown;
     if (inbound && inboundOpenFor !== host) {
       try {
@@ -2961,11 +2984,16 @@ export default function envoyExtension(pi: PiApi): void {
       (error: unknown) => ({ error })
     );
     if (!owns()) return false;
+    // Established once the registration landed, which is what a bridge call asks before it runs
+    // a pass of its own (`establishForBridge`): a pass this call queues reads the host as it
+    // stands when its turn comes, so one queued for an established session would learn a session
+    // the host has moved to meanwhile as a continuation of the one it was made for (`noteMove`),
+    // and the role of that session would be claimed for it.
     if (registration === undefined) establishedSession = host;
     // Armed whether or not this registration was accepted: a registration the listener refuses
     // (`503 consumer_error|no_grant`, `409 not_requested|invalid_session_id`) leaves the session
     // with no consumer and so no inbound at all, and the heartbeat is the path that asks again,
-    // which is what the session was told (`tellInboundUnavailable`).
+    // which is what the session was told (`inboundOutage`).
     ensureHeartbeat(context);
 
     // The nested move has its own queue and its own deadline: it is fenced by `roleMoves`, not
@@ -3230,8 +3258,9 @@ export default function envoyExtension(pi: PiApi): void {
           `Envoy session ${targetSessionID} does not hold role ${whileHolding} for a notice subscription`
         );
       }
-      // Marked before the subscription opens, so no registration ever carries it, and a move the
-      // model starts from here on sees it.
+      // Marked before the subscription opens, so the registration it leads to already carries
+      // them as the role's, which `endRole` closes and unregisters together, and a move the
+      // model starts from here on sees them.
       for (const subject of expandSubscriptionTopics([topic])) {
         if (isRoleBound(subject)) continue;
         roleNoticeSubjects.add(subject);
@@ -3313,8 +3342,11 @@ export default function envoyExtension(pi: PiApi): void {
     try {
       await establish();
     } catch (error) {
+      // Whatever the pass failed at: the NATS connection it dials, the relay subject it opens
+      // for the session's consumer, or the registration the listener refused. The session runs
+      // either way, and it receives nothing until a pass gets through.
       context.ui.notify(
-        `envoy: NATS unavailable (${messageFor(error)}); retrying in the background`,
+        `envoy: this session is not registered (${messageFor(error)}); retrying in the background`,
         "warning"
       );
       let attempting = false;
@@ -3322,7 +3354,7 @@ export default function envoyExtension(pi: PiApi): void {
         if (established || attempting) return;
         attempting = true;
         void establish()
-          .then(() => context.ui.notify("envoy: NATS connection established", "warning"))
+          .then(() => context.ui.notify("envoy: this session is registered", "warning"))
           // Quiet on purpose: the initial warning disclosed the outage, and a
           // fresh warning every retry tick would spam the session.
           .catch(() => undefined)
@@ -4014,9 +4046,31 @@ export default function envoyExtension(pi: PiApi): void {
           // needs NATS: with inbound off the session would follow a topic it can never receive
           // on, so the tool refuses here, saying why.
           requireInbound();
+          const requested = topicsFor(parameters);
+          // A topic no stream subject captures is refused here, before anything follows it: the
+          // listener refuses the whole registration naming one (`streamDeliversNothing`), so a
+          // single such topic would make every later registration of this session fail, its
+          // interest row lapse and its role claims fail with it, until the process restarts.
+          // Only a topic the registration would carry: one reaching a private stream subject is
+          // left out of the registration instead, which the listener answers with a warning
+          // rather than a refusal, so it wedges nothing.
+          const ownSubject = agentSubject(sessionID);
+          const role = heldRole();
+          const uncaptured = requested.filter(
+            (topic) =>
+              streamDeliversNothing(topic) &&
+              !reachesPrivateStreamSubject(ownSubject, topic, role === undefined ? [] : [role])
+          );
+          if (uncaptured.length > 0) {
+            return toolFailure(
+              new Error(
+                `no stream subject captures ${uncaptured.join(", ")}, so nothing would be delivered to this session on ${uncaptured.length === 1 ? "it" : "them"}; follow a notifications.team.<name> topic instead`
+              )
+            );
+          }
           const added: string[] = [];
           const already: string[] = [];
-          for (const topic of topicsFor(parameters)) {
+          for (const topic of requested) {
             (follow(topic) ? added : already).push(topic);
           }
           let warnings: readonly string[] | undefined;

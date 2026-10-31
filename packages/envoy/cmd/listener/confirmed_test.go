@@ -366,9 +366,7 @@ func TestDurableAcknowledgesAStoredForwardCopyAndDeliversNothing(t *testing.T) {
 	t.Cleanup(func() { _ = subscription.Unsubscribe() })
 
 	forwardCopy := listenerTestEnvelope(topic, "publish.stored-copy")
-	if err := harness.client.PublishCoreTo(contracts.AgentSubject("ses_self_subscribed"), forwardCopy); err != nil {
-		t.Fatalf("store the forward copy: %v", err)
-	}
+	publishTo(t, harness.client, contracts.AgentSubject("ses_self_subscribed"), forwardCopy)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		info, err := harness.client.JS().ConsumerInfo(bus.Stream, consumer)

@@ -175,9 +175,10 @@ var privateStreamSubjects = []string{
 	ExceptionTopicPrefix + "notifications.team.>",
 }
 
-// LegionNoticeTopicPrefix opens every Legion daemon notice subject (LEGION_NOTICE_TOPIC_PREFIX,
-// packages/contracts/src/subject.ts).
-const LegionNoticeTopicPrefix = "notifications.legion."
+// legionNoticeTopicPrefix opens every Legion daemon notice subject (LEGION_NOTICE_TOPIC_PREFIX,
+// packages/contracts/src/subject.ts). Nothing outside this package reads it: a caller asks
+// ControllerNoticeRole or NamesControllerNoticeLane instead.
+const legionNoticeTopicPrefix = "notifications.legion."
 
 // controllerNoticeSuffix ends the one subject of that family naming a controller rather than an
 // issue (legionControllerNoticeSubject in packages/contracts, notify.ControllerTopic in the Go
@@ -192,7 +193,7 @@ const controllerNoticeSuffix = ".controller"
 // token, an empty project, a longer subject, and the issue notices of the same family
 // (notifications.legion.<p>.<issue key>) name none.
 func ControllerNoticeRole(topic string) (string, bool) {
-	project, found := strings.CutPrefix(topic, LegionNoticeTopicPrefix)
+	project, found := strings.CutPrefix(topic, legionNoticeTopicPrefix)
 	if !found {
 		return "", false
 	}

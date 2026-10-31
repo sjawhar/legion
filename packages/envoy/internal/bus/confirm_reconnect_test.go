@@ -168,12 +168,12 @@ func TestSameErrorTreatsAValueThatCannotBeComparedAsChanged(t *testing.T) {
 }
 
 // answeringServer serves one NATS client and stays up: it answers every flush that follows a
-// publish with the permissions violation for deny, when deny is not empty, and then the PONG, and,
-// when receipt is true, then sends the notification stream's acknowledgement and an empty receipt
-// to the publish's reply subject, as a stored agent subject with a live holder answers a forward.
-// A publish with headers (HPUB, as RequestCoreTo's forward with its Nats-Msg-Id is) is read whole
-// by its length, since its header block spans lines.
-func answeringServer(t *testing.T, deny string, receipt bool) *nats.Conn {
+// publish with the permissions violation for deny, when deny is not empty, and then the PONG,
+// and, when stored is true, then sends the notification stream's acknowledgement to the publish's
+// reply subject, as a captured agent subject answers a forward. A publish with headers (HPUB, as
+// a forward with its Nats-Msg-Id is) is read whole by its length, since its header block spans
+// lines.
+func answeringServer(t *testing.T, deny string, stored bool) *nats.Conn {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -224,10 +224,9 @@ func answeringServer(t *testing.T, deny string, receipt bool) *nats.Conn {
 					fmt.Fprintf(conn, "-ERR 'Permissions Violation for Publish to %q'\r\n", deny)
 				}
 				fmt.Fprint(conn, "PONG\r\n")
-				if sid, ok := sids[reply]; ok && receipt {
-					const stored = `{"stream":"ENVOY_NOTIFICATIONS","seq":1}`
-					fmt.Fprintf(conn, "MSG %s %s %d\r\n%s\r\n", reply, sid, len(stored), stored)
-					fmt.Fprintf(conn, "MSG %s %s 0\r\n\r\n", reply, sid)
+				if sid, ok := sids[reply]; ok && stored {
+					const ack = `{"stream":"ENVOY_NOTIFICATIONS","seq":1}`
+					fmt.Fprintf(conn, "MSG %s %s %d\r\n%s\r\n", reply, sid, len(ack), ack)
 				}
 				published = false
 			case len(fields) == 1 && fields[0] == "PING":
@@ -266,25 +265,33 @@ func TestPublishConfirmedReadsTheStateBeforeThePublish(t *testing.T) {
 }
 
 // A forward publishConfirmed cannot confirm - the server reported another subject's violation
-// during it - still counts as delivered when the stream's acknowledgement and its receipt arrive,
-// since they prove it.
-func TestAnUnconfirmedForwardWithAReceiptIsDelivered(t *testing.T) {
+// during it - still counts as delivered when the stream's acknowledgement arrives, since it
+// proves the forward reached the stream.
+func TestAnUnconfirmedForwardTheStreamStoredIsDelivered(t *testing.T) {
 	conn := answeringServer(t, "notifications.other", true)
 	client := &Client{Conn: conn}
 
-	if err := client.RequestCoreTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, 2*time.Second); err != nil {
-		t.Fatalf("an unconfirmed forward whose receipt arrived returned %v, want nil", err)
+	forward, err := client.StartRequestStoredTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, 2*time.Second)
+	if err != nil {
+		t.Fatalf("an unconfirmed forward was refused outright: %v", err)
+	}
+	if err := forward.Wait(); err != nil {
+		t.Fatalf("an unconfirmed forward the stream acknowledged returned %v, want nil", err)
 	}
 }
 
-// An unconfirmed forward with no receipt returns why it is unconfirmed, never ErrReceiptTimeout,
-// which the listener treats as delivered to a live holder.
-func TestAnUnconfirmedForwardWithoutAReceiptIsNotAReceiptTimeout(t *testing.T) {
+// An unconfirmed forward the stream never acknowledged is not stored, and says why it is
+// unconfirmed: the listener reports it delivery_failed rather than delivered.
+func TestAnUnconfirmedForwardWithoutTheStreamsAcknowledgementIsNotStored(t *testing.T) {
 	conn := answeringServer(t, "notifications.other", false)
 	client := &Client{Conn: conn}
 
-	err := client.RequestCoreTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, 300*time.Millisecond)
-	if !errors.Is(err, errPublishUnconfirmed) || errors.Is(err, ErrReceiptTimeout) {
-		t.Fatalf("an unconfirmed forward with no receipt returned %v, want the unconfirmed error", err)
+	forward, err := client.StartRequestStoredTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, 300*time.Millisecond)
+	if err != nil {
+		t.Fatalf("an unconfirmed forward was refused outright: %v", err)
+	}
+	err = forward.Wait()
+	if !errors.Is(err, errPublishUnconfirmed) || !errors.Is(err, ErrForwardNotStored) {
+		t.Fatalf("an unconfirmed forward with no acknowledgement returned %v, want the unconfirmed error wrapped by ErrForwardNotStored", err)
 	}
 }

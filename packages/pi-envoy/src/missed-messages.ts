@@ -9,8 +9,8 @@ import {
   type LedgerSnapshot,
   type LedgerState,
   LedgerStateSchema,
-  rememberedTopics,
 } from "@legion/envoy-client/delivery-ledger";
+import { rememberedTopics } from "@legion/envoy-client/stream-topics";
 
 /** The custom type of every card the extension shows the session. */
 const ENVOY_MESSAGE = "envoy-message";
@@ -204,7 +204,7 @@ function writtenCards(
 /** The topics the newest replay state says the session followed that a restore follows again
  *  (`rememberedTopics`: neither an agent subject nor a role lane). */
 export function rememberedSubjects(entries: readonly unknown[]): readonly string[] {
-  return rememberedTopics(newestState(entries));
+  return rememberedTopics(newestState(entries)?.topics);
 }
 
 /** The replay notices a session's entries record as held and not as handed, in the order held

@@ -102,18 +102,21 @@ receivedAt)`, which shows that notice at once. `failureNoticeFields` words that 
 holds a newline stays inside its own field. Work started for one session stops, writing nothing, once
 `sessionID()` names another.
 
-The host policy both plugins share sits beside the ledger, so each host keeps only how it shows a
-card, how it warns, and how it persists. `replayFollowedSubjects(ownAgentSubject, topics,
-heldForRole?)` is what a host's `followedSubjects()` answers: its own agent subject and every
-topic it follows but a role lane, a subject it holds for a role, and a topic reaching a private
-stream subject (`reachesPrivateStreamSubject`, which a host's registration applies too: another
-session's agent subject, a failed-delivery lane on an agent subject, the Legion controller lane,
-or a wildcard reaching one, the listener's own rule, `privateStreamSubjects` and
-`ReachesPrivateStreamSubject` in `packages/envoy/internal/bus/stream.go`). `rememberedTopics(state)`
-is what a restore follows again from a persisted state: every
-subject but agent subjects and role lanes. `routeReplayNotice(notice, {warn, card})` sends a
-one-time notice where its kind belongs: a card for `stream_recreated` and `retention_gap`,
-rendered by `envoyNoticeText`.
+The host policy both plugins share sits in `@legion/envoy-client/stream-topics`, so each host keeps
+only how it shows a card, how it warns, and how it persists. `replayFollowedSubjects(
+ownAgentSubject, topics, heldForRole?)` is what a host's `followedSubjects()` answers, which is
+what a restart follows again: its own agent subject and every topic it follows but a role lane, a
+subject it holds for a role, and a topic reaching a private stream subject.
+`reachesPrivateStreamSubject(ownAgentSubject, topic, roles?)` is the listener's own rule,
+`privateStreamSubjects` and `ReachesPrivateStreamSubject` in
+`packages/envoy/internal/bus/stream.go`, which a host's registration applies too: another session's
+agent subject, a failed-delivery lane on an agent subject or a team topic, a controller notice lane
+of a project whose controller role `roles` does not name, or a wildcard reaching one. A session
+holding that role registers its own project's lane, since its consumer is the only way the notice
+reaches it (`controllerNoticeRole` names the role a lane is for). `rememberedTopics(topics)` is what
+a restore follows again from a persisted state: every subject but agent subjects and role lanes.
+`streamDeliversNothing(topic)` is the topic a registration must not carry: a `notifications.` topic
+no stream subject captures and no role lane, which the listener refuses the whole registration for.
 
 ## NATS connection
 

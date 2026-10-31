@@ -5,10 +5,10 @@ import { join } from "node:path"
 import type { Interest, SubscribeResult } from "@legion/envoy-client/transport"
 import type {
   ChannelBrokerMessage,
+  ChannelConnection,
   ChannelConnectionStatus,
-  ChannelForwarderConnection,
   ChannelTopicSubscription,
-} from "../src/channel-forwarder"
+} from "../src/channel-topics"
 import {
   CHANNEL_CAPABILITIES,
   type ChannelNotification,
@@ -19,7 +19,7 @@ import {
 import { SessionIdentity } from "../src/session-identity"
 import type { FakeClient } from "./channel-session-harness"
 
-class IdleNats implements ChannelForwarderConnection {
+class IdleNats implements ChannelConnection {
   subscribe(): ChannelTopicSubscription {
     return {
       unsubscribe: () => undefined,

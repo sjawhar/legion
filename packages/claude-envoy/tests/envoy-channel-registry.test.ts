@@ -557,3 +557,32 @@ test("a Dispatch subscription removal that names no topics removes nothing", asy
     await rm(stateDirectory, { recursive: true, force: true })
   }
 })
+
+// A topic the stream captures nothing of is refused by the listener with the whole registration,
+// so one subscription would wedge every later one (INFRA-771 review).
+test("refuses a subscription of a topic no stream subject captures, and follows nothing of it", async () => {
+  const calls: string[] = []
+  const nats = new FakeNats(calls)
+  const stateDirectory = await scratchState()
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      client: recordingClient(calls),
+    }),
+  )
+
+  try {
+    await expect(session.follow(["notifications.lxspec.probe"])).rejects.toThrow(
+      "no stream subject captures notifications.lxspec.probe",
+    )
+    expect(session.topics()).toEqual([directSubject])
+
+    // A wildcard the stream does capture is followed, and its bare base, which the stream
+    // captures nothing of, is not registered beside it.
+    expect(await session.follow(["notifications.team.>"])).toEqual(["notifications.team.>"])
+    expect(session.topics()).toEqual([directSubject, "notifications.team.>"])
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})

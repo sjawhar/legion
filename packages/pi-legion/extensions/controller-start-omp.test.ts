@@ -7,6 +7,7 @@ import {
   legionControllerNoticeSubject,
   ROLE_TOPIC_PREFIX,
 } from "@legion/contracts";
+import { deliverSubject, RelayHeader } from "@legion/envoy-client/consumer-delivery";
 import {
   type Block,
   type Cleanup,
@@ -19,7 +20,7 @@ import {
   spawnRpc,
   writeStandinProfile,
 } from "@legion/pi-shared/test/omp-harness";
-import { connect, StringCodec } from "nats";
+import { connect, headers as natsHeaders, StringCodec } from "nats";
 import { z } from "zod";
 
 // The operator's controller on the real, interactive Oh My Pi, as `legion controller start` runs
@@ -82,6 +83,12 @@ const CONTROLLER_ARGS = [
 
 /** The project the cases' controller serves: the daemon state fixtures' `legion`. */
 const PROJECT = "legion";
+/**
+ * The stream the stand-in listener names in its registration answers and in the relay frames it
+ * sends: one stream for the whole case, so a frame never reads as a stream the session's resume
+ * point does not name (`ConsumerDelivery.answered`).
+ */
+const STAND_IN_STREAM_ID = "controller-start-stream";
 
 /**
  * The extensions every controller loads. The Envoy entry is the sibling plugin's: the controller
@@ -360,6 +367,19 @@ async function serveController(
       machine_id: "controller-start-machine",
       dir: workspace,
       topics: [],
+      // A session takes its messages from its own consumer, which this listener relays on the
+      // session's deliver subject (`controllerInbound`): a registration answered without this
+      // leaves the plugin with no consumer and the session deaf, which is what it refuses.
+      ...(url.pathname === "/v1/interests/subscribe"
+        ? {
+            delivery: {
+              mode: "consumer",
+              subject: deliverSubject(sid),
+              stream_id: STAND_IN_STREAM_ID,
+              gap: false,
+            },
+          }
+        : {}),
     });
   });
   // A request still held at the end (an interrupted one among them) is answered, so the server
@@ -656,31 +676,37 @@ interface SentCard {
 }
 
 /**
- * What reaches a controller session over the real NATS server: a card on the controller role's
- * lane, as the Envoy listener forwards it to the session's agent subject, and a daemon notice on
- * the controller topic, as the listener publishes what the daemon's controller-notice executor
- * posts (packages/daemon/internal/daemon/outbox.go `controllerNotice`, the listener's
- * `messageEnvelope` in packages/envoy/cmd/listener/api.go).
+ * What reaches a controller session over the real NATS server. A session takes its messages from
+ * its own consumer and from nothing else (INFRA-771), so every frame here goes where the Envoy
+ * listener's relay would send it: the session's deliver subject
+ * (`notifications.envoy.deliver.<session>`), under the headers that name the subject the stream
+ * stored it on. A card is the listener's forward of a role-lane message to the session's agent
+ * subject; a notice is what the daemon's controller-notice executor posts on the controller topic
+ * (packages/daemon/internal/daemon/outbox.go `controllerNotice`, the listener's
+ * `messageEnvelope` in packages/envoy/cmd/listener/api.go), which only a session holding that
+ * project's controller role registers, and so only its consumer carries.
  */
 interface ControllerInbound {
   /**
-   * Publishes one card to session `sid` and returns it with the server's acknowledgement of the
-   * frame: the forwarded envelope keeps the role topic, and the session answers it nowhere, since
-   * the listener's forward counts as delivered once the stream stored it.
+   * Relays one card to session `sid` and returns it with the session's answer that it took the
+   * frame: the forwarded envelope keeps the role topic, and the frame travels the session's
+   * deliver subject, which it answers `received` on as it decodes it.
    */
   card(sid: string, label: string): SentCard;
   /**
-   * Sends `card`'s frame to `sid` again, as the listener re-sends a card it could not store, and
-   * resolves once the server took the repeat. The session delivers a repeat nowhere (its dedupe),
-   * so this adds no message: it only puts another frame behind the ones published before it, which
-   * the session's one connection takes in that order.
+   * Relays `card`'s frame to `sid` again, as the listener redelivers a frame, and resolves once
+   * the session has taken the repeat. The session delivers a repeat nowhere (its dedupe), so this
+   * adds no message: it only puts another frame behind the ones relayed before it, which the
+   * session takes in that order.
    */
   repeat(sid: string, card: Card): Promise<unknown>;
   /**
-   * Publishes one triage notice on the controller topic and returns its summary (`triage on
-   * <issue>`, the daemon's `noticeSummary`), whose issue key no other notice shares.
+   * Relays one triage notice on the controller topic to session `sid` and returns its summary
+   * (`triage on <issue>`, the daemon's `noticeSummary`), whose issue key no other notice shares.
+   * The session receives it only while its registration carries that lane, which its controller
+   * role is what allows.
    */
-  notice(): string;
+  notice(sid: string): string;
 }
 
 async function controllerInbound(nats: string): Promise<ControllerInbound> {
@@ -688,9 +714,38 @@ async function controllerInbound(nats: string): Promise<ControllerInbound> {
   cleanup.push(() => connection.close());
   const codec = StringCodec();
   const noticeSubject = legionControllerNoticeSubject(PROJECT);
-  const sendFrame = (sid: string, frame: Uint8Array): Promise<unknown> => {
-    connection.publish(`notifications.agent.${sid}`, frame);
-    return connection.flush();
+  let relayed = 0;
+  /**
+   * One relay frame, as the listener's relay of the session's consumer sends it: the stored
+   * subject, sequence, stream and time in its headers (`decodeRelayFrame`), on the session's
+   * deliver subject. The request's answer is the session's own `received`, which it sends as it
+   * decodes the frame; until the session has subscribed that subject the server reports no
+   * responder, so the frame is sent again.
+   */
+  const relay = async (sid: string, subject: string, frame: Uint8Array): Promise<unknown> => {
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      relayed += 1;
+      const header = natsHeaders();
+      header.set(RelayHeader.subject, subject);
+      header.set(RelayHeader.streamSeq, String(relayed));
+      header.set(RelayHeader.streamID, STAND_IN_STREAM_ID);
+      header.set(RelayHeader.delivered, "1");
+      header.set(RelayHeader.storedAt, new Date().toISOString());
+      try {
+        return await connection.request(deliverSubject(sid), frame, {
+          headers: header,
+          timeout: 2_000,
+        });
+      } catch (error) {
+        if (Date.now() > deadline) {
+          throw new Error(`${sid} took no relay frame on ${subject}: ${String(error)}`);
+        }
+        // A real clock, deliberately: a session that has not yet subscribed its deliver subject
+        // emits no signal here — the server only answers the next send with no responder.
+        await Bun.sleep(100);
+      }
+    }
   };
   return {
     card(sid, label) {
@@ -709,12 +764,16 @@ async function controllerInbound(nats: string): Promise<ControllerInbound> {
           trace_id: `trace-${key}`,
         })
       );
-      return { card: { summary, frame }, taken: sendFrame(sid, frame) };
+      return {
+        card: { summary, frame },
+        taken: relay(sid, `notifications.agent.${sid}`, frame),
+      };
     },
-    repeat: (sid, card) => sendFrame(sid, card.frame),
-    notice() {
+    repeat: (sid, card) => relay(sid, `notifications.agent.${sid}`, card.frame),
+    notice(sid) {
       const text = `triage on LEGION-${100_000 + Math.floor(Math.random() * 900_000)}`;
-      connection.publish(
+      void relay(
+        sid,
         noticeSubject,
         codec.encode(
           JSON.stringify({
@@ -853,8 +912,8 @@ test.skipIf(skip)(
         sid = claimed;
         sent = inbound.card(claimed, "role-claim");
       },
-      onNoticeInterest: () => {
-        notice = inbound.notice();
+      onNoticeInterest: (claimed) => {
+        notice = inbound.notice(claimed);
       },
     });
     const { card, taken } = await session.until("the controller role's claim", () => sent);
@@ -1182,7 +1241,7 @@ test.skipIf(skip)(
     const inbound = await controllerInbound(setup().nats);
     const { card, taken } = inbound.card(claimed, "claim");
     await taken;
-    const notice = inbound.notice();
+    const notice = inbound.notice(claimed);
     await inbound.repeat(claimed, card);
     expect(session.turns).toHaveLength(1);
     noticeRegistration.release();

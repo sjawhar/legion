@@ -62,25 +62,14 @@ func TestSubOK_NoSubscription(t *testing.T) {
 }
 
 func TestPublishBoundsReconnectWhenNATSUnavailable(t *testing.T) {
+	// Publish routes each topic to its transport (bus.UsesCoreTransport), so both cases are the
+	// one call a caller makes.
 	cases := []struct {
-		name    string
-		topic   string
-		publish func(*bus.Client, contracts.Envelope) error
+		name  string
+		topic string
 	}{
-		{
-			name:  "jetstream",
-			topic: "notifications.github.acme.widgets.timeout",
-			publish: func(client *bus.Client, item contracts.Envelope) error {
-				return client.Publish(item)
-			},
-		},
-		{
-			name:  "core",
-			topic: "notifications.role.legion-timeout",
-			publish: func(client *bus.Client, item contracts.Envelope) error {
-				return client.PublishCore(item)
-			},
-		},
+		{name: "jetstream", topic: "notifications.github.acme.widgets.timeout"},
+		{name: "core", topic: "notifications.role.legion-timeout"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -97,7 +86,7 @@ func TestPublishBoundsReconnectWhenNATSUnavailable(t *testing.T) {
 			result := make(chan error, 1)
 			started := time.Now()
 			go func() {
-				result <- tc.publish(client, contracts.Envelope{
+				result <- client.Publish(contracts.Envelope{
 					EventID:        "evt-publish-reconnect-timeout-" + tc.name,
 					Source:         "agent",
 					SourceEventID:  "source-publish-reconnect-timeout-" + tc.name,

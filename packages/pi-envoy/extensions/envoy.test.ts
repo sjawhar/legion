@@ -28,7 +28,6 @@ import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject, type SessionAnswer } from "@legion/contracts";
 import { askgateState } from "@legion/envoy-client/askgate-marker";
 import { deliverSubject, RelayHeader } from "@legion/envoy-client/consumer-delivery";
-import { subjectsOverlap } from "@legion/envoy-client/delivery-ledger";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { forgetKeyedLayerMemory } from "@legion/envoy-client/dispatch-http";
 import { shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
@@ -36,6 +35,7 @@ import { sessionDirectory } from "@legion/envoy-client/dispatch-session-director
 import { appendResult, readSessionTitle } from "@legion/envoy-client/dispatch-session-state";
 import { machineID } from "@legion/envoy-client/machine";
 import { renderSessionAnswers } from "@legion/envoy-client/session-answers";
+import { subjectsOverlap } from "@legion/envoy-client/stream-topics";
 import {
   type EnvoyStack,
   envoyStackEnabled,
@@ -5945,6 +5945,144 @@ console.log(JSON.stringify(args));
     expect(await followedTopics(fixture.tools, context)).not.toContain(notice);
   });
 
+  // INFRA-771: a session takes its messages from its own consumer, whose filter is the topics it
+  // registered, so the controller's notice lane and its Slack mention topics have to be in the
+  // registration while it holds the role — on the base they came in on a core subscription this
+  // change deleted. Each test here imports its own copy of the extension, as every row does.
+  test("a controller session registers its project's notice lane and its Slack mention topics, and takes a notice on the lane", async () => {
+    const role = "legion-acme-controller";
+    const lane = "notifications.legion.acme.controller";
+    const mention = "notifications.slack.T01.C9.mention";
+    // The topics of every registration, in order, and of every removal from the registry.
+    const registrations: string[][] = [];
+    const unregistered: string[][] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
+      if (url.pathname === "/v1/interests/subscribe") {
+        registrations.push(Array.isArray(body?.topics) ? body.topics : []);
+      }
+      if (url.pathname === "/v1/interests/unsubscribe") {
+        unregistered.push(Array.isArray(body?.topics) ? body.topics : []);
+        return response({});
+      }
+      if (url.pathname === "/v1/roles/set") {
+        return response({
+          session_id: "ses_controller",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${role}`],
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?controller-notice-lane");
+    const fixture = createPi();
+    let shown = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        shown.resolve();
+      },
+    });
+    const context = sessionContext("ses_controller");
+    await fixture.handlers.get("session_start")?.({}, context);
+    await claimEnvoyRole("ses_controller", role, context);
+    await subscribeLegionNotice("ses_controller", lane, context, role);
+    await subscribeLegionNotice("ses_controller", mention, context, role);
+
+    // The registration the listener stores, and so the session's consumer filter, names both.
+    const registered = registrations.at(-1) ?? [];
+    expect(registered).toContain(lane);
+    expect(registered).toContain(mention);
+
+    // What the listener's relay of that consumer hands over on the lane reaches the session.
+    const relayed = natsState.controls.get(lane);
+    if (relayed === undefined) {
+      throw new Error("the lane is in no registration, so nothing relays it");
+    }
+    relayed.push(
+      JSON.stringify({
+        event_id: "evt-controller-notice",
+        source: "agent",
+        source_event_id: "source-controller-notice",
+        topic: lane,
+        dedupe_key: "legion-outbox:controller-notice",
+        issued_at: 1,
+        payload_summary: "triage on ACME-7",
+        trace_id: "trace-controller-notice",
+      })
+    );
+    await shown.promise;
+    expect(decode(fixture.messages[0] ?? "")).toEqual({
+      envoy: {
+        from: "agent",
+        at: "1970-01-01T00:00:00Z",
+        id: "evt-controller-notice",
+        summary: "triage on ACME-7",
+      },
+    });
+
+    // And so does a Slack mention of the channel the same role opened.
+    shown = Promise.withResolvers<void>();
+    const mentioned = natsState.controls.get(mention);
+    if (mentioned === undefined) {
+      throw new Error("the mention topic is in no registration, so nothing relays it");
+    }
+    mentioned.push(
+      JSON.stringify({
+        event_id: "evt-controller-mention",
+        source: "slack",
+        source_event_id: "source-controller-mention",
+        topic: mention,
+        dedupe_key: "slack:controller-mention",
+        issued_at: 1,
+        payload_summary: "@controller look at this",
+        trace_id: "trace-controller-mention",
+      })
+    );
+    await shown.promise;
+    expect(decode(fixture.messages[1] ?? "")).toMatchObject({
+      envoy: { id: "evt-controller-mention", summary: "@controller look at this" },
+    });
+
+    // The role ends: the lane and the mention topic are closed and taken out of the listener's
+    // registry, which only ever adds a registered topic, so the session's consumer stops
+    // carrying another holder's notices.
+    await claimEnvoyRole("ses_controller", "legion-reviewer", context);
+    expect(unregistered.flat()).toEqual(expect.arrayContaining([lane, mention]));
+    const left = await followedTopics(fixture.tools, context);
+    expect(left).not.toContain(lane);
+    expect(left).not.toContain(mention);
+  });
+
+  test("a session that holds no controller role registers no controller notice lane", async () => {
+    const lane = "notifications.legion.acme.controller";
+    const registrations: string[][] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
+      if (url.pathname === "/v1/interests/subscribe") {
+        registrations.push(Array.isArray(body?.topics) ? body.topics : []);
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?controller-lane-unheld");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const context = sessionContext("ses_no_role");
+    await fixture.handlers.get("session_start")?.({}, context);
+    const subscribe = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribe === undefined) throw new Error("envoy_subscribe was not registered");
+    await subscribe.execute("", { topics: [lane] });
+
+    // The listener stores no controller lane for a session that does not hold its role, so the
+    // session leaves it out of every registration itself, and nothing relays it.
+    for (const topics of registrations) expect(topics).not.toContain(lane);
+    expect(natsState.controls.get(lane)).toBeUndefined();
+  });
+
   // A fixture holding `legion-controller`. Once `gate(role)` is called, the listener holds the
   // next claim of `role` until its `release` resolves. The model's envoy_role_set reaches the move
   // queue in the call itself, so a second call made after `reached` is queued behind the first.
@@ -9767,6 +9905,56 @@ console.log(JSON.stringify(args));
       { session_id: "ses_unsubscribe", role },
       { session_id: "ses_unsubscribe", role, soft: true },
     ]);
+  });
+
+  // A topic the stream captures nothing of would be refused by the listener with the whole
+  // registration, so one envoy_subscribe would wedge every later one (INFRA-771 review).
+  test("envoy_subscribe refuses a topic no stream subject captures, and keeps registering", async () => {
+    const registrations: string[][] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
+      if (url.pathname === "/v1/interests/subscribe") {
+        const topics: string[] = Array.isArray(body?.topics) ? body.topics : [];
+        registrations.push(topics);
+        // The listener's own rule: a `notifications.` topic no stream subject captures is
+        // refused by name, with the whole registration (cmd/listener's subscribeHandler).
+        const uncaptured = topics.find(
+          (topic) => topic === "notifications.team" || topic === "notifications.lxspec.probe"
+        );
+        if (uncaptured !== undefined) {
+          return new Response(
+            JSON.stringify({ error: `no stream subject captures ${uncaptured}` }),
+            { status: 400 }
+          );
+        }
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?uncaptured-subscribe");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const context = sessionContext("ses_uncaptured");
+    await fixture.handlers.get("session_start")?.({}, context);
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
+
+    const refused = await subscribeTool.execute("", { topics: ["notifications.lxspec.probe"] });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0]?.text).toContain("notifications.lxspec.probe");
+    expect(await followedTopics(fixture.tools, context)).not.toContain(
+      "notifications.lxspec.probe"
+    );
+
+    // A wildcard whose bare base the stream captures nothing of carries only the wildcard, so
+    // the registration stands and every later one does too.
+    const wildcard = await subscribeTool.execute("", { topics: ["notifications.team.>"] });
+    expect(wildcard.isError).toBeFalsy();
+    expect(wildcard.details).toMatchObject({ added: ["notifications.team.>"] });
+    const registered = registrations.at(-1) ?? [];
+    expect(registered).toContain("notifications.team.>");
+    expect(registered).not.toContain("notifications.team");
+    expect(registrations.every((topics) => !topics.includes("notifications.team"))).toBe(true);
   });
 
   test("unsubscribes role-shaped subscriptions locally without releasing the held role", async () => {
@@ -14537,7 +14725,7 @@ console.log(JSON.stringify(args));
           session_id: "ses_list",
           machine_id: "test",
           dir: "/tmp/envoy-omp-test",
-          topics: ["notifications.agent.ses_list", "notifications.registry-only"],
+          topics: ["notifications.agent.ses_list", "notifications.team.registry-only"],
         });
       }
       return response({ session_id: "ses_list", machine_id: "test", dir: "/tmp", topics: [] });
@@ -14552,20 +14740,20 @@ console.log(JSON.stringify(args));
     if (subscribeTool === undefined || listTool === undefined)
       throw new Error("subscription tools were not registered");
 
-    await subscribeTool.execute("", { topics: ["notifications.live-only"] });
+    await subscribeTool.execute("", { topics: ["notifications.team.live-only"] });
     const result = await listTool.execute("", {});
 
     expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
       topics: [
         "notifications.agent.ses_list",
-        "notifications.registry-only",
-        "notifications.live-only",
+        "notifications.team.registry-only",
+        "notifications.team.live-only",
       ],
     });
     expect(result.details.interests).toEqual([
       { topic: "notifications.agent.ses_list", source: "both" },
-      { topic: "notifications.registry-only", source: "registry" },
-      { topic: "notifications.live-only", source: "live" },
+      { topic: "notifications.team.registry-only", source: "registry" },
+      { topic: "notifications.team.live-only", source: "live" },
     ]);
   });
 
@@ -14854,7 +15042,7 @@ console.log(JSON.stringify(args));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(natsState.subscriptions.has("notifications.envoy.deliver.ses_retry")).toBe(true);
-    expect(notifications.some((message) => message.includes("NATS connection established"))).toBe(
+    expect(notifications.some((message) => message.includes("this session is registered"))).toBe(
       true
     );
     const connectionsAfterRecovery = natsState.connectedNames.length;
@@ -15190,7 +15378,7 @@ console.log(JSON.stringify(args));
       if (subscribeTool === undefined || unsubscribeTool === undefined)
         throw new Error("subscription tools were not registered");
 
-      const topic = "notifications.retrying";
+      const topic = "notifications.team.retrying";
       await subscribeTool.execute("", { topics: [topic] });
       const controls = natsState.controls.get(topic);
       if (controls === undefined) throw new Error("subscription was not created");

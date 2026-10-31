@@ -21,21 +21,18 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
-// Consumer delivery of the simulated sessions (-session-delivery consumer, or
-// LOADTEST_SESSION_DELIVERY=consumer): each session registers with `delivery: {consumer: true,
-// epoch}`, gets each stored message of its subjects as a relay frame on its relay subject
+// Consumer delivery of the simulated sessions: each session registers with `delivery: {consumer:
+// true, epoch}`, gets each stored message of its subjects as a relay frame on its relay subject
 // (bus.DeliverSubject), and answers each frame `received`, then `done`, on the frame's reply
 // subject, as the pi plugin does (packages/envoy-client/src/consumer-delivery.ts). The frame is the
 // session's receipt; its Envoy-Stored-At header, the stream's store time of the message, gives the
 // delivery latency from publish. The session keeps its core subscriptions, as the plugin does: a
 // core copy of a relayed subject answers its lane receipt on the agent topic and is not counted.
 
-// The session delivery modes (-session-delivery), named as the listener's registration answer
-// names them.
-const (
-	sessionDeliveryCore     = "core"
-	sessionDeliveryConsumer = "consumer"
-)
+// sessionDeliveryConsumer is the mode the listener answers a registration it gave a consumer
+// (cmd/listener/session_delivery.go deliveryModeConsumer), the only mode it answers at all: a
+// registration it can give no consumer is refused, since nothing else delivers to a session.
+const sessionDeliveryConsumer = "consumer"
 
 // The headers of a relay frame and the replies to it (packages/envoy/cmd/listener/session_relay.go).
 const (
@@ -80,7 +77,8 @@ type relaySessions struct {
 	// consumer is set for each session whose last registration answered consumer.
 	consumer []atomic.Bool
 	mu       sync.Mutex
-	// answers holds each session's last answer: "consumer", or "core:<reason>"; "" before one.
+	// answers holds each session's last answer: the delivery mode it named, "" before one and
+	// for an answer that named no consumer delivery.
 	answers []string
 	// streams and written are each session's resume point, as the plugin keeps it
 	// (packages/envoy-client/src/consumer-delivery.ts resumePoint): the stream the last answer or
@@ -116,22 +114,18 @@ func (r *relaySessions) relayed(session int) bool { return r.consumer[session].L
 
 // answered records session's registration answer; a consumer answer naming another stream than
 // the session's resume point starts the resume point again on that stream.
-func (r *relaySessions) answered(session int, mode, reason, streamID string) {
-	answer := sessionDeliveryConsumer
-	if mode != sessionDeliveryConsumer {
-		answer = sessionDeliveryCore + ":" + reason
-	}
+func (r *relaySessions) answered(session int, mode, streamID string) {
 	r.mu.Lock()
 	prev := r.answers[session]
-	r.answers[session] = answer
-	if answer == sessionDeliveryConsumer {
+	r.answers[session] = mode
+	if mode == sessionDeliveryConsumer {
 		r.switchStream(session, streamID)
 	}
 	r.mu.Unlock()
-	if prev != "" && prev != answer {
+	if prev != "" && prev != mode {
 		r.modeChanges.Add(1)
 	}
-	r.consumer[session].Store(answer == sessionDeliveryConsumer)
+	r.consumer[session].Store(mode == sessionDeliveryConsumer)
 }
 
 // switchStream starts session's resume point on streamID when it names another stream. Under mu.
@@ -240,16 +234,16 @@ func (r *relaySessions) coreCopy() {
 	r.coreCopies.Add(1)
 }
 
-// sessionDeliverySummary is how the sessions' delivery went under consumer delivery.
+// sessionDeliverySummary is how the sessions' delivery went.
 type sessionDeliverySummary struct {
-	// ConsumerSessions counts the sessions whose last registration answered consumer;
-	// CoreSessions those whose last answer was core, by reason in CoreReasons, and
-	// Unanswered those that never got an answer. A step whose sessions fell back to core
-	// measured the core path, not consumer delivery.
-	ConsumerSessions int            `json:"consumer_sessions"`
-	CoreSessions     int            `json:"core_sessions"`
-	CoreReasons      map[string]int `json:"core_reasons,omitempty"`
-	Unanswered       int            `json:"unanswered"`
+	// ConsumerSessions counts the sessions whose last registration answered consumer delivery;
+	// NoConsumerSessions those whose last answer named another mode or none, which this listener
+	// never answers 2xx (a registration it can give no consumer is refused, and the registrar
+	// counts that refusal among its errors); and Unanswered those that never got an answer. A
+	// step with any session not on consumer delivery measured a path that delivers nothing.
+	ConsumerSessions   int `json:"consumer_sessions"`
+	NoConsumerSessions int `json:"no_consumer_sessions"`
+	Unanswered         int `json:"unanswered"`
 	// ModeChanges counts the answers that differed from the session's answer before.
 	ModeChanges int64 `json:"mode_changes"`
 	// Frames counts the relay frames; Duplicates the frames of a stream sequence the session had
@@ -267,21 +261,20 @@ type sessionDeliverySummary struct {
 }
 
 func (r *relaySessions) summary() sessionDeliverySummary {
-	out := sessionDeliverySummary{CoreReasons: map[string]int{},
+	out := sessionDeliverySummary{
 		ModeChanges: r.modeChanges.Load(), Frames: r.frameCount.Load(), Duplicates: r.duplicates.Load(),
 		Redelivered: r.redelivered.Load(), Gaps: r.gaps.Load(), Undecodable: r.undecodable.Load(),
 		ReplyErrors: r.replyErrors.Load(), CoreCopies: r.coreCopies.Load()}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, a := range r.answers {
-		switch {
-		case a == "":
+		switch a {
+		case "":
 			out.Unanswered++
-		case a == sessionDeliveryConsumer:
+		case sessionDeliveryConsumer:
 			out.ConsumerSessions++
 		default:
-			out.CoreSessions++
-			out.CoreReasons[strings.TrimPrefix(a, sessionDeliveryCore+":")]++
+			out.NoConsumerSessions++
 		}
 	}
 	return out

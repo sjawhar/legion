@@ -72,20 +72,21 @@ func TestRelayHandlerCountsEachSequenceOnce(t *testing.T) {
 }
 
 // TestRelayAnswersCountTheSessionsOnConsumerDelivery: the summary counts each session by its last
-// registration answer, core ones by reason, and counts the answers that changed a session's mode.
+// registration answer -- consumer delivery, an answer naming no consumer, or none at all -- and
+// counts the answers that changed a session's mode.
 func TestRelayAnswersCountTheSessionsOnConsumerDelivery(t *testing.T) {
 	r := newRelaySessions(4, 2)
 	if r.epochs[0] == "" || r.epochs[0] == r.epochs[1] {
 		t.Fatalf("epochs %q: want one random epoch per connection", r.epochs)
 	}
-	r.answered(0, sessionDeliveryConsumer, "", "stream-a")
-	r.answered(1, sessionDeliveryConsumer, "", "stream-a")
-	r.answered(1, sessionDeliveryCore, "consumer_error", "")
-	r.answered(2, sessionDeliveryCore, "no_grant", "")
+	r.answered(0, sessionDeliveryConsumer, "stream-a")
+	r.answered(1, sessionDeliveryConsumer, "stream-a")
+	// An answer that named no delivery field at all, which only a listener before INFRA-771 sends.
+	r.answered(1, "", "")
+	r.answered(2, "core", "")
 	d := r.summary()
-	if d.ConsumerSessions != 1 || d.CoreSessions != 2 || d.Unanswered != 1 || d.ModeChanges != 1 ||
-		d.CoreReasons["consumer_error"] != 1 || d.CoreReasons["no_grant"] != 1 {
-		t.Errorf("summary %+v, want 1 consumer, 2 core (consumer_error, no_grant), 1 unanswered, 1 mode change", d)
+	if d.ConsumerSessions != 1 || d.NoConsumerSessions != 1 || d.Unanswered != 2 || d.ModeChanges != 1 {
+		t.Errorf("summary %+v, want 1 consumer, 1 without a consumer, 2 unanswered, 1 mode change", d)
 	}
 	if !r.relayed(0) || r.relayed(1) || r.relayed(3) {
 		t.Errorf("relayed: session 0 %v, 1 %v, 3 %v; want true, false, false", r.relayed(0), r.relayed(1), r.relayed(3))
@@ -99,7 +100,7 @@ func TestRelayResumePointFollowsDoneFrames(t *testing.T) {
 	ns := &natsSessions{receipts: newCollector[receipt](16), envelopes: envelopeSamples{data: map[string][]byte{}, marked: map[string]bool{}}}
 	ns.relay = newRelaySessions(1, 1)
 	r := ns.relay
-	r.answered(0, sessionDeliveryConsumer, "", "stream-a")
+	r.answered(0, sessionDeliveryConsumer, "stream-a")
 	if _, ok := r.delivery(0)["resume"]; ok {
 		t.Fatalf("resume point before any frame: %v", r.delivery(0))
 	}
@@ -113,34 +114,34 @@ func TestRelayResumePointFollowsDoneFrames(t *testing.T) {
 	if resume["stream_id"] != "stream-a" || resume["seq"] != uint64(12) {
 		t.Errorf("resume point %v, want stream-a at 12", resume)
 	}
-	r.answered(0, sessionDeliveryConsumer, "", "stream-b")
+	r.answered(0, sessionDeliveryConsumer, "stream-b")
 	if _, ok := r.delivery(0)["resume"]; ok {
 		t.Errorf("resume point after the stream changed: %v", r.delivery(0))
 	}
 }
 
 // TestTablesShowSessionDelivery: the session-delivery table shows the sessions on consumer
-// delivery, the latency from publish, and the listener's and NATS's trends; a core step shows "-"
-// where consumer delivery has no value.
+// delivery, the latency from publish, and the listener's and NATS's trends; a step with no
+// delivery summary shows "-" where consumer delivery has no value.
 func TestTablesShowSessionDelivery(t *testing.T) {
 	consumers, pulls, sessionPulls := 1003.0, 40.0, 33.3
 	consumer := stepData{name: "after", sum: summary{
-		Config:   summaryConfig{Step: "after", SessionDelivery: sessionDeliveryConsumer},
+		Config:   summaryConfig{Step: "after"},
 		Events:   eventsSummary{DeliveryMsFromPublish: stat{N: 10, P50: 12, P99: 80}, DeliveryMsFromArrival: stat{N: 10, P50: 900, P99: 4000}},
 		Sessions: sessionsSummary{Delivery: &sessionDeliverySummary{ConsumerSessions: 1000, Frames: 50}},
 		Resources: &resourcesSummary{JSConsumersMax: &consumers, PullRequestsPerS: &pulls, SessionPullRequestsPerS: &sessionPulls,
 			RSSMiBMax: map[string]float64{"listener": 90}, Trends: map[string]trend{"listener": {CoresFirstThird: 0.1, CoresLastThird: 0.12, RSSMiBFirstThird: 80, RSSMiBLastThird: 85}}},
 	}}
-	core := stepData{name: "before", sum: summary{Config: summaryConfig{Step: "before"}}}
-	md := renderTables([]stepData{consumer, core})
+	unmeasured := stepData{name: "before", sum: summary{Config: summaryConfig{Step: "before"}}}
+	md := renderTables([]stepData{consumer, unmeasured})
 	text := section(md, "Session delivery, listener and NATS")
 	cells := rowCells(text, "after")
-	if cells == nil || cells[1] != "consumer" || cells[2] != "1000 / 0" || cells[3] != "12 / 80" || cells[7] != "0.100 / 0.120" ||
-		cells[8] != "80 / 85 (90)" || cells[11] != "1,003" || cells[12] != "40.0 / 33.3" {
+	if cells == nil || cells[1] != "1000 / 0" || cells[2] != "12 / 80" || cells[6] != "0.100 / 0.120" ||
+		cells[7] != "80 / 85 (90)" || cells[10] != "1,003" || cells[11] != "40.0 / 33.3" {
 		t.Errorf("the consumer step's row: %q\n%s", cells, text)
 	}
-	if cells := rowCells(text, "before"); cells == nil || cells[1] != "core" || cells[2] != "-" || cells[11] != "-" {
-		t.Errorf("the core step's row: %q\n%s", cells, text)
+	if cells := rowCells(text, "before"); cells == nil || cells[1] != "-" || cells[10] != "-" {
+		t.Errorf("the step with no delivery summary: %q\n%s", cells, text)
 	}
 	if !strings.Contains(text, "Envoy-Stored-At") {
 		t.Errorf("no note says where the latency from publish comes from:\n%s", text)

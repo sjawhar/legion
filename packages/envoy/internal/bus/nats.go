@@ -1,7 +1,6 @@
 package bus
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -952,8 +951,8 @@ func (c *Client) Close() {
 // DRAINING_PUBS again for about 5 s after Drain returns (see the wait below). It stops the client
 // first, so neither the drain's close nor a recovery already under way reconnects or re-subscribes
 // a process that is shutting down. It then drains the delivery subscriptions while the connection
-// still accepts new ones: a handler finishing its delivery may subscribe (RequestCoreTo's receipt
-// inbox), which a draining connection refuses. Next it runs the drain hooks (AddDrainHook), which
+// still accepts new ones: a handler finishing its delivery may subscribe (a forward's reply
+// inbox, startForward), which a draining connection refuses. Next it runs the drain hooks (AddDrainHook), which
 // end the KV watchers with requests of their own while the connection still carries them, even
 // when the deliveries ran out their share of the timeout (drainHookReserve) or failed to drain. Only
 // then does it drain the connection, whose Drain only starts the drain, and wait for it to close
@@ -1023,12 +1022,13 @@ func (c *Client) Drain(timeout time.Duration) error {
 // drainHookReserve is the part of Drain's timeout kept from the delivery subscriptions for the
 // drain hooks and the connection's own drain, so a delivery still in its handler near the deadline
 // cannot leave the hooks no time and make each KV watcher's consumer delete fail at ERROR. A
-// delivery's handler can take seconds (a role-lane forward waits up to 2 s for its receipt, a
-// session delivery up to its request limit), while a hook's delete is one round trip per watcher,
-// run for every watcher at once, and the connection's drain a flush and a close: 3 s is
-// comfortably more than one round trip even over a relay. The listener drains for 13 s, so its
-// deliveries keep the 10 s they had before the hooks and the hooks get their 3 s on top. A drain
-// shorter than 10 s keeps 30% of its timeout instead, so its deliveries still get most of it.
+// delivery's handler can take seconds (a role-lane forward waits up to 2 s for the stream's
+// acknowledgement, a session delivery up to its request limit), while a hook's delete is one
+// round trip per watcher, run for every watcher at once, and the connection's drain a flush and
+// a close: 3 s is comfortably more than one round trip even over a relay. The listener drains for
+// 13 s, so its deliveries keep the 10 s they had before the hooks and the hooks get their 3 s on
+// top. A drain shorter than 10 s keeps 30% of its timeout instead, so its deliveries still get
+// most of it.
 const drainHookReserve = 3 * time.Second
 
 // drainDeliveries drains the delivery subscriptions, pass after pass while a bind in flight
@@ -1101,7 +1101,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 	for {
 		conn := c.currentConn()
 		// A live connection serves even a stopped client: deliveries still in their handlers during
-		// Drain publish their receipts and exceptions through it.
+		// Drain publish their forwards and exceptions through it.
 		if conn != nil && (conn.IsConnected() || conn.IsDraining()) {
 			return nil
 		}
@@ -1174,11 +1174,23 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 // before. The capture is judged on the subjects this binary compiles in, not the deployed stream's:
 // a topic under a subject only a newer build adds (which reconciliation keeps) goes over core NATS
 // from an older one, so the stream still stores it but without a MsgId, and the older listener's
-// durable never fans it out. The listener's publish route reads it too, to refuse such a topic by
 // name: nothing would store it, and a session reads only what its own consumer holds
-// (cmd/listener/api.go).
+// (ReachesNoSession, cmd/listener/api.go).
 func UsesCoreTransport(topic string) bool {
 	return strings.HasPrefix(topic, NotificationTopicPrefix) && !StreamCaptures(topic)
+}
+
+// ReachesNoSession reports whether a topic a caller names would deliver to no session at all: a
+// notification topic no stream subject captures (UsesCoreTransport) that is not a role lane. A
+// session receives what its own consumer delivers, which is what the stream stored, so a publish
+// to such a topic reaches nobody, now or later, and an interest in it would be stored and deliver
+// nothing. The listener refuses both by name, at POST /v1/messages/publish and at
+// POST /v1/interests/subscribe (cmd/listener/api.go), which is the one place this question is
+// asked. A role lane is the exception the name's "no session" turns on: it travels over core NATS
+// to the listener, which forwards the message to its holder's agent subject, where the stream
+// stores it for the holder's own consumer.
+func ReachesNoSession(topic string) bool {
+	return UsesCoreTransport(topic) && !strings.HasPrefix(topic, contracts.RoleTopicPrefix)
 }
 
 // ErrRefused is returned for an envelope that is refused the same way however often it is
@@ -1310,9 +1322,9 @@ func (c *Client) refused(err error, size int) error {
 	return err
 }
 
-// publishBound bounds Publish, PublishCoreTo and PublishReportingDuplicate, and the publishJetStream
-// and PublishCoreContext of a caller that passed no deadline of its own: their wait for a reconnect and
-// their flush or JetStream acknowledgement together. A publish window's sends take
+// publishBound bounds Publish and PublishReportingDuplicate, and the publishJetStream and
+// PublishCoreContext of a caller that passed no deadline of its own: their wait for a reconnect
+// and their flush or JetStream acknowledgement together. A publish window's sends take
 // publishAcknowledgementTimeout instead. It is also the HTTP client's per-attempt deadline
 // (packages/envoy-client/src/transport.ts), which a publish that spends the whole bound can never
 // be answered inside, and that is what the Within forms below exist for.
@@ -1475,29 +1487,15 @@ func (c *Client) publishJetStreamAs(ctx context.Context, item contracts.Envelope
 	return ack.Duplicate, nil
 }
 
-// PublishCore publishes directly to the envelope's NATS subject without
-// waiting for a JetStream acknowledgment.
-func (c *Client) PublishCore(item contracts.Envelope) error {
-	return c.PublishCoreTo(item.Topic, item)
-}
-
-// PublishCoreTo publishes item directly to subject and confirms the server accepted it
-// (publishConfirmed), so a nil error means it did: a publish NATS denies (a permissions violation
-// of a per-client grant), a flush that fails and a publish the server cannot be shown to have
-// accepted all return an error. The subject can differ from item.Topic when an authoritative
-// router forwards an envelope while retaining its original topic for the recipient. It bounds
-// itself at publishBound, a reconnect included; a caller with a deadline of its own reaches the
-// same publish through PublishCoreContext, or PublishWithin.
-func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
-	ctx, cancel := context.WithTimeout(context.Background(), publishBound)
-	defer cancel()
-	return c.PublishCoreContext(ctx, subject, item)
-}
-
-// PublishCoreContext is PublishCoreTo under ctx: ctx is the whole publish's bound, so it is both
-// what the wait for a reconnect ends with and the window publishConfirmed flushes and confirms
-// within, and a caller answering inside a deadline of its own (the listener's routes: a publish
-// through PublishWithin, the publish route's confirmed ad-hoc topic send) is never held past it.
+// PublishCoreContext publishes item directly to subject under ctx, confirming the server accepted
+// it (publishConfirmed), so a nil error means it did: a publish NATS denies (a permissions
+// violation of a per-client grant), a flush that fails and a publish the server cannot be shown
+// to have accepted all return an error. The subject can differ from item.Topic when an
+// authoritative router forwards an envelope while retaining its original topic for the recipient.
+//
+// ctx is the whole publish's bound, so it is both what the wait for a reconnect ends with and the
+// window publishConfirmed flushes and confirms within, and a caller answering inside a deadline
+// of its own (the listener's routes: a publish through PublishWithin) is never held past it.
 // The bound taken below is the earlier of ctx's own deadline and publishBound, since WithTimeout
 // keeps the parent's deadline when that is the earlier one; publishBound is what bounds a caller
 // that passed none.
@@ -1524,97 +1522,52 @@ func (c *Client) PublishCoreContext(ctx context.Context, subject string, item co
 	return c.publishConfirmed(ctx, conn, &nats.Msg{Subject: subject, Data: data}, conn.PublishMsg)
 }
 
-// ErrReceiptTimeout is returned by RequestCoreTo only when the publish and the
-// flush both succeeded, the server reported nothing and the connection stayed
-// up through them, and no empty receipt arrived before the deadline: the
-// forward is known to have reached the server, and whoever holds the subject
-// did not acknowledge it in time. A flush that fails or times out — a
-// reconnecting or stalled connection still buffering the forward — is returned
-// as the client's own error, never this one, because that forward is not known
-// to have left this process; so is a forward the server denied
-// (ErrPublishDenied), or one during which the server reported another error or
-// the connection dropped, since either may have hidden its denial.
-var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
-
 // ForwardMsgID is the Nats-Msg-Id of an envelope whose dedupe key is dedupeKey published or
 // forwarded to subject: the dedupe key, a colon, the subject. publishJetStream stores an envelope
 // that earns a MsgId under it, so each topic one upstream event is published on keeps its own
-// copy, and every forward to a session's subject (startForward, for RequestCoreTo and
-// StartRequestStoredTo alike) sets its header through it, so the stream, which captures every
-// agent subject, keeps one copy of a message per recipient however many times a sender forwards
-// it, and a forward of the same message to another recipient is a copy of its own.
+// copy, and every forward to a session's subject (startForward) sets its header through it, so
+// the stream, which captures every agent subject, keeps one copy of a message per recipient
+// however many times a sender forwards it, and a forward of the same message to another
+// recipient is a copy of its own.
 func ForwardMsgID(dedupeKey, subject string) string {
 	return dedupeKey + ":" + subject
 }
 
-// ErrForwardNotStored is returned by RequestCoreTo when the holder's empty receipt arrived but the
-// stream's acknowledgement that it stored the forward did not, before the deadline, or came back as
-// the stream's error: the holder saw the forward live, but the forward's one lasting copy, which the
-// holder's session consumer delivers after any break, is missing. The forward does not count as
-// delivered; the listener reports it delivery_failed.
+// ErrForwardNotStored is returned by a forward's Wait when the stream's acknowledgement that it
+// stored the forward did not arrive before the deadline, or came back as the stream's error: the
+// forward's one lasting copy, which the holder's session consumer delivers, is missing. The
+// forward does not count as delivered; the listener reports it delivery_failed.
 var ErrForwardNotStored = errors.New("bus: the stream did not acknowledge storing the forward")
 
-// RequestCoreTo delivers item directly to subject and succeeds only once two replies arrived: the
-// notification stream's acknowledgement that it stored the forward (agent subjects are captured by
-// the stream, which answers a core publish with a reply subject as it answers a JetStream publish)
-// and the holder's empty receipt, a reply with no data and no header field. The server's
-// no-responders answer carries a Status header, so it is neither. The forward carries a
-// Nats-Msg-Id of item's dedupe key and subject (ForwardMsgID), so a sender that forwards one
-// envelope again until a receipt arrives leaves the stream one copy per message and recipient,
-// however many attempts it makes, and the stream acknowledges each repeat as a duplicate, which
-// counts as stored; every attempt still reaches the core subscribers on subject. Because the
-// forward has headers, the server hands its replies to this client with a header block, empty for
-// a receipt, so the receipt is told by its header holding no field rather than by its having none.
-// No receipt by the deadline is ErrReceiptTimeout; a receipt without the stream's acknowledgement
-// is ErrForwardNotStored. The flush is bounded by the same window as the receipt wait, so the call
-// never outlives timeout by the client's default 10 s flush. A forward the server denied returns
-// at once; one publishConfirmed cannot confirm for another reason still waits, since its replies
-// prove it was delivered, and returns that reason instead of ErrReceiptTimeout if no receipt
-// arrives.
+// StartRequestStoredTo publishes a forward of item to subject and returns once the server has it,
+// leaving the wait for the stream's acknowledgement to the returned forward's Wait, so a caller
+// can publish forwards in order on one goroutine and wait for each on another. The window,
+// timeout, starts with this call. Every holder is reached this way: no session subscribes to its
+// agent subject any more (INFRA-771), so the forward's one lasting copy is the stored one, which
+// the holder's session consumer delivers through the listener's relay, with acknowledgement and
+// redelivery.
 //
-// It is StartRequestCoreTo followed by the returned forward's Wait.
-func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout time.Duration) error {
-	forward, err := c.StartRequestCoreTo(subject, item, timeout)
-	if err != nil {
-		return err
-	}
-	return forward.Wait()
-}
-
-// StartRequestCoreTo publishes RequestCoreTo's forward and returns once the server has it, leaving
-// the wait for its two replies to the returned forward's Wait, so a caller can publish forwards in
-// order on one goroutine and wait for each on another. The window, timeout, starts with this call.
-// An error is RequestCoreTo's own before any reply could arrive (a denied or invalid forward, a
-// connection that never came back within timeout); every returned forward must be waited for, which
-// releases its reply subscription.
-func (c *Client) StartRequestCoreTo(subject string, item contracts.Envelope, timeout time.Duration) (*PendingForward, error) {
-	return c.startForward(subject, item, timeout, false)
-}
-
-// StartRequestStoredTo publishes a forward as StartRequestCoreTo does, Nats-Msg-Id included, for a
-// holder with no NATS subscriber to answer it: a serving-port session whose stored messages its
-// session consumer delivers, with acknowledgement and redelivery, through the listener's relay. Its
-// Wait succeeds on the stream's acknowledgement alone, which is that delivery's one lasting copy,
-// and ignores any receipt. No acknowledgement by the deadline, the stream's error answer, or the
-// server's no-responders answer (nothing captured the subject) is ErrForwardNotStored (wrapping the
-// reason, and the one publishConfirmed could not confirm the publish for, when it could not).
+// The forward carries a Nats-Msg-Id of item's dedupe key and subject (ForwardMsgID), so a sender
+// that forwards one envelope again until it is stored leaves the stream one copy per message and
+// recipient, however many attempts it makes, and the stream acknowledges each repeat as a
+// duplicate, which counts as stored. An error here is the publish's own, before any reply could
+// arrive (a denied or invalid forward, a connection that never came back within timeout); every
+// returned forward must be waited for, which releases its reply subscription.
 func (c *Client) StartRequestStoredTo(subject string, item contracts.Envelope, timeout time.Duration) (*PendingForward, error) {
-	return c.startForward(subject, item, timeout, true)
+	return c.startForward(subject, item, timeout)
 }
 
-// PendingForward is a forward StartRequestCoreTo or StartRequestStoredTo published, whose replies
-// Wait reads.
+// PendingForward is a forward StartRequestStoredTo published, whose replies Wait reads.
 type PendingForward struct {
-	receipt  *nats.Subscription
+	// replies is the forward's reply inbox, which the stream answers on.
+	replies  *nats.Subscription
 	deadline time.Time
-	// unconfirmed is publishConfirmed's error for a publish it could not confirm, which the replies
-	// may still overrule; nil when it confirmed the publish.
+	// unconfirmed is publishConfirmed's error for a publish it could not confirm, which the
+	// stream's acknowledgement may still overrule; nil when it confirmed the publish.
 	unconfirmed error
-	// storedOnly is set for StartRequestStoredTo's forward, which needs no receipt.
-	storedOnly bool
 }
 
-func (c *Client) startForward(subject string, item contracts.Envelope, timeout time.Duration, storedOnly bool) (*PendingForward, error) {
+func (c *Client) startForward(subject string, item contracts.Envelope, timeout time.Duration) (*PendingForward, error) {
 	if err := checkSubject(subject); err != nil {
 		return nil, err
 	}
@@ -1630,7 +1583,7 @@ func (c *Client) startForward(subject string, item contracts.Envelope, timeout t
 	deadline, _ := ctx.Deadline()
 	conn := c.Conn
 	inbox := nats.NewInbox()
-	receipt, err := conn.SubscribeSync(inbox)
+	replies, err := conn.SubscribeSync(inbox)
 	if err != nil {
 		return nil, err
 	}
@@ -1638,69 +1591,47 @@ func (c *Client) startForward(subject string, item contracts.Envelope, timeout t
 	forward.Header.Set(nats.MsgIdHdr, ForwardMsgID(item.DedupeKey, subject))
 	err = c.publishConfirmed(ctx, conn, forward, conn.PublishMsg)
 	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
-		_ = receipt.Unsubscribe()
+		_ = replies.Unsubscribe()
 		return nil, err
 	}
-	return &PendingForward{receipt: receipt, deadline: deadline, unconfirmed: err, storedOnly: storedOnly}, nil
+	return &PendingForward{replies: replies, deadline: deadline, unconfirmed: err}, nil
 }
 
-// Wait reads the forward's replies until its outcome is known or its window ends, and releases its
-// reply subscription. Its errors are RequestCoreTo's for a forward StartRequestCoreTo published, and
-// StartRequestStoredTo's for one that published.
+// Wait reads the forward's replies until the stream has acknowledged storing it or its window
+// ends, and releases its reply subscription. No acknowledgement by the deadline, the stream's
+// error answer, and the server's no-responders answer (nothing captured the subject) are each
+// ErrForwardNotStored, wrapping the reason and, when publishConfirmed could not confirm the
+// publish, the reason for that.
 func (f *PendingForward) Wait() error {
-	defer f.receipt.Unsubscribe()
-	received, stored := false, false
-	// refused is the stream's error answer to the forward, which no later reply changes.
-	var refused error
+	defer f.replies.Unsubscribe()
 	for {
 		remaining := time.Until(f.deadline)
 		if remaining <= 0 {
 			break
 		}
-		response, err := f.receipt.NextMsg(remaining)
+		response, err := f.replies.NextMsg(remaining)
 		if errors.Is(err, nats.ErrTimeout) {
 			break
 		}
 		if err != nil {
 			// The server's no-responders answer: nothing, not even a stream, took the forward.
-			if f.storedOnly && errors.Is(err, nats.ErrNoResponders) {
+			if errors.Is(err, nats.ErrNoResponders) {
 				return fmt.Errorf("%w: %w", ErrForwardNotStored, err)
 			}
 			return err
 		}
-		if len(response.Data) == 0 && len(response.Header) == 0 {
-			received = true
-		} else if ack, ok := readPublishAcknowledgement(response.Data); ok {
-			if ack.Error != nil {
-				refused = ack.Error
-			} else {
-				stored = true
-			}
-		}
-		if f.storedOnly {
-			if stored {
-				return nil
-			}
-			if refused != nil {
-				return fmt.Errorf("%w: %w", ErrForwardNotStored, refused)
-			}
+		ack, ok := readPublishAcknowledgement(response.Data)
+		if !ok {
 			continue
 		}
-		if received && stored {
-			return nil
+		// The stream's error answer to the forward, which no later reply changes.
+		if ack.Error != nil {
+			return fmt.Errorf("%w: %w", ErrForwardNotStored, ack.Error)
 		}
-		if received && refused != nil {
-			return fmt.Errorf("%w: %w", ErrForwardNotStored, refused)
-		}
+		return nil
 	}
-	if f.storedOnly {
-		if f.unconfirmed != nil {
-			return fmt.Errorf("%w: %w", ErrForwardNotStored, f.unconfirmed)
-		}
-		return ErrForwardNotStored
-	}
-	if !received {
-		return cmp.Or(f.unconfirmed, ErrReceiptTimeout)
+	if f.unconfirmed != nil {
+		return fmt.Errorf("%w: %w", ErrForwardNotStored, f.unconfirmed)
 	}
 	return ErrForwardNotStored
 }

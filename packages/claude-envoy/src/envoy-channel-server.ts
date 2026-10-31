@@ -13,6 +13,7 @@ import {
   type ConsumerGapNotice,
   createConsumerDelivery,
   gapNoticeText,
+  inboundUnavailable,
   inboundUnavailableNoticeText,
 } from "@legion/envoy-client/consumer-delivery"
 import {
@@ -29,9 +30,6 @@ import {
   type DeliveryLedger,
   envoyNoticeText,
   failureNoticeFields,
-  reachesPrivateStreamSubject,
-  rememberedTopics,
-  replayFollowedSubjects,
 } from "@legion/envoy-client/delivery-ledger"
 import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory"
 import { writeSessionTitle } from "@legion/envoy-client/dispatch-session-state"
@@ -45,6 +43,12 @@ import {
   sessionSettings,
 } from "@legion/envoy-client/session-settings"
 import { postSlackReply } from "@legion/envoy-client/slack-post"
+import {
+  reachesPrivateStreamSubject,
+  rememberedTopics,
+  replayFollowedSubjects,
+  streamDeliversNothing,
+} from "@legion/envoy-client/stream-topics"
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -73,12 +77,12 @@ import { name as packageName, version as packageVersion } from "../package.json"
   type: "json",
 }
 import {
-  type ChannelForwarder,
-  type ChannelForwarderConnection,
+  type ChannelConnection,
   type ChannelTopicSubscription,
-  createChannelForwarder,
+  type ChannelTopics,
+  createChannelTopics,
   deliveryIdentity,
-} from "./channel-forwarder"
+} from "./channel-topics"
 import { type ChannelGate, detectClaudeChannel, installedPluginVersion } from "./claude-channel"
 import { claudeProjectDirectory, claudeSessionId, configuredValue } from "./claude-session"
 import { inboundOffChannelSession, serveEnvoyOff } from "./envoy-off"
@@ -247,7 +251,7 @@ export interface ChannelSession {
 
 export interface ChannelSessionOptions {
   readonly identity: SessionIdentity
-  readonly connection: ChannelForwarderConnection
+  readonly connection: ChannelConnection
   readonly notifier: ChannelNotifier
   /**
    * The delivery modes the session advertises to the listener, which Dispatch checks every
@@ -555,7 +559,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   const ledger: DeliveryLedger = createDeliveryLedger({
     host: {
       sessionID: () => (shuttingDown || ledgerBound !== identity.id ? undefined : identity.id),
-      // What the session registers (`replayFollowedSubjects`).
+      // What the ledger persists, so a restart follows it again (`replayFollowedSubjects`).
       followedSubjects: () => replayFollowedSubjects(directSubject, userTopics),
       showFailureNotice: (notice) => delivery.notice(envoyNoticeText(failureNoticeFields(notice))),
       failureNoticeFailed: (notice, error) => {
@@ -591,7 +595,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     stateWriter = replayStateWriter(file, snapshot)
     openRelay(sessionId, stateWriter, snapshot.consumer)
     ledgerBound = sessionId
-    return rememberedTopics(snapshot.state)
+    return rememberedTopics(snapshot.state?.topics)
   }
 
   /**
@@ -620,10 +624,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * the stream kept while the session was away never closes a topic followed again since.
    */
   const closeRemovedSubscriptions = async (frame: ConsumerFrame): Promise<void> => {
-    const open = relay?.sessionID === identity.id ? relay : undefined
     await closeReplayedRemoval(frame, {
       sessionID: identity.id,
-      followedBefore: (topic) => open?.delivery.followedBefore(topic, frame.storedAtMs) !== false,
+      relay: relay?.sessionID === identity.id ? relay.delivery : undefined,
       close: (topic) => userTopics.delete(topic),
       unregister: unfollowRemovedTopics,
       followedChanged: () => ledger.followedChanged(),
@@ -769,18 +772,14 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * relay it asked for. An answer for an id this process has left, or for a relay since closed,
    * changes nothing.
    */
-  const takeDeliveryAnswer = (
-    sessionID: string,
-    asked: Relay | undefined,
-    result: SubscribeResult,
-  ): void => {
-    if (sessionID !== identity.id || asked === undefined || relay !== asked) return
+  const takeDeliveryAnswer = (sessionID: string, asked: Relay, result: SubscribeResult): void => {
+    if (sessionID !== identity.id || relay !== asked) return
     asked.delivery.answered(result.delivery)
   }
 
-  // Nothing is subscribed per topic: the forwarder holds the followed set a registration
-  // carries, and the one NATS subscription this process makes is the relay's (`openRelay`).
-  const forwarder: ChannelForwarder = createChannelForwarder(options.connection)
+  // Nothing is subscribed per topic: this holds the followed set a registration carries, and
+  // the one NATS subscription this process makes is the relay's (`openRelay`).
+  const followedTopics: ChannelTopics = createChannelTopics(options.connection)
 
   /**
    * Drops removed topics from the followed set and the registry entry, its failure reported
@@ -792,7 +791,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     // that. A failure here is not retried by name: the heartbeat's own interest
     // reconciliation (below) brings the entry back in line with what this session
     // actually follows, whatever caused the drift.
-    dropFromForwarderAndRegistry(topics).catch((error: unknown) => {
+    dropFromTopicsAndRegistry(topics).catch((error: unknown) => {
       process.stderr.write(
         `envoy-channel: could not drop a removed subscription from the registry — ${messageFor(error)}; the next heartbeat reconciles it\n`,
       )
@@ -807,8 +806,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * `unfollowRemovedTopics`, a removal's best-effort drop, and the public `unfollow` below —
    * take these same two steps in this order; only whether they wait for them differs.
    */
-  function dropFromForwarderAndRegistry(topics: readonly string[]): Promise<void> {
-    forwarder.unfollow(topics)
+  function dropFromTopicsAndRegistry(topics: readonly string[]): Promise<void> {
+    followedTopics.unfollow(topics)
     // The relay takes the topics the session follows now, before a registration carries them.
     if (relay?.sessionID === identity.id) relay.delivery.setFollowed(registeredTopics())
     return serialized(() => options.client.unsubscribe({ sessionID: identity.id, topics }))
@@ -816,11 +815,17 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
 
   /**
    * The topics a registration carries: every subject followed, the direct one included, but a
-   * followed topic reaching another session's agent subject (a wildcard over them, or another
-   * session's by name), which the listener refuses to store.
+   * followed topic reaching a private stream subject of another session (a wildcard over the
+   * agent subjects, another session's by name, a failed-delivery lane, or the controller notice
+   * lane of a project whose controller role this session does not hold), which the listener
+   * refuses to store. The lane of a role it does hold is carried: a session receives what its
+   * own consumer delivers and nothing else.
    */
   function registeredTopics(): string[] {
-    return forwarder.topics().filter((topic) => !reachesPrivateStreamSubject(directSubject, topic))
+    const roles = heldRole === undefined ? [] : [heldRole]
+    return followedTopics
+      .topics()
+      .filter((topic) => !reachesPrivateStreamSubject(directSubject, topic, roles))
   }
 
   /**
@@ -830,11 +835,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * `not_requested`, `invalid_session_id`), which the error carries in its message and which
    * `inboundUnavailableNoticeText` words for every host.
    */
-  let inboundUnavailableTold = false
-  const tellInboundUnavailable = (error: unknown): void => {
-    if (inboundUnavailableTold) return
-    inboundUnavailableTold = true
-    const why = messageFor(error)
+  const inboundOutage = inboundUnavailable((why) => {
     process.stderr.write(
       `envoy-channel: this session receives nothing (${why}); registering again every heartbeat\n`,
     )
@@ -843,7 +844,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         `envoy-channel: the session could not be told that it receives nothing — ${messageFor(noticeError)}\n`,
       )
     })
-  }
+  })
 
   /** The title last stamped, so a heartbeat stamps nothing new. */
   let stampedTitle: { readonly sessionID: string; readonly title: string } | undefined
@@ -887,7 +888,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       const refused = new Error(
         "this session holds no relay subject, so the listener can give it no consumer and it can receive nothing",
       )
-      tellInboundUnavailable(refused)
+      inboundOutage.refused(refused)
       throw refused
     }
     asking.delivery.setFollowed(topics)
@@ -909,10 +910,10 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       // A registration the listener refused (`503 consumer_error|no_grant`, `409
       // not_requested|invalid_session_id`) leaves the session with no consumer at all, as every
       // other failed registration does: the session is told once and the heartbeat asks again.
-      tellInboundUnavailable(error)
+      inboundOutage.refused(error)
       throw error
     }
-    inboundUnavailableTold = false
+    inboundOutage.accepted()
     takeDeliveryAnswer(sessionID, asking, result)
   }
 
@@ -1059,7 +1060,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     const previous = identity.id
     const previousSubject = directSubject
     const nextSubject = agentSubject(next)
-    forwarder.follow(nextSubject)
+    followedTopics.follow(nextSubject)
     try {
       // Bounded: this runs inside the registry chain, and a flush on a stalled NATS
       // connection never settles, which would hold every later write and shutdown.
@@ -1073,16 +1074,14 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       // The session stays on the old id until a later tick retries, so the new
       // subject leaves the topic list; otherwise the next registration would
       // advertise it under the old id.
-      void forwarder.unfollow([nextSubject])
+      followedTopics.unfollow([nextSubject])
       throw error
     }
     identity.set(next)
     directSubject = nextSubject
-    // `unfollow` removes the subject from the topic list before it first awaits.
-    // What it then awaits is the drain of deliveries already in flight, and the
-    // handoff does not wait for it: a stuck notification would otherwise hold
-    // every registry write queued behind this one. The drain never rejects.
-    void forwarder.unfollow([previousSubject])
+    // `unfollow` only takes the subject out of the topic list a registration carries: nothing is
+    // subscribed per topic, so there is nothing to drain and nothing to wait for.
+    followedTopics.unfollow([previousSubject])
     // The new id's delivery state: none after a `/clear`, which starts afresh as a new session
     // does, so nothing published before it existed comes back. Until it is loaded, the ledger
     // records nothing. Loading it closes the old id's relay (its unanswered frames `nak`) and
@@ -1110,17 +1109,17 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   let interestsRead = false
 
   /**
-   * Brings the registry entry and this process's own NATS subscriptions into line
+   * Brings the registry entry and the topic set this session registers into line
    * with each other. The first successful read adopts every topic the entry lists;
    * every later read subtracts every topic the entry lists that
-   * `forwarder.topics()` no longer names.
+   * `followedTopics.topics()` no longer names.
    *
-   * Subtracting is safe only while `forwarder.topics()` is authoritative for this
-   * session, so both windows where it is not are checked after the read, together,
-   * because both open while the read is in flight. `interestsRead` is false until
-   * a read has succeeded, when the forwarder holds only the direct subject while
-   * the entry legitimately holds more. `shuttingDown` is set as teardown begins,
-   * and `forwarder.close()` empties the topic list in that same synchronous step,
+   * Subtracting is safe only while `followedTopics.topics()` is authoritative for
+   * this session, so both windows where it is not are checked after the read,
+   * together, because both open while the read is in flight. `interestsRead` is
+   * false until a read has succeeded, when the set holds only the direct subject
+   * while the entry legitimately holds more. `shuttingDown` is set as teardown
+   * begins, and `close()` empties the topic list in that same synchronous step,
    * so a shutdown landing mid-read would leave an emptied list looking like total
    * drift. Neither is read before the await: the early return at the top only
    * saves a round trip, and guards nothing.
@@ -1134,7 +1133,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * slipping through loses one topic.
    *
    * A 404 completes the read: it is the genuinely-new-session case, and the
-   * forwarder is already complete. Any other failure leaves `interestsRead` false
+   * topic set is already complete. Any other failure leaves `interestsRead` false
    * and the next heartbeat adopts again, so a permanent outage means the entry is
    * never reconciled. That is the correct direction, because nothing undoes a
    * wrong subtraction: `unregisterSession` deletes only the sessions row, so a
@@ -1162,13 +1161,13 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       for (const topic of registry?.topics ?? []) {
         if (topic === directSubject || topic.startsWith(ROLE_TOPIC_PREFIX)) continue
         userTopics.add(topic)
-        forwarder.follow(topic)
+        followedTopics.follow(topic)
       }
       interestsRead = true
       return
     }
     if (registry === undefined) return
-    const followed = new Set(forwarder.topics())
+    const followed = new Set(followedTopics.topics())
     const drifted = registry.topics.filter(
       (topic) =>
         topic !== directSubject && !topic.startsWith(ROLE_TOPIC_PREFIX) && !followed.has(topic),
@@ -1239,10 +1238,10 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   const remembered = await restoreDelivery()
   // The NATS subscription precedes registration so the listener never routes
   // a direct delivery to an advertised but deaf channel process.
-  forwarder.follow(directSubject)
+  followedTopics.follow(directSubject)
   for (const topic of remembered) {
     userTopics.add(topic)
-    forwarder.follow(topic)
+    followedTopics.follow(topic)
   }
   // Best-effort: a listener outage must not fail startup. It leaves
   // `interestsRead` false, so the heartbeat retries the adopt and never
@@ -1255,7 +1254,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   await options.connection.flush()
   await serialized(async () => {
     // Best-effort, as the interests read above is: a listener that refuses this registration
-    // because it can give the session no consumer (`tellInboundUnavailable` tells the session
+    // because it can give the session no consumer (`inboundOutage` tells the session
     // once, naming the listener's reason), or one that is down, must not take the whole channel
     // with it — the tools, the role and the `dispatch` command work without it. Every heartbeat
     // asks again, and `registrationFailed` makes the first accepted one a regain of the role.
@@ -1347,14 +1346,31 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
 
   return {
     delivery,
-    topics: () => forwarder.topics(),
+    topics: () => followedTopics.topics(),
     async follow(topics) {
       if (shuttingDown) return []
+      // A topic no stream subject captures is refused here, before anything follows it: the
+      // listener refuses the whole registration naming one (`streamDeliversNothing`), so a
+      // single such topic would make every later registration of this session fail, its
+      // interest row lapse and its role claims fail with it, until the process restarts.
+      // Only a topic the registration would carry: one reaching a private stream subject is
+      // left out of it instead (`registeredTopics`), which the listener answers with a warning
+      // rather than a refusal, so it wedges nothing.
+      const roles = heldRole === undefined ? [] : [heldRole]
+      const uncaptured = topics.filter(
+        (topic) =>
+          streamDeliversNothing(topic) && !reachesPrivateStreamSubject(directSubject, topic, roles),
+      )
+      if (uncaptured.length > 0) {
+        throw new Error(
+          `no stream subject captures ${uncaptured.join(", ")}, so nothing would be delivered to this session on ${uncaptured.length === 1 ? "it" : "them"}; follow a notifications.team.<name> topic instead`,
+        )
+      }
       const fresh: string[] = []
       for (const topic of expandSubscriptionTopics(topics)) {
         if (topic === directSubject || userTopics.has(topic)) continue
         userTopics.add(topic)
-        forwarder.follow(topic)
+        followedTopics.follow(topic)
         fresh.push(topic)
       }
       await options.connection.flush()
@@ -1370,7 +1386,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       const requested = topics.length === 0 ? [...userTopics] : expandSubscriptionTopics(topics)
       const removed = requested.filter((topic) => userTopics.delete(topic))
       if (removed.length === 0) return []
-      const unsubscribing = dropFromForwarderAndRegistry(removed)
+      const unsubscribing = dropFromTopicsAndRegistry(removed)
       // Recorded at once, so a restart does not follow the topics again from the delivery state.
       await ledger.followedChanged()
       await unsubscribing
@@ -1393,7 +1409,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       if (handoffFile !== undefined) unwatchFile(handoffFile, handoffFileChanged)
       // The relay's unanswered frames `nak`, so the listener sends them to whoever resumes.
       closeRelay()
-      await forwarder.close()
+      await followedTopics.close()
       await serialized(() => options.client.unregisterSession(identity.id)).catch(
         (error: unknown) => {
           process.stderr.write(
@@ -1738,7 +1754,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
   process.once("SIGHUP", stop)
   await server.connect(new StdioServerTransport())
 
-  let connection: ChannelForwarderConnection | undefined
+  let connection: ChannelConnection | undefined
   try {
     const { inbound } = envoy
     if ("off" in inbound) {

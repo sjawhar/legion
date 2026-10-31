@@ -611,18 +611,62 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 // UpdatedAt, and the row is younger than InterestRefreshAge. An unchanged row is thus rewritten
 // once per InterestRefreshAge, its UpdatedAt lags the session's last heartbeat by less than that,
 // and Reap adds InterestRefreshAge to its grace window (InterestReapAllowance), so that lag never
-// shortens a paused session's grace. A changed row is written, and so is a record it cannot
 // decode; any other failed read refuses the write (mergeForUpsert). The session row
 // (session.SessionRegistry.Put) is written on every heartbeat: its bucket's MaxAge is the liveness
 // clock, and NATS connect notices ($SYS) are not available to replace it.
+//
+// It reads the session's roles itself (controllerLaneRoles). A caller that already read them to
+// decide the same topics elsewhere, the listener's registration route filtering a session
+// consumer, plans once and writes that plan instead (PlanInterest, UpsertPlanned).
 func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []string) (Interest, error) {
 	cur, getErr := r.Get(ctx, item.SessionID)
 	roles, err := r.controllerLaneRoles(item.SessionID, cur.Topics, item.Topics, topics)
 	if err != nil {
 		return Interest{}, err
 	}
+	return r.upsert(ctx, cur, getErr, item, InterestPlan{Roles: roles, Topics: topics})
+}
+
+// PlanInterest plans the interest row a registration of sessionID naming requested will store:
+// the topics it will hold (MergedTopics of the stored row and requested) and the roles read to
+// decide them, read once for the row's topics and requested together (controllerLaneRoles). The
+// listener's registration route filters the session's consumer on the plan and hands the same
+// plan back to UpsertPlanned, so a registration whose body leaves out a controller notice lane
+// its row holds keeps that lane in the filter and in the row alike: the roles behind both are
+// this one read, which the row's own topics are part of.
+//
+// A session with no row, and a row this build cannot decode, plan from no stored topics: the
+// registration's own topics are the authority on such a record, as the write that follows treats
+// it (mergeForUpsert). Any other read that did not answer is returned, and so is a role view
+// that cannot answer yet (ErrRoleViewNotReady): the route refuses the registration rather than
+// filter a consumer on a row the write would decide differently.
+func (r *Registry) PlanInterest(ctx context.Context, sessionID string, requested []string) (InterestPlan, error) {
+	cur, err := r.Get(ctx, sessionID)
+	if err != nil && !errors.Is(err, nats.ErrKeyNotFound) && !errors.Is(err, ErrMalformedInterest) {
+		return InterestPlan{}, err
+	}
+	roles, err := r.controllerLaneRoles(sessionID, cur.Topics, requested)
+	if err != nil {
+		return InterestPlan{}, err
+	}
+	return InterestPlan{Roles: roles, Topics: MergedTopics(sessionID, roles, cur.Topics, requested)}, nil
+}
+
+// UpsertPlanned is UpsertWithin for a caller holding a plan (PlanInterest): it writes the row
+// that plan decided, under the roles that decided it, rather than reading the session's roles
+// again. The row it merges the plan into is read again here, so a row another registration wrote
+// meanwhile loses no topic; under the plan's roles that merge is the plan again whenever the row
+// has not changed.
+func (r *Registry) UpsertPlanned(ctx context.Context, item Interest, plan InterestPlan) (Interest, error) {
+	cur, getErr := r.Get(ctx, item.SessionID)
+	return r.upsert(ctx, cur, getErr, item, plan)
+}
+
+// upsert is UpsertWithin's write, over the row cur that getErr reports the read of and the plan
+// its caller decided.
+func (r *Registry) upsert(ctx context.Context, cur Interest, getErr error, item Interest, plan InterestPlan) (Interest, error) {
 	now := r.now().UnixMilli()
-	merged, err := mergeForUpsert(cur, getErr, item, topics, now, roles)
+	merged, err := mergeForUpsert(cur, getErr, item, now, plan)
 	if err != nil {
 		return Interest{}, err
 	}
@@ -681,12 +725,13 @@ func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []str
 // it cannot decode), and the session's own subscribe is the authority on its record.
 //
 // The merged row keeps no topic reaching a private stream subject that is not the session's own,
-// and holds them sorted (MergedTopics, which the listener's registration route reads to build the
-// same set before this write): a row stored before the listener refused such a topic is cleaned at
-// the session's next registration. roles is what the session holds (controllerLaneRoles), which
-// decides the one private subject a session registers beside its own agent subject: the controller
-// notice lane of the project whose controller role it holds.
-func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, now int64, roles []string) (Interest, error) {
+// and holds them sorted (MergedTopics): a row stored before the listener refused such a topic is
+// cleaned at the session's next registration. plan is the topics to merge in and the roles the
+// session holds (controllerLaneRoles), which decide the one private subject a session registers
+// beside its own agent subject: the controller notice lane of the project whose controller role
+// it holds. The listener's registration route filters the session's consumer on the row this
+// merge produces, having planned it with these same roles (PlanInterest).
+func mergeForUpsert(cur Interest, getErr error, item Interest, now int64, plan InterestPlan) (Interest, error) {
 	if getErr != nil && !errors.Is(getErr, nats.ErrKeyNotFound) && !errors.Is(getErr, ErrMalformedInterest) {
 		return Interest{}, getErr
 	}
@@ -697,7 +742,7 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 	item.MachineID = first(item.MachineID, curValue(cur.MachineID))
 	item.Dir = first(item.Dir, curValue(cur.Dir))
 	item.UpdatedAt = now
-	item.Topics = MergedTopics(sessionID, roles, item.Topics, topics)
+	item.Topics = MergedTopics(sessionID, plan.Roles, item.Topics, plan.Topics)
 	return item, nil
 }
 
