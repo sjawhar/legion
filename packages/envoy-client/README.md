@@ -136,10 +136,11 @@ redials. `patches/nats@2.29.3.patch` (root `package.json`'s `patchedDependencies
 at install and so carried by both plugins' bundles) makes `NodeTransport` keep the socket from the
 moment it dials and destroy it when a transport that never connected is closed, and makes the
 stale-connection close skip the flush (`transport.close()` in place of `transport.disconnect()`
-in `ProtocolHandler.disconnect()`; a client-initiated `reconnect()` still flushes);
-`src/__tests__/nats-stall.test.ts` fails without either. Bun ignores a `patchedDependencies` entry
-for a version that is not installed without a word, so moving nats means carrying the patch to
-the new version.
+in `ProtocolHandler.disconnect()`, which the stale-connection close after two unanswered pings and
+`handleAuthError` with no `connectError` handler both call, while a client-initiated `reconnect()`
+still flushes); `src/__tests__/nats-stall.test.ts` fails without either. Bun ignores a
+`patchedDependencies` entry for a version that is not installed without a word, so moving nats
+means carrying the patch to the new version.
 
 `@legion/envoy-client/test/stall-proxy`, `@legion/envoy-client/test/envoy-stack` and
 `@legion/envoy-client/test/stall-scenario` (Bun only, not built, in `test/`) are what the stall

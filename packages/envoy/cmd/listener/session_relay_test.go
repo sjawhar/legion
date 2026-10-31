@@ -1049,6 +1049,260 @@ func requireRelayedPush(t *testing.T, pushes <-chan string, item contracts.Envel
 	}
 }
 
+// A message on a followed topic whose targeted delivery mode a serving-port session on consumer
+// delivery does not advertise is refused and acked by the relay of that session's consumer, which
+// holds the session's only copy of it, as soon as the relay reads it. The durable path's fan-out
+// reports nothing and records nothing for such a session, its own refusals included: an attempt
+// record of a refusal nobody pushed is a record naming no push in flight, and the relay would
+// hold its copy under it -- and the session's later messages behind that -- until it expired
+// (attemptCacheTTL, INFRA-594).
+func TestServePortRelayRefusesAnUnadvertisedModeTheFanoutAlsoRefused(t *testing.T) {
+	const (
+		relayedPort = 4096
+		corePort    = 4097
+	)
+	// Unowned, so no relay runs until the fan-out has read the message: the test orders the two
+	// paths by construction rather than by timing.
+	rig := newRelayRigUnowned(t, relayPauseFirst, relayPauseMax)
+	relayed := "ses_mode_relayed_" + id.New()
+	core := "ses_mode_core_" + id.New()
+	topic := "notifications.github.acme.mode-" + id.New() + ".mention"
+	relayedPushes := make(chan string, 8)
+	corePushes := make(chan string, 8)
+	rig.harness.config.deliverer.HTTPClient = &http.Client{Transport: listenerTransport(func(request *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		if strings.HasSuffix(request.URL.Host, strconv.Itoa(relayedPort)) {
+			relayedPushes <- string(body)
+		} else {
+			corePushes <- string(body)
+		}
+		return listenerDeliveryResponse(http.StatusNoContent), nil
+	})}
+
+	// The session under test: a serving port on consumer delivery, following the topic, which
+	// advertises no delivery mode at all.
+	rig.subscribe(t, `{"session_id":"`+relayed+`","port":`+strconv.Itoa(relayedPort)+`,"host":"127.0.0.1","topics":["`+topic+`"]}`)
+	if entry := rig.entry(t, relayed); entry.Delivery != session.DeliveryConsumer {
+		t.Fatalf("the session's entry records delivery %q, want the consumer's", entry.Delivery)
+	}
+	// A second interest on the topic, a serving-port session of this machine on the core path
+	// that does advertise the mode: the durable path reads the message for it and fans it out
+	// over every interest, this machine's consumer-delivery session included.
+	if _, err := rig.harness.registry.Upsert(store.Interest{SessionID: core, MachineID: "test-machine"}, []string{topic}); err != nil {
+		t.Fatalf("register %s's interest: %v", core, err)
+	}
+	if err := rig.harness.sessions.Put(core, session.SessionEntry{Port: corePort, MachineID: "test-machine", Host: "127.0.0.1", Capabilities: []string{"btw"}}); err != nil {
+		t.Fatalf("register %s's entry: %v", core, err)
+	}
+	bindTestDurable(t, rig, "listener-unadvertised-mode-"+id.New(), topic)
+
+	item := listenerTestEnvelope(topic, "unadvertised-mode-"+id.New())
+	item.Payload = `{"delivery":{"mode":"btw"}}`
+	ack, err := rig.harness.client.JS().Publish(topic, marshalListenerEnvelope(t, item))
+	if err != nil {
+		t.Fatalf("store the message: %v", err)
+	}
+	// The durable path has read the message once the core-path session's port has it.
+	select {
+	case body := <-corePushes:
+		if !strings.Contains(body, item.EventID) {
+			t.Fatalf("the core-path session's port was pushed:\n%s\nwant %s", body, item.EventID)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the durable path never pushed the message to the core-path session")
+	}
+
+	rig.relays.setOwned(true)
+	awaitAcked(t, rig.consumers, relayed, ack.Sequence)
+	select {
+	case body := <-relayedPushes:
+		t.Fatalf("the relayed session's port was pushed a mode it does not advertise:\n%s", body)
+	case <-time.After(time.Second):
+	}
+}
+
+// A push the durable path handed to a serving-port session's worker while the session's entry was
+// on core delivery -- what a registration answered core on a transient consumer-call failure
+// leaves behind (sessionDelivery.refused), with the session's consumer still on the server --
+// reaches the port although the entry flips back to consumer delivery under it. The relay of the
+// session's consumer does not ack the message on the attempt that path recorded: it holds it
+// unacked while the push is in flight (holdWhilePushedElsewhere) and pushes it itself once that
+// record is gone. So the message survives both ways the worker's push can end without delivering
+// it -- the attempt record expiring (attemptCacheTTL) and the push being handed back on a
+// sessions.Get miss, whose durable redelivery the consumer's hold on the sequence skips -- rather
+// than being lost with no exception (INFRA-594).
+func TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// beforeThePortAccepts runs once the relay has judged the message against the push in
+		// flight, while the port still refuses; nil leaves the hand-over to the worker alone.
+		beforeThePortAccepts func(t *testing.T, rig *relayRig, sessionID, registration string, item contracts.Envelope)
+	}{
+		{name: "the worker reads the flipped entry"},
+		{
+			name: "the attempt record is gone",
+			beforeThePortAccepts: func(t *testing.T, rig *relayRig, sessionID, _ string, item contracts.Envelope) {
+				// What attemptCacheTTL does five minutes after the hand-over, with the time the
+				// message spent queued and refused counting toward it: nothing in this process
+				// says any more that a push of it is in flight.
+				rig.harness.config.attemptCache.Clear(item.DedupeKey, sessionID)
+			},
+		},
+		{
+			name: "the session's entry is gone and it registers again",
+			beforeThePortAccepts: func(t *testing.T, rig *relayRig, sessionID, registration string, _ contracts.Envelope) {
+				// The sessions.Get miss that hands the worker's push back (servePortGone), as the
+				// cache refills or the session re-registers: the push is NAKed and the attempt
+				// cleared, and the durable redelivery is skipped because the session's consumer
+				// holds this sequence.
+				if err := rig.harness.sessions.Delete(context.Background(), sessionID); err != nil {
+					t.Fatalf("delete the session's entry: %v", err)
+				}
+				awaitLogLine(t, rig, "serving-port push handed back", 45*time.Second)
+				rig.subscribe(t, registration)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newRelayRig(t)
+			sessionID := "ses_flip_back_" + id.New()
+			topic := "notifications.github.acme.flip-" + id.New() + ".mention"
+			var accepting atomic.Bool
+			refused := make(chan string, 64)
+			accepted := make(chan string, 8)
+			rig.harness.config.deliverer.HTTPClient = &http.Client{Transport: listenerTransport(func(request *http.Request) (*http.Response, error) {
+				body, err := io.ReadAll(request.Body)
+				if err != nil {
+					return nil, err
+				}
+				if !accepting.Load() {
+					// Never blocking: the worker pushes again on its backoff while the test waits,
+					// and a push that blocks here would hold the message rather than refuse it.
+					select {
+					case refused <- string(body):
+					default:
+					}
+					return listenerDeliveryResponse(http.StatusServiceUnavailable), nil
+				}
+				accepted <- string(body)
+				return listenerDeliveryResponse(http.StatusNoContent), nil
+			})}
+
+			registration := `{"session_id":"` + sessionID + `","port":4096,"host":"127.0.0.1","topics":["` + topic + `"]}`
+			rig.subscribe(t, registration)
+			if entry := rig.entry(t, sessionID); entry.Delivery != session.DeliveryConsumer {
+				t.Fatalf("the session's entry records delivery %q, want the consumer's", entry.Delivery)
+			}
+			// The entry a registration answered core writes for a serving port: no delivery mode,
+			// while the consumer the first registration created stays on the server (api.go).
+			if err := rig.harness.sessions.Put(sessionID, session.SessionEntry{Port: 4096, MachineID: "test-machine", Host: "127.0.0.1"}); err != nil {
+				t.Fatalf("put the session's entry on core delivery: %v", err)
+			}
+			if entry := rig.entry(t, sessionID); entry.Delivery != "" {
+				t.Fatalf("the session's entry records delivery %q, want none", entry.Delivery)
+			}
+			bindTestDurable(t, rig, "listener-flip-back-"+id.New(), topic)
+
+			item := listenerTestEnvelope(topic, "flip-back-"+id.New())
+			ack, err := rig.harness.client.JS().Publish(topic, marshalListenerEnvelope(t, item))
+			if err != nil {
+				t.Fatalf("store the message: %v", err)
+			}
+			requireRefusal(t, refused, item, "the durable path never pushed the message to the port")
+			// Two more refusals before the flip, so the worker's backoff is 4 s by the last of
+			// them: the test has that long to flip the entry, let the relay judge the message
+			// and, in the variant that deletes the entry, delete it before the worker's next try
+			// reads the session again.
+			for range 2 {
+				requireRefusal(t, refused, item, "the worker stopped pushing the message to the port")
+			}
+
+			// The next registration finds the consumer and its original start, so the entry is
+			// back on consumer delivery with the message in the consumer's window, and its relay
+			// restarts.
+			rig.subscribe(t, registration)
+			entry := rig.entry(t, sessionID)
+			if entry.Delivery != session.DeliveryConsumer || entry.ConsumerStart > ack.Sequence {
+				t.Fatalf("after registering again the entry records delivery %q and consumer start %d, want the consumer's and a start at or below %d",
+					entry.Delivery, entry.ConsumerStart, ack.Sequence)
+			}
+			awaitRelayJudged(t, rig, sessionID, ack.Sequence)
+			if tc.beforeThePortAccepts != nil {
+				tc.beforeThePortAccepts(t, rig, sessionID, registration, item)
+			}
+
+			accepting.Store(true)
+			select {
+			case body := <-accepted:
+				if !strings.Contains(body, item.EventID) {
+					t.Fatalf("the port accepted:\n%s\nwant the message in flight, %s", body, item.EventID)
+				}
+			case <-time.After(60 * time.Second):
+				t.Fatalf("the message %s never reached the port", item.EventID)
+			}
+			select {
+			case body := <-accepted:
+				t.Fatalf("the port was pushed the message a second time:\n%s", body)
+			case <-time.After(2 * time.Second):
+			}
+		})
+	}
+}
+
+// awaitRelayJudged waits for the relay of sessionID's consumer to have pulled the message stored
+// at seq and judged it against what the caches and the session's entry say: the judgement is two
+// cache reads after the pull, which the settle below allows far more time than. A test that then
+// changes what the message is judged against changes it after the relay's first reading of it,
+// rather than racing that reading.
+func awaitRelayJudged(t *testing.T, rig *relayRig, sessionID string, seq uint64) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		info, err := rig.consumers.Info(context.Background(), sessionID)
+		if err != nil {
+			t.Fatalf("read the consumer of %s: %v", sessionID, err)
+		}
+		if info.Delivered.Stream >= seq {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the relay of %s never pulled the message stored at %d: its consumer has delivered through %d", sessionID, seq, info.Delivered.Stream)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(500 * time.Millisecond)
+}
+
+// awaitLogLine waits for line to appear in the listener's log, failing the test when it does not
+// within the bound.
+func awaitLogLine(t *testing.T, rig *relayRig, line string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for !strings.Contains(rig.harness.logs.String(), line) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the listener never logged %q within %s", line, within)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// requireRefusal reads the next push the port refused, failing the test under line when none
+// arrives, or when it carries another message.
+func requireRefusal(t *testing.T, refused <-chan string, item contracts.Envelope, line string) {
+	t.Helper()
+	select {
+	case body := <-refused:
+		if !strings.Contains(body, item.EventID) {
+			t.Fatalf("the port was pushed:\n%s\nwant %s", body, item.EventID)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal(line)
+	}
+}
+
 // The stored copy of a role forward to a serving-port holder, stored below that holder's consumer
 // start, reaches its port: the copy is in no consumer -- it was stored while the holder had none,
 // and the holder's consumer starts above it -- so the durable path pushes it, as it does for any

@@ -1,0 +1,5 @@
+kind: Changed
+body: 'legion-architect: a child issue is a separately deliverable change (its own pull request or deploy); a fresh red team checks every proposed child before it is filed or released, and the root proves its acceptance in its own last round instead of an integration child.'
+time: 2026-10-30T21:18:33.750146823Z
+custom:
+    Issue: pr2576

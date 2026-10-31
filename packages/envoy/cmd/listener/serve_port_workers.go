@@ -256,9 +256,11 @@ func (w *servePortWorkers) pushUntilSettled(push servePortPush) (retry, ended bo
 		switch verdict {
 		case servePortConsumerRelays:
 			// The session's consumer holds this message after all - its entry moved to consumer
-			// delivery while the push waited - and the relay of that consumer pushes it. The
-			// attempt the path that handed this push over recorded is cleared and no dedupe key
-			// is recorded: only a real push writes what the relay reads
+			// delivery while the push waited - and the relay of that consumer delivers it. Clearing
+			// the attempt the path that handed this push over recorded is what tells that relay so:
+			// it holds the message while the record stands and pushes it once the record is gone
+			// (session_relay.go's holdWhilePushedElsewhere). No dedupe key is recorded: only a real
+			// push writes what the relay reads as a copy the session already has
 			// (session.SessionEntry.ConsumerRelaysStored).
 			applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
 				sessionID:    push.sessionID,
@@ -274,6 +276,11 @@ func (w *servePortWorkers) pushUntilSettled(push servePortPush) (retry, ended bo
 			})
 			return true, nil
 		case servePortGone:
+			// Back to the durable, which delivers the message again under the session's new state.
+			// A redelivery the durable path then skips because the session's consumer holds the
+			// message (session.SessionEntry.ConsumerRelaysStored) loses nothing: clearing the
+			// attempt leaves the message to the relay of that consumer, which is holding it
+			// unacked until exactly that record is gone (session_relay.go).
 			applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
 				sessionID: push.sessionID,
 				log: func(logger *logging.Logger) {
@@ -339,7 +346,7 @@ const (
 )
 
 // target reads push's session's current state: its entry, and what to do with the push. The
-// verdicts are session.Deliverer.Resolve's, read again at each try because the entry may have
+// verdicts are session.Deliverer.Resolve's, resolved again at each try because the entry may have
 // moved since the path that handed the push over resolved it: a session whose consumer holds this
 // stored message is relayed from there, one that subscribes on NATS itself with no port has it,
 // and a message stored below a consumer's start is in no consumer, so this push is how the session
@@ -349,16 +356,27 @@ func (w *servePortWorkers) target(push servePortPush) (session.SessionEntry, ser
 	if err != nil {
 		return session.SessionEntry{}, servePortGone
 	}
-	if entry.ConsumerRelaysStored(push.storedSubject(), push.storedSeq) {
-		return entry, servePortConsumerRelays
+	interest, err := w.cfg.registry.Get(context.Background(), push.sessionID)
+	if err != nil {
+		interest = store.Interest{SessionID: push.sessionID}
 	}
-	if entry.SelfSubscribed && entry.Port == 0 {
+	// The copy the session's consumer may hold is this message as it is stored (storedSubject).
+	// A session whose entry moved to consumer delivery under this push is relayed from there, and
+	// the relay of that consumer holds the message unacked while this push is in flight rather
+	// than acking it on the attempt the handing-over path recorded (session_relay.go's
+	// holdWhilePushedElsewhere): dropping the push below hands the message to that relay rather
+	// than losing it.
+	result, err := w.cfg.deliverer.Resolve(push.item, interest, &entry, push.storedSubject(), push.storedSeq)
+	switch {
+	case err != nil:
+		return entry, servePortGone
+	case result.Relayed:
+		return entry, servePortConsumerRelays
+	case result.Push:
+		return entry, servePortPushIt
+	default:
 		return entry, servePortSkip
 	}
-	if !ownsServingPortSession(w.cfg, push.sessionID, entry) {
-		return entry, servePortGone
-	}
-	return entry, servePortPushIt
 }
 
 // ownsServingPortSession reports whether sessionID, of entry, is a serving-port session this

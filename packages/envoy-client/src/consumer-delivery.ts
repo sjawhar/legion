@@ -386,6 +386,17 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     written = undefined;
   };
 
+  // Tells `stream_recreated` once when the stream the last registration asked to resume on is not
+  // `id`, the stream the listener now relays: that stream was replaced and what it held is gone.
+  // It runs on whichever of the registration's answer and the relay's first frame arrives first,
+  // since the listener starts the relay before it writes the answer.
+  const tellReplacedResume = (id: string) => {
+    const asked = resumePoint() ?? registeredResume;
+    if (asked === undefined || asked.stream_id === id) return;
+    registeredResume = undefined;
+    tellGap("stream_recreated");
+  };
+
   const followedAt = (subject: string): number | undefined => {
     if (subject === ownSubject) return Number.NEGATIVE_INFINITY;
     let earliest: number | undefined;
@@ -505,6 +516,8 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     if (frame.streamID !== streamID) {
       if (streamID !== undefined && (written !== undefined || held.size > 0)) {
         tellGap("stream_recreated");
+      } else if (streamID === undefined) {
+        tellReplacedResume(frame.streamID);
       }
       switchStream(frame.streamID);
     }
@@ -594,11 +607,9 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
         // The stream the registration asked to resume on is not the one the listener answered:
         // that stream was replaced, the consumer starts at the new stream's end, and what the
         // old one held is gone. Told once: the switch below makes the answer's stream the
-        // current one, so a later answer naming it tells nothing.
-        const asked = resumePoint() ?? registeredResume;
-        if (asked !== undefined && asked.stream_id !== answer.stream_id) {
-          tellGap("stream_recreated");
-        }
+        // current one, so a later answer naming it tells nothing, and a relay frame that came
+        // first already told it (`tellReplacedResume` in `receive`).
+        tellReplacedResume(answer.stream_id);
         switchStream(answer.stream_id);
       }
       if (answer.gap) {

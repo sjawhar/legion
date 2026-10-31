@@ -46,6 +46,9 @@ func TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget(t *t
 	if err != nil {
 		t.Fatalf("open the interest registry: %v", err)
 	}
+	// The control GET /v1/sessions below reports each session's roles, so it is refused the
+	// bus-unavailable 503 until the role claim view answers, whatever the bus is doing.
+	waitForRegistry(t, registry)
 	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
 	if err != nil {
 		t.Fatalf("open the session registry: %v", err)
@@ -149,6 +152,10 @@ func TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget(t *t
 		}
 		if !strings.HasPrefix(refusal.Error, busUnansweredPrefix) {
 			t.Fatalf("the refusal reads %q, want it to begin %q", refusal.Error, busUnansweredPrefix)
+		}
+		if strings.Contains(refusal.Error, store.ErrRoleViewNotReady.Error()) {
+			t.Fatalf("%s with the bus silent was refused %q: that refusal came from the role claim view rather than the silent bus, so it says nothing about the read this test freezes",
+				route, refusal.Error)
 		}
 		if got := recorder.Header().Get("Retry-After"); got != "1" {
 			t.Fatalf("Retry-After = %q, want 1", got)

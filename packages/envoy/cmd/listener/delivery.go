@@ -721,6 +721,21 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	} else {
 		result = session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr, cfg.deliverer)
 	}
+	if result.Relayed {
+		// The session's own consumer holds this message and the relay of that consumer delivers it
+		// (session.SessionEntry.ConsumerRelaysStored), as on the fan-out path below. The attempt
+		// recorded above is rolled back and no dedupe key is written: a record this path left for a
+		// session it never pushed to is one the relay reads as a push in flight, or as a copy the
+		// session already has, and the message waits on, or is acked by, a push nobody made.
+		applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			sessionID:    sessionID,
+			metricStatus: "skipped",
+			duration:     &deliveryTimer,
+			clearAttempt: true,
+		})
+		message.finalize(false)
+		return
+	}
 	if result.Push {
 		handOverOrRetry(cfg, message, servePortPush{item: item, sessionID: sessionID, settle: message.settle, storedSeq: message.storedSeq(), logLine: "listener agent delivered", timer: deliveryTimer})
 		return
@@ -919,28 +934,41 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		return
 	}
 	mode, modeErr := envelopeDeliveryMode(item)
-	resolve := cfg.deliverer.DeliverWithResultForEntry
-	if message.mode == durableDelivery {
-		resolve = func(item contracts.Envelope, interest store.Interest, entry *session.SessionEntry) (session.DeliveryResult, error) {
-			return cfg.deliverer.Resolve(item, interest, entry, message.storedSeq())
-		}
-	}
 
 	var failed bool
 	var deadDeliveries int
 	for _, interest := range items {
 		verdict, target, _ := judgeFollowedTopic(cfg.followedTopicRules(), interest.SessionID, item, mode, modeErr)
 		if verdict != takeFollowedTopic {
+			if target != nil && target.ConsumerRelaysStored(item.Topic, message.storedSeq()) {
+				// The session's own consumer holds this message, so the relay of that consumer
+				// judges and reports its own copy by these same rules
+				// (sessionRelays.followedTopicVerdict), as the Relayed branch below leaves every
+				// other outcome of such a message to it. A refusal reported here records an
+				// attempt (fanoutRefusalOutcome), and an attempt record naming no push in flight
+				// is one that relay would hold the message under until it expired. Only the mode
+				// refusals reach this guard: they are the ones judgeFollowedTopic returns an
+				// entry with, and the only ones that record anything.
+				applyDeliveryOutcome(cfg, item, deliveryOutcome{
+					sessionID:    interest.SessionID,
+					metricStatus: "skipped",
+				})
+				continue
+			}
 			applyDeliveryOutcome(cfg, item, fanoutRefusalOutcome(interest.SessionID, item, verdict, mode))
 			continue
 		}
 		deliveryTimer := metrics.NewTimer()
-		if target != nil && target.ConsumerRelaysStored(item.Topic, message.storedSeq()) {
+		// One resolution per recipient decides every outcome below, this path's push included: it
+		// reads the entry the judgement above returned and makes no call of its own.
+		delivery, err := cfg.deliverer.Resolve(item, interest, target, item.Topic, message.storedSeq())
+		if err == nil && delivery.Relayed {
 			// The session's own consumer holds this message and the relay of that consumer pushes
 			// it (sessionRelays.pushUntilAccepted), which is also what records its dedupe key, on
-			// the port's 204. Nothing is recorded here: an attempt or dedupe record this path
-			// wrote for a session it does not push to is one the relay would find and ack a copy
-			// the session never received by (session.SessionEntry.ConsumerRelaysStored).
+			// the port's 204. Nothing is recorded here: a dedupe record this path wrote for a
+			// session it does not push to is one the relay would ack a copy the session never
+			// received by, and an attempt record one it would hold that copy under for nothing
+			// (session.SessionEntry.ConsumerRelaysStored).
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				sessionID:    interest.SessionID,
 				metricStatus: "skipped",
@@ -948,13 +976,22 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 			})
 			continue
 		}
+		// The attempt is recorded before the push is made or handed over, so another copy of the
+		// same event read while it is in flight is a dedupe skip rather than a second push.
 		cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
-		delivery, err := resolve(item, interest, target)
 		if err == nil && delivery.Push {
-			if !handOverPush(cfg, servePortPush{item: item, sessionID: interest.SessionID, settle: message.settle, storedSeq: message.storedSeq(), timer: deliveryTimer}) {
-				failed = true
+			if message.mode == durableDelivery {
+				// The durable path's push waits behind the session's earlier messages in its own
+				// worker, and the message is acknowledged once that push ends.
+				if !handOverPush(cfg, servePortPush{item: item, sessionID: interest.SessionID, settle: message.settle, storedSeq: message.storedSeq(), timer: deliveryTimer}) {
+					failed = true
+				}
+				continue
 			}
-			continue
+			// The live and core paths push here, in the handler, as
+			// session.Deliverer.DeliverWithResultForEntry pushes for them elsewhere: their
+			// message is sent once to whoever is there, with nothing to acknowledge or retry.
+			err = cfg.deliverer.Push(context.Background(), item, interest.SessionID, delivery.Entry)
 		}
 		if err != nil {
 			retryable := shouldNAKFanoutDelivery(target != nil, err)

@@ -220,12 +220,11 @@ func roleForwardCopyDelivery(cfg listenerDeliveryHandlerConfig, message delivery
 		message.finalize(false)
 		return
 	}
-	entry, err := cfg.sessions.Get(holder)
-	if err != nil || entry.ConsumerHoldsStored(message.storedSeq()) {
+	if !storedForwardCopyIsDelivery(cfg, holder, message.storedSeq()) {
 		message.finalize(false)
 		return
 	}
-	if !ownsServingPortSession(cfg, holder, entry) || cfg.dedupeCache.Seen(item.DedupeKey, holder) || cfg.attemptCache.Seen(item.DedupeKey, holder) {
+	if cfg.dedupeCache.Seen(item.DedupeKey, holder) || cfg.attemptCache.Seen(item.DedupeKey, holder) {
 		message.finalize(false)
 		return
 	}

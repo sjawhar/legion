@@ -132,6 +132,9 @@ for variable in $(compgen -e); do
   esac
 done
 model_key_file=${SESSION_DELIVERY_MODEL_KEY_FILE:-/var/run/model-gateway-key/key}
+# A caller's own key reaches nothing the run starts: the builds, bun's lifecycle scripts and the
+# tools would otherwise inherit it. The sessions get the key file's through isolated_exec.
+unset ANTHROPIC_API_KEY
 
 readonly me=envoy-session-delivery
 refuse() {

@@ -8,7 +8,7 @@ import {
   startEnvoyStack,
 } from "@legion/envoy-client/test/envoy-stack"
 import { type StallProxy, startStallProxy } from "@legion/envoy-client/test/stall-proxy"
-import { runFreezeScenario } from "@legion/envoy-client/test/stall-scenario"
+import { RECOVERY_BOUND_MS, runFreezeScenario } from "@legion/envoy-client/test/stall-scenario"
 import type { Subprocess } from "bun"
 import { z } from "zod"
 
@@ -217,7 +217,7 @@ for (const listenerGrant of ["current", "before-session-consumers"] as const) {
               proxy.connections.some(
                 (opened) => opened.acceptedAt >= frozenAt && opened.subscribedAt !== undefined,
               ),
-            frozenAt + 60_000,
+            frozenAt + RECOVERY_BOUND_MS,
             "the session to subscribe again after the hung redial",
           )
           const signalledAt = Date.now()

@@ -84,6 +84,10 @@ const (
 	// the max.
 	pushRetryFirst = time.Second
 	pushRetryMax   = 30 * time.Second
+	// relayHeldRecheck is how often the relay judges a message it holds again: one another path is
+	// already pushing (holdWhilePushedElsewhere), which it neither pushes nor acks until that push
+	// lands or the attempt record naming it is gone.
+	relayHeldRecheck = time.Second
 	// relayPruneInterval is how often the relay drops lapsed session entries from the cache
 	// (session.SessionRegistry.PruneLapsed), so a session that stopped registering stops being
 	// relayed: a lapse has no watch event.
@@ -860,8 +864,10 @@ func (m *sessionRelays) relayServingPort(ctx context.Context, run *relayRun) rel
 // kept in progress so its ack wait never runs out. It returns false when the relay was stopped
 // first.
 //
-// A message on a topic a session follows (not its own agent subject or a role) is refused as the
-// durable path's fan-out refuses it (refuseFollowedTopic).
+// A message on a topic a session follows (not its own agent subject or a role) is judged as the
+// durable path's fan-out judges it (followedTopicVerdict): one the session already has is acked
+// unpushed, and one another path is already pushing is held until that push lands or ends
+// (holdWhilePushedElsewhere).
 func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string, msg bus.SessionMessage) bool {
 	var item contracts.Envelope
 	if err := decodeStoredEnvelope(msg.Data, &item); err != nil {
@@ -869,9 +875,14 @@ func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string,
 		_ = msg.Ack()
 		return true
 	}
-	if m.refuseFollowedTopic(sessionID, item) {
+	switch m.holdWhilePushedElsewhere(ctx, sessionID, item, msg) {
+	case relayAcksIt:
 		_ = msg.Ack()
 		return true
+	case relayStopped:
+		// The relay was stopped while it held the message, which stays unacked: whichever relay
+		// starts next pulls it again.
+		return false
 	}
 	return pushWithBackoff(ctx, m.logger, sessionID, item, func(attempt int) (bool, error) {
 		if err := m.push(ctx, sessionID, item, msg); err != nil {
@@ -901,33 +912,98 @@ func (m *sessionRelays) push(ctx context.Context, sessionID string, item contrac
 	return m.deliverer.Push(ctx, item, sessionID, entry)
 }
 
-// refuseFollowedTopic applies the durable path's refusals (judgeFollowedTopic) to item, a message
-// on a topic the session follows, and reports whether item is refused: a copy the session already
-// took or is already being sent, an echo of its own message, or a delivery mode it does not
-// advertise or that cannot be read, which is reported as a delivery_failed exception as the
-// fan-out reports it. A message on the session's agent subject, a role forward included, is
-// addressed to this session alone and is never refused here.
-func (m *sessionRelays) refuseFollowedTopic(sessionID string, item contracts.Envelope) bool {
+// relayVerdict is what the relay of a serving-port session's consumer does with a message on a
+// topic the session follows (sessionRelays.followedTopicVerdict).
+type relayVerdict uint8
+
+const (
+	// relayPushesIt: the relay pushes the message to the session's port.
+	relayPushesIt relayVerdict = iota
+	// relayAcksIt: the message is refused, and acked unpushed.
+	relayAcksIt
+	// relayHoldsIt: another path is already pushing this message (an attempt record), so the relay
+	// neither pushes nor acks it yet (holdWhilePushedElsewhere).
+	relayHoldsIt
+	// relayStopped: the relay was stopped while it held the message, which stays unacked.
+	relayStopped
+)
+
+// followedTopicVerdict applies the durable path's judgement (judgeFollowedTopic) to item, a
+// message on a topic the session follows, and says what the relay does with it: a copy the
+// session already took, an echo of its own message, and a delivery mode it does not advertise or
+// that cannot be read are acked unpushed, the last reported as a delivery_failed exception as the
+// fan-out reports it; a copy another path is already pushing is held. A message on the session's
+// agent subject, a role forward included, is addressed to this session alone and is never refused
+// here.
+func (m *sessionRelays) followedTopicVerdict(sessionID string, item contracts.Envelope) relayVerdict {
 	if isControlTopic(item.Topic) {
-		return false
+		return relayPushesIt
 	}
 	mode, modeErr := envelopeDeliveryMode(item)
 	verdict, _, err := judgeFollowedTopic(m.rules, sessionID, item, mode, modeErr)
 	switch verdict {
 	case takeFollowedTopic:
-		return false
+		return relayPushesIt
 	case followedTopicEcho:
 		m.logger.DeliveryLog(slog.LevelInfo, "session relay skipped an echo", sessionID, item.Topic, item.EventID, "skipped")
-		return true
-	case followedTopicDeduped, followedTopicAttempted:
+		return relayAcksIt
+	case followedTopicDeduped:
 		m.logger.DeliveryLog(slog.LevelInfo, "session relay skipped a copy the session already has", sessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
-		return true
+		return relayAcksIt
+	case followedTopicAttempted:
+		return relayHoldsIt
 	}
 	m.logger.DeliveryLog(slog.LevelWarn, "session relay refused a message the session cannot take", sessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
 	if publishErr := publishDeliveryException(m.client, item, "delivery_failed", sessionID, ""); publishErr != nil {
 		m.logger.Warn("session relay could not publish a delivery exception", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", publishErr.Error()))
 	}
-	return true
+	return relayAcksIt
+}
+
+// holdWhilePushedElsewhere judges item for the relay and holds msg while another path's push of it
+// is in flight, judging it again every relayHeldRecheck and keeping it in progress meanwhile. It
+// returns the verdict the hold ended on, relayStopped when the relay was stopped first.
+//
+// An attempt record is a push in flight, not a delivery: the path that wrote it is a serving-port
+// worker handed the push before the session's entry moved to consumer delivery under it
+// (serve_port_workers.go). Acking the message on that record would rest the session's only copy on
+// a process-local cache that expires and on a worker that may yet drop or hand back its push, so
+// the message is held unacked instead, and judged again:
+//   - the worker's 204 records the dedupe key: the session has the message, so it is acked;
+//   - the worker drops its push (its session is relayed now) or hands it back, either of which
+//     clears the attempt: the relay pushes the message itself;
+//   - neither happens and the record expires (attemptCacheTTL, 5 minutes from when it was
+//     written): the relay pushes the message itself. A copy that lands from both pushes is one the
+//     session drops by its dedupe key, so an expiry race costs a duplicate, never the message.
+//
+// The hold is therefore bounded by attemptCacheTTL plus one relayHeldRecheck, and it stalls
+// nothing beyond the session's own later messages, which wait behind it in stream order as they
+// wait behind a head message the port keeps refusing (pushUntilAccepted) -- a wait with no bound at
+// all. The message is kept in progress, so the consumer's ack wait (bus.SessionConsumerAckWait)
+// never runs out under it; the messages the server delivers behind it are bounded by the
+// consumer's MaxAckPending (bus.SessionConsumerMaxAckPending) and are redelivered without limit
+// (MaxDeliver -1) until the relay takes each in turn, the redelivered copies of the ones it has
+// pushed by then acked and skipped (relayServingPort's pushedThrough).
+func (m *sessionRelays) holdWhilePushedElsewhere(ctx context.Context, sessionID string, item contracts.Envelope, msg bus.SessionMessage) relayVerdict {
+	var since time.Time
+	for {
+		verdict := m.followedTopicVerdict(sessionID, item)
+		if verdict != relayHoldsIt {
+			if !since.IsZero() && verdict == relayPushesIt {
+				m.logger.DeliveryLog(slog.LevelInfo, "session relay pushes a message whose other push ended unlanded", sessionID, item.Topic, item.EventID, "retrying",
+					slog.String("dedupe_key", item.DedupeKey), slog.String("held", time.Since(since).String()))
+			}
+			return verdict
+		}
+		if since.IsZero() {
+			since = time.Now()
+			m.logger.DeliveryLog(slog.LevelInfo, "session relay holds a message another path is pushing", sessionID, item.Topic, item.EventID, "retrying", slog.String("dedupe_key", item.DedupeKey))
+		}
+		_ = msg.InProgress()
+		if waitUnlessDone(ctx, relayHeldRecheck) != nil {
+			return relayStopped
+		}
+	}
 }
 
 // decodeStoredEnvelope decodes a stored message into item under the durable path's rules

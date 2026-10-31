@@ -542,6 +542,43 @@ describe("gaps", () => {
     expect(gaps.map((notice) => notice.kind)).toEqual(["stream_recreated"]);
     expect(delivery.resumePoint()).toBeUndefined();
   });
+
+  // The listener starts the relay before it writes the registration's answer, and the relay's
+  // frames come over NATS apart from that HTTP answer, so the first frame of the stream that
+  // replaced the one the session resumed on can arrive before the answer naming it. The
+  // replacement is still told, once.
+  test("a frame from another stream than the resume point's, before the answer, is told once", () => {
+    const { delivery, gaps } = setup();
+    delivery.restore({ resume: { stream_id: "stream-old", seq: 9 }, follows: {} });
+
+    delivery.registration();
+    delivery.receive(relay({ seq: 1, streamID: "stream-new" }));
+    delivery.answered({
+      mode: "consumer",
+      subject: deliverSubject(SESSION),
+      stream_id: "stream-new",
+      gap: false,
+    });
+    delivery.receive(relay({ seq: 2, streamID: "stream-new" }));
+
+    expect(gaps.map((notice) => notice.kind)).toEqual(["stream_recreated"]);
+  });
+
+  test("a frame from the resume point's own stream, before the answer, tells nothing", () => {
+    const { delivery, gaps } = setup();
+    delivery.restore({ resume: { stream_id: "stream-old", seq: 9 }, follows: {} });
+
+    delivery.registration();
+    delivery.receive(relay({ seq: 10, streamID: "stream-old" }));
+    delivery.answered({
+      mode: "consumer",
+      subject: deliverSubject(SESSION),
+      stream_id: "stream-old",
+      gap: false,
+    });
+
+    expect(gaps).toEqual([]);
+  });
 });
 
 describe("what the registration resumes at", () => {
