@@ -208,7 +208,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 		_ = os.RemoveAll(staging)
 	}()
 	if request.CacheURL == "" {
-		clone := feedTransfer{verb: "clone", argv: []string{"git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "clone", "--bare", "--quiet", GitHubURL(request.Repo), staging}, destination: staging}
+		clone := feedTransfer{verb: "clone", argv: []string{"git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "clone", "--bare", "--quiet", GitHubURL(request.Repo), staging}, destination: staging, dir: filepath.Dir(staging)}
 		report.Cloned = true
 		deadline := request.Clock.Now().Add(request.bound())
 		if err := report.fromGitHub(ctx, run, request, clone, staging, held, deadline); err != nil {
@@ -397,7 +397,7 @@ func remoteHead(ctx context.Context, run Runner, request FetchRequest, gitDir st
 // anything but a branch is the fetch's failure.
 func remoteRefs(ctx context.Context, run Runner, request FetchRequest, gitDir string, held *fetchCredential, deadline time.Time, patterns ...string) (string, map[string]string, error) {
 	argv := append([]string{"git", "--git-dir=" + gitDir, "ls-remote", "--symref", GitHubURL(request.Repo), "HEAD"}, patterns...)
-	result, err := transferWithRetries(ctx, run, request, feedTransfer{verb: "ls-remote", argv: argv}, held, deadline)
+	result, err := transferWithRetries(ctx, run, request, feedTransfer{verb: "ls-remote", argv: argv, dir: gitDir}, held, deadline)
 	if err != nil {
 		return "", nil, fmt.Errorf("read GitHub's default branch of %s: %w", request.Repo, err)
 	}
@@ -437,7 +437,7 @@ func followHead(ctx context.Context, run Runner, request FetchRequest, gitDir st
 	if target == "" {
 		return nil
 	}
-	current, err := runCommandTimeout(ctx, run, []string{"git", "--git-dir=" + gitDir, "symbolic-ref", "--quiet", "HEAD"}, isolatedGitConfig, "", run.Timeout())
+	current, err := runCommandTimeout(ctx, run, []string{"git", "--git-dir=" + gitDir, "symbolic-ref", "--quiet", "HEAD"}, isolatedGitConfig, gitDir, run.Timeout())
 	if err != nil {
 		return err
 	}
@@ -644,7 +644,9 @@ func askCache(ctx context.Context, request FetchRequest, path string, withToken 
 // removes what was written. The stream is read to its end, so a transfer the cache broke off is a
 // failure, not a short repository.
 func unpackCache(ctx context.Context, run Runner, request FetchRequest, staging string) (int64, error) {
-	if _, err := RunChecked(ctx, run, []string{"git", "init", "--bare", "--quiet", staging}, isolatedGitConfig, ""); err != nil {
+	// The init runs beside the repository it makes rather than in it: staging is the repository,
+	// and what a command creates is no working directory of its own.
+	if _, err := RunChecked(ctx, run, []string{"git", "init", "--bare", "--quiet", staging}, isolatedGitConfig, filepath.Dir(staging)); err != nil {
 		return 0, err
 	}
 	bounded, cancel := context.WithCancel(ctx)
@@ -716,7 +718,8 @@ func verifyCache(ctx context.Context, run Runner, request FetchRequest, staging 
 		return err
 	}
 	verify := func(argv []string, left time.Duration) error {
-		result, err := runCommandTimeout(ctx, run, argv, isolatedGitConfig, "", left)
+		// Every check runs in staging, which the stream filled before verifyCache was called.
+		result, err := runCommandTimeout(ctx, run, argv, isolatedGitConfig, staging, left)
 		_, err = checkedResult(argv, result, err)
 		return err
 	}
@@ -944,12 +947,15 @@ func (r *countingReader) stalledBy(err error) error {
 var errStreamStalled = fmt.Errorf("the repository cache delivered less than %d bytes in %s, the low-speed bound below which its stream is ended", CacheStreamLowSpeedBytes, CacheStreamLowSpeedTime)
 
 // feedTransfer is how Fetch brings the repository from GitHub: verb names each attempt in the
-// log and in a failure, argv is the attempt, and destination, for a clone, is the temporary
-// directory the attempt clones into, removed before a retry.
+// log and in a failure, argv is the attempt, destination, for a clone, is the temporary
+// directory the attempt clones into, removed before a retry, and dir is the directory each
+// attempt runs in. That is never destination: transferWithRetries removes it between attempts,
+// and a child whose working directory has been removed cannot start.
 type feedTransfer struct {
 	verb        string
 	argv        []string
 	destination string
+	dir         string
 }
 
 // fetchInto is the transfer into a feed repository that exists, with the remote named by its URL
@@ -981,12 +987,12 @@ type feedTransfer struct {
 func fetchInto(feed string, repo ghrepo.Repository, exact []string) feedTransfer {
 	argv := []string{"git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "--git-dir=" + feed, "fetch", "--prune", "--quiet", GitHubURL(repo)}
 	if len(exact) == 0 {
-		return feedTransfer{verb: "fetch", argv: append(argv, "+refs/heads/*:refs/heads/*")}
+		return feedTransfer{verb: "fetch", argv: append(argv, "+refs/heads/*:refs/heads/*"), dir: feed}
 	}
 	for _, ref := range exact {
 		argv = append(argv, "+"+ref+":"+ref)
 	}
-	return feedTransfer{verb: "fetch", argv: append(argv, "+"+issueBranches+":"+issueBranches)}
+	return feedTransfer{verb: "fetch", argv: append(argv, "+"+issueBranches+":"+issueBranches), dir: feed}
 }
 
 // issueBranches is the pattern every Legion issue branch of a repository matches: Bookmark names
@@ -1034,9 +1040,11 @@ func feedConfiguration(ctx context.Context, run Runner, gitDir string) error {
 
 // FeedGit runs git on the bare repository gitDir — a feed's, or the repository cache's — under
 // the runner's slow-command budget, holding no credential and reading no configuration but that
-// repository's own: what reads or tends such a repository outside Fetch's transfer.
+// repository's own: what reads or tends such a repository outside Fetch's transfer. It runs in
+// gitDir itself, which is there whenever something reads or tends it, so no caller has to name a
+// directory and no child of this package's takes the one the process happens to run in.
 func FeedGit(ctx context.Context, run Runner, gitDir string, args ...string) (Result, error) {
-	return RunChecked(ctx, run, append([]string{"git", "--git-dir=" + gitDir}, args...), isolatedGitConfig, "")
+	return RunChecked(ctx, run, append([]string{"git", "--git-dir=" + gitDir}, args...), isolatedGitConfig, gitDir)
 }
 
 // FeedGitWithin is FeedGit bounded by timeout instead of the runner's slow-command budget: for a
@@ -1044,7 +1052,7 @@ func FeedGit(ctx context.Context, run Runner, gitDir string, args ...string) (Re
 // does.
 func FeedGitWithin(ctx context.Context, run Runner, gitDir string, timeout time.Duration, args ...string) (Result, error) {
 	argv := append([]string{"git", "--git-dir=" + gitDir}, args...)
-	result, err := runCommandTimeout(ctx, run, argv, isolatedGitConfig, "", timeout)
+	result, err := runCommandTimeout(ctx, run, argv, isolatedGitConfig, gitDir, timeout)
 	return checkedResult(argv, result, err)
 }
 
@@ -1061,7 +1069,7 @@ func transferWithRetries(ctx context.Context, run Runner, request FetchRequest, 
 		if err := held.renew(); err != nil {
 			return Result{}, fmt.Errorf("%s attempt %d: %w", transfer.verb, attempt, err)
 		}
-		result, runErr := runCommandTimeout(ctx, run, transfer.argv, held.env, "", deadline.Sub(now))
+		result, runErr := runCommandTimeout(ctx, run, transfer.argv, held.env, transfer.dir, deadline.Sub(now))
 		result.Stderr = held.scrub(result.Stderr)
 		_, failed := checkedResult(transfer.argv, result, runErr)
 		if failed == nil {
