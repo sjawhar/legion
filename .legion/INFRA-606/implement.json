@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-30T23:17:37Z",
+  "completed": "2026-10-31T01:11:29Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -236,6 +236,14 @@
       "observed": "All pass except the local collation test; #2392's horizon tests and this PR's bound, generation, hub and mention tests pass together; dispatchConnectionsPerPod stays 89.",
       "headSha": "ed9b67599c7c73016199563d60ef3a626a0cca53",
       "negativeControl": "At 8f68d44d four hub tests fail (the relay-fed generation's seed recompute) while passing on main and the branch alone; 57c4a697 settles the seed in the rigs and they pass 5 of 5."
+    },
+    {
+      "criterion": "Tester round 17: no required test is made flaky by the change (TestIdenticalViewsShareOneRecompute, red in envoy-go-race-api; TestAHeldLaneKeepsItsQueuedCommentsInOrderThroughASweep).",
+      "surface": "internal/dispatch/api against Postgres, under the race detector",
+      "command": "GOMAXPROCS=4 CGO_ENABLED=1 go test -p 2 -parallel 4 -race ./internal/dispatch/api/ -run '^(TestIdenticalViewsShareOneRecompute|TestAHeldLaneKeepsItsQueuedCommentsInOrderThroughASweep)$' -count=50",
+      "observed": "ok (50 of 50 each), and 50 of 50 without -race; the related hub, live, relay, mention, sweep and claim groups pass.",
+      "headSha": "72a07b4954ff7f3191d375d898a3b6a7f8b3246f",
+      "negativeControl": "At ed9b6759 the tester measured 4 of 20 failures for each (the relay feed's seed recompute in the count; the hook ageing the map's claim while a refresh had already moved the row)."
     }
   ],
   "filesChanged": [
@@ -378,7 +386,8 @@
     "The mention dedupe key drops the mode (<comment>:<target>): a Retry in any mode of a mention that already reached the session is recorded duplicate and dropped (architect's ruling).",
     "Forward merge at afab3fdc (main d126b19d): main's #2483 took 0148, so the fallback table is 0149_comment_fallback_copies; route pin 148.",
     "Forward merges at 8f68d44d (main 6fa26c74, #2392's event horizon: the relay, bounded resume, overflow catch-up and the events-log route read only up to the horizon; the hub keeps #2392's asynchronous feed take, costing one seed recompute per hub generation start) and ed9b6759 (main 4ca6415a, #2466's load-test replay beside the restart scenario); fallback table 0150_comment_fallback_copies.",
-    "Four hub tests (main's) settle the relay feed's seed before measuring (57c4a697), because this PR starts a hub generation at the first subscribe; no assertion weakened."
+    "Four hub tests (main's) settle the relay feed's seed before measuring (57c4a697), because this PR starts a hub generation at the first subscribe; no assertion weakened.",
+    "refreshHeldClaims records a refreshed claim only over the one it snapshotted (a test-exposed race, not a product defect: the row's claim only moves forward, so no sweep sees a live queued attempt as free)."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -387,7 +396,7 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 17,
-  "answersTest": "1300c5c68d983835c33bd303dacd3cdee73ae7d2",
+  "round": 18,
+  "answersTest": "0bd0f6a8eeff0126ff79b492c05ae669ed965f72",
   "answersReview": "d8b5a38fcddc4e3a4c504d787c6371812805bec0"
 }
