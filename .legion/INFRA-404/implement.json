@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-404",
+  "completed": "2026-10-31T05:45:00Z",
+  "proof": [
+    {
+      "criterion": "A5 — a listener built from the branch, on a NATS server, with real client processes, shows each row of R8's table, that a refused process stays registered, and that after the holder exits the refused Oh My Pi process takes the role on its next session event.",
+      "surface": "packages/pi-envoy/scripts/smoke-role-takeover.sh: a real nats-server and a real listener built from this branch with go build, driven by separate OS processes — one Bun child per Oh My Pi extension instance loading the real extensions/envoy.ts against the stand-in host, and the real packages/claude-envoy channel-server process under a stand-in claude parent for the Claude Code rows. Each client reaches the listener through its own logging proxy, so every 409 and every client_instance_id is read from the wire rather than inferred.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bash packages/pi-envoy/scripts/smoke-role-takeover.sh",
+      "observed": "SMOKE ROLE TAKEOVER PASS: all 10 rows held against the listener built from this working copy. Row 1 (reload, channel-server restart) keeps the role across two different client instances; row 2 a fork takes its parent's role inside one instance; row 3 a move takes it; row 4 a /clear handoff deregisters its own entry (the listener answered deleted=true) and takes the role; row 5 after another process resumed and registered the predecessor, the fork claim and the move claim are each refused 409 naming that holder, and the Claude /clear handoff is refused twice (its claim and its heartbeat re-assertion) with the holder's entry kept (deleted=false, reason \"the registration belongs to another client instance\") and its role record still on disk and refreshed by its next heartbeat; the refused Oh My Pi process stays registered and takes the role on its next session event once the holder has left the registry.",
+      "headSha": "dd0d2d0d0618f6bb396a32fc1f978df21c39c49d",
+      "negativeControl": "The same script with --base-rev main@origin, which builds the listener from main (92619d8dfcc6) and leaves every client this branch's, exits 1: SMOKE ROLE TAKEOVER FAIL: 3 of 10 rows did not hold against the listener built from main@origin — the fork claim naming the resumed predecessor answers 200 where the branch answers 409, the move claim the same, and the Claude handoff's deregistration deletes the other process's live entry (no deleted=false body at all), after which main's listener hands the role to the handoff. Rows 1-4 and both standalone A5 claims pass on main too, which is right: this change does not alter them."
+    },
+    {
+      "criterion": "A3 — the pi-envoy test suite passes, and smoke-registration-stall.sh --arm stall and --arm recover pass with a real Oh My Pi process against a real listener.",
+      "surface": "packages/pi-envoy/scripts/smoke-registration-stall.sh --local-stack: a real omp pane, spawned by the script, against a nats-server and a listener the script builds from this branch and starts on loopback. --local-stack is new in this change, so the smoke no longer needs a production listener or its bearer token; the pod's own model route (ANTHROPIC_BASE_URL plus PI_CONFIG_FILES, inherited by the pane) served the real model turn, so no credential was requested or handled.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bash packages/pi-envoy/scripts/smoke-registration-stall.sh --local-stack --arm recover && bash packages/pi-envoy/scripts/smoke-registration-stall.sh --local-stack --arm stall",
+      "observed": "SMOKE recover PASS: 01a19067-8591-776b-8a5c-14ba99f60019 was deleted from the registry while its process ran and re-registered itself 91s later (budget 135s), last_seen 1793424067168 -> 1793424157179 and the pane's own registration count 1 -> 2. SMOKE stall PASS: 01a19069-225e-7467-9c92-2e0bd28a4d48 stayed listed 362s after registration 3 wedged — past the 300s record lifetime — last_seen advanced 1793424262511 -> 1793424712515, 7 accepted registrations, and the pane said the stall exactly once. The package suite at the same head: 1757 pass, 30 skip, 0 fail (cd packages/pi-envoy && bun test --path-ignore-patterns=extensions/card-delivery-omp.test.ts), and the card-delivery lane 0 pass, 9 skip, which is this pod having no NATS for it.",
+      "headSha": "dd0d2d0d0618f6bb396a32fc1f978df21c39c49d",
+      "negativeControl": "Each arm reads a measurement rather than an exit code, and each refuses what it cannot show: an earlier run of the stall arm against a listener that was not yet healthy ended 'the listener did not become healthy' and exited non-zero rather than passing, and the recover arm's verdict names the only two requests it made to the listener (21 GET /v1/sessions polls and the single DELETE), so a pass produced by anything else the pane did would not be reported as one."
+    },
+    {
+      "criterion": "A2 — envoy.ts re-checks no fence by hand and declares none of the moved state.",
+      "surface": "The source file packages/pi-envoy/extensions/envoy.ts, the three greps of the plan's section 1 (F1).",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && grep -nE '\\blive\\(\\)|const owns|\\bFence\\b|UNFENCED|serialQueue|AbandonedTaskError' packages/pi-envoy/extensions/envoy.ts; grep -nE '\\b(claimedRoleTopic|claimedRoleSessionID|holdUnconfirmed|pendingHandBacks|abandonedHolds|refusedRoles|roleNoticesFor|roleNoticeSubjects|roleEnds|registeredFor|registeredAt|establishedSession|roleSettledFor|agentSessions|inboundOpenFor)\\b' packages/pi-envoy/extensions/envoy.ts; grep -n 'sessionOpen(' packages/pi-envoy/extensions/envoy.ts",
+      "observed": "The first two greps print nothing (exit 1). The third prints exactly one line, 1032: the isOwnSession callback; sessionOpen's own definition reads 'const sessionOpen = (id: string)' and matches no 'sessionOpen(' pattern, which is what A2 allows for. envoy.ts is 640 lines shorter than before the rewire.",
+      "headSha": "dd0d2d0d0618f6bb396a32fc1f978df21c39c49d",
+      "negativeControl": "The same greps against the base, main@origin, print the 29 hand-written checks and every moved declaration, which is the state this criterion is about."
+    },
+    {
+      "criterion": "A1 — unit tests of the new module show a step past the deadline, a step of a session task whose session moved, a no-session task, a refused step ending the task as decided nothing, a dial a refused task opened being closed, and each named operation of R3.",
+      "surface": "packages/pi-envoy/src/registration-state.test.ts, the package's own Bun suite, against injected fakes with no Oh My Pi host and no network.",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/pi-envoy && bun test src/registration-state.test.ts",
+      "observed": "55 pass, 0 fail (56 before the simplify pass removed TaskHandle.handBack, which nothing called, and the one test written for it).",
+      "headSha": "dd0d2d0d0618f6bb396a32fc1f978df21c39c49d",
+      "negativeControl": "The module's refusal is what the tests turn on: a handle bound with actFor to a session the injected sessionOpen predicate then refuses writes nothing and its task resolves undefined, and the deadline cases run on an injected clock rather than a wait, so a module that stopped refusing would fail them rather than run slower."
+    },
+    {
+      "criterion": "A4 — Go tests of the listener show each case of R6, each case of R7 including the 200 for a kept entry, and R5's storage.",
+      "surface": "The Go packages of packages/envoy, on the in-process nats-server (internal/testnats).",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' go test -timeout 20m -count=1 ./cmd/listener/ ./internal/session/ ./internal/store/",
+      "observed": "ok github.com/sjawhar/envoy/cmd/listener 486.037s; ok github.com/sjawhar/envoy/internal/store 30.112s; ok github.com/sjawhar/envoy/internal/session 10.081s. The new cases: TestRoleSetHandlerSoftClaimPredecessorInstance (a live predecessor of another instance keeps the role with a 409 naming it; a predecessor with no entry gives it up; a claim under the holder's own id keeps it; a claimant with no id and a predecessor with no id each take it and the takeover is logged with both session ids; a predecessor read that fails answers 503; a cached predecessor entry the bucket has replaced does not decide; the claim keeps the claimant's stored id), the rewritten TestRoleSetHandlerSoftClaim case for the same-instance predecessor, TestSessionRegistryDeleteIfInstance_* (same id deletes, another id keeps, an entry naming no instance is deleted, a request naming none deletes, an absent key answers deleted, the lost compare-and-swap retries once through the suite's own KV seam), TestDeleteSessionHandler_* for the three route answers, and TestInstanceMatches.",
+      "headSha": "901c54769998 (the last commit that changes Go; the three later commits change no Go file, and go build, go vet and gofmt -l are clean at dd0d2d0d)",
+      "negativeControl": "Each R6 case is paired with its opposite in the same test: the same claim against a predecessor of another instance answers 409 where against the claimant's own instance it answers 200, and the trailing-cache case is asserted twice before the claim — the observer's cache holding the claimant's instance and the bucket holding another — so a handler that read the cache would pass the first assertion and fail the 409."
+    },
+    {
+      "criterion": "A6 — the texts R9 names state the new rule, and each changed package has a changelog fragment.",
+      "surface": "The repository's own texts and the four packages' unreleased changelog directories.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && grep -rn 'live or not' packages/envoy packages/envoy-client packages/pi-envoy packages/claude-envoy skills docs/solutions .dispatch; ls packages/{envoy,pi-envoy,claude-envoy,envoy-client}/.changes/unreleased/pr2592*; bash .github/scripts/check-private-names.sh",
+      "observed": "No text of R9's list says 'live or not'. The remaining matches are unrelated (internal/dispatch/processes/processes_test.go, internal/dispatch/envoy/client.go, claude-envoy/hooks/session-hook.ts's 'alive or not yet written') or are this change's own description of the base listener, in packages/pi-envoy/scripts/README.md and smoke-role-takeover.sh, where it states what --base-rev builds and is true of main. One fragment in each of the four packages (pr2592-Changed-*.yaml). check-private-names: no file or path names the private deployment repository or the company (6630 files).",
+      "headSha": "dd0d2d0d0618f6bb396a32fc1f978df21c39c49d",
+      "negativeControl": "check-private-names.sh is a refusing check: it exits non-zero naming the file and the term when a text names a private host or the deployment repository, so its silence is a pass rather than a check that did not run."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/session/registry.go — SessionEntry.ClientInstanceID; DeleteIfInstance; Delete's cache reconcile extracted into reconcileDeleted, which both call",
+    "packages/envoy/internal/session/instance.go (new) — InstanceMatches(stored, requested), the helper INFRA-392 shares",
+    "packages/envoy/cmd/listener/claim_wiring.go — subscribeBody.client_instance_id, trimmed into the entry",
+    "packages/envoy/cmd/listener/role_holder.go — bucketSessionEntry, the bucket-only read",
+    "packages/envoy/cmd/listener/api.go — roleSetHandler takes the logger, reads the claimant's entry from the bucket, and decides the predecessor by R6's three cases; deleteSessionHandler takes client_instance_id and answers the JSON body; the R9 comments",
+    "packages/envoy/internal/store/kv.go — the contract comments of SetRole and SetRoleWithPrevious (comments only)",
+    "packages/envoy-client/src/transport.ts — SubscribeInput.clientInstanceID, newClientInstanceID(), unregisterSession({sessionID, clientInstanceID?}), the R9 comments",
+    "packages/claude-envoy/src/envoy-channel-server.ts — one instance id per process, sent on the registration and both deregistrations; restoreRole keeps the record when the 409 names the predecessor itself; the R9 comments",
+    "packages/pi-envoy/src/registration-state.ts (new) + registration-state.test.ts (new) — the module that owns the two queues, each task's deadline and fence, the shared role and registration state, and the instance id",
+    "packages/pi-envoy/extensions/envoy.ts — rewired onto that module; Fence, UNFENCED, serialQueue and every moved declaration gone (640 lines shorter)",
+    "packages/pi-envoy/scripts/smoke-role-takeover.sh (new) + scripts/role-takeover/{omp-client,claude-client,listener-proxy,host-stub}.ts (new) — the A5 surface",
+    "packages/pi-envoy/scripts/smoke-registration-stall.sh — --local-stack, the $TMPDIR fix, and a pick_port that cannot hand two services one port",
+    "packages/pi-envoy/tsconfig.json — the role-takeover drivers are typechecked",
+    ".github/workflows/ci.yaml — the role-takeover smoke as one step of the existing envoy-session-stall job",
+    "The R9 texts: packages/envoy/AGENTS.md, packages/envoy/docs/architecture.md, packages/envoy-client/README.md, packages/pi-envoy/{AGENTS.md,README.md,scripts/README.md}, packages/claude-envoy/{AGENTS.md,README.md}, skills/envoy/references/roles.md, the four .dispatch/architecture records, three docs/solutions entries",
+    "One changelog fragment in each of packages/{envoy,pi-envoy,claude-envoy,envoy-client}/.changes/unreleased/"
+  ],
+  "trickyParts": [
+    "The claim route now makes two bucket reads (the claimant's own and, for a soft claim naming a predecessor, that predecessor's), each capped at roleHolderReadTimeout = 2s and both inside the route's sendRequestBudget = 3500ms. The frozen-bus route table (packages/envoy/cmd/listener/write_routes_frozen_bus_test.go, writeRoutesWithin = 4s) is the machine check that the route still fits, and it is unchanged and green.",
+    "The claimant's bucket read is not conditional on soft: the entry it answers is also the one PutWithin writes back, so reading it only for soft claims would reinstate the stale write-back the cache gave.",
+    "DeleteIfInstance retries its conditional delete once on a lost compare-and-swap, because the common cause is the deleting instance's own heartbeat landing between the read and the delete, and a spurious 'kept' would leave the predecessor's entry alive and make the next claim a 409 for no reason. A second lost compare-and-swap answers kept.",
+    "A value in the session bucket this build cannot unmarshal names no instance, so DeleteIfInstance deletes it (logged): a record no reader can act on must not block a deregistration.",
+    "The module's run resolves undefined when a task's session moved, which is how a pass decides nothing. The two call sites that must still reject — the Legion bridge's claim and the envoy_role_set tool — turn that undefined into SessionLeftError naming the session the task was decided for, which is what their existing tests pin.",
+    "The handle's subscribe takes the dial step rather than the module's bare adapter: a subscribe that has to make the connection would otherwise dial unfenced, and a refused task would open subjects a newer pass had closed.",
+    "packages/pi-envoy/scripts/role-takeover drivers are Bun processes outside the package's test runner; they are typechecked (tsconfig.json includes them) but run only by the smoke."
+  ],
+  "deviations": [
+    "The plan's section 7 expected a test to pin settleRole's unguarded warnNoticesClosed write after the last await. None did: the three tests that exercise warnNoticesClosed (envoy.test.ts:7309, :7469, :8958) all assert the notice on a session that is still open, so closing that window changed no test.",
+    "Two assertions changed, both named by the plan: envoy.test.ts's 'registers the shared eight-tool contract and delegates HTTP operations to EnvoyClient' and 'registers a self-subscribed interest on session start', each of which pins the exact /v1/interests/subscribe body and now allows client_instance_id (R5). The third exact-body assertion the plan expected to change is in packages/envoy-client/src/__tests__/transport.test.ts and changed there. No other test was changed or deleted except the one written for TaskHandle.handBack, which the simplify pass removed with the member nothing called.",
+    "The plan's F7 said the claimant's entry would be re-read with d.sessions.Refresh; it is read with bucketSessionEntry, the same Refresh under the same bound, so the two reads share one helper.",
+    "The plan put InstanceMatches's merge case in internal/session/session_test.go; mergeForClaim is tested only in claim_test.go, so the case sits there.",
+    "The simplify pass applied six findings on top of the reviewed work and the whole proof was re-run at the applied head: a pick_port that could hand two services one port (a defect in a file this change touches), a RoleRegainReason declared twice, TaskHandle.handBack which nothing called, one refusal message built twice, two mintings of the client instance id replaced by newClientInstanceID() in @legion/envoy-client (which also makes the pi-envoy id the full 128 random bits the spec names, where randomUUID gave 122), and five driver operations the smoke never sends."
+  ],
+  "openQuestions": [
+    "The cmd/listener Go suite needs a Postgres (DISPATCH_TEST_DATABASE_URL) that this pod lost when it was replaced mid-round; its green run above is at 901c54769998, and no Go file changed in the three commits after it (go build, go vet and gofmt are clean at the head). CI's own run at the head is the check to read."
+  ],
+  "discoveredComplexity": [
+    "mergeForClaim can discard an incoming registration whole (a portless claim against a live portful route, a non-driving claim against a fresh driving incumbent), and the instance id goes with it: the stored id then stays the incumbent's. Both clients that carry this change register port 0 and driving false, so neither rule fires between them; the case is recorded in TestMergeForClaim_RejectedClaimLeavesTheIncumbentsClientInstanceIDStored.",
+    "INFRA-392 (sjawhar/legion#2596) rewrites internal/session/registry.go, internal/store/kv.go and internal/kvwatch around whole-bucket re-reads, and adds IsLive(entry, now). Its implementer and I agreed: InstanceMatches keeps this signature, this branch merges first on current evidence, and that branch brings the base forward once afterwards. When IsLive lands, the one call to change here is liveSessionEntry in cmd/listener/role_holder.go."
+  ]
+}
