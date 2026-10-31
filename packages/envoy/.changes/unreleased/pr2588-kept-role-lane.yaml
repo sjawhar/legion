@@ -1,0 +1,21 @@
+kind: Added
+body: |-
+  The listener keeps a role message it cannot deliver and gives it to the role's next holder.
+  A publish to a role with no live holder, or one whose claim has lapsed, is answered 202 with
+  `kept: true` and `kept_reason` (`unclaimed` or `holder_lapsed`) in place of 404, and the message
+  is stored on `notifications.envoy.kept.role.<role>`, a private stream subject the listener alone
+  reads. The next session to claim that role is handed each kept copy once, in the order the
+  copies were kept, each carrying `kept_at`. A copy kept more than an hour before the claim is
+  dropped and counted on the new `envoy_role_kept_expired_total`. A sender that keeps a queue of
+  its own publishes with `keep: false` and gets the 404 unchanged, through the publish body or,
+  for a message published straight onto the lane, the envelope's own `keep` field, which the lane
+  honours the same way. A handover walks a role's lane again for the role's current holder until
+  the lane is empty, and a lane whose handover a restart ended is picked up by a sweep that runs
+  every five minutes and at each listener's start, so no copy waits for a claim a live holder will
+  not make. `notifications.role.>` is still not a stream subject, and no NATS grant changed.
+
+  RELEASE ORDER: deploy the `legion` binary that sends `keep: false` before this listener. A
+  `legion` binary of the release before it sends no `keep` field, so the new listener keeps its
+  notice and answers 202, which that binary reads as neither success nor "no holder": its outbox
+  row keeps retrying while Envoy also hands the message to the role's next holder, and the role
+  gets it twice. In the other order there is no such window.

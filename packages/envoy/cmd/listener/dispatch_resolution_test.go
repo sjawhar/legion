@@ -141,6 +141,10 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 		// is zero, so nothing here is ever deferred, and these tests cover Dispatch resolution and
 		// delivery rather than the retry policy (INFRA-141).
 		deferredUnplaceable: newUnplaceableDeferrals(),
+		// The guards two drains of one role take inside one listener, which main.go keeps one set
+		// of for the process. This rig needs one for the same reason as the set above: the handler
+		// refuses a config without it, and nothing here keeps a role message.
+		roleKeepDrains: newRoleKeepGuards(),
 	}
 	// The durable path's pushes to serving-port sessions and the role lane's forwards run off the
 	// handler, as main.go wires them (wireDeliveryWorkers).

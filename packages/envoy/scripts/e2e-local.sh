@@ -8,6 +8,12 @@
 # delivers to the host-local fake session. ENVOY_CI_DEBOUNCE=250ms keeps this
 # bounded acceptance run responsive while retaining the production settle logic.
 #
+# Role messages: the run proves the listener's kept lane end to end. A publish to a role nobody
+# holds, and one to a role whose holder's registration is gone, are each kept rather than refused
+# and answered 202 with kept_reason unclaimed or holder_lapsed; each kept message then reaches the
+# fake session that claims the role exactly once, carrying kept_at. A publish to a role that live
+# session holds still answers 200 naming the holder, with no kept field.
+#
 # Ports: the OS chooses each one, and each URL is built from the port its own process reports
 # (natsd's "Listening for client connections on" line, the listener's "envoy-listener listening"
 # addr, the fake session's "ready <port>"). E2E_NATS_PORT, E2E_PORT and E2E_SESSION_PORT set a port
@@ -24,9 +30,13 @@ Usage: e2e-local.sh [--help]
 
 Boot a throwaway NATS and the local Envoy listener, submit signed public GitHub
 fixtures plus one direct message, prove how a send to an unknown session and a
-send whose bus is gone are refused, and write raw and rendered acceptance
-evidence to packages/envoy/out/e2e/. NATS is a server of this checkout's own
-build (internal/testnats/cmd/natsd), so no container runtime is needed.
+send whose bus is gone are refused, prove the kept lane — a role message nobody
+holds and one whose holder's claim has lapsed are kept and answered 202, and
+each reaches the session that claims the role next exactly once, carrying
+kept_at, while a role a live session holds still answers 200 — and write raw and
+rendered acceptance evidence to packages/envoy/out/e2e/. NATS is a server of
+this checkout's own build (internal/testnats/cmd/natsd), so no container runtime
+is needed.
 EOF
 }
 
@@ -74,6 +84,11 @@ readonly unwired_response_file="${out_dir}/unwired-subscribe-response.json"
 readonly unheld_role_response_file="${out_dir}/unheld-role-response.json"
 readonly role_claim_response_file="${out_dir}/role-claim-response.json"
 readonly held_role_response_file="${out_dir}/held-role-response.json"
+readonly lapsed_role_claim_response_file="${out_dir}/lapsed-role-claim-response.json"
+readonly lapsed_registry_response_file="${out_dir}/lapsed-registry-response.json"
+readonly lapsed_role_response_file="${out_dir}/lapsed-role-response.json"
+readonly lapsed_role_reclaim_response_file="${out_dir}/lapsed-role-reclaim-response.json"
+readonly keep_false_role_response_file="${out_dir}/keep-false-role-response.json"
 readonly listener_log_file="${out_dir}/listener.log"
 readonly session_log_file="${out_dir}/session.log"
 readonly subscriber_log_file="${out_dir}/subscriber.log"
@@ -140,6 +155,8 @@ trap 'cleanup 143' TERM
 
 rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_go_file" \
   "$direct_response_file" "$unwired_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
+  "$lapsed_role_claim_response_file" "$lapsed_registry_response_file" "$lapsed_role_response_file" "$lapsed_role_reclaim_response_file" \
+  "$keep_false_role_response_file" \
   "$absent_session_response_file" "$bus_down_response_file" "$bus_down_headers_file" "$bus_down_result_file" "$bus_down_client_file" \
   "$registry_session_response_file" "$registry_missing_response_file" \
   "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$nats_log_file" \
@@ -147,6 +164,15 @@ rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_g
 rm -rf "$nats_store_dir"
 : >"$envelopes_file"
 : >"$session_prompts_file"
+# Every log file is created before the process that writes it, so a wait that reads one cannot
+# race the redirect that creates it: wait_for_listener's jq and wait_for_nats's grep would
+# otherwise read a file that is not there yet — jq exits non-zero on it, which under set -e ends
+# the whole run at "waiting for the listener address". The waits themselves are untouched: each
+# still fails the moment its own process is gone, and still fails on its own deadline.
+: >"$nats_log_file"
+: >"$listener_log_file"
+: >"$session_log_file"
+: >"$subscriber_log_file"
 mkfifo "$session_ready_fifo" "$subscriber_ready_fifo"
 
 printf 'building listener and NATS server\n'
@@ -329,6 +355,11 @@ readonly session_port
     const subscription = connection.subscribe("notifications.>");
     process.stdout.write("ready\n");
     for await (const message of subscription) {
+      // The listener keeps a role message nobody can take on a kept lane of that role, and records
+      // how far it has drained that lane on a cursor subject beside it. The kept copy is an
+      // envelope and is captured; the cursor is bookkeeping of the listener alone, which carries
+      // no envelope and reaches no session, so this capture of envelopes skips it.
+      if (message.subject.startsWith("notifications.envoy.kept.cursor.")) continue;
       const raw = codec.decode(message.data);
       appendFileSync(output, `${raw}\n`);
       // The fake session holds the role below, and the publish route answers a role message only
@@ -533,15 +564,107 @@ if [[ "$missing_status" != 404 ]] || ! jq -e --arg session_id "$missing_session_
   exit 1
 fi
 
+# The kept lane. A role message the listener cannot deliver is not lost and the sender is not
+# left to queue it: the listener keeps the message and hands it to whoever claims the role within
+# the hour. Both windows the keep covers are proved here, each on a role of its own: (i) nobody
+# holds the role, and (ii) a holder whose registration is gone, its claim lapsed. In each, the
+# fake session then claims the role and must be handed the kept message exactly once, carrying
+# kept_at, the time the listener took it in.
+
+# count_session_prompts reports how many prompts the fake session was pushed that name event_id.
+# Every prompt carries its message's "Event ID: <id>" line (session.Deliverer.Text), so this
+# counts the session's own deliveries of one message, which is what exactly once is about: the bus
+# holds two copies of a kept message — the one on the kept lane and the forward the drain made of
+# it — and only the second is a delivery.
+count_session_prompts() {
+  local event_id=$1
+  jq -rs --arg event_id "$event_id" \
+    '[.[] | .parts[]? | select(.type == "text") | select((.text // "") | contains("Event ID: " + $event_id))] | length' \
+    "$session_prompts_file"
+}
+
+# count_kept_forwards reports how many captured frames are the drain's forward of event_id: the
+# copy handed to the role's new holder carries kept_at, the time the stream stored the kept copy,
+# under the role arbiter's forward dedupe key, while the copy on the kept lane itself carries no
+# kept_at and keeps the key the publish gave it.
+count_kept_forwards() {
+  local event_id=$1
+  jq -rs --arg event_id "$event_id" \
+    '[.[] | select(.event_id == $event_id and .kept_at != null and ((.dedupe_key // "") | startswith("envoy.role.forward.")))] | length' \
+    "$envelopes_file"
+}
+
+# wait_for_kept_delivery proves one window of the kept lane: the message the kept answer named
+# reaches the session that has just claimed the role, exactly once and carrying kept_at. The
+# forward and the prompt are written by two processes of their own, so this waits for both to
+# arrive rather than racing either, and then fails on any count but one — a control notice
+# delivered twice is as wrong as one never delivered.
+wait_for_kept_delivery() {
+  local window=$1
+  local event_id=$2
+  local deadline=$((SECONDS + 20))
+  local prompts=0
+  local forwards=0
+  while ((SECONDS < deadline)); do
+    prompts="$(count_session_prompts "$event_id")"
+    forwards="$(count_kept_forwards "$event_id")"
+    if ((prompts != 0 && forwards != 0)); then
+      break
+    fi
+    sleep 0.25
+  done
+  if ((prompts != 1)); then
+    printf 'ERR: the %s kept message %s reached the fake session %s times within 20 seconds, not exactly once.\n' \
+      "$window" "$event_id" "$prompts" >&2
+    return 1
+  fi
+  if ((forwards != 1)); then
+    printf 'ERR: the %s kept message %s was forwarded carrying kept_at %s times within 20 seconds, not exactly once.\n' \
+      "$window" "$event_id" "$forwards" >&2
+    return 1
+  fi
+  printf '%s: kept message %s reached the fake session exactly once, carrying kept_at\n' "$window" "$event_id"
+}
+
+# wait_for_unregistered returns once the listener reports the fake session's registration gone.
+# The registry read and the publish route's first resolution of a role's holder read a session the
+# same way (liveSessionEntry, through a cache the delete evicts), so this is the point from which
+# a claim that names that session is a lapsed one rather than a live holder.
+wait_for_unregistered() {
+  local deadline=$((SECONDS + 20))
+  local status=""
+  while ((SECONDS < deadline)); do
+    status="$(curl -sS -o "$lapsed_registry_response_file" -w '%{http_code}' \
+      "${listener_url}/v1/registry/${session_id}")"
+    if [[ "$status" == 404 ]]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  printf 'ERR: the listener still answered HTTP %s for the deleted registration of %s after 20 seconds.\n' \
+    "$status" "$session_id" >&2
+  cat "$lapsed_registry_response_file" >&2
+  return 1
+}
+
+# Window (i): nobody holds the role. The publish is answered 202 with the envelope the listener
+# kept, kept true and kept_reason unclaimed, on the role topic it was sent to — not the 404 every
+# sender needed a fallback of its own for.
+printf 'publishing to a role nobody holds\n'
 role="e2e-reviewer"
 unheld_status="$(curl -sS -o "$unheld_role_response_file" -w '%{http_code}' \
   -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/messages/publish" \
   -d "{\"topic\":\"notifications.role.${role}\",\"message\":\"Role delivery.\"}")"
-if [[ "$unheld_status" != 404 ]] || ! jq -e --arg role "$role" '.error == ("no holder for role " + $role)' "$unheld_role_response_file" >/dev/null; then
-  printf 'ERR: an unheld role publish was not rejected with 404.\n' >&2
+if [[ "$unheld_status" != 202 ]] || ! jq -e --arg role "$role" \
+  '.kept == true and .kept_reason == "unclaimed" and .topic == ("notifications.role." + $role) and (.event_id | length) > 0' \
+  "$unheld_role_response_file" >/dev/null; then
+  printf 'ERR: a publish to a role nobody holds answered HTTP %s, not a 202 keeping it with kept_reason unclaimed on the role topic.\n' \
+    "$unheld_status" >&2
+  cat "$unheld_role_response_file" >&2
   exit 1
 fi
+unheld_event_id="$(jq -r '.event_id' "$unheld_role_response_file")"
 curl -fsS -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/roles/set" \
   -d "{\"session_id\":\"${session_id}\",\"role\":\"${role}\"}" >"$role_claim_response_file"
@@ -549,13 +672,104 @@ jq -e --arg session_id "$session_id" '.session_id == $session_id' "$role_claim_r
   printf 'ERR: fake session did not claim the role.\n' >&2
   exit 1
 }
-curl -fsS -X POST -H 'Content-Type: application/json' \
+wait_for_kept_delivery 'unclaimed-role window' "$unheld_event_id"
+
+# The control for both kept windows above, on the same route and the same unheld state: a sender
+# that keeps its own queue asks for keep false and gets exactly today's refusal, and the listener
+# stores nothing for the role. The Legion daemon's notice publisher sends this
+# (packages/daemon/internal/notify/notify.go).
+printf 'publishing to a role nobody holds, asking for nothing to be kept\n'
+keep_false_role="e2e-unkept"
+keep_false_status="$(curl -sS -o "$keep_false_role_response_file" -w '%{http_code}' \
+  -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/messages/publish" \
-  -d "{\"topic\":\"notifications.role.${role}\",\"message\":\"Role delivery.\"}" >"$held_role_response_file"
-jq -e --arg session_id "$session_id" '.holder == $session_id' "$held_role_response_file" >/dev/null || {
-  printf 'ERR: held role publish did not return the fake-session holder.\n' >&2
+  -d "{\"topic\":\"notifications.role.${keep_false_role}\",\"message\":\"Unkept role delivery.\",\"keep\":false}")"
+if [[ "$keep_false_status" != 404 ]] || ! jq -e --arg role "$keep_false_role" \
+  '. == {error: ("no holder for role " + $role), reason: "unclaimed"}' \
+  "$keep_false_role_response_file" >/dev/null; then
+  printf 'ERR: a publish with keep false to a role nobody holds answered HTTP %s, not the 404 naming the role unclaimed.\n' \
+    "$keep_false_status" >&2
+  cat "$keep_false_role_response_file" >&2
+  exit 1
+fi
+# Nothing was kept, so claiming the role hands the claimant nothing. The claim below is the same
+# call the two kept windows are drained by; the assertion that nothing arrived is made at the end
+# of the role section, after the lapsed window's own bounded wait for a delivery has run, so the
+# drain this claim started has had its chance and no fixed sleep is needed here.
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/roles/set" \
+  -d "{\"session_id\":\"${session_id}\",\"role\":\"${keep_false_role}\"}" >/dev/null
+
+# A role a live session holds answers as it always did, beside the two kept answers above, so no
+# one of the three can be read for another: 200 naming the holder, and no kept field at all.
+held_status="$(curl -sS -o "$held_role_response_file" -w '%{http_code}' \
+  -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/messages/publish" \
+  -d "{\"topic\":\"notifications.role.${role}\",\"message\":\"Role delivery.\"}")"
+if [[ "$held_status" != 200 ]] || ! jq -e --arg session_id "$session_id" \
+  '.holder == $session_id and (has("kept") | not) and (has("kept_reason") | not)' \
+  "$held_role_response_file" >/dev/null; then
+  printf 'ERR: a publish to the role the fake session holds answered HTTP %s, not a 200 naming the holder with no kept field.\n' \
+    "$held_status" >&2
+  cat "$held_role_response_file" >&2
+  exit 1
+fi
+
+# Window (ii): a claim that lapsed. The fake session claims a role of its own, and then its
+# registration is removed through the listener, rather than waiting out the five minutes a claim
+# takes to go stale. A registration and a role claim are separate records, and removing the first
+# leaves the second naming a session nothing can reach: the role has a holder on paper and none
+# to deliver to, so the publish is kept under kept_reason holder_lapsed, naming that holder.
+printf 'publishing to a role whose holder has gone\n'
+lapsed_role="e2e-escalation"
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/roles/set" \
+  -d "{\"session_id\":\"${session_id}\",\"role\":\"${lapsed_role}\"}" >"$lapsed_role_claim_response_file"
+jq -e --arg session_id "$session_id" '.session_id == $session_id' "$lapsed_role_claim_response_file" >/dev/null || {
+  printf 'ERR: fake session did not claim the role whose claim is about to lapse.\n' >&2
   exit 1
 }
+curl -fsS -X DELETE "${listener_url}/v1/sessions/${session_id}" >/dev/null
+wait_for_unregistered
+lapsed_status="$(curl -sS -o "$lapsed_role_response_file" -w '%{http_code}' \
+  -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/messages/publish" \
+  -d "{\"topic\":\"notifications.role.${lapsed_role}\",\"message\":\"Lapsed-claim role delivery.\"}")"
+if [[ "$lapsed_status" != 202 ]] || ! jq -e --arg role "$lapsed_role" --arg session_id "$session_id" \
+  '.kept == true and .kept_reason == "holder_lapsed" and .holder == $session_id and .topic == ("notifications.role." + $role)' \
+  "$lapsed_role_response_file" >/dev/null; then
+  printf 'ERR: a publish to the role whose holder is gone answered HTTP %s, not a 202 keeping it with kept_reason holder_lapsed naming %s.\n' \
+    "$lapsed_status" "$session_id" >&2
+  cat "$lapsed_role_response_file" >&2
+  exit 1
+fi
+lapsed_event_id="$(jq -r '.event_id' "$lapsed_role_response_file")"
+
+# The session registers again, with the registration it first made, and claims the role again: the
+# kept copy waits for the claim, not for the registration.
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/interests/subscribe" -d "$subscribe_body" >/dev/null
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/roles/set" \
+  -d "{\"session_id\":\"${session_id}\",\"role\":\"${lapsed_role}\"}" >"$lapsed_role_reclaim_response_file"
+jq -e --arg session_id "$session_id" '.session_id == $session_id' "$lapsed_role_reclaim_response_file" >/dev/null || {
+  printf 'ERR: the re-registered fake session did not claim the lapsed role again.\n' >&2
+  exit 1
+}
+wait_for_kept_delivery 'lapsed-claim window' "$lapsed_event_id"
+
+# The keep-false control, read now: its claim went in before the lapsed window, whose own bounded
+# wait has since seen a kept message delivered, so a drain of the unkept role would have run by
+# now. The fake session was handed nothing for it, and the bus holds no copy of it either.
+if grep -q 'Unkept role delivery.' "$session_prompts_file"; then
+  printf 'ERR: a message published with keep false reached the role claimant; nothing should have been kept.\n' >&2
+  exit 1
+fi
+if jq -e 'select(.payload_summary == "Unkept role delivery.")' "$envelopes_file" >/dev/null 2>&1; then
+  printf 'ERR: a message published with keep false is on the bus; the listener stored nothing for it.\n' >&2
+  exit 1
+fi
+printf 'keep-false control: the unheld role answered 404, nothing was stored and its claimant was handed nothing\n'
 
 post_github issue_comment "${fixture_dir}/issue-comment-created.json"
 post_github issue_comment "${fixture_dir}/issue-comment-edited.json"

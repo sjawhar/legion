@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-839",
+  "completed": "2026-10-30T22:10:00Z",
+  "plan": "dispatch://INFRA-839/artifact/plan-md (v1), written against main at ab3193265e73 and spec v3. One release: the listener keeps a role message it cannot deliver (unclaimed, holder_lapsed) on notifications.envoy.kept.role.<role>, a new private stream subject, with a per-role cursor on notifications.envoy.kept.cursor.<role>, and forwards each kept copy once, in order and younger than one hour, to the next holder's agent subject on the claim write (POST /v1/roles/set). notifications.role.> stays off the stream, the purge and migrateRoleLanesOffStream stay, no NATS grant changes. The sender is answered 200 with kept; a sender with its own queue sends keep:false, and the Legion daemon does.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase's own rules, with references/pr-body.md for the proof entries the five acceptance lines need, references/skip-checks-trailer.md for the handoff push, references/conflicts-and-rewrites.md because dispatch://INFRA-771's tree edits the same three files, and references/tools.md for what the pod carries",
+      "skills/envoy/SKILL.md and skills/envoy/references/deliveries.md: they state the role-delivery rules this change rewrites, and the implementer edits both (plan T12)",
+      "skill://ce-simplify-code: T4 to T7 add a lane, an answer field and a drain to code that already carries four delivery paths, so the simplify pass runs over them before the handoff",
+      "skill://dispatch and skill://dispatch-first: any finding or decision goes to the architect or to Dispatch, never to a new issue",
+      "skill://asd-ste100: T12 rewrites prose that agents and the public site read"
+    ],
+    "test": [
+      "skill://legion-worker with references/pr-body.md: what a proof, a surface and a negative control are, which acceptance 2 demands for three separate live cases",
+      "skills/envoy/references/deliveries.md: the delivery rules the live rig and the Go tests assert, including exactly-once to a holder",
+      "skill://legion-worker/references/tools.md: the rig needs only bun, curl, flock, go, jq and openssl, and starts its own nats-server in process, so nothing is installed in the pod"
+    ],
+    "review": [
+      "skill://legion-worker with references/review-threads.md and references/merge-gate.md: the round's mechanics and what the approval covers",
+      "skill://thermonuclear-deep-review: a kept copy that re-enters the listener's own delivery path, a cursor that advances twice, and a role message delivered to a later generation's holder are the correctness risks of this change",
+      "skill://thermonuclear-code-quality: the new cmd/listener/role_keep.go boundary and the publish answer's shape are where the abstraction can blur",
+      "skill://asd-ste100: the rewritten rules in packages/envoy/AGENTS.md, skills/envoy and the docs site"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Acceptance 1's mechanism does not produce the Outcome: a session that follows a subject for the first time starts at the stream's end (packages/envoy-client/src/replay.ts:553, cmd/listener/replay.go:204, replay.ts:874), so adding notifications.role.> to the stream hands a next holder nothing.",
+        "answer": "Reported to the architect with the citations; the architect rewrote the spec to v3 and the issue's title. The plan forwards kept copies at the claim write instead (plan section 2, T5). Recorded as a departure below."
+      },
+      {
+        "finding": "Acceptance 1 cannot be carried out in this workflow: two releases is two merges, one Legion issue merges once, and no listener serves a version (cmd/listener/main.go:424-505, api.go:759-770), so 'shown by the running versions' has no command.",
+        "answer": "Reported with the measurement; spec v3 asks for one release. The plan needs no version surface, and criterion 1 is proven by a Go test that a start whose subject list lacks the kept prefix keeps it, purges nothing and returns no error."
+      },
+      {
+        "finding": "The first design kept nothing on receipt_timeout, so a stopped session inside session.ClaimStaleAfter (5 minutes, internal/session/claim.go:14) was uncovered; the forward is published there and 504 is answered (cmd/listener/confirmed.go:258-277, :371-374).",
+        "answer": "Measured: a published forward is stored under the holder's agent subject (internal/bus/stream.go:115, bus.ForwardMsgID), and a session that returns under the same id replays it (cmd/listener/replay.go:237-248). Plan section 1 states it, spec v3's Why now states it, and T0 measures it before any code is written; if T0 finds otherwise, the implementer reports to the architect before T4."
+      },
+      {
+        "finding": "A kept copy carries the role topic in its envelope, so the listener's durable (filtered on bus.StreamSubjects(), cmd/listener/durable.go:123) would route it to roleTopicDelivery on every machine (delivery.go:319, :440); the one guard covers only agent-subject copies (delivery.go:311).",
+        "answer": "T2 adds bus.DurableNotificationSubjects(), the stream subjects without the kept prefix, and every consumer filter uses it; section 5 test 6 proves a kept copy reaches no durable consumer, raises no exception and is not counted."
+      },
+      {
+        "finding": "'Delivered once' has no owner rule: the role lane is queue-grouped per machine (cmd/listener/main.go:931, internal/bus/stream.go:86-88), so N listeners each keep a copy, and two claims can each read the same cursor, which GetLastMsg cannot compare and swap.",
+        "answer": "The kept copy carries Nats-Msg-Id = bus.KeptMsgID(dedupeKey, role) so the stream's 72 h duplicate window collapses N writes to one (T3, test 3), and the cursor advances under ExpectLastSequencePerSubject (T3, test 4)."
+      },
+      {
+        "finding": "A trigger of 'claim created or holder changed' never fires for a session that returns under its own id and re-asserts the same claim (internal/store/kv.go:962-971).",
+        "answer": "The trigger is every successful claim write (plan section 2, T5); the cursor makes a repeat a no-op of one or two stream reads, and roleKeepDrainMax bounds the work."
+      },
+      {
+        "finding": "During a rolling deploy a claim served by a listener of the older release forwards nothing, and the five listener deployments roll separately.",
+        "answer": "Named as hazard 4: a holder re-claims on its heartbeat, so the next claim served by an upgraded listener drains the copies inside roleKeepWindow; past the window they are dropped and counted. Stated, not engineered around."
+      },
+      {
+        "finding": "If acceptance 1 stood, the role subject would need a shared/private classification, the exceptions twin would have to move with it, and the rollback trap is real.",
+        "answer": "Void under spec v3; the classification question is answered for the kept prefix instead, which is private (T2, test 9). The rollback-trap measurement is kept in plan section 0 because the next roles read it."
+      },
+      {
+        "finding": "A keep that applies to every sender silently replaces the Legion daemon's notice queue: its hold, its per-architect order fence, architectEnded and the merge-queue Dispatch fallback (packages/daemon/internal/daemon/outbox.go:627-760).",
+        "answer": "The architect settled decision C: keep:false exists and the daemon sends it (T8, acceptance 3, test 8). One message has one keeper."
+      },
+      {
+        "finding": "The stream's 72 h age plus a role token that names the tree role, not a run, would hand a day-old control notice to a later generation's holder, which is what sjawhar/legion#753 removed and dispatch://INFRA-122/comment/694d10a8 settled.",
+        "answer": "The architect settled decision B: roleKeepWindow is one hour, an older copy is dropped and counted, and a forwarded one carries kept_at so the holder can judge it (T5, T1, acceptance 2c)."
+      },
+      {
+        "finding": "Nobody is told about a kept message no one ever claims; it expires silently, where today the sender learns at once.",
+        "answer": "The answer says kept and names no holder, so a sender that must act has the fact (T7); an over-age drop is counted on envoy_role_kept_expired_total and logged once (T5). Hazard 5 states the residue."
+      },
+      {
+        "finding": "Acceptance 4 names one document; the rule is stated in several more.",
+        "answer": "T12 lists every one of them, and criterion 4's grep is the machine check. The two records that stay true, internal/bus/stream.go:305 and docs/solutions/envoy/nats-jetstream-stream-ensure-only-adds-subjects.md:57-59, are deliberately outside the pattern."
+      },
+      {
+        "finding": "Acceptance 2's wording is ambiguous: what 'when it registers' means, what 'once' is measured on, and what the negative control has to show for the stopped-holder case, which today's build may already satisfy.",
+        "answer": "Spec v3 names POST /v1/roles/set. The plan measures 'once' on the holder's agent subject and the listener's own delivery log and counter, and the negative controls are split into the no-holder case (e2e-local.sh:538-545, 404 unclaimed) and the lapsed-claim case (404 holder_lapsed), the two cases where today's build delivers nothing (criteria 2a, 2b)."
+      },
+      {
+        "finding": "The Why's citation did not carry the requirement: dispatch://LINUX-31/ask/c928b75d-5386-4826-b6fd-7cc5b7893b65 is about contract ownership, and the sentence quoted was an agent's, not the person's.",
+        "answer": "Reported to the architect, which corrected the Why in spec v3 to the person's own words. No ask was opened: the issue already tells the tree what to build."
+      },
+      {
+        "finding": "Round one of the plan review: acceptance 5's double record no longer exists at this base (the guard at cmd/listener/delivery.go:311-315 precedes the single counter at :316; sjawhar/legion#2370, 30ecdcd4e, 2026-10-29, after INFRA-119 was filed on 2026-10-22).",
+        "answer": "Measured by running TestDurableAcknowledgesAStoredForwardCopyAndDeliversNothing at the base (ok, 0.424s). Plan section 1 records it, T6 becomes the regression test plus the kept lane's own rule, and criterion 5 says which half fails before the change. Named in the completion summary for the architect, since the spec's acceptance 5 assumes a defect."
+      },
+      {
+        "finding": "Round one of the plan review: criterion 4's grep contradicted the plan's own promise that the role-lane retention rule does not change.",
+        "answer": "Criterion 4's pattern now names only the keeping rule, and T12 no longer edits the two records whose statements stay true. The reviewer ran the new grep in round two: it matches only packages/envoy/AGENTS.md:2838 and skills/envoy/SKILL.md:68."
+      }
+    ]
+  },
+  "planReview": { "verdict": "approved", "rounds": 2 },
+  "specDepartures": [
+    {
+      "spec": "Spec v1 acceptance 1: two releases, the first removing the purge and the subject drop everywhere, the second adding notifications.role.> to the stream, with the second gated on every ConnectOwningStream caller running the first, shown by the running versions.",
+      "plan": "One release. The listener keeps an undeliverable role message on notifications.envoy.kept.>, a stored subject of its own, and forwards it on the claim write. The role lanes stay off the stream, and the purge, migrateRoleLanesOffStream and every NATS grant stay as they are.",
+      "evidence": "A first follow of a subject starts at the stream's end (packages/envoy-client/src/replay.ts:553, cmd/listener/replay.go:204, replay.ts:874), so the stored role subject would hand a next holder nothing. A binary that still carries the purge exits at start against such a stream, because ensureStreamWithConfig returns the migration's error (internal/bus/stream.go:273-281, :430-443) and the listener grant holds no STREAM.PURGE and no consumer-list call (infra/core/permissions.go:49-70, infra/README.md:2708-2712): a trap on every rollback of five listener deployments and Dispatch's server. Two releases is also two merges, and no listener serves a version to gate them with (cmd/listener/main.go:424-505).",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "Acceptance 1 is replaced: one release, a kept subject the listener owns outside the role lanes, forwarded once and in order on POST /v1/roles/set, with a listener of the previous release still starting against the new stream state.",
+          "Acceptance 2 gains the one-hour window, the kept_at stamp and the counted drop of an over-age copy.",
+          "Acceptance 3 is new: a sender can ask not to be kept, and the Legion daemon does."
+        ],
+        "summary": [
+          "The issue's title changed to 'Envoy keeps a role message nobody holds and gives it to the next holder when the role is claimed'."
+        ],
+        "settledDecisions": [
+          {
+            "decision": "Role messages are not kept for a later claimant (sjawhar/legion#753, dispatch://INFRA-122/comment/694d10a8, 'Deliver to whoever is there').",
+            "detail": "Reversed for an undeliverable role message only, and bounded: one hour, the copy carries the time it was kept, and an older one is dropped and counted. INFRA-514's architect settled the window on 2026-10-30."
+          }
+        ]
+      }
+    },
+    {
+      "spec": "Spec v3 acceptance 5 (folded from dispatch://INFRA-119): the listener records a role-lane message once, with a test over its delivery paths showing one count for one role publish.",
+      "plan": "The double record is already gone at this base, so the plan pins the rule with a regression test rather than fixing it, and extends the rule to the kept lane, which is the half that fails before the change.",
+      "evidence": "cmd/listener/delivery.go:311-315 acknowledges the forward's stored copy and returns before the module's only messagesReceived.Inc at :316 and the listener received line at :317; cmd/listener/live_topics.go:66-69 returns before the handler for a role subject. TestDurableAcknowledgesAStoredForwardCopyAndDeliversNothing (cmd/listener/confirmed_test.go:626) passes at ab3193265e73, run by the planner: ok github.com/sjawhar/envoy/cmd/listener 0.424s. The guard came with sjawhar/legion#2370 (30ecdcd4e, 2026-10-29), after INFRA-119 was filed on 2026-10-22.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "Acceptance 5's 'the test fails at the commit before the change' holds only for the kept copy's half; the forward-copy half passes at the base and is a regression test."
+        ]
+      }
+    }
+  ]
+}

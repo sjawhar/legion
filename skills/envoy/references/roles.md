@@ -1,10 +1,10 @@
 # How a role claim lives
 
-Read this when a role you held is gone after a resume, fork or restart, when `envoy_role_set` is refused, or when a role publish returns `no holder`.
+Read this when a role you held is gone after a resume, fork or restart, when `envoy_role_set` is refused, or when Envoy keeps a role publish because no live session holds the role.
 
 - A claim belongs to the session, not the process. `omp --resume` re-claims the role recorded in the session transcript, also after the listener removed the dead session's old row (a session's registration lapses 5 minutes after its last heartbeat).
 - `/fork`, `/branch`, `/handoff` and any other switch that carries the transcript read the role the previous session id held and move it to the new id while the new session starts. `/new` and `/resume` install an unrelated transcript and carry nothing.
-- A process that dies and is never resumed stops being a live holder. Until its registration lapses, role publishes return an error that names the holder and says it did not confirm the message (`receipt_timeout`); once it lapses, they return `no holder` until that transcript resumes or another session claims the role.
+- A process that dies and is never resumed stops being a live holder. Until its registration lapses, role publishes return an error that names the holder and says it did not confirm the message (`receipt_timeout`). Once it lapses, Envoy keeps each role message for the session that claims the role next, and the publish's answer says it was kept, until that transcript resumes or another session claims the role.
 - A role message the listener forwarded to your session while you held the role is kept on your inbox in the stream, which your own durable consumer reads, so your session gets it once after a resume or a reconnect within 72 hours, also when the role moved to another session in the meantime.
 - An automatic reclaim never steals. It is a soft claim, which the listener grants only when the role is unheld, held by a session that is no longer live, or held by the id this session continues (a fork's parent). When a different live session holds it (the parent of a `/fork` whose role moved to the child, or a second process on the same transcript), the listener refuses atomically, and the resumed session logs a warning and holds nothing.
 - Only an explicit `envoy_role_set` is last-claim-wins. Running it again for a role this session already holds is harmless.

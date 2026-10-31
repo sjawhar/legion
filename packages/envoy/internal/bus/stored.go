@@ -40,14 +40,75 @@ type StoredMessage struct {
 // permissions violation, when the connection's user may not make the read, reported as soon as the
 // server refuses it rather than once the wait runs out; and ctx's error when ctx ends first.
 func (c *Client) NextStoredMessage(ctx context.Context, subject string, seq uint64) (StoredMessage, error) {
-	request, err := json.Marshal(struct {
+	return c.storedMessage(ctx, struct {
 		Seq     uint64 `json:"seq"`
 		NextFor string `json:"next_by_subj"`
 	}{Seq: seq, NextFor: subject})
+}
+
+// LastStoredMessage reads the newest message the notification stream holds on a subject that
+// subject matches (wildcards allowed), with STREAM.MSG.GET and last_by_subj. The listener's kept
+// lanes are read this way: a role's kept subject and its drain cursor each hold the one message
+// that counts, and that is the newest. It is the same request NextStoredMessage makes, over the
+// same stored-message API subject (storedMessageAPI), so it needs no grant beyond the one the
+// listener already holds for that read.
+//
+// Its errors are NextStoredMessage's: the stream's own API errors as *nats.APIError, so errors.Is
+// matches nats.ErrMsgNotFound (the stream holds nothing on subject) and nats.ErrStreamNotFound (no
+// such stream); nats.ErrNoResponders when no JetStream answers; ErrPublishDenied when the
+// connection's user may not make the read; and ctx's error when ctx ends first.
+func (c *Client) LastStoredMessage(ctx context.Context, subject string) (StoredMessage, error) {
+	return c.storedMessage(ctx, struct {
+		LastFor string `json:"last_by_subj"`
+	}{LastFor: subject})
+}
+
+// KeptRoleLanes reports the role of every kept lane the notification stream still holds a copy on
+// (KeptRoleSubject), sorted, so each is read once and two passes over an unchanged stream read the
+// same list. It is the listener's backstop over the lanes nobody is draining: a role whose kept
+// copies were stranded by a listener that ended mid-drain is on it, and a role whose lane the
+// stream holds nothing on is not, whatever its drain cursor says.
+//
+// It is one STREAM.INFO of the stream with the kept role subjects as its filter, which answers
+// every such subject and how many messages it holds; the listener already holds that grant for the
+// stream it owns (infra/core/permissions.go), and nats.go pages the answer itself, so a sweep
+// costs one round trip whatever the deployment holds. A stream that holds no kept copy at all
+// answers an empty list: the state carries a subject only while a message is stored on it.
+//
+// Its errors are the stream's own: nats.ErrStreamNotFound when the stream is gone,
+// nats.ErrNoResponders when no JetStream answers, and ctx's error when ctx ends first.
+func (c *Client) KeptRoleLanes(ctx context.Context) ([]string, error) {
+	if err := c.ensureConnWithContext(ctx); err != nil {
+		return nil, err
+	}
+	info, err := c.JS().StreamInfo(Stream,
+		&nats.StreamInfoRequest{SubjectsFilter: KeptRoleSubject(">")},
+		nats.Context(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("bus: read %s's kept role lanes: %w", Stream, err)
+	}
+	roles := make([]string, 0, len(info.State.Subjects))
+	for subject, held := range info.State.Subjects {
+		role, ok := strings.CutPrefix(subject, KeptRoleSubjectPrefix)
+		if !ok || role == "" || held == 0 {
+			continue
+		}
+		roles = append(roles, role)
+	}
+	slices.Sort(roles)
+	return roles, nil
+}
+
+// storedMessage makes one stored-message read of the notification stream and reads its answer, for
+// NextStoredMessage and LastStoredMessage alike: request is the body each builds, naming the
+// message it wants. The stream's error answer comes back as the *nats.APIError it is, and an
+// answer that names neither a message nor an error is this package's own error.
+func (c *Client) storedMessage(ctx context.Context, request any) (StoredMessage, error) {
+	body, err := json.Marshal(request)
 	if err != nil {
 		return StoredMessage{}, err
 	}
-	reply, err := c.requestConfirmed(ctx, storedMessageAPI, request)
+	reply, err := c.requestConfirmed(ctx, storedMessageAPI, body)
 	if err != nil {
 		return StoredMessage{}, err
 	}

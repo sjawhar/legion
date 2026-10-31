@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-839",
+  "round": 6,
+  "verdict": "pass",
+  "codeHead": "5593037ddf83",
+  "prHead": "a97cba62741668db52f18e87557b9ff84c9e4011",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran e2e-local.sh at this head: exit 0, `unclaimed-role window: kept message 81ad614e9f57155842ea85639963100d reached the fake session exactly once, carrying kept_at`, `lapsed-claim window: kept message 8bbec01fb48bd6e979cf96f45cb9a384 …`, `keep-false control: … answered 404, nothing was stored`, both PASS lines. The round-6 handoff names no test for any of its findings (every `test` field is empty), so I read the tests out of the commit itself and pinned each fix by mutation; the outbox tests were run on a real Postgres with -v, never as a skip."
+  },
+  "pinVerification": {
+    "whyMutationAndNotTheOldHead": "This round changes the production signatures the tests call (drainKeptRole loses its holder and entry arguments, bus.KeptRoleLanes is new), so copying this round's test files onto 703782de does not compile — `not enough arguments in call to drainKeptRole`, `client.KeptRoleLanes undefined`. That method is exhausted at this head, so each fix was reverted on its own in a scratch clone of 5593037ddf83 and its test re-run, as in round 4.",
+    "results": [
+      {"fix": "Blocking 1: a walk that only skipped expired or refused copies counts as progress (`forwarded > 0 || passed > 0`)", "mutation": "counted forwards alone, both in the progress branch and the idle branch", "test": "TestAHandoverWalksPastMoreExpiredCopiesThanItsIdleWalksAllow", "result": "FAIL 2.13s", "verdict": "pins"},
+      {"fix": "Blocking 3: the holder is resolved at the top of every pass, after the pause", "mutation": "moved the resolution back above the pause", "test": "TestAHandoverResolvesTheHolderOfAWalkAfterThePauseBeforeIt", "result": "FAIL 1.55s", "verdict": "pins"},
+      {"fix": "The sweep at listener start and every five minutes", "mutation": "sweepKeptRoleLanes returns at once, handing over nothing", "test": "TestTheSweepHandsOverALaneNoHandoverIsDraining", "result": "FAIL 30.35s", "verdict": "pins"},
+      {"fix": "Minor: a receipt timeout is no longer counted as delivered", "mutation": "mapped bus.ErrReceiptTimeout back to a clean delivery before finishRoleForward", "test": "TestAKeptCopyThatDrewNoReceiptIsReportedReceiptTimeout", "result": "FAIL 0.37s", "verdict": "pins"},
+      {"fix": "Blocking 2: Dispatch's role-routed events carry no keep flag and are kept", "mutation": "restored the round-5 opt-out, setting item.Keep = false in publishRoute", "test": "TestARoleRoutedEventIsKeptForTheRolesNextHolder (on a real Postgres, -v)", "result": "FAIL: `the copy on notifications.role.reviewer carries keep false, want no flag at all: the listener keeps it for the role's next holder`", "verdict": "pins"}
+    ],
+    "atHead": "All eight of the round's tests pass at this head, each genuinely run: TestAHandoverWalksPastMoreExpiredCopiesThanItsIdleWalksAllow 2.66s, TestAHandoverRetriesMoreFailedWalksThanItsIdleWalksAllow 15.12s, TestAHandoverResolvesTheHolderOfAWalkAfterThePauseBeforeIt 1.06s, TestTheSweepHandsOverALaneNoHandoverIsDraining 0.06s, TestADispatchRoleRoutedEventToAnUnheldRoleReachesTheNextHolder 0.06s, TestAKeptCopyThatDrewNoReceiptIsReportedReceiptTimeout 0.06s, TestKeptRoleLanesAnswersEveryRoleWithACopyOnItsLane 0.34s (internal/bus), TestARoleRoutedEventIsKeptForTheRolesNextHolder 2.35s (outbox, on Postgres with -v)."
+  },
+  "proof": [
+    {
+      "criterion": "A listener killed mid-handover with copies left and a live holder is recovered by the sweep at the restart: the rest are delivered, with nobody claiming the role again.",
+      "surface": "A real envoy-listener process built from this head on a real NATS server, with a real session process on a serving port; 40 copies kept, the role claimed, the listener SIGKILLed part way through the handover and restarted under the same machine id, as a real restart has.",
+      "command": "bash $TMPDIR/tester/r6.sh (section A)",
+      "observed": "Killed with 13 of 40 delivered and the holder still live and still holding the role. The restarted listener logged `listener kept role sweep found a lane no handover was draining` and finished the lane with no new claim: 40 of 40 delivered, 0 more than once in this run.",
+      "headSha": "5593037ddf83",
+      "negativeControl": "With the sweep mutated to hand over nothing, TestTheSweepHandsOverALaneNoHandoverIsDraining fails (30.35s). An earlier run of this same rig, before I corrected it, restarted the listener under a DIFFERENT machine id and delivered only 10 of 40 — the stored interest names the owning listener, so a serving-port holder is not served by a listener of another machine. That is the rig's artefact and not the product's, and it is why the restart must reuse the machine id."
+    },
+    {
+      "criterion": "A lane of 30 expired copies followed by 5 fresh ones delivers the 5 (blocking 1: expired copies cost a scan, not the walk's idle budget).",
+      "surface": "A shortened-window build of this head (roleKeepWindow = 3 s) on a real listener, so the first 30 copies read as past the window; the 5 fresh ones are published after the wait.",
+      "command": "bash $TMPDIR/tester/r6.sh (section B)",
+      "observed": "Fresh copies delivered 5 of 5; expired copies delivered 0 of 30; envoy_role_kept_expired_total = 30.",
+      "headSha": "5593037ddf83",
+      "negativeControl": "With progress counted as forwards alone, TestAHandoverWalksPastMoreExpiredCopiesThanItsIdleWalksAllow fails: the handover gives up over the expired run and the fresh copies behind them are never forwarded."
+    },
+    {
+      "criterion": "A Dispatch role-routed event to an unheld role reaches the next holder once (blocking 2, the reversal of round 5's opt-out).",
+      "surface": "Both halves. The outbox's own: the real publisher on a real Postgres. The listener's: a raw core-NATS publish on the role topic with NO keep flag, which is what the outbox now sends, to a role nobody holds.",
+      "command": "go test -v -run TestARoleRoutedEventIsKeptForTheRolesNextHolder ./internal/dispatch/outbox with DISPATCH_TEST_DATABASE_URL set; bash $TMPDIR/tester/r6d.sh",
+      "observed": "The outbox test genuinely runs and passes (2.48s). Live: the event was kept and the next session to claim the role received it exactly 1 time.",
+      "headSha": "5593037ddf83",
+      "negativeControl": "Restoring the round-5 opt-out (item.Keep = false in publishRoute) fails the outbox test with `carries keep false, want no flag at all`; and in the round-5 rig a lane publish that does carry keep:false is still not kept and raises the no_holder exception, so the flag is what decides."
+    },
+    {
+      "criterion": "Round 5's properties still hold at this head.",
+      "surface": "The round-5 rigs re-run unchanged, plus e2e-local.sh, the round-4 rig, and a shortened-window build rebuilt from THIS head.",
+      "command": "bash $TMPDIR/tester/r5.sh ; bash $TMPDIR/tester/r5c.sh ; bash $TMPDIR/tester/multi2.sh ; bash packages/envoy/scripts/e2e-local.sh ; bash $TMPDIR/tester/accept.sh ; bash $TMPDIR/tester/rest.sh",
+      "observed": "25 copies over the walk budget on one claim, none twice. A transient forward failure with no second claim: 8 of 8. Interleaved handover: B claimed while A had 8, A ended at 15 and stopped, B took 45, 60 of 60 exactly once, none to both or neither. keep:false lane publish not kept and excepted, the unflagged one kept. SIGKILL + 60 s claim window: 12 of 12 exactly once. 24 concurrent claims: 24 x 200. e2e-local exit 0 with both kept windows and the 404 control. Order 1,2,3 each once with kept_at on every forward and none on the stored copy; second claim forwards nothing; one received count and one `listener received` line per lane publish. Drop on the 3 s build rebuilt from this head: expired 0 -> 1, age 8.111314674s. Rollback: previous-release listener started on the new stream state, 2 of 2 kept messages survived. Acceptance 3: daemon publisher 404 + ErrNoHolder with nothing kept; the real client reads 202 as success with kept_at on the card and throws on keep:false.",
+      "headSha": "5593037ddf83",
+      "negativeControl": "The previous release's daemon publisher, which sends no keep field, still gets 202 with its message kept, where this head's publisher leaves the lane empty."
+    }
+  ],
+  "findings": [
+    {
+      "severity": "important, for the architect and the merge gate",
+      "what": "No code head of this pull request has completed CI since round 2. Each round's push CANCELS the previous round's run before its heaviest lanes and the required `ci-ok` finish.",
+      "evidence": "Run 41188931937 (round 4's head db64c79daa38, created 09:30:03Z) ended `cancelled`, updated 12:40:36Z — the moment round 5's push landed. Run 41202161046 (round 5's head 703782de8f2b, created 12:40:34Z) ended `cancelled`, updated 14:52:38Z — the moment this round's push landed. That second run did get 24 lanes to `success` before it was cut: lint, typecheck, test, contracts, envoy-client, envoy-go-race, envoy-go-race-api, envoy-go-race-docs, envoy-e2e-local, envoy-infra-go, envoy-plugin, envoy-session-stall, listener-server-change, pi-envoy, pi-legion, pi-shared, claude-envoy, dispatch-browser-multiprocess, dispatch-memory, dispatch-multiprocess, docs/build, worker-image/build, changes, ci-filters. The four it never finished are exactly the long ones and the aggregate: `ci-ok`, `envoy-go`, `dispatch`, `envoy-smoke`. `envoy-go` is the lane that covers the kept lane's own Go package, and `ci-ok` is what main's ruleset requires. Both last succeeded at round 2's head 4f6e9985b979 (run 41163858951), which predates the claim-forward-confirm design, the handover rewrite, the sweep and the Dispatch keep reversal. This round's run 41212135030 (created 14:52:18Z) was still `queued` at 15:16Z, 24 minutes in, with only `changes` queued.",
+      "whyItMatters": "The merge gate needs `ci-ok` green at the head the merger builds READY from. On the present cadence that can never happen: a round takes about two hours of queue and lanes, and the next push arrives first and cancels it. This is scheduling, not a defect in the change, and it is the architect's to break — one round where nothing is pushed until the run drains would settle it. It does not fail this round: every acceptance line is proven live, and I ran the kept-lane Go tests and their mutations locally myself.",
+      "whatIRanLocally": "The eight round-6 tests, the five mutations, and round 3's, 4's and 5's drain tests, all under -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB. That is not the whole of `envoy-go`."
+    }
+  ],
+  "ci": {
+    "state": "Run 41212135030 (CI, head 5593037ddf83, created 14:52:18Z) was still QUEUED at 15:16Z with only its `changes` job queued. No lane has a conclusion at this head, and there is no `ci-ok` check run.",
+    "unreadLanes": ["ci-ok", "lint", "typecheck", "test", "envoy-go", "envoy-go-race", "dispatch", "envoy-smoke", "envoy-e2e-local", "pi-envoy", "claude-envoy", "pi-shared", "pi-legion", "contracts", "envoy-client", "listener-server-change", "docs", "changes", "pr-title"],
+    "atThePreviousHead": "24 lanes green at 703782de8f2b before that run was cancelled; `ci-ok`, `envoy-go`, `dispatch` and `envoy-smoke` never finished. See findings[0].",
+    "note": "The pull request is MERGEABLE / CLEAN. A lane still running is read as running and never waited for; the reviewer reads CI at the head it reviews."
+  },
+  "memory": {
+    "caps": "Every Go run used -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, one package at a time, and no parallel subagent ran go test.",
+    "sampled": "556 samples of /sys/fs/cgroup/memory/memory.usage_in_bytes spanning about 1112 s; min 3.50, max 4.15 GiB of the pod's 19. Pod-wide and spanning the whole round, so attributable to no single run and not to this role alone; a floor at 2 s.",
+    "sampler": "Started as a named background job whose FOREGROUND process is the bounded loop, with a ready line before it, and stopped by writing to proc://mem-sampler-r6/kill — the form the architect published after my round-5 defect. One job, one sample file, no stray loop: pgrep is clear."
+  },
+  "housekeeping": "The Postgres I started for the outbox tests is stopped and port 5434 is closed; I dropped my two throwaway databases (t6_new, t6_old) first. It went down once mid-round on its own, which turned one mutation run into a connection error rather than an assertion; I restarted it and re-ran that mutation, and the result recorded above is the real assertion failure. No rig process of mine is left running."
+}

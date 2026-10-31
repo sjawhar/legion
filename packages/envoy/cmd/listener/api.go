@@ -63,9 +63,20 @@ type sendResponse struct {
 	Duplicate bool   `json:"duplicate,omitempty"`
 }
 
+// publishResponse is the publish route's accepted answer: the envelope as the listener built it,
+// the holder a role send's message reached, and - for a role send the listener could not deliver
+// and kept on the role's kept lane instead (roleSend.kept) - Kept and the case it was kept for.
+// Both are absent from every other answer, a delivered role send's included. A role send has
+// three answers and a sender tells them apart by status: 200, a live holder took the message;
+// 202, nobody holds the role and the message waits for whoever claims it; 404, nothing was kept.
 type publishResponse struct {
 	contracts.Envelope
 	Holder string `json:"holder,omitempty"`
+	Kept   bool   `json:"kept,omitempty"`
+	// KeptReason is the holder state the resolution found, the same two values and the same
+	// wire words the 404's own reason carries (roleHolderError.Reason): unclaimed, or
+	// holder_lapsed.
+	KeptReason roleHolderState `json:"kept_reason,omitempty"`
 }
 
 type subscribeResponse struct {
@@ -648,7 +659,8 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 }
 
 // publishHandler rejects agent-targeted topics (must use /v1/messages/send
-// instead) and sends the envelope. A role topic is forwarded to its holder and
+// instead) and the listener's own kept lane, and sends the envelope. A role
+// topic is forwarded to its holder and
 // an ad-hoc topic confirmed with each self-subscribed recipient, both answered
 // once confirmed or when publishDeliveryWindow from the request's arrival has
 // passed (sendToRole, sendToTopic in confirmed.go); a topic the stream captures
@@ -664,6 +676,13 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 // /v1/messages/send, whose key is the listener's. Like the send route, it answers through record,
 // which writes this route's one line per request with the answer; a confirmed send answers through
 // it too.
+//
+// keep is meaningful only for a role topic, and unset means true: a role message the listener
+// cannot deliver is kept on the role's kept lane and handed to the role's next holder, and the
+// send is answered 202 kept rather than 404 (roleSend.kept). A sender that holds a queue of its
+// own and must get today's answer passes keep: false, which keeps nothing and answers the 404.
+// A role token no claim can name keeps nothing either, which the keep itself refuses, for this
+// route and the role lane alike (keepForNextHolder).
 func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		arrived := time.Now()
@@ -675,6 +694,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		var request struct {
 			messageBody
 			Topic string `json:"topic"`
+			Keep  *bool  `json:"keep"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "invalid json")
@@ -697,6 +717,10 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		}
 		if strings.HasPrefix(request.Topic, contracts.AgentTopicPrefix) {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
+			return
+		}
+		if strings.HasPrefix(request.Topic, bus.KeptTopicPrefix) {
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to "+bus.KeptTopicPrefix+" topics; that lane is the listener's own, holding the copies it keeps for a role's next holder and the cursors of its drains")
 			return
 		}
 		if message, field := validateMessageBody(request.messageBody); message != "" {
@@ -723,6 +747,11 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			dedupeKey = "publish." + request.IdempotencyKey
 		}
 		item := messageEnvelope(request.messageBody, request.Topic, dedupeKey)
+		// The request's keep flag travels on the envelope, the one place a give-up path reads it
+		// from (keepForNextHolder): a role send that finds no live holder keeps its message for
+		// the role's next holder unless its sender says it keeps a queue of its own. No flag at
+		// all means keep, so every publisher that sets none is unchanged.
+		item.Keep = request.Keep
 		record.item = &item
 		if err := item.Validate(); err != nil {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, err.Error())
@@ -1071,6 +1100,12 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 // context, so a bus that does not answer is the bus-unavailable 503 with Retry-After: 1 inside the
 // caller's attempt (writeStoreError). The store's own answers keep the answers they had: a held
 // role is a 409, a refused key a 413 or 400, and an unreadable claim the 503 or 500 it was.
+//
+// A claim that landed also hands the role's kept lane to its new holder: whatever the listener
+// kept while the role had none is forwarded to the claimant (runKeptRoleDrain, which resolves the
+// role's holder itself and so hands the lane to the claim that superseded this one when one has).
+// That runs in a goroutine under a context of its own, so this answer's status and body are
+// exactly what they were and wait for none of it.
 func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1168,6 +1203,7 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}
+		go runKeptRoleDrain(*d.delivery, body.Role)
 		writeJSON(w, http.StatusOK, item)
 	}
 }

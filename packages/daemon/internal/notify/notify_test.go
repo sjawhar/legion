@@ -33,6 +33,10 @@ func TestHTTPPublisherSendsPayloadAndOutboxDedupeKey(t *testing.T) {
 			Message   string  `json:"message"`
 			Payload   *string `json:"payload"` // the listener's messageBody (packages/envoy/cmd/listener/api.go:68-80)
 			DedupeKey string  `json:"dedupe_key"`
+			// The daemon keeps its own queue of notices, so it asks the listener to keep
+			// nothing and to answer a role nobody holds with its 404 (ErrNoHolder). A missing
+			// field would read as the listener's default, which is to keep.
+			Keep *bool `json:"keep"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			w.WriteHeader(http.StatusBadRequest) // the listener answers "invalid json"
@@ -40,6 +44,9 @@ func TestHTTPPublisherSendsPayloadAndOutboxDedupeKey(t *testing.T) {
 		}
 		if body.Topic != "notifications.legion.LEGION.LEGION-208" || body.Message != "worker-died on LEGION-208" || body.DedupeKey != "legion-outbox:42" {
 			t.Fatalf("publish body = %#v", body)
+		}
+		if body.Keep == nil || *body.Keep {
+			t.Fatalf("publish keep = %v, want false: the daemon keeps its own notice queue", body.Keep)
 		}
 		var payload map[string]string
 		if body.Payload == nil {

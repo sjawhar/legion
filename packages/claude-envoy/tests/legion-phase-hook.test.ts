@@ -2,7 +2,11 @@ import { expect, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { EnvoyApiError, type PublishInput } from "@legion/envoy-client/transport"
+import {
+  EnvoyApiError,
+  type PublishInput,
+  type PublishResult,
+} from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
 import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops"
 import { REMINDER } from "@legion/pi-shared/phase-stall"
@@ -80,7 +84,10 @@ async function harness(
     /** What the bridge answers the `attempt`th inbox write; queued by default. */
     readonly inboxAnswer?: (attempt: number) => Promise<void>
     /** What the listener answers the `attempt`th publish; accepted by default. */
-    readonly publish?: (input: PublishInput, attempt: number) => Promise<unknown>
+    readonly publish?: (
+      input: PublishInput,
+      attempt: number,
+    ) => Promise<Pick<PublishResult, "kept">>
   } = {},
 ): Promise<Harness> {
   const directory = await mkdtemp(join(tmpdir(), "claude-envoy-phase-hook-"))
@@ -362,14 +369,17 @@ test("a tool call that failed is work too, and resets the count", async () => {
   }
 })
 
-test("the architect is told at the threshold, asked again when no session holds the role, and never twice", async () => {
+test("the architect is told at the threshold, asked again when the listener kept nothing, and never twice", async () => {
   const { endpoint, record, inbox, published, close } = await harness({
     record: recorded("open", 1),
     claim: implementer,
     env: { LEGION_STALL_ARCHITECT_AFTER: "2" },
     publish: async (_input, attempt) => {
       if (attempt > 1) return {}
-      // The listener's "no live session holds that role".
+      // The listener's "nothing was kept for that role". The notice asks for no `keep: false`,
+      // so a role no session holds is kept and answered 202 instead (INFRA-839); this 404 is a
+      // keep that failed, or a listener from before the kept lane. Either way the architect was
+      // not told, and the next delivered reminder publishes again under the same key.
       throw new EnvoyApiError({
         method: "POST",
         url: "http://listener.test/v1/messages/publish",

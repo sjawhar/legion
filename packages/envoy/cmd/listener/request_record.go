@@ -96,8 +96,15 @@ type requestRecord struct {
 
 // accept writes the handler's 200 and records the request as accepted.
 func (rec *requestRecord) accept(w http.ResponseWriter, value interface{}) {
-	writeJSON(w, http.StatusOK, value)
-	rec.write(http.StatusOK, outcomeAccepted)
+	rec.acceptWith(w, http.StatusOK, value)
+}
+
+// acceptWith writes an accepted answer under a status of its own and records it as accepted: the
+// publish route's 202 for a role message it kept rather than delivered (roleSend.kept), which is
+// an answer and not a refusal, and is a different fact from the 200 of a message a holder took.
+func (rec *requestRecord) acceptWith(w http.ResponseWriter, status int, value interface{}) {
+	writeJSON(w, status, value)
+	rec.write(status, outcomeAccepted)
 }
 
 // refuse writes exactly the named refusal writeJSONError writes, and records it under outcome.

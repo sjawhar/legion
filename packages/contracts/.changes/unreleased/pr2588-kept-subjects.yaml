@@ -1,0 +1,7 @@
+kind: Added
+body: |-
+  Two optional envelope fields for Envoy's kept role lane. `kept_at` is the time the listener kept
+  an undeliverable role message, carried on the copy it forwards to the role's next holder. `keep`
+  is the sender's own opt-out: `false` on a message published straight onto a role lane tells the
+  listener to keep nothing and raise the exception it raised before, which is for a sender that
+  keeps a queue of its own and redelivers from it. An absent `keep` means the message is kept.

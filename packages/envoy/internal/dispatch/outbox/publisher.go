@@ -1245,6 +1245,14 @@ func publishDestination(deps Deps, eventID int64, item contracts.Envelope, a *at
 	return nil
 }
 
+// publishRoute sends one event to the one destination its route names. A role route carries no
+// keep flag (contracts.Envelope.Keep), so the listener keeps the event for the role's next holder
+// as it keeps any role message: this publisher sends a role route once, marks the event published
+// as soon as NATS accepted it - a core flush for a role topic, with no receipt behind it - and
+// never sends it again, and nothing here consumes the no_holder exception, so an event routed to
+// a role with no live holder used to be dropped. The only repeat this publisher makes is the
+// at-least-once after a claim-window race, whose copy the holder drops by its dedupe key, which
+// is the same key a kept copy carries.
 func publishRoute(deps Deps, eventID int64, item contracts.Envelope, a *attempt, route *string) error {
 	if route == nil || *route == "" {
 		return nil

@@ -190,7 +190,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives such a live topic directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says. A role message has three possible answers. First, the session that holds the role takes the message. That session must confirm the message inside the listener's window, or this tool errs. Second, no session holds the role, or its holder's claim has lapsed. The listener then keeps the message, and gives it to the next session that claims that role in the hour that follows. This is a success, and the result says that the listener kept the message. Third, the listener keeps nothing and errs, which tells you to reach the agent some other way. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives such a live topic directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish,
   },
@@ -249,6 +249,25 @@ export function sendConfirmationText(result: {
   readonly confirmed: boolean;
 }): string {
   return `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
+}
+
+/**
+ * The envoy_publish confirmation line both hosts show the model, so a kept answer reads the same
+ * on each. A kept answer is a success: the listener holds the message on the role's kept lane and
+ * hands it to the session that claims the role next, so the line says that and names no holder —
+ * on `holder_lapsed` the holder the answer carries is the lapsed claim's session, which never
+ * received the message.
+ */
+export function publishConfirmationText(result: {
+  readonly envelope: { readonly event_id: string };
+  readonly holder?: string;
+  readonly kept?: boolean;
+}): string {
+  const published = `published ${result.envelope.event_id}`;
+  if (result.kept === true) {
+    return `${published}; kept for the role: no session holds it yet, and the message waits for the session that claims it next`;
+  }
+  return result.holder === undefined ? published : `${published}; holder ${result.holder}`;
 }
 
 /**

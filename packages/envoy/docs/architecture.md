@@ -101,9 +101,15 @@ attempt:
 role send's first role-holder resolution that did not answer, exactly the same way; that
 resolution (the claim read, the holder's session read and the release of a lapsed claim) runs
 inside the same 3.5 s budget, and one the budget runs out on is that 503 too, naming the call that
-did not answer. Its 413, its 400s, its 403 for a denied publish and its role 404s (`unclaimed`,
-`holder_lapsed`) are unchanged; a role or ad-hoc topic's confirmed send then runs on within its
-own 4 s and answers its 200, 403 `capability` or 504 as "Role delivery and exceptions" says.
+did not answer. Its 413, its 400s and its 403 for a denied publish are unchanged. Its role 404s
+(`unclaimed`, `holder_lapsed`) keep their bodies, and a role send gives one only when the listener
+kept nothing: the request sent `keep: false`; the role's token is one `rolePattern` refuses, which
+no claim can ever name; the claim lapsed and the restart grace retained it, whose holder keeps the
+role and writes no new claim for a handover to follow; or the keep itself failed. A role send whose
+message
+the listener kept answers `202` instead. A role or ad-hoc topic's confirmed send then runs on
+within its own 4 s and answers its 200, 202, 403 `capability` or 504 as "Role delivery and
+exceptions" says.
 
 A publish the server denies under this listener's own grant (`bus.ErrPublishDenied`) is the
 table's `403` on either route. A publish on either transport can be denied this way: a core
@@ -166,7 +172,9 @@ role topic resolved one. `outcome` is one of `accepted`, `invalid_request`, `too
 and a role send, `publish_denied` for send and publish alike, since a publish on either transport
 can be denied, and `role_unclaimed`, `role_lapsed`, `role_holder_changed`,
 `role_claim_unreadable` and a confirmed send's 504 reason (`receipt_timeout`, `delivery_failed`,
-`not_confirmed`, `publish_failed`) for publish. Two
+`not_confirmed`, `publish_failed`) for publish. A role send whose message the listener kept is
+`accepted`, because its 202 is an answer and not a refusal, so `role_unclaimed` and `role_lapsed`
+name a send that kept nothing. Two
 refusals carry no such line, because neither reaches a handler: the 401 the API auth wrapper
 writes, and a request the starting gate turns away while the routes are still opening, which logs
 `request refused while starting` itself.
@@ -179,6 +187,7 @@ writes, and a request the starting gate turns away while the routes are still op
 | `delivered` | Pushed to the session, or forwarded to a role holder that receipted it |
 | `skipped` | Nothing to push: the session consumes its own subscription, or the envelope would echo back to the session that sent it |
 | `dedupe` | A repeat the dedupe cache recognised as already delivered, or the attempt cache as already attempted |
+| `kept` | A role message no live holder could take, kept for the session that claims the role next |
 | `failed` | The push, the role forward, or the delivery-mode guard before either, failed |
 | `receipt_timeout` | A role forward reached the server and its live holder sent no receipt within two seconds |
 | `unplaceable_no_record` | An agent delivery given up: no session record this listener could read |
@@ -249,12 +258,16 @@ seconds the route resolves the holder again and forwards the same envelope (one 
 100 ms later, until a reply arrives or four seconds from the request's arrival have passed. A
 holder served on a port answers no receipt, so its forward counts as delivered once the stream
 acknowledges storing it, and the stored copy is what reaches its port. It answers `200` with the
-`holder` once the holder replied; `404` with `reason` `unclaimed` or
-`holder_lapsed` when no live session holds the role; the 503 or 500 `GET /v1/roles/<role>` gives
-when its first resolution of the holder, within 3.5 s of the request's arrival, fails (see "Send
-and publish answers"); `403` with `reason: "capability"` when the holder does not take the
+`holder` once the holder replied; `202` with `kept: true`, `kept_reason` (`unclaimed` or
+`holder_lapsed`) and `holder` when a lapsed claim named one, when no live session holds the role
+and the listener kept the message for the role's next holder; `404` with `reason` `unclaimed` or
+`holder_lapsed` when no live session holds the role and nothing was kept, which a sender asks for
+with `keep: false` and which a keep that failed gives too; the 503 or 500 `GET /v1/roles/<role>`
+gives when its first resolution of the holder, within 3.5 s of the request's arrival, fails (see
+"Send and publish answers"); `403` with `reason: "capability"` when the holder does not take the
 payload's delivery mode; and `504` with `reason`, `event_id`, `dedupe_key`, `holder` and
-`attempts` once the four seconds passed. The reason is
+`attempts` once the four seconds passed, which keeps nothing, since that forward is already stored
+on the holder's agent subject. The reason is
 `receipt_timeout` when the message was forwarded and flushed to the server and the registered,
 live holder sent no receipt (`bus.ErrReceiptTimeout`, which the client returns from the receipt
 wait alone — never from the flush, whose own timeout is the same `nats.ErrTimeout` value), and
@@ -262,6 +275,29 @@ wait alone — never from the flush, whose own timeout is the same `nats.ErrTime
 forward to, a holder lookup that failed or ran out of time, a publish or flush to the server
 that failed or timed out, or the stream did not acknowledge storing the forward,
 `bus.ErrForwardNotStored`). The route publishes no exception: its sender has the answer.
+
+The listener keeps a role message on a stored subject of its own,
+`notifications.envoy.kept.role.<role>`. No session may register that subject, no replay hands it
+out, and no consumer of the notification stream delivers it, so a kept copy never re-enters the
+delivery path it was taken out of. `notifications.role.>` is still not a stream subject. The next
+session that claims the role is handed the role's kept copies off its own claim request, and the
+claim is answered before they are forwarded. One walk of a role's lane is bounded - twenty
+forwards, two hundred copies read, sixty seconds - and the handover around it walks the lane again,
+for the role's holder as it resolves it each time, until the lane is empty, the role has no live
+holder, or three walks running make no progress at all; a walk that failed is waited out on a
+widening cadence while the holder is live. The role's cursor,
+`notifications.envoy.kept.cursor.<role>`, carries the lane's progress and one walk's claim of it,
+so two listeners walking one lane do not forward a copy twice. A handover this process lost - a
+restart, a rolling deploy - is picked up by a sweep every five minutes and at the listener's own
+start, which hands over every lane that holds copies after its cursor while the role's holder is
+live: nothing waits for a claim a live holder will not make. Each forwarded
+copy carries `kept_at`, the Unix-millisecond time the listener kept it, so the holder can judge
+the message's age. A copy the listener kept more than an hour before is dropped rather than
+forwarded, and counted on `envoy_role_kept_expired_total`. `GET /v1/roles/<role>` still answers
+404 for an unheld or lapsed role: only the publish route gained the kept answer. A sender that
+keeps a queue of its own and redelivers from it asks not to be kept (`keep: false`) and gets
+today's 404; the Legion daemon does, and Dispatch's outbox, which sends a role route once and
+reads no exception, does not: its role-routed events are kept like any role message.
 
 An ad-hoc topic sent through the route is published over core NATS, then forwarded the same way
 to each session registered on it, on any machine, that holds its own NATS connection
@@ -282,9 +318,12 @@ delivery.
 
 The role lane, a core-NATS queue subscriber in each listener, carries a role topic a client
 publishes straight onto NATS rather than through the route. It resolves the holder at delivery
-time and forwards once, and its outcome is one of three exception reasons: `no_holder` when no
-session claims the role, `delivery_failed` or `receipt_timeout` as above. A role claimant does not
-subscribe directly to its role subject, and a role message is not retained for a future claimant.
+time and forwards once. Its two give-up branches, an unclaimed role and a lapsed holder, keep the
+message for the role's next holder first, as the publish route keeps one, and a message that was
+kept publishes no exception and counts as `kept`. A keep that failed leaves its branch as it was,
+so the lane's outcome is then one of three exception reasons: `no_holder` when no session claims
+the role, `delivery_failed` or `receipt_timeout` as above. A role claimant does not subscribe
+directly to its role subject.
 The forward is stored on the holder's agent subject (one copy per message and holder, by its
 `Nats-Msg-Id`), so a holder on consumer delivery that was away gets it from its session consumer
 when it is back; a serving-port holder counts the stream's acknowledgement alone, since its relay,

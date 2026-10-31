@@ -68,8 +68,9 @@ It builds `cmd/listener` and a throwaway NATS server of its own
 (`internal/testnats/cmd/natsd`), so it needs no container runtime, starts both, and
 submits signed public GitHub fixtures plus a three-paragraph direct agent
 message. The driver asserts the one-warning response for a never-seen GitHub
-repository, rejects an unheld role publish before proving the fake session can
-claim and receive that role, validates settled pull-request checks, lifecycle
+repository, keeps an unheld role's publish and hands it to the fake session that
+claims that role, refuses a `keep: false` publish to an unheld role, validates
+settled pull-request checks, lifecycle
 and comment topics, PR-less workflow and Actions-job behavior, obsolete-topic absence, and
 both renderers' direct-message summary/body contract.
 

@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-839",
+  "completed": "2026-10-31T13:45:00Z",
+  "round": 3,
+  "reviewedCodeHead": "703782de8f2b822a982f95dc3fe7303b75c3b292",
+  "diffBase": "3666db3184d3 (legion/INFRA-594, the base commit the branch merged)",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 8,
+  "ci": "The base legion/INFRA-594 requires no check. At CI head 703782de8f2b, the changes job and pr-title were queued when I read it at about 13:15Z. The compare from 703782de8f2b to 7d4ba962c721 is handoffs only. That does not gate a REQUEST_CHANGES. When CI concludes, the outbox lane needs -v output, or proof the job sets DISPATCH_TEST_DATABASE_URL, before TestARoleRoutedEventTellsTheRoleLaneToKeepNothing counts.",
+  "round2": "Round-2 findings 2 to 12 are fixed or answered (the claim-window clock assumption is stated in the doc, and I accept it). Finding 1 is only partly fixed; what remains is round-3 finding 1. I answered each round-2 thread.",
+  "thermonuclear": {
+    "deepReview": "Verdict: CHANGES at 703782de",
+    "codeQuality": "Verdict: CHANGES at 703782de"
+  },
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:443", "description": "The handover gives a lane up with copies on it while the holder is live. Three cases: (a) a walk that only skips expired or refused copies has forwarded == 0, so four such walks (800 copies in a row) end the handover; (b) four failed walks about 1 s apart, or one failed holder resolution, end it, which a bus outage longer than a few seconds produces; (c) a listener restart in the middle of a drain ends it. Nothing starts another handover while the holder stays live, so 202-kept copies age out. Fix: count a cursor advance as progress, retry failures with backoff inside the handover window, and add a sweep that starts a handover for any role whose kept lane is ahead of its cursor and has a live holder (on start and on a periodic tick)."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/outbox/publisher.go:1248", "description": "The reason given for keep:false on Dispatch's role route, that Dispatch redelivers a role-routed event from its own outbox on its own receipts, is not what the outbox does. publishDestination sends each destination once, and the event is marked published once core NATS accepts it. Nothing in internal/dispatch consumes no_holder. So Dispatch's role-routed events to an unheld role are still dropped, and the PR's Outcome line is false for them. The architect needs to decide again with these facts: either drop keep:false from publishRoute, or keep it and correct envelope.ts, role_keep.go, the outbox comment and test, the census row and the Outcome."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:452", "description": "The handover resolves the holder before its pause. After a busy lane the pause is 60 s, so the next walk uses a holder and an entry 60 s old, and roleKeepDrainHolds counts an unclaimed role as still held. A holder that released the role or ended during the pause is handed up to 20 copies, and the cursor moves past them. Fix: resolve after the pause, and resolve in one place (drop the holder and entry parameters from drainKeptRole)."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:436", "description": "walkCtx starts before the per-role lock (:515), so a walk that waits on another walk spends its 60 s window waiting and can fail its confirm, leaving a claim that blocks for 60 s. Start the window after the lock."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:629", "description": "A kept copy whose forward drew no receipt is counted as delivered and its dedupe recorded. The role lane counts the same thing as receipt_timeout. Finish it with the receipt-timeout outcome, so the two counters agree."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:182", "description": "writeRoleKeepCursor turns ErrCursorMoved into owned == false, and roleKeepWriteEnd turns it back into an end state, with a fake 'drained' value for 'go on'. Pass the error through and map it once."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/confirmed.go:252", "description": "The keep decision lives in two flags: request.Keep threaded as roleSend.keep, and Envelope.Keep, which keepForNextHolder reads. Set item.Keep from the request and let keepForNextHolder decide for both paths."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/publisher.go:1266", "description": "Every role-routed envelope points at one package variable, dispatchRoleKeep, so a write through any of them changes every later event. Use new(false)."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:96", "description": "The roleKeepDrainIdleRounds doc says 3 idle walks, but the loop gives up on the 4th (idle > 3)."},
+    {"severity": "minor", "file": "packages/pi-legion/.changes/unreleased/pr2588-phase-reminder-kept.yaml", "description": "The fragment says the stall reminder is now kept by Envoy. It now opts out with keep:false. The contracts fragment does not announce the new envelope field keep, and the envoy fragment does not say that the role lane honours it or that Dispatch sets it."},
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md:2405", "description": "AGENTS.md:2403-2405 ('The next claim takes the rest') and docs/architecture.md:279-282 still describe the round-2 drain, and architecture.md:106 names two of the four keep-nothing cases."}
+  ]
+}
