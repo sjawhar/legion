@@ -13,6 +13,12 @@
 -- process that dies leaves its row behind; that row stops counting the moment its connection
 -- drops, and the next admission deletes it. The release before this one neither reads nor writes
 -- the table, and its own queue stays capped per process, as before.
+--
+-- The migration adds this table and nothing else, so the release before this one runs over the
+-- new schema unchanged and the census answers 0. It takes ACCESS EXCLUSIVE on the new table,
+-- which nothing else reads yet, and SHARE ROW EXCLUSIVE on artifacts for the foreign key to it
+-- (on delete cascade): a write to artifacts waits behind the migration's short transaction, and
+-- a read does not.
 create table doc_conditional_edit_queue (
   artifact_id uuid not null references artifacts(id) on delete cascade,
   process_id uuid not null,

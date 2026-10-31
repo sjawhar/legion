@@ -18,7 +18,9 @@ begin
 end $$;
 -- Its own migration, so the transaction holds issues' SHARE ROW EXCLUSIVE lock (create trigger's)
 -- alone, for milliseconds, and never while waiting for another table's: a write to issues waits
--- behind it, and a read does not.
+-- behind it, and a read does not. The migration adds this function and this trigger and nothing
+-- else, so the release before this one runs over the new schema unchanged and the census
+-- answers 0.
 create trigger issues_open_notify after update of closed_at on issues
   for each row when (old.closed_at is distinct from new.closed_at)
   execute function issues_open_notify();
