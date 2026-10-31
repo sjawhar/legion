@@ -147,6 +147,14 @@ func New(baseURL, token string) *HTTPPublisher {
 }
 
 // Publish posts the listener envelope that preserves the outbox row's idempotent delivery key.
+//
+// It sends keep: false, so the listener refuses a role nobody holds with its 404 (ErrNoHolder
+// below) instead of keeping the message for the role's next holder. The daemon keeps its own
+// queue of notices, which does more than a kept copy can: the outbox row is held and each
+// architect's notices keep their order behind it, architectEnded finishes a row whose architect
+// is gone, a receipt timeout reholds the notice, and a merge-queue row posts a Dispatch message
+// when the role is unheld. One message has one keeper, so this sender keeps its own
+// (packages/daemon/internal/daemon/outbox.go).
 func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payload any, dedupeKey string) error {
 	// The listener carries a payload as a JSON document in a string (its messageBody,
 	// packages/envoy/cmd/listener/api.go:68-80); an object there is refused as invalid JSON.
@@ -159,7 +167,8 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 		Message   string `json:"message"`
 		Payload   string `json:"payload"`
 		DedupeKey string `json:"dedupe_key"`
-	}{Topic: topic, Message: message, Payload: string(encoded), DedupeKey: dedupeKey})
+		Keep      bool   `json:"keep"`
+	}{Topic: topic, Message: message, Payload: string(encoded), DedupeKey: dedupeKey, Keep: false})
 	if err != nil {
 		return fmt.Errorf("encode notice for %s: %w", topic, err)
 	}
