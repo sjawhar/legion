@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-562",
-  "completed": "2026-10-31T18:46:16Z",
+  "completed": "2026-10-31T19:15:49Z",
   "proof": [
     {
       "criterion": "Items 1 and 2: a message or mention whose request is cancelled after commit reaches its recipient without a retry; pending attempts a killed process left are sent by the other process under their own key",
@@ -243,6 +243,14 @@
       "observed": "Attempt 1's dispatch job: `1 failed`, `1433 passed`; the failure was `e2e/overlapping-marks.e2e.ts:311` (a wider and a narrower ask, the wider made first, @phone, chromium), a 30 s timeout, while the same case passed in the iphone project and every other mark kind and order passed. This PR changes no Dispatch web code and not that spec; main's own run 41197405735 failed the same test (the architect's reading). Attempt 2 (started by the reviewer, the one permitted re-run): dispatch job 124606239428 `completed success`. No code changed this round; the head stays 0b95c3c7.",
       "headSha": "0b95c3c74545",
       "negativeControl": "Attempt 1 of the same job on the same commit failed that one test, so the pass on attempt 2 comes from the rerun, not from any change."
+    },
+    {
+      "criterion": "CI red read at 72f001f2 was attempt 1's ci-ok; attempt 2 of the same run is green at code 0b95c3c7, with no code change",
+      "surface": "GitHub Actions CI run 41209030154 on the pull request's merge ref, attempt 2",
+      "command": "gh api 'repos/sjawhar/legion/actions/runs/41209030154/jobs?per_page=100' --jq '.jobs[] | select(.name==\"ci-ok\" or .name==\"dispatch\")'",
+      "observed": "Attempt 2: dispatch job 124606239428 `completed success`, ci-ok job 124624720380 `completed success`. The only failure of attempt 1 was main's flaky e2e/overlapping-marks.e2e.ts:311 in dispatch job 124566006375. The reviewer approved at 44af8c32. No code changed; the code head stays 0b95c3c7.",
+      "headSha": "0b95c3c74545",
+      "negativeControl": "Attempt 1 of the same run on the same commit: dispatch job 124566006375 failure (1 failed, 1433 passed) and ci-ok job 124596000987 failure."
     }
   ],
   "filesChanged": [
