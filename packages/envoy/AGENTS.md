@@ -379,8 +379,8 @@ A state is kept only when it reads back as the document that made it: decoded in
 That catches a re-encoding that renumbers or drops a client's clocks, as a decoder that integrated the items after a skipped clock range would;
 ygo parks them (upstream since v1.51.0, reearth/ygo#257).
 It does not catch a re-encoding that keeps every clock and moves text, such as a lost right origin, which `TestACompactedDocumentKeepsItsOrderThroughLaterUpdates` guards on each ygo bump.
-A state that reads back otherwise, or a log the fold's document cannot apply (one parking more than the pending queue below holds), is logged (`dispatch: a document's stored updates do not fold into a state that
-reads back as them`): the load serves the stored updates merged whole, which for a log the fold cannot apply is what `loadDocument` decodes and refuses as `ErrDocumentUnloadable`, offering the rebuild, and compaction leaves them as stored without building that merge;
+A state that reads back otherwise, or a log the fold's document cannot apply (one parking more than the pending queue below holds), is logged (`dispatch: a document's stored updates do not fold into a state that reads back as them`):
+the load serves the stored updates merged whole, which for a log the fold cannot apply is what `loadDocument` decodes and refuses as `ErrDocumentUnloadable`, offering the rebuild, and compaction leaves them as stored without building that merge;
 the process's later compactions of the same rows skip them until they change.
 A room's load decodes the stored state once:
 `servicePersistenceAdapter.LoadDoc` hands ygo no bytes and puts the state it read (or the socket's preload) on the load's record (`roomLoad`), and the room's own load hook (`onLoadDocument`, through `bootstrapLoadedState`) decodes it into the room's document under the server's pending cap, `maxUpdateItems`, before anything reads or observes it.
@@ -598,7 +598,7 @@ A helper that walks the room inside `Server.Apply` outside a transaction, as an 
 
 Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment (`internal/dispatch/docs/persistence.go`) states the rule and its reason, and the service builds that decoder two ways.
 `newCappedDocumentCopy` takes the cap of the instance the decode runs for - `PgVersioned.maxPendingItems` or `Service.maxPendingItems`, both `maxUpdateItems` in production and lowered only by a test (`shrinkPendingItems`): the store's fold of its stored rows and that fold's read-back (`stateThrough`, `readsBackOtherwise`), the document a load decodes its state into (`documentThrough`), the check of a history a rebuild makes and of the seed it stores (`validateUpdate`).
-`newDocumentCopy` takes `maxUpdateItems` itself: a copy of a resident document (`snapshotDocument`, a room's rendered replica), a write's fork of the stored or the live document (`coldFork`, `buildFork`), a socket's admission decode of the stored history (`loadTree`) and the store's check of each update it appends (`appendUpdate`, `AppendUpdateTx`).
+`newDocumentCopy` takes `maxUpdateItems` itself: a copy of a resident document (`snapshotDocument`, a room's rendered replica), a write's fork of the stored or the live document (`coldFork`, `buildFork`), the growth check's decode of a fork's own state (`refuseUndecodable`), a socket's admission decode of the stored history (`loadTree`) and the store's check of each update it appends (`appendUpdate`, `AppendUpdateTx`).
 ygo builds the decoder for the service's rooms (`Server.MaxPendingItems`, set in `New` from `Service.maxPendingItems`).
 ygo's check of each update the service broadcasts (`Server.BroadcastUpdate`) takes no pending queue, since the room has already applied the update (reearth/ygo#268, in the pinned fork).
 In a room, which keeps what it parks across updates, the queue is also the most the room's peers can park, about ten times ygo's default.

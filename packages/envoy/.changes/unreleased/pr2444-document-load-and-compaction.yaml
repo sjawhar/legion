@@ -1,7 +1,7 @@
 kind: Fixed
 body: |-
   A document load no longer replays the document's whole history, and an edit no longer waits behind
-  its document's compaction (INFRA-593). A room load or a cold read folded every stored
+  its document's compaction. A room load or a cold read folded every stored
   `doc_updates` row inside its transaction on the rooms pool, because compaction ran only as a room
   closed, as the server shut down, and in the outbox's daily pass, which first ran 24 hours after
   start and only with NATS configured; and a compaction folded while it held the document's lock, so
@@ -20,16 +20,19 @@ body: |-
   folds on a two-connection pool of its own (`dispatch-compaction`), so one server's stated
   connection ceiling rises by 2, to 91; it holds no document lock while it folds, writes under the
   lock only when the rows it folded are unchanged, and leaves rows younger than 2 minutes as
-  written. The LEGION-496 guarantee, that `doc_updates` and any backup of it hold no text a write
-  deleted, now holds within about 75 minutes of the write (the 2-minute tail, the 15-minute age
-  rule, the hourly sweep) rather than as a room closes, as the server shuts down and daily. ygo's
-  `CompactEvery` setting and the outbox's daily compaction are removed. The room's own decode of a
-  document many writers touched is faster too: the ygo fork pin moves from `v1.51.3-sami.4` to the
-  fork rebuilt on upstream v1.54.0 (`v1.54.1-sami.1`), whose decoder integrates an update's
-  deferred items in dependency order instead of re-scanning every deferred item once per
-  dependency, so the state of a 400-paragraph spec after 240 versions decodes in about 143 ms
-  rather than 433 ms. The fork also caps parked delete ranges as parked items are, retries them only
-  once they can apply, and refuses an update past that cap or the pending cap before it changes the
-  document; its opt-in hooks and scan bounds are off, and Dispatch sets none.
+  written. The guarantee that `doc_updates` and any backup of it hold no text a write deleted now
+  holds within about 75 minutes of the write (the 2-minute tail, the 15-minute age rule, the hourly
+  sweep) rather than as a room closes, as the server shuts down and daily. ygo's `CompactEvery`
+  setting and the outbox's daily compaction are removed. The room's own decode of a document many
+  writers touched is faster too: the ygo fork pin moves from `v1.51.3-sami.4` to the fork rebuilt on
+  upstream v1.54.0 (`v1.54.1-sami.1`), whose decoder integrates an update's deferred items in
+  dependency order instead of re-scanning every deferred item once per dependency, so the state of a
+  400-paragraph spec after 240 versions decodes in about 143 ms rather than 433 ms. The fork also
+  caps parked delete ranges as parked items are, retries them only once they can apply, and refuses
+  an update past that cap or the pending cap before it changes the document; an update that fails
+  partway leaves the room with what it kept and drains the pending queue on that part. When the
+  server closes a browser's connection itself (a room close or a shutdown), input the browser had
+  sent and the server had not yet read is dropped rather than applied, and the browser sends it again
+  when it reconnects. The fork's opt-in hooks and scan bounds are off, and Dispatch sets none.
 custom:
-    Issue: INFRA-593
+    Issue: pr2444

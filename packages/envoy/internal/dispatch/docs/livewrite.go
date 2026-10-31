@@ -544,8 +544,7 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	fork := newDocumentCopy(crdt.WithClientID(write.clientID))
 	if len(loaded.Update) > 0 {
 		if err := decodeStoredState(fork, loaded.Update); err != nil {
-			// A room's load of the same history would fail it, as loadTree does, and states
-			// a refusal ygo gives no reason for once (decodeStoredState).
+			// A room's load of the same history would fail it, as loadTree does.
 			s.failRoom(write.artifactID, fmt.Errorf("decode live document: %w", err))
 			return nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
 		}

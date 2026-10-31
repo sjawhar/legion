@@ -166,18 +166,15 @@ func validateUpdate(update []byte, maxPending int) error {
 }
 
 // decodeStoredState applies state, a stored history, one of its rows or the state a room or cold
-// read loads, to doc. Every decode of stored state runs here: the history checks (validateUpdate),
-// a room's load hook (bootstrapLoadedState), the document a load decodes its state into
-// (documentThrough), the tree a socket's admission reads (loadTree), the fork a cold write makes of
-// the history (coldFork), and a fold's apply of each stored row and its read-back of the state it
-// encoded (fold, readsBackOtherwise), whose refusal a load and a compaction log. ygo's apply names a
-// failure as ErrInvalidUpdate followed by the decoder's reason ("crdt: invalid update: encoding:
-// unexpected end of input"), except where its reader of an update's structs fails with no reason of
-// its own, which the release candidate this module pins (go.mod) reports as that sentinel wrapped in
-// itself ("crdt: invalid update: crdt: invalid update"). That one is returned as the sentinel alone,
-// so the line a refusal logs states it once; every other error is returned as ygo gave it. The
-// fold's structural reads of the same rows (MergeUpdatesV1, DiffUpdateV1: mergedThrough and the
-// parked updates fold keeps) pass their errors through invalidOnce too.
+// read loads, to doc, and is the one way the service decodes stored state, so every refusal of it
+// reads the same. ygo's apply names a failure as ErrInvalidUpdate followed by the decoder's reason
+// ("crdt: invalid update: encoding: unexpected end of input"). The release candidate this module
+// pins (go.mod) regressed on that: where its reader of an update's structs fails it reports the
+// sentinel wrapped in itself ("crdt: invalid update: crdt: invalid update") and no reason, which
+// invalidOnce returns as the sentinel alone so the line a refusal logs states it once. The fix is
+// with the ygo release (dispatch://INFRA-593/artifact/ygo-truncated-reason-patch); once the pinned
+// tag carries it, delete invalidOnce, doubledInvalidUpdate and the reasonless cases of
+// decode_reason_test.go and fold_reason_test.go, which then fail saying nothing reasonless is left.
 func decodeStoredState(doc *crdt.Doc, state []byte) error {
 	return invalidOnce(crdt.ApplyUpdateV1(doc, state, nil))
 }
