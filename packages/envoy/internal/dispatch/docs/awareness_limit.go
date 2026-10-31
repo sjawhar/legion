@@ -3,7 +3,6 @@ package docs
 import (
 	"bufio"
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -317,7 +316,7 @@ func (c *awarenessLimitConn) pass(rest int64, final bool) {
 	c.writeFrame(gws.BinaryMessage, final && rest == 0, c.message)
 	c.message = c.message[:0]
 	if rest > 0 {
-		c.out.Write(maskedFrameHeader(continuationFrame, final, rest, c.key))
+		c.out.Write(append(frameHeader(continuationFrame, final, rest, maskedFrame), c.key[:]...))
 		c.through = rest
 	}
 	c.mode = limitIdle
@@ -390,27 +389,11 @@ func (c *awarenessLimitConn) writeAwareness(update []byte) {
 // writeFrame puts payload on the stream ygo reads as one frame, masked under the frame's own key
 // as every frame a client sends is.
 func (c *awarenessLimitConn) writeFrame(opcode byte, final bool, payload []byte) {
-	c.out.Write(maskedFrameHeader(opcode, final, int64(len(payload)), c.key))
+	header := frameHeader(opcode, final, int64(len(payload)), maskedFrame)
+	c.out.Write(append(header, c.key[:]...))
 	for i, b := range payload {
 		c.out.WriteByte(b ^ c.key[i%4])
 	}
-}
-
-// maskedFrameHeader is the header of a masked frame of opcode carrying length bytes under key.
-func maskedFrameHeader(opcode byte, final bool, length int64, key [4]byte) []byte {
-	header := []byte{opcode}
-	if final {
-		header[0] |= finalFrame
-	}
-	switch {
-	case length < 126:
-		header = append(header, maskedFrame|byte(length))
-	case length <= 0xffff:
-		header = binary.BigEndian.AppendUint16(append(header, maskedFrame|126), uint16(length))
-	default:
-		header = binary.BigEndian.AppendUint64(append(header, maskedFrame|127), uint64(length))
-	}
-	return append(header, key[:]...)
 }
 
 // documentMessageKind reads a document message's Hocuspocus header - the document it names and

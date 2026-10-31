@@ -107,7 +107,7 @@ func TestADocumentSocketsFrameSentBeforeTheUpgradesAnswerIsFiltered(t *testing.T
 	const invented = 10
 	writer := &hijackedWriter{
 		conn:     &scriptedSocket{frames: bytes.NewReader(nil)},
-		buffered: clientFrame(gws.BinaryMessage, true, awarenessMessageOf(limitRoom, awarenessStates(500_000, invented, `{"user":{"name":"invented"}}`))),
+		buffered: clientFrame(gws.BinaryMessage, true, awarenessMessageOf(limitRoom, awarenessStates(500_000, invented, 1, `{"user":{"name":"invented"}}`))),
 	}
 	conn, buffers, err := (&awarenessLimitWriter{ResponseWriter: writer, room: limitRoom}).Hijack()
 	if err != nil {

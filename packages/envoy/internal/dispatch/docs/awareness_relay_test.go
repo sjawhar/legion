@@ -310,7 +310,7 @@ func TestAReaderInTheRoomAgainKeepsItsStateThoughARemovalRacesItsReturn(t *testi
 				return
 			}
 			// Alice's next frame, at the clock after the one she was taken away at.
-			if err := aw.ApplyUpdate(awarenessEntryUpdate(aliceClient, meta.Clock+1, string(state)), "alice's next frame"); err != nil {
+			if err := aw.ApplyUpdate(awarenessStates(aliceClient, 1, meta.Clock+1, string(state)), "alice's next frame"); err != nil {
 				t.Errorf("announce alice again at clock %d: %v", meta.Clock+1, err)
 			}
 		})
@@ -330,7 +330,7 @@ func TestAReaderInTheRoomAgainKeepsItsStateThoughARemovalRacesItsReturn(t *testi
 	// The removal another of the room's paths makes while alice's own tab is still open, as a
 	// disconnecting tab's echoed clients and an expiry do: applied to the room's awareness
 	// directly, the way those paths reach it.
-	if err := aw.ApplyUpdate(awarenessEntryUpdate(aliceClient, clock, "null"), "a removal of task A's own"); err != nil {
+	if err := aw.ApplyUpdate(awarenessStates(aliceClient, 1, clock, "null"), "a removal of task A's own"); err != nil {
 		t.Fatalf("remove alice's client at clock %d: %v", clock, err)
 	}
 	if announced.Load() == 0 {
@@ -493,16 +493,16 @@ func TestAnAwarenessStateTooLargeToRelayIsDroppedAndCounted(t *testing.T) {
 	}
 }
 
-// awarenessStates is one y-protocols awareness update announcing count clients from first, each
-// at a clock of 1 with state, as one peer's frame carries them: the state of a cursor, or "null"
-// to take those clients away as the disconnect of the peer that sent them does. It is the one
-// encoder the tests of this package announce awareness clients with.
-func awarenessStates(first, count uint64, state string) []byte {
+// awarenessStates is one y-protocols awareness update announcing count clients from first, each at
+// clock with state, as one peer's frame carries them: the state of a cursor, or "null" to take
+// those clients away as the disconnect of the peer that sent them does. It is the one encoder the
+// tests of this package announce awareness clients with.
+func awarenessStates(first, count, clock uint64, state string) []byte {
 	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
 		encoder.WriteVarUint(count)
 		for client := first; client < first+count; client++ {
 			encoder.WriteVarUint(client)
-			encoder.WriteVarUint(1)
+			encoder.WriteVarUint(clock)
 			encoder.WriteVarString(state)
 		}
 	})
@@ -537,7 +537,7 @@ func TestAnAwarenessFrameOverTheClientBoundRelaysNoMoreThanTheBound(t *testing.T
 	}
 
 	const flood = 8 * maxAwarenessClientsPerRoom
-	if err := aw.ApplyUpdate(awarenessStates(1, flood, floodState), "a peer of task A"); err != nil {
+	if err := aw.ApplyUpdate(awarenessStates(1, flood, 1, floodState), "a peer of task A"); err != nil {
 		t.Fatalf("apply a frame of %d awareness clients: %v", flood, err)
 	}
 	waitFor(t, roomWait(t), "task A's relay to be sending the bound's clients of the frame", func() bool {
@@ -597,13 +597,13 @@ func TestAwarenessClientsThatLeaveFreeTheRoomsBoundAtOnce(t *testing.T) {
 	}
 
 	const flood = 8 * maxAwarenessClientsPerRoom
-	if err := aw.ApplyUpdate(awarenessStates(1, flood, floodState), "a peer of task A"); err != nil {
+	if err := aw.ApplyUpdate(awarenessStates(1, flood, 1, floodState), "a peer of task A"); err != nil {
 		t.Fatalf("apply a frame of %d awareness clients: %v", flood, err)
 	}
 	waitFor(t, roomWait(t), "task A's relay to be sending the bound's clients of the frame", func() bool {
 		return relayedClients(pair.taskA, pair.artifactID) == maxAwarenessClientsPerRoom
 	})
-	if err := aw.ApplyUpdate(awarenessStates(1, flood, "null"), "a peer of task A"); err != nil {
+	if err := aw.ApplyUpdate(awarenessStates(1, flood, 1, "null"), "a peer of task A"); err != nil {
 		t.Fatalf("take the frame's %d awareness clients away: %v", flood, err)
 	}
 	waitFor(t, roomWait(t), "task A's relay to be sending none of the frame's clients once they have left", func() bool {
@@ -618,16 +618,6 @@ func TestAwarenessClientsThatLeaveFreeTheRoomsBoundAtOnce(t *testing.T) {
 		fmt.Sprintf("alice's cursor, announced on task A just after a frame of %d clients had come and gone, reaching bob on task B", flood))
 }
 
-// awarenessEntryUpdate is a one-client awareness update, as y-protocols encodes one.
-func awarenessEntryUpdate(client, clock uint64, state string) []byte {
-	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
-		encoder.WriteVarUint(1)
-		encoder.WriteVarUint(client)
-		encoder.WriteVarUint(clock)
-		encoder.WriteVarString(state)
-	})
-}
-
 // A batch too large for one notification is split across several, each within the limit and
 // holding whole clients, and a client too large for any is dropped and counted.
 func TestAnAwarenessBatchIsSplitAcrossNotificationsWithinTheLimit(t *testing.T) {
@@ -636,13 +626,13 @@ func TestAnAwarenessBatchIsSplitAcrossNotificationsWithinTheLimit(t *testing.T) 
 	batch := make(map[uint64][]byte)
 	for client := uint64(1); client <= 5; client++ {
 		state := `{"name":"` + strings.Repeat("x", 2_500) + `"}`
-		entries, err := decodeAwarenessEntries(awarenessEntryUpdate(client, client, state))
+		entries, err := decodeAwarenessEntries(awarenessStates(client, 1, client, state))
 		if err != nil {
 			t.Fatal(err)
 		}
 		batch[client] = entries[0].raw
 	}
-	huge, err := decodeAwarenessEntries(awarenessEntryUpdate(99, 1, `{"name":"`+strings.Repeat("y", roomSyncPayloadLimit)+`"}`))
+	huge, err := decodeAwarenessEntries(awarenessStates(99, 1, 1, `{"name":"`+strings.Repeat("y", roomSyncPayloadLimit)+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

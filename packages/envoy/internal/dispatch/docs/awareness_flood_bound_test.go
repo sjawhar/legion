@@ -27,13 +27,13 @@ func TestRepeatedAwarenessFloodsDoNotGrowARoomsAwarenessWithoutLimit(t *testing.
 	next := uint64(1_000_000)
 	for frame := range frames {
 		if frame%2 == 0 {
-			if err := aw.ApplyUpdate(awarenessStates(next, perFrame, floodState), "a peer of task A"); err != nil {
+			if err := aw.ApplyUpdate(awarenessStates(next, perFrame, 1, floodState), "a peer of task A"); err != nil {
 				t.Fatalf("frame %d: %v", frame, err)
 			}
-			if err := aw.ApplyUpdate(awarenessStates(next, perFrame, "null"), "a peer of task A"); err != nil {
+			if err := aw.ApplyUpdate(awarenessStates(next, perFrame, 1, "null"), "a peer of task A"); err != nil {
 				t.Fatalf("frame %d's removal: %v", frame, err)
 			}
-		} else if err := aw.ApplyUpdate(awarenessStates(next, perFrame, "null"), "a peer of task A"); err != nil {
+		} else if err := aw.ApplyUpdate(awarenessStates(next, perFrame, 1, "null"), "a peer of task A"); err != nil {
 			t.Fatalf("frame %d: %v", frame, err)
 		}
 		next += perFrame

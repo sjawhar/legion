@@ -586,13 +586,13 @@ What the two processes share, and what each keeps to itself:
   with no reconnect.
 - The two delivery durables keep their shape. NATS admits one binder; the second process stands
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
-- Eleven periodic maintenance loops run once per period across the processes, not once per process.
+- Twelve periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
   lands between another's passes — the ordinary case, since each ticker draws its phase at boot
   and a rolling update starts the second process minutes after the first — finds the period
-  already served and logs the same skip. The settlement resumption is one of the eleven: a
+  already served and logs the same skip. The settlement resumption is one of the twelve: a
   settlement reads the store under the document's lock whichever process runs it, so one process
   per minute arms every owed settlement. The delivery live hub, the event-stream relay, the
   process's shared listener connection with the document rooms' room sync on it, and the document

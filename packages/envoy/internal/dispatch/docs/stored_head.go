@@ -3,7 +3,9 @@ package docs
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
+	"time"
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
@@ -130,9 +132,125 @@ func (s *Service) roomHoldsHead(live *crdt.Doc, head int64) bool {
 	return cursor == nil || cursor.heldThrough() >= head
 }
 
+// roomBehindHead reports whether live, the room resident for write's document, stands behind the
+// durable head - an update the other process appended that this room has not caught up yet. The
+// head is read in the caller's own transaction, which a write always has (liveWrite): a read of
+// its own would be a second pooled connection taken under that transaction
+// (store.ErrNestedAcquire). That head includes the versions this transaction has appended itself,
+// which are in no room until it publishes, so the room's cursor is read with them folded in
+// (liveWrite.withOwnAppends); without that every operation after a transaction's first append
+// would judge its own room behind. A document whose room kept no cursor is not judged behind:
+// nothing says it is.
+//
+// A difference the first read sees is not the answer: every durable writer of this process
+// advances the room's cursor inside the document's advisory lock, after the commit that raised the
+// head (PgVersioned.appendUpdate, Ledger.takeRoomCursors), so a reader holding no lock lands
+// between a browser append's commit and its cursor advance and reads a healthy room as one another
+// process left behind. The confirmation takes that lock in the caller's own transaction, which
+// holds it until the transaction ends, as an upload and a conditional edit already hold it from
+// before their fork read (ReplaceText, ApplyOps): under it no write of this process sits between
+// its commit and its cursor, and no append lands between the cursor read and the head read beside
+// it. It costs that lock only where the cheap read saw a difference, which a healthy room under
+// its own browsers' writes sees rarely and a room another process left behind sees until its
+// catch-up lands.
+//
+// Why the false verdict is worth a lock. It sent the write down the cold path (forkLive), which
+// reads the stored document - and the store of a room still writing is behind the room by
+// whatever its persistence worker has not appended yet, in the order its observers fired rather
+// than the order the room applied them (consumeUpdateClass). A version prefix of that is not a
+// state the document ever held: an update whose deletes landed without the inserts they replaced
+// leaves a tree with no block in it at all, which every write starting from it refuses
+// (ErrDocOutsideSchema). A room confirmed behind the head forks from that same store, which its
+// own browsers' appends still reach (the gate admits them, appendBrowser), so the cold path costs
+// it the same exposure for the moment until its catch-up lands; a warm fork from a room missing
+// the other process's rows would instead be refused at its append.
+func (s *Service) roomBehindHead(ctx context.Context, write *liveWrite, live *crdt.Doc) (bool, error) {
+	cursor := s.cursorOf(live)
+	tx, joined := txFromContext(ctx)
+	if cursor == nil || !joined {
+		return false, nil
+	}
+	head, err := currentUpdateCursor(ctx, tx, write.artifactID)
+	if err != nil {
+		return false, err
+	}
+	if write.withOwnAppends(cursor.heldThrough()) == head {
+		return false, nil
+	}
+	if err := lockDocumentRoom(ctx, tx, write.artifactID); err != nil {
+		return false, err
+	}
+	if head, err = currentUpdateCursor(ctx, tx, write.artifactID); err != nil {
+		return false, err
+	}
+	return write.withOwnAppends(cursor.heldThrough()) != head, nil
+}
+
 // roomHeld reports whether this process holds a room of room, resident or still loading.
 func (s *Service) roomHeld(room string) bool {
 	return s.srv.GetDoc(room) != nil || slices.Contains(s.srv.Rooms(), room)
+}
+
+// publishedLossTimeout bounds what recordPublishedLoss reads: the other processes' flush, a
+// catch-up of this process's room, or a load of the stored document. The write's writer slot is
+// held until it returns.
+const publishedLossTimeout = 10 * time.Second
+
+// recordPublishedLoss judges, once the write is committed and published, which of the write's
+// operations the document at its stored head no longer holds, and records it: the lost-edit
+// check's second window, a concurrent change that landed between the version render and this
+// publish. Nothing can be rolled back here - the update is durable and the version written - so
+// the verdict rides the caller's response instead (Ledger.LostOps).
+//
+// A write that inserted no text reaches the verdict too, an empty one: a delete, a replace that
+// only shortens, a retype, an operation that changed nothing - none of them wrote anything a
+// concurrent change could remove, so "nothing was lost" is a statement this can make without
+// reading the document, and it is the one those edits deserve. Only a check that could not read
+// the document, or a document holding a tree too deep to read, leaves no verdict, which the caller
+// reports as undetermined.
+//
+// A person on another process can have deleted what the write inserted, in a room this process
+// never holds. So first every other process holding a room of the document makes its updates
+// durable (a second flush, flushOtherRooms's query, asked now that the write holds no lock), and
+// the verdict is judged on the document at the stored head: this process's room, caught up to the
+// head first when another process is a member (catchUpRoom), or, with no room here or one that
+// could not be caught up, the stored document itself, read without loading a room (on the pool
+// document loads use: other writers waiting for this write's slot hold the shared pool's
+// connections).
+//
+// The read is a point-in-time statement, as the spec says it must be: a deletion landing after it
+// is not reported, and a deletion landing before it is. A room is read as of one moment under its
+// document lock (readLive), since the room's peers write it while the check walks it, and the walk
+// (pmdoc.AuthoredTextRuns) takes no lock. The room's update observer has already brought its
+// replica up to date with this write, so the check reads the write's own blocks rather than a copy
+// of the whole document. It is deliberately taken without a Yjs transaction of its own: an empty
+// transaction still fires the room's update observers, so it would put an empty update through
+// ygo's persistence worker - a durable doc_updates row - on every edit.
+func (s *Service) recordPublishedLoss(write *liveWrite) {
+	if write.loss == nil {
+		write.lost, write.lostVerdict = nil, true
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), publishedLossTimeout)
+	defer cancel()
+	rooms, err := s.store.Pool.Rooms()
+	if err != nil {
+		slog.Warn("dispatch: reach the document store to judge a published write's text", "room", write.artifactID, "error", err)
+		return
+	}
+	_, others, err := s.roomQueries.ask(ctx, rooms, write.artifactID, roomQueryFlush)
+	if err != nil {
+		// Whether another process holds the document is unknown, so the verdict reads the head.
+		slog.Warn("dispatch: ask the other processes to store their rooms' updates before judging a published write's text",
+			"room", write.artifactID, "error", err)
+		others = true
+	}
+	lost, err := s.lostAtStoredHead(ctx, rooms, write, others)
+	if err != nil {
+		slog.Warn("dispatch: read a published write's text back from the document", "room", write.artifactID, "error", err)
+		return
+	}
+	write.lost, write.lostVerdict = lost, true
 }
 
 // lostAtStoredHead is write's lost operations on the document at its stored head: this process's

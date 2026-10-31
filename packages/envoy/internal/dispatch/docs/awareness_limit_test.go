@@ -165,7 +165,7 @@ func awarenessClients(t *testing.T, message readMessage) (string, []uint64) {
 func TestADocumentSocketAnnouncesNoMoreAwarenessClientsThanItsBound(t *testing.T) {
 	const invented = 2_048
 	messages := filtered(t, socketSending(clientFrame(gws.BinaryMessage, true,
-		awarenessMessageOf(limitRoom, awarenessStates(500_000, invented, `{"user":{"name":"invented"}}`)))))
+		awarenessMessageOf(limitRoom, awarenessStates(500_000, invented, 1, `{"user":{"name":"invented"}}`)))))
 
 	if len(messages) != 1 {
 		t.Fatalf("a frame of %d awareness clients reached ygo as %d messages, want one", invented, len(messages))
@@ -195,9 +195,9 @@ func TestADocumentSocketTakingAnAwarenessClientAwayMayAnnounceAnother(t *testing
 		encoder.WriteVarString("null")
 	})
 	messages := filtered(t, socketSending(
-		clientFrame(gws.BinaryMessage, true, awarenessMessageOf(limitRoom, awarenessStates(11, 4, `{"user":{"name":"tab"}}`))),
+		clientFrame(gws.BinaryMessage, true, awarenessMessageOf(limitRoom, awarenessStates(11, 4, 1, `{"user":{"name":"tab"}}`))),
 		clientFrame(gws.BinaryMessage, true, awarenessMessageOf(limitRoom, removal)),
-		clientFrame(gws.BinaryMessage, true, awarenessMessageOf(limitRoom, awarenessStates(21, 1, `{"user":{"name":"tab"}}`))),
+		clientFrame(gws.BinaryMessage, true, awarenessMessageOf(limitRoom, awarenessStates(21, 1, 1, `{"user":{"name":"tab"}}`))),
 	))
 
 	if len(messages) != 3 {
@@ -243,7 +243,7 @@ func TestADocumentSocketsOtherMessagesReachYgoUnchanged(t *testing.T) {
 // A socket that splits its awareness frame across websocket frames is held to the same bound: the
 // filter reads the message its frames make, not each frame on its own.
 func TestAFragmentedAwarenessFrameIsHeldToTheSameBound(t *testing.T) {
-	message := awarenessMessageOf(limitRoom, awarenessStates(700_000, 64, `{"user":{"name":"invented"}}`))
+	message := awarenessMessageOf(limitRoom, awarenessStates(700_000, 64, 1, `{"user":{"name":"invented"}}`))
 	messages := filtered(t, socketSending(
 		clientFrame(gws.BinaryMessage, false, message[:3]),
 		clientFrame(continuationFrame, false, message[3:40]),
@@ -266,7 +266,7 @@ func TestAFragmentedAwarenessFrameIsHeldToTheSameBound(t *testing.T) {
 // An awareness message past the size one carries reaches ygo naming no client, which it applies
 // and broadcasts as no change, rather than being read whole to be filtered.
 func TestAnAwarenessMessagePastTheSizeOneCarriesNamesNoClient(t *testing.T) {
-	huge := awarenessMessageOf(limitRoom, awarenessStates(1, 1, `{"user":{"name":"`+strings.Repeat("x", maxAwarenessMessageBytes)+`"}}`))
+	huge := awarenessMessageOf(limitRoom, awarenessStates(1, 1, 1, `{"user":{"name":"`+strings.Repeat("x", maxAwarenessMessageBytes)+`"}}`))
 	messages := filtered(t, socketSending(clientFrame(gws.BinaryMessage, true, huge)))
 
 	if len(messages) != 1 {

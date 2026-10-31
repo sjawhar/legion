@@ -106,16 +106,6 @@ const appendGateStatement = `
 			from artifacts a join issues i on i.key = a.issue_key where a.id = $1)
 	from doc_updates where artifact_id = $1`
 
-// appendGateRow is what the gate's read answers (appendGateStatement): latest, the head, and
-// intact, whether a stored row at or below the room's cursor remains; closedFor is how long ago
-// the document's issue closed on the database's clock, nil while it is open and for a document of
-// no issue.
-type appendGateRow struct {
-	latest    int64
-	intact    bool
-	closedFor *time.Duration
-}
-
 // observedBeforeClose is whether a browser update the room's observer took age ago, on this
 // process's monotonic clock, was taken no later than closeMargin after its issue's close
 // committed, closedFor ago on the database's clock (closed_at, which the close stamps as its last
@@ -150,14 +140,17 @@ func observedBeforeClose(observed time.Time, age, closedFor time.Duration) bool 
 // update of its browsers down this path, a decode of the whole stored document under the
 // document's lock each.
 func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind appendKind, observed time.Time, update []byte) (latest int64, replaced bool, err error) {
-	var row appendGateRow
+	var intact bool
 	var closedMicros *int64
-	if err := tx.QueryRow(ctx, appendGateStatement, room, through).Scan(&row.latest, &row.intact, &closedMicros); err != nil {
+	if err := tx.QueryRow(ctx, appendGateStatement, room, through).Scan(&latest, &intact, &closedMicros); err != nil {
 		return 0, false, fmt.Errorf("read the document's head for the append gate: %w", err)
 	}
+	// closedFor is how long ago the document's issue closed on the database's clock, nil while it
+	// is open and for a document of no issue.
+	var closedFor *time.Duration
 	if closedMicros != nil {
-		closedFor := time.Duration(*closedMicros) * time.Microsecond
-		row.closedFor = &closedFor
+		closed := time.Duration(*closedMicros) * time.Microsecond
+		closedFor = &closed
 	}
 	// The update's age is taken at the read, as the database measures the close's.
 	var age time.Duration
@@ -165,26 +158,26 @@ func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind
 		age = time.Since(observed)
 	}
 	switch {
-	case kind == appendBrowser && row.closedFor != nil && !observedBeforeClose(observed, age, *row.closedFor):
+	case kind == appendBrowser && closedFor != nil && !observedBeforeClose(observed, age, *closedFor):
 		return 0, false, fmt.Errorf("%w: room %s's document belongs to an issue closed %s ago, and the room took the update %s ago",
-			ErrIssueClosed, room, row.closedFor.Round(time.Millisecond), age.Round(time.Millisecond))
-	case historyReplaced(through, row.latest, row.intact):
-		if kind == appendBrowser && row.latest > through {
-			holds, holdsErr := storedHistoryHolds(ctx, tx, room, row.latest, update)
+			ErrIssueClosed, room, closedFor.Round(time.Millisecond), age.Round(time.Millisecond))
+	case historyReplaced(through, latest, intact):
+		if kind == appendBrowser && latest > through {
+			holds, holdsErr := storedHistoryHolds(ctx, tx, room, latest, update)
 			if holdsErr != nil {
 				return 0, false, holdsErr
 			}
 			if holds {
-				return row.latest, true, nil
+				return latest, true, nil
 			}
 		}
 		return 0, false, fmt.Errorf("%w: room %s holds the document through update %d, and the stored history was replaced under it (head %d)",
-			ErrRoomBehindHead, room, through, row.latest)
-	case kind == appendDerived && through != row.latest:
+			ErrRoomBehindHead, room, through, latest)
+	case kind == appendDerived && through != latest:
 		return 0, false, fmt.Errorf("%w: room %s holds the document through update %d, the stored document stands at %d",
-			ErrRoomBehindHead, room, through, row.latest)
+			ErrRoomBehindHead, room, through, latest)
 	}
-	return row.latest, false, nil
+	return latest, false, nil
 }
 
 // storedHistoryHolds reports whether room's stored history through head holds every item update
