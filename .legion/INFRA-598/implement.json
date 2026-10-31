@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-598",
-  "completed": "2026-10-30T21:58:24Z",
+  "completed": "2026-10-31T00:41:29Z",
   "proof": [
+    {
+      "criterion": "Review round 5: main merged with one dashboard transport; collect --run works while another run holds the lock; the daemons write their pidfile before any lock read; every write into the shared pods goes through a guarded helper, typing_start's token write included",
+      "surface": "cluster.sh under cluster.test.sh's fakes (fake lock naming another run, failing lock reads), the loadgen Go tests, and the repository's CI check scripts, at the merged head",
+      "command": "cd packages/envoy && go test -p 2 -parallel 4 -count=1 ./loadtest/ && bash loadtest/run-step.test.sh && bash loadtest/common.test.sh && timeout 1800 bash loadtest/cluster/cluster.test.sh; repo root: shellcheck of cluster.sh, check-ci-images.sh tree, check-ci-filters.sh, check-private-names.sh; diff check https://github.com/sjawhar/legion/pull/2462#issuecomment-6536640777",
+      "observed": "go test ok; run-step and common exit 0; cluster.test.sh 51 PASS, 0 FAIL ((y): the five helpers refuse, typing_start writes no token, collect --run <own run> exits 0 with no lock read; (z): up starts both daemons although every lock read after the lock fails); shellcheck, check-ci-images, check-ci-filters, check-private-names exit 0; no .legion/INFRA-639 in the tree",
+      "headSha": "6ac308721eb5",
+      "negativeControl": "against f7beb833's cluster.sh: 'typing_start wrote this run's agent token into run lt-20261028t080000-beef's runner pod', 'collect --run ... exited 1 while the lock names run ...', 'up exited 1 although only the reads of the lock after it took one failed'"
+    },
     {
       "criterion": "Review round 4: no stop, start, write or removal path of cluster.sh acts on another run's copy; heap-missing.txt records the removal's real result",
       "surface": "cluster.sh under cluster.test.sh's fakes (real processes, a real SIGKILL, the fake lock naming another run), and the repository's CI check scripts",
@@ -145,7 +153,8 @@
     "The reference-seed rerun of the full curves and the hour (results v5) runs after INFRA-707's passes, as the architect decided; this round's 100Gi default rests on a 20-minute typed replay's 9.4 GiB peak, and each step of that rerun records its pg-disk.json peak.",
     "A typed replay still loses edits where typing changed the logged text (68 named and 44 unnamed edits in the 20-minute r16-typing); the README says typed replays are not compared with the outage.",
     "The tester's cases (o) and (p) keep their shellcheck notes; CI runs no shellcheck on cluster.test.sh.",
-    "The four cluster files are exceptions under 'a CI job runs it, and it fetches nothing' rather than the architect's suggested 'no CI job runs it' for three of them: envoy-go runs cluster.test.sh, which sources cluster.sh, templates nats.yaml and runs render-nats.sh --pin-from, so 'no CI job runs it' would be false; none of them hands an image to a registry in CI."
+    "The four cluster files are exceptions under 'a CI job runs it, and it fetches nothing' rather than the architect's suggested 'no CI job runs it' for three of them: envoy-go runs cluster.test.sh, which sources cluster.sh, templates nats.yaml and runs render-nats.sh --pin-from, so 'no CI job runs it' would be false; none of them hands an image to a registry in CI.",
+    "Main's probeDashboard replaced this PR's decideLiveTransport: it falls back to SSE on any dial failure (this PR's only on a 404) and probes even with -live 0; neither was re-added."
   ],
   "openQuestions": []
 }
