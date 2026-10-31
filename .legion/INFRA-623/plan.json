@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-623",
+  "completed": "2026-10-31T06:50:22Z",
+  "plan": "dispatch://INFRA-623/artifact/plan-md",
+  "cause": "packages/daemon/internal/workspace/config.go:232 runs every provisioning command with child.Dir = command.Dir, and most call sites pass \"\". A child with no working directory inherits the process's. jj git clone (clone.go:301) and jj git init --colocate (clone.go:339) open no workspace, take no -R, and jj walks up from the working directory to the closest .jj. In a Legion issue pod the test process's cwd is inside $LEGION_WORKSPACE, a jj workspace of the pod's real shared clone, so jj opens and writes that repository. On GitHub's runners the checkout has no .jj, so CI is green.",
+  "measurements": [
+    "main 3f7b3e75, Legion issue pod, 2026-10-31: packages/daemon/internal/workspace test binary with /legion/repos bind-mounted read-only (unshare -Urm + mount --bind + mount -o remount,bind,ro), cwd = the package directory: 61 test failures, 96 occurrences of 'Internal error: Failed to determine the secure config for a repo' / 'Read-only file system (os error 30) at path \"/legion/repos/github.com/sjawhar/legion/.jj/repo/.tmpXXXXXX\"', each naming jj git clone or jj git init --colocate.",
+    "Same binary, same read-only guard, cwd = an empty directory outside any jj repository: PASS, 0 failures, 313 s.",
+    "All ten tests of packages/daemon/internal/daemon/check_wake_test.go pass in the pod with /legion/repos read-only, from the package directory and from a neutral one, exit 0, ~16 s per run, against a locally started Postgres and nats-server v2.10.22; no output names /legion/repos, 'Read-only file system', 'secure config' or a github.com clone.",
+    "A PATH-shim trace of every jj and git child of those check_wake runs: 39 children, exactly one with no working directory of its own, jj --version from packages/daemon/internal/daemon/tools.go:133, which opens no repository."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the implementer's phase mechanics, the handoff, the push and the pull request body all come from it.",
+      "skill://legion-worker/references/pr-body.md: the change must carry a proof per acceptance line in the shape that reference defines, and its 'Fast-follow:' rule forbids deferring any of the twenty call sites.",
+      "skill://legion-worker/references/tools.md: acceptance A3 needs a Postgres and a nats-server the implementer starts on the issue's volume, and the reference names which daemon packages a pod cannot run so a pod-only failure is not read as a regression.",
+      "skill://legion-worker/references/default-branch-check.md: the identity check before each push, since every role of this issue shares the workspace.",
+      "skill://ce-simplify-code: the change puts three refusals into one settled file, config.go; the simplify pass is where they are read as one rule rather than three.",
+      "skill://dispatch-first: search before posting any finding this change turns up."
+    ],
+    "test": [
+      "skill://legion-worker: the tester's phase mechanics, its handoff and its evidence rules.",
+      "skill://legion-worker/references/tools.md: A3 and A5 both need a Postgres and a nats-server started on the issue's volume, and A3's verdict depends on reading a pod-only failure as the environment rather than as a regression.",
+      "skill://legion-worker/references/pr-body.md: the tester records proofs in the same shape, each with its negative control.",
+      "skill://dispatch-first: search before posting any finding."
+    ],
+    "review": [
+      "skill://legion-worker: the reviewer's round, what goes back and what the reviewer fixes itself.",
+      "skill://legion-worker/references/merge-gate.md: approval of the head by SHA and READY's rules.",
+      "skill://legion-worker/references/review-threads.md: replying to, judging and resolving threads.",
+      "skill://legion-worker/references/pr-body.md: judging whether each recorded proof is a proof.",
+      "skill://ce-simplify-code: reviewing the simplify head of a change that touches one settled file in three places."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: delivered item 1 ('every daemon test and e2e script that provisions a workspace clones a local fixture repository, never github.com') is already true. recordingRunner.Run (workspace_test.go:92-111) rewrites every clone and fetch remote to a local bare repository seedRemote creates in a t.TempDir() (workspace_test.go:157-167, 218). Delivering it as written changes nothing and leaves the defect.",
+        "answer": "The plan restates the deliverable as the working-directory invariant and records item 1 as spec departure 3, with the citation, so no implementer spends a round converting tests to a local fixture."
+      },
+      {
+        "finding": "F2: the defect is in production, not only in tests. execRunner is the production runner, and under runtime: tmux the daemon provisions host workspaces in its own process (daemon.go:1076, specs.go:151, outbox.go:1286). deploy/kubernetes/daemon/legion.yaml.example:15 ships state_dir: ./state, resolved against the config file's directory (config/config.go:883, :851-856), so a legion.yaml kept in a checkout puts the shared clone under that checkout's .jj.",
+        "answer": "Recorded as spec departure 5 and made the plan's own scope: the fix is in execRunner and the call sites (designs D1-D5), not in the tests, and acceptance A2 checks the production refusals directly."
+      },
+      {
+        "finding": "F3: two further packages run the same rootless commands. packages/daemon/cmd/legion/workspace_init_test.go:213-216 runs workspace-init in process at the package directory, and packages/daemon/internal/runtime/sandbox/boundary_test.go:646 holds a second copy of the requireFilters probe with no Dir, identical to internal/workspace/isolation_test.go:210.",
+        "answer": "Task 5 fixes both requireFilters probes, and acceptance A3 runs the whole packages/daemon module from each package's own directory rather than internal/workspace alone."
+      },
+      {
+        "finding": "F4: refusing an empty Dir is a runtime refusal that breaks twenty in-package call sites, the exported FeedGit and FeedGitWithin (called from repocache/server.go:352, 441), and four tests (isolation_test.go:540, 636, 759 and errwaitdelay_test.go:31). The intended invariant 'under the state directory' is also false for the repository cache, which has no state directory (repocache/server.go:198).",
+        "answer": "Task 2 names every site in design D4's table, including the four test call sites, and D4 states the invariant as 'the directory the command operates on, or its parent when the command creates it' rather than 'under the state directory'."
+      },
+      {
+        "finding": "F5: giving the two rootless commands a Dir arms guardWorkspace for them for the first time, and refuseSymlinkedLayout (config.go:354) would then walk layoutDepth = 4 ancestors from <state>/repos/github.com/<owner> and Lstat the state directory itself, contradicting config.go:352-353 ('The state directory itself is not checked').",
+        "answer": "Design D2 makes jjWorkspaceRoot resolve from -R alone, so Command.Dir is purely the working directory and the guard is unchanged for every command. The existing subtest TestTheRunnerRefusesASymlinkedLayoutDirectory/a_symlinked_state_directory_is_allowed (isolation_test.go:719) is named as the check, and task 1 orders D2 before D1."
+      },
+      {
+        "finding": "F6: a Dir under the state directory does not close the hole when the state directory is itself inside a jj repository, because jj walks up and has no ceiling option; and the intended regression test, with the decoy only at the process cwd, would pass against code that names a Dir but adds no ancestor check.",
+        "answer": "Design D3 refuses an enclosing workspace for a jj command that creates a repository, with the alternative (accept the gap) named and rejected on the evidence in F2. Acceptance A1 half (b) puts the state directory inside the decoy, which is what distinguishes D3 from D4."
+      },
+      {
+        "finding": "F7: item 3's GIT_* clause is not this failure's cause, and the comment's runSetupWith guess is wrong: runSetupWith always sets a working directory (workspace_test.go:179), Go's exec keeps the last duplicate so the test's appends win, and no variable the pod sets names /legion/repos. The residue is that runSetup leaves the pod's GIT_CONFIG_COUNT=5 block intact, so a fixture git carries credential.https://github.com.helper=!legion git-credential and core.hooksPath=/dev/null.",
+        "answer": "Recorded as spec departure 4. The clause is satisfied rather than argued away: design D5 strips the inherited GIT_CONFIG_* block from the provisioning environment (a production defect, since isolatedGitConfig and pinGitConfig intend 'no configuration but its own' and pinGitConfig appends after the inherited count), and design D6 gives the fixture helper a fixtureEnvironment that drops the inherited git identity and configuration."
+      },
+      {
+        "finding": "F8: the spec's facts about which tests fail no longer hold - ten check_wake tests not eight, the rig's repository is sjawhar/legion (check_wake_test.go:242) not acme/widgets, hostWorkspace (check_wake_test.go:285-288, from 2dbeca18b9c2) makes the launch provision nothing, and merged-root-waits.sh's driver sets rt.InPod = true (merged_root_waits_live_test.go:126-136).",
+        "answer": "Recorded as spec departures 1 and 2 with the measurements, and no acceptance line quotes the spec's test names."
+      },
+      {
+        "finding": "F9: delivered item 2 ('a test run with outbound network blocked') names no command and cannot pass as written: the e2e script requires LEGION_TEST_PG_DSN (live-daemon-proof.sh:77-78) and runs go install nats-server unless LEGION_E2E_NATS_BIN is set (:82-94), and six daemon tests build binaries that reach proxy.golang.org on a cold module cache.",
+        "answer": "Replaced by acceptance A3 (the whole module under a read-only /legion/repos, with a Postgres and nats-server started on the issue's volume), A5 (the e2e script with LEGION_E2E_NATS_BIN set and a warm module cache, reaching nothing but loopback) and A6 (CI's daemon-go job)."
+      },
+      {
+        "finding": "F10: item 3's proof names no command, and 'the real clone' does not exist on a GitHub runner, so taken literally CI would never guard the regression.",
+        "answer": "Split into acceptance A1, a runner-portable regression test that must fail before the fix and pass after, and acceptance A3, the pod proof whose read-only mount makes any write an error rather than silent damage."
+      },
+      {
+        "finding": "F11: item 1's 'never github.com' has no check, and two tests reach real GitHub deliberately as a devbox release gate (internal/api/real_github_test.go:24, 31-35; real_github_ready_test.go:34-35).",
+        "answer": "Acceptance A4 is a tester step: one suite run under jj and git PATH shims asserting no child resolves an unrewritten github.com URL and no child runs with the test process's working directory, with the LEGION_REAL_GITHUB gate named as the kept exception."
+      },
+      {
+        "finding": "F12: repository rules that bind - docs/testing.md:3 is the file for a test rule the code under test does not show, and none of its four sections covers this one; semantic line breaks bind any guide edited; no changelog fragment is needed because AGENTS.md:537-539 limits fragments to the seven CHANGELOG_PACKAGES and packages/daemon/.changie.yaml does not exist; skills/AGENTS.md does not bind.",
+        "answer": "Task 8 adds the docs/testing.md section and runs bun scripts/semantic-line-breaks.ts on it, and the plan states the changelog and skills conclusions so no round is spent on them."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "The spec's summary says eight daemon check_wake tests fail on main in a Legion issue pod, e.g. TestAnIssueDeployedEventWakesTheCheck at check_wake_test.go:433, and that they clone the stand-in repository acme/widgets.",
+      "plan": "The plan treats that claim as no longer true and builds no work on it. check_wake_test.go holds ten tests, not eight; the rig's repository is sjawhar/legion (check_wake_test.go:242), never acme/widgets; and 2dbeca18b9c2 (2026-10-27 16:41Z, nine hours after the spec was written) made newCheckWakeRig call hostWorkspace (check_wake_test.go:285-288), so the launch provisions nothing.",
+      "evidence": "Measured on main 3f7b3e75 in a Legion issue pod with /legion/repos bind-mounted read-only, against a locally started Postgres and nats-server v2.10.22: all ten tests pass from the package directory and from a neutral one, exit 0, ~16 s per run, and no output names /legion/repos, 'Read-only file system', 'secure config' or a github.com clone. A PATH-shim trace of all 39 jj and git children shows exactly one command with no working directory, jj --version (tools.go:133), which opens no repository.",
+      "outcome": {
+        "kind": "changed",
+        "summary": [
+          "Eight daemon check_wake tests fail on main in a pod: false at 3f7b3e75. All ten pass.",
+          "Those tests clone acme/widgets: false. The rig's repository is sjawhar/legion and it clones nothing."
+        ]
+      }
+    },
+    {
+      "spec": "The spec's summary says scripts/e2e/merged-root-waits.sh clones the stand-in repository acme/widgets and fails on main in a pod.",
+      "plan": "The plan takes the script as already free of that clone and keeps only an end-to-end run of it in a pod as acceptance A5, because nobody has run it there.",
+      "evidence": "The script contains no git, gh or jj command; its driver sets rt.InPod = true with a comment naming this exact failure (merged_root_waits_live_test.go:126-136), so the daemon provisions no host workspace. Its only reach outside the process is go install github.com/nats-io/nats-server/v2@v2.10.22 (scripts/e2e/lib/live-daemon-proof.sh:82-94), skipped when LEGION_E2E_NATS_BIN is set, plus the Postgres LEGION_TEST_PG_DSN names.",
+      "outcome": {
+        "kind": "changed",
+        "summary": [
+          "merged-root-waits.sh clones acme/widgets: false. It contains no clone and its driver provisions nothing."
+        ]
+      }
+    },
+    {
+      "spec": "Delivered item 1: every daemon test and e2e script that provisions a workspace clones a local fixture repository (a bare repository created by the test), never github.com, so they pass with no network.",
+      "plan": "The plan does not convert any test to a local fixture, because every one already is. It replaces item 1 with the working-directory invariant: no git or jj that the daemon, its CLI or their tests start inherits the process's working directory, and no jj command that creates a repository runs below a .jj it does not own. Item 1's 'never github.com' survives as acceptance A4, a PATH-shim run of the suite, with the LEGION_REAL_GITHUB devbox release gate as the named exception.",
+      "evidence": "recordingRunner.Run rewrites every clone and fetch remote to the local bare remote (workspace_test.go:92-111), which seedRemote creates in a t.TempDir() (workspace_test.go:157-167, 218); the comment at workspace_test.go:127-128 says so. The recorded argv still reads https://github.com/acme/widgets (asserted at workspace_test.go:569-571), which is what makes the spec's reading plausible, but no process resolves it. The measured cause is config.go:232 with an empty Dir, which item 1 does not name at all.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "Replaces item 1 with: the runner refuses a command that names no working directory, and a jj command that creates a repository refuses an enclosing .jj (acceptance A1 and A2).",
+          "Keeps 'never github.com' as acceptance A4, scoped to tests that run by default, with LEGION_REAL_GITHUB named as the kept exception."
+        ]
+      }
+    },
+    {
+      "spec": "Delivered item 3, added by dispatch://INFRA-623/comment/b3c0117c-3441-4594-b56d-4725d80fb533: every workspace test runs against a temporary repository with an environment that cannot resolve to the pod's real clone (no inherited GIT_* or repository-cache paths), proven by a test that runs the package in a pod-like environment and checks the real clone's refs are unchanged. The comment names runSetupWith passing os.Environ() as the likely vector.",
+      "plan": "The plan records that the named vector is wrong and that no inherited variable can resolve to the pod's real clone, then satisfies the clause anyway as two hardening designs, and splits the proof in two.",
+      "evidence": "runSetupWith always sets a working directory (workspace_test.go:179), and Go's exec de-duplicates Cmd.Env keeping the last entry, so fromOrigin's appends override the pod's (workspace_test.go:198). The pod's variables are GIT_CONFIG_COUNT=5 with credential.https://github.com.helper, credential.https://github.com.useHttpPath, core.fsmonitor and core.hooksPath, GIT_AUTHOR_*/GIT_COMMITTER_* and JJ_CONFIG; none names /legion/repos, and LEGION_STATE_DIR is /var/run/legion/state. The real residue is that pinGitConfig (config.go:500-517) appends its pins after the inherited GIT_CONFIG_COUNT, against isolatedGitConfig's stated intent (fetch.go:29-32), so a pod's role credential helper reaches a provisioning git.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "The GIT_* clause becomes design D5 (strip the inherited GIT_CONFIG_* block from the provisioning environment, a production fix) and design D6 (fixtureEnvironment in the test helper), not an environment-scrubbing pass justified by this failure.",
+          "'A test that runs the package in a pod-like environment and checks the real clone's refs are unchanged' becomes acceptance A1, a runner-portable regression test that fails before the fix, plus acceptance A3, the pod run with /legion/repos bind-mounted read-only so any write is an error rather than a ref comparison after the fact."
+        ]
+      }
+    },
+    {
+      "spec": "The spec frames the defect as a test-environment problem: the tests fail in a Legion issue pod and pass on GitHub's runners, and all three delivered items are about tests and scripts.",
+      "plan": "The plan fixes the production runner and its call sites, and treats the test failure as the symptom. Designs D1, D2, D3, D4 and D5 all change production code in packages/daemon/internal/workspace; acceptance A2 checks the production refusals directly.",
+      "evidence": "execRunner (config.go:201) is the production runner, and under runtime: tmux the daemon provisions host workspaces in its own process (daemon.go:1076 hostWorkspaces: !rt.ProvisionsWorkspaces(), specs.go:151, outbox.go:1286). deploy/kubernetes/daemon/legion.yaml.example:15 ships state_dir: ./state, and config/config.go:883 with :851-856 resolves a relative state_dir against the config file's directory, so a legion.yaml kept in a checkout puts <checkout>/state/repos/github.com/<owner>/<repo> under <checkout>/.jj and every provision then writes that checkout's repository. The Kubernetes path is not exposed: the pod's containers set WorkingDir: /legion (sandbox/podkind.go:169, :186, names.go:57).",
+      "outcome": {
+        "kind": "changed",
+        "scope": "Grows from the tests and the e2e script to the production provisioning runner and its twenty call sites in packages/daemon/internal/workspace, plus the two exported helpers FeedGit and FeedGitWithin, and the two test helpers in packages/daemon/cmd/legion and packages/daemon/internal/runtime/sandbox that hold the same defect."
+      }
+    }
+  ]
+}

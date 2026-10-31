@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-623",
+  "completed": "2026-10-31T13:47:17Z",
+  "round": 2,
+  "reviewedHead": "1199e95aa961992cb7aa1849c15373cacde353cd",
+  "codeHead": "bd2921e6133a951d1a43a3a280784201a634b9fc",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 3,
+  "thermonuclear": {
+    "deepReview": "Verdict: APPROVE at 1199e95a (four Minor findings: 1, 2 and 4 adopted below; 3, the stale PR-body pointers, fixed by the reviewer in the body)",
+    "codeQuality": "Verdict: CHANGES at 1199e95a (findings 1 and 3 adopted; 2, the legion.yaml hint in the refusal, judged not a defect as in round 1)"
+  },
+  "roundOneThreads": "All five round-1 threads were fixed in 6c8bb1f7 and bd2921e6 and resolved by the implementer. I replied on each one and accepted all five: PRRT_kwDORFy7ds6yQwSf, PRRT_kwDORFy7ds6yQwSj, PRRT_kwDORFy7ds6yQwSn, PRRT_kwDORFy7ds6yQwSp and PRRT_kwDORFy7ds6yQwSq.",
+  "prBodyEdits": "I made four edits to the PR body. 'Look at first' named resolveExisting, which no longer exists, and now names the current code. The CI line under 'Not proven / risk' now gives the current CI head. The Contract change census now lists the production caller of search 3 (sandbox/podkind.go:181) and its remaining hits, and every hit of search 5 the census had left out (clone.go:87,255; sandbox manifest.go, live_setup_*, boundary_test.go, controller_test.go; workspace_test.go). A Rollout line was added: an immediate refusal, naming the silent write it closes.",
+  "ci": "The required checks are ci-ok and pr-title. The CI head is 4d6744eb; its compare with 1199e95a touches only .legion/INFRA-623/. At 13:40Z its runs were still queued. I read that as no verdict. This request does not depend on CI.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/workspace/enclosingrepository_test.go",
+      "description": "No row of TestAJJThatCreatesARepositoryIsRefusedInsideOne holds the case this round made load-bearing: a `.jj` that is a symlink to a directory. jj opens that repository (measured by the deep review). Production refuses it through os.Stat, but a change to os.Lstat + IsDir would pass every row while jj went on to write the repository. The tester recorded the same gap. Add a row with the parent's .jj symlinked to a .jj directory, and expect a refusal that names it."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/workspace/config.go",
+      "description": "The -R invariant (Dir is the -R target) is kept by hand at three sites that rebuild runCheckedOnClone: bookmark.go:199-203, and config.go:836-840 and :858 in removeRepositoryIdentity. The invariant's list is also written twice, at config.go:540-544 and docs/testing.md:66-67. Route the three sites through runCheckedOnClone. State the invariant once, on onClone/runCheckedOnClone, where Dir is chosen, and have docs/testing.md point to it."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/workspace/config.go",
+      "description": "The refusal (:434) and its echoes (:225, :416, enclosingrepository_test.go:86 and :299-300, docs/testing.md:65 and :79-80) say the run writes the enclosing repository in every case. jj 0.45.1 writes config-id only when that repository still holds a legacy .jj/repo/config.toml. I measured a fresh 0.45.1 repository: it gained nothing. Make the claim conditional."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/workspace/config.go",
+      "description": "Two comments are stale. ':396-400' says 'Run's three refusals', but Run has more refusals, and one of the three it names is a strip that refuses nothing. ':533-534' says 'guardWorkspace is unchanged for every command', which describes the diff, not the code."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/workspace/enclosingrepository_test.go",
+      "description": "The comment at :57-62 calls the symlink row 'the live operator case, a legion.yaml kept inside a checkout with state_dir resolved against it'. A relative state_dir resolves lexically, with no symlink, so that case is the first row."
+    }
+  ],
+  "notAdopted": [
+    "code-quality 2 (the refusal restates legion.yaml's state_dir rule): as in round 1, the plan's risk section requires the refusal to name the way out, and the text is conditioned on runtime: tmux, which is true."
+  ]
+}

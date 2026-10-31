@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-623",
+  "completed": "2026-10-31T14:50:00Z",
+  "round": 4,
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Round 4 is the review's prose corrections, the table row round 3 asked for, and two call sites moved onto runCheckedOnClone, so each was checked rather than read. (a) The new row pins what it claims to pin: with os.Stat put back to os.Lstat in a scratch copy of this head, 'a .jj that is a symlink to a repository's .jj' fails and no other row of TestAJJThatCreatesARepositoryIsRefusedInsideOne or of TestProvisionLeavesTheEnclosingRepositoryUntouched does — my round-3 observation is closed and locked. (b) The corrected write claim matches what I measured in rounds 1 and 3: jj reads the enclosing repository's configuration whenever it opens it, and writes a config-id there only when that repository still holds a legacy .jj/repo/config.toml, which is why both the already-migrated shared clone and a fresh decoy showed no write at the base commit while a decoy carrying the legacy file did. (c) The two refactors (undescribedMove and removeRepositoryIdentity onto runCheckedOnClone) keep every jj child in its own -R: the PATH-shim trace of a real provision run at this head shows 11 of the 12 jj children each standing in exactly its own -R directory, none mismatched, and the 12th rootless under the guard. (d) The four refusal cases and the two over-refusal controls were driven again on the CLI at this head, and the whole module, the pod provision and merged-root-waits.sh re-run."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "Round 3's observation, now closed: the decision that a `.jj` which is a symlink to a repository counts — os.Stat rather than os.Lstat — is pinned by a test, and the behaviour it pins is what jj does.",
+      "surface": "go test on any machine, against a scratch copy of this head whose refuseEnclosingWorkspace reads the entry with os.Lstat again; and, for the behaviour itself, the production CLI against a real repository reached through such a link.",
+      "command": "go -C packages/daemon test -count=1 -run 'TestAJJThatCreatesARepositoryIsRefusedInsideOne|TestProvisionLeavesTheEnclosingRepositoryUntouched' ./internal/workspace, in that scratch copy; then $TMPDIR/tester/legion-r4 workspace-init provision --root $TMPDIR/tester/e2-host/state --feed /legion/feed, where e2-host/.jj is a symlink to a decoy repository's .jj",
+      "observed": "With os.Lstat restored, exactly one subtest fails: 'a .jj that is a symlink to a repository's .jj'. Every other row passes, so the row carries the pin by itself. On the CLI at this head the same shape is refused, exit 1, and the decoy is byte-identical (.jj content b4c095acfc607875 before and after) with no config-id written.",
+      "headSha": "99291f360b745d85f1c8dbd05b0db0b248a0f02a",
+      "negativeControl": "The same two tests at this head unmodified: ok — the row passes only with os.Stat in place. And jj's own reading, measured in round 3 on jj 0.45.1: `jj status` below a directory whose `.jj` is a symlink to a repository reports that repository's working copy, so following the link is what the guard must do."
+    },
+    {
+      "criterion": "Delivered item 1 of dispatch://INFRA-623/spec, through every way of naming the state directory, with the refusal naming the path configured and the path jj stands in.",
+      "surface": "The production CLI an issue pod's init container runs, `legion workspace-init provision` built at this head, against decoys of the tester's own carrying the legacy .jj/repo/config.toml, provisioning from the pod's real feed /legion/feed.",
+      "command": "$TMPDIR/tester/legion-r4 workspace-init provision --issue INFRA-623 --repo sjawhar/legion --default-branch main --root <each case> --credential-helper '!legion git-credential' --feed /legion/feed",
+      "observed": "A symlink whose target is inside a repository: exit 1, 'refusing to run jj in …/e1-link/repos/github.com/sjawhar, which resolves to …/e1-repo/state/repos/github.com/sjawhar: …/e1-repo/.jj is a Jujutsu repository …', decoy byte-identical (.jj content 82fdf1889efc0d7e before and after), no config-id. A `.jj` that is a symlink to another repository's `.jj`: exit 1, that repository byte-identical (b4c095acfc607875), no config-id.",
+      "headSha": "99291f360b745d85f1c8dbd05b0db0b248a0f02a",
+      "negativeControl": "The over-refusal direction, which is the worse failure: a state directory below a directory holding a regular file named `.jj` provisions (exit 0, 16 entries in the workspace), right because jj reads no repository there; a symlinked state directory whose target sits in no repository provisions (exit 0, 16 entries); and a symlink loop as --root, measured in round 2, is refused with nothing written. At the base commit 4933464f, measured in round 1, the first case above exits 0 reporting success while writing config-id into that repository."
+    },
+    {
+      "criterion": "A3 — the daemon suite passes in a Legion issue pod with /legion/repos mounted read-only, each package from its own directory; every failure is a package this pod cannot run.",
+      "surface": "The Legion issue pod itself, /legion/repos bind-mounted read-only (unshare -Urm, mount --bind, mount -o remount,bind,ro), the whole packages/daemon module, each test binary in its own package directory inside $LEGION_WORKSPACE, against the PostgreSQL 17.11 and nats-server v2.10.22 on the issue's volume (the tester's own database legiontest623).",
+      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:54329/legiontest623?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:44222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:48222 unshare -Urm $TMPDIR/ro.sh \"$LEGION_WORKSPACE\" go -C packages/daemon test -count=1 -timeout 40m ./...",
+      "observed": "52 packages ok — internal/workspace ok 392.748s, internal/workflow ok 673.863s, and the two the refactors touch most, internal/repocache ok 43.777s and internal/shim ok 3.615s, among them — and 0 lines naming /legion/repos, 0 naming 'Read-only file system', 0 naming 'secure config'. The seven failing packages and their twelve tests are the same set as rounds 1, 2 and 3: cmd/legion, internal/daemon (five), internal/intake and internal/natsauth (panic: rootless Docker not found), internal/launcher (two, which read the pod's own OMP_SESSION_SQL_DSN_FILE), internal/runtime/sandbox (the guard's CAP_DAC_OVERRIDE defeating its os.Chmod(dir, 0) isolation) and internal/runtime/tmux (no tmux in the pod).",
+      "headSha": "99291f360b745d85f1c8dbd05b0db0b248a0f02a",
+      "negativeControl": "Recorded in round 1 and unchanged: internal/launcher and internal/runtime/tmux, the two packages the implementer had not named, fail with the same three messages at the base commit 4933464f8ece59afaa387baadbb6928c4b9cee2a in a scratch copy under the same guard, so they are the pod's and not the branch's."
+    },
+    {
+      "criterion": "A4 and delivered item 2, with this round's new ground: two call sites moved onto runCheckedOnClone, and since a -R is no fence, every jj child must still stand in its own -R.",
+      "surface": "`legion workspace-init provision` built at this head, run from inside $LEGION_WORKSPACE with /legion/repos read-only, under PATH shims for git and jj that log each child's own `pwd -P`, its argv and its GIT_CONFIG_* environment before exec'ing the real binary.",
+      "command": "SHIMLOG=$TMPDIR/tester/trace-r4.log unshare -Urm $TMPDIR/ro.sh \"$LEGION_WORKSPACE\" env SHIMLOG=… PATH=$TMPDIR/tester/shims:$PATH $TMPDIR/tester/legion-r4 workspace-init provision --issue INFRA-623 --repo sjawhar/legion --default-branch main --root $TMPDIR/tester/stateW --credential-helper '!legion git-credential' --feed /legion/feed",
+      "observed": "23 children, 0 of them in /legion/workspaces/sjawhar/legion/infra-623. Of the 12 jj children, 11 name a -R and every one runs in exactly that directory (9 in the shared clone, 1 in the temporary clone, 1 in the issue workspace) with no mismatch, and the 12th is the rootless `jj git init --colocate` under the guard. Every child's GIT_CONFIG_* block is the command's own plus the pin and nothing else, so the pod's five pairs reach none of them. The same run left the pod's shared clone byte-identical: .jj file set 5bc5330a…, .jj content 1e640f6e…, git refs 531ecdbf…, each equal before and after, with the provision exiting 0.",
+      "headSha": "99291f360b745d85f1c8dbd05b0db0b248a0f02a",
+      "negativeControl": "The same trace with the binary built at the base commit 4933464f, recorded in round 1: 23 of 23 children ran in /legion/workspaces/sjawhar/legion/infra-623, each carrying the pod's inherited block, credential.https://github.com.helper='!legion git-credential' among them."
+    },
+    {
+      "criterion": "A5 — scripts/e2e/merged-root-waits.sh runs end to end in a Legion issue pod.",
+      "surface": "The live proof itself: the whole Go daemon over the PostgreSQL 17.11 on the issue's volume and a nats-server v2.10.22 of the run's own, driven through Dispatch and GitHub envelopes and the daemon's own HTTP routes.",
+      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:54329/legiontest623?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/harness/bin/nats-server bash scripts/e2e/merged-root-waits.sh",
+      "observed": "exit 0.",
+      "headSha": "99291f360b745d85f1c8dbd05b0db0b248a0f02a",
+      "negativeControl": "The same command with LEGION_TEST_PG_DSN unset, measured in rounds 1 and 2: 'FAIL prerequisites: LEGION_TEST_PG_DSN is required …', 'merged root waits e2e: FAIL at prerequisites after 0s'."
+    }
+  ],
+  "observations": [
+    "Both of the tester's standing observations are now closed: round 2's, that the refusal named only one path, and round 3's, that following symlinks was load-bearing and unpinned. No new observation this round.",
+    "The corrected write claim is the one I measured. jj reads the enclosing repository's configuration whenever it opens that repository, and writes into it only when a legacy .jj/repo/config.toml is there to migrate. That is why the base-commit control stopped reproducing on the pod's shared clone once it held a config-id, and why every decoy of these four rounds plants the legacy file."
+  ],
+  "ciAtTheHead": "Read on GitHub at 14:22Z, not re-run and not waited for: the CI run at this head, 41209286823, is `queued` (created 14:15:28Z). Every CI run since 41184469645 at the early code head 09c1d5c1 — the last one to conclude, success — was cancelled by the next push, so no CI lane has settled on the branch's current code. A6 is unsettled at this head and is the reviewer's read before it approves.",
+  "environment": "The acceptance criteria call for no secret-scrub evidence, and none was gathered. What the environment contributed is named above: the pod's own GIT_CONFIG_* block, which the PATH-shim trace reads, and OMP_SESSION_SQL_DSN_FILE, which internal/launcher's two pod-only failures read. Nothing of this round was pointed at the sessions database OMP_SESSION_SQL_DSN_FILE names: every run used the tester's own database legiontest623 in the harness PostgreSQL at 127.0.0.1:54329. That PostgreSQL and the nats-server at 127.0.0.1:44222 are left running for the next role."
+}
