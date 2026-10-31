@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
 import type { Agent, AskFollower, Subscriber } from "../../api/types";
 import { AskRecipients, type AskRecipientsProps, reachLabel, reachRows } from "./AskRecipients";
 
@@ -318,6 +318,28 @@ test("AskRecipients says when the subscribers fetch failed and retries it, inste
     );
     expect(page.getIssueSubscribers).toHaveBeenCalledTimes(2);
     expect(within(section).queryByRole("alert")).toBeNull();
+  } finally {
+    page.unmount();
+  }
+});
+
+// While Envoy's agent list refills, the card says so - not that the listener is unreachable -
+// counts nobody, and shows each follower's running state as unknown rather than not running.
+test("AskRecipients says the agent list is refilling and claims no count or offline follower", async () => {
+  const refilling = new ApiError(503, { code: "ENVOY_REFILLING", error: AGENT_LIST_REFILLING });
+  const page = renderRecipients({ agents: refilling, subscribers: refilling });
+
+  try {
+    const section = screen.getByRole("region", { name: "Recipients" });
+    const notice = await within(section).findByTestId("agent-list-refilling");
+    expect(notice.textContent).toBe(AGENT_LIST_REFILLING);
+    expect(within(section).queryByRole("alert")).toBeNull();
+    expect(within(section).queryByRole("button", { name: /^Reaches/ })).toBeNull();
+    expect(within(section).getByRole("button", { name: "Recipients" })).toBeTruthy();
+    await waitFor(() =>
+      expect(within(section).getAllByRole("img", { name: "Running state unknown" })).toHaveLength(2)
+    );
+    expect(within(section).queryByRole("img", { name: "Not running" })).toBeNull();
   } finally {
     page.unmount();
   }

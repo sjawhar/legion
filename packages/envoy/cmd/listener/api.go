@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
@@ -30,6 +31,8 @@ type streamInfoLookup interface {
 	StreamInfo(stream string, opts ...nats.JSOpt) (*nats.StreamInfo, error)
 }
 
+// apiError is the body of a /v1 error answer. Code names an answer a caller acts on beyond its
+// status (listRefillingCode); every other answer leaves it out.
 type apiError struct {
 	Code     string   `json:"code,omitempty"`
 	Error    string   `json:"error"`
@@ -195,6 +198,25 @@ func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 
 func writeJSONError(w http.ResponseWriter, status int, message string, expected ...string) {
 	writeJSON(w, status, apiError{Error: message, Expected: expected})
+}
+
+// listRefillingCode, listRefillingMessage and listRefillingRetryAfter are the refilling answer of
+// the two list routes (writeListRefilling).
+const (
+	listRefillingCode       = "refilling"
+	listRefillingMessage    = "envoy: the agent list is refilling; try again in a moment"
+	listRefillingRetryAfter = "5"
+)
+
+// writeListRefilling answers a list read (GET /v1/sessions, GET /v1/interests/) whose cache copy
+// cannot be served (kvwatch.ErrRefilling): it has not completed a read of its bucket yet, or has
+// not followed the bucket for longer than the stale bound. A 503 with Retry-After and the
+// refilling code, never a list: a list from that copy could be missing a live agent, and a caller
+// would take the missing row for an absent agent. The /v1 start gate answers the same while no
+// copy has been read at all.
+func writeListRefilling(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", listRefillingRetryAfter)
+	writeJSON(w, http.StatusServiceUnavailable, apiError{Error: listRefillingMessage, Code: listRefillingCode})
 }
 
 // writeNATSError answers a request NATS did not serve. What NATS refuses however often it is sent
@@ -794,7 +816,26 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID str
 	if err != nil {
 		return sessionInfo{}, err
 	}
-	info := sessionInfo{
+	info := sessionInfoWith(sessionID, entry, roles)
+	readCtx, cancel := context.WithTimeout(ctx, sessionInterestReadTimeout)
+	defer cancel()
+	interest, err := registry.Get(readCtx, sessionID)
+	switch {
+	case errors.Is(err, nats.ErrKeyNotFound):
+		return info, nil
+	case interestReadAnswered(err):
+		return info, err
+	case err != nil:
+		return sessionInfo{}, err
+	}
+	info.Topics = interest.Topics
+	return info, nil
+}
+
+// sessionInfoWith is the row sessionID's entry makes, holding roles and no topics yet: the one
+// shape both sessionInfoFor and listedSessionInfo fill in, each from the read its route may make.
+func sessionInfoWith(sessionID string, entry session.SessionEntry, roles []string) sessionInfo {
+	return sessionInfo{
 		SessionID:      sessionID,
 		MachineID:      entry.MachineID,
 		Host:           entry.HostOrMachine(),
@@ -809,19 +850,6 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID str
 		Plugin:         entry.Plugin,
 		PluginVersion:  entry.PluginVersion,
 	}
-	readCtx, cancel := context.WithTimeout(ctx, sessionInterestReadTimeout)
-	defer cancel()
-	interest, err := registry.Get(readCtx, sessionID)
-	switch {
-	case errors.Is(err, nats.ErrKeyNotFound):
-		return info, nil
-	case interestReadAnswered(err):
-		return info, err
-	case err != nil:
-		return sessionInfo{}, err
-	}
-	info.Topics = interest.Topics
-	return info, nil
 }
 
 // interestReadAnswered reports whether err, from a read of an interest record other than the
@@ -852,26 +880,71 @@ func writeInterestRecordUnreadable(w http.ResponseWriter, sessionID string, err 
 	))
 }
 
-// sessionsHandler returns all live sessions by iterating the session registry
-// (envoy_sessions, 5-min TTL — only live sessions) and enriching each with
-// topic data from the interests registry (envoy_interests). Every interest read shares one
-// sendRequestBudget deadline, so however many rows miss the interest cache the list answers
-// inside it. Each row's roles are those whose claims name the session (sessionInfoFor). A session
-// whose interest read answered with no topics to give - a record this build cannot decode or a key
-// the bucket refuses (interestReadAnswered) - is listed with no topics rather than refusing the
-// list; any other error, a claims view that cannot answer among them, is a read that did not answer
-// and ends the request with the bus-unavailable 503. The registry logs a record this build cannot
-// decode at WARN itself; a key the bucket refuses is logged here at WARN, once per listed session,
-// through the registry's logger, the listener's own.
+// listedSessionInfo is sessionInfoFor for one row of GET /v1/sessions: its topics come from the
+// interest copy alone (store.Registry.Cached), never the read-through Get, so a list makes no
+// per-key bucket read, which over a slow KV leader would hold the answer for seconds per row.
+// listedSessions has already checked that the copy can be served, so a session it holds no
+// interest for subscribed to nothing. The roles are the ones whose claims name the session, as
+// every other answer's are (sessionInfoFor), and a claims view that cannot answer is returned
+// alone, as a read that did not answer.
+func listedSessionInfo(registry *store.Registry, sessionID string, entry session.SessionEntry) (sessionInfo, error) {
+	roles, err := registry.RolesHeldBy(sessionID)
+	if err != nil {
+		return sessionInfo{}, err
+	}
+	info := sessionInfoWith(sessionID, entry, roles)
+	if interest, found := registry.Cached(sessionID); found {
+		info.Topics = interest.Topics
+	}
+	return info, nil
+}
+
+// listedSessions is the one listing of live sessions, which GET /v1/sessions answers and the
+// envoy_active_sessions gauge counts: the session copy's rows, once both copies a row is built from
+// can be served. A row joins the interest copy for its topics, so a session copy that can be
+// served beside an interest copy that cannot would answer rows stripped of their subscriptions.
+// Servable reads each watcher's state only, never a cache, so the check takes no cache lock. Its
+// error is kvwatch.ErrRefilling while either copy cannot be served (writeListRefilling).
+func listedSessions(registry *store.Registry, sessions *session.SessionRegistry) ([]session.ListEntry, error) {
+	if err := registry.Servable(); err != nil {
+		return nil, err
+	}
+	if err := sessions.Servable(); err != nil {
+		return nil, err
+	}
+	return sessions.List()
+}
+
+// listedSessionCount is how many rows listedSessions would answer, counted under the session
+// copy's shared lock with no list built: the gauge wants the number alone (registerListGauges).
+// It refuses for the same reasons a list does, so a copy that cannot be served records no sample
+// rather than a count of part of a bucket.
+func listedSessionCount(registry *store.Registry, sessions *session.SessionRegistry) (int, error) {
+	if err := registry.Servable(); err != nil {
+		return 0, err
+	}
+	if err := sessions.Servable(); err != nil {
+		return 0, err
+	}
+	return sessions.LiveCount(), nil
+}
+
+// sessionsHandler answers GET /v1/sessions with listedSessions, enriching each row from the
+// interest copy and the role claims alone (listedSessionInfo). Each row's roles are those whose
+// claims name the session; a claims view that cannot answer is a read that did not answer and
+// ends the request with the bus-unavailable 503. While either copy cannot be served it answers
+// the refilling 503 (writeListRefilling), never a list that could be missing a live agent.
 func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
-		defer cancel()
-		entries, err := sessions.List()
+		entries, err := listedSessions(registry, sessions)
+		if errors.Is(err, kvwatch.ErrRefilling) {
+			writeListRefilling(w)
+			return
+		}
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -883,16 +956,10 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 			if !strings.Contains(entry.Dir, dirFilter) || !strings.Contains(entry.Title, titleFilter) {
 				continue
 			}
-			info, err := sessionInfoFor(ctx, registry, entry.SessionID, entry.SessionEntry)
-			if err != nil && !interestReadAnswered(err) {
+			info, err := listedSessionInfo(registry, entry.SessionID, entry.SessionEntry)
+			if err != nil {
 				writeBusUnavailable(w, err)
 				return
-			}
-			if errors.Is(err, bus.ErrRefused) {
-				registry.Logger().Warn("session listed with no topics: its interest record could not be read",
-					slog.String("session_id", entry.SessionID),
-					slog.String("error", err.Error()),
-				)
 			}
 			result = append(result, info)
 		}
@@ -1006,7 +1073,15 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 				writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 				return
 			}
-			items := registry.List()
+			items, err := registry.List()
+			if errors.Is(err, kvwatch.ErrRefilling) {
+				writeListRefilling(w)
+				return
+			}
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			rows := make([]interestRow, 0, len(items))
 			for _, item := range items {
 				rows = append(rows, interestRowFor(sessions, item))

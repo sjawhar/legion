@@ -1913,8 +1913,11 @@ function routeHeldBySession(issue: RoutedIssue): boolean {
  * An issue's route as every agent surface reads it: where its messages go and whether that
  * reaches anyone, from the `route_status` the server resolved on this read. A route to a role
  * nobody holds, or to a session that is not running, reaches nobody as of the server's copy of
- * the listener's session list, at most 5 s old,
- * so it says so - and says "right now", because a restarting session is absent for minutes.
+ * the listener's session list, at most 5 s old, so it says so - and says "right now", because a
+ * restarting session is absent for minutes. An `unknown` route says why from
+ * `route_status_reason`: a listener whose agent list is refilling did answer and will judge it
+ * in a moment, while one that is unreachable (or a server too old to give a reason) did not
+ * answer at all.
  */
 function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): string {
   if (issue.route === null) return "none";
@@ -1927,7 +1930,10 @@ function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): st
     no_holder: issue.route.startsWith("role:")
       ? " (nobody holds it right now)"
       : " (that session is not running right now)",
-    unknown: " (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
+    unknown:
+      issue.route_status_reason === "refilling"
+        ? " (the Envoy listener's agent list is refilling, so whether it reaches anyone is unknown; try again in a moment)"
+        : " (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
   };
   return issue.route + (issue.route_status == null ? "" : reach[issue.route_status]);
 }
@@ -3712,6 +3718,7 @@ export async function executeDispatchTool(
         route: row.route ?? null,
         route_status: row.route_status ?? null,
         route_holder: row.route_holder ?? null,
+        route_status_reason: row.route_status_reason ?? null,
         updated_at: row.updated_at,
         progress: row.progress,
       }));

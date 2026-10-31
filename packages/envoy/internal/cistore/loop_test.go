@@ -871,7 +871,7 @@ func TestSummaryTickRefusesReclaimedClaimWhoseSnapshotWasReplaced(t *testing.T) 
 	originalKV := replicaA.watcher.KV()
 	var keyGets int
 	useKV(t, replicaA, &interleavingKV{
-		KeyValue: originalKV,
+		KeyValue: originalKV.Legacy(),
 		beforeGet: func(got string) {
 			if got != key {
 				return
@@ -883,7 +883,7 @@ func TestSummaryTickRefusesReclaimedClaimWhoseSnapshotWasReplaced(t *testing.T) 
 			}
 		},
 	})
-	t.Cleanup(func() { useKV(t, replicaA, originalKV) })
+	t.Cleanup(func() { useKV(t, replicaA, originalKV.Legacy()) })
 
 	bPublished := make(chan struct{})
 	pub := &recPub{onPublish: func(contracts.Envelope) {
@@ -1009,7 +1009,7 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 		blocked bool
 	}
 	useKV(t, store, &interleavingKV{
-		KeyValue: originalKV,
+		KeyValue: originalKV.Legacy(),
 		afterUpdate: func(updatedKey string, _ []byte, _ uint64) {
 			claimGate.Lock()
 			if updatedKey != key || claimGate.blocked {
@@ -1042,7 +1042,7 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("summary tick did not resume")
 	}
-	useKV(t, store, originalKV)
+	useKV(t, store, originalKV.Legacy())
 
 	if got := pub.count(); got != 0 {
 		t.Fatalf("rearmed claim published %d stale envelopes, want 0", got)

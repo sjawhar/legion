@@ -232,6 +232,58 @@ func TestListInterestsReportsUnavailableListener(t *testing.T) {
 	}
 }
 
+// The listener refuses a list it cannot stand behind with a 503 whose code is "refilling"
+// (cmd/listener writeListRefilling). Both list reads return that as ErrRefilling carrying the
+// listener's Retry-After, never as ErrUnavailable; any other 503 - another code, no code, a body
+// that is not JSON - stays ErrUnavailable.
+func TestListReadsTellARefillingListenerFromAnUnavailableOne(t *testing.T) {
+	reads := map[string]func(*Client) error{
+		"sessions": func(c *Client) error {
+			_, err := c.Sessions(context.Background())
+			return err
+		},
+		"interests": func(c *Client) error {
+			_, err := c.ListInterests(context.Background())
+			return err
+		},
+	}
+	answer := func(retryAfter, body string) *httptest.Server {
+		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if retryAfter != "" {
+				w.Header().Set("Retry-After", retryAfter)
+			}
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(body))
+		}))
+		t.Cleanup(listener.Close)
+		return listener
+	}
+	const refilling = `{"error":"envoy: the agent list is refilling; try again in a moment","code":"refilling"}`
+	for name, read := range reads {
+		t.Run(name, func(t *testing.T) {
+			for retryAfter, want := range map[string]string{"7": "7", "": ""} {
+				err := read(New(answer(retryAfter, refilling).URL))
+				var refused *RefillingError
+				if !errors.Is(err, ErrRefilling) || errors.Is(err, ErrUnavailable) || !errors.As(err, &refused) {
+					t.Fatalf("refilling 503: err = %v, want ErrRefilling and not ErrUnavailable", err)
+				}
+				if refused.RetryAfter != want {
+					t.Fatalf("refilling 503 with Retry-After %q: RetryAfter = %q, want %q", retryAfter, refused.RetryAfter, want)
+				}
+			}
+			for _, body := range []string{
+				`{"error":"service starting","code":"starting"}`,
+				`{"error":"envoy: the message bus did not answer: no responders"}`,
+				"listener restarting\n",
+			} {
+				if err := read(New(answer("1", body).URL)); !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrRefilling) {
+					t.Fatalf("503 %q: err = %v, want ErrUnavailable and not ErrRefilling", body, err)
+				}
+			}
+		})
+	}
+}
+
 func TestInterestReturnsOneSessionsTopics(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/interests/s1" || r.Method != http.MethodGet {

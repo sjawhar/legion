@@ -501,7 +501,7 @@ func TestE2E_InterestReaperCleanup(t *testing.T) {
 		return getErr == nil && current.UpdatedAt == interest.UpdatedAt
 	})
 
-	reaped, err := env.registry.Reap(func(string) bool { return false }, store.InterestReapGrace)
+	reaped, err := env.registry.Reap(func(string) (bool, error) { return false, nil }, store.InterestReapGrace)
 	if err != nil {
 		t.Fatalf("reap stale interests: %v", err)
 	}

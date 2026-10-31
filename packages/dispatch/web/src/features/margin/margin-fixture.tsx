@@ -22,6 +22,7 @@ export const specArtifact: Artifact = {
 export const issue: IssueDetails = {
   route_status: null,
   route_holder: null,
+  route_status_reason: null,
   artifacts: [specArtifact],
   children: [],
   closed_at: null,

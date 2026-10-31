@@ -3,6 +3,7 @@ package api
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -38,12 +39,18 @@ import (
 // `dispatch issues --help` (route_status) ask for two reads ten minutes apart instead.
 
 // routeRoster is one listener answer about who is running. answered is false when the listener
-// is unconfigured or did not answer; every route then reads unknown. Its maps and its session
-// slice are read-only once built, since every read the cache serves shares them: a reader that
-// sorts or edits the sessions copies them first, and never writes a session's Roles or
-// Capabilities, which every copy shares too.
+// is unconfigured or gave no list; every route then reads unknown, and reason says why:
+// model.RouteReasonRefilling for the listener's refilling answer, whose Retry-After rides in
+// retryAfter, model.RouteReasonUnreachable for anything else. Its maps and its session slice are
+// read-only once built, since every read the cache serves shares them: a reader that sorts or
+// edits the sessions copies them first, and never writes a session's Roles or Capabilities, which
+// every copy shares too.
 type routeRoster struct {
 	answered bool
+	// reason is why an unanswered roster gave no list: model.RouteReasonRefilling, with the
+	// listener's Retry-After in retryAfter, or model.RouteReasonUnreachable.
+	reason     string
+	retryAfter string
 	// sessions is the listener's answer, in the listener's order.
 	sessions []envoy.Session
 	live     map[string]struct{}
@@ -76,7 +83,9 @@ const routeRosterTimeout = 2 * time.Second
 // changes no answer's age; it is as long as routeRosterTTL so that a listener that hangs costs
 // fewer routeRosterTimeout waits: one shared wait per routeRosterTimeout+routeRosterSilenceTTL
 // (7 s) rather than per 3 s. A route_status, unknown included, then lags the listener by at most
-// routeRosterTTL, plus routeRosterTimeout while the listener hangs.
+// routeRosterTTL, plus routeRosterTimeout while the listener hangs. A listener refilling its list
+// is left alone for the silence window like any other unanswered fetch: its reason, and the
+// Retry-After it sent, are the roster's and reach every read the window serves.
 const (
 	routeRosterTTL        = 5 * time.Second
 	routeRosterSilenceTTL = 5 * time.Second
@@ -112,16 +121,17 @@ type rosterFetch struct {
 
 // readRouteRoster answers who is running: the cached roster while it is fresh, else the answer of
 // the one fetch in flight, starting it when none is. A listener that is unconfigured, does not
-// answer, or answers late leaves the roster unanswered, and so does a read whose own request ends
-// while it waits (its err then wraps the request's context error); the fetch runs on for the
-// other reads, and its answer fills the cache. The fetch runs on the process's lifetime, so once
-// a shutdown begins it ends or fails at once, and that failure is kept for the silence window.
-// What an unanswered roster means is the caller's: an issue read reads every route unknown and
-// still succeeds, while listAgents, which has nothing to list without the listener, answers 503
-// with the roster's err, or, during a shutdown drain, asks the listener on its own request.
+// answer, answers late, or is refilling its list leaves the roster unanswered with the reason
+// that says which, and so does a read whose own request ends while it waits (its err then wraps
+// the request's context error); the fetch runs on for the other reads, and its answer fills the
+// cache. The fetch runs on the process's lifetime, so once a shutdown begins it ends or fails at
+// once, and that failure is kept for the silence window. What an unanswered roster means is the
+// caller's: an issue read reads every route unknown, with the roster's reason, and still
+// succeeds, while listAgents, which has nothing to list without the listener, answers 503 with
+// the roster's err, or, during a shutdown drain, asks the listener on its own request.
 func (s *server) readRouteRoster(ctx context.Context) routeRoster {
 	if s.deps.Envoy == nil {
-		return routeRoster{}
+		return routeRoster{reason: model.RouteReasonUnreachable}
 	}
 	if s.deps.ListenerRosterUncached {
 		// An end-to-end test process: every read asks the listener itself, with no TTL, no shared
@@ -150,7 +160,7 @@ func (s *server) readRouteRoster(ctx context.Context) routeRoster {
 	case <-fetch.done:
 		return fetch.roster
 	case <-ctx.Done():
-		return routeRoster{err: fmt.Errorf("%w: %v", envoy.ErrUnavailable, ctx.Err())}
+		return routeRoster{reason: model.RouteReasonUnreachable, err: fmt.Errorf("%w: %v", envoy.ErrUnavailable, ctx.Err())}
 	}
 }
 
@@ -177,8 +187,12 @@ func (s *server) listRouteRoster(ctx context.Context) routeRoster {
 	ctx, cancel := context.WithTimeout(ctx, cmp.Or(s.rosters.timeout, routeRosterTimeout))
 	defer cancel()
 	sessions, err := s.deps.Envoy.Sessions(ctx)
-	if err != nil {
-		return routeRoster{err: err}
+	var refilling *envoy.RefillingError
+	switch {
+	case errors.As(err, &refilling):
+		return routeRoster{reason: model.RouteReasonRefilling, retryAfter: refilling.RetryAfter, err: err}
+	case err != nil:
+		return routeRoster{reason: model.RouteReasonUnreachable, err: err}
 	}
 	roster := routeRoster{
 		answered: true,
@@ -202,16 +216,16 @@ func (s *server) listRouteRoster(ctx context.Context) routeRoster {
 	return roster
 }
 
-// reach judges one route against the roster: null for no route, unknown when the listener did
-// not answer, live with the holder when a running session receives it, no_holder otherwise. A
-// stored route that no longer parses reaches nobody.
+// reach judges one route against the roster: null for no route, unknown with the roster's reason
+// when the listener gave no list, live with the holder when a running session receives it,
+// no_holder otherwise. A stored route that no longer parses reaches nobody.
 func (r routeRoster) reach(route *string) model.IssueRouteReach {
 	if route == nil {
 		return model.IssueRouteReach{}
 	}
 	status := func(value string) *string { return &value }
 	if !r.answered {
-		return model.IssueRouteReach{RouteStatus: status(model.RouteUnknown)}
+		return model.IssueRouteReach{RouteStatus: status(model.RouteUnknown), RouteStatusReason: status(r.reason)}
 	}
 	parsed, err := model.ParseRoute(*route)
 	if err != nil {

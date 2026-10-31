@@ -41,7 +41,7 @@ func webhookSweeper(natsClient *bus.Client, app *auth.AppConfig, apiBase string,
 		if !natsClient.Connected() {
 			return bus.KeyValue{}, errors.New("NATS is not connected, so the sweep's state cannot be opened yet")
 		}
-		return redeliver.OpenState(natsClient.JS(), replicas)
+		return redeliver.OpenState(natsClient.Conn, natsClient.JS(), replicas)
 	}
 	return &redeliver.Sweeper{GitHub: github, Open: open, Logger: slog.Default(), Pace: redeliveryPace}, nil
 }
