@@ -58,7 +58,9 @@ var ListenerLogSignals = []LogSignal{
 	{
 		// A JetStream publish that did not complete: the delivery path's slog JSON line
 		// (cmd/listener/delivery.go) and a webhook handler's plain log line
-		// (internal/webhook/webhook.go, deliveryFailed).
+		// (internal/webhook/webhook.go, deliveryFailed). A GitHub delivery logs that line at its
+		// first failure in each listener task and `redelivery <delivery>: …` at each later one,
+		// whose third word no filter takes as a source.
 		alarm:  "publish-failure",
 		metric: "PublishFailures",
 		filters: []struct{ name, pattern string }{
@@ -69,13 +71,15 @@ var ListenerLogSignals = []LogSignal{
 			"`<webhook> publish failed`, e.g. `nats: no response from stream`) — a delivery from the " +
 			"Dispatch GitHub App (legion-envoy) waits for Dispatch's redelivery sweep, a Slack event is " +
 			"retried by Slack three times with backoff and lost only if every attempt fails, any other " +
-			"GitHub sender's delivery answered 503 is lost, and delivery-exception notices are lost; read " +
-			"%s for the nats error.",
+			"GitHub sender's delivery answered 503 is lost, and delivery-exception notices are lost. A GitHub " +
+			"delivery is counted at its first failure in each listener task; a later failure of it is logged " +
+			"`redelivery <delivery>: github publish failed` and not counted. Read %s for the nats error.",
 	},
 	{
 		// A delivery NATS can never take, answered 422 (internal/webhook/webhook.go's refusal
 		// branch): one filter for each length of the action that logs it, matching `refused*` where
-		// a failure says `failed`.
+		// a failure says `failed`. A GitHub delivery's refusals after its first in a listener task
+		// are logged `redelivery <delivery>: …`, which no filter matches.
 		alarm:  "webhook-refused",
 		metric: "WebhookRefusals",
 		filters: []struct{ name, pattern string }{
@@ -85,10 +89,35 @@ var ListenerLogSignals = []LogSignal{
 		},
 		description: "Envoy listener refused a webhook delivery (`<source> publish refused`, `github ci record refused` " +
 			"or `github ci suite record refused`, answered 422): the envelope is past what NATS takes or the " +
-			"commit's CI record is past its bound, the same input is refused on every attempt, and Dispatch's " +
-			"redelivery sweep does not retry a 4xx, so the delivery is lost (a refused CI record leaves its " +
-			"commit overflowed, never settling). Read %s for the refusal's reason; the fix is " +
+			"commit's CI record is past its bound, and the same input is refused on every attempt. A GitHub " +
+			"delivery is counted at its first refusal in each listener task: Dispatch's redelivery sweep asks " +
+			"for a failed delivery again for 72 hours, and each later refusal of it is logged " +
+			"`redelivery <delivery>: <action> refused` and not counted. A delivery refused before a fix " +
+			"deploys is recovered once the fix lands within those 72 hours; past them it is lost. A refused " +
+			"CI record leaves its commit overflowed, never settling, whatever is redelivered. Read %s for " +
+			"the refusal's reason; the fix is " +
 			"a cap in legion's normalizer or a CI bound, not the NATS server's limits.",
+	},
+	{
+		// A rebuild of the listener's KV watches that has not succeeded within bus.RepairGrace of
+		// a NATS reconnect: the ERROR the bus logs through Go's default handler
+		// (internal/bus/recovery.go, reportHookFailure), so date, time and level anchor it. The
+		// WARN the same call writes below the grace, `envoy nats reconnect hook failed; it is
+		// retried`, is repaired by the next run and does not page, so the level and the plural
+		// `hooks` both keep it out.
+		alarm:  "reconnect-hooks-stalled",
+		metric: "ReconnectHooksStalled",
+		filters: []struct{ name, pattern string }{
+			{"reconnect-hooks-stalled-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, level=ERROR, w1=envoy, w2=nats, w3=reconnect, w4=hooks, w5=have, w6=not, w7=succeeded, ...]`},
+		},
+		description: "An Envoy listener's KV watch rebuild has not succeeded for a minute after a NATS " +
+			"reconnect (`envoy nats reconnect hooks have not succeeded`): its interest, role-claim, " +
+			"session and CI caches no longer follow their buckets and serve what they last held, and " +
+			"`/healthz` reports this as 200 `degraded` naming `KV watch rebuild` — deliberately not a " +
+			"503, which would replace the only task into the same failing rebuild with empty caches. " +
+			"The bus keeps retrying the rebuild with backoff. Read the line's `error` in %s for the " +
+			"failing bucket read: typically a JetStream that refuses or does not answer consumer " +
+			"creation for the KV streams.",
 	},
 	{
 		// A start that dropped another deployment's overlapping stream subject: the WARN the bus

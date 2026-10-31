@@ -37,7 +37,7 @@ That note says to add the packages that gain goroutines. Three points it does no
 - INFRA-141 added the role claim view (`holders`, `holderRevisions`, `holderEpoch` under
   `holdersMu` in `internal/store/kv.go`) and the watcher completeness that feeds it
   (`kvwatch.Watcher.Complete`, `WithRescan`). CI's `envoy-go-race` job
-  (`.github/workflows/envoy-and-contracts.yaml`) named only the Dispatch packages and
+  (`.github/workflows/ci.yaml`) named only the Dispatch packages and
   `./internal/bus/`.
 - The tester's `-race` run of `./cmd/listener` at a9a44ddd failed in 2 of 30 runs:
   `timeOutRoleClaimScan` (`cmd/listener/roles_from_claims_test.go`) replaced `Registry.holders`
@@ -48,4 +48,10 @@ That note says to add the packages that gain goroutines. Three points it does no
 - The job's limit was 45 minutes. Its first race step took 880 s on main's last green run and its
   own `-timeout` is 30 minutes, so the new step's `-timeout 30m` could never fire. 81c75d73 set
   `timeout-minutes: 75` for a worst case of 66: about 1 minute of setup, 30 for the first step, up
-  to 5 for the second step's race compile, and 30 for the second step.
+  to 5 for the second step's race compile, and 30 for the second step. The lane is now one job per
+  package group, each with one `-race` step of its own: `envoy-go-race` (delivery, the Dispatch
+  store, the bus, the listener, the registry store, the session cache and kvwatch) and
+  `envoy-go-race-api` at `-timeout 30m` with `timeout-minutes: 45`, and `envoy-go-race-pmdoc` at
+  `-timeout 40m` with `timeout-minutes: 50`, because that package measured 1023.519 s on a runner
+  of its own and 1210 s while it contended. The document service has a race job of its own beside
+  them, `envoy-go-race-docs`, at `-timeout 60m` with `timeout-minutes: 70`.

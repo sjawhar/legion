@@ -3,6 +3,7 @@ package gcp_test
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -72,6 +73,38 @@ func dispatchBrokerAndAppArgs(t *testing.T) *gcp.DispatchArgs {
 }
 
 const (
+	// inClusterNatsURL is the NATS hub's own Service in the pods' cluster, the address
+	// natsInCluster is for: with it set the app and the listener dial this themselves.
+	inClusterNatsURL = "nats://envoy-hub.envoy.svc.cluster.local:4222"
+	// dispatchNatsReplicas and dispatchStreamMaxBytes are the two JetStream numbers the tests
+	// set: three copies of every stream and bucket, and a 64 MiB stream limit. Neither is any
+	// binary's default, so a container carrying one carries what the input asked for.
+	dispatchNatsReplicas   = 3
+	dispatchStreamMaxBytes = 64 << 20
+	// dispatchSocks5Proxy is the front door's SOCKS5 Service, the address both NATS clients
+	// carry without natsInCluster, and frontDoorPodURN and frontDoorServiceURN the two children
+	// each waits for in that mode.
+	dispatchSocks5Proxy = "example-dispatch-tailnet.dispatch.svc.cluster.local:1055"
+	frontDoorPodURN     = "urn:pulumi:s::p::" + dispatchType + "$kubernetes:apps/v1:Deployment::example-dispatch-tailnet"
+	frontDoorServiceURN = "urn:pulumi:s::p::" + dispatchType + "$kubernetes:core/v1:Service::example-dispatch-tailnet"
+)
+
+// setInClusterNats turns natsInCluster on and points natsUrl at the hub's in-cluster Service,
+// which the two NATS clients then dial directly instead of through the front door's SOCKS5 proxy.
+func setInClusterNats(a *gcp.DispatchArgs) {
+	yes := true
+	a.NatsInCluster = &yes
+	a.NatsUrl = pulumi.String(inClusterNatsURL)
+}
+
+// setNatsNumbers sets natsReplicas and streamMaxBytes, the two settings both NATS clients carry
+// in either mode.
+func setNatsNumbers(a *gcp.DispatchArgs) {
+	a.NatsReplicas = pulumi.IntRef(dispatchNatsReplicas)
+	a.StreamMaxBytes = pulumi.IntRef(dispatchStreamMaxBytes)
+}
+
+const (
 	azureEmbedEndpoint  = "https://example-resource.services.ai.azure.com/models"
 	azureEmbedKeySecret = "projects/example-project/secrets/example-azure-embed-key"
 	azureTenantID       = "example-azure-tenant-id"
@@ -108,19 +141,41 @@ func runDispatch(t *testing.T, args *gcp.DispatchArgs, providers bool) (*pulumit
 
 func runDispatchNamed(t *testing.T, name string, args *gcp.DispatchArgs, providers bool) (*pulumitest.Mocks, error) {
 	t.Helper()
+	if !providers {
+		return runDispatchWithProviders(t, name, args)
+	}
+	return runDispatchWithProviders(t, name, args, newGCPProvider, newRandomProvider)
+}
+
+// newGCPProvider and newRandomProvider declare the two providers a Dispatch program gives the
+// component, each under the name the registration golden holds.
+func newGCPProvider(ctx *pulumi.Context) (pulumi.ProviderResource, error) {
+	return gcpsdk.NewProvider(ctx, "gcp-example", &gcpsdk.ProviderArgs{})
+}
+
+func newRandomProvider(ctx *pulumi.Context) (pulumi.ProviderResource, error) {
+	return randomsdk.NewProvider(ctx, "random-example", &randomsdk.ProviderArgs{})
+}
+
+// runDispatchWithProviders runs args through the mock engine with the providers the program
+// declares, registered in the order given and passed to the component together. With none given
+// the component is called with no providers option at all, which is how a program that declares
+// none reaches it.
+func runDispatchWithProviders(t *testing.T, name string, args *gcp.DispatchArgs, providers ...func(*pulumi.Context) (pulumi.ProviderResource, error)) (*pulumitest.Mocks, error) {
+	t.Helper()
 	m := newMocks()
 	err := m.Run(func(ctx *pulumi.Context) error {
+		var declared []pulumi.ProviderResource
+		for _, newProvider := range providers {
+			provider, err := newProvider(ctx)
+			if err != nil {
+				return err
+			}
+			declared = append(declared, provider)
+		}
 		var opts []pulumi.ResourceOption
-		if providers {
-			gcpProvider, err := gcpsdk.NewProvider(ctx, "gcp-example", &gcpsdk.ProviderArgs{})
-			if err != nil {
-				return err
-			}
-			randomProvider, err := randomsdk.NewProvider(ctx, "random-example", &randomsdk.ProviderArgs{})
-			if err != nil {
-				return err
-			}
-			opts = append(opts, pulumi.Providers(gcpProvider, randomProvider))
+		if len(declared) > 0 {
+			opts = append(opts, pulumi.Providers(declared...))
 		}
 		_, err := gcp.NewDispatch(ctx, name, args, opts...)
 		return err
@@ -345,6 +400,11 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "fewer than one replica", edit: func(a *gcp.DispatchArgs) { a.Replicas = pulumi.IntRef(0) }, err: []string{"replicas", "at least 1"}},
 		{name: "fewer than one front-door replica", edit: func(a *gcp.DispatchArgs) { a.FrontDoorReplicas = pulumi.IntRef(0) }, err: []string{"frontDoorReplicas 0", "at least 1"}},
 		{name: "fewer than one listener replica", edit: func(a *gcp.DispatchArgs) { a.ListenerReplicas = pulumi.IntRef(-1) }, err: []string{"listenerReplicas -1", "at least 1"}},
+		{name: "no NATS copies", edit: func(a *gcp.DispatchArgs) { a.NatsReplicas = pulumi.IntRef(0) }, err: []string{"natsReplicas 0", "is below 1", "leave it unset for one copy"}},
+		{name: "a negative NATS copy count", edit: func(a *gcp.DispatchArgs) { a.NatsReplicas = pulumi.IntRef(-1) }, err: []string{"natsReplicas -1", "is below 1", "leave it unset for one copy"}},
+		{name: "more NATS copies than NATS keeps", edit: func(a *gcp.DispatchArgs) { a.NatsReplicas = pulumi.IntRef(6) }, err: []string{"natsReplicas 6", "is above 5, the most copies NATS keeps"}},
+		{name: "a stream byte limit of none", edit: func(a *gcp.DispatchArgs) { a.StreamMaxBytes = pulumi.IntRef(0) }, err: []string{"streamMaxBytes 0", "is below 1", "leave it unset for no limit"}},
+		{name: "a negative stream byte limit", edit: func(a *gcp.DispatchArgs) { a.StreamMaxBytes = pulumi.IntRef(-1) }, err: []string{"streamMaxBytes -1", "is below 1", "leave it unset for no limit"}},
 		{name: "a pprof port of 0", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(0) }, err: []string{"pprofPort 0", "1-65535", "leave it unset"}},
 		{name: "a negative pprof port", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(-1) }, err: []string{"pprofPort -1", "1-65535"}},
 		{name: "a pprof port past 65535", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(65536) }, err: []string{"pprofPort 65536", "1-65535"}},
@@ -647,30 +707,44 @@ func TestDispatchRefusesASeedInTheComponentName(t *testing.T) {
 // natsUrl is an Input, checked inside the ApplyT that renders the listener's environment: core's
 // Env names its own inputs (natsUrls by index, socks5Proxy), neither of which gcp:Dispatch has,
 // so the component maps each refusal onto natsUrl, a core.InputError, and wraps it with its type
-// and name — it never panics, which would kill the provider process.
+// and name — it never panics, which would kill the provider process. With natsInCluster there is
+// no proxy whose refusal to map: the component refuses a local URL itself, before core's Env is
+// reached, and names natsUrl there too, since the pods would be dialling themselves.
 func TestDispatchRefusesABadNatsURLOnceItResolves(t *testing.T) {
 	seed, _ := testnats.User(t)
 	rows := []struct {
 		name, url, want string
+		// inCluster rows go through the component alone: gcp.DispatchListenerEnvError renders
+		// the SOCKS5 mode, which is the only mode that helper has.
+		inCluster bool
 	}{
-		{"a loopback URL", "nats://127.0.0.1:4222", "natsUrl names a local NATS server"},
-		{"a URL holding a seed", "nats://example:" + seed + "@example-hub.example-tailnet.ts.net:4222", "natsUrl holds an nkey seed (not echoed)"},
+		{name: "a loopback URL", url: "nats://127.0.0.1:4222", want: "natsUrl names a local NATS server"},
+		{name: "a URL holding a seed", url: "nats://example:" + seed + "@example-hub.example-tailnet.ts.net:4222", want: "natsUrl holds an nkey seed (not echoed)"},
+		{name: "a loopback URL with natsInCluster", url: "nats://127.0.0.1:4222", inCluster: true,
+			want: "natsUrl names a local NATS server; with natsInCluster the pods dial it directly"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			err := gcp.DispatchListenerEnvError("example-dispatch", row.url)
-			var input *core.InputError
-			require.ErrorAs(t, err, &input)
-			require.Equal(t, "natsUrl", input.Input)
-			require.ErrorContains(t, err, row.want)
-			require.NotContains(t, err.Error(), "natsUrls")
-			require.NotContains(t, err.Error(), "socks5Proxy")
-			require.NotContains(t, strings.ToUpper(err.Error()), seed)
+			if !row.inCluster {
+				err := gcp.DispatchListenerEnvError("example-dispatch", row.url)
+				var input *core.InputError
+				require.ErrorAs(t, err, &input)
+				require.Equal(t, "natsUrl", input.Input)
+				require.ErrorContains(t, err, row.want)
+				require.NotContains(t, err.Error(), "natsUrls")
+				require.NotContains(t, err.Error(), "socks5Proxy")
+				require.NotContains(t, strings.ToUpper(err.Error()), seed)
+			}
 
 			args := dispatchArgs()
+			if row.inCluster {
+				setInClusterNats(args)
+			}
 			args.NatsUrl = pulumi.String(row.url)
-			_, err = runDispatch(t, args, true)
+			_, err := runDispatch(t, args, true)
 			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.want)
+			require.NotContains(t, err.Error(), "natsUrls")
+			require.NotContains(t, err.Error(), "socks5Proxy")
 			require.NotContains(t, strings.ToUpper(err.Error()), seed)
 		})
 	}
@@ -1229,10 +1303,8 @@ func TestDispatchRefusesATailnetServiceOtherThanItsOwn(t *testing.T) {
 func requireWaitsForTheFrontDoor(t *testing.T, m *pulumitest.Mocks, deployment, dials string) {
 	t.Helper()
 	deps := m.Named(t, "kubernetes:apps/v1:Deployment", deployment).RPC.GetDependencies()
-	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:apps/v1:Deployment::example-dispatch-tailnet",
-		dials+" is created after the pod running the SOCKS5 proxy")
-	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:core/v1:Service::example-dispatch-tailnet",
-		dials+" dials the proxy at its Service, not at the pod")
+	require.Contains(t, deps, frontDoorPodURN, dials+" is created after the pod running the SOCKS5 proxy")
+	require.Contains(t, deps, frontDoorServiceURN, dials+" dials the proxy at its Service, not at the pod")
 }
 
 // envoy-dispatch serves without NATS: its /healthz readiness reads only Postgres, reporting nats
@@ -1264,18 +1336,118 @@ func TestDispatchListenerIsAuthenticated(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	const socks5Proxy = "example-dispatch-tailnet.dispatch.svc.cluster.local:1055"
 	listenerToken := map[string]any{"name": "example-dispatch-listener", "key": "ENVOY_API_TOKEN"}
-	listener := containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch-listener"), "envoy-listener"))
+	listener := listenerEnv(t, m)
 	require.Equal(t, "example-dispatch", listener["ENVOY_MACHINE_ID"])
 	require.Equal(t, "0.0.0.0", listener["ENVOY_LISTEN_HOST"])
 	require.Equal(t, listenerToken, listener["ENVOY_API_TOKEN"])
-	require.Equal(t, socks5Proxy, listener["ENVOY_NATS_SOCKS5_PROXY"])
+	require.Equal(t, dispatchSocks5Proxy, listener["ENVOY_NATS_SOCKS5_PROXY"])
 
-	app := containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch"), "envoy-dispatch"))
+	app := appEnv(t, m)
 	require.Equal(t, "http://example-dispatch-listener.dispatch.svc.cluster.local:9020", app["ENVOY_URL"])
 	require.Equal(t, listenerToken, app["ENVOY_TOKEN"])
-	require.Equal(t, socks5Proxy, app["ENVOY_NATS_SOCKS5_PROXY"])
+	require.Equal(t, dispatchSocks5Proxy, app["ENVOY_NATS_SOCKS5_PROXY"])
+}
+
+// dispatchNatsEnvs are the environments of the two containers that dial the NATS hub, the app's
+// envoy-dispatch and the listener's envoy-listener, keyed by container name.
+func dispatchNatsEnvs(t *testing.T, m *pulumitest.Mocks) map[string]map[string]any {
+	t.Helper()
+	return map[string]map[string]any{
+		"envoy-dispatch": appEnv(t, m),
+		"envoy-listener": listenerEnv(t, m),
+	}
+}
+
+// dispatchNatsSettings are the NATS settings one container's environment holds: of the five keys
+// the two clients share, the ones that are there, an absent key left out rather than read as an
+// empty value, so a key one side does not render never matches the other side's empty one.
+func dispatchNatsSettings(env map[string]any) map[string]any {
+	settings := map[string]any{}
+	for _, key := range []string{"NATS_URLS", "ENVOY_ALLOW_REMOTE_NATS", "ENVOY_NATS_SOCKS5_PROXY", "ENVOY_NATS_REPLICAS", "ENVOY_STREAM_MAX_BYTES"} {
+		if value, ok := env[key]; ok {
+			settings[key] = value
+		}
+	}
+	return settings
+}
+
+// With natsInCluster both NATS clients dial natsUrl themselves, so neither names the front door's
+// proxy at all: the key is absent, not empty, since ENVOY_NATS_SOCKS5_PROXY="" is a setting the
+// binaries would read as a proxy to use. The two JetStream numbers are independent of the mode and
+// reach both containers here.
+func TestDispatchInClusterNatsDropsTheProxyAndCarriesTheNumbers(t *testing.T) {
+	args := dispatchArgs()
+	setInClusterNats(args)
+	setNatsNumbers(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	for container, env := range dispatchNatsEnvs(t, m) {
+		require.Equal(t, inClusterNatsURL, env["NATS_URLS"], container)
+		require.Equal(t, "1", env["ENVOY_ALLOW_REMOTE_NATS"], container)
+		require.Equal(t, strconv.Itoa(dispatchNatsReplicas), env["ENVOY_NATS_REPLICAS"], container)
+		require.Equal(t, strconv.Itoa(dispatchStreamMaxBytes), env["ENVOY_STREAM_MAX_BYTES"], container)
+		require.NotContains(t, env, "ENVOY_NATS_SOCKS5_PROXY", "%s dials the hub itself", container)
+	}
+}
+
+// natsInCluster alone renders neither number: unset, each binary keeps one copy and sets no byte
+// limit (bus.ParseNATSReplicas, bus.ParseStreamMaxBytes), which the variable's absence gives.
+func TestDispatchInClusterNatsRendersNoNumbersWhenUnset(t *testing.T) {
+	args := dispatchArgs()
+	setInClusterNats(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	for container, env := range dispatchNatsEnvs(t, m) {
+		require.NotContains(t, env, "ENVOY_NATS_REPLICAS", "%s keeps one copy", container)
+		require.NotContains(t, env, "ENVOY_STREAM_MAX_BYTES", "%s sets no byte limit", container)
+	}
+}
+
+// The two numbers are inputs of their own: with natsInCluster unset they reach both containers
+// beside ENVOY_NATS_SOCKS5_PROXY, the hub still being dialled through the front door's Service.
+func TestDispatchNatsNumbersKeepTheProxyPath(t *testing.T) {
+	args := dispatchArgs()
+	setNatsNumbers(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	for container, env := range dispatchNatsEnvs(t, m) {
+		require.Equal(t, strconv.Itoa(dispatchNatsReplicas), env["ENVOY_NATS_REPLICAS"], container)
+		require.Equal(t, strconv.Itoa(dispatchStreamMaxBytes), env["ENVOY_STREAM_MAX_BYTES"], container)
+		require.Equal(t, dispatchSocks5Proxy, env["ENVOY_NATS_SOCKS5_PROXY"], container)
+	}
+}
+
+// The app's NATS settings are a list written out by hand in appEnv and the listener's come out of
+// core.ListenerConfig.Env: two renderings of one deployment's bus, which this is what keeps from
+// drifting apart. Each mode is compared as the settings present with their values, so a key one
+// container leaves out never passes for the other's empty value.
+func TestDispatchAppAndListenerAgreeOnNats(t *testing.T) {
+	for _, row := range []struct {
+		name     string
+		edit     func(*gcp.DispatchArgs)
+		settings int
+	}{
+		{"through the front door's proxy", func(*gcp.DispatchArgs) {}, 5},
+		{"dialling the hub in the cluster", setInClusterNats, 4},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := dispatchArgs()
+			row.edit(args)
+			setNatsNumbers(args)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+
+			envs := dispatchNatsEnvs(t, m)
+			app := dispatchNatsSettings(envs["envoy-dispatch"])
+			require.Len(t, app, row.settings, "the app carries every NATS setting this mode renders")
+			require.Equal(t, app, dispatchNatsSettings(envs["envoy-listener"]),
+				"the two NATS clients of one deployment carry the same settings")
+		})
+	}
 }
 
 // A stopping listener pod keeps answering /v1 while its removal from Service example-dispatch-
@@ -1428,6 +1600,32 @@ func TestDispatchPoliciesFenceTheProxyAndTheListener(t *testing.T) {
 		policyIngressPods(t, m, "example-dispatch-listener", 9020))
 }
 
+// With natsInCluster nothing of the SOCKS5 path is rendered: no Service publishes 1055, no
+// front-door pod runs the proxy, the front door's NetworkPolicy admits nobody (1055 was its only
+// rule), and neither workload waits for the front door — the negative of
+// requireWaitsForTheFrontDoor, since there is no proxy left to be up before them. The front door
+// itself still runs: it hosts the Tailscale Service every reader reaches Dispatch at.
+func TestDispatchInClusterNatsLeavesNoSocks5Path(t *testing.T) {
+	args := dispatchArgs()
+	setInClusterNats(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	for _, registration := range registrationsOf(m, "kubernetes:core/v1:Service") {
+		require.NotEqual(t, "example-dispatch-tailnet", registration.Name, "no Service publishes the proxy's port")
+	}
+	template := deploymentPodTemplate(t, m, "example-dispatch-tailnet")
+	require.NotContains(t, frontDoorEnv(t, podContainer(t, template, "tailscale")), "TS_SOCKS5_SERVER",
+		"no front-door pod runs the proxy")
+	require.Empty(t, policyIngressRules(t, m, "example-dispatch-tailnet", 0),
+		"the front door's policy is still there and admits nothing at all")
+	for _, deployment := range []string{"example-dispatch", "example-dispatch-listener"} {
+		deps := m.Named(t, "kubernetes:apps/v1:Deployment", deployment).RPC.GetDependencies()
+		require.NotContains(t, deps, frontDoorPodURN, deployment+" waits for no front-door pod")
+		require.NotContains(t, deps, frontDoorServiceURN, deployment+" dials no proxy at a Service")
+	}
+}
+
 // The front door's serve config, ConfigMap example-dispatch-serve's serve.json, hosts the
 // Tailscale Service svc:example-dispatch, terminating TLS for its name on 443 and proxying to the
 // app's Service.
@@ -1520,6 +1718,37 @@ func TestDispatchListenerPodMatchesGolden(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+}
+
+// dispatchRegistrations renders every registration the mock engine recorded as one line holding
+// the registration's type, its name and the URN of the parent it was registered under. A read,
+// which the engine records with no register request, renders an empty parent. The lines are
+// sorted: the Go SDK registers each resource from a goroutine of its own, so the order the engine
+// sees them in is the scheduler's and differs from run to run, and only the set of registrations
+// is the component's to decide.
+func dispatchRegistrations(m *pulumitest.Mocks) string {
+	registrations := m.Registrations()
+	lines := make([]string, 0, len(registrations))
+	for _, registration := range registrations {
+		parent := ""
+		if registration.RPC != nil {
+			parent = registration.RPC.GetParent()
+		}
+		lines = append(lines, fmt.Sprintf("%s %s parent=%s\n", registration.Type, registration.Name, parent))
+	}
+	slices.Sort(lines)
+	return strings.Join(lines, "")
+}
+
+// This golden is the component's declaration: every resource the default inputs register, and the
+// name and the parent each is given, captured before the cluster-only mode existed. A change that
+// leaves the default path alone leaves this file byte-identical, so a failure says the default
+// path moved — a resource renamed, reparented, added or dropped — and the fix is the component,
+// never the golden.
+func TestDispatchRegistrationsMatchTheGolden(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	require.Equal(t, readGolden(t, "dispatch-registrations.golden"), dispatchRegistrations(m))
 }
 
 // Every workload's pods keep apart at any replica count, over that Deployment's own selector:

@@ -502,6 +502,43 @@ func TestSettleSweepsUnrecordedMarksAfterTTL(t *testing.T) {
 	}
 }
 
+// An ask whose anchor names document A and whose block_artifact_id names document B records its
+// mark on A, so the mark outlives UnrecordedMarkTTL there while an unrecorded mark on A is swept.
+func TestSettleKeepsTheAnchoredMarkOfAnAskThatAlsoNamesABlock(t *testing.T) {
+	database := storetest.Open(t)
+	documentA := createDocument(t, database, "")
+	documentB := createDocument(t, database, "")
+	const ttl = time.Minute
+	service := New(Deps{
+		Store:             database,
+		Events:            events.NewBroker(),
+		Settle:            time.Hour,
+		UnrecordedMarkTTL: ttl,
+	})
+	started := time.Now()
+	var aged atomic.Int64
+	service.now = func() time.Time { return started.Add(time.Duration(aged.Load())) }
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	seedServiceText(t, service, documentA, "The quick brown fox")
+	seedServiceText(t, service, documentB, "The quick brown fox")
+	askID := insertAnchoredAsk(t, service, documentA, "brown")
+	if _, err := database.Pool.Exec(context.Background(), `update asks set block_artifact_id = $1 where id = $2`, documentB, askID); err != nil {
+		t.Fatalf("name the ask's block document: %v", err)
+	}
+	browserMark(t, service, documentA, "proofComment", "dangling", "quick")
+
+	settleCurrentGeneration(t, service, documentA)
+	aged.Store(int64(ttl))
+	settleCurrentGeneration(t, service, documentA)
+	tree := liveTree(t, service, documentA)
+	if _, _, found := pmdoc.FindMark(tree, "proofComment", "dangling"); found {
+		t.Fatal("unrecorded mark not swept once its TTL passed")
+	}
+	if _, _, found := pmdoc.FindMark(tree, "dispatchAsk", askID); !found {
+		t.Fatal("anchored mark of an ask that also names a block on another document was swept")
+	}
+}
+
 func TestMarkOnlyUpdateSweepsUnrecordedMarksWithoutCanonicalizingLegacyTable(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = 10 * time.Millisecond
@@ -1318,9 +1355,9 @@ func TestWritesBesideALiveRepeatedBlockIDAreTaken(t *testing.T) {
 			_, err = joinedReplaceText(service, artifactID, current+"\nAn added line.\n", alice)
 			return err
 		}, want: func(before string) string {
-			// Minted in preorder: the original's paragraph takes minted-1, the copy minted-2.
+			// The original's paragraph, unchanged, keeps its id, so the copy takes the first id minted.
 			copied := strings.LastIndex(before, "{#note ")
-			return before[:copied] + "{#minted-2 " + before[copied+len("{#note "):] + "\nAn added line.\n"
+			return before[:copied] + "{#minted-1 " + before[copied+len("{#note "):] + "\nAn added line.\n"
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

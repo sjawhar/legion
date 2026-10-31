@@ -23,6 +23,13 @@ repository traffic.
 `<owner>` and `<repo>` are each one segment, a dot written `_` (`sjawhar/.github`
 is `notifications.github.sjawhar._github`); the payload's `repo` is the exact name.
 
+Git bounds no ref's length, and the bus refuses a subject past 4,032 bytes
+(`contracts.SubjectMaxBytes`), so a push whose subject would be longer has its ref
+segment cut to what fits, between characters, followed by `~` and the first 16 hex
+digits of the SHA-256 of the whole ref name. The push is still published, and two
+long refs that share the kept text keep subjects of their own; the payload's `ref`
+is the ref, capped at 2,048 runes like every text the envelope copies.
+
 A `check_run` or `check_suite` of a pull request does not publish a raw envelope.
 It updates durable CI state; one `checks` envelope publishes after the PR head's
 CI is complete. A completed `check_run` from the GitHub Actions App that lists no

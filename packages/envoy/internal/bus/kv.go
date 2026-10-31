@@ -53,10 +53,12 @@ func EnsureKeyValue(js nats.JetStreamContext, config *nats.KeyValueConfig) (KeyV
 // discard policy, direct get, rollup, delete settings, metadata and the rest stay as they are. A
 // bucket with as many copies or more is left alone, and one copy needs no read: every stream has at
 // least one. As for the stream (ensureStreamWithConfig), two starts raising at once each write the
-// deployment's one count, and a raise whose answer never came succeeds when the stream, read
-// again, has the copies (updateStream). Its error names the bucket's stream and, for a refused
-// raise, the setting (refusedSettings): `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: ...`, so
-// the keeper's line says which bucket it could not raise.
+// deployment's one count. A raise whose answer never came succeeds when the stream, read again,
+// has the copies, and one the server refused as overlapping the bucket's own stream is sent again
+// until the stream has them or its sends run out (updateStream). Its error names the bucket's
+// stream and, for a refused raise, the setting (refusedSettings):
+// `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: ...`, so the keeper's line says which bucket
+// it could not raise.
 func raiseReplicas(js nats.JetStreamContext, bucket string, replicas int) (int, error) {
 	if replicas <= 1 {
 		return 0, nil

@@ -102,9 +102,17 @@ func TestGraphEdgesUnionsMentionsWithEveryStructuralRelation(t *testing.T) {
 		"from issue":             `select * from graph_edges where from_kind = 'issue' and from_id = 'CORE-2'`,
 		"from block":             `select * from graph_edges where from_kind = 'block' and from_id = 'CORE-1/spec#b1'`,
 		"to a document's blocks": `select * from graph_edges where to_kind = 'block' and to_id in (select node_id from document_blocks where artifact_id = '` + ids.Spec + `')`,
+		"to comment":             `select * from graph_edges where to_kind = 'comment' and to_id = '` + ids.AnchoredComment + `'`,
+		"to message":             `select * from graph_edges where to_kind = 'message' and to_id = '` + ids.Message + `'`,
+		"to comment block":       `select * from graph_edges where to_kind = 'comment_block' and to_id = 'comment/` + ids.AnchoredComment + `#b1'`,
+		"from comment block":     `select * from graph_edges where from_kind = 'comment_block' and from_id = 'comment/` + ids.AnchoredComment + `#b1'`,
+		"to message block":       `select * from graph_edges where to_kind = 'message_block' and to_id = 'message/` + ids.Message + `#b1'`,
+		"from message block":     `select * from graph_edges where from_kind = 'message_block' and from_id = 'message/` + ids.Message + `#b1'`,
+		"to a comment's blocks":  `select * from graph_edges where to_kind = 'comment_block' and to_id in (select node_id from comment_blocks where comment_id = '` + ids.AnchoredComment + `')`,
+		"to a message's blocks":  `select * from graph_edges where to_kind = 'message_block' and to_id in (select node_id from message_blocks where message_id = '` + ids.Message + `')`,
 	} {
 		plan := explainWithoutSeqScan(t, store, query)
-		for _, table := range []string{"refs", "artifacts", "asks", "comments", "messages", "issues", "issue_links", "ask_followers", "issue_component_members", "issue_components", "document_blocks", "block_refs", "document_block_versions"} {
+		for _, table := range []string{"refs", "artifacts", "asks", "comments", "messages", "issues", "issue_links", "ask_followers", "issue_component_members", "issue_components", "document_blocks", "block_refs", "document_block_versions", "comment_blocks", "message_blocks", "comment_block_refs", "message_block_refs"} {
 			if strings.Contains(plan, "Seq Scan on "+table) {
 				t.Errorf("%s: plan scans %s sequentially:\n%s", name, table, plan)
 			}
@@ -162,6 +170,77 @@ func TestGraphEdgesCarryBlockMentionsAndPartOf(t *testing.T) {
 	sortGraphEdges(want)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("block edges = %#v\nwant %#v", got, want)
+	}
+}
+
+// A current block of a comment or message is a node of the graph under its storage kind
+// (comment_block, message_block): it is part_of its item, each link it holds is an edge out of it,
+// and a reply that names it is a replies_to edge to it. A removed block is neither part_of its
+// item nor the source of the links it held.
+func TestItemBlockArmsAreGraphEdges(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	var comment, reply, message, messageReply string
+	if err := store.Pool.QueryRow(ctx, `
+		with p as (insert into projects (key, name) values ('CORE', 'Core') returning key),
+		issue as (insert into issues (key, project_key, number, title, created_by, rank) select 'CORE-1', key, 1, 'One', '{"kind":"user","id":"alice"}', 'A' from p returning key),
+		target as (insert into issues (key, project_key, number, title, created_by, rank) select 'CORE-2', 'CORE', 2, 'Two', '{"kind":"user","id":"alice"}', 'B' from issue returning key),
+		comment as (insert into comments (issue_key, author, body) select key, '{"kind":"user","id":"alice"}', 'Alpha CORE-2' from issue returning id),
+		comment_block as (insert into comment_blocks (comment_id, block_id, node_id, position, type, text_sha256, excerpt, made_at, changed_revision, changed_at)
+			select id, 'b1', 'comment/' || id || '#b1', 0, 'paragraph', 'x', 'Alpha CORE-2', now(), 1, now() from comment returning comment_id),
+		comment_removed as (insert into comment_blocks (comment_id, block_id, node_id, position, type, text_sha256, excerpt, made_at, changed_revision, changed_at, removed_at)
+			select id, 'b2', 'comment/' || id || '#b2', null, 'paragraph', 'y', 'Gone CORE-2', now(), 1, now(), now() from comment returning comment_id),
+		comment_refs as (insert into comment_block_refs (comment_id, block_id, from_node, to_kind, to_id, source_seq)
+			select id, b.block_id, 'comment/' || id || '#' || b.block_id, 'issue', 'CORE-2', 7 from comment, target, (values ('b1'), ('b2')) as b (block_id) returning comment_id),
+		reply as (insert into comments (issue_key, author, body, reply_to, replies_to_block)
+			select 'CORE-1', '{"kind":"session","id":"s1"}', 'Agreed', id, 'comment/' || id || '#b1' from comment returning id),
+		message as (insert into messages (issue_key, author, body) select key, '{"kind":"session","id":"s1"}', 'Beta CORE-2' from issue returning id),
+		message_block as (insert into message_blocks (message_id, block_id, node_id, position, type, text_sha256, excerpt, made_at, changed_at)
+			select id, 'b1', 'message/' || id || '#b1', 0, 'paragraph', 'z', 'Beta CORE-2', now(), now() from message returning message_id),
+		message_refs as (insert into message_block_refs (message_id, block_id, from_node, to_kind, to_id, source_seq)
+			select id, 'b1', 'message/' || id || '#b1', 'issue', 'CORE-2', 8 from message, target returning message_id),
+		message_reply as (insert into messages (issue_key, author, body, in_reply_to, replies_to_block)
+			select 'CORE-1', '{"kind":"user","id":"alice"}', 'Noted', id, 'message/' || id || '#b1' from message returning id)
+		select comment.id::text, reply.id::text, message.id::text, message_reply.id::text
+		from comment, reply, message, message_reply, comment_block, comment_removed, message_block
+	`).Scan(&comment, &reply, &message, &messageReply); err != nil {
+		t.Fatalf("seed item blocks: %v", err)
+	}
+
+	rows, err := store.Pool.Query(ctx, `
+		select from_kind, from_id, kind, to_kind, to_id, source_seq is not null from graph_edges
+		where from_kind in ('comment_block', 'message_block') or to_kind in ('comment_block', 'message_block')`)
+	if err != nil {
+		t.Fatalf("read graph_edges: %v", err)
+	}
+	defer rows.Close()
+	var got []graphEdgeRow
+	for rows.Next() {
+		var row graphEdgeRow
+		if err := rows.Scan(&row.FromKind, &row.FromID, &row.Kind, &row.ToKind, &row.ToID, &row.HasSourceSeq); err != nil {
+			t.Fatalf("scan graph edge: %v", err)
+		}
+		got = append(got, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate graph_edges: %v", err)
+	}
+	commentBlock, messageBlock := "comment/"+comment+"#b1", "message/"+message+"#b1"
+	want := []graphEdgeRow{
+		{"comment_block", commentBlock, "part_of", "comment", comment, false},
+		{"comment_block", commentBlock, "mentions", "issue", "CORE-2", true},
+		{"comment", reply, "replies_to", "comment_block", commentBlock, false},
+		{"message_block", messageBlock, "part_of", "message", message, false},
+		{"message_block", messageBlock, "mentions", "issue", "CORE-2", true},
+		{"message", messageReply, "replies_to", "message_block", messageBlock, false},
+	}
+	sortGraphEdges(got)
+	sortGraphEdges(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("item block edges = %#v\nwant %#v", got, want)
 	}
 }
 

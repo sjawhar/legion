@@ -91,11 +91,7 @@ func (s *Service) indexUnrenderedVersion(ctx context.Context, tx pgx.Tx, artifac
 // located in its version, stores excerpts on them (nil: marks them owed), and counts the targets
 // moved, which its blocks and their mentions moved, as well (refs.ReplaceDocumentCounted).
 func replaceVersionRefs(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, located []text.Located, moved []refs.Target, excerpts map[refs.Target]model.GraphExcerpt) (model.ReferenceChanges, error) {
-	found := make([]text.Ref, len(located))
-	for i, mention := range located {
-		found[i] = mention.Ref
-	}
-	return refs.ReplaceDocumentCounted(ctx, tx, artifactID, version, versionAt, found, moved, excerpts)
+	return refs.ReplaceDocumentCounted(ctx, tx, artifactID, version, versionAt, text.Refs(located), moved, excerpts)
 }
 
 // referenceExcerptBatch is how many documents one reconciliation tick reads; referenceExcerptStep
