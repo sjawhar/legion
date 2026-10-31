@@ -2,57 +2,55 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-727",
-  "completed": "2026-10-31T10:15:00Z",
-  "round": 9,
+  "completed": "2026-10-31T13:40:00Z",
+  "round": 10,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2548",
-  "head": "afd9b5517c93",
-  "codeHead": "bc29f804",
-  "answers": "The reviewer's round-3 changes request at 476a817c: both important findings, the one it raised past the round cap because it shares a cause with the first, and all five minor ones. Six threads answered and resolved.",
+  "head": "d7ff72b0266c",
+  "codeHead": "ba82ad08",
+  "answers": "The reviewer's round-4 changes request at bc29f804: the important finding and all four minor ones. Four threads answered and resolved.",
   "proof": [
     {
-      "criterion": "Important 1, and the defect past the cap with the same cause: an empty or short remembered side matched any text, so a whole-block selection kept a placement that told no reading apart - two readings were called alike, and after the reader's block lost the words a lone unrelated reading silently took the comment",
+      "criterion": "The important finding: in the document-wide step any newline passed for a block edge, so a line inside another paragraph or a fenced code block read as a block of its own and a comment whose own block was deleted could still be moved onto it with nothing shown",
       "surface": "Dispatch's web app in Chromium through Playwright, against the real Go server and PostgreSQL 17.11 with pgvector, and the proof-editor unit suite",
       "command": "cd packages/dispatch && bun run e2e -- compose-wait",
-      "observed": "14 passed. A remembered side shorter than the 32-character cap now carries the block edge it was cut at - in the block step it must sit at that block's own start or end, in the document's one text next to a newline or at its ends - and `NO_SURROUNDINGS`, which is empty because nothing was remembered, still matches every reading. Two new rows drive the real editor: a whole paragraph rewritten to read its words twice among different text is refused with the draft kept and nothing marked, and the same paragraph losing the words while one unrelated reading stands elsewhere is refused rather than moved there. The reviewer's two reproductions are unit rows as well, answering `unsurrounded` and `unplaceable`.",
-      "headSha": "bc29f804",
-      "negativeControl": "Both e2e rows are red before this change: the first sends and closes the composer with the false 'same text around them' sentence, the second creates the comment on the sentence that merely quotes the words. Writing them taught one thing worth keeping: a doc-edit that rewrites exactly the marked run leaves the mark on the new text, so each row has the sweep take the mark while the tab is away."
+      "observed": "15 passed (10.3m). Edges are block offsets now, never a character: `readingsOf` takes the blocks it is scanning in place of `positionAt` and the `acrossBlocks` flag, so both character tests are gone - a remembered-whole prefix must start at a block's own `at`, a remembered-whole suffix must end at its `at + length`, found by the halving search `positionIn` already used, shared as `blockAt`. The reader's-block step and `placementOf` pass a one-element list; the document step passes `documentText`'s own blocks. The reviewers' reproduction is a compose-wait row: the reader selects a whole block whose words also read on a hard-break line of the next paragraph, the sweep takes the mark while the tab is away, that block loses the words, and Send refuses with the draft kept and nothing marked.",
+      "headSha": "ba82ad08",
+      "negativeControl": "Putting the character test back fails the new hard-break unit row with a fresh mark on the second paragraph's line and placement `prefix \"Notes:\\n\", suffix \"\\nLater text here.\"` - the reviewers' reproduction exactly. Unit rows also cover a fenced code block's line and the document-wide two-readings case after a whole-block deletion, which nothing covered before."
     },
     {
-      "criterion": "Important 2, new with round 2's bridge wait: a Retry pressed during the wait started a second recovery and left a stray mark in the shared document",
-      "surface": "The margin's own React tests",
+      "criterion": "The four minor findings",
+      "surface": "The margin's and the document's own React tests",
       "command": "cd packages/dispatch && bun test --parallel web/src e2e/__tests__",
-      "observed": "2986 pass. The recovery is marked running before the wait and cleared in a finally, and after the await the store is re-read: the recovery returns unless that entry is still refused with the same mark id, and that entry's request is what readdress carries. A test presses Retry while the document is unbound and sees exactly one remarkMark. During the wait the composer now says it is re-attaching the draft rather than showing the server's refusal - a seventh reader-facing sentence, asserted like the other six - and a fake-timer row drives the path where no document binds within the bound and the reader gets the document-not-open sentence.",
-      "headSha": "bc29f804",
-      "negativeControl": "The reviewer's own reproduction is the control: two remarkMark calls for one mark id and a send under a third mark. The new test fails without the guard."
+      "observed": "2988 pass. The pending report is sent on both outcomes of a row's write, so a count skipped while a write was in flight is shown whether the store takes the row or refuses it, with a row driving a refused write while an earlier count is held. The composer keeps saying it is re-attaching until the retry answers, instead of falling back to the server's words in the middle of the wait, with a row that holds `whenSent` open across the assertions. The false 'and their words never moved' is deleted from the test whose paragraph is dropped.",
+      "headSha": "ba82ad08",
+      "negativeControl": "Each of the two behaviour fixes has a row that fails without it; the prose one is a deletion, checked by reading the row it sits on."
     },
     {
       "criterion": "Nothing else in the application broke, and the merge of main changed none of this branch's lines",
       "surface": "The whole Chromium e2e project, and the fingerprint over the pull request's own diff",
       "command": "cd packages/dispatch && bun run e2e -- --project=chromium",
-      "observed": "940 passed, 0 failed (1.4h) at bc29f804. main was then merged for its CI fixes (#2598's claims-doc test, which turns ci-ok red on every branch whose base predates it), with no conflict; the fingerprint over this pull request's own lines is aaf00f65ce47f728cef1e8c2f9c1d88eef8b8544774be19f74305ce9f58a8627 on both sides of the merge, unchanged, so that project run stands for the merge head. The 14 rows, both typechecks, both unit suites, biome, the README's line-break check, go vet, gofmt and the Go sweep tests (177s) were all re-run at the merge head afd9b551 anyway.",
-      "headSha": "afd9b5517c93",
-      "negativeControl": "The fingerprint is computed from the fork point at each head, so a merge that had touched one of this branch's lines would change it; it did not."
+      "observed": "941 passed, 0 failed (1.5h) at the merge head. main was merged for its CI fixes (#2601, the claim-list parser that follows #2598), with no conflict; the fingerprint over this pull request's own lines is c0867d151eb313a66e61e744b2b352eed1077d981bce473ab9e9d76b76819227 on both sides, unchanged. The 15 rows, both typechecks, both unit suites, biome, the README's line-break check, go vet, gofmt and the Go sweep tests (197s) were all run at that head.",
+      "headSha": "d7ff72b0266c",
+      "negativeControl": "The fingerprint is computed from the fork point at each head, so a merge touching one of this branch's lines would change it; it did not."
     }
   ],
   "filesChanged": [
-    "packages/proof-editor/src/record-mark-retype.ts and tests/record-mark-retype.test.ts (the block-edge rule, its two new rows, and the prose the reviewer named)",
-    "packages/dispatch/web/src/features/margin/margin-context.tsx, margin-context.test.ts, MentionComposer.margin.test.tsx (the recovery guard, the re-attaching sentence, two new rows)",
-    "packages/dispatch/web/src/features/doc/pending-sync.ts, pending-sync.test.ts, pending-waiter.ts, pending-waiter.test.ts, connection.test.ts, ProofDocument.test.tsx (countsEveryRow dropped for the reviewer's smaller fix)",
-    "packages/dispatch/web/src/features/conversation/useSessionSends.ts, packages/envoy/cmd/dispatch/README.md (prose)",
-    "packages/dispatch/e2e/compose-wait.e2e.ts (my own: two new rows and one corrected comment)"
+    "packages/proof-editor/src/record-mark-retype.ts and tests/record-mark-retype.test.ts (blocks instead of newlines, three new rows, the prose deletion)",
+    "packages/dispatch/web/src/features/doc/pending-sync.ts and pending-sync.test.ts",
+    "packages/dispatch/web/src/features/margin/margin-context.tsx and MentionComposer.margin.test.tsx",
+    "packages/dispatch/e2e/compose-wait.e2e.ts (my own: the hard-break row)"
   ],
   "trickyParts": [
-    "An empty remembered side is not 'matches anything': it is the block edge the words began or ended at. Carrying that in the value rather than inferring it from the string is what lets a null placement keep matching everything while a kept one does not.",
-    "A doc-edit that rewrites exactly the marked run leaves the mark on the new text, so neither whole-block row could take the mark by an edit alone; both have the sweep take it while the tab is away, which is the path a reader actually meets.",
-    "The bridge wait made the margin's recovery re-entrant for the first time. Marking the mark id as recovering before the await, and re-reading the store after it, are two halves of one fix: the first stops a second waiter, the second stops a stale request from overwriting the first's work."
+    "The document's one text is read with `textBetween(…, \"\\n\", \"\\n\")`, which turns a hard break into a newline and keeps a code block's own line breaks, so no character in that text tells a block separator from a line. Only the block offsets `documentText` already returns can, which is why every scan is now given them.",
+    "Passing the blocks instead of a position function also removed the two closures each scan allocated, and left one way to ask where a block begins and ends."
   ],
   "deviations": [],
   "openQuestions": [
     "The reported 'about ten seconds' is still unexplained, as every round has recorded.",
-    "main's flaky listener test is fixed by #2594, which had not landed when this round merged main; #2598, the one that turns ci-ok red deterministically, is in."
+    "main's flaky listener test is #2594's, which had still not landed when this round merged main; #2598 and #2601, the deterministic ci-ok failures, are both in."
   ],
   "discoveredComplexity": [
-    "The merge was needed for a reason the rule allows - a fix for a red check that only the base has - rather than to refresh the branch.",
+    "The PR body's 'Re-measured as promised' line said the accepted sentence-rewrite limit was the only way a record could reach a passage the reader did not select. This round's finding made that false, and the line is corrected to say what the limit is and what closed the other way.",
     "The simplify pass is spent (round 1, ce-simplify-code at 96a647eb, applied). A round answering a review runs none."
   ]
 }
