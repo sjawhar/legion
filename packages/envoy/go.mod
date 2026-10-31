@@ -134,15 +134,17 @@ require (
 )
 
 // The sjawhar/ygo fork is upstream ygo v1.54.0 plus the fixes its RELEASE_NOTES.md lists, each
-// waiting in an upstream pull request. Dispatch relies on five of them: CloseRoom closes a peer
+// waiting in an upstream pull request. Dispatch relies on these: CloseRoom closes a peer
 // that joins while it runs (reearth/ygo#331); a document logs each committed transaction's update,
 // in commit order under its own lock (UpdateLog, #332), so the room's update observer measures
 // each update against the room the commit before it left; an update past the cap on parked delete
 // ranges, or past the pending queue's own cap, is refused before it changes the document (#334,
-// #340, and the clock and client bounds of #356); a struct sent again while it waits in the
-// pending queue parks once (#344); and a peer the server closes while its read loop runs has its
-// unread buffered input dropped rather than applied and stored (#343), which the closes Dispatch
-// itself makes - its CloseRoom calls and its shutdown - take. The fork's opt-in hooks and bounds
-// (Server.OnPeerUpdate, WithMaxIntegrateScan, WithIntegrateScanBudget, Server.PeerWriteQueueBytes)
-// are off unless set, and Dispatch sets none.
+// #340), and one holding a clock past 2^53-1 or a client past 2^55-1 is refused when that part is
+// decoded, leaving what already integrated as any partial apply does (#356); a struct sent again
+// while it waits in the pending queue parks once (#344); when the room applies a peer's update
+// only in part, its other peers get what it kept and parked (#357); and a peer the server closes
+// while its read loop runs has its unread buffered input dropped rather than applied and stored
+// (#343), which the closes Dispatch itself makes - its CloseRoom calls and its shutdown - take.
+// The fork's opt-in hooks and bounds (Server.OnPeerUpdate, WithMaxIntegrateScan,
+// WithIntegrateScanBudget, Server.PeerWriteQueueBytes) are off unless set, and Dispatch sets none.
 replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.54.1-sami.1
