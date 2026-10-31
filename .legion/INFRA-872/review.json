@@ -2,33 +2,19 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-872",
-  "completed": "2026-10-31T03:40:00Z",
-  "round": 2,
+  "completed": "2026-10-31T07:48:30Z",
+  "round": 3,
   "decision": "changes_requested",
-  "reviewedCodeHead": "e56b8561390b",
+  "reviewedCodeHead": "3df4b6201acc287d15ebefc4596488c47ff8e3ea",
   "critical": 0,
   "important": 1,
-  "minor": 2,
+  "minor": 0,
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/infra/README.md", "description": "Lines 1434-1437 (and the changelog fragment lines 8-10): step 1 of 'Moving a stack that declares the Service itself' runs `pulumi state delete` on the consumer's Service, but every stack that followed the earlier releases' docs passed that Service's Name output into the component, so the component depends on it in state. `pulumi state delete` refuses a resource that others depend on (pulumi pkg/resource/edit/operations.go:83-86) and suggests `--target-dependents`, which removes the Dispatch component and every child from state. Reproduced by the deep review with pulumi v3.268.0 on a file backend. The working route is retainOnDelete (one apply that sets it on the old pin, then the apply that removes the declaration), plus unprotecting first if the consumer protected the Service."},
-    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_frontdoor.go", "description": "Lines 484-486, README.md:561 and README.md:688-690: 'no resource option of the consumer's own program reaches a component's child' contradicts README.md:2101-2105, which says a resource transform on the component reaches each child. The true reason: the child's explicit Protect overrides what it would inherit, so only a transform or a state edit could change a fixed one."},
-    {"severity": "minor", "file": "packages/envoy/infra/README.md", "description": "Lines 561, 1220 and 1314 link `(#inputs)`, which GitHub gives to the first `### Inputs` heading (gcp:ClusteredNatsHub, line 177); gcp:Dispatch's is `#inputs-1`. All three links are this pull request's own."}
+    {"severity": "important", "file": "packages/envoy/internal/broker/oauth/claims_doc_test.go", "description": "The required check ci-ok is red at 3df4b620 (CI run 41170299514) because envoy-go fails TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries. Main broke it: the test fails at main d7e1daaaa (#2474, docs/kubernetes.md one sentence per line) and passes at d7e1daaaa~1. Not a defect of this change. Per the architect's route: take sjawhar/legion#2598's copy of this file byte for byte (head 930cad24) and change nothing else, or merge main if #2598 has merged; push once without skip-checks."}
   ],
-  "roundOneThreads": {
-    "accepted": ["PRRT_kwDORFy7ds6yMoRS", "PRRT_kwDORFy7ds6yMoRT", "PRRT_kwDORFy7ds6yMoRY", "PRRT_kwDORFy7ds6yMoRa", "PRRT_kwDORFy7ds6yMoRb", "PRRT_kwDORFy7ds6yMoRe", "PRRT_kwDORFy7ds6yMoRg"],
-    "stillStanding": {
-      "PRRT_kwDORFy7ds6yMoRO": "migration section added, but its step 1 fails (finding 1)",
-      "PRRT_kwDORFy7ds6yMoRj": "the changelog fragment names the same failing step (finding 1)",
-      "PRRT_kwDORFy7ds6yMoRW": "the new Protect reason contradicts README.md:2101-2105 (finding 2)"
-    }
-  },
-  "verified": [
-    "go vet ./gcp/ ./internal/... ./provider/ and go vet -tags multiprocess ./cmd/dispatch/ clean; go test ./gcp/ -run 'TestDispatch|TestConstruct' -count=1 ok 12.239s at e56b8561; gofmt clean.",
-    "Deep review: dropping `service` from the front door's DependsOn fails TestDispatchTheFrontDoorWaitsForItsTailscaleService; deleting the tailscale Require block fails TestDispatchRequiresATailscaleProviderOnlyWithAFrontDoor/with_a_front_door; forcing it always on fails the sandbox subtest. The StringArray join keeps the one-key bytes and the secret flag (sdk v3.268.0 internal/types.go awaitInputs).",
-    "The renamed fragments: pr2504 is the pull request that added the INFRA-743 file (f12c22adb), pr2553 the INFRA-797 ones (ecbc2c8fa); no fragment in unreleased/ carries an INFRA- key."
-  ],
-  "notes": [
-    "implement.json proof 3 still says the newest tag is envoy-infra-v6.4.0; it is v6.6.0 and v7.0.0 still holds. The tester's note on the PR corrects it, and retro removes the handoff before READY; the implementer corrects it when it next writes implement.json."
-  ],
-  "ci": "At code head e56b8561 the CI run 41162202857 is still queued; not waited for, since this round requests changes."
+  "proseFixPushed": "3df4b620: README step 1 and the changelog fragment say protect: false in the program (an apply writes the program's protect back to state, so a prior pulumi state unprotect does not last); the Go comment cites registerResource at context.go:1832-1835.",
+  "threads": "All 12 threads answered and resolved; the five round-2 threads accepted by reply at 3df4b620.",
+  "thermo": "Round 3 pair at b7b62c89 (code b6a02fb9): deep review and code quality found the protect step and the SDK citation, both fixed in 3df4b620; no other finding.",
+  "nextRound": "Check only that claims_doc_test.go equals #2598's (or that a main merge brings it), then approve once ci-ok and pr-title are green at the code head, naming the run.",
+  "ci": "Run 41170299514 at 3df4b620: pr-title, lint, test, envoy-infra-go, dispatch jobs green; envoy-go failure; ci-ok failure."
 }
