@@ -183,8 +183,11 @@ stamps.
 - **The daemon-launched controller keeps failing.** `legion claims list` shows its claim,
   `legion-<project>-controller`, and the daemon logs why each launch failed and when it retries a
   failed one. `kubectl -n <namespace> describe pod legion-<project>-controller` and its logs show the
-  pod's own side. The controller's session is a row in the session database like every other, so a
-  launch that cannot find it fails naming it rather than starting a fresh controller quietly.
+  pod's own side. If the stopped controller's session was lost with its volume or wedged by a
+  provider refusal, take its recorded session from the claim and run `legion claims forget-session
+  --claim legion-<project>-controller --session <recorded session id> --operator-token-file <file>`.
+  The daemon clears the claim's matching session record only; it does not read or change the session
+  database, so its old row remains. Its keeper then retries the claim with a fresh session.
 - **The daemon refuses to boot: `stop legion-<project>-controller, the controller an earlier boot
   under controller: daemon launched, since this daemon leaves the controller to its operator
   (controller: operator): …`.** `legion.yaml` was switched back to `controller: operator`, and the
@@ -380,6 +383,19 @@ as a lingering tree's does, is refused naming the issue. `legion claims retry --
 same of every failed claim the daemon holds, in turn, prints each one it retried, and exits 1
 naming each it refused: run it once the cause of a run of failed launches is gone (a host moved
 onto tmux, a broken key replaced).
+
+When a failed architect's session was lost with its volume or wedged by a provider refusal, clear
+the stopped claim's matching record before retrying:
+
+```sh
+legion claims forget-session --config legion.yaml --operator-token-file operator-token --claim <token> --session <recorded session id>
+```
+
+The daemon does not read or change the session database, so the old session row remains. A root
+that was parked should be re-admitted after this command, not retried by hand; its next workflow
+start spawns a fresh session. To replace a session of a claim that is still live, suspend it first;
+the command refuses every live claim and any `--session` that does not equal the recorded session.
+The resumed claim starts fresh with its pending task.
 
 To see why the launches failed, read the failed role's lines of the `roles` container's log in the
 issue's pod. The launcher prefixes each role's lines with the role's name:

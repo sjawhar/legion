@@ -1,6 +1,0 @@
-kind: Fixed
-body: |-
-  The `dispatch` command (`dist/dispatch.js`) and the session's start notice name the lost `DISPATCH_URL` when `DISPATCH_TOKEN_FILE` is set and nothing names the server: `DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for`. In a Legion pod, which has no envoy.json and whose session keeps one shell, a command that ran `unset DISPATCH_URL` made every later `dispatch` say `no envoy.json at <path>: Dispatch is off`.
-time: 2026-10-31T12:00:03.000000000Z
-custom:
-    Issue: pr2295

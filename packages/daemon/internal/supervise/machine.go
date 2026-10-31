@@ -223,10 +223,9 @@ type ClaimView struct {
 // when its tree closes.
 func (c Claim) treeRoot() bool { return claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) }
 
-// Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
-// StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
-// PromptRefused, Timer, StalePlugin, and the nine requests. The transition table has a row or a
-// named ignore for every one of them in every state.
+// Event is everything that reaches a machine: RuntimeObservation, StreamHello, StreamTurnStart,
+// StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked, PromptRefused, Timer, StalePlugin,
+// and the requests. The transition table has a row or a named ignore for every one in every state.
 type Event interface{ isEvent() }
 
 // Store is the persistence a machine writes through. A claim and its pending delivery are

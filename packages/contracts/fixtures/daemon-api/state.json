@@ -467,6 +467,7 @@
           "-c",
           "echo fixture-setup"
         ],
+        "test_postgres": false,
         "repository_cache": {
           "volume": "40Gi",
           "refresh_minutes": 15,

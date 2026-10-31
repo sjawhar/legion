@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -40,6 +42,7 @@ func TestOperatorRoutesRefuseAnythingButTheOperatorBearer(t *testing.T) {
 		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/resume"},
 		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/stop"},
 		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/retry"},
+		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/forget-session"},
 		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/close"},
 	}
 	for _, route := range routes {
@@ -308,6 +311,129 @@ func TestTheOperatorsRetryRelaunchesAFailedClaimOnItsKeptSessionWithFreshBudgets
 		live.Budgets != (supervise.Budgets{}) {
 		t.Fatalf("stored %+v, want the architect ready on its kept session with fresh budgets", live)
 	}
+}
+
+// A failed claim whose recorded session cannot be resumed can be made launchable without retaining
+// a resume path that fails every attempt. The operator then retries its architect claim, which must
+// spawn a fresh session rather than resume the abandoned one.
+func TestForgetSessionLetsTheOperatorRetryAFailedArchitectWithAFreshSpawn(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+	refused := fake.SpawnResult{Err: errors.New("the session table holds no such session")}
+	h.runtime.ScriptResume(refused, refused)
+	machine, _ := h.supervisor.Machine(architectToken)
+	if err := machine.Handle(h.ctx, supervise.RuntimeObservation{Observation: runtime.Observation{
+		Locator: *machine.Claim().Locator, Kind: runtime.Gone,
+	}}); err == nil {
+		t.Fatal("the missing-session relaunches answered no error")
+	}
+	if failed := h.stored(architectToken); failed.State != supervise.StateFailed || failed.SessionFile == "" {
+		t.Fatalf("failed claim = %+v, want failed with its session recorded", failed)
+	}
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session",
+		map[string]string{"session": "ses_architect"})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("forget-session = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	var forgotten OperatorClaim
+	decodeInto(t, recorder, &forgotten)
+	if forgotten.State != string(supervise.StateFailed) || forgotten.Session != "" || forgotten.SessionFile != "" ||
+		forgotten.ForgottenSession != "ses_architect" || forgotten.ForgottenSessionFile != "/sessions/ses_architect.jsonl" {
+		t.Fatalf("forget-session answered %+v, want the failed claim with its recorded session reported and cleared", forgotten)
+	}
+	if stored := h.stored(architectToken); stored.Session != "" || stored.SessionFile != "" {
+		t.Fatalf("stored claim after forget-session = %+v, want no recorded session", stored)
+	}
+
+	retried := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/retry", nil)
+	if retried.Code != http.StatusOK {
+		t.Fatalf("retry after forget-session = %d, want 200; body %s", retried.Code, retried.Body)
+	}
+	if spawns := h.runtime.CallsOf("Spawn"); len(spawns) != 2 || spawns[1].Spec.ResumeSessionFile != "" {
+		t.Fatalf("spawns after retry = %+v, want the retry to spawn a fresh session", spawns)
+	}
+}
+
+// Forgetting a different session is refused, naming the session the claim actually records so the
+// operator cannot clear a newly registered session by mistake.
+func TestForgetSessionRefusesASessionMismatch(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+	refused := fake.SpawnResult{Err: errors.New("the runtime refused the relaunch")}
+	h.runtime.ScriptResume(refused, refused)
+	machine, _ := h.supervisor.Machine(architectToken)
+	if err := machine.Handle(h.ctx, supervise.RuntimeObservation{Observation: runtime.Observation{
+		Locator: *machine.Claim().Locator, Kind: runtime.Gone,
+	}}); err == nil {
+		t.Fatal("the relaunches the runtime refused answered no error")
+	}
+	before := h.stored(architectToken)
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session",
+		map[string]string{"session": "ses_other"}), http.StatusConflict,
+		"forget-session refused: legion-legion-legion-208-architect records session ses_architect; pass --session ses_architect to start fresh")
+
+	after := h.stored(architectToken)
+	if after.Session != before.Session || after.SessionFile != before.SessionFile || after.State != before.State {
+		t.Fatalf("forget-session moved the claim: %+v -> %+v", before, after)
+	}
+}
+
+// An operator may deliberately start fresh from a session the database still holds, but only after
+// the process is stopped and only by naming that exact session. The pending task survives to the
+// fresh launch.
+func TestForgetSessionWithExplicitSessionResumesASuspendedClaimFresh(t *testing.T) {
+	h := newHarness(t)
+	body := spawnBody()
+	body.Task = "Continue the review."
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", body); recorder.Code != http.StatusCreated {
+		t.Fatalf("spawn = %d, want 201; body %s", recorder.Code, recorder.Body)
+	}
+	conn := fake.NewConn()
+	h.conns.Register(architectToken, conn)
+	h.ready(architectToken, "ses_architect", 1)
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("suspend = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session",
+		map[string]string{"session": "ses_architect"})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("forget-session = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	var forgotten OperatorClaim
+	decodeInto(t, recorder, &forgotten)
+	if forgotten.State != string(supervise.StateSuspended) || forgotten.Session != "" || forgotten.SessionFile != "" ||
+		forgotten.Pending == nil || forgotten.Pending.Task != body.Task {
+		t.Fatalf("forget-session answered %+v, want the suspended claim with its task and no session", forgotten)
+	}
+	resumed := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/resume", nil)
+	if resumed.Code != http.StatusOK {
+		t.Fatalf("resume = %d, want 200; body %s", resumed.Code, resumed.Body)
+	}
+	var launched OperatorClaim
+	decodeInto(t, resumed, &launched)
+	if launched.State != string(supervise.StateLaunching) || launched.Pending == nil || launched.Pending.Task != body.Task {
+		t.Fatalf("resume answered %+v, want the fresh launch carrying its pending task", launched)
+	}
+	if spawns := h.runtime.CallsOf("Spawn"); len(spawns) != 2 || spawns[1].Spec.ResumeSessionFile != "" {
+		t.Fatalf("spawns = %+v, want the resumed claim to spawn fresh", spawns)
+	}
+}
+
+func TestForgetSessionRefusesAStillLiveClaimEvenWithAnExplicitSession(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session",
+		map[string]string{"session": "ses_architect"}), http.StatusConflict,
+		"forget-session refused: legion-legion-legion-208-architect is ready; suspend, fail, or retire it before starting fresh")
 }
 
 // The operator's retry is for a failed claim alone. A live claim has not failed, a suspended one is
@@ -988,5 +1114,129 @@ func TestListOfNoClaimsIsAnEmptyArray(t *testing.T) {
 	recorder := h.operator(http.MethodGet, "/legion/v1/operator/claims", nil)
 	if got := strings.TrimSpace(recorder.Body.String()); recorder.Code != http.StatusOK || got != `{"claims":[]}` {
 		t.Fatalf("list = %d %s, want 200 {\"claims\":[]}", recorder.Code, got)
+	}
+}
+
+func TestForgetSessionRequiresTheRecordedSession(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+	before := h.stored(architectToken)
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session", map[string]string{}),
+		http.StatusBadRequest, "session is required")
+
+	if after := h.stored(architectToken); after.Session != before.Session || after.SessionFile != before.SessionFile || after.State != before.State {
+		t.Fatalf("forget-session without session moved the claim: %+v -> %+v", before, after)
+	}
+}
+
+func TestForgetSessionRechecksItsSessionInsideTheMachine(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("suspend = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+
+	snapshotted, resumeForget := make(chan struct{}), make(chan struct{})
+	testServer := &server{
+		supervisor: h.supervisor,
+		project:    testProject,
+		stopping:   context.Background(),
+		drained:    context.Background(),
+		decisions:  NewRouteDecisions(),
+		beforeForgetSessionHandle: func() {
+			close(snapshotted)
+			<-resumeForget
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/forget-session", testServer.forgetSession)
+	h.handler = mux
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response <- h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session",
+			map[string]string{"session": "ses_architect"})
+	}()
+	select {
+	case <-snapshotted:
+	case recorder := <-response:
+		t.Fatalf("forget-session completed before its snapshot hook: %d %s", recorder.Code, recorder.Body)
+	case <-time.After(time.Second):
+		t.Fatal("forget-session did not reach its snapshot hook")
+	}
+
+	machine, _ := h.supervisor.Machine(architectToken)
+	if err := machine.Handle(h.ctx, supervise.RequestForgetSession{Claim: architectToken, Session: "ses_architect"}); err != nil {
+		t.Fatalf("first forget after snapshot: %v", err)
+	}
+	if err := machine.Handle(h.ctx, supervise.RequestResume{Claim: architectToken}); err != nil {
+		t.Fatalf("resume after first forget: %v", err)
+	}
+	generation := machine.Claim().Generation
+	if err := machine.Handle(h.ctx, supervise.RequestRegister{
+		Claim: architectToken, Generation: generation, Session: "ses_replacement", SessionFile: "/sessions/ses_replacement.jsonl",
+		PluginContract: DaemonAPIVersion,
+	}); err != nil {
+		t.Fatalf("register replacement session: %v", err)
+	}
+	if err := machine.Handle(h.ctx, supervise.RequestReady{Claim: architectToken, Generation: generation, Session: "ses_replacement"}); err != nil {
+		t.Fatalf("ready replacement session: %v", err)
+	}
+	if err := machine.Handle(h.ctx, supervise.RequestSuspend{Claim: architectToken, By: supervise.SuspendedByOperator}); err != nil {
+		t.Fatalf("suspend replacement session: %v", err)
+	}
+	close(resumeForget)
+
+	wantRefusal(t, <-response, http.StatusConflict,
+		"forget-session refused: legion-legion-legion-208-architect records session ses_replacement; pass --session ses_replacement to start fresh")
+	if got := h.stored(architectToken); got.State != supervise.StateSuspended || got.Session != "ses_replacement" || got.SessionFile != "/sessions/ses_replacement.jsonl" {
+		t.Fatalf("paused forget changed the replacement claim to %+v", got)
+	}
+}
+
+func TestForgetSessionRefusesDaemonStopAfterPreflight(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("suspend = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	stopping, beginStop := context.WithCancel(context.Background())
+	snapshotted, resumeForget := make(chan struct{}), make(chan struct{})
+	testServer := &server{
+		log:        slog.Default(),
+		supervisor: h.supervisor,
+		project:    testProject,
+		stopping:   stopping,
+		drained:    context.Background(),
+		decisions:  NewRouteDecisions(),
+		beforeForgetSessionHandle: func() {
+			close(snapshotted)
+			<-resumeForget
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/forget-session", testServer.forgetSession)
+	h.handler = mux
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response <- h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session",
+			map[string]string{"session": "ses_architect"})
+	}()
+	select {
+	case <-snapshotted:
+	case recorder := <-response:
+		t.Fatalf("forget-session completed before its snapshot hook: %d %s", recorder.Code, recorder.Body)
+	case <-time.After(time.Second):
+		t.Fatal("forget-session did not reach its snapshot hook")
+	}
+	beginStop()
+	close(resumeForget)
+
+	wantRefusal(t, <-response, http.StatusServiceUnavailable, "forget-session refused: the daemon is stopping; ask again once it is back")
+	if got := h.stored(architectToken); got.State != supervise.StateSuspended || got.Session != "ses_architect" || got.SessionFile != "/sessions/ses_architect.jsonl" {
+		t.Fatalf("stopped forget changed the claim to %+v", got)
 	}
 }

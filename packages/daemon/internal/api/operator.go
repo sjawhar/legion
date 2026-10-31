@@ -50,17 +50,24 @@ type RetryRequest struct {
 	FreshSession bool `json:"freshSession,omitempty"`
 }
 
+// ForgetSessionRequest names the claim's recorded session that the operator is abandoning.
+type ForgetSessionRequest struct {
+	Session string `json:"session"`
+}
+
 // OperatorClaim is a claim as the operator sees it: everything the supervisor holds about it but
 // its two hashes.
 type OperatorClaim struct {
-	Token       claim.Token `json:"token"`
-	Tree        string      `json:"tree"`
-	Issue       string      `json:"issue"`
-	Role        claim.Role  `json:"role"`
-	Generation  uint64      `json:"generation"`
-	State       string      `json:"state"`
-	Session     string      `json:"session"`
-	SessionFile string      `json:"sessionFile"`
+	Token                claim.Token `json:"token"`
+	Tree                 string      `json:"tree"`
+	Issue                string      `json:"issue"`
+	Role                 claim.Role  `json:"role"`
+	Generation           uint64      `json:"generation"`
+	State                string      `json:"state"`
+	Session              string      `json:"session"`
+	SessionFile          string      `json:"sessionFile"`
+	ForgottenSession     string      `json:"forgottenSession,omitempty"`
+	ForgottenSessionFile string      `json:"forgottenSessionFile,omitempty"`
 	// Locator is the claim's process, the runtime's nested shape; none while nothing runs.
 	Locator         *runtime.Locator `json:"locator,omitempty"`
 	Budgets         BudgetsView      `json:"budgets"`
@@ -346,6 +353,56 @@ func (s *server) readOptionalBody(w http.ResponseWriter, r *http.Request, into a
 	return false
 }
 
+// forgetSession clears a recorded session only when the operator names that exact session and the
+// claim has no live process. The session store is deliberately untouched.
+func (s *server) forgetSession(w http.ResponseWriter, r *http.Request) {
+	var req ForgetSessionRequest
+	if !s.readBody(w, r, &req, nil) {
+		return
+	}
+	if !requireFields(w, field{"session", req.Session}) {
+		return
+	}
+	token := claim.Token(r.PathValue("token"))
+	m, ok := s.supervisor.Machine(token)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, errorBody("no claim "+string(token)))
+		return
+	}
+	c := m.Claim()
+	if req.Session != c.Session {
+		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
+			"forget-session refused: %s records session %s; pass --session %s to start fresh", c.Token, c.Session, c.Session)))
+		return
+	}
+	if !forgettable(c.State) {
+		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
+			"forget-session refused: %s is %s; suspend, fail, or retire it before starting fresh", c.Token, c.State)))
+		return
+	}
+	if s.beforeForgetSessionHandle != nil {
+		s.beforeForgetSessionHandle()
+	}
+	ctx, decided := s.decision(r, token)
+	defer decided()
+	if s.stopped(w, "forget-session") {
+		return
+	}
+	if err := m.Handle(ctx, supervise.RequestForgetSession{Claim: token, Session: req.Session}); err != nil {
+		s.operatorFailure(w, "forget-session", token, err)
+		return
+	}
+	s.log.Info("api: operator forgot session", "claim", token, "session", c.Session, "sessionFile", c.SessionFile)
+	s.operatorDone(r, token)
+	view := operatorView(m.Claim())
+	view.ForgottenSession, view.ForgottenSessionFile = c.Session, c.SessionFile
+	writeJSON(w, http.StatusOK, view)
+}
+
+func forgettable(state supervise.ClaimState) bool {
+	return state == supervise.StateQueued || state == supervise.StateSuspended || state == supervise.StateFailed || state == supervise.StateRetired
+}
+
 // retryClaim is the operator's retry of a claim that is running nothing: one that failed, and one
 // an operator stopped, which retires it. A phase worker is retried through its issue's phase,
 // never on its own, because a worker relaunched outside its phase is handed no task and does
@@ -406,7 +463,7 @@ func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	working := workedPhase(*recorded)
-	if req.FreshSession && !s.forgetSession(w, r, m, token) {
+	if req.FreshSession && !s.forgetSessionForRetry(w, r, m, token, c.Session) {
 		return
 	}
 	fact := intake.Fact(intake.RestartPhase{Issue: c.Issue, Role: c.Role})
@@ -454,13 +511,16 @@ func workedPhase(issue record.Issue) phase.Phase {
 	return issue.Phase
 }
 
-// forgetSession has the claim drop the session it recorded, for a retry that asked for a new one,
-// and reports whether it did: a machine that refuses it — a claim running the session, which no
-// retry of this route reaches — is the operator's answer, and nothing is started after it.
-func (s *server) forgetSession(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token) bool {
+// forgetSessionForRetry has the claim drop the session it recorded, for a retry that asked for a
+// new one, and reports whether it did: a machine that refuses it — a claim running the session,
+// which no retry of this route reaches, or one that recorded another session since this request
+// read it — is the operator's answer, and nothing is started after it. The session is passed back
+// as the claim reported it, so the machine clears the one this retry saw and never a later one
+// (supervise's forgetSession).
+func (s *server) forgetSessionForRetry(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token, session string) bool {
 	ctx, decided := s.decision(r, token)
 	defer decided()
-	if err := m.Handle(ctx, supervise.RequestForgetSession{Claim: token}); err != nil {
+	if err := m.Handle(ctx, supervise.RequestForgetSession{Claim: token, Session: session}); err != nil {
 		s.operatorFailure(w, "retry", token, err)
 		return false
 	}

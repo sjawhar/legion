@@ -643,15 +643,10 @@ The document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts 
 A room an `Apply` opened with no peer is idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484).
 `PgVersioned`'s per-room locks likewise live only while a caller holds or waits for one.
 
-A document socket's peer hears from it at least every 15 s (`documentKeepAlive`, `docs/keepalive.go`), as `/ws/live`'s page does.
-`@hocuspocus/provider` closes a socket that has delivered no message for 30 s, and counts every message and nothing else:
-a websocket ping reaches no page, and ygo, unlike `@hocuspocus/server`, sends no peer its own awareness renewal back, so a lone idle editor heard nothing after its sync and closed and re-synced every 33 s.
-The keep-alive is the protocol's own message, an awareness update naming no client, which the provider applies as no change.
-ygo gives no application a way to write to one of its peers, so `Service.ServeHTTP` hands ygo's upgrade a response writer whose hijacked connection follows the frames gorilla/websocket writes on it (`frameWatch`) and puts the keep-alive only between two of its messages:
-never inside a frame gorilla writes in two parts, between a streamed message's frames, or after a close (`TestAKeepAliveGoesOutOnlyBetweenTheWritersMessages`).
-A keep-alive that cannot be written within 10 s closes the connection, which ends ygo's read of it.
-A ygo that sends its peers a keep-alive of its own makes this wrapper removable;
-a provider upgrade that counts something other than messages needs `TestAnIdleDocumentSocketIsSentAKeepAliveTheProviderCounts` checked against it again.
+`@hocuspocus/provider` renews its awareness every 15 to 18 s and closes a socket that has delivered no message for 30 s, and counts every message and nothing else: a websocket ping reaches no page.
+ygo returns a read-write peer's awareness update to every peer, including its sender, so a lone editor receives that renewal.
+A read-only peer receives ygo's bounded empty awareness response and cannot change shared awareness.
+Dispatch writes no document-socket keep-alive frames.
 
 The room's update observer renders a replica of the room, the one its reads walk, not the live tree, since ygo fires it after the transaction has released the document's lock and another write can be integrating meanwhile (`renderedReplica`).
 The replica moves only through the room's commits, one at a time and in commit order:
@@ -3767,12 +3762,13 @@ ALREADY_ENROLLED`, and the policy never sees the slot:
 a pod is a requester with no operator, whose service is its launcher credential's only when its verified subject matches `BROKER_SERVICES`.
 Migration 0007 is forward-only: an older broker binary's conflict lookup reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled back past it once a slotted enrollment exists.
 An older broker binary refuses a `BROKER_SERVICES` that names a service for more than one account (`must give each service once`), and the broker is one pod, so once the setting names a service twice the image is never rolled back past this change without moving the setting back in the same step.
-An enrollment's kind is `session` (an agent session on a machine its person logged in:
-the helper's own, or a key a launcher such as agentbox brings through the helper's `enroll-session-key`) or `pod`;
-migration 0012 rewrote every stored `box`/`host` to `session`.
+An enrollment the broker creates is of kind `session` (an agent session on a machine its person logged in:
+the helper's own, or a key a launcher such as agentbox brings through the helper's `enroll-session-key`) or `pod`.
+The `enrollments` kind constraint also admits `vm` (migration 0020), which no route creates.
+Migration 0012 rewrote every stored `box`/`host` to `session`.
 `POST /v1/enrollments` takes only `session` and `pod` (`400 INVALID_KIND` otherwise):
 the `host` and `box` of a helper before legion-envoy 10 are refused, since such a helper can no longer log in again.
-No reader of stored data needs them: the `enrollments` kind constraint admits only the two, and a record body that predates 0012 keeps its `box`/`host` as text its id hashes, which `record.ParseBody` reads without checking the kind.
+No reader of stored data needs them: the kind constraint admits neither, and a record body that predates 0012 keeps its `box`/`host` as text its id hashes, which `record.ParseBody` reads without checking the kind.
 The helper still asks an older broker, which answers `session` `400 INVALID_KIND`, once more as `host` or `box` (`helper/broker.go`, `enroll`:
 gone once the production broker records `session`).
 The CLI and helper speak only the kind-free pair:
