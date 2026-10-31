@@ -1,6 +1,7 @@
 import type { Browser, BrowserContext, BrowserContextOptions, Page } from "@playwright/test";
 
 import { devSignInError, devSignInPath } from "./api";
+import { measured } from "./measure";
 
 /** Signs `context` in as `login` at the harness server's dev sign-in route. The cookie it sets is
  *  the one an issuer sign-in issues; the context's request client shares the context's cookie jar,
@@ -9,10 +10,12 @@ import { devSignInError, devSignInPath } from "./api";
  *  names a generation in `user_sessions`, which `resetDatabase` truncates, so sign a context in
  *  after the reset. */
 export async function signIn(context: BrowserContext, login: string): Promise<void> {
-  const response = await context.request.get(devSignInPath(login), { maxRedirects: 0 });
-  if (response.status() !== 302) {
-    throw devSignInError(login, response.status(), await response.text());
-  }
+  await measured("sign-in", async () => {
+    const response = await context.request.get(devSignInPath(login), { maxRedirects: 0 });
+    if (response.status() !== 302) {
+      throw devSignInError(login, response.status(), await response.text());
+    }
+  });
 }
 
 export async function asUser(
@@ -46,7 +49,7 @@ export async function withAlice(
 export async function asPlainHttpUser(browser: Browser, login: string): Promise<BrowserContext> {
   const context = await browser.newContext();
   const page = await context.newPage();
-  const landed = await page.goto(devSignInPath(login));
+  const landed = await measured("sign-in", () => page.goto(devSignInPath(login)));
   const signInResponse = (await landed?.request().redirectedFrom()?.response()) ?? landed;
   if (signInResponse?.status() !== 302) {
     throw devSignInError(

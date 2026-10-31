@@ -2,6 +2,7 @@ import { resetFakeEnvoy } from "./agents";
 import { forgetSessions, quiesceDocuments } from "./api";
 import { resetFakeBroker } from "./fake-broker-helpers";
 import { resetFakeGithub } from "./fake-github-helpers";
+import { measured } from "./measure";
 import { sql } from "./psql";
 
 // The dashboard tables (dashboard_builds, dashboard_assets, dashboard_build_assets, migration 0136)
@@ -179,13 +180,21 @@ async function resetDatabaseOnce(): Promise<void> {
  * The truncate takes `user_sessions` with it, so a session cookie minted before it is refused
  * until its login signs in again: e2e/api.ts forgets its cached ones here, and a browser context
  * signs in after the reset (e2e/users.ts).
+ *
+ * The two sides are the timing fixture's parts `reset-sql` and `reset-fakes` (e2e/measure.ts):
+ * the three fakes are one part, settled together so one failing still lets the others finish.
  */
 export async function resetDatabase(): Promise<void> {
   const resets = await Promise.allSettled([
-    quiesceDocuments().then(resetDatabaseOnce),
-    resetFakeEnvoy(),
-    resetFakeBroker(),
-    resetFakeGithub(),
+    measured("reset-sql", () => quiesceDocuments().then(resetDatabaseOnce)),
+    measured("reset-fakes", async () => {
+      const fakes = await Promise.allSettled([
+        resetFakeEnvoy(),
+        resetFakeBroker(),
+        resetFakeGithub(),
+      ]);
+      for (const fake of fakes) if (fake.status === "rejected") throw fake.reason;
+    }),
   ]);
   for (const reset of resets) if (reset.status === "rejected") throw reset.reason;
   forgetSessions();

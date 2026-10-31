@@ -5,6 +5,7 @@ import { targetedListeners } from "./harness-listeners";
 import { harnessPorts, harnessVariables } from "./harness-ports";
 import { harnessProcessCount } from "./harness-processes";
 import { harnessSignIn } from "./harness-signin";
+import { measuring } from "./measure";
 import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 
 // The plain-HTTP project's origin is a proxy on PLAIN_HTTP_PORT, reached by a host name Chromium
@@ -126,7 +127,11 @@ export default defineConfig({
   outputDir: "test-results",
   fullyParallel: false,
   workers: 1,
-  reporter: "list",
+  // With E2E_MEASURE_FILE set, the timing fixture's reporter writes one row per test beside the
+  // list reporter's own output (e2e/measure-reporter.ts); without it the run is untouched.
+  reporter: measuring
+    ? [["list"], [fileURLToPath(new URL("./measure-reporter.ts", import.meta.url))]]
+    : "list",
   expect: { timeout: expectTimeout },
   use: {
     ...devices["Desktop Chrome"],
