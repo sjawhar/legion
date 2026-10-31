@@ -25,6 +25,9 @@ const issue: IssueDetails = {
   route_status: null,
   route_holder: null,
   route_status_reason: null,
+  holder_state: null,
+  last_seen: null,
+  takeable_at: null,
   artifacts: [
     {
       created_at: "2026-09-09T00:00:00Z",
@@ -383,6 +386,54 @@ test("IssuePage's header warns when nobody holds the route, and adds nothing whe
   } finally {
     refillingView.unmount();
     refilling();
+  }
+});
+
+// A route whose holder has missed its heartbeats is neither unreachable nor unjudged: the
+// listener judged it and said the session is stalled, and what is sent to the issue waits for
+// it. Folding that into either of the other two markers tells a reader to re-staff a role that
+// is still held, or hides that anything is wrong at all (dispatch://INFRA-392).
+test("IssuePage's header marks an unresponsive route holder apart from an unheld and a refilling route", async () => {
+  const stateRow = async () => {
+    const rail = await screen.findByTestId("issue-metadata-rail");
+    await within(rail).findByRole("button", { name: "Messages default to role:sre" });
+    return screen.getByTestId("issue-state-actions");
+  };
+
+  const stalled = stubIssuePage({
+    ...issue,
+    route: "role:sre",
+    route_status: "holder_unresponsive",
+    route_holder: "ses-sre",
+  });
+  const stalledView = renderIssuePage();
+  try {
+    const row = await stateRow();
+    const marker = within(row).getByTestId("issue-route-unresponsive");
+    expect(marker.textContent).toContain("role:sre:");
+    expect(marker.textContent).toContain("Unresponsive, still reached");
+    expect(marker.getAttribute("title")).toContain("waits until it answers");
+    expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
+    expect(within(row).queryByTestId("issue-route-unknown")).toBeNull();
+    expect(within(row).queryByTestId("issue-route-refilling")).toBeNull();
+  } finally {
+    stalledView.unmount();
+    stalled();
+  }
+
+  // The other two states leave this marker off, so the three never read as one another.
+  for (const reach of [
+    { route_status: "no_holder" } as const,
+    { route_status: "unknown", route_status_reason: "refilling" } as const,
+  ]) {
+    const other = stubIssuePage({ ...issue, route: "role:sre", ...reach });
+    const otherView = renderIssuePage();
+    try {
+      expect(within(await stateRow()).queryByTestId("issue-route-unresponsive")).toBeNull();
+    } finally {
+      otherView.unmount();
+      other();
+    }
   }
 });
 

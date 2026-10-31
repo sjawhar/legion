@@ -202,19 +202,21 @@ type Confirming =
  * subscribed to the owner's topic family, under `via issue subscription` (or `via document
  * subscription`). Each session is listed and counted once (`reachRows`): as a follower, else as a
  * subscriber, else via the claim, else via the route, so a session keeps the control it has. Each
- * session is drawn by `AgentName`: its name, its running state from the agent registry (not the
- * subscribers endpoint's `live`, a second snapshot taken at another time; unknown, not offline,
- * while the registry's latest read failed), and its live link. While the listener did not answer,
- * the route's row carries the issue page's `Route reach unknown` marker, and a role route then
- * reads `Reaches N + route (unknown)` (`reachLabel`). A follower's Unfollow and a subscriber's
- * Unsubscribe each confirm first, name what still reaches the session (a subscription, the claim
- * or the route, or that a role route nobody is known to hold may, while its reach is unknown),
- * and then cut the route that actually delivers; the claim and route rows have no control, since
- * both change on the issue. A subscriber whose only matching topic is wider than this owner (e.g.
- * `notifications.dispatch.>`) names that topic and has no control, as the header's Subscribed
- * agents panel does. When the subscribers fetch fails, the card says so with a retry - the shared
- * refilling notice while Envoy's agent list refills - and counts nobody, instead of passing the
- * follower count off as the whole set.
+ * session is drawn by `AgentName`: its name, its state from the agent registry - running,
+ * unresponsive or not running - (not the subscribers endpoint's `live`, a second snapshot taken
+ * at another time; unknown, not offline, while the registry's latest read failed), and its live
+ * link. A session that has missed its heartbeats is still reached and still counted: the
+ * listener stores what is sent to it, so its row differs only by that mark. While the listener
+ * did not answer, the route's row carries the issue page's `Route reach unknown` marker, and a
+ * role route then reads `Reaches N + route (unknown)` (`reachLabel`). A follower's Unfollow and
+ * a subscriber's Unsubscribe each confirm first, name what still reaches the session (a
+ * subscription, the claim or the route, or that a role route nobody is known to hold may, while
+ * its reach is unknown), and then cut the route that actually delivers; the claim and route rows
+ * have no control, since both change on the issue. A subscriber whose only matching topic is
+ * wider than this owner (e.g. `notifications.dispatch.>`) names that topic and has no control,
+ * as the header's Subscribed agents panel does. When the subscribers fetch fails, the card says
+ * so with a retry - the shared refilling notice while Envoy's agent list refills - and counts
+ * nobody, instead of passing the follower count off as the whole set.
  */
 export function AskRecipients({
   askId,

@@ -11,6 +11,9 @@ const issue: IssueDetails = {
   route_status: null,
   route_holder: null,
   route_status_reason: null,
+  holder_state: null,
+  last_seen: null,
+  takeable_at: null,
   artifacts: [],
   children: [
     {

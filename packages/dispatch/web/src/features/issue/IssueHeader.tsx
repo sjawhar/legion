@@ -74,7 +74,11 @@ import { PriorityEditor } from "./PriorityControl";
 import { ProgressChips } from "./ProgressChips";
 import { stateForIssue } from "./pins";
 import { RepoControl } from "./RepoControl";
-import { RouteReachUnknownMarker, UnreachableRouteMarker } from "./RouteReach";
+import {
+  RouteReachUnknownMarker,
+  UnreachableRouteMarker,
+  UnresponsiveRouteMarker,
+} from "./RouteReach";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
 import type { IssuePriorityWrite } from "./useIssuePriority";
@@ -526,6 +530,7 @@ export function IssueHeader({
           {drafts.route === (issue.route ?? "") ? (
             <>
               <UnreachableRouteMarker issue={issue} showRoute />
+              <UnresponsiveRouteMarker issue={issue} showRoute />
               {issue.route !== null && issue.route_status === "unknown" ? (
                 issue.route_status_reason === "refilling" ? (
                   <span
@@ -547,7 +552,7 @@ export function IssueHeader({
                   status, priority and assignee, and Release is an action beside Close. This
                   row wraps, so both stay visible and tappable at 390px; the metadata rail
                   below never wraps (#1211) and would clip them. */}
-              <ClaimChip claim={issue.claim} />
+              <ClaimChip claim={issue.claim} liveness={issue} />
               <button
                 aria-label={`Release the claim on ${issue.key}`}
                 className={`min-h-11 shrink-0 rounded-lg px-2 py-2 text-sm font-medium sm:px-3 md:min-h-8 md:py-1 xl:px-2 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}

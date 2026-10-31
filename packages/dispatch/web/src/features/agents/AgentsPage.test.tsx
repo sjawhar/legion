@@ -313,6 +313,42 @@ test("Agents lists live session activity and capability-aware actions", async ()
   }
 });
 
+// A session that has missed its heartbeats is still listed, still holds its roles and claims,
+// and is still worth messaging. A page that dropped it, or drew it like any other row, sent a
+// person looking for a replacement for a session that was working (dispatch://INFRA-392).
+test("Agents lists an unresponsive session with its state, neither dropped nor drawn as running", async () => {
+  const stalled = {
+    ...agents[0],
+    last_seen: now - 6 * 60_000,
+    session_id: "stalled-session",
+    state: "unresponsive",
+    title: "Stalled",
+  } satisfies Agent;
+  const page = renderAgents({ listedAgents: [...agents, stalled] });
+
+  try {
+    await screen.findByRole("heading", { name: "Agents" });
+    const row = card(screen.getByRole("region", { name: "Agents" }), "Stalled");
+    const note = within(row).getByTestId("agent-unresponsive");
+    expect(note.textContent).toContain("Unresponsive");
+    expect(note.getAttribute("title")).toContain("It has not ended");
+    // The name's own mark reads the row's state, never the list's membership.
+    const mark = within(row).getByRole("img", { name: "Unresponsive" });
+    expect(mark.getAttribute("title")).toContain("seen 6 minutes ago");
+    expect(within(row).queryByRole("img", { name: "Not running" })).toBeNull();
+    expect(within(row).queryByRole("img", { name: "Running" })).toBeNull();
+    // A live row beside it says nothing of the kind.
+    expect(
+      within(card(screen.getByRole("region", { name: "Agents" }), "Planner")).queryByTestId(
+        "agent-unresponsive"
+      )
+    ).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
 // A Claude Code session takes Aside but not Send: the card's plain message goes as an Aside and
 // says so, rather than warning that the Send it would have been records a failed attempt. A
 // session that advertises no mode at all says on its card that it takes no messages.

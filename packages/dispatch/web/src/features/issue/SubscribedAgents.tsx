@@ -19,12 +19,12 @@ export interface SubscribedAgentsProps {
 /**
  * The "Subscribed agents" header section shared by an issue's header and a project
  * document's page: sessions whose persisted Envoy interests include this owner's topic
- * family, each drawn by `AgentName` (its name, its running state from the agent registry, and
- * a link to its live conversation), how long ago it was last seen, and an Unsubscribe control
- * that confirms before telling the session it was removed. The running state is the
- * registry's alone: the subscribers endpoint's `live` (`Subscriber.live`) is a second snapshot
- * taken at another time, so it is deliberately ignored and one agent never shows two states on
- * one page.
+ * family, each drawn by `AgentName` (its name, its state from the agent registry - running,
+ * unresponsive or not running - and a link to its live conversation), how long ago it was last
+ * seen, and an Unsubscribe control that confirms before telling the session it was removed.
+ * That state is the registry's alone: the subscribers endpoint's `live` (`Subscriber.live`) is
+ * a second snapshot taken at another time, and it knows only two states where the registry
+ * knows three, so it is deliberately ignored and one agent never shows two states on one page.
  */
 export function SubscribedAgents({
   onUnsubscribe,

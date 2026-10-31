@@ -41,6 +41,15 @@ interface FakeInterest {
  *  ended. `unreadable` is the bucket read that did not answer at all. */
 type SessionRecord = "present" | "absent" | "unreadable";
 
+/** The state the listener's own record puts a session in, which it judges from that record's
+ *  last registration and carries on every row and per-session answer: `live` within the live
+ *  window, `unresponsive` past it and inside the gone horizon. A `gone` session is one no
+ *  answer names at all, which this fixture models with `setSessionRecord(id, "absent")`, so it
+ *  is not a state a seeded session can be put in. */
+type SessionState = "live" | "unresponsive";
+
+const SESSION_STATES: readonly SessionState[] = ["live", "unresponsive"];
+
 /** How the listener answers its two list reads, `GET /v1/sessions` and `GET /v1/interests/`.
  *  `ok` answers them from the fixture. `refilling` is the real listener's answer while its copy
  *  of a bucket cannot be served (packages/envoy/cmd/listener writeListRefilling): 503,
@@ -77,6 +86,9 @@ interface FakeEnvoyState {
   /** What the session store holds per id; an id named by no entry here is `present`, the state
    *  a seeded session starts in. */
   readonly records: Map<string, SessionRecord>;
+  /** The state the listener's record puts each session in; an id named by no entry here is
+   *  `live`, the state a seeded session starts in. */
+  readonly states: Map<string, SessionState>;
   readonly sendStatuses: Map<string, 200 | 404>;
   /** How long a send to a session is held before it is answered, in milliseconds, as a listener
    *  slow to take it would hold it; an id named by no entry here is answered at once. */
@@ -101,6 +113,7 @@ function emptyState(): FakeEnvoyState {
     sendStatuses: new Map(),
     sentMessages: [],
     sessions: [],
+    states: new Map(),
     unsubscribeCalls: [],
   };
 }
@@ -117,11 +130,31 @@ function asSeen(session: FakeSession, now: number): FakeSession {
   return { last_seen: now, ...session, host: session.host ?? session.machine_id };
 }
 
+/** A session as an answer carries it: seen, and with the state the listener judged it to be in,
+ *  which every row and every per-session answer of the real listener names. */
+function asAnswered(session: FakeSession, now: number): FakeSession & { state: SessionState } {
+  return { ...asSeen(session, now), state: stateOf(session.session_id) };
+}
+
+function stateOf(sessionID: string): SessionState {
+  return state.states.get(sessionID) ?? "live";
+}
+
 /** Whether this listener names a session at all. The live set is the listener's in-memory cache,
  *  which a test drops a session from to model that cache refilling; a session whose record is
- *  `absent` has really ended, and then no answer may name it however the live set stands. */
+ *  `absent` has really ended, and then no answer may name it however the live set stands. An
+ *  unresponsive session is named too: it has missed its heartbeats, it has not ended, and the
+ *  listener still holds its record (dispatch://INFRA-392). */
 function isLive(sessionID: string): boolean {
   return state.liveSessions.has(sessionID) && state.records.get(sessionID) !== "absent";
+}
+
+/** The `include` selector both session routes take, as the real listener reads it
+ *  (`cmd/listener/api.go` includeUnresponsive): a comma-separated list, and an unknown value is
+ *  ignored rather than refused. Without it an unresponsive session is answered for by neither
+ *  route, as a caller that never heard of the state would expect. */
+function includesUnresponsive(url: URL): boolean {
+  return (url.searchParams.get("include") ?? "").split(",").includes("unresponsive");
 }
 
 // FAKE_ENVOY_PORT, or with it unset port 0, so the OS chooses; the line at the end reports the
@@ -134,10 +167,14 @@ const server = Bun.serve({
     if (request.method === "GET" && url.pathname === "/v1/sessions") {
       if (state.lists !== "ok") return listRefusal(state.lists);
       const now = Date.now();
+      const unresponsive = includesUnresponsive(url);
       return Response.json(
         state.sessions
-          .filter((session) => isLive(session.session_id))
-          .map((session) => asSeen(session, now))
+          .filter(
+            (session) =>
+              isLive(session.session_id) && (unresponsive || stateOf(session.session_id) === "live")
+          )
+          .map((session) => asAnswered(session, now))
       );
     }
     if (request.method === "GET" && url.pathname.startsWith("/v1/roles/")) {
@@ -147,10 +184,28 @@ const server = Bun.serve({
       );
       if (holder === undefined)
         return Response.json({ error: `no holder for role ${role}` }, { status: 404 });
+      const holderState = stateOf(holder.session_id);
+      // An unresponsive holder keeps the role: the lookup refuses to answer with it unless the
+      // caller asked for that state, and it releases nothing either way, as the real listener's
+      // holder_lapsed refusal says (packages/envoy/cmd/listener/api.go).
+      if (holderState === "unresponsive" && !includesUnresponsive(url)) {
+        return Response.json(
+          {
+            claim_released: false,
+            code: "holder_lapsed",
+            error: `role ${role} is held by a session that is not live`,
+            holder: holder.session_id,
+            holder_state: holderState,
+            last_seen: asSeen(holder, Date.now()).last_seen,
+          },
+          { status: 404 }
+        );
+      }
       return Response.json({
-        ...asSeen(holder, Date.now()),
+        ...asAnswered(holder, Date.now()),
         capabilities: holder.capabilities ?? [],
         holder: holder.session_id,
+        holder_state: holderState,
         role,
         roles: holder.roles ?? [],
       });
@@ -173,8 +228,22 @@ const server = Bun.serve({
       if (record === "absent" || session === undefined) {
         return Response.json({ error: `no live session ${sessionID}` }, { status: 404 });
       }
+      const answered = asAnswered(session, Date.now());
+      // A session past the live window is the 404 it always was unless the caller asked for it
+      // with include=unresponsive, and that refusal keeps the "no live session <id>" prefix
+      // Dispatch classifies on, with the state and the heartbeat added beside it.
+      if (answered.state === "unresponsive" && !includesUnresponsive(url)) {
+        return Response.json(
+          {
+            error: `no live session ${sessionID}`,
+            last_seen: answered.last_seen,
+            state: answered.state,
+          },
+          { status: 404 }
+        );
+      }
       state.liveSessions.add(sessionID);
-      return Response.json(asSeen(session, Date.now()));
+      return Response.json(answered);
     }
     if (request.method === "POST" && url.pathname === "/v1/messages/send") {
       const message = (await request.json()) as SentMessage;
@@ -198,9 +267,12 @@ const server = Bun.serve({
       const streamKey = `${message.idempotency_key}@${message.target_session}`;
       const duplicate = state.publishedKeys.has(streamKey);
       state.publishedKeys.add(streamKey);
+      // recipient_state is what the recipient's record said when the send was accepted: a
+      // session that has missed its heartbeats is still sent to, and its message waits.
       return Response.json({
         event_id: `envelope-${state.sentMessages.length}`,
         recipient: message.target_session,
+        recipient_state: stateOf(message.target_session),
         ...(duplicate ? { duplicate: true } : {}),
       });
     }
@@ -240,6 +312,8 @@ const server = Bun.serve({
         record?: SessionRecord;
         send_delay_ms?: number;
         send_status?: 200 | 404;
+        state?: SessionState;
+        last_seen?: number;
       };
       if (!state.sessions.some((session) => session.session_id === sessionID)) {
         return Response.json({ error: `unknown fixture session ${sessionID}` }, { status: 404 });
@@ -275,12 +349,36 @@ const server = Bun.serve({
         // asks for the genuine absence gets both at once rather than having to say it twice.
         if (body.record === "absent") state.liveSessions.delete(sessionID);
       }
+      if (body.state !== undefined) {
+        if (!SESSION_STATES.includes(body.state)) {
+          return Response.json({ error: "state must be live or unresponsive" }, { status: 400 });
+        }
+        state.states.set(sessionID, body.state);
+      }
+      if (body.last_seen !== undefined) {
+        // The heartbeat an answer reports, which is what a reader of an unresponsive session
+        // dates its silence by and what Dispatch adds its claim grace to. Writing it on the
+        // seeded row keeps `asSeen` from stamping the read's own time over it.
+        if (!Number.isInteger(body.last_seen) || body.last_seen <= 0) {
+          return Response.json(
+            { error: "last_seen must be a positive whole number of epoch milliseconds" },
+            { status: 400 }
+          );
+        }
+        const index = state.sessions.findIndex((session) => session.session_id === sessionID);
+        const seeded = state.sessions[index];
+        if (seeded !== undefined) {
+          state.sessions[index] = { ...seeded, last_seen: body.last_seen };
+        }
+      }
       return Response.json({
+        last_seen: state.sessions.find((session) => session.session_id === sessionID)?.last_seen,
         live: state.liveSessions.has(sessionID),
         record: state.records.get(sessionID) ?? "present",
         send_delay_ms: state.sendDelays.get(sessionID) ?? 0,
         send_status: state.sendStatuses.get(sessionID) ?? 200,
         session_id: sessionID,
+        state: stateOf(sessionID),
       });
     }
     if (request.method === "GET" && url.pathname === "/__fixture/sends") {

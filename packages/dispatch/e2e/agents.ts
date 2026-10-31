@@ -89,6 +89,30 @@ export async function setSessionRecord(sessionID: string, record: SessionRecord)
   await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", { record });
 }
 
+/** The state the fake listener's record puts a seeded session in. `gone` is not one of them: a
+ *  session the listener holds no record of at all is `setSessionRecord(id, "absent")`. */
+export type SessionState = "live" | "unresponsive";
+
+/** Puts a seeded session past the listener's live window, or back inside it, without reseeding.
+ *  An `unresponsive` session is still listed, still holds its roles and claims and is still
+ *  delivered to; every answer about it carries that state, and `GET /v1/sessions` and the
+ *  per-session route answer for it only when the caller asks with `include=unresponsive`, as
+ *  Dispatch's own listener client always does (dispatch://INFRA-392). Pair it with
+ *  `setSessionLastSeen` wherever the row's age matters: Dispatch dates the silence by that
+ *  heartbeat and adds its claim grace to it. */
+export async function setSessionState(sessionID: string, state: SessionState): Promise<void> {
+  await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", { state });
+}
+
+/** The heartbeat every answer reports for a seeded session, in epoch milliseconds, in place of
+ *  the read's own time: what an unresponsive session's silence is dated from, and what Dispatch
+ *  adds `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` to for the moment its claim comes free. */
+export async function setSessionLastSeen(sessionID: string, lastSeen: number): Promise<void> {
+  await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", {
+    last_seen: lastSeen,
+  });
+}
+
 /** How the fake listener answers its two list reads (`GET /v1/sessions`, `GET /v1/interests/`):
  *  `ok` from the fixture; `refilling` with the real listener's refilling answer (503,
  *  `Retry-After: 5`, code `refilling`), which Dispatch reports as `ENVOY_REFILLING`; `down` with a

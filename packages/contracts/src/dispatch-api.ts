@@ -2092,6 +2092,14 @@ export interface RelatedChecksReport {
   readonly total_ms: RelatedCheckTiming;
 }
 
+/**
+ * The registry's own answer for a session it still holds a record of: `live` within the
+ * listener's live window, `unresponsive` past it and inside the gone horizon. These are the two
+ * a list can carry; `gone` is a session no list names. `IssueClaimHolderState` adds `unknown`,
+ * which is a read's own answer about a holder rather than anything the registry reports.
+ */
+export type AgentSessionState = "live" | "unresponsive";
+
 export interface Agent {
   readonly session_id: string;
   readonly title: string;
@@ -2113,6 +2121,15 @@ export interface Agent {
    */
   readonly capabilities: string[];
   readonly last_seen: number;
+  /**
+   * The state the listener's own record puts the session in when it answered: `live`, or
+   * `unresponsive` for one past the live window that has not reached the gone horizon - it has
+   * missed heartbeats, it has not ended, and it keeps its roles and claims, so the list carries
+   * it rather than dropping it (dispatch://INFRA-392). A `gone` session is listed by nobody.
+   * Absent from a Dispatch server that predates the field, and a reader then has only the
+   * membership it always had: every listed session is running.
+   */
+  readonly state?: AgentSessionState;
   readonly open_asks: number;
   readonly last_activity: string | null;
 }

@@ -69,7 +69,13 @@ import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
-import { AgentName, type AgentPart, AgentParts, useAgentText } from "../refs/AgentName";
+import {
+  AgentName,
+  type AgentPart,
+  AgentParts,
+  AgentUnresponsiveNote,
+  useAgentText,
+} from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -736,6 +742,13 @@ function AgentRow({
           {agent.roles.map((role) => (
             <LabelPill key={role}>{role}</LabelPill>
           ))}
+          {/* A session that has missed its heartbeats is still listed and still worth
+              messaging, so the row says which it is rather than looking like any other: its
+              name's mark alone is a ring a reader would have to hover. */}
+          <AgentUnresponsiveNote
+            lastSeen={agent.last_seen}
+            state={agent.state === "unresponsive" ? "unresponsive" : "running"}
+          />
         </div>
         <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
           <span className={`text-xs ${textMutedOnCanvas}`}>
