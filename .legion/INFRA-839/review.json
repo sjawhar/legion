@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-839",
+  "completed": "2026-10-31T04:40:00Z",
+  "round": 1,
+  "reviewedCodeHead": "4f6e9985b979dde50813ede831ad315571c5f6fb",
+  "diffBase": "0d71712bd594344706b3c8d247e7896e49450822 (legion/INFRA-594, the stacked base)",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 11,
+  "minor": 4,
+  "ci": "Base legion/INFRA-594 requires no check (rulesets and branch protection both empty). CI head 4f6e9985b979: run 41163858951 still queued at the read (only `changes` queued, `pr-title` queued); compare 4f6e9985b979...afcdadf80d4e is handoffs only. Not a gate for a REQUEST_CHANGES.",
+  "thermonuclear": {
+    "deepReview": "Verdict: CHANGES at 4f6e9985 (M1-M5 plus minors and one authz hardening item)",
+    "codeQuality": "Verdict: CHANGES at 4f6e9985 (three Medium structural findings, four Minor)"
+  },
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:198", "description": "Expired and undecodable copies use up roleKeepDrainMax (20): a role unheld for hours (stream MaxAge 72h) drops 20 old copies, advances the cursor and forwards none of the fresh ones, which then wait for a claim that rarely comes within the hour. 202 kept, never delivered. No test with more than 20 copies."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:253", "description": "The cursor compare-and-swap runs once after every forward, so two listeners draining one role (claim on A, takeover on B inside the 60 s drain) both forward every copy, to two holders. The comment at :66-68 describes a guard that does not exist."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:235", "description": "The drain forwards without beforeForward (api.go:489-497): an echo to the source session, and a delivery mode the holder does not advertise, are forwarded where the route and lane both refuse them. Kept copies also carry no Sender stamp (noHolder runs before senderStamp)."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/api.go:750", "description": "publishHandler keeps for any role token the KV alphabet admits, but roleSetHandler refuses anything outside rolePattern (^[a-z0-9][a-z0-9_-]*$): an uppercase hand-formatted token, once a correctable 404, is now 202 kept and expires unread."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/confirmed.go:248", "description": "A keep stored after a concurrent claim's drain read the lane waits for the next claim and usually expires; nothing re-resolves the holder after a keep."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/delivery.go:470", "description": "The role lane keeps for a lapsed holder whose claim is retained (the route deliberately does not, confirmed.go:415); a holder that re-registers inside the grace writes no claim, so the copy is never drained."},
+    {"severity": "important", "file": "packages/pi-shared/src/phase-reminder.ts:99", "description": "tellArchitect publishes with keep unset, so a stall notice to an unheld architect is answered 202, marked reported, and dropped after an hour; before, every later reminder retried until an architect held the role. A sender with its own retry should send keep:false."},
+    {"severity": "important", "file": "packages/envoy/internal/bus/stream.go:226", "description": "StreamSubjects now includes the private kept prefix and each consumer filter must remember DurableNotificationSubjects; tests still build listener durables from StreamSubjects. Keep StreamSubjects the consumer list and add the kept subject only where the stream is configured."},
+    {"severity": "important", "file": "packages/contracts/src/subject.ts:7", "description": "KEPT_TOPIC_PREFIX, keptRoleSubject and keptRoleCursorSubject have no TypeScript caller; the Go copy is hand-written in gen-go.ts and generated.go. Listener-only subjects belong in internal/bus beside ExceptionTopicPrefix."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:71", "description": "Package-global roleKeepDrains and a cfg == nil branch that exists only for tests; put the guard set on listenerDeliveryHandlerConfig like deferredUnplaceable and wire delivery in the tests."},
+    {"severity": "important", "file": "PR body", "description": "No `## Contract change census`: the publish route's answer to an unheld role changes from 404 to 202 at a process boundary (and gains the keep field and kept_at); the body must list every caller of POST /v1/messages/publish for a role topic, in and outside this repository, with a disposition each."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:269", "description": "Security[authz] hardening: publishHandler stores any notifications.envoy.kept.* topic, so a bearer holder can rewind a role's cursor (an envelope decodes as {kept:0}) or forge a kept copy. Refuse the kept prefix in publishHandler."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/delivery.go:460", "description": "The keep call is duplicated in the unclaimed and default branches; one call before the switch does the same."},
+    {"severity": "minor", "file": "packages/envoy/internal/bus/nats.go:1389", "description": "PublishStoredOn and PublishStoredAs wrap one function; the only production caller discards the bool."},
+    {"severity": "minor", "file": "packages/envoy-client/src/transport.ts:353", "description": "keptReason union hand-copied from the zod enum at :109; derive it."}
+  ]
+}
