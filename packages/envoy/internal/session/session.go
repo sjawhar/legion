@@ -61,8 +61,9 @@ type DeliveryResult struct {
 	Skipped bool
 	// Relayed is set with Skipped by Resolve for a message the session's own consumer holds, so
 	// the relay of that consumer is what delivers it (ConsumerRelaysStored): the caller pushes
-	// nothing and records nothing about it, since a record it wrote for a push it never made is
-	// one the relay reads as a copy the session already has and acks unpushed.
+	// nothing and records nothing about it, since a dedupe record it wrote for a push it never
+	// made is one the relay reads as a copy the session already has and acks unpushed, and an
+	// attempt record is one the relay holds the message under until that record is gone.
 	Relayed bool
 	// Push is set by Resolve for a serving-port session this listener owns: the caller pushes the
 	// message to the session's port (Push) at the address Entry gives. DeliverWithResultForEntry
@@ -89,8 +90,9 @@ func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest s
 // stream sequence storedSeq on topic, so the relay of that consumer (cmd/listener's sessionRelays)
 // is what delivers it and no other path may push it, nor record anything about it: the dedupe and
 // attempt records of such a message are the relay's to write, from its own push, or the relay
-// would find a record nothing pushed and ack a copy the session never received. A topic the stream
-// does not capture is in no consumer whatever the session's delivery is, so it is pushed as before.
+// would find a record nothing pushed and ack a copy the session never received, or hold the
+// message for a push that is not in flight. A topic the stream does not capture is in no consumer
+// whatever the session's delivery is, so it is pushed as before.
 func (e SessionEntry) ConsumerRelaysStored(topic string, storedSeq uint64) bool {
 	return e.ConsumerHoldsStored(storedSeq) && bus.StreamCaptures(topic)
 }

@@ -11,12 +11,20 @@ body: |-
   records neither an attempt nor a dedupe key for it, so a message another interest on the topic
   sends down the durable path still reaches the port rather than being acked as a copy the session
   already has. The other side of that rule: an attempt record is a push in flight, not a delivery,
-  so a worker whose own attempt record the relay would ack the message by finishes its push
-  instead of dropping it. A session whose registration was answered `core` on a transient consumer
-  call failure, and whose next registration puts it back on its consumer while a push is in
-  flight, still gets that message. A session consumer's start sequence is recorded on the
-  session's entry, and the durable path skips only the stored messages at or after it: a message
-  stored below that start -- a push NAKed back to the durable, or one deferred as unplaceable,
-  before the session's first consumer was created -- is in no consumer, so the durable still
-  pushes it to the port instead of acknowledging it as delivered, the stored copy of a role
-  forward to a serving-port holder included (INFRA-594).
+  so the relay holds a message another path is pushing -- unacked in its consumer, kept in
+  progress, judged again every second -- rather than acking it, and acks it only once the dedupe
+  key that push's 204 records says the session has it. A push that ends without landing, because
+  the worker reads the session's flipped entry, hands the push back, or lets its attempt record
+  expire, leaves the message to the relay, which pushes it itself: delivery rests on the
+  consumer's ack state rather than on a process-local record that expires, and the race between
+  the two pushes costs at worst a duplicate the session drops by its dedupe key, never the
+  message. A session whose registration was answered `core` on a transient consumer call failure,
+  and whose next registration puts it back on its consumer while a push is in flight, still gets
+  that message, however that push ends. The durable path's delivery to an agent subject records
+  nothing for a message the session's consumer holds either, as its fan-out already recorded
+  nothing. A session consumer's start sequence is recorded on the session's entry, and the durable
+  path skips only the stored messages at or after it: a message stored below that start -- a push
+  NAKed back to the durable, or one deferred as unplaceable, before the session's first consumer
+  was created -- is in no consumer, so the durable still pushes it to the port instead of
+  acknowledging it as delivered, the stored copy of a role forward to a serving-port holder
+  included (INFRA-594).
