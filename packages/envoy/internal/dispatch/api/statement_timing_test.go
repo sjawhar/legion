@@ -113,21 +113,71 @@ func TestStatementTimings(t *testing.T) {
 	relatedArguments := []any{strings.Join(quoted, " | "), subjects.Project, suggestionSearchDepth,
 		subjects.RareWord, headlineOptions, 0, contracts.SearchKindDepth, searchFusionK}
 
-	runner.Head(t, "searchQuery, keywords only",
-		benchtime.Statement{SQL: searchQuery, Args: searchArguments})
-	runner.Head(t, "searchQueryMeaning",
-		benchtime.Statement{SQL: searchQueryMeaning, Args: slices.Concat(searchArguments, meaning)})
-	runner.Head(t, "relatedKeywordQuery",
-		benchtime.Statement{SQL: relatedKeywordQuery, Args: slices.Concat(relatedArguments, []any{lexemes, weights})})
-	runner.Head(t, "relatedMeaningQuery", benchtime.Statement{
-		SQL:  relatedMeaningQuery,
+	// The five statements of search's document arm are protocol 2: their head text reads
+	// document_search and their before text reads the lateral over artifact_versions, and one
+	// database cannot hold both. documentArmSide takes whichever the database it is pointed at
+	// can run, and names the side it read, so the two-commit run is this one test against two
+	// databases rather than a second harness.
+	side, label := documentArmSide(t, runner)
+	runner.Head(t, "searchQuery, keywords only"+label,
+		benchtime.Statement{SQL: side.searchQuery, Args: searchArguments})
+	runner.Head(t, "searchQueryMeaning"+label,
+		benchtime.Statement{SQL: side.searchQueryMeaning, Args: slices.Concat(searchArguments, meaning)})
+	runner.Head(t, "relatedKeywordQuery"+label,
+		benchtime.Statement{SQL: side.relatedKeywordQuery, Args: slices.Concat(relatedArguments, []any{lexemes, weights})})
+	runner.Head(t, "relatedMeaningQuery"+label, benchtime.Statement{
+		SQL:  side.relatedMeaningQuery,
 		Args: slices.Concat(relatedArguments, meaning, []any{lexemes, weights}),
 		// The check raises hnsw.ef_search for its own transaction, so a measurement without it
 		// would be of a statement production never runs (relatedEFSearch).
 		Setup: []string{relatedEFSearch},
 	})
-	runner.Head(t, "relatedProbeSQL",
-		benchtime.Statement{SQL: relatedProbeSQL, Args: []any{subjects.Project, lexemes, "", (*string)(nil)}})
+	runner.Head(t, "relatedProbeSQL"+label,
+		benchtime.Statement{SQL: side.relatedProbeSQL, Args: []any{subjects.Project, lexemes, "", (*string)(nil)}})
+}
+
+// documentArmStatements are the five statements whose document arm this change moved onto
+// document_search, in the one spelling the database under measurement can run.
+type documentArmStatements struct {
+	searchQuery         string
+	searchQueryMeaning  string
+	relatedKeywordQuery string
+	relatedMeaningQuery string
+	relatedProbeSQL     string
+}
+
+// documentArmSide answers the five statements this database can run, and the label that names
+// the side they are. A database migrated from a checkout of main has no document_search, so it
+// can run only main's text, which is protocol 2's before side; the head's schema runs this
+// branch's. The table is read from the catalogue rather than from a caught error, so a statement
+// that fails for its own reason still fails the run.
+func documentArmSide(t *testing.T, runner *benchtime.Runner) (documentArmStatements, string) {
+	t.Helper()
+	var present bool
+	if err := runner.Conn().QueryRow(context.Background(), `
+		select exists (
+			select 1 from information_schema.tables
+			where table_schema = current_schema() and table_name = 'document_search'
+		)
+	`).Scan(&present); err != nil {
+		t.Fatalf("read whether this database holds document_search: %v", err)
+	}
+	if !present {
+		return documentArmStatements{
+			searchQuery:         mainSearchQuery,
+			searchQueryMeaning:  mainSearchQueryMeaning,
+			relatedKeywordQuery: mainRelatedKeywordQuery,
+			relatedMeaningQuery: mainRelatedMeaningQuery,
+			relatedProbeSQL:     mainRelatedProbeSQL,
+		}, " (main's text, the before side)"
+	}
+	return documentArmStatements{
+		searchQuery:         searchQuery,
+		searchQueryMeaning:  searchQueryMeaning,
+		relatedKeywordQuery: relatedKeywordQuery,
+		relatedMeaningQuery: relatedMeaningQuery,
+		relatedProbeSQL:     relatedProbeSQL,
+	}, " (this branch's text, the after side)"
 }
 
 // TestRelatedTermsRefreshTiming is protocol 3, the refresh's own, and it is a Go test rather
