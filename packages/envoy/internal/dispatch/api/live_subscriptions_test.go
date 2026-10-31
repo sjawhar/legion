@@ -131,7 +131,10 @@ func hubSubs(hub *deliveryHub) int {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
 	held := 0
-	for _, subs := range hub.conns {
+	if hub.generation == nil {
+		return 0
+	}
+	for _, subs := range hub.generation.conns {
 		held += len(subs)
 	}
 	return held

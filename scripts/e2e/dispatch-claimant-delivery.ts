@@ -31,6 +31,11 @@ const origin = new URL(dispatchUrl).origin;
 const publishWaitMs = 10_000;
 const settleMs = 2_000;
 const mentionWaitMs = 15_000;
+/** How long a mention's delivery row may stay `pending` after the comment's 201. The comment
+ *  answers every mention attempt pending, and its sender sends after the response: one listener
+ *  call, bounded by the listener client's 5-second window, then the settle. Ten seconds is two of
+ *  those windows; a row still pending past it is a send this binary never settled. */
+const mentionSettleMs = 10_000;
 
 const person = "alice";
 const sessionP = "claimant-e2e-p";
@@ -223,7 +228,8 @@ async function setSendStatus(session: string, status: 200 | 404): Promise<void> 
 /** The person's comment on `key` mentioning `session` in the default mode (`steer`), with what
  *  `extra` adds (an ask reply's `ask_id`). It prints the sessions the comment.created payload's
  *  mentions resolved to, how many sends for the comment the fake listener took, and each delivery
- *  row `GET /api/v1/comments/{id}` reads, and returns the event and the newest row's state. It
+ *  row `GET /api/v1/comments/{id}` reads once none is pending (settledDeliveries), and returns the
+ *  event and the newest row's state. It
  *  throws when the mention did not resolve to `session`: every mention case is about a session the
  *  mention named, whatever its send did. */
 async function personMentions(
@@ -244,16 +250,15 @@ async function personMentions(
   const resolved = mentions.map(
     (item) => `${item.target}→${JSON.stringify(item.session_id ?? null)}`
   );
+  const rows = await settledDeliveries(commentId);
   const sends = (await (await fetch(new URL("/__fixture/sends", envoyUrl))).json()) as {
     idempotency_key: string;
   }[];
-  // A mention's send is keyed `<comment id>:<target>:<mode>`.
+  // A mention's send is keyed `<comment id>:<target>`, whatever mode the attempt went in.
   const taken = sends.filter((send) => send.idempotency_key.startsWith(`${commentId}:`)).length;
   note(
     `the person commented ${commentId} on ${key} mentioning session:${session}; comment.created mentions ${resolved.join(" ") || "(none)"}; the fake listener took ${taken} send(s) for it`
   );
-  const rows = (((await asAgent(`/api/v1/comments/${commentId}`)) as Json).comment as Json)
-    .deliveries as Json[];
   for (const row of rows) {
     const error =
       row.error === null || row.error === undefined ? "" : ` error=${JSON.stringify(row.error)}`;
@@ -265,6 +270,24 @@ async function personMentions(
     throw new Error(`the mention did not resolve to ${session}`);
   }
   return { event, state: rows.at(-1)?.state };
+}
+
+/** The delivery rows `GET /api/v1/comments/{id}` reads once none is `pending`: the comment's 201
+ *  answers its mention attempts pending and the sender settles them after the response. Throws
+ *  when a row is still pending `mentionSettleMs` after the comment was created. */
+async function settledDeliveries(commentId: string): Promise<Json[]> {
+  const deadline = Date.now() + mentionSettleMs;
+  for (;;) {
+    const rows = (((await asAgent(`/api/v1/comments/${commentId}`)) as Json).comment as Json)
+      .deliveries as Json[];
+    if (!rows.some((row) => row.state === "pending")) return rows;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `comment ${commentId}'s mention delivery row was still pending ${mentionSettleMs / 1000}s after its 201`
+      );
+    }
+    await Bun.sleep(100);
+  }
 }
 
 const results: { name: string; ok: boolean }[] = [];

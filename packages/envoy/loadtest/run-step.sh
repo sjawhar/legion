@@ -4,6 +4,8 @@
 #   run-step.sh <name> --events <per s> --sessions <n> --requests <per s>
 #     [--duration 180s] [--warmup 30s] [--grace 20s] [--event-mix <preset or kind=w,...>]
 #     [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed <n>] [--out <dir>]
+#     [--live-resume 0|1] [--live-stale <n>] [--restart-at <duration>]
+#     [--mention-frac <0..1>] [--mentions <n>] [--envoy-rtt <duration>]
 #
 #   run-step.sh <name> --replay [--rate F] [--reads RHO] [--read-mix M] [--uploads U]
 #     [--rng-seed N] [--from D --to D] [--roster N] [--keys-file FILE] [--warmup D]
@@ -17,7 +19,9 @@
 # ignores. Every step then resets the stack to the seed (stack.sh reset: database recreated from
 # dispatch_seed, NATS on a fresh store, listener and Dispatch restarted), runs `loadgen run` and
 # renders `loadgen tables` in the step directory, $LOADTEST_ROOT/runs/<name>/ unless --out names
-# another (it must not exist or be empty). Dispatch's log is the step's dispatch.log.
+# another (it must not exist or be empty). Dispatch's log is the step's dispatch.log. --envoy-rtt
+# starts Dispatch with ENVOY_URL through a latency proxy of that round trip in front of the
+# listener (stack.sh LOADTEST_ENVOY_RTT); every other flag goes to `loadgen run`.
 #
 # A --replay step replays the LINUX bundle (README.md, The replay) instead: stack.sh setup
 # (incremental; with --dispatch-commit, envoy-dispatch from that commit, a rev that names no commit
@@ -33,8 +37,9 @@
 # LOADTEST_PG_DIRECT; --gomaxprocs sets LOADTEST_GOMAXPROCS. The reset's replay/last-reset.json is
 # copied into the step directory.
 #
-# Dispatch is stopped when the step ends, pass or fail, so the box is idle between steps; Postgres,
-# the proxy, NATS and the listener keep running (stack.sh stop stops them).
+# Dispatch (and the listener's latency proxy) are stopped when the step ends, pass or fail, so the
+# box is idle between steps; Postgres, the proxy, NATS and the listener keep running (stack.sh stop
+# stops them).
 #
 # One run at a time per LOADTEST_ROOT (common.sh): a run-step.sh or run-series.sh on a root that
 # another run holds is refused before it touches the stack. A step in which a stack process exited,
@@ -47,6 +52,9 @@ stack=$here/stack.sh
 # shellcheck source=packages/envoy/loadtest/common.sh
 source "$here/common.sh"
 resolve_paths
+# Dispatch reaches the listener directly unless --envoy-rtt says otherwise, whatever this shell
+# holds.
+export LOADTEST_ENVOY_RTT=
 
 [ $# -ge 1 ] || usage
 name=$1
@@ -110,7 +118,20 @@ while [ $# -gt 0 ]; do
       --events) have_events=true ;;
       --sessions) have_sessions=true ;;
       --requests) have_requests=true ;;
-      --duration | --warmup | --grace | --event-mix | --human | --live | --rng-seed) ;;
+      --duration | --warmup | --grace | --event-mix | --human | --live | --rng-seed | --live-stale | --restart-at | --mention-frac | --mentions) ;;
+      --live-resume)
+        case $value in
+          1) args+=(-live-resume) ;;
+          0) ;;
+          *) die "--live-resume takes 1 or 0, not '$value'" ;;
+        esac
+        continue
+        ;;
+      --envoy-rtt)
+        [[ $value =~ ^[0-9]+(\.[0-9]+)?(ns|us|ms|s|m)$ ]] || die "--envoy-rtt takes a duration such as 200ms, not '$value'"
+        LOADTEST_ENVOY_RTT=$value
+        continue
+        ;;
       --route-mix) value=$(abs_file --route-mix "$value") ;;
       *) die "unknown flag '$flag'" ;;
     esac
@@ -168,7 +189,7 @@ mkdir -p -- "$out"
 # it) and the rest of the stack is idle, so what it shows is other work on the machine. Read after
 # the reset, it would show Dispatch's own start-up work instead.
 box_busy=$("$stack" loadgen box-busy)
-trap '"$stack" stop dispatch' EXIT
+trap '"$stack" stop dispatch envoy_proxy' EXIT
 if $replay; then
   "$stack" reset --replay "$out/dispatch.log"
   cp -- "$ROOT/replay/last-reset.json" "$out/last-reset.json"
@@ -178,10 +199,11 @@ else
 fi
 rc=0
 "$stack" loadgen run -name "$name" -out "$out" -build-commit "$commit" -build-dirty="$dirty" -box-busy-before "$box_busy" "${args[@]}" || rc=$?
-"$stack" stop dispatch
+"$stack" stop dispatch envoy_proxy
 trap - EXIT
 cp -- "$ROOT/logs/listener.out" "$out/listener.log"
 cp -- "$ROOT/logs/nats.out" "$out/nats.log"
+[ -z "$LOADTEST_ENVOY_RTT" ] || cp -- "$ROOT/logs/envoy-proxy.out" "$out/envoy-proxy.log"
 if ((rc != 0)); then
   # loadgen run printed why above (a stack process that exited during the step, commit rows it
   # could not read, or its error).

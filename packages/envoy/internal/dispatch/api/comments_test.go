@@ -46,7 +46,7 @@ func TestMentionedCommentDeliversAndProjectsResolvedMention(t *testing.T) {
 		}
 	}))
 	defer listener.Close()
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Comment mentions", "before")
 
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
@@ -76,8 +76,12 @@ func TestMentionedCommentDeliversAndProjectsResolvedMention(t *testing.T) {
 		t.Fatalf("created mentions = %#v, want the resolved default-steer session mention", created.Mentions)
 	}
 	if len(created.Deliveries) != 1 || created.Deliveries[0].Target != "session:s1" ||
-		created.Deliveries[0].State != "sent" {
-		t.Fatalf("created deliveries = %#v, want one sent session:s1 attempt", created.Deliveries)
+		created.Deliveries[0].State != "pending" {
+		t.Fatalf("created deliveries = %#v, want one pending session:s1 attempt", created.Deliveries)
+	}
+	if settled := settledCommentDeliveries(t, database, created.ID); len(settled) != 1 ||
+		settled[0].Target != "session:s1" || settled[0].State != "sent" {
+		t.Fatalf("settled deliveries = %#v, want one sent session:s1 attempt", settled)
 	}
 	if len(sent) != 1 {
 		t.Fatalf("listener sends = %#v, want exactly one mention delivery", sent)

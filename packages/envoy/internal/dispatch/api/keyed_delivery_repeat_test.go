@@ -105,6 +105,9 @@ func TestARepeatOfACommentDeliversItsOwedMentionOnce(t *testing.T) {
 		t.Fatalf("first: status=%d body=%s", first.Code, first.Body.String())
 	}
 	comment := decodeBody[model.Comment](t, first)
+	// The comment's own send runs after its response (comment_mention_sender.go); the test stands
+	// the attempt back up only once that send has settled.
+	settledCommentDeliveries(t, database, comment.ID)
 
 	// The process stopped before it could record what its send did: the attempt is pending again,
 	// its claim long lapsed, and the key holds the comment with no stored answer.
@@ -123,12 +126,16 @@ func TestARepeatOfACommentDeliversItsOwedMentionOnce(t *testing.T) {
 	}
 	answered := decodeBody[model.Comment](t, repeat)
 	if answered.ID != comment.ID || len(answered.Mentions) != 1 || len(answered.Deliveries) != 1 ||
-		answered.Deliveries[0].Attempt != 1 || answered.Deliveries[0].State != "sent" {
-		t.Fatalf("the repeat answered %#v, want comment %s with its one mention sent on attempt 1", answered, comment.ID)
+		answered.Deliveries[0].Attempt != 1 {
+		t.Fatalf("the repeat answered %#v, want comment %s with its one mention on attempt 1", answered, comment.ID)
+	}
+	// The repeat queues the owed attempt on the mention sender's lanes, behind its answer.
+	if settled := settledCommentDeliveries(t, database, comment.ID); !allSent(settled) {
+		t.Fatalf("the attempt after the repeat = %#v, want it sent", settled)
 	}
 	// Both sends carry the attempt's own key, which is what makes the second a repeat the stream
 	// drops rather than a second frame.
-	key := comment.ID + ":session:s1:steer"
+	key := comment.ID + ":session:s1"
 	if keys := keysOf(sends); !equalStrings(keys, []string{key, key}) {
 		t.Fatalf("listener sends = %v, want the one attempt's key twice", keys)
 	}
@@ -149,7 +156,7 @@ func TestARepeatOfACommentDeliversItsOwedMentionOnce(t *testing.T) {
 // without a listener call.
 func TestARepeatOfADeliveredCommentSendsNothingMore(t *testing.T) {
 	listener, sends := newBroadcastListener(t, agentSessions)
-	handler, _, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	issue := createTestIssue(t, handler, "KEYD", "Keyed comments")
 	for name, test := range map[string]struct {
 		key   string
@@ -171,11 +178,17 @@ func TestARepeatOfADeliveredCommentSendsNothingMore(t *testing.T) {
 			if first.Code != http.StatusCreated {
 				t.Fatalf("first: status=%d body=%s", first.Code, first.Body.String())
 			}
+			// The comment's own send runs after its response, so the repeat and the count below
+			// follow it rather than race it.
+			comment := decodeBody[model.Comment](t, first)
+			if test.sends > 0 {
+				settledCommentDeliveries(t, database, comment.ID)
+			}
 			again := post()
 			if again.Code != http.StatusCreated || !replayed(again) {
 				t.Fatalf("the repeat: status=%d body=%s, want the comment replayed", again.Code, again.Body.String())
 			}
-			if decodeBody[model.Comment](t, again).ID != decodeBody[model.Comment](t, first).ID {
+			if decodeBody[model.Comment](t, again).ID != comment.ID {
 				t.Fatalf("the repeat answered another comment: %s", again.Body.String())
 			}
 			if sent := len(sends.targets()) - before; sent != test.sends {

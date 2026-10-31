@@ -16,18 +16,22 @@ import (
 // to local subscribers. NATS publication is an outbox concern owned by A5.
 //
 // Its fan-out is a Stream of its own (stream.go), so the one implementation of the overflow
-// contract serves both it and the reader's live feed. A Broker's subscribers are the ones that
-// want this process's own writes as it commits them: the outbox's local wake
-// (outbox/publisher.go) and the delivery hub's intake (api/delivery_live_hub_intake.go). An
-// events subscription is not one of them; it reads the relay's stream, which carries the other
-// process's events too.
+// contract serves both it and the reader's live feed. A Broker's subscriber is the one that wants
+// this process's own writes as it commits them: the outbox's local wake (outbox/publisher.go).
+// Neither an events subscription nor the delivery hub is one; both read the event stream relay's
+// stream (api/event_stream_relay.go), which carries the other process's events too.
 type Broker struct {
-	stream *Stream
+	stream *Stream[model.Event]
 }
+
+// brokerBuffer is how far behind a Broker subscriber may fall before the stream drops it: 64
+// events, more than any one request commits. A dropped subscriber (the outbox's wake) subscribes
+// again and catches up from the database.
+const brokerBuffer = 64
 
 // NewBroker creates an empty in-process broker.
 func NewBroker() *Broker {
-	return &Broker{stream: NewStream()}
+	return &Broker{stream: NewStream[model.Event]()}
 }
 
 // LockOwners locks all event owners in a deterministic order. A transaction that appends
@@ -413,7 +417,7 @@ func quietAskEdit(payload any) bool {
 }
 
 // Subscribe returns a committed-event stream and a cancellation function.
-func (b *Broker) Subscribe() (<-chan model.Event, func()) { return b.stream.Subscribe() }
+func (b *Broker) Subscribe() (<-chan model.Event, func()) { return b.stream.Subscribe(brokerBuffer) }
 
 // SubscriberCount reports the active local fan-out subscriptions.
 func (b *Broker) SubscriberCount() int { return b.stream.SubscriberCount() }

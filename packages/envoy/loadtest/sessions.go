@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -80,9 +81,10 @@ func (ns *natsSessions) handler(agent bool, nonce int64) nats.MsgHandler {
 		if json.Unmarshal([]byte(env.Payload), &ev) != nil {
 			return
 		}
-		key := ev.Type
+		// A payload with no event type is a listener send (a mention), not a Dispatch event.
+		key := cmp.Or(ev.Type, "send")
 		if agent {
-			key = "agent." + ev.Type
+			key = "agent." + key
 		}
 		ns.envelopes.offer(key, m.Data, nonce)
 		ns.receipts.add(receipt{EventID: ev.ID, Recv: now, Agent: agent})
@@ -163,14 +165,19 @@ func (r *registrar) register(ctx context.Context, i int) error {
 }
 
 // registrationBody is session s's registration with the listener: its directory, title and the
-// topics of the issues it watches.
+// topics of the issues it watches. With -mention-frac, it advertises the default mention
+// delivery, so Dispatch delivers a mention of the session.
 func (st *step) registrationBody(s session) []byte {
 	topics := []string{}
 	for _, w := range s.watched {
 		topics = append(topics, st.issueTopic(w))
 	}
+	capabilities := []string{}
+	if st.cfg.mentionFrac > 0 {
+		capabilities = []string{mentionDelivery}
+	}
 	b, _ := json.Marshal(map[string]any{"session_id": s.id, "dir": "/work/" + s.id, "title": "load " + s.id,
-		"topics": topics, "port": 0, "self_subscribed": true, "driving": false, "capabilities": []string{}})
+		"topics": topics, "port": 0, "self_subscribed": true, "driving": false, "capabilities": capabilities})
 	return b
 }
 

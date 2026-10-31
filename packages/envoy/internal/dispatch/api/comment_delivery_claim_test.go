@@ -61,6 +61,7 @@ func TestMentionDeliveryPersistsPendingBeforeSendAndRetryCompletesIt(t *testing.
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "This delivery must be durable before its send.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
+	settledCommentDeliveries(t, database, comment.ID)
 	if pendingDuringSend != "pending" {
 		t.Fatalf("delivery state during send = %q, want pending row committed before sending", pendingDuringSend)
 	}
@@ -143,6 +144,7 @@ func TestConcurrentMentionRetryResolvesNewAttemptUnderLock(t *testing.T) {
 	created := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Retry with the new holder after the original completes.", "mentions": []map[string]any{{"target": "role:reviewer"}},
 	}))
+	settledCommentDeliveries(t, database, created.ID)
 	if _, err := database.Pool.Exec(context.Background(), `
 		update comment_deliveries set state = 'pending', envelope_id = null, error = null, claimed_at = null
 		where comment_id = $1 and target = 'role:reviewer' and attempt = 1
@@ -153,7 +155,7 @@ func TestConcurrentMentionRetryResolvesNewAttemptUnderLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load retry comment: %v", err)
 	}
-	event, err := direct.loadCommentCreatedEvent(context.Background(), database.Pool, created.ID)
+	event, err := direct.loadCommentCreatedEvent(context.Background(), database.Pool, comment)
 	if err != nil {
 		t.Fatalf("load retry event: %v", err)
 	}
@@ -170,7 +172,7 @@ func TestConcurrentMentionRetryResolvesNewAttemptUnderLock(t *testing.T) {
 	second := make(chan deliveryResult, 1)
 	go func() {
 		attempt, err := direct.deliverResolvedCommentMention(
-			context.Background(), comment, event, stale, model.Actor{Kind: "user", ID: "alice"}, 0,
+			context.Background(), comment, event, stale, model.Actor{Kind: "user", ID: "alice"}, attemptClaim{},
 		)
 		first <- deliveryResult{attempt: attempt, err: err}
 	}()
@@ -180,7 +182,7 @@ func TestConcurrentMentionRetryResolvesNewAttemptUnderLock(t *testing.T) {
 	mu.Unlock()
 	go func() {
 		attempt, err := direct.deliverResolvedCommentMention(
-			context.Background(), comment, event, stale, model.Actor{Kind: "user", ID: "bob"}, 0,
+			context.Background(), comment, event, stale, model.Actor{Kind: "user", ID: "bob"}, attemptClaim{},
 		)
 		second <- deliveryResult{attempt: attempt, err: err}
 	}()
@@ -239,7 +241,8 @@ func TestAbandonedMentionAttemptIsResumedUnderItsOriginalIdempotencyKey(t *testi
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "The sender dies before it hears back.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
-	original := comment.ID + ":session:s1:steer"
+	original := comment.ID + ":session:s1"
+	settledCommentDeliveries(t, database, comment.ID)
 	if len(keys) != 1 || keys[0] != original {
 		t.Fatalf("original send keys = %#v, want %q", keys, original)
 	}
@@ -261,7 +264,7 @@ func TestAbandonedMentionAttemptIsResumedUnderItsOriginalIdempotencyKey(t *testi
 	if attempt := decodeBody[commentDeliveryRead](t, held); attempt.Attempt != 2 || attempt.State != "sent" {
 		t.Fatalf("retry beside a held attempt = %#v, want its own attempt 2", attempt)
 	}
-	// The key carries no attempt number, only the target and mode: a same-mode retry beside a
+	// The key carries no attempt number and no mode, only the mention's target: a retry beside a
 	// live claim opens its own attempt ROW (nobody drives the held one), but sends under the
 	// SAME key as the original - if the held attempt's send lands too, the stream recognises
 	// the repeat and this one settles as a duplicate rather than a second delivery.
@@ -334,6 +337,7 @@ func TestStrandedMentionAttemptIsResolvedRatherThanFailedUnsent(t *testing.T) {
 		"body":     "The client gives up while the listener is still answering.",
 		"mentions": []map[string]any{{"target": "session:s1"}},
 	}))
+	settledCommentDeliveries(t, database, comment.ID)
 
 	// Exactly what openCommentDeliveryAttempt leaves behind when its sender never comes back:
 	// pending, claimed, and carrying neither a session nor a resolve error. The claim is old
@@ -359,7 +363,7 @@ func TestStrandedMentionAttemptIsResolvedRatherThanFailedUnsent(t *testing.T) {
 		attempt.SessionID == nil || *attempt.SessionID != "s1" {
 		t.Fatalf("resumed stranded attempt = %#v, want attempt 1 sent to the live session s1", attempt)
 	}
-	original := comment.ID + ":session:s1:steer"
+	original := comment.ID + ":session:s1"
 	if len(keys) != 1 || keys[0] != original {
 		t.Fatalf("stranded-attempt send keys = %#v, want one send under the original key %q", keys, original)
 	}

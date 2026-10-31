@@ -233,13 +233,68 @@ func TestAnAgentViewNamesItsKindAndItsSessionAlone(t *testing.T) {
 	}
 }
 
-// A viewer that falls behind ends its subscription rather than losing a frame. The relay never
-// parses a frame, so it cannot tell a superseded snapshot from a tool result or from the settled
-// frame of an earlier message; dropping the wrong one would leave a tool call reading "running…"
-// with nothing later to correct it. Ending the subscription costs the page a subscribe, and the
-// subscribe rebuilds from the session's own replay. The subscription here waits for room as a
-// socket's does while its page reads nothing, so it drains nothing of what the session publishes.
-func TestAgentStreamEndsTheStreamWhenAViewerFallsBehind(t *testing.T) {
+// paddedFrame is a frame of exactly size bytes that names its place in the sequence.
+func paddedFrame(seq, size int) agentstream.Frame {
+	head := fmt.Sprintf(`{"seq":%d,"pad":"`, seq)
+	return agentstream.Frame(head + strings.Repeat("x", size-len(head)-len(`"}`)) + `"}`)
+}
+
+// agentFrameOf reads the subscription's next frame, which must be agent's frame named event, and
+// answers its data.
+func agentFrameOf(t *testing.T, stream *gatedStream, event string) string {
+	t.Helper()
+	frame, ok := stream.next(t, "the "+event+" of agent").(LiveAgentFrame)
+	if !ok || frame.Sub != "agent" || frame.Event != event {
+		t.Fatalf("frame = %+v, want the %s of agent", frame, event)
+	}
+	return string(frame.Data)
+}
+
+// A view's budget is bytes, not frames: agentStreamBufferBytes of them. Everything published while
+// its page reads nothing is held, up to the whole budget, and reaches the page in order. The
+// subscription here waits for room as a socket's does while its page reads nothing, so it drains
+// nothing of what the session publishes until the test lets it.
+func TestAnAgentViewHoldsFramesWithinTheViewersBudget(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		frames int
+		size   int
+	}{
+		{name: "200 small frames", frames: 200, size: 1 << 10},
+		// A session snapshots a message at most every 100 ms, so a two-second replay wait on a
+		// large message queues about this many snapshots of it.
+		{name: "20 snapshots of a large message", frames: 20, size: 300 << 10},
+		{name: "the whole budget", frames: agentStreamBufferBytes / (1 << 20), size: 1 << 20},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := agentstream.NewMemory()
+			_, _, _, served := newRegisteredTestServer(t, testServerOptions{agentStream: source})
+			stream := newGatedStream()
+			running := served.startAgentSubscription(t.Context(), stream, "agent", plannerSessionID)
+			t.Cleanup(running.stop)
+			pollUntil(t, 5*time.Second, "the view arms the session", func() bool { return source.Watches(plannerSessionID) >= 1 })
+
+			for index := range test.frames {
+				source.Publish(plannerSessionID, paddedFrame(index, test.size))
+			}
+			close(stream.gate)
+
+			agentFrameOf(t, stream, "responder")
+			for index := range test.frames {
+				if data := agentFrameOf(t, stream, "frame"); data != string(paddedFrame(index, test.size)) {
+					t.Fatalf("frame %d is %d bytes, %.20q, want frame seq %d", index, len(data), data, index)
+				}
+			}
+		})
+	}
+}
+
+// A viewer that falls further behind than its budget ends its subscription rather than losing a
+// frame. The relay never parses a frame, so it cannot tell a superseded snapshot from a tool
+// result or from the settled frame of an earlier message; dropping the wrong one would leave a
+// tool call reading "running…" with nothing later to correct it. Ending the subscription costs
+// the page a subscribe, and the subscribe rebuilds from the session's own replay.
+func TestAnAgentViewThatFallsPastItsBudgetEndsAsBehind(t *testing.T) {
 	source := agentstream.NewMemory()
 	_, _, _, served := newRegisteredTestServer(t, testServerOptions{agentStream: source})
 	stream := newGatedStream()
@@ -247,20 +302,22 @@ func TestAgentStreamEndsTheStreamWhenAViewerFallsBehind(t *testing.T) {
 	t.Cleanup(running.stop)
 	pollUntil(t, 5*time.Second, "the view arms the session", func() bool { return source.Watches(plannerSessionID) >= 1 })
 
-	// More frames than the view holds for a page that reads nothing.
-	for index := range agentStreamBuffer * 4 {
-		source.Publish(plannerSessionID, agentstream.Frame(fmt.Sprintf(`{"seq":%d}`, index)))
+	// The whole budget, and then one frame more than it holds.
+	frames := agentStreamBufferBytes / (1 << 20)
+	for index := range frames {
+		source.Publish(plannerSessionID, paddedFrame(index, 1<<20))
 	}
+	source.Publish(plannerSessionID, paddedFrame(frames, 64))
 	close(stream.gate)
 	if frame, ok := stream.next(t, "the responder").(LiveAgentFrame); !ok || frame.Event != "responder" {
 		t.Fatalf("first frame = %+v, want the responder", frame)
 	}
-	// What was held before the view fell behind may still go, in order; after it, the end.
+	// What was held before the view fell past its budget may still go, in order; after it, the end.
 	for last := -1; ; {
 		switch frame := stream.next(t, "the end of agent").(type) {
 		case LiveAgentFrame:
 			var seq int
-			if _, err := fmt.Sscanf(string(frame.Data), `{"seq":%d}`, &seq); err != nil || frame.Event != "frame" || seq != last+1 {
+			if _, err := fmt.Sscanf(string(frame.Data), `{"seq":%d,`, &seq); err != nil || frame.Event != "frame" || seq != last+1 {
 				t.Fatalf("frame %+v after seq %d, want the next frame in order", frame, last)
 			}
 			last = seq

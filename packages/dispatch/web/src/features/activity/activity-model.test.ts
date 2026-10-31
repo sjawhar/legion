@@ -93,3 +93,39 @@ test("an architecture import names the repository it came from; a retained event
     activityDescription({ ...projectEvent, payload: { error }, type: "architecture.sync_failed" })
   ).toEqual(["failed to sync the architecture model: duplicate component id api"]);
 });
+
+function commentDelivery(receipt: { state: "sent" | "failed"; duplicate?: boolean }): Event {
+  return {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-10-25T00:00:00Z",
+    id: 1,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      attempt: 1,
+      comment_id: "comment-1",
+      delivery: "btw",
+      reply_id: null,
+      session_id: null,
+      target: "session:planner",
+      ...(receipt.state === "failed" ? { error: "no live session planner" } : {}),
+      ...receipt,
+    },
+    seq: 1,
+    type: "comment.delivery",
+  };
+}
+
+test("a mention receipt says whether the mention reached its target", () => {
+  expect(activityDescription(commentDelivery({ state: "sent" }))).toEqual([
+    "delivered a comment mention to session:planner",
+  ]);
+  expect(activityDescription(commentDelivery({ state: "failed" }))).toEqual([
+    "could not deliver a comment mention to session:planner",
+  ]);
+  // A repeat the stream already held reached nobody new, which the line says rather than
+  // counting it as a second delivery.
+  expect(activityDescription(commentDelivery({ duplicate: true, state: "sent" }))).toEqual([
+    "already delivered a comment mention to session:planner",
+  ]);
+});

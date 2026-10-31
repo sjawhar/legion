@@ -99,7 +99,7 @@ func TestDashboardChoice(t *testing.T) {
 				winStart: time.Now().Add(-time.Minute),
 				winEnd:   time.Now().Add(time.Minute),
 			}
-			ds := st.startDashboard(ctx, url)
+			ds := st.startDashboard(ctx, url, nil)
 			var frames []liveFrame
 			for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
 				if frames = ds.frames.snapshot(); len(frames) >= 2 {

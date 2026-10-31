@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-606",
+  "completed": "2026-10-31T09:10:31Z",
+  "round": 9,
+  "headReviewed": "9e5642edb7e900ef2273f6243625f2ca973ad0da",
+  "codeHead": "3d5c31a9da84",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 3,
+  "roundKind": "Full round: my last review (round 8) requested changes, so this is not a confirmation round and no round-shape comparison applies.",
+  "ci": "Required set is now ci-ok and pr-title (rulesets). Run 41170407259 at 3d5c31a9: every job green except envoy-go, whose only failure is main's TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries in internal/broker/oauth (broken by #2474, fixed by open #2598), so ci-ok is red on main's test alone; pr-title success.",
+  "tests": "Deep reviewer at 3d5c31a9, Postgres 16 local: go build and vet clean; full ./internal/dispatch/api under -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB passes except the known collation test; outbox, model, internal/contracts, cmd/listener pass. Round-8 reproduction adapted (TestARetryInAnotherModeThatTimedOutLeavesTheRecipientOneCopy) passes and fails with the mode put back in the key. Two scratch rollout tests (old-key send then new-key resend; old receipt-timeout then new same-mode Retry) fail: the session gets the comment twice. Pod memory about 2.2 GB when sampled.",
+  "threadsAnswered": [
+    "PRRT_kwDORFy7ds6x-gRS",
+    "PRRT_kwDORFy7ds6x-gRg"
+  ],
+  "round8Status": "Fixed: one key per mention, so a timed-out Retry in another mode leaves one copy; the sweep settles an overtaken attempt left pending; the doc passages are corrected except comment_delivery.go:672-677. The #2392 horizon merge holds: relay, resume, overflow catch-up and GET /api/v1/events/log read up to the horizon with no skip or duplicate. refreshHeldClaims records only over the claim it read.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/model/model.go",
+      "description": "CommentMentionIdempotencyKey changed from main's `<comment>:<target>:<mode>` to `<comment>:<target>`, and the listener derives the dedupe key verbatim (cmd/listener/api.go:574-578). A mention the previous build delivered and did not settle, resent by this build's sweep, or a same-mode Retry of an old receipt-timeout attempt, reaches the session again with duplicate:false; the outbox's copy for an old failed attempt does too. The window is the 72 h MentionSweepWindow / duplicate window after the deploy; Recreate does not avoid it. Reproduced in two scratch tests. Fix: key by the mention's own mode, `<comment>:<target>:<comment_mentions.delivery>` (attempt 1 is always in that mode), which equals main's key for every automatic send and keeps one key per mention, so the round-8 fix holds."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/delivery_sweep.go",
+      "description": "Docs: delivery_sweep.go:87-95 lists a stood-down attempt among the outbox's resumed ones and says the copy is held back for every attempt a send is still coming for, and model.go:1445-1450 says an abandoned attempt has no send coming; a stood-down attempt reads abandoned while its Retry is in flight and becomes the sweep's owed attempt once the Retry fails. comment_delivery.go:672-677 says nothing else settles an overtaken attempt; settleSupersededMentions now does. events.go:22-24 says the overflow catch-up pages at maxEventReplay; it reads at maxLiveReplay (live_events.go:312)."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body",
+      "description": "The risk bullet on the fallback copy still names the key `agent.<session>.<comment>:<target>:<mode>` and says a retry in another mode is delivered; under b423cb71 both are false."
+    }
+  ],
+  "notRaised": "Under the architect's round cap: settleSupersededMentions copies settleUndeliverable's batch loop; resolveEventReplay's -1 sentinel parameter and the duplicated handover check in feedEvents/resumeAfterOverflow; the abandoned predicate expanded twice in mentionDeliveryQuery; comment_delivery.go at 1131 lines."
+}

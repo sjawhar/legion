@@ -133,29 +133,21 @@ func deliveryErrorText(err error) string {
 	return err.Error()
 }
 
-// claimLapsed is the predicate a claim transaction selects beside the pending attempt it locks:
-// whether that attempt is free for this sender to take, because nobody holds it or whoever
-// claimed it never came back within the lease, model.DeliveryClaimLapse (a minute), the window
-// the outbox's mention deferral shares. A send is bounded by the listener client's own window
-// (five seconds by default, DepsInput.EnvoyTimeout in a test) and the short transaction that
-// records its outcome, so a claim older than the lease was left by a process that died between
-// the two. A retry beside a live claim takes an attempt of its own rather than two senders
-// driving one.
-//
-// What a retry beside a lapsed claim does depends on its mode. In the attempt's own mode it
-// resumes that attempt under its original number, and so its original idempotency key, whose
-// repeat of a send that did land is recognised and dropped (DELIVERY_DUPLICATE_WINDOW_MS in
-// packages/contracts). In a different mode it may not: that key is mode-scoped, so riding the
-// same row would publish a second frame under one attempt number. It settles the stranded
-// attempt instead and opens an attempt of its own.
-//
-// Postgres judges it, against the claimed_at Postgres itself wrote. A Dispatch task whose clock
-// ran ahead of the database would otherwise read every live claim as lapsed, and one that ran
-// behind could never resume a stranded attempt.
-var claimLapsed = `(claimed_at is null or claimed_at < now() - ` + model.DeliveryClaimLapseInterval + `)`
-
 // attemptClaim is the attempt one sender owns and the claim it holds on it. The two travel
 // together because every statement of that sender's settle transaction is scoped to the pair.
+//
+// A claim transaction takes a pending attempt only while no sender holds it
+// (model.DeliveryClaimFreeSQL, selected beside the row it locks): nobody claimed it, or whoever
+// did never came back within model.DeliveryClaimLapse. A retry beside a live claim takes an
+// attempt of its own rather than two senders driving one. A retry beside a lapsed claim resumes
+// that attempt under its original number, and so its original idempotency key, whose repeat of a
+// send that did land is recognised and dropped (DELIVERY_DUPLICATE_WINDOW_MS in
+// packages/contracts), and in the mode that attempt's row pinned rather than the one asked for.
+// For a comment mention that is the whole of it: its key names the mention and not the mode
+// (model.CommentMentionIdempotencyKey), so a resumed attempt's frame goes under the key its
+// earlier frame went under whichever mode either was sent in (claimCommentDeliveryAttempt). A
+// targeted message's key is mode-scoped, so a retry there in another mode may not ride that row
+// at all: it settles the stranded attempt and opens an attempt of its own (deliverMessageResuming).
 type attemptClaim struct {
 	attempt   int
 	claimedAt time.Time
@@ -187,7 +179,7 @@ func receiptError(failure *string) string {
 // concurrent retries of the same comment or message.
 //
 // Both statements this transaction makes are scoped to the claim this sender took, because two
-// senders can hold one attempt: a claim outlives its sender by the claimLapsed lease, and a
+// senders can hold one attempt: a claim outlives its sender by model.DeliveryClaimLapse, and a
 // sender that comes back after that lease lapsed finds the attempt resumed by someone else.
 // Only the sender the row's claim still names settles it or pays anything on it; the other
 // leaves the row as it found it.

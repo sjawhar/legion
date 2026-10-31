@@ -571,10 +571,11 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, message, field)
 			return
 		}
-		dedupeKey := "agent." + targetSession + "." + id.New()
-		if body.IdempotencyKey != "" {
-			dedupeKey = "agent." + targetSession + "." + body.IdempotencyKey
+		idempotencyKey := body.IdempotencyKey
+		if idempotencyKey == "" {
+			idempotencyKey = id.New()
 		}
+		dedupeKey := contracts.AgentSendDedupeKey(targetSession, idempotencyKey)
 		item := messageEnvelope(body, contracts.AgentSubject(targetSession), dedupeKey)
 		record.item = &item
 		if err := item.Validate(); err != nil {

@@ -15,9 +15,15 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// maxEventReplay is one page of the event log readEventsAfterID reads: an events subscription's
-// catch-up and the relay's read each page through the log at it.
-const maxEventReplay = 1000
+const (
+	// maxEventPage is the most events one page of an issue's or a document's event log holds,
+	// and its default.
+	maxEventPage = 200
+	// maxEventReplay is the most events one page of the global event log holds (readEventsAfterID):
+	// the relay's read, an events subscription's catch-up and GET /api/v1/events/log each page
+	// through the log at it, and it is that route's default.
+	maxEventReplay = 1000
+)
 
 const eventSelect = `select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key, ''), e.seq, e.type, e.actor, e.notify, e.created_at, e.payload
 	from events e
@@ -34,6 +40,44 @@ func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events, err := s.readEvents(r.Context(), issueOwner(r.PathValue("key")), options)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, events)
+}
+
+// listEventLog pages the whole event log by id, whatever owns each event: an issue, a document,
+// a project or nothing. It answers the events after ?after= (default 0) in ascending id order,
+// at most ?limit= of them. Any authenticated caller may read it, as the events view on a page's
+// live socket carries every event to them.
+//
+// Ids are not commit order (events.Broker.Append), so a caller that pages by the id of the last
+// row it was answered would step over a lower id still open and never see it. The page is
+// therefore capped at the safe horizon, at or below which every event is final, the same cap and
+// the same wait GET /api/v1/references?since= reads under (sinceHorizon): every event committed
+// before the request stands at or below it, so paging to the end of this answer skips nothing.
+func (s *server) listEventLog(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	query := r.URL.Query()
+	after, err := parseNonNegativeInt(query.Get("after"), "after")
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	limit, err := parseEventLimit(query.Get("limit"), maxEventReplay)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	through, err := s.sinceHorizon(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	events, err := s.readEventsAfterID(r.Context(), after, through, limit)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -63,7 +107,7 @@ func parseEventListOptions(r *http.Request) (eventListOptions, error) {
 	if err != nil {
 		return eventListOptions{}, err
 	}
-	limit, err := parseEventLimit(query.Get("limit"))
+	limit, err := parseEventLimit(query.Get("limit"), maxEventPage)
 	if err != nil {
 		return eventListOptions{}, err
 	}
@@ -78,32 +122,6 @@ func parseEventListOptions(r *http.Request) (eventListOptions, error) {
 		ids:        ids,
 		limit:      limit,
 	}, nil
-}
-
-// eventLogUnbrokenThrough is the id before the first one missing from the event log counted up
-// from 1, or its newest id when none is missing: every id at or below it is a committed event.
-// It reads the whole log, so feedEvents asks it only of a log that was reset beneath the relay,
-// whose ids restart at 1 (`truncate events restart identity`) and which is as short as the time
-// since that reset.
-func (s *server) eventLogUnbrokenThrough(ctx context.Context) (int64, error) {
-	var through int64
-	err := s.deps.Store.Pool.QueryRow(ctx, `
-		select coalesce(
-			(select min(n) - 1 from (select id, row_number() over (order by id) as n from events) numbered where id <> n),
-			(select max(id) from events),
-			0)
-	`).Scan(&through)
-	return through, err
-}
-
-// eventLogHead is the event log's newest committed id, 0 for an empty log. It is no cursor: ids
-// are not commit order, so a lower id can still be open below it. feedEvents only compares a
-// page's since and the relay's cursor against it, to tell an id of this log from one of a log it
-// replaced.
-func (s *server) eventLogHead(ctx context.Context) (int64, error) {
-	var head int64
-	err := s.deps.Store.Pool.QueryRow(ctx, `select coalesce(max(id), 0) from events`).Scan(&head)
-	return head, err
 }
 
 type eventListOptions struct {
@@ -149,15 +167,31 @@ func (s *server) readEvents(ctx context.Context, owner owner, options eventListO
 	`, ownerValue, options.after, options.limit)
 }
 
-// readEventsAfterID reads one page of the global event log in id order: the events whose ids are
-// in (after, through]. Ids are not commit order, so a reader that moves its cursor to a page's
-// last row passes a through at or below the safe horizon (events.Horizon), where every event is
-// final: no lower id the page skipped can commit later.
-func (s *server) readEventsAfterID(ctx context.Context, after, through int64) ([]model.Event, error) {
+// readEventsAfterID reads one page of the global event log in id order: at most limit of the
+// events whose ids are in (after, through]. Ids are not commit order, so a reader that moves its
+// cursor to a page's last row passes a through at or below the safe horizon (events.Horizon),
+// where every event is final: no lower id the page skipped can commit later.
+func (s *server) readEventsAfterID(ctx context.Context, after, through int64, limit int) ([]model.Event, error) {
 	return s.readEventRows(ctx, eventSelect+`
 		where e.id > $1 and e.id <= $2
 		order by e.id asc limit $3
-	`, after, through, maxEventReplay)
+	`, after, through, limit)
+}
+
+// eventLogUnbrokenThrough is the id before the first one missing from the event log counted up
+// from 1, or its newest id when none is missing: every id at or below it is a committed event.
+// It reads the whole log, so feedEvents asks it only of a log that was reset beneath the relay,
+// whose ids restart at 1 (`truncate events restart identity`) and which is as short as the time
+// since that reset.
+func (s *server) eventLogUnbrokenThrough(ctx context.Context) (int64, error) {
+	var through int64
+	err := s.deps.Store.Pool.QueryRow(ctx, `
+		select coalesce(
+			(select min(n) - 1 from (select id, row_number() over (order by id) as n from events) numbered where id <> n),
+			(select max(id) from events),
+			0)
+	`).Scan(&through)
+	return through, err
 }
 
 // eventFeedHeadWait bounds how long eventFeedHead waits on a process that has proven no horizon
@@ -424,13 +458,14 @@ func parseNonNegativeInt(raw, field string) (int64, error) {
 	return value, nil
 }
 
-func parseEventLimit(raw string) (int, error) {
+// parseEventLimit reads a page's limit: 1 to most, and most when absent.
+func parseEventLimit(raw string, most int) (int, error) {
 	if strings.TrimSpace(raw) == "" {
-		return 200, nil
+		return most, nil
 	}
 	limit, err := strconv.Atoi(raw)
-	if err != nil || limit < 1 || limit > 200 {
-		return 0, errorf(http.StatusBadRequest, "INVALID_QUERY", "limit must be between 1 and 200")
+	if err != nil || limit < 1 || limit > most {
+		return 0, errorf(http.StatusBadRequest, "INVALID_QUERY", "limit must be between 1 and %d", most)
 	}
 	return limit, nil
 }

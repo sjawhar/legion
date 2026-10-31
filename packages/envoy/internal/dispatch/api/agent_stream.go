@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,10 +26,15 @@ const (
 	// How often an attached viewer re-arms the session. Well inside the session's own watch
 	// window (AGENT_STREAM_WATCH_TTL_MS), so a live viewer never lets it lapse.
 	agentStreamWatchInterval = 10 * time.Second
-	// Frames held for a page that is reading slower than the session is producing. A view that
-	// fills it ends (behind) rather than losing a frame, and the page's subscribe rebuilds from the
-	// session's replay.
-	agentStreamBuffer = 64
+	// The most frame bytes a view holds for a page that is reading slower than the session is
+	// producing, counted as each frame's payload length from the moment it is queued until it has
+	// been handed to the socket's stream (liveSocketStream, 64 frames), which is where a page that
+	// stops reading backs up next. A session publishes a message's snapshot at most every 100 ms
+	// and a view queues for up to agentStreamReplayTimeout before its first write, so 20 snapshots
+	// of 400 KiB fit; NATS's 1 MiB max_payload caps one frame, so a single frame always fits. A
+	// view that fills it ends (behind) rather than losing a frame, and the page's subscribe
+	// rebuilds from the session's replay.
+	agentStreamBufferBytes = 8 << 20
 	// How long a view whose relay call failed waits before it ends (dropped), so a relay that keeps
 	// failing - a NATS connection that is reconnecting - is not asked again as fast as the page can
 	// subscribe.
@@ -49,6 +55,67 @@ func agentStreamSessionID(raw string) (string, string) {
 		return "", "session_id must be a session uuid"
 	}
 	return id, ""
+}
+
+// agentStreamQueue holds the frames a view has been delivered and not yet written, in the order
+// they arrived, within agentStreamBufferBytes.
+type agentStreamQueue struct {
+	// wake has one slot: a push fills it, and the view takes every queued frame when it fires.
+	wake chan struct{}
+	// overflow closes once, when a frame would take the view past its budget.
+	overflow chan struct{}
+
+	mu     sync.Mutex
+	frames []agentstream.Frame
+	// queued is the bytes of the queued frames; size is those plus the bytes taken and not yet
+	// released.
+	queued     int
+	size       int
+	overflowed bool
+}
+
+func newAgentStreamQueue() *agentStreamQueue {
+	return &agentStreamQueue{wake: make(chan struct{}, 1), overflow: make(chan struct{})}
+}
+
+// push queues frame, or ends the view when frame would take it past its budget. Once the view has
+// overflowed it queues nothing more and holds nothing. It never blocks: it runs on the transport's
+// own goroutine.
+func (q *agentStreamQueue) push(frame agentstream.Frame) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.overflowed {
+		return
+	}
+	if q.size+len(frame) > agentStreamBufferBytes {
+		q.overflowed = true
+		q.frames, q.queued = nil, 0
+		close(q.overflow)
+		return
+	}
+	q.frames = append(q.frames, frame)
+	q.queued += len(frame)
+	q.size += len(frame)
+	signal(q.wake)
+}
+
+// take hands over every queued frame in order, and their bytes. Those bytes stay counted against
+// the budget until release, so the budget bounds what the view holds while the frames are being
+// queued on the socket's stream too. After an overflow it hands over nothing.
+func (q *agentStreamQueue) take() ([]agentstream.Frame, int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	frames, size := q.frames, q.queued
+	q.frames, q.queued = nil, 0
+	return frames, size
+}
+
+// release returns the bytes of frames take handed over once they are queued on the socket's
+// stream (liveSocketStream), which is where the writer takes them from.
+func (q *agentStreamQueue) release(size int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.size -= size
 }
 
 // replayAgentStream asks the session for its history, reporting separately whether anyone

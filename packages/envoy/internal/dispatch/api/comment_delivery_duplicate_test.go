@@ -16,8 +16,9 @@ import (
 // LEGION-271, acceptance 5. A comment mention's key was attempt-scoped exactly like a targeted
 // message's, and its claim path resumes only a pending row, so a mention whose send landed and
 // then missed the listener client's window was recorded failed and its retry reached the agent a
-// second time. The key is now scoped to the mention's target and mode, so the stream recognises
-// the repeat and the retry's row records it as a duplicate rather than a fresh delivery.
+// second time. The key is now the mention's - its comment and its target, whatever the mode - so
+// the stream recognises the repeat and the retry's row records it as a duplicate rather than a
+// fresh delivery.
 func TestCommentMentionThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(t *testing.T) {
 	var listenerState struct {
 		sync.Mutex
@@ -66,6 +67,7 @@ func TestCommentMentionThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "The mention landed; the answer did not.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
+	settledCommentDeliveries(t, database, comment.ID)
 
 	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/deliveries", map[string]any{
 		"delivery": "steer",
@@ -78,9 +80,9 @@ func TestCommentMentionThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(
 	keys := append([]string(nil), listenerState.keys...)
 	delivered := len(listenerState.delivered)
 	listenerState.Unlock()
-	original := comment.ID + ":session:s1:steer"
+	original := comment.ID + ":session:s1"
 	if len(keys) != 2 || keys[0] != original || keys[1] != original {
-		t.Fatalf("mention send keys = %#v, want both sends under the target-and-mode key %q", keys, original)
+		t.Fatalf("mention send keys = %#v, want both sends under the mention's key %q", keys, original)
 	}
 	if delivered != 1 {
 		t.Fatalf("the listener delivered %d distinct keys %#v, want the agent to receive the mention once", delivered, keys)

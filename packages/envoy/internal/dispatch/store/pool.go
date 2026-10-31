@@ -236,22 +236,21 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 	return version, nil
 }
 
-// listenerPoolSize bounds the pool Listener takes its connections from. Three permanent
-// listeners dial through it - the delivery hub, the event stream relay and the stale-room
-// evictor - and each connection is hijacked as soon as it is opened, so it leaves with its
-// caller and the pool holds none between dials: what one bounds is dials in flight, not
-// connections held. A listener redialling while another dials waits that dial out, which is
-// what a loop that dials and then waits for notifications for the life of the process can
-// afford.
+// listenerPoolSize bounds the pool Listener takes its connections from. Three listeners dial
+// through it - the delivery hub, the event stream relay and the stale-room evictor - and each
+// connection is hijacked as soon as it is opened, so it leaves with its caller and the pool holds
+// none between dials: what one bounds is dials in flight, not connections held. A listener
+// redialling while another dials waits that dial out, which is what a loop that dials and then
+// waits for notifications for as long as it runs can afford.
 const listenerPoolSize = 1
 
 // Listener returns one connection of its own for LISTEN, from a one-connection pool opened from the
 // shared pool's configuration and hijacked, so it holds no shared connection. The caller closes it.
-// The delivery hub (api/delivery_live_hub.go), the event stream relay (api/event_stream_relay.go)
-// and the document rooms' stale-room evictor (docs/stale_room.go) each hold one for as long as
-// they wait for notifications, which is the life of the process: a connection of the shared pool
-// held that long would be one fewer for every request, and a LISTEN on a pooled connection would
-// end when the pool recycled it.
+// The document rooms' stale-room evictor (docs/stale_room.go) holds one for the life of the
+// process; the delivery hub (api/delivery_live_hub.go) and the event stream relay
+// (api/event_stream_relay.go) each hold one while something subscribes to them, and close it when
+// the last subscriber leaves. A connection of the shared pool held that long would be one fewer
+// for every request, and a LISTEN on a pooled connection would end when the pool recycled it.
 func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	listen, err := p.separate(&p.listen, listenerPoolSize, "listener")
 	if err != nil {
@@ -304,15 +303,18 @@ const outboxPoolSize = 1
 // pools above, so it is counted here rather than by a method of Pool.
 const registryPoolSize = 1
 
-// permanentListeners is how many connections the listener pool dials and hands off for the life
-// of the process: the delivery hub, the event stream relay and the stale-room evictor (Listener).
-const permanentListeners = 3
+// listenerConnections is how many connections the listener pool dials and hands off at once: the
+// delivery hub's and the event stream relay's, each held only while something subscribes to them,
+// and the stale-room evictor's, held for the life of the process (Listener). A process nobody
+// streams from and no Delivery page is open on holds one of the three; the count is what it may
+// hold at once.
+const listenerConnections = 3
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres:
 // every pool's size, the registry's own pool (processes.Register) and the event horizon's
-// (Horizon) among them, and one connection per permanent listener, which the listener pool dials
-// and hands off rather than holds.
-const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + registryPoolSize + horizonPoolSize + permanentListeners
+// (Horizon) among them, and one connection per listener it may hold at once, which the listener
+// pool dials and hands off rather than holds.
+const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + registryPoolSize + horizonPoolSize + listenerConnections
 
 // Outbox is the pool the events outbox claims, reads and records events through, and reads the
 // followers and authors a publish routes to. Under load the API's requests queue for the shared

@@ -58,7 +58,7 @@ func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 const acceptedAsUserTurn = "user_turn"
 
 // acceptFresh is one of the accept's checks, judged by Postgres against the created_at Postgres
-// wrote, as claimLapsed is: the attempt was opened within the last minute. created_at, not
+// wrote, as model.DeliveryClaimFreeSQL is: the attempt was opened within the last minute.
 // claimed_at, because a resume moves claimed_at. So only an attempt a person has just asked for
 // can be taken, and one that reached its session as a card - an older plugin, a Claude Code
 // session, a card fallback of the last minute's accept - can never be taken as a turn later.
@@ -287,7 +287,7 @@ func (s *server) messageDeliveryRoute(ctx context.Context, message model.Message
 		`, message.ID, resumeAttempt).Scan(&pinned)
 	} else {
 		err = s.deps.Store.Pool.QueryRow(ctx, `
-			select session_id, `+claimLapsed+`
+			select session_id, `+model.DeliveryClaimFreeSQL+`
 			from message_deliveries
 			where message_id = $1 and state = 'pending'
 			order by attempt
@@ -354,7 +354,7 @@ func (s *server) recordPendingMessageDelivery(
 		var bound model.MessageDelivery
 		var free bool
 		err = tx.QueryRow(ctx, `
-			select attempt, delivery, session_id, `+claimLapsed+`
+			select attempt, delivery, session_id, `+model.DeliveryClaimFreeSQL+`
 			from message_deliveries
 			where message_id = $1 and attempt = $2 and state = 'pending'
 			for update
@@ -390,7 +390,7 @@ func (s *server) recordPendingMessageDelivery(
 	var stranded model.MessageDelivery
 	var lapsed bool
 	err = tx.QueryRow(ctx, `
-		select attempt, delivery, session_id, `+claimLapsed+`
+		select attempt, delivery, session_id, `+model.DeliveryClaimFreeSQL+`
 		from message_deliveries
 		where message_id = $1 and state = 'pending'
 		order by attempt
@@ -695,7 +695,7 @@ func (s *server) deliverMessageResuming(
 			if err != nil {
 				return ResolvedMention{}, err
 			}
-			return s.resolveMentionTargets(ctx, []string{route}, delivery)[0], nil
+			return s.resolveMentionTarget(ctx, route, delivery, 0), nil
 		},
 		func(ctx context.Context, resolved ResolvedMention) (pendingMessageDelivery, error) {
 			return s.recordPendingMessageDelivery(ctx, message, actor, resolved, replyThread, resumeAttempt)

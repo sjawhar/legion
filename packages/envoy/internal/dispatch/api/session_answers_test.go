@@ -95,7 +95,13 @@ func (f *answersFixture) answer(t *testing.T, askID string, selected []string, t
 // comment posts a comment on the fixture's issue as actor and returns its id.
 func (f *answersFixture) comment(t *testing.T, body map[string]any, actor string) string {
 	t.Helper()
-	return f.write(t, http.MethodPost, "/api/v1/issues/"+f.issue+"/comments", body, actor)
+	id := f.write(t, http.MethodPost, "/api/v1/issues/"+f.issue+"/comments", body, actor)
+	// A comment's mentions are sent after its answer (mentionSender): wait until none is pending, so
+	// what a test reads of them is their outcome.
+	if _, mentions := body["mentions"]; mentions {
+		settledCommentDeliveries(t, f.database, id)
+	}
+	return id
 }
 
 // message posts a message on the fixture's issue as actor and returns its id.

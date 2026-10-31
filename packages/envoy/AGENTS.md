@@ -982,32 +982,68 @@ The listener is a cross-service HTTP call bounded only by its five-second client
 that many concurrent ones empty the pool and stall every unrelated request, which a listener restart alone is enough to cause.
 A read (`Session`, `Sessions`, `Role`, `Interest`, `ListInterests`) is resolved first, with nothing held;
 the transaction then re-reads under its own lock whatever the resolution depended on and decides with the resolution only while the locked row still agrees, taking it once more when it does not and answering a conflict after that.
-`api/envoy_resolve.go` owns that loop (`resolveThenLock`, `errStaleResolution`), the delivery read every send resolves through (`resolveDeliveryTarget`) and the settle half (`settleDeliveryAttempt`, `attemptClaim`, `claimLapsed`, `deliveryOutcome`, `receiptError`);
+`api/envoy_resolve.go` owns that loop (`resolveThenLock`, `errStaleResolution`), the delivery read every send resolves through (`resolveDeliveryTarget`) and the settle half (`settleDeliveryAttempt`, `attemptClaim`, `deliveryOutcome`, `receiptError`);
 its callers are `api/comment_create.go` (the mention and route resolution behind `suppress_route`), `api/comment_delivery.go` and `api/message_delivery.go` (a delivery's recipient, its claim and its settle) and `api/issue_claim.go` (the holder's liveness, on both the claim and the release route).
 Three of those decisions now read one session by id rather than scanning the live list:
 a comment mention's `session:` target, each selected recipient of a broadcast (`resolveBroadcastSessions`, eight reads in flight under one five-second budget) and whether an issue's claim holder is still working (`fetchHolderLiveness`).
 A list is one listener's cache of the session registry, so only the per-session read tells a session that ended from one that cache has not refilled yet, and a read that did not answer never reports the session gone:
 a broadcast and a claim are refused `503
-ENVOY_UNAVAILABLE`, the broadcast with nothing written, while a mention's comment is still created `201` and that mention's delivery is recorded `failed` with the listener's own `envoy
-listener: …` text.
+ENVOY_UNAVAILABLE`, the broadcast with nothing written, while a mention's comment is still created `201`.
+A mention lookup is bounded at 250 ms (`mentionLookupTimeout`, as is the route's when the comment mentions anyone, and up to 8 run at once, the route's beside them):
+a listener that answers none delays a comment with up to 8 mentions by one 250 ms timeout, and each further 8 mentions add one (ceil(k/8) timeouts for k mentions).
+One cut short leaves its mention unresolved, for the sender to resolve when it sends, and one the listener answered with its own `envoy listener: …` error records that mention's delivery `failed` with that text.
 A write - `Envoy.Send`, `Unsubscribe` - runs after a commit, never inside:
 the attempt is committed first, sent, and settled by a second short transaction, so a process that dies in between leaves a record of the attempt rather than losing it.
 
 Both delivery paths are that pair, and the same claim.
-A comment mention's attempt is the `comment_deliveries` row the creating transaction commits as `pending`;
-the post-commit sender - and every later `POST /api/v1/comments/{id}/deliveries` retry - claims it (`claimed_at`, migration `0046`), resolves, records that resolution on the claimed row, sends, and records `sent` or `failed` with its `comment.delivery` event in a second transaction.
+A comment mention's attempt is the `comment_deliveries` row the creating transaction commits as `pending` and claimed (`claimed_at`, migration `0046`), and the create answers with it still `pending`;
+the post-commit sender takes that claim over - and every later `POST /api/v1/comments/{id}/deliveries` retry takes one of its own - resolves, records that resolution on the claimed row, sends, and records `sent` or `failed` with its `comment.delivery` event in a second transaction.
+A session the comment's creation skipped on the issue's route because a mention delivers to it (`suppress_route`), or that a mention of the comment names (`mentions`, which every other session route of the outbox reads: an author or thread session, a primary document's author, the claimant, a follower), hears the comment once:
+from the mention, or, when the mention's send fails, from the copy that route sends.
+The outbox decides that copy when it publishes, by the mention rule (`attempt.leftToMention`, below), which counts each attempt under one session (`model.MentionSession`, and `model.MentionSessionSQL` over a `comment_deliveries` row) - so it finds an unanswered `session:<id>` mention's attempt by its `<id>` before the sender resolves it - and a route suppressed by its string alone by the mention of that target.
+The two-copy cases (an unanswered `role:X` mention whose holder an author or thread route, a primary-document route, the claimant route, a follower route or the route under another string names;
+a `role:X` route whose own lookup went unanswered while a mention of another string reaches its holder) remain.
+What the attempt came to - sent, live, abandoned, or past the lease a send is waited out for, each a predicate over its row in `internal/dispatch/model` (`MentionLiveSQL`, `MentionAbandonedSQL` and `MentionResumedSQL`, which split the pending attempts three ways, each into exactly one, all turning on `model.DeliveryClaimLapse`, the lease the sweep waits an attempt out for before it sends it (`OwedMentionAttemptSQL`):
+past that lease no attempt is live, whoever holds it and whether or not a later attempt overtook it.
+A later attempt decides the one it overtook only once it has been delivered:
+until then the overtaken attempt stands (`MentionAttemptStandsSQL`), so a Retry that fails leaves its mention to the attempt it overtook, which the sweep owes and a sender bound to it sends) - decides that copy and which of the outbox, a sender's claim and the sweep acts on the attempt;
+`publishFallbackCopies` in `internal/dispatch/outbox/mentions.go` is the protocol's one description, the `comment_fallback_copies` rows (migration `0150`) included.
+So a mentioned session loses no comment through a kill, and hears it once unless the killed sender had already handed the frame over.
+The post-commit sender (`mentionSender`, `api/comment_mention_sender.go`) runs after the response, one FIFO lane per recipient (the session the mention's lookup pinned, else its target as written:
+`role:X` shares `session:<X's holder>`'s lane only when its lookup found the holder, and an unanswered `role:X` is keyed by its string, so two comments to one recipient can then arrive in either order):
+each recipient gets the comments this process accepted, on one lane, in the order it accepted them, at most 8 lanes send at once, and at most 4,096 sends wait.
+Each attempt is claimed when its comment commits it, and this process writes that claim again every `mentionClaimRefresh` (`model.DeliveryClaimLapse`/3) while its send waits on its lane, so a recipient keeps that order however long its first send takes:
+the sweep below takes no attempt a live process holds.
+The outbox counts such an attempt live for the `model.DeliveryClaimLapse` after its comment committed and no longer:
+past that lease it counts it resumed, holds that session's copy as a `comment_fallback_copies` row and publishes the comment's event, and the fallback pass settles that row with nothing published once the lane's send lands, or publishes the copy when that send fails.
+A Retry that overtook the queued attempt and was sent takes the mention over:
+the lane settles that attempt superseded without sending it (`MentionAttemptDeliveredLaterSQL`), and a Retry that is still in flight when the lane reaches the attempt it overtook decides it either way - the lane leaves it `pending` and unclaimed, for the sweep to send should the Retry fail and for the Retry's own sender to settle superseded should it land.
+The lane's own send takes its process's claim over (`model.DeliveryClaimMineSQL`) and refuses another sender's.
+A send past the queue's bound gives that claim back, so its attempt stays `pending` and unclaimed.
+Once the server's lifetime ends nothing more is queued - a comment that commits during the HTTP drain is answered, its refused send logged at WARN and its attempt's claim given back - no queued send starts, no claim is written again, and the sends in flight get 10 s (`mentionDrainTimeout`) before their context is cancelled;
+the drain then gives back the claim of every send it never started.
+An attempt no sender finishes is the delivery sweep's (`resumeOwedDeliveries`, `api/delivery_sweep.go`):
+one process's maintenance loop, under the sweep's lease, sends once a minute the attempts `model.OwedMentionAttemptSQL` reads - `pending`, unclaimed or with a lapsed claim, its mention's to send still (no later attempt of that target stands in its place, every later one having failed), and created between a claim lease (one minute) and `model.MentionSweepWindow` (the duplicate window) ago - whichever process left them, through the same claim, so an attempt a live sender holds is not sent twice.
+So a process that stops leaves its refused and never-started sends, and one past the queue's bound, `pending` and unclaimed, for a later pass once they have waited a lease - in a rolling update (`gcp:Dispatch` above one replica) the successor is up before the old process is stopped - and a process killed with sends queued or in flight leaves their attempts `pending` under claims nothing writes again, which the first pass after they lapse resumes, within a minute and a sweep interval of the kill.
+Such a resend repeats the attempt's idempotency key, so a send the killed process had already handed over is dropped as a repeat (`DELIVERY_DUPLICATE_WINDOW_MS` says by whom, and where that fails).
+Each pass reads the partial index `comment_deliveries_pending` (migration 0138, `created_at` where `state = 'pending'`):
+with nothing owed it is one statement a minute that reads no row, and otherwise it reads what it owes and each one's `comment.created` event.
+No event can drive the sweep instead:
+a killed process sends no signal, and a stopping one refuses its sends after its lifetime ends, so no live process hears of the attempts either leaves.
+Order holds within one process only:
+an attempt resumed after a crash or a handoff can reach its recipient after comments accepted later.
 A targeted message is the same shape on `message_deliveries`, resolved before the claim rather than after it:
 `recordPendingMessageDelivery` claims or opens the attempt and commits it `pending` carrying that resolution, the send follows, and `completeMessageDelivery` settles it with the `message.delivery` event.
 Either way the pending row names the session its frame is going to before that frame is sent, and each of those statements is its own short transaction or single pooled read, so no step of a delivery holds a connection across another.
 
-A claim outlives its sender by a minute, which Postgres judges (`claimLapsed`) against the `claimed_at` Postgres itself wrote, so no task's clock skew can read a live claim as lapsed or leave a stranded attempt unresumable.
+A claim outlives its sender by a minute, which Postgres judges (`model.DeliveryClaimFreeSQL`) against the `claimed_at` Postgres itself wrote, so no task's clock skew can read a live claim as lapsed or leave a stranded attempt unresumable.
 A retry beside a live claim takes an attempt of its own; one beside an abandoned claim resumes the original attempt under its original number.
 A resumed attempt keeps the recipient it was opened for - a comment attempt its pinned session or its resolve error, a message attempt the session its row names - because that is the session holding the frame;
 a role that has moved since is reached by an attempt of its own rather than by re-pointing this one, and only whether the original recipient can still receive the mode is re-derived.
 An attempt stranded before anything was resolved has no recipient to keep and is resolved afresh under that same number, never reported undeliverable unsent.
 
-The idempotency key carries no attempt number: it is `<message>:<mode>` and `<comment>:<target>:<mode>`, stable across every attempt of that pair.
-The listener prefixes the recipient (`agent.<session>.<key>`) to make the envelope's `dedupe_key`, and the JetStream MsgId appends the topic, so the key's real scope is **(message, mode, recipient session)**, and a retry of a send that already landed repeats the dedupe key of the frame that landed - and nothing else of it, because the listener mints a fresh `event_id` per send.
+The idempotency key carries no attempt number: a targeted message's is `<message>:<mode>` and a comment mention's is `<comment>:<target>`, stable across every attempt of that pair - and, for a mention, across the modes those attempts went in.
+The listener prefixes the recipient (`agent.<session>.<key>`) to make the envelope's `dedupe_key`, and the JetStream MsgId appends the topic, so the key's real scope is **(message, mode, recipient session)** for a message and **(comment, target, recipient session)** for a mention, and a retry of a send that already landed repeats the dedupe key of the frame that landed - and nothing else of it, because the listener mints a fresh `event_id` per send.
 That is what makes a retry after a receipt timeout safe:
 the listener publishes the envelope before it answers, so an answer that misses the client's window says nothing about whether the message landed, and only the same key can be recognised as the repeat it is.
 **Who recognises it, for how long, and where that fails is stated once, on `DELIVERY_DUPLICATE_WINDOW_MS` in `packages/contracts/src/dispatch-api.ts`; read it there rather than here.**
@@ -1017,9 +1053,16 @@ a full stream refuses a new message (`DiscardNew`, `bus.ErrStreamFull`, which th
 A copy sent without its `Nats-Msg-Id` is the exception:
 the stream recognises no repeat without that id, so it stores that copy as a message of its own:
 the send again after an `ErrNotStored` acknowledgement, on the send and publish routes' own path (`publishJetStream`, `internal/bus/nats.go`) and in the outbox window (`sendJetStream`, `internal/bus/async.go`).
-A retry in a DIFFERENT mode is a different key and genuinely does deliver again, which is what the dashboard's retry row says:
+A retry of a MESSAGE in a DIFFERENT mode is a different key and genuinely does deliver again, which is what the dashboard's retry row says:
 its **Retry** re-sends the attempt's own mode, and the two mode-change actions say "instead".
-A mode change never rides on a stranded attempt - resuming it would publish a second frame under one attempt number - so the claim transaction settles that attempt `failed` ("superseded by a retry in another mode"), moves its `claimed_at` so the original sender stops owning it, appends its own `message.delivery` receipt, and opens a new attempt pinned to the session the stranded row named.
+A mode change never rides on a stranded message attempt - resuming it would publish a second frame under one attempt number - so the claim transaction settles that attempt `failed` ("superseded by a retry in another mode"), moves its `claimed_at` so the original sender stops owning it, appends its own `message.delivery` receipt, and opens a new attempt pinned to the session the stranded row named.
+
+A comment mention's key names no mode, so a Retry of a mention in another mode repeats it:
+when an earlier attempt of that mention reached the session, the Retry's frame is dropped and its attempt is recorded `duplicate`, delivering nothing.
+That is what makes the attempt a Retry overtook safe to send after it (INFRA-606).
+An attempt stands as soon as every later attempt failed (`model.MentionAttemptStandsSQL`), and a failure says nothing about whether the frame landed - a receipt timeout says it may have, and a reply callback can fail an attempt the session plainly received - so the overtaken attempt is sent, and whichever copy arrives second is the repeat its host drops (`model.CommentMentionIdempotencyKey`).
+A mode change there rides the attempt it resumes rather than settling it:
+a resumed attempt keeps the mode its row pinned, and the mode decides only how the frame is presented.
 
 **The window is one number, and the promise expires with it.**
 `DELIVERY_DUPLICATE_WINDOW_MS` in `packages/contracts` is the single literal:
@@ -1027,7 +1070,8 @@ A mode change never rides on a stranded attempt - resuming it would publish a se
 Past that window neither the stream nor a host remembers the key, so a same-mode retry is a second delivery - which is why the row stores only the CAUSE of a receipt timeout and never the advice.
 Every delivery surface composes the advice from `packages/dispatch/web/src/features/conversation/delivery.ts`, whose header names the surfaces:
 it makes the promise only for a failed attempt inside the window, and an attempt its session answered with an error gets a mode change rather than a Retry (`DELIVERY_DUPLICATE_WINDOW_MS` says why).
-The mode-change actions are not gated: they always deliver.
+The mode-change actions are not gated: for a targeted message they always deliver;
+for a comment mention they deliver only while no attempt of that mention has reached the session, every mode of a mention sharing its one key.
 Their clause ("sending in a different mode delivers it again") is added only for a receipt timeout, the one cause whose send may already have reached the recipient;
 `RECEIPT_TIMEOUT_CAUSE` in `packages/contracts` is that cause's single literal, generated into Go as `contracts.ReceiptTimeoutCause` so the string Dispatch stores and the string the dashboard keys on cannot drift.
 This window bounds a delivery retry only, not a repeated write:
@@ -2119,12 +2163,14 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   `events.Broker.Append` takes only its owner's row lock (none for an ownerless, session-addressed event), so one owner's events commit in id order and two owners' never wait for each other.
   A transaction that appends to multiple owners must call `LockOwners` with every owner before its first append, so two such transactions never take shared owners in opposite orders.
   Every reader that pages the log by a global id cursor
-  — the event stream relay that feeds every events subscription, the delivery hub, `GET /api/v1/references?since=` — reads only up to the safe horizon of the process's one `events.Horizon` (`events/horizon.go`) and delivers in id order, and GET /auth/whoami's `event_head`, which a page resumes its first events subscription from, is an id at or below which every event is already final (`eventFeedHead`, `api/events.go`).
+  — the event stream relay that feeds every events subscription and the Delivery page's hub, an events subscription's own bounded replay and its catch-up after an overflow, `GET /api/v1/events/log`, `GET /api/v1/references?since=` — reads only up to the safe horizon of the process's one `events.Horizon` (`events/horizon.go`) and delivers in id order, and GET /auth/whoami's `event_head`, which a page resumes its first events subscription from, is an id at or below which every event is already final (`eventFeedHead`, `api/events.go`).
   Append takes its transaction id before the insert draws the event id, which the horizon's proof needs, and `events_id_seq` must keep `CACHE 1`;
   do not bypass the broker with direct event inserts (`TestOnlyTheBrokerInsertsEvents`).
-  An events subscription's `events_start` says `replay_complete: true` (`LiveEventsStart`, `feedEvents` in `api/live_events.go`) when its resume is at or below the log's newest id when it subscribed:
-  it is replayed every event after the resume before it goes live, so the page missed nothing and may skip the refresh it owes a gap.
-  A subscription with no resume, and a resume above the newest id (an id of a log that was reset), say `false` and start at the relay's published cursor;
+  The relay runs only while something subscribes:
+  the first subscription starts a generation, the cancellation of the last stops it at once, and each generation reads its first cursor afresh, so a process nobody streams from holds no LISTEN connection and reads no event log.
+  An events subscription's `events_start` says `replay_complete: true` (`LiveEventsStart`, `feedEvents` in `api/live_events.go`) when its resume is at or below the log's newest id when it subscribed and its gap fits the replay's bounds (`maxLiveReplay` events, 256, whose frames total at most `maxLiveReplayBytes`, 1 MiB):
+  it is replayed every event after the resume, up to the cursor the relay had published through, before it goes live, so the page missed nothing and may skip the refresh it owes a gap.
+  A subscription with no resume, a resume past either bound (replayed nothing), and a resume above the newest id (an id of a log that was reset) each say `false` and start at the relay's published cursor, which is the page's cue to refresh what it shows once;
   a subscription that finds the relay still on a reset log's cursor waits for the relay's reset before it starts.
 
 - Project creation, repository mappings, and architecture sources own project-scoped events (`project.created`, `project.updated`, `settings.repo_project.updated`, `settings.architecture_source.updated`, and the importer's `architecture.synced` `{repo, branch, commit, components}` / `architecture.sync_failed` `{repo, branch, error}`, each naming the one source it judges (`components` is that source's count;
@@ -3001,7 +3047,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   It means "the stream already held this MsgId", which includes the publish path's own reconnect retry whose first attempt landed and lost its acknowledgement.
   A message NATS cannot take whole is a 413 naming its size against the server's max payload, and a topic NATS does not accept (one holding whitespace or an empty token) a 400.
   The route takes the caller's `source` and idempotency key as given (`messageEnvelope`), so any caller can send a `source: "dispatch"` frame under the key a Dispatch send will use, which a core-NATS host then drops as a repeat when the real send or its Retry arrives.
-  That key is not secret: a comment mention's is `<comment id>:<target>:<mode>` (`comment_delivery.go`), and the comment id rides the `comment.created` envelope on the issue's owner topic.
+  That key is not secret: a comment mention's is `<comment id>:<target>` (`comment_delivery.go`), and the comment id rides the `comment.created` envelope on the issue's owner topic.
   It is accepted because every caller `apiAuth` admits (the shared bearer, or any service-account token the verifier accepts, whose claims it does not read) can already send any `source: "dispatch"` frame, with any content, to any live session;
   suppressing one Retry is a subset of that, and a Dispatch-only credential is the fix for the whole class.
   The listener is not the only route to that either:
@@ -3355,7 +3401,7 @@ a mention attempt whose document is no longer a project's, `not sent: the docume
 and one whose comment no longer holds the mention, `not sent: the
 comment no longer mentions this target`.
 Each settle is a transaction of its own that takes the owner's lock first and checks the cause again under it, so an issue reopened meanwhile keeps its attempt owed.
-It then sends, `broadcastDeliveryWorkers` at a time and at most `deliverySweepBatch` (100) of each kind a pass, every attempt that is its message's or its mention's latest, still pending, its claim lapsed (`claimLapsed`, a minute), opened over a minute ago and inside `DeliveryDuplicateWindow` - the exact attempt it selected, bound to its attempt number for a message and a mention alike, never an older pending one a card retry overtook - and the first attempt of a keyed send whose process died between committing its message and opening that attempt, found by its key's recovery point once the key's holder is gone.
+It then sends, `broadcastDeliveryWorkers` at a time and at most `deliverySweepBatch` (100) of each kind a pass, every attempt that is its message's or its mention's latest, still pending, its claim lapsed (`model.DeliveryClaimFreeSQL`, a minute), opened over a minute ago and inside `DeliveryDuplicateWindow` - the exact attempt it selected, bound to its attempt number for a message and a mention alike, never an older pending one a card retry overtook - and the first attempt of a keyed send whose process died between committing its message and opening that attempt, found by its key's recovery point once the key's holder is gone.
 One rule says what is owed (`owedMessageAttempt`, `owedCommentAttempt`, `owedKeyedSend` and the closed or gone predicates, package constants):
 the settle reads use them as they are and the send reads (`owedDeliveries`) their negations, so no attempt that cannot be sent ever fills a send batch.
 Of two senders that find one attempt owed - the sweep and a repeat, or two processes' sweeps - the one that claims it sends and the other sends nothing.
@@ -3602,7 +3648,7 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
 - Dispatch issue events use `notifications.dispatch.issue.<KEY>.<type>`, carry every event, and are retained in JetStream;
   `notify` only controls agent wake and routing the same envelope to `notifications.role.<role>` or `notifications.agent.<session_id>` (the issue's route, which also applies to a comment or ask anchored on the issue's own artifact).
   An ask-scoped event - `ask.answered`, `ask.edited`, `ask.handed_back`, `ask.resolved`, and `comment.created`, `comment.resolved`, `comment.reopened` or `comment.edited` carrying an `ask_id` - is additionally published straight to each follower's `notifications.agent.<session_id>` regardless of `notify` and of the issue's route, so a session-authored reply on an ask reaches its followers even though it wakes nobody through the issue topic;
-  the acting session is skipped, and so is a follower a new comment's (`comment.created`) mentions resolved to (`payloadMentionedSessions`, each `mentions[].session_id`) once the mention delivered it (the mention rule below) - the comment's edit, resolution and reopening reach every follower - and a session already reached by the issue's route is not sent the envelope twice.
+  the acting session is skipped, and so is a follower a new comment's (`comment.created`) mentions resolved to (`payloadMentionedSessions`: each `mentions[].session_id`, and the `<id>` of a `session:<id>` mention that names none) once the mention delivered it (the mention rule below) - the comment's edit, resolution and reopening reach every follower - and a session already reached by the issue's route is not sent the envelope twice.
   A quiet `ask.edited` (a version move of an approval request that an earlier version already moved since it was opened or last handed back, `quiet: true`) has `notify` false and reaches no follower, as a human's unnamed `artifact.version` reaches nobody;
   the first move after an opening or a hand-back is not quiet.
 
@@ -3620,7 +3666,8 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
   A routed issue, or one a session claimed, takes no primary-document route: the route's holder and the claimant (the claimant route below) hear the comment.
   The order of an event's destinations is fixed (`publishDestinations`):
   the owner topic, the route, the claimant, the primary document's sessions, the author routes, the ask's followers, the previous claimant; a topic is sent once.
-  The primary-document and author routes are skipped for a human, who has no topic, for the event's own actor, so a session commenting on a document it wrote is never told of its own comment, and for a session the comment's mentions resolved to once the mention delivered it (`recipientFilter`, which reads the comment's `mentions` as the claimant and follower routes do; the mention rule below).
+  The primary-document and author routes are skipped for a human, who has no topic, for the event's own actor, so a session commenting on a document it wrote is never told of its own comment, and for a session the comment's mentions resolved to once the mention delivered it (`recipientFilter`, which reads the comment's `mentions` as the claimant and follower routes do, `payloadMentionedSessions`: a session a mention's lookup pinned, or the `<id>` of a `session:<id>` mention whose lookup went unanswered; the mention rule below).
+  An unanswered `role:X` mention names no session, so a thread session or document author who holds `role:X` hears the comment twice.
   An agent's comment notifies nobody (`notify` is false), so it takes no primary-document or author route at all.
   When a batch's recipient query fails, the error is carried on each event that needed it (`recipientList.err`), not as the row's failure:
   the attempt sends the owner topic, the route and the claimant, then ends with that error at the primary-document or author step, so `settle` backs the event off with those destinations recorded, or releases it when the process is stopping or NATS is unreachable.
@@ -3643,20 +3690,37 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
 
 - The mention rule (`attempt.leftToMention`) is the one rule the route, claimant, primary-document, author and follower copies of a new comment apply to a session its mentions resolved to;
   the route's session is `suppressed_route_session_id`, the session the route resolved to when the comment was written, and the rule applies while the route still names that target or that session (`suppressesCurrentRoute`; `suppress_route` must be set).
+  A comment whose route string equals the target of a mention whose lookup went unanswered records `suppress_route` with `suppressed_route` alone, no `suppressed_route_session_id`;
+  `suppressesCurrentRoute` then applies the rule to that target's attempts (`attempt.leftTo` keyed by the target, the copy being the route's own topic) while the route is still that string.
   A mention resolved at write time is a candidate only: its send runs after the comment commits and can fail.
-  `loadMentionDeliveries` reads the comment's `comment_deliveries` once per attempt (`send`), grouped by session (`mentionDeliveryQuery`), and only for a `comment.created` whose mentions resolved to a session.
-  A session with a `sent` row is skipped: the mention delivered the comment.
-  A session with no `sent` row and a `pending` one whose claim (its creation, while no sender claimed it) is younger than `model.DeliveryClaimLapse` (a minute) has its copy held back while every other destination is sent in the batch's window;
+  `loadMentionDeliveries` reads the comment's `comment_deliveries` in one query per attempt (`send`), grouped by session and by target (`mentionDeliveryQuery`), and only for a `comment.created` that names a mentioned session or suppresses its route by a mention's target.
+  Each attempt counts under one session (`model.MentionSessionSQL`: its `session_id`, or the `<id>` of an unpinned `session:<id>` target, an unanswered mention the sender has not resolved yet), so its copy waits on it like a pinned one's.
+  A session (or target) with a `sent` row is skipped: the mention delivered the comment.
+  One whose attempt is live (`model.MentionLiveSQL`: an attempt created less than `model.DeliveryClaimLapse` ago that is not abandoned - the mention's own, claimed, which it is from the moment its comment commits and stays while its send waits on its recipient's lane, or unclaimed, the shape of an attempt whose send the sender refused, and, inside that same lease, one a later attempt overtook while a sender holds it) has its copy held back while every other destination is sent in the batch's window;
   the attempt then reports `errMentionPending` (`attempt.err`), `settle` records the event `deferred`, and `recordBatch` adds the destinations it reached to `published_destinations`, moves `next_attempt_at` out by `mentionPendingDelay` (2 s) and leaves `published_at` null and `attempt_count` as it was, so waiting on a send never runs the event to its dead letter.
-  Every other session - each attempt `failed`, a `pending` one past the minute (abandoned;
-  the API's `claimLapsed` is built from the same `model.DeliveryClaimLapse`), or no row at all - is published to as if it had not been mentioned.
+  An abandoned attempt (`model.MentionAbandonedSQL`) is settled `failed` by the outbox, with its `comment.delivery` receipt, before it publishes the copy (`mentionComment.settleAbandoned`), and an attempt past that lease (`model.MentionResumedSQL`: any pending attempt older than the lease that is not abandoned - the delivery sweep resends it, or a sender holds it queued behind a lane held longer than a lease, or a Retry overtook it while the sender that queued it still holds it) has its copy held as a `comment_fallback_copies` row (migration `0150`), which the fallback pass decides later;
+  a row whose decision or publish fails counts the attempt and backs off by `retry.Delay`, as an event does, and is never given up, its `retry.DeadLetterAttempts`th failure logged at Error.
+  The doc comment of `publishFallbackCopies` in `internal/dispatch/outbox/mentions.go` is that protocol's one description, races included.
+
+- Every other session - each attempt `failed`, or no row at all - is published to as if it had not been mentioned, but for the dedupe key of its copy:
+  a copy on the own topic of a session with a `failed` attempt (or an abandoned one, which the outbox settles `failed` first) carries the key that attempt's send went under, `contracts.AgentSendDedupeKey(session, model.CommentMentionIdempotencyKey(comment, target))` - the listener's `agent.<session>.<comment>:<target>` for the mention - in place of `dispatch-<event id>`, and keeps the event id `dispatch-<event id>` (`attempt.sessionCopy`, `mentionDeliveries.fallbackKeys`).
+  Of several failed targets the lowest target string keys it;
+  the mode a target's attempts went in never shows in it, every attempt of one mention sending under that one key.
+  Every other destination the event's own publish reaches, a role route included, carries `dispatch-<event id>`;
+  a fallback copy carries its key's failed attempt's key whatever its destination (`targetFallbackKeys` for a row keyed by a target).
   A deferral with a denial (`bus.ErrPublishDenied`) or any other failure of the event is backed off as a failure, its attempt counted;
   a deferral that meets a lost NATS connection (`bus.ErrUnavailable`) or a stopping process is released, not backed off, like any event that met them.
   A comment's edit, resolution and reopening, and every other event, are never left to a mention.
-  One copy is not guaranteed: a receipt timeout records the attempt `failed` though the listener may have delivered the mention, and a first attempt stranded `pending` past the minute may have landed before its sender stopped.
-  Either way the outbox also publishes the session's own-topic copy, so the session receives the comment twice, under different dedupe keys (the mention's delivery and the outbox's event);
-  a host treats the second copy as the same comment (same comment id).
-  Nor is order: while a `comment.created` is deferred, the same comment's `comment.edited`, `comment.resolved` and `comment.reopened` are events of their own and publish at once, so a claimant, follower, author or route topic can receive the edit before the creation - for as long as the mention's send is undecided, normally a listener receipt timeout and at most about a minute for a stranded attempt, plus `mentionPendingDelay`.
+
+- A mention that landed before its attempt failed is not shown twice:
+  a receipt timeout records the attempt `failed` though the listener may have delivered the mention, a first attempt stranded `pending` past the minute may have landed before its sender stopped, and the outbox settles it and publishes the copy, and a send the killed process had handed the listener before it died, whose delivery sweep resend then fails for good (the listener down after the restart), is followed by the fallback pass's copy.
+  Each way the copy carries the mention's own dedupe key, so the host, which drops a frame whose event id it saw or whose named dedupe key it claimed within `DELIVERY_DUPLICATE_WINDOW_MS` (`createDeliveryDedupe` in `packages/envoy-client`), drops it;
+  and the stream, whose MsgId is the dedupe key and the subject, stores it no second time within its 72-hour duplicate window.
+  A session no mention reached never claimed that key and is shown the copy.
+  A session one comment mentions under two targets is sent one mention per target, so it can still see the copy beside a mention of the other target, no more copies than had every mention landed.
+  A retry of the mention after the copy landed repeats the copy's key too, whichever mode it goes in:
+  the stream reports it a duplicate and the host drops it.
+  Nor is order: while a `comment.created` is deferred, the same comment's `comment.edited`, `comment.resolved` and `comment.reopened` are events of their own and publish at once, so a claimant, follower, author or route topic can receive the edit before the creation - for as long as the mention's send is undecided, normally a listener receipt timeout and at most about a minute after the comment committed, whoever holds the attempt, plus `mentionPendingDelay`.
   A host that sees an edit, resolution or reopening for a comment it does not know is seeing this window, not a bug; the creation follows.
   `ask.follower_added` and `ask.follower_removed` also route directly to the session they name, since a newly added follower is not subscribed to the issue topic by default.
 

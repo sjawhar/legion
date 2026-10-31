@@ -1042,6 +1042,11 @@ An anchor whose artifact id is not a lower-case document id is left out of the i
 The release before it never reads the index and serves beside it unchanged, except that its sweep still drops the mark of an ask holding both columns (no such row is written today), and rolling Dispatch back past `0148` is an image rollback alone:
 the index is left for the next release that reads it.
 
+Migration `0150_comment_fallback_copies` creates `comment_fallback_copies`, the copies of a new comment the outbox held back for a mention it waits on no longer - one the delivery sweep resends, one a sender still holds queued behind a lane held past a claim lease, and one a Retry overtook while its sender holds it - one row per comment and destination topic, which the outbox's fallback pass publishes once that send fails and settles with nothing published once it lands (`publishFallbackCopies` in `internal/dispatch/outbox/mentions.go`), and its partial index of the unsettled rows.
+It names no other table, so a plain `create table` and `create index` in the runner's transaction lock only the new table, and the release before it neither reads nor writes it, so that release runs over the new schema unchanged and the census answers `0`.
+That release does not publish a `comment_fallback_copies` row either: it has no fallback pass, and its outbox skips an event already published, so a copy a row holds is never sent once it serves alone.
+Before rolling back past `0150`, run `select count(*) from comment_fallback_copies where settled_at is null` and roll back only when it answers `0`, or let this build drain the rows first.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
 On success it backfills each artifact's project and generated `ref_key`.
@@ -1671,6 +1676,12 @@ Each item below names a path with its method and identity, then its purpose.
   Answer `204` with no body, reading nothing: it says only that the process answers.
   A liveness or startup probe asks it rather than `/healthz`, so a slow or unreachable Postgres, NATS or file store neither restarts the process nor adds load on every probe period.
 
+- `/api/v1/events/log?after=&limit=` (GET; cookie, trusted header, or bearer)
+
+  Page the whole event log by id, whatever owns each event (an issue, a document, a project or none):
+  the events with id greater than `after` (default 0), oldest first, at most `limit` (1–1000, default 1000), each as the issue and document event lists serve it.
+  An invalid value is `400 INVALID_QUERY`.
+
 - `/metrics` (GET; none)
 
   The process's metrics in the Prometheus text format:
@@ -1708,7 +1719,12 @@ Each item below names a path with its method and identity, then its purpose.
 
   One WebSocket per browser tab, serving delivery, events, and agent subscriptions.
   An events subscription resumes after a decimal event id;
-  its `events_start` says `replay_complete: true` when that id is at or below the log's head, so every event after it is replayed before it goes live and a client may skip the refresh it would owe the gap, and `false` with no resume or one above the head (a log that was reset).
+  its `events_start` says `replay_complete: true` when that id is at or below the log's head and the gap fits the replay's bounds (at most 256 events whose frames total at most 1 MiB), so every event after it is replayed before it goes live and a client may skip the refresh it would owe the gap, and `false` with no resume, past either bound, or above the head (a log that was reset).
+  An events subscription that falls 64 events behind the relay catches up from the log within the same bounds and goes on; past them, or once the log is reset, it ends as `behind` and the page subscribes again.
+  An agent view holds at most 8 MiB of queued frames and ends as `behind` past that.
+  A page that stops reading meets the socket's own bounds first (#2449):
+  the writer's 10 s write deadline (`liveSocketWriteWait`) ends the socket, which holds at most 16 of the hub's frames (`liveSocketQueue`) and 64 stream frames (`liveSocketStream`);
+  the agent view's 8 MiB bounds only what it buffers while the socket writes slower than the session produces.
   A socket rotates with 4001 at a random age from 30 to 60 minutes;
   it closes with 1012 on restart, 1008 when its caller stops resolving, and 1013 when the hub queue fills.
 

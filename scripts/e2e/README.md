@@ -598,7 +598,10 @@ A watcher checks each pane the daemon launches
 — the ones it starts on its own included
 — as soon as its OMP process exists, before the plugin registers and so before any turn;
 a mismatch kills the private tmux server and aborts naming the pane, and the audit fails naming any launch the watcher never saw.
-At the end, a read-only audit replays production Dispatch events from a baseline read at boot (the baseline event is the replay's positive control) and fails on any event a rig session authored or that names the rig's project key, then reads the operator's Envoy listener (`GET /v1/sessions`, `STAGE3_PRODUCTION_ENVOY_URL`, default `http://127.0.0.1:9020`) and fails on any rig session.
+At the end, a read-only audit reads every production Dispatch event from a baseline event id read at boot, whatever owns it (an issue, a document, a project or none), by paging `GET /api/v1/events/log?after=` by id, and reads the production projects.
+It fails on any such event a rig session authored or that names the rig's project key, and on any production project naming that key, then reads the operator's Envoy listener (`GET /v1/sessions`, `STAGE3_PRODUCTION_ENVOY_URL`, default `http://127.0.0.1:9020`) and fails on any rig session.
+A read that fails, or a read that does not carry the baseline event itself (the control that the read covers the run's window), fails the audit.
+A production Dispatch without the event-log route (a build from before it) answers it 404; the audit says so and reads that build's `/ws/live` replay instead (`lib/dispatch-live-events.ts`, resuming after the baseline less one, for 25 s), which carries every event whatever owns it, with the same control.
 The audit writes nothing.
 It reads the operator's Dispatch as a command run from the operator's shell resolves it ([`lib/operator-dispatch.sh`](#liboperator-dispatchsh)), with the `DISPATCH_TOKEN` the script read at start and took out of its environment, so nothing the run starts inherits it.
 A file, URL or token that prevents Dispatch fails the baseline read, naming it; with no Dispatch configured, there is none to audit.
@@ -3500,6 +3503,7 @@ Each item below names a case and how it is driven, then what the event's envelop
 
 Each mention case fails when the comment.created payload's mention does not carry the mentioned session's `session_id`:
 the cases are about a mention that resolved, whatever its send did.
+A comment answers its mention attempts `pending` and its sender settles them after the response, so each mention case reads the comment's delivery rows once none is `pending`, and fails when one still is 10 s after the 201 (two of the listener client's 5 s windows).
 
 Every case runs and prints `== <case>`, what it read, and `ok <case>` or `FAIL <case>: <why>`; a summary follows, and any FAIL exits 1.
 The work directory, under `TMPDIR`, holds the binaries and the logs of natsd, the fake listener and the server:
@@ -4368,10 +4372,14 @@ Stage 3 and `stage3-4b13b-acceptance.sh` read their production audit's server an
 operator_dispatch     # sets operator_dispatch_file, _url, _token and _notice
 operator_dispatch_hold_token     # moves DISPATCH_TOKEN into operator_token, out of the environment
 production_baseline     # sets prod_dispatch_url, prod_token, prod_baseline (`none` without Dispatch)
+production_dispatch_audit SESSIONS ENVOY     # the audit of every production Dispatch event from the baseline
 ```
 
 The two Stage 3 scripts call `operator_dispatch_hold_token` once at start, so nothing a run starts inherits the operator's production bearer, and `production_baseline` to open their audit's window:
 it resolves the operator's Dispatch with the held bearer and reads the newest event id of the issues updated in the last 24 hours, through a 0600 header file under the caller's `$work` (`prod_header_file`).
+Their `production_audit` calls `production_dispatch_audit`, which pages `GET /api/v1/events/log?after=` from the baseline id less one until a short page, so it reads every event at or above the baseline whatever owns it, and reads the production projects;
+it writes `$evidence/production-dispatch-audit.json` and fails on an event a rig session authored or that names the rig's `$project`, on a production project naming it, on a read that fails, and on a read that does not carry the baseline event.
+A Dispatch that answers that route 404 is a build from before it: the function says so and reads its `/ws/live` replay since the baseline less one for 25 s instead (`lib/dispatch-live-events.ts`); any other failure fails the audit.
 
 `operator_dispatch` runs `bun scripts/e2e/lib/operator-dispatch.ts <bearer file>`, which resolves Dispatch with `@legion/envoy-client` as every command does, so no script keeps its own copy of the which-file or the same-server rule:
 the envoy.json `envoyConfigPath("command")` chooses (`ENVOY_CONFIG_FILE`, which the operator's own session sets, then a named omp profile's `PI_CODING_AGENT_DIR`, `CLAUDE_CONFIG_DIR` only under `CLAUDE_CODE_CHILD_SESSION=1` (a Claude Code shell), and `OPENCODE_CONFIG_DIR`, then `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`), the working directory's `.envoy/envoy.json`, and `dispatchSettings` over the environment as it is at the call (`DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`;

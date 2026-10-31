@@ -144,6 +144,9 @@ func nulListener(t *testing.T) *httptest.Server {
 func TestEveryStoringRouteRefusesANulInItsText(t *testing.T) {
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: nulListener(t).URL, settle: time.Hour})
 	f := newNulFixture(t, handler)
+	// The mention's send runs after its response (mentionSender) and writes its comment.delivery
+	// event then; it must land before the rows below compare the tables around each refusal.
+	settledCommentDeliveries(t, database, f.mention)
 	awaitBackgroundWrites(t, served)
 	session := func(id string) map[string]any { return map[string]any{"kind": "session", "id": id} }
 	issue := "/api/v1/issues/" + f.issue

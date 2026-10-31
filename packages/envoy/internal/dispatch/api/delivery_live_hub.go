@@ -50,7 +50,9 @@ type deliverySubscription struct {
 // before the hub knows a verdict: the first is set silently, from the read that answers the first
 // snapshot (recompute).
 // While delivery is not configured the sub is told DELIVERY_NOT_CONFIGURED once and stays open,
-// and the settings' first save answers its snapshot. A sub id conn already holds is replaced.
+// and the settings' first save answers its snapshot. A sub id conn already holds is replaced. The
+// first sub of a hub with none starts a generation (deliveryHub); once the server's lifetime has
+// ended no generation starts and the frame is answered nothing, as the socket closes with 1012.
 func (h *deliveryHub) Subscribe(conn deliveryLiveConn, frame deliverySubscription) bool {
 	spec, refusal := parseDeliveryLiveView(frame.View)
 	if refusal != nil {
@@ -58,7 +60,6 @@ func (h *deliveryHub) Subscribe(conn deliveryLiveConn, frame deliverySubscriptio
 		conn.Send(*refusal)
 		return false
 	}
-	h.start()
 	var held *DeliveryLiveRevs
 	if frame.Resume != nil {
 		seq, err := strconv.ParseInt(frame.Resume.Seq, 10, 64)
@@ -67,7 +68,7 @@ func (h *deliveryHub) Subscribe(conn deliveryLiveConn, frame deliverySubscriptio
 			return false
 		}
 		// Read before the hub's lock, which no database read is made under.
-		oldest, err := delivery.OldestChangeSeq(h.readContext(), h.server.deps.Store.Pool)
+		oldest, err := delivery.OldestChangeSeq(store.WithTransactionTracking(h.lifetime), h.server.deps.Store.Pool)
 		switch {
 		case err != nil:
 			slog.Warn("dispatch: delivery live resume answers a snapshot: read the oldest kept change", "error", err)
@@ -81,91 +82,128 @@ func (h *deliveryHub) Subscribe(conn deliveryLiveConn, frame deliverySubscriptio
 	now := h.clock.Now()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.dropLocked(conn, frame.Sub)
-	view := h.views[spec.key]
+	g := h.generation
+	if g == nil {
+		if h.closed || h.lifetime.Err() != nil {
+			return false
+		}
+		g = h.startLocked()
+	}
+	subs := g.conns[conn]
+	if subs == nil {
+		subs = map[string]*deliverySub{}
+		g.conns[conn] = subs
+	}
+	if replaced := subs[frame.Sub]; replaced != nil {
+		// conn keeps a sub, so the generation runs on.
+		g.leaveLocked(replaced)
+	}
+	view := g.views[spec.key]
 	if view == nil {
 		view = &deliveryView{spec: spec, subs: map[*deliverySub]struct{}{}}
-		h.views[spec.key] = view
+		g.views[spec.key] = view
 	}
 	sub := &deliverySub{id: frame.Sub, conn: conn, view: view, needsSnapshot: held == nil, needsVerdict: true}
 	if held != nil {
 		sub.revs = *held
 	}
 	view.subs[sub] = struct{}{}
-	subs := h.conns[conn]
-	if subs == nil {
-		subs = map[string]*deliverySub{}
-		h.conns[conn] = subs
-	}
 	subs[frame.Sub] = sub
 	switch {
 	case view.body != nil && !view.dirty && !view.computing:
-		h.answerLocked(sub)
+		h.answerLocked(g, sub)
 	case view.computing || view.dirty:
 		// The recompute under way, or the one the view already waits for, answers it.
 	default:
-		h.markDirtyLocked(view, now, deliveryCauseSubscribe)
+		h.markDirtyLocked(g, view, now, deliveryCauseSubscribe)
 	}
 	return true
 }
 
-// Unsubscribe drops conn's sub; a view's last sub drops the view.
+// Unsubscribe drops conn's sub; a view's last sub drops the view, and the hub's last its generation.
 func (h *deliveryHub) Unsubscribe(conn deliveryLiveConn, sub string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.dropLocked(conn, sub)
 }
 
-// Close drops every sub conn holds. The socket calls it however it ends: its age (4001), shutdown
-// (1012), its caller no longer resolving (1008), a full queue (1013), a read error.
+// Close drops every sub conn holds. The socket calls it however it ends: shutdown (1012), its
+// caller no longer resolving (1008), a full queue (1013), a read error.
 func (h *deliveryHub) Close(conn deliveryLiveConn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for id := range h.conns[conn] {
+	if h.generation == nil {
+		return
+	}
+	for id := range h.generation.conns[conn] {
 		h.dropLocked(conn, id)
 	}
 }
 
-// dropLocked drops conn's sub id, the view it leaves without a sub, and conn once it holds none.
+// dropLocked drops conn's sub id, the view it leaves without a sub, and conn once it holds none. The
+// drop that leaves the hub no conn stops its generation: its listener closes its connection, its
+// intake cancels its relay subscription, and nothing reads either log until the next Subscribe.
 func (h *deliveryHub) dropLocked(conn deliveryLiveConn, id string) {
-	subs := h.conns[conn]
+	g := h.generation
+	if g == nil {
+		return
+	}
+	subs := g.conns[conn]
 	sub := subs[id]
 	if sub == nil {
 		return
 	}
 	delete(subs, id)
 	if len(subs) == 0 {
-		delete(h.conns, conn)
+		delete(g.conns, conn)
 	}
-	delete(sub.view.subs, sub)
-	if len(sub.view.subs) == 0 && h.views[sub.view.spec.key] == sub.view {
-		delete(h.views, sub.view.spec.key)
+	g.leaveLocked(sub)
+	if len(g.conns) == 0 {
+		g.stop()
+		h.generation = nil
 	}
 }
 
-// The channels the delivery hub listens on. delivery_changes carries no payload and is notified
-// as a delivery_changes row commits (migration 0100); delivery_freshness carries the settings
-// row's freshness columns as JSON (0100); dispatch_events carries no payload and is notified as an
-// event commits (0107). The event stream relay listens on the third of them (event_stream_relay.go).
+// leaveLocked takes sub out of its view, and drops the view it leaves without a sub.
+func (g *hubGeneration) leaveLocked(sub *deliverySub) {
+	delete(sub.view.subs, sub)
+	if len(sub.view.subs) == 0 && g.views[sub.view.spec.key] == sub.view {
+		delete(g.views, sub.view.spec.key)
+	}
+}
+
+// The channels the delivery hub listens on. delivery_changes carries no payload and is notified as
+// a delivery_changes row commits (migration 0100); delivery_freshness carries the settings row's
+// freshness columns as JSON (0100).
 const (
 	deliveryChangesChannel   = "delivery_changes"
 	deliveryFreshnessChannel = "delivery_freshness"
-	dispatchEventsChannel    = "dispatch_events"
 )
 
-// deliveryHub keeps every open Delivery and Pipeline page current (LEGION-690). It learns of a change
-// from Postgres (LISTEN delivery_changes, delivery_freshness, dispatch_events, on one connection of
-// its own, pglisten.Listener) and from the in-process event broker; marks dirty only the views the
-// change can touch; recomputes each dirty view once per burst, one recompute at a time, as the GET
-// routes' population read and pure compute; re-runs the compute alone, reading nothing, when
-// something leaves a preset window; and sends each subscriber only the keys whose revision differs
-// from what it holds.
+// deliveryHubFeedBuffer is the hub's slots on the relay's feed: more than one relay page
+// (maxEventReplay), which the relay publishes at once, so a page never overflows an intake that
+// was busy when it came.
+const deliveryHubFeedBuffer = 1024
+
+// deliveryHub keeps every open Delivery and Pipeline page current (LEGION-690). It learns of a
+// delivery change from Postgres (LISTEN delivery_changes and delivery_freshness, on one connection
+// of its own, pglisten.Listener) and of a committed event from the event stream relay's feed, the
+// process's one reader of the event log; marks dirty only the views the change can touch;
+// recomputes each dirty view once per burst, one recompute at a time, as the GET routes'
+// population read and pure compute; re-runs the compute alone, reading nothing, when something
+// leaves a preset window; and sends each subscriber only the keys whose revision differs from
+// what it holds.
 //
-// Three goroutines start on the first Subscribe and run until lifetime ends: the listener; the
-// intake, which alone moves the two cursors (the delivery change log's and the event log's) and
-// marks views dirty; and the worker, which alone recomputes, so one recompute runs at a time. The
-// intake resolves the event cursor, which waits for a safe horizon, on a fourth that ends once it
-// has (seedEvents), at the start and after a reset of the event log.
+// Each run of the hub is a generation (hubGeneration): the first Subscribe of a hub with no sub
+// starts one, and the drop of its last sub stops it, at once, with no grace period, so a process
+// with no open page holds no connection for the hub and reads neither log for it. A generation
+// runs three goroutines on a context of its own: the listener; the intake, which alone moves the
+// change log's cursor, applies the relay's events and marks views dirty; and the worker, which
+// alone recomputes, so one recompute runs at a time. Its relay subscription, which waits for a
+// safe horizon, is taken on a fourth that ends once it has (seedEvents), at the start and after
+// a feed closes. A generation owns its views and conns, and
+// the drop of its last conn is what stops it, so a goroutine of a stopped generation reaches only
+// its own empty maps, never the next generation's, and returns once its context ends.
 type deliveryHub struct {
 	server   *server
 	clock    hubClock
@@ -176,38 +214,44 @@ type deliveryHub struct {
 	dial                    func(ctx context.Context) (*pgx.Conn, error)
 	listenIdle, pingTimeout time.Duration
 	backoff                 func(attempt int) time.Duration
-	// observe, when set, is told of each recompute and catch-up; tests set it.
+	// observe, when set, is told of each recompute, connection and event; tests set it.
 	observe func(deliveryHubNote)
 
-	once    sync.Once
+	// running counts every generation's goroutines. Add runs under mu and only while closed is
+	// false, so no Add can follow the Wait in wait.
 	running sync.WaitGroup
-	// ready closes once the intake has read where the delivery change log stands, which the worker
-	// waits for. The event cursor is resolved apart (seedEvents), so neither waits on the horizon.
+
+	mu sync.Mutex
+	// closed is set by wait: the lifetime has ended and no generation starts again.
+	closed bool
+	// generation is the running generation, nil while no conn holds a sub.
+	generation *hubGeneration
+}
+
+// hubGeneration is one run of the hub. ctx, stop and the channels are set once at its start; the
+// rest is guarded by the hub's mu. views and conns are emptied by the drops that stop it, and no
+// sub joins it once stopped.
+type hubGeneration struct {
+	ctx  context.Context
+	stop context.CancelFunc
+	// ready closes once the intake has read where the change log stands, which the worker waits
+	// for. The relay subscription is taken apart (seedEvents), so neither waits on the horizon.
 	ready chan struct{}
 	// Each wake holds at most one pending signal: what it asks for covers every signal before it.
-	wakeWork, wakeChanges, wakeEvents, connected chan struct{}
-	barrier                                      chan chan struct{}
-	// seeds hands the intake the event cursor seedEvents resolved; one slot, as one runs at a time.
-	seeds chan hubEventSeed
-	// seeded is whether the intake holds an event cursor, false while seedEvents resolves one; and
-	// gaps schedules the re-read of an event gap left open above the safe horizon (readEvents).
-	// Only the intake goroutine touches them.
-	seeded bool
-	gaps   eventGapReread
+	wakeWork, wakeChanges, connected chan struct{}
+	barrier                          chan chan struct{}
+	// feeds hands the intake the relay subscription seedEvents took; one slot, as one runs at a
+	// time.
+	feeds chan hubEventFeed
 
-	mu    sync.Mutex
 	views map[string]*deliveryView // by canonical view key
 	conns map[deliveryLiveConn]map[string]*deliverySub
+
 	// changeSeq and changeAt are the last delivery change read and its at, to tell a reset log;
 	// epoch counts the resets, so a recompute that read across one stores no change position.
 	changeSeq int64
 	changeAt  time.Time
 	epoch     int64
-	// eventCursor and eventAt are the last event id scanned and its created_at, to tell a reset log.
-	// Every event at or below eventCursor is final (catchUpEvents, receive); both mean nothing
-	// while the intake holds no cursor (seeded false).
-	eventCursor int64
-	eventAt     time.Time
 	// p0 is the open P0 issues (OpenP0Keys), kept current from issue event payloads.
 	p0 map[string]struct{}
 	// fresh is the freshness row as last heard, and sent the verdict last sent; known is false
@@ -249,6 +293,15 @@ type deliveryView struct {
 	notBefore             time.Time
 	cause                 string
 	computing             bool
+	// reading is set while recompute's population read runs, outside the lock, and until it
+	// installs that read's answer. heardIssues and heardSessions record what the events applied
+	// meanwhile acted on (applyEventLocked): each issue with whether it was a P0 before or after
+	// one of them, and each writing session with its newest title. The read may have passed a row
+	// before its event committed, so recompute checks them against the answer it installs
+	// (recheckHeardLocked).
+	reading       bool
+	heardIssues   map[string]bool
+	heardSessions map[string]string
 	// settings, pop and pipe are as of the last read, and readFrom the window start pop was read
 	// for: an expiry narrows them without a read.
 	settings delivery.DeliverySettings
@@ -316,11 +369,13 @@ type deliveryFreshnessVerdict struct {
 
 // deliveryHubNote is one thing the hub did, for a test's observe.
 type deliveryHubNote struct {
-	what          string // "recompute begin", "recompute end", "events caught up", "events seeded", "connected", "broker dropped"
-	view          string // the view's key
-	cause         string
-	sent          int
-	from, through int64
+	what  string // "recompute begin", "recompute read", "recompute end", "connected", "events seeded", "event", "feed closed"
+	view  string // the view's key
+	cause string
+	sent  int
+	// eventID is the event an "event" note applied, or the head an "events seeded" note's feed
+	// began at.
+	eventID int64
 }
 
 const (
@@ -330,7 +385,7 @@ const (
 	viewMaxWait = 2 * time.Second
 	// deliveryLiveRetry is how long a view whose read failed waits before the next.
 	deliveryLiveRetry = 5 * time.Second
-	// deliveryLivePage is how many changes or events one catch-up read takes.
+	// deliveryLivePage is how many changes one catch-up read takes.
 	deliveryLivePage = 1000
 	// deliveryStaleAfter is how long the reconciled sources go without a pass before the verdict
 	// names them stale: freshness.ts's three missed five-minute intervals.
@@ -348,47 +403,58 @@ var deliveryLivePresets = []int{7, 14, 28, 84}
 // arrive irregularly, never are.
 var deliveryReconciledSources = []string{"prs", "runs", "ci"}
 
-// newDeliveryHub is the hub of s's open pages. Nothing runs until the first Subscribe, which starts
-// its goroutines on lifetime.
+// newDeliveryHub is the hub of s's open pages, on s's event stream relay. Nothing runs until the
+// first Subscribe, which starts a generation on lifetime.
 func newDeliveryHub(s *server, lifetime context.Context, clock hubClock) *deliveryHub {
 	return &deliveryHub{
 		server: s, clock: clock, lifetime: lifetime,
 		dial: func(ctx context.Context) (*pgx.Conn, error) {
 			return s.deps.Store.Pool.Listener(ctx)
 		},
+	}
+}
+
+// startLocked runs a new generation's listener, intake, worker and first relay subscribe, with mu
+// held.
+func (h *deliveryHub) startLocked() *hubGeneration {
+	ctx, stop := context.WithCancel(h.lifetime)
+	g := &hubGeneration{
+		ctx: ctx, stop: stop,
 		ready:    make(chan struct{}),
-		wakeWork: make(chan struct{}, 1), wakeChanges: make(chan struct{}, 1),
-		wakeEvents: make(chan struct{}, 1), connected: make(chan struct{}, 1),
+		wakeWork: make(chan struct{}, 1), wakeChanges: make(chan struct{}, 1), connected: make(chan struct{}, 1),
 		barrier: make(chan chan struct{}),
-		seeds:   make(chan hubEventSeed, 1),
+		feeds:   make(chan hubEventFeed, 1),
 		views:   map[string]*deliveryView{},
 		conns:   map[deliveryLiveConn]map[string]*deliverySub{},
 		p0:      map[string]struct{}{},
 	}
+	listener := &pglisten.Listener{
+		Owner:       "dispatch",
+		Dial:        h.dial,
+		Channels:    []string{deliveryChangesChannel, deliveryFreshnessChannel},
+		ListenIdle:  h.listenIdle,
+		PingTimeout: h.pingTimeout,
+		Backoff:     h.backoff,
+		OnConnected: func() { signal(g.connected) },
+		OnNotify:    func(channel, payload string) { h.onNotify(g, channel, payload) },
+	}
+	h.running.Add(3)
+	go func() { defer h.running.Done(); listener.Run(ctx) }()
+	go func() { defer h.running.Done(); h.intake(g) }()
+	go func() { defer h.running.Done(); h.work(g) }()
+	h.seedEvents(g)
+	h.generation = g
+	return g
 }
 
-// start runs the hub's goroutines once.
-func (h *deliveryHub) start() {
-	h.once.Do(func() {
-		listener := &pglisten.Listener{
-			Owner:       "dispatch",
-			Dial:        h.dial,
-			Channels:    []string{deliveryChangesChannel, deliveryFreshnessChannel, dispatchEventsChannel},
-			ListenIdle:  h.listenIdle,
-			PingTimeout: h.pingTimeout,
-			Backoff:     h.backoff,
-			OnConnected: func() { signal(h.connected) },
-			OnNotify:    h.onNotify,
-		}
-		h.running.Add(3)
-		go func() { defer h.running.Done(); listener.Run(h.lifetime) }()
-		go func() { defer h.running.Done(); h.intake(h.lifetime) }()
-		go func() { defer h.running.Done(); h.work(h.lifetime) }()
-	})
+// wait marks the hub closed, so no generation starts again, then returns once every generation's
+// goroutines have. It is called after the lifetime ended, which ends them all.
+func (h *deliveryHub) wait() {
+	h.mu.Lock()
+	h.closed = true
+	h.mu.Unlock()
+	h.running.Wait()
 }
-
-// wait returns once every goroutine the hub started has, after its lifetime ended.
-func (h *deliveryHub) wait() { h.running.Wait() }
 
 // signal leaves one signal on wake unless one is already there.
 func signal(wake chan struct{}) {
@@ -398,10 +464,10 @@ func signal(wake chan struct{}) {
 	}
 }
 
-// readContext is a context for one read of the shared pool, marked so the pool refuses it a second
-// connection.
-func (h *deliveryHub) readContext() context.Context {
-	return store.WithTransactionTracking(h.lifetime)
+// readContext is a context for one of g's reads of the shared pool, which ends with g and is marked
+// so the pool refuses it a second connection.
+func (g *hubGeneration) readContext() context.Context {
+	return store.WithTransactionTracking(g.ctx)
 }
 
 func (h *deliveryHub) note(n deliveryHubNote) {
@@ -410,27 +476,31 @@ func (h *deliveryHub) note(n deliveryHubNote) {
 	}
 }
 
-// onNotify routes one notification, on the listener's goroutine: a change or an event wakes the
-// intake's catch-up of its log, and a freshness row is applied at once, reading nothing.
-func (h *deliveryHub) onNotify(channel, payload string) {
+// onNotify routes one notification to g, on the listener's goroutine: a change wakes the intake's
+// catch-up of the change log, and a freshness row is applied at once, reading nothing.
+func (h *deliveryHub) onNotify(g *hubGeneration, channel, payload string) {
 	switch channel {
 	case deliveryChangesChannel:
-		signal(h.wakeChanges)
-	case dispatchEventsChannel:
-		signal(h.wakeEvents)
+		signal(g.wakeChanges)
 	case deliveryFreshnessChannel:
-		h.applyFreshness(payload)
+		h.applyFreshness(g, payload)
 	}
 }
 
-// catchUpNow catches both logs up and returns once it has, or once the hub's lifetime ended. The
-// event log is caught up only once the intake holds an event cursor (applySeed).
+// catchUpNow catches the change log up and returns once it has, or once the running generation
+// ended; with no generation running it returns at once.
 func (h *deliveryHub) catchUpNow() {
+	h.mu.Lock()
+	g := h.generation
+	h.mu.Unlock()
+	if g == nil {
+		return
+	}
 	done := make(chan struct{})
 	select {
-	case h.barrier <- done:
+	case g.barrier <- done:
 		<-done
-	case <-h.lifetime.Done():
+	case <-g.ctx.Done():
 	}
 }
 

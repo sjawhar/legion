@@ -74,6 +74,7 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Keep this holder.", "mentions": []map[string]any{{"target": "role:reviewer"}},
 	}))
+	settledCommentDeliveries(t, database, comment.ID)
 	if _, err := database.Pool.Exec(context.Background(), `
 		update comment_deliveries set state = 'pending', envelope_id = null, error = null, claimed_at = null
 		where comment_id = $1 and target = 'role:reviewer' and attempt = 1
@@ -159,6 +160,7 @@ func TestStrandedAttemptRetriedDuringAListenerOutageKeepsThePinAndAcceptsTheRepl
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Attempt 1 goes out fine.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
+	settledCommentDeliveries(t, database, comment.ID)
 
 	// A sender recorded attempt 2's resolution - pinning it to s1, the session its frame
 	// reached - and died before it could send or settle. The claim is old enough to be
@@ -228,6 +230,7 @@ func TestStrandedRoleAttemptRetriedDuringAnOutageKeepsThePinAndRefusesTheNewHold
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Keep this holder through an outage.", "mentions": []map[string]any{{"target": "role:reviewer"}},
 	}))
+	settledCommentDeliveries(t, database, comment.ID)
 
 	// Attempt 1 sent to s1, the role's holder at creation. A sender strands it back to
 	// pending, claimed long enough ago to be plainly abandoned; the row still names s1, the
@@ -322,6 +325,7 @@ func TestPendingMentionRetryKeepsItsOriginalDeliveryMode(t *testing.T) {
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Keep the original mode.", "mentions": []map[string]any{{"target": "session:s1"}}, "delivery": "btw",
 	}))
+	settledCommentDeliveries(t, database, comment.ID)
 	if _, err := database.Pool.Exec(context.Background(), `
 		update comment_deliveries set state = 'pending', envelope_id = null, error = null, claimed_at = null
 		where comment_id = $1 and target = 'session:s1' and attempt = 1
@@ -390,8 +394,8 @@ func TestPendingMentionRetryRechecksCapabilityAgainstCurrentRegistration(t *test
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Created while steer was advertised.", "mentions": []map[string]any{{"target": "session:s1"}}, "delivery": "steer",
 	}))
-	if len(comment.Deliveries) != 1 || comment.Deliveries[0].State != "sent" {
-		t.Fatalf("initial delivery = %#v, want sent", comment.Deliveries)
+	if settled := settledCommentDeliveries(t, database, comment.ID); len(settled) != 1 || settled[0].State != "sent" {
+		t.Fatalf("initial delivery = %#v, want sent", settled)
 	}
 	if _, err := database.Pool.Exec(context.Background(), `
 		update comment_deliveries set state = 'pending', envelope_id = null, error = null, claimed_at = null
@@ -446,17 +450,18 @@ func TestInitialCommentDeliveryRechecksCapabilityAgainstCurrentRegistration(t *t
 		}
 	}))
 	defer listener.Close()
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Initial capability race", "before")
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body":     "Created while steer was advertised.",
 		"mentions": []map[string]any{{"target": "session:s1"}},
 		"delivery": "steer",
 	}))
-	if len(comment.Deliveries) != 1 {
-		t.Fatalf("deliveries = %#v, want one", comment.Deliveries)
+	settled := settledCommentDeliveries(t, database, comment.ID)
+	if len(settled) != 1 {
+		t.Fatalf("deliveries = %#v, want one", settled)
 	}
-	attempt := comment.Deliveries[0]
+	attempt := settled[0]
 	if attempt.State != "failed" || attempt.Error == nil ||
 		*attempt.Error != "session s1 (planner) does not advertise steer" || sends != 0 {
 		t.Fatalf("initial delivery reused stale capability: session reads=%d sends=%d attempt=%#v", sessionReads, sends, attempt)
@@ -490,9 +495,9 @@ func TestPendingUnresolvedMentionRetryKeepsTheOriginalError(t *testing.T) {
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Keep the original resolution error.", "mentions": []map[string]any{{"target": "role:reviewer"}},
 	}))
-	if len(comment.Deliveries) != 1 || comment.Deliveries[0].Error == nil ||
-		*comment.Deliveries[0].Error != "no holder for role reviewer" {
-		t.Fatalf("initial unresolved delivery = %#v", comment.Deliveries)
+	if settled := settledCommentDeliveries(t, database, comment.ID); len(settled) != 1 || settled[0].Error == nil ||
+		*settled[0].Error != "no holder for role reviewer" {
+		t.Fatalf("initial unresolved delivery = %#v", settled)
 	}
 	if _, err := database.Pool.Exec(context.Background(), `
 		update comment_deliveries set state = 'pending', envelope_id = null, error = null, claimed_at = null
@@ -521,7 +526,7 @@ func TestPendingUnresolvedMentionRetryKeepsTheOriginalError(t *testing.T) {
 // A listener that cannot answer whether a session lives is not a listener saying that session
 // ended. The per-session read answers 503 here, as it does while the message bus is silent, and
 // what the attempt records must be the listener's own reason: "no live session " is the prefix a
-// mention's session pin is kept or dropped by (resolveMentionTargets in comment_delivery.go) and
+// mention's session pin is kept or dropped by (resolveMentionTarget in comment_delivery.go) and
 // the text the dashboard prints, so wording an unanswered read that way would un-name a
 // recipient that never went anywhere and tell a person to stop waiting on it.
 func TestMentionDuringAnUnanswerableRegistryReadIsNotRecordedAsNoLiveSession(t *testing.T) {
@@ -543,16 +548,17 @@ func TestMentionDuringAnUnanswerableRegistryReadIsNotRecordedAsNoLiveSession(t *
 		}
 	}))
 	defer listener.Close()
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Mention while the bus is silent", "before")
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Does this reach you?", "mentions": []map[string]any{{"target": "session:s1"}},
 		"delivery": "steer",
 	}))
-	if len(comment.Deliveries) != 1 || comment.Deliveries[0].Error == nil {
-		t.Fatalf("deliveries = %#v, want one failed delivery", comment.Deliveries)
+	settled := settledCommentDeliveries(t, database, comment.ID)
+	if len(settled) != 1 || settled[0].Error == nil {
+		t.Fatalf("deliveries = %#v, want one failed delivery", settled)
 	}
-	delivery := comment.Deliveries[0]
+	delivery := settled[0]
 	if delivery.State != "failed" || sends != 0 {
 		t.Fatalf("delivery during a silent bus = %#v sends=%d, want a failure and no send", delivery, sends)
 	}

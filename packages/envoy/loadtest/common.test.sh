@@ -428,13 +428,13 @@ ports_for() {
   shift
   env -u LOADTEST_PG_PORT -u LOADTEST_PROXY_PORT -u LOADTEST_NATS_PORT \
     -u LOADTEST_NATS_MONITOR_PORT -u LOADTEST_LISTENER_PORT -u LOADTEST_DISPATCH_PORT \
-    -u LOADTEST_PPROF_PORT "$@" bash -c 'source "$1"; stack_ports "$2"' ports "$helper" "$root"
+    -u LOADTEST_PPROF_PORT -u LOADTEST_ENVOY_PROXY_PORT "$@" bash -c 'source "$1"; stack_ports "$2"' ports "$helper" "$root"
 }
 
 # case_stack_ports: the stack's default ports follow LOADTEST_ROOT, so two Legion roles of one pod,
 # each on its own root, almost always start a stack each with no port variable set: each root's path
 # picks one of the 200 blocks of ports, and no two ports of one block or of two different blocks
-# meet. Two roots whose paths pick one block (about 1 pair in 200) hold the same 7 ports; the two
+# meet. Two roots whose paths pick one block (about 1 pair in 200) hold the same 8 ports; the two
 # roots below do not.
 case_stack_ports() {
   out=""
@@ -446,7 +446,7 @@ case_stack_ports() {
   [ "$one" != "$two" ] || { out="$one" fail "(i) two roots got the same ports"; return; }
   overlap=$(comm -12 <(awk '{print $2}' <<<"$one" | sort) <(awk '{print $2}' <<<"$two" | sort))
   [ -z "$overlap" ] || { out="$one"$'\n'"$two" fail "(i) two roots share the ports $(tr '\n' ' ' <<<"$overlap")"; return; }
-  [ "$(wc -l <<<"$one")" = 7 ] || { out="$one" fail "(i) a root's ports are not the 7 stack.json keys"; return; }
+  [ "$(wc -l <<<"$one")" = 8 ] || { out="$one" fail "(i) a root's ports are not the 8 stack.json keys"; return; }
 
   # Every port of every block, against every other: all inside 1024-65535, none twice.
   local report

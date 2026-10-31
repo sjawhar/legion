@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"errors"
 	"log"
 	"log/slog"
@@ -14,14 +13,15 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/delivery/measures"
 )
 
-// work recomputes the dirty views and the expired ones, one at a time, and keeps the freshness
-// verdict on its threshold. One timer, re-armed after every pass, wakes it at the earliest moment
-// a view is due or the reconciled sources cross their threshold; nothing else wakes it but a mark.
-func (h *deliveryHub) work(ctx context.Context) {
+// work recomputes g's dirty views and the expired ones, one at a time, and keeps the freshness
+// verdict on its threshold, until g ends. One timer, re-armed after every pass, wakes it at the
+// earliest moment a view is due or the reconciled sources cross their threshold; nothing else
+// wakes it but a mark.
+func (h *deliveryHub) work(g *hubGeneration) {
 	select {
-	case <-ctx.Done():
+	case <-g.ctx.Done():
 		return
-	case <-h.ready:
+	case <-g.ready:
 	}
 	var timer hubTimer
 	defer func() {
@@ -30,36 +30,36 @@ func (h *deliveryHub) work(ctx context.Context) {
 		}
 	}()
 	for {
-		for h.runDue() {
+		for h.runDue(g) {
 		}
 		now := h.clock.Now()
 		h.mu.Lock()
-		h.judgeLocked(now)
-		next, ok := h.nextWakeLocked(now)
+		h.judgeLocked(g, now)
+		next, ok := h.nextWakeLocked(g, now)
 		h.mu.Unlock()
 		if timer != nil {
 			timer.Stop()
 			timer = nil
 		}
 		if ok {
-			timer = h.clock.At(next, func() { signal(h.wakeWork) })
+			timer = h.clock.At(next, func() { signal(g.wakeWork) })
 		}
 		select {
-		case <-ctx.Done():
+		case <-g.ctx.Done():
 			return
-		case <-h.wakeWork:
+		case <-g.wakeWork:
 		}
 	}
 }
 
 // runDue recomputes, or narrows, the view that is due earliest, and is false when none is due.
-func (h *deliveryHub) runDue() bool {
+func (h *deliveryHub) runDue(g *hubGeneration) bool {
 	now := h.clock.Now()
 	h.mu.Lock()
 	var due *deliveryView
 	var dueAt time.Time
 	var cause string
-	for _, view := range h.views {
+	for _, view := range g.views {
 		at, why, ok := view.dueAt()
 		if ok && !at.After(now) && (due == nil || at.Before(dueAt)) {
 			due, dueAt, cause = view, at, why
@@ -70,9 +70,9 @@ func (h *deliveryHub) runDue() bool {
 	case due == nil:
 		return false
 	case cause == deliveryCauseExpiry:
-		h.expire(due)
+		h.expire(g, due)
 	default:
-		h.recompute(due, cause)
+		h.recompute(g, due, cause)
 	}
 	return true
 }
@@ -103,22 +103,22 @@ func (view *deliveryView) dueAt() (time.Time, string, bool) {
 	return time.Time{}, "", false
 }
 
-// nextWakeLocked is the earliest moment after now a view is due or the verdict's reconciled
+// nextWakeLocked is the earliest moment after now a view is due or g's verdict's reconciled
 // sources cross their threshold.
-func (h *deliveryHub) nextWakeLocked(now time.Time) (time.Time, bool) {
+func (h *deliveryHub) nextWakeLocked(g *hubGeneration, now time.Time) (time.Time, bool) {
 	var next time.Time
 	consider := func(at time.Time) {
 		if next.IsZero() || at.Before(next) {
 			next = at
 		}
 	}
-	for _, view := range h.views {
+	for _, view := range g.views {
 		if at, _, ok := view.dueAt(); ok {
 			consider(at)
 		}
 	}
-	if h.known && h.fresh.lastReconcileAt != nil {
-		if crossing := h.fresh.lastReconcileAt.Add(deliveryStaleAfter).Add(time.Nanosecond); crossing.After(now) {
+	if g.known && g.fresh.lastReconcileAt != nil {
+		if crossing := g.fresh.lastReconcileAt.Add(deliveryStaleAfter).Add(time.Nanosecond); crossing.After(now) {
 			consider(crossing)
 		}
 	}
@@ -146,23 +146,24 @@ type deliveryViewRead struct {
 // population read, the ancestors of the issues it names, and the pure compute. It sends each sub
 // the delta against what it holds (a snapshot to a sub with none), or DELIVERY_NOT_CONFIGURED to
 // a sub not yet told.
-func (h *deliveryHub) recompute(view *deliveryView, cause string) {
+func (h *deliveryHub) recompute(g *hubGeneration, view *deliveryView, cause string) {
 	started := time.Now()
 	h.mu.Lock()
-	view.dirty, view.immediate, view.computing = false, false, true
-	spec, epoch := view.spec, h.epoch
+	view.dirty, view.immediate, view.computing, view.reading = false, false, true, true
+	spec, epoch := view.spec, g.epoch
 	h.mu.Unlock()
 	h.note(deliveryHubNote{what: "recompute begin", view: spec.key, cause: cause})
 
-	read, err := h.read(view, spec)
+	read, err := h.read(g, view, spec)
+	h.note(deliveryHubNote{what: "recompute read", view: spec.key, cause: cause})
 
 	now := h.clock.Now()
 	h.mu.Lock()
 	view.computing, view.readingSeq = false, 0
 	sent := 0
 	switch {
-	case h.views[spec.key] != view:
-		// Every sub left while it read.
+	case g.views[spec.key] != view:
+		// Every sub left while it read, and the generation stopped if they were the last.
 	case errors.Is(err, delivery.ErrNoSettings):
 		view.body, view.expiry, view.seq = nil, time.Time{}, read.seq
 		for sub := range view.subs {
@@ -174,7 +175,7 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 			}
 		}
 	case err != nil:
-		if h.lifetime.Err() == nil {
+		if g.ctx.Err() == nil {
 			slog.Warn("dispatch: delivery live recompute failed; retrying", "view", spec.kind, "error", err)
 		}
 		if !view.dirty {
@@ -182,7 +183,7 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 		}
 		view.lastDirty, view.notBefore = now, now.Add(deliveryLiveRetry)
 	default:
-		if h.epoch != epoch {
+		if g.epoch != epoch {
 			// The change log was reset while it read, so its position names nothing in the new one.
 			read.seq = 0
 		}
@@ -190,28 +191,31 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 		view.body, view.seq, view.changedAt = &read.body, read.seq, read.changedAt
 		view.from, view.at, view.expiry = read.from, read.at, read.expiry
 		view.issues, view.ancestors, view.sessions = read.issues, read.ancestors, read.sessions
-		sent = h.sendLocked(view)
-		if !h.known {
+		sent = h.sendLocked(g, view)
+		if !g.known {
 			// The first verdict is set silently, from the first settings read.
-			h.fresh = deliveryFreshnessHeard{
+			g.fresh = deliveryFreshnessHeard{
 				lastEventAt: read.settings.LastEventAt, lastReconcileAt: read.settings.LastReconcileAt,
 				lastError: read.settings.LastError, unfetchable: read.unfetchable,
 			}
-			h.sent = h.verdictLocked(now)
-			h.known = true
+			g.sent = g.verdictLocked(now)
+			g.known = true
 		} else {
-			h.fresh.unfetchable = read.unfetchable
-			h.judgeLocked(now)
+			g.fresh.unfetchable = read.unfetchable
+			h.judgeLocked(g, now)
 		}
 	}
+	// What the events applied during the read touched is checked against the answer it installed,
+	// or the last one when it installed none.
+	h.recheckHeardLocked(g, view, now)
 	subscribers := len(view.subs)
 	h.mu.Unlock()
 	h.finishRecompute(spec, cause, started, read.prs, read.runs, subscribers, sent)
 }
 
-// read is recompute's read and compute, outside the hub's lock.
-func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec) (deliveryViewRead, error) {
-	ctx, pool := h.readContext(), h.server.deps.Store.Pool
+// read is recompute's read and compute, outside the hub's lock, on g's context.
+func (h *deliveryHub) read(g *hubGeneration, view *deliveryView, spec deliveryLiveSpec) (deliveryViewRead, error) {
+	ctx, pool := g.readContext(), h.server.deps.Store.Pool
 	var read deliveryViewRead
 	var err error
 	if read.seq, err = delivery.LatestChangeSeq(ctx, pool); err != nil {
@@ -288,7 +292,7 @@ func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec) (deliveryV
 // reading nothing: the compute over the population as last read, narrowed to the window now, with
 // the settings that read held. The population and its read's start stay as read, and the next
 // expiry comes from the narrowed population.
-func (h *deliveryHub) expire(view *deliveryView) {
+func (h *deliveryHub) expire(g *hubGeneration, view *deliveryView) {
 	started := time.Now()
 	h.mu.Lock()
 	view.computing = true
@@ -320,13 +324,13 @@ func (h *deliveryHub) expire(view *deliveryView) {
 	view.computing = false
 	sent := 0
 	switch {
-	case h.views[spec.key] != view:
+	case g.views[spec.key] != view:
 	case err != nil:
 		slog.Error("dispatch: delivery live expiry could not encode its body", "view", spec.kind, "error", err)
 		view.expiry = time.Time{}
 	default:
 		view.body, view.from, view.at, view.expiry = &encoded, from, at, expiry
-		sent = h.sendLocked(view)
+		sent = h.sendLocked(g, view)
 	}
 	subscribers := len(view.subs)
 	h.mu.Unlock()
@@ -349,10 +353,10 @@ func deliveryLiveCompute(kind string, settings delivery.DeliverySettings, pop de
 }
 
 // sendLocked answers every sub of view from its body, and counts the frames it sent.
-func (h *deliveryHub) sendLocked(view *deliveryView) int {
+func (h *deliveryHub) sendLocked(g *hubGeneration, view *deliveryView) int {
 	sent := 0
 	for sub := range view.subs {
-		if h.answerLocked(sub) {
+		if h.answerLocked(g, sub) {
 			sent++
 		}
 	}
@@ -360,14 +364,14 @@ func (h *deliveryHub) sendLocked(view *deliveryView) int {
 }
 
 // answerLocked sends sub what it needs to hold its view's body (answerBodyLocked) and, after its
-// first answer, the verdict the hub knows, when it knows one (Subscribe). It reports whether it
-// sent sub a snapshot or a delta.
-func (h *deliveryHub) answerLocked(sub *deliverySub) bool {
+// first answer, the verdict the generation knows, when it knows one (Subscribe). It reports
+// whether it sent sub a snapshot or a delta.
+func (h *deliveryHub) answerLocked(g *hubGeneration, sub *deliverySub) bool {
 	sent := h.answerBodyLocked(sub)
 	if sub.needsVerdict {
 		sub.needsVerdict = false
-		if h.known {
-			sub.conn.Send(h.freshnessFrameLocked(h.sent))
+		if g.known {
+			sub.conn.Send(g.freshnessFrameLocked(g.sent))
 		}
 	}
 	return sent

@@ -1,0 +1,9 @@
+kind: Changed
+body: |-
+    An agent conversation view on `GET /ws/live` holds at most 8 MiB of queued frames, where it held
+    64 whole frames; a view past the budget ends as `behind`, as before, and its page subscribes
+    again. A page that stops reading is still ended first by the socket's 10 s write deadline,
+    with the socket's 64-frame stream, which agent frames ride, in front of it.
+time: 2026-10-28T11:33:07.834601386Z
+custom:
+    Issue: pr2406
