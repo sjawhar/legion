@@ -178,6 +178,7 @@ import {
   type TaskHandle,
   taskWasAbandoned,
 } from "../src/registration-state";
+import { ServerClock } from "../src/server-clock";
 import { withSessionAnswers } from "../src/session-answers-context";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
@@ -624,11 +625,17 @@ export default function envoyExtension(pi: PiApi): void {
   // reach it through `requireEnvoy`, which refuses, saying why Envoy is off, so this session
   // reaches no listener and no NATS server its configuration does not name. Tools, `/whoami`,
   // inbound messages and the heartbeat exist only with Envoy on, so only the Legion interface's
-  // `claim` and `subscribe` can meet that refusal.
+  // `claim` and `subscribe` can meet that refusal. Every reply's `Date` tells how far this
+  // machine's clock runs from the listener's, which each card's age states (`../src/server-clock`).
+  const serverClock = new ServerClock(() => Date.now());
   const active = envoy.enabled
     ? {
         settings: envoy,
-        client: createEnvoyClient({ baseUrl: envoy.url, fetch, token: envoy.token }),
+        client: createEnvoyClient({
+          baseUrl: envoy.url,
+          fetch: serverClock.observing(fetch),
+          token: envoy.token,
+        }),
       }
     : undefined;
   const requireEnvoy = (): NonNullable<typeof active> => {
@@ -1037,8 +1044,12 @@ export default function envoyExtension(pi: PiApi): void {
 
   // When each card reached each session this process serves, which every model request shows
   // beside the card's send time (`../src/card-age`): a card's `message_end` in a session fixes it
-  // for that session, so a session the host moves to reads when it was shown the card itself.
-  const cardAges = new CardAges({ now: () => Date.now() });
+  // for that session, so a session the host moves to reads when it was shown the card itself. The
+  // listener's clock, from its replies, says how much of the gap this machine's clock made.
+  const cardAges = new CardAges({
+    now: () => Date.now(),
+    clockOffset: () => serverClock.offset(),
+  });
 
   // A card's message: its `details` name the frame (`replayLedgerIdentity`), which the host keeps
   // on the message it writes, beside the wake's card marker. An `inert` card is a steer that starts

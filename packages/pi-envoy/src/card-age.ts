@@ -4,9 +4,11 @@ import { REPLAY_DELIVERED_ENTRY, writtenCardIdentity } from "./missed-messages";
 
 /**
  * How long a card may take from its send to this session before its card states the wait in
- * words. A card read that late carries an `at:` stamp that far behind the present, and a reader
- * that takes the stamp for the present time draws wrong conclusions from it, about the clocks of
- * the machines that sent it among others.
+ * words, and how far this machine's clock may run from the sending server's before the card says
+ * so. A card read that late carries an `at:` stamp that far behind the present, and a reader that
+ * takes the stamp for the present time draws wrong conclusions from it, about the clocks of the
+ * machines that sent it among others; a clock that far off makes a wait out of nothing, or hides
+ * one, unless the card says how the clocks stand.
  */
 export const MATERIAL_WAIT_MS = 15 * 60_000;
 
@@ -16,6 +18,19 @@ export const CARD_AGES_LIMIT = 20_000;
 /** What `CardAges` asks of the extension around it. */
 export interface CardAgesDeps {
   readonly now: () => number;
+  /**
+   * How many milliseconds this machine's clock runs ahead of the Envoy listener's (negative:
+   * behind), from the listener's latest reply (`ServerClock`, `./server-clock`); undefined before
+   * any reply carried its time, or with nothing to measure.
+   */
+  readonly clockOffset?: () => number | undefined;
+}
+
+/** When a card reached a session, by this machine's clock, and how that clock stood then. */
+interface Delivery {
+  readonly at: number;
+  /** `CardAgesDeps.clockOffset` when the time was fixed; undefined until one was measured. */
+  readonly clockOffset: number | undefined;
 }
 
 /** A card in a request's messages: its event id, and the text that holds its `envoy:` block. */
@@ -36,6 +51,18 @@ interface CardText {
  * the two are `MATERIAL_WAIT_MS` or more apart, `waited:`, the gap in words. The card the host
  * persists is unchanged: these lines exist only in the requests (`annotate`, from the extension's
  * `context` handler).
+ *
+ * The two times come from two clocks, and only two: `at:` is set by the server that accepted the
+ * message (the Envoy listener the sender sent through, or Dispatch's server for a Dispatch event),
+ * never by the agent that sent it, and `delivered:` is this machine's. Each card fixes how far this
+ * machine's clock ran from the listener's (`CardAgesDeps.clockOffset`) with its delivery time. When
+ * that is `MATERIAL_WAIT_MS` or more either way, the card says which way and by how much
+ * (`clocks:`), and `waited:` is the gap less that difference, so a clock that runs ahead makes no
+ * wait and one that runs behind hides none. With no material difference measured, a `delivered:`
+ * that many minutes before `at:` still says the clocks disagree by at least that. A smaller
+ * difference adds to or takes from the stated wait silently, and the difference measured is this
+ * session's listener's: a sending server with another clock (Dispatch's, or a listener on the
+ * sender's own machine) is taken to keep the listener's time.
  *
  * The delivery time of a card is the time the host emitted its `message_end` in this process
  * (`written`). A card whose `message_end` this process did not see before its first request has
@@ -58,12 +85,14 @@ interface CardText {
  * this process, up to the `CARD_AGES_LIMIT` newest session-and-event pairs. A restart takes the
  * time from the ledger record, written within the same moment as the `message_end`; to the second
  * they agree, except for a write that lands in the next second, which re-reads the cached prefix
- * once from that card on.
+ * once from that card on. The clock difference is fixed with the time, except that a card whose
+ * time was fixed before any listener reply carried the listener's time takes the first one measured
+ * after, which changes its text once.
  */
 export class CardAges {
   readonly #deps: CardAgesDeps;
   readonly #startedAt: number;
-  readonly #delivered = new Map<string, number>();
+  readonly #delivered = new Map<string, Delivery>();
 
   constructor(deps: CardAgesDeps) {
     this.#deps = deps;
@@ -101,11 +130,17 @@ export class CardAges {
       let delivered = this.#delivered.get(key);
       if (delivered === undefined) {
         recorded ??= branchTimes(branch());
-        delivered = recorded.get(card.eventID) ?? this.#handedHere(message);
-        if (delivered === undefined) return message;
-        this.#remember(key, delivered);
+        const at = recorded.get(card.eventID) ?? this.#handedHere(message);
+        if (at === undefined) return message;
+        delivered = this.#remember(key, at);
+      } else if (delivered.clockOffset === undefined) {
+        const clockOffset = this.#deps.clockOffset?.();
+        if (clockOffset !== undefined) {
+          delivered = { at: delivered.at, clockOffset };
+          this.#delivered.set(key, delivered);
+        }
       }
-      const text = withDelivery(card.text, delivered);
+      const text = withDelivery(card.text, delivered.at, delivered.clockOffset);
       if (text === undefined) return message;
       changed = true;
       return card.withText(text);
@@ -122,12 +157,14 @@ export class CardAges {
     return typeof handed === "number" && handed >= this.#startedAt ? this.#deps.now() : undefined;
   }
 
-  #remember(key: string, at: number): void {
-    this.#delivered.set(key, at);
+  #remember(key: string, at: number): Delivery {
+    const delivery = { at, clockOffset: this.#deps.clockOffset?.() };
+    this.#delivered.set(key, delivery);
     if (this.#delivered.size > CARD_AGES_LIMIT) {
       const oldest = this.#delivered.keys().next();
       if (oldest.done !== true) this.#delivered.delete(oldest.value);
     }
+    return delivery;
   }
 }
 
@@ -218,23 +255,41 @@ const SENT_LINE = /^ {2}(at|published_at): (.+)$/;
 const DELIVERED_LINE = /^ {2}delivered: /;
 
 /**
- * A card's text with `delivered:`, and `waited:` when material, after the line that dates its
- * send; undefined for a text with no such line, or one that already says when it was delivered.
+ * A card's text with `delivered:`, and `waited:` and `clocks:` when material, after the line that
+ * dates its send; undefined for a text with no such line, or one that already says when it was
+ * delivered. `clockOffset` is how far this machine's clock ran ahead of the Envoy listener's
+ * (negative: behind) when `delivered` was fixed, when known.
  */
-export function withDelivery(text: string, delivered: number): string | undefined {
+export function withDelivery(
+  text: string,
+  delivered: number,
+  clockOffset?: number
+): string | undefined {
   const lines = text.split("\n");
   const sentIndex = lines.findIndex((line) => SENT_LINE.test(line));
   if (sentIndex < 0 || lines.some((line) => DELIVERED_LINE.test(line))) return undefined;
   const matched = SENT_LINE.exec(lines[sentIndex] ?? "");
   const field = matched?.[1] ?? "at";
   const sent = Date.parse(toonString(matched?.[2] ?? ""));
-  const waitedMs = Number.isNaN(sent) ? 0 : delivered - sent;
-  const fields = {
-    delivered: inboundTimestamp(delivered),
-    ...(waitedMs >= MATERIAL_WAIT_MS && {
-      waited: `${duration(waitedMs)} between ${field} and delivered; ${field} is when it was sent, not the present time`,
-    }),
-  };
+  const fields: Record<string, string> = { delivered: inboundTimestamp(delivered) };
+  if (!Number.isNaN(sent)) {
+    // `delivered - sent` crosses two clocks: this machine's and the sending server's.
+    const gap = delivered - sent;
+    const skew =
+      clockOffset !== undefined && Math.abs(clockOffset) >= MATERIAL_WAIT_MS ? clockOffset : 0;
+    const waitedMs = gap - skew;
+    const whose = `delivered is this machine's clock and ${field} the sending server's`;
+    if (waitedMs >= MATERIAL_WAIT_MS) {
+      const less = skew === 0 ? "" : ", less the difference in clocks";
+      fields.waited = `${duration(waitedMs)} between ${field} and delivered${less}; ${whose}, and ${field} is when it was sent, not the present time`;
+    }
+    if (skew !== 0) {
+      const way = skew > 0 ? "ahead of" : "behind";
+      fields.clocks = `this machine's clock runs ${duration(Math.abs(skew))} ${way} the Envoy listener's, read from the listener's replies; ${whose}`;
+    } else if (gap <= -MATERIAL_WAIT_MS) {
+      fields.clocks = `delivered is ${duration(-gap)} before ${field}, so this machine's clock runs at least ${duration(-gap)} behind the sending server's; ${whose}`;
+    }
+  }
   const added = encode(fields)
     .split("\n")
     .map((line) => `  ${line}`);

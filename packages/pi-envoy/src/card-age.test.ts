@@ -99,8 +99,10 @@ describe("a card in a model request", () => {
 
     expect(text).toContain('\n  at: "2026-10-31T06:27:17Z"\n  delivered: "2026-10-31T11:13:02Z"\n');
     expect(text).toContain(
-      '\n  waited: "4 h 45 min between at and delivered; at is when it was sent, not the present time"\n'
+      "\n  waited: \"4 h 45 min between at and delivered; delivered is this machine's clock and at the sending server's, and at is when it was sent, not the present time\"\n"
     );
+    // With no clock difference measured, the card claims none.
+    expect(text).not.toContain("clocks:");
   });
 
   test("written at once says when it was delivered, and nothing about a wait", () => {
@@ -331,9 +333,122 @@ describe("a card in a model request", () => {
         '\n  published_at: "2026-10-31T06:27:17.000Z"\n  delivered: "2026-10-31T11:13:02Z"\n'
       );
       expect(text).toContain(
-        '\n  waited: "4 h 45 min between published_at and delivered; published_at is when it was sent, not the present time"\n'
+        "\n  waited: \"4 h 45 min between published_at and delivered; delivered is this machine's clock and published_at the sending server's, and published_at is when it was sent, not the present time\"\n"
       );
     }
+  });
+});
+
+// A card's `at:` is the sending server's clock and its `delivered:` this machine's. On 2026-10-31 a
+// real 4 h 45 min wait was read as slow clocks; the mirror, a clock 4 h 45 min ahead, printed the
+// same `waited:` line byte for byte for a card that waited a second.
+describe("a card whose two clocks disagree", () => {
+  const AHEAD = 4 * 3_600_000 + 45 * 60_000;
+
+  test("on a machine whose clock runs ahead says so, and makes no wait of it", () => {
+    let clock = SENT;
+    const ages = new CardAges({ now: () => clock, clockOffset: () => AHEAD });
+    const prompt = card("evt-ahead", SENT, SENT);
+    // Written one second after its send, by a clock 4 h 45 min ahead.
+    clock = SENT + 1_000 + AHEAD;
+    ages.written(prompt, SESSION);
+
+    const text = textOf(
+      ages.annotate([prompt], () => [], SESSION),
+      "evt-ahead"
+    );
+
+    expect(text).toContain('\n  delivered: "2026-10-31T11:12:18Z"\n');
+    expect(text).not.toContain("waited:");
+    expect(text).toContain(
+      "\n  clocks: \"this machine's clock runs 4 h 45 min ahead of the Envoy listener's, read from the listener's replies; delivered is this machine's clock and at the sending server's\"\n"
+    );
+  });
+
+  test("on a machine whose clock runs behind says so, and states the wait it would hide", () => {
+    let clock = SENT;
+    const ages = new CardAges({ now: () => clock, clockOffset: () => -AHEAD });
+    const stale = card("evt-behind", SENT, SENT);
+    // Written two hours after its send, by a clock 4 h 45 min behind: before its `at:`.
+    clock = SENT + 2 * 3_600_000 - AHEAD;
+    ages.written(stale, SESSION);
+
+    const text = textOf(
+      ages.annotate([stale], () => [], SESSION),
+      "evt-behind"
+    );
+
+    expect(text).toContain('\n  delivered: "2026-10-31T03:42:17Z"\n');
+    expect(text).toContain(
+      "\n  waited: \"2 h 0 min between at and delivered, less the difference in clocks; delivered is this machine's clock and at the sending server's, and at is when it was sent, not the present time\"\n"
+    );
+    expect(text).toContain(
+      "\n  clocks: \"this machine's clock runs 4 h 45 min behind the Envoy listener's, read from the listener's replies; delivered is this machine's clock and at the sending server's\"\n"
+    );
+  });
+
+  test("delivered well before its send with no difference measured says the clocks disagree by at least that", () => {
+    let clock = SENT;
+    const ages = new CardAges({ now: () => clock });
+    const early = card("evt-before", SENT, SENT);
+    clock = SENT - 20 * 60_000;
+    ages.written(early, SESSION);
+
+    const text = textOf(
+      ages.annotate([early], () => [], SESSION),
+      "evt-before"
+    );
+
+    expect(text).not.toContain("waited:");
+    expect(text).toContain(
+      "\n  clocks: \"delivered is 20 min before at, so this machine's clock runs at least 20 min behind the sending server's; delivered is this machine's clock and at the sending server's\"\n"
+    );
+  });
+
+  // The stated limit: a difference under the threshold is neither shown nor taken off the wait.
+  test("by less than the threshold adds to the wait it states, and says nothing of the clocks", () => {
+    let clock = SENT;
+    const ages = new CardAges({ now: () => clock, clockOffset: () => 10 * 60_000 });
+    const late = card("evt-small-skew", SENT, SENT);
+    clock = SENT + 2 * 3_600_000 + 10 * 60_000;
+    ages.written(late, SESSION);
+
+    const text = textOf(
+      ages.annotate([late], () => [], SESSION),
+      "evt-small-skew"
+    );
+
+    expect(text).toContain('waited: "2 h 10 min between at and delivered; ');
+    expect(text).not.toContain("clocks:");
+  });
+
+  test("keeps the difference its time was fixed with, and takes the first one measured when there was none", () => {
+    let clock = SENT;
+    let offset: number | undefined;
+    const ages = new CardAges({ now: () => clock, clockOffset: () => offset });
+    const prompt = card("evt-measured-later", SENT, SENT);
+    clock = SENT + 1_000 + AHEAD;
+    ages.written(prompt, SESSION);
+    const unmeasured = textOf(
+      ages.annotate([prompt], () => [], SESSION),
+      "evt-measured-later"
+    );
+    offset = AHEAD;
+    const measured = textOf(
+      ages.annotate([prompt], () => [], SESSION),
+      "evt-measured-later"
+    );
+    // A later measurement leaves the card as it read, so the prompt cache reads it again.
+    offset = 0;
+    const again = textOf(
+      ages.annotate([prompt], () => [], SESSION),
+      "evt-measured-later"
+    );
+
+    expect(unmeasured).toContain('waited: "4 h 45 min between at and delivered; ');
+    expect(measured).not.toContain("waited:");
+    expect(measured).toContain("clocks: \"this machine's clock runs 4 h 45 min ahead of");
+    expect(again).toBe(measured);
   });
 });
 

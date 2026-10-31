@@ -15829,10 +15829,22 @@ describe("messages missed while the subscription was down", () => {
       readonly sendUserInput?: (text: string, options: unknown) => Promise<UserInputResult>;
       /** The host's side turn (`runEphemeralTurn`), which a targeted BTW runs. */
       readonly runEphemeralTurn?: SessionContext["runEphemeralTurn"];
+      /** The listener's clock, sent as every reply's `Date`; replies carry none without it. */
+      readonly listenerClock?: () => number;
     } = {}
   ) {
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
-    globalThis.fetch = listenerFetch(model, options.dispatch);
+    const listener = listenerFetch(model, options.dispatch);
+    const listenerClock = options.listenerClock;
+    globalThis.fetch =
+      listenerClock === undefined
+        ? listener
+        : ((async (input: string | URL | Request, init?: RequestInit) => {
+            const answer = await listener(input, init);
+            const headers = new Headers(answer.headers);
+            headers.set("date", new Date(listenerClock()).toUTCString());
+            return new Response(answer.body, { status: answer.status, headers });
+          }) as typeof fetch);
     const { default: envoyExtension } = await import(`./envoy.ts?${query}`);
     const fixture = createPi();
     const notifications: string[] = [];
@@ -16175,12 +16187,60 @@ describe("messages missed while the subscription was down", () => {
 
       expect(first).toMatch(/\\n {2}delivered: \\"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\\"\\n/);
       expect(first).toContain(
-        'waited: \\"5 h 0 min between at and delivered; at is when it was sent, not the present time\\"'
+        "waited: \\\"5 h 0 min between at and delivered; delivered is this machine's clock and at the sending server's, and at is when it was sent, not the present time\\\""
       );
       // The same bytes in every request, so the provider's prompt cache reads them again.
       expect(second).toBe(first);
       // The card the host keeps is the one it was handed.
       expect(card.content).not.toContain("delivered:");
+    });
+
+    // The mirror of the case above: a machine whose clock runs 4 h 45 min ahead of the listener's
+    // read a card that waited a second exactly as if it had waited 4 h 45 min. The listener's
+    // replies carry its clock, so the card says how the clocks stand and states no wait.
+    test("a card from a listener whose clock runs hours behind this machine's says so, and states no wait", async () => {
+      const behind = 4 * 3_600_000 + 45 * 60_000;
+      const model = new StreamModel();
+      const session = await bootReplay("card-age-clocks", model, {
+        listenerClock: () => Date.now() - behind,
+      });
+      // The listener stamps the send by its own clock, a second before the card reaches us.
+      const sentAt = Date.now() - behind - 1_000;
+      const frame = JSON.stringify({
+        event_id: "evt-card-age-clocks",
+        source: "agent",
+        source_event_id: "source-card-age-clocks",
+        source_session: "ses_peer",
+        topic: session.agentSubject,
+        dedupe_key: "agent.ses_peer.card-age-clocks",
+        issued_at: sentAt,
+        payload_summary: "Its log reports the time from date -u.",
+        trace_id: "trace-card-age-clocks",
+      });
+
+      session.live(session.agentSubject).push(frame);
+      await until(() => session.cards("evt-card-age-clocks").length > 0, "the live card");
+      await session.take();
+      const [card] = session.cards("evt-card-age-clocks");
+      if (card === undefined) throw new Error("the card was not handed");
+      const written = {
+        role: "custom",
+        customType: card.customType,
+        content: card.content,
+        display: true,
+        details: card.details,
+        timestamp: Date.now(),
+      };
+      const contextHandler = session.fixture.handlers.get("context");
+      if (contextHandler === undefined) throw new Error("no context handler was registered");
+      const request = JSON.stringify(
+        await contextHandler({ messages: [written] }, sessionContext("ses_replay"))
+      );
+
+      expect(request).not.toContain("waited:");
+      expect(request).toContain(
+        "clocks: \\\"this machine's clock runs 4 h 45 min ahead of the Envoy listener's, read from the listener's replies; delivered is this machine's clock and at the sending server's\\\""
+      );
     });
 
     // The replay case above ("a frame shown before the host moved to this session"): one process
