@@ -1223,11 +1223,12 @@ describe("A long body parsed in the worker", () => {
   // A turn streaming into the live view hands the same body a longer source every frame. The
   // frame the worker has already started on cannot be taken back, so the page waits for that one
   // answer and posts the frame the reader is waiting for in its place, rather than one message
-  // per frame: the worker is made to parse exactly one stale frame, its answer paints nothing
-  // because nobody waits for it any more, and the newest frame is what the reader ends on. A
-  // queue that posted each frame as it arrived would have the worker parse every one of them and
-  // would let an older answer land on a body that has moved on (sjawhar/legion#2519).
-  test("gives the worker one stale frame while a turn streams, and paints only the newest", async () => {
+  // per frame: the worker is made to parse exactly one stale frame. That frame is the newest
+  // parse the reader can be given until the stream pauses, so it is painted when it lands, and
+  // the element stays marked pending because the frame they are on is still owed. A queue that
+  // posted each frame as it arrived would have the worker parse every one of them
+  // (sjawhar/legion#2519).
+  test("gives the worker one stale frame while a turn streams, and paints it while the newest is owed", async () => {
     const worker = installFakeParseWorker();
     const first = longBody("A turn streaming past the worker");
     const grown = `${first}${"- y\n".repeat(50)}`;
@@ -1243,17 +1244,59 @@ describe("A long body parsed in the worker", () => {
       // was posted behind it.
       expect(worker.requests.map(({ markdown }) => markdown)).toEqual([first]);
 
-      // The stale frame's answer lands. Nothing paints from it, and the frame the reader is on
-      // takes its place in the worker.
+      // The stale frame's answer lands. It is what the reader is shown, and the frame they are
+      // on takes its place in the worker.
       await act(() => worker.answer(0));
-      await flushTasks();
-      expect(topItems(view.container)).toHaveLength(0);
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
       expect(pendingMark(view.container)).toBe("true");
+      expect(fallbackMark(view.container)).toBeNull();
       expect(worker.requests.map(({ markdown }) => markdown)).toEqual([first, grownAgain]);
 
       await act(() => worker.answer(1));
       await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 100));
       expect(topItems(view.container).at(-1)?.textContent).toBe("z");
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // What a reader watching a long turn sees. The live view renders up to ten frames a second
+  // (`AgentThread.tsx`), and a parse of a long body takes longer than the gap between two of
+  // them, so every frame cancels the parse of the frame before it. An element that took only
+  // the answer to the frame it is on would be shown nothing for as long as the stream ran: each
+  // answer would land for a frame already replaced. The answer to a frame this element asked
+  // for is painted instead, however many frames have been written since, so the body grows one
+  // parse behind the stream (sjawhar/legion#2519).
+  test("grows through a stream whose frames outrun the worker, a parse behind it", async () => {
+    const worker = installFakeParseWorker();
+    const frames = [0, 1, 2, 3, 4].map(
+      (frame) => `${longBody("A turn the worker cannot keep up with")}${"- y\n".repeat(frame * 20)}`
+    );
+    const view = render(<MarkdownBody markdown={frames[0]} />);
+
+    try {
+      await worker.waitForRequests(1);
+      // Two more frames are written while the worker is still on the first: the reader is shown
+      // the frame it was holding, and the newest takes its place.
+      view.rerender(<MarkdownBody markdown={frames[1]} />);
+      view.rerender(<MarkdownBody markdown={frames[2]} />);
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      expect(pendingMark(view.container)).toBe("true");
+
+      // The stream writes on while that frame is parsed, and the body grows again.
+      view.rerender(<MarkdownBody markdown={frames[3]} />);
+      view.rerender(<MarkdownBody markdown={frames[4]} />);
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 40));
+      expect(pendingMark(view.container)).toBe("true");
+
+      // The stream stops. The frame the reader is on is the one the worker is holding, and the
+      // body ends on it, marked neither pending nor as the fallback.
+      await act(() => worker.answer(2));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 80));
       expect(pendingMark(view.container)).toBeNull();
       expect(fallbackMark(view.container)).toBeNull();
     } finally {
@@ -1284,6 +1327,48 @@ describe("A long body parsed in the worker", () => {
       expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 51);
 
       await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 51));
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // A sliced paint empties the element before its first batch and fills it 500 nodes a task, so
+  // between those tasks the element holds part of a body. A frame arriving in the middle of one
+  // must not stop it: the next render is pending and keeps whatever the element holds, so the
+  // reader would be left with a truncated prefix - 250 of 1,511 paragraphs in the deep review's
+  // reproduction - until that frame's own answer and its whole paint landed. The paint goes on
+  // to the end instead, which is the newest body the reader can be shown while the frame they
+  // are on is still owed (sjawhar/legion#2519).
+  test("goes on filling a body when the next frame arrives mid-paint, rather than leaving part of one", async () => {
+    const worker = installFakeParseWorker();
+    const first = paragraphBody("A long comment the reader is watching");
+    const edited = `${first}${"y\n\n".repeat(50)}`;
+    const editedAgain = `${edited}${"z\n\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+
+      view.rerender(<MarkdownBody markdown={edited} />);
+      await act(() => worker.answer(1));
+      // The paint of the edit has emptied the element and is filling it a batch at a task: what
+      // the element holds now is part of a body, fewer blocks than the paint before it left.
+      await waitFor(() =>
+        expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 1)
+      );
+
+      // The next frame lands mid-paint. The body being painted still arrives whole, and the
+      // element stays marked pending, since that frame is owed.
+      view.rerender(<MarkdownBody markdown={editedAgain} />);
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 51));
+      expect(pendingMark(view.container)).toBe("true");
+      expect(fallbackMark(view.container)).toBeNull();
+
+      await act(() => worker.answer(2));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 101));
       expect(pendingMark(view.container)).toBeNull();
       expect(fallbackMark(view.container)).toBeNull();
     } finally {

@@ -226,6 +226,12 @@ function* attachNode(parent: Node, node: Node, batch: { left: number }): Generat
  * it costs one off-page walk rather than thousands of live mutations. Only the attach itself is
  * split, and by node count rather than by time: putting a node in is a pointer's work, and what
  * it costs is paid by the engine afterwards, where no clock of this module's can see it.
+ *
+ * What the element held - the reader's own text, or the body painted from the frame before -
+ * waits off the page while the batches land, and goes back if this paint is stopped before its
+ * last one (`useRenderedMarkdown`'s `paintAcrossTasks` returns the generator). So a paint the
+ * next answer takes over from leaves the whole body the reader was reading, never the prefix of
+ * one that was still arriving (sjawhar/legion#2519).
  */
 function* paintBlockInSlices(
   element: HTMLElement,
@@ -240,10 +246,21 @@ function* paintBlockInSlices(
   yield;
   // The reader's own text goes as the first batch of the body arrives, so the element holds one
   // or the other at every moment the engine draws, and the batches fill it from there.
-  element.replaceChildren();
-  const batch = { left: ATTACH_BATCH };
-  while (built.firstChild !== null) {
-    yield* attachNode(element, built.firstChild, batch);
+  const held = document.createDocumentFragment();
+  while (element.firstChild !== null) {
+    held.appendChild(element.firstChild);
+  }
+  let landed = false;
+  try {
+    const batch = { left: ATTACH_BATCH };
+    while (built.firstChild !== null) {
+      yield* attachNode(element, built.firstChild, batch);
+    }
+    landed = true;
+  } finally {
+    if (!landed) {
+      element.replaceChildren(held);
+    }
   }
 }
 
