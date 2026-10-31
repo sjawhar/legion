@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-588",
+  "completed": "2026-10-31T17:23:27Z",
+  "round": "defect after READY: daemon timestamped-migration tests assumed no real timestamped migration (INFRA-138 architect report, INFRA-588 architect Envoy 5bbdc16e)",
+  "head": "d910aa0c290899e350686886399c893340fd05e2",
+  "filesChanged": [
+    "packages/envoy/migrationid/migrationid.go: exported ClosedAt (the closing-file lookup Check now calls)",
+    "packages/envoy/migrationid/migrationid_test.go: TestClosedAtIsTheClosingNumberOfTheSeriesTheSetHolds",
+    "packages/daemon/internal/store/migrate_timestamped_test.go: numberedWith (embedded migrations up to migrationid.ClosedAt, plus the crafted ones); the widen test starts from emptyStore migrated through that set"
+  ],
+  "proof": [
+    {
+      "criterion": "the three daemon tests hold once the daemon ships a real timestamped migration",
+      "surface": "daemon store package tests on PostgreSQL 17.11 with a throwaway real migration 20261101000000_throwaway_probe.up.sql in the embedded set (removed after)",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=... go test -count=1 ./internal/store/...",
+      "observed": "with the probe: ok (store 74.6 s, migrations ok); without it: ok, and internal/api ok",
+      "headSha": "d910aa0c290899e350686886399c893340fd05e2",
+      "negativeControl": "at 475a0929 with the same probe: FAIL TestMigrateAppliesATimestampedMigrationMergedAfterALaterOne and TestMigrateAppliesEveryTimestampedMigrationOnceOnAFreshDatabase (schema version = 20261101000000, want 20261031120000) and TestTheFirstTimestampedMigrationWidensTheVersionColumn (bigint after the numbered set, want integer)"
+    },
+    {
+      "criterion": "Dispatch migrate tests have no such assumption",
+      "surface": "Dispatch store, pgmigrate, migrationid and cmd/dispatch tests with a throwaway timestamped migration and census in Dispatch embedded set",
+      "command": "go test ./internal/dispatch/store/ ./internal/pgmigrate/... ./migrationid/; go test ./cmd/dispatch -run Healthz|Census|Migrat",
+      "observed": "all ok at 475a0929 with the probe (the out-of-order tests build synthetic sets with oooSet), so no Dispatch change",
+      "headSha": "d910aa0c290899e350686886399c893340fd05e2",
+      "negativeControl": "the daemon tests above fail with the same probe, so the probe does reach an embedded set"
+    },
+    {
+      "criterion": "migrationid behaviour unchanged; repository checks",
+      "surface": "envoy migrationid tests, check-ci-filters, check-image-trigger-paths, gofmt, go vet",
+      "command": "go test ./migrationid/; bash .github/scripts/check-ci-filters.sh; bash .github/scripts/check-image-trigger-paths.sh",
+      "observed": "all pass; Check refuses no closing file and two closing files with the same messages",
+      "headSha": "d910aa0c290899e350686886399c893340fd05e2",
+      "negativeControl": "TestCheckFindsTheSeriesByItsClosingFile still refuses a next-number file"
+    }
+  ],
+  "deviations": [
+    "Code pushed after READY, at the architect request; the daemon returns the issue to implementing."
+  ],
+  "openQuestions": []
+}
