@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-558",
-  "completed": "2026-10-30T23:12:00Z",
+  "completed": "2026-10-31T00:40:00Z",
   "proof": [
+    {
+      "criterion": "Tester round 4: the required lint and test checks fail on the dispatch-two-builds job's Postgres image; every CI image comes from ghcr.io/sjawhar/legion/ci.",
+      "surface": "The repository's own CI image and filter checks, as the lint and test jobs run them",
+      "command": "bash .github/scripts/check-ci-images.sh tree && bash .github/scripts/check-ci-images.test.sh && bash .github/scripts/check-ci-filters.sh && bash .github/scripts/check-ci-filters.test.sh",
+      "observed": "'37 reference(s) in 32 file(s) of CI's reach name one of those rows; ... the 28 that name mirror.gcr.io are all in the exception list' (exit 0); check-ci-images.test.sh 99 passed 0 failed; check-ci-filters.sh: every filter matches (27 gates); check-ci-filters.test.sh 132 passed",
+      "headSha": "74666d32c2be",
+      "negativeControl": "At bfb12f38 (image mirror.gcr.io/pgvector/pgvector): CI run 41140700903 lint failed with check-ci-images.sh naming .github/workflows/ci.yaml:2664, and test failed 'FAIL: the real tree passes the tree mode'."
+    },
     {
       "criterion": "Item 6 / acceptance 1: the two-build test passes for the current build against the previous release (CLI, documents, messages both ways).",
       "surface": "Two real envoy-dispatch processes (legion-envoy-v24.4.0, the release --previous-release and CI resolve for this base, built from git archive, and this head) on one Postgres 17 + pgvector and one nats-server",
@@ -46,6 +54,7 @@
     }
   ],
   "filesChanged": [
+    "74666d32: .github/workflows/ci.yaml (dispatch-two-builds' Postgres service is the ghcr.io/sjawhar/legion/ci copy of pgvector, same digest)",
     "b52a1c5d/d4d3d793: docs/keepalive.go (closeBetweenMessages), docs/schema_admission.go (Close, revokeUnless keeps an unanswered revoked entry), schema_admission_test.go",
     "54967fa8/55cf521d: delivery/held_durable.go and intake.go (receivers, retryHeld logs once, takeOverConfig/startingAt moved, one account), api/server.go and agent_stream.go (refuseUndeclaredMembers), live_agent_test.go, twobuild_documents_test.go, routes_table_test.go",
     "ef225a36: contracts dispatch-api.ts (jitteredDelay private, exhausted () => Error), envoy-client dispatch-http.ts (options object) and every caller",
