@@ -1,0 +1,8 @@
+kind: Fixed
+body: |-
+    A worker whose plugin is below the contract that added `ready_for_update` is no longer
+    relaunched in the middle of its turn. It cannot be asked to push first, so its relaunch now
+    waits for the turn to end, and whatever it had not pushed survives. A claim that is idle is
+    relaunched at once as before, and the project controller, which works no checkout and has
+    nothing to push, keeps its immediate relaunch.
+time: 2026-10-30T19:30:00Z

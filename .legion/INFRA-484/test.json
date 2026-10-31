@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-484",
+  "completed": "2026-10-30T20:15:00Z",
+  "round": 8,
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "I re-ran the round's ground independently at code head 35f650654f53 (handoff 7e173b66). My round-7 red test passes both rows, unmodified; the whole internal/supervise package is green, where last round it failed on that test alone; internal/api, internal/daemon's PodUpdate suite and every other package this change touches are ok over a real Postgres; all four TypeScript suites pass and every static lane is clean. I also rebuilt the cross-language wire harness the drain destroyed and ran it at this head, which is the one seam neither side's permanent suite covers."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "The architect's line one: a claim below the update contract is relaunched when its turn ends, so the round-7 red test passes and plugin_test.go's mid-turn test changes to the new rule.",
+      "surface": "The claim machine through its own events, as the daemon drives it: the StalePlugin post the boot and the orphan sweep make, and the StreamTurnEnd the worker's own turn ends with.",
+      "command": "cd packages/daemon && go test ./internal/supervise -run 'TestAStalePluginBelowTheUpdateContract|TestAStalePlugin|TestAStaleController' -count=1 -v",
+      "observed": "PASS for every one. My red test TestAStalePluginBelowTheUpdateContractIsRelaunchedWhenItsTurnEnds passes both rows — the idle claim relaunched at once, and the claim in a turn left working with no Resume until StreamTurnEnd, then launching — and `jj diff --from 201367a34b56 --to 7e173b66ba49` over stale_contract_test.go shows the round added two tests of its own beside mine and changed not a line of mine. plugin_test.go answers the new rule rather than deleting the old test: StateWorking is out of TestAStalePluginRelaunchesTheClaimChargingNothing's state list, and TestAStalePluginMidTurnInterruptsTheTaskChargingNothing is now TestAStaleControllerPluginMidTurnInterruptsTheTaskChargingNothing, which keeps the interruption for the project controller alone — right, since the controller works no checkout, has nothing to push, and has no round it could answer. The whole internal/supervise package is ok, where last round it failed on my red test alone.",
+      "headSha": "35f650654f53",
+      "negativeControl": "The round's own two additions are the controls on the held relaunch and both pass: TestAStalePluginBelowTheUpdateContractRetiresTheFinishedTaskBeforeItRelaunches holds that the finished turn's task is retired rather than taken back and re-delivered, so the resumed agent does not do it twice; and TestAStalePluginBelowTheUpdateContractDropsTheHeldRelaunchWithItsProcess holds that a claim whose process goes while the relaunch waits drops the hold with it, so nothing relaunches a claim with no process to replace."
+    },
+    {
+      "criterion": "The architect's line three, the end-to-end proof: a worker's ready_for_update signal over the real wire, and the pod replaced only once every worker has answered.",
+      "surface": "The daemon's own HTTP server on a real TCP listener over a real Postgres, with the real supervision, the real claim machines and the real sweep, and the signal sent by the real plugin client — executePhaseOp({op:\"ready_for_update\"}) from @legion/pi-shared run under Bun, which calls createLegionDaemonClient(...).readyForUpdate(...) over the global fetch. Nothing permanent drives this route at all: the package's own fleet rig answers a round through the machine, and pi-shared's tests call the client against a stub. The harness went with the last pod's disk, so I wrote it again; the copy for a reader is at /legion/scratch/infra-484-proof/ and both files were removed from the workspace after the run.",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=postgres://legion@127.0.0.1:5433/postgres?sslmode=disable go test ./internal/daemon/ -run TestINFRA484ReadyForUpdateWireProof -count=1 -v",
+      "observed": "PASS. The sweep opened round \"pod:4f2a18c6-5d3b-4e07-9a2c-7b8e1d6f0394\" with reasons \"image, resources\"; ReplacePod calls before any answer 0; the implementer's POST answered 204 with the contract's LegionReadyForUpdateRequest schema reading its body as valid; ReplacePod still 0 with the tester unanswered; the tester's POST answered 204; ReplacePod 1 once both had answered. The tester's body carried no `head` member at all, which is the branch-head-absent case the plugin sends.",
+      "headSha": "35f650654f53",
+      "negativeControl": "In the same run a signal carrying a wrong secret: the daemon answered 403 Forbidden, the client raised LegionDaemonApiError, and the tester's claim still recorded UpdateSignalledAt unset with its round open, so the next sweep replaced nothing."
+    },
+    {
+      "criterion": "The architect's line three, first half: AC5, AC6 and AC7 — the stale claim served through an open round, the op in both hosts, and the contract moving coherently across the daemon, the fixture and both manifests.",
+      "surface": "The daemon's API and claim machine through their own route helpers, and each plugin package's own test runner.",
+      "command": "cd packages/daemon && go test ./internal/api -run 'StalePlugin|PodUpdate|Golden' -count=1 && go test ./internal/supervise -run 'Plugin|PodUpdate|Stale' -count=1 && go test ./internal/daemon -run PodUpdate -count=1; then (cd packages/pi-shared && bun run test), (cd packages/pi-legion && bun test --path-ignore-patterns=scripts/skill-scenarios), (cd packages/claude-envoy && bun run test), (cd packages/contracts && bun run test)",
+      "observed": "ok internal/api, ok internal/supervise, ok internal/daemon; pi-shared 96 ran 0 fail, pi-legion 553 ran 0 fail, claude-envoy 281 ran 0 fail, contracts 328 ran 0 fail.",
+      "headSha": "35f650654f53",
+      "negativeControl": "internal/api's golden test pins the Go side to packages/contracts/fixtures/daemon-api/version.json, which both plugin manifests' own tests read, so a contract left behind on any one of the five sites fails rather than passing quietly; and TestPodUpdateContractIsNotAboveTheDaemonContract holds supervise.PodUpdateContract at or below the daemon's own."
+    },
+    {
+      "criterion": "The whole branch's regression lock at this head, in both languages.",
+      "surface": "The repository's own command set, run locally for the paths changed.",
+      "command": "cd packages/daemon && go build ./... && go vet -tags e2e ./... && gofmt -l . && LEGION_TEST_PG_DSN=... go test ./internal/... ./cmd/... -count=1 -timeout 30m; cd ../.. && bunx biome check .",
+      "observed": "go build, go vet -tags e2e and gofmt -l clean; biome exits 0. The Go suite leaves eleven failures and no others, and internal/supervise is now among the green.",
+      "headSha": "35f650654f53",
+      "negativeControl": "Every one of the eleven reproduces on the control clone of main at ef1b05a349e8 under /legion/scratch/tmp/main-control, run against the same Postgres: the ten this branch has had since round 2 (rootless Docker absent, tmux absent, the worker image absent) and internal/ompsessions' TestImportRefusesContentNoTextValueHolds/not_UTF-8, which is the encoding of the embedded cluster I built in this pod and fails identically on main. None is this change's, and the list has not grown."
+    }
+  ],
+  "ciAtHead": "Running, not read, not waited for. CI run 41112709978 at the code head 35f650654f53 had `test` and `docs / build` in progress and every other lane queued when I read it, the `dispatch` job among them. The architect's line two — the implementer re-runs the red dispatch job once — was done: run 41071529046 carries a second attempt of that job, 124253773941, which GitHub cancelled when the next push superseded the run rather than letting it finish, so it produced no verdict. The verdict now rides on this head's own `dispatch` job, which is where it belongs. Re-running a lane is not evidence a tester may produce, so I read that job's result at the head and ran none myself. The earlier red was established in round 7 as not this change's: 1429 passed and 1 failed, an iphone touch-drag browser test, in a package the branch touches no file of, and green on main's four most recent completed runs.",
+  "observations": [
+    "What decides whether this round's rule reaches the deployment at all is a configuration fact outside this change, and the architect should know it because it is the likeliest cause of the live INFRA-825 case. A stale-plugin relaunch happens only where the daemon can relaunch onto a plugin pair: daemon.go:698 sets pluginRelaunchable to `cfg.Runtime.Name == \"tmux\" || plugins != nil`, so under runtime: kubernetes it is true only when runtime.kubernetes.plugins names a pair. Where it is false, refreshStalePlugins relaunches nothing, logs supervise.NoPluginSourceMessage once per claim at boot, and a claim below the update contract stays on the old plugin exactly as INFRA-825's did. `legion start --check-config` prints the configuration's open capability gaps, and docs/kubernetes.md's \"Contract discipline\" covers the pair. Nothing of this change can close that gap, and I raise it as a reading rather than a failure.",
+    "The round again appended two tests of its own to a file holding one of my red tests (stale_contract_test.go). Every line of mine is unchanged, so this is co-location rather than a change to a red test; I record it only so it stays that way."
+  ],
+  "notReached": [
+    "AC8, the live stage4a pod-update and pod-update-fleet checkpoints: `kubectl -n legion auth can-i get sandboxes` answers `no` from this pod, as in every round. The live acceptance is the first image roll on the INFRA deployment after the release, through the implementer's production check.",
+    "AC9: after the deploy, by its nature."
+  ]
+}

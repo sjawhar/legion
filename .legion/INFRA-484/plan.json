@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-484",
+  "completed": "2026-10-29T19:35:00Z",
+  "plan": "dispatch://INFRA-484/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker — this is a Legion phase in a shared jj workspace: it gives the workspace binding, the push with the handoff-only `skip-checks: true` trailer, the handoff file and `handoff_complete`, and the no-deferrals rule this change needs because the drift split touches tests of today's rule.",
+      "skill://legion-worker/references/pr-body.md — the implementer must prove each acceptance criterion on a production-like surface at the head that merges, and this reference defines what a proof entry is (criterion, surface, command, observed, headSha, negativeControl).",
+      "skill://legion-worker/references/default-branch-check.md — every push of this change is to sjawhar/legion's issue branch, and the identity check runs before each one.",
+      "skill://legion-worker/references/skip-checks-trailer.md — the handoff-only pushes of this issue carry the trailer and the code pushes must not; a wrong trailer stalls the issue.",
+      "skill://legion-worker/references/tools.md — the daemon tests need real Postgres and the live checkpoint needs kubectl and go in the pod; this reference says how to reach a tool the image may not carry without an image change.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md — `packages/daemon/internal/api/version.go` collides with main at every forward merge (the contract number), which is exactly this reference's case.",
+      "skill://ce-simplify-code — the change spans eight steps across six packages; the simplify pass runs once on the settled head before the proof.",
+      "skill://dispatch and skill://dispatch-first — the implementer searches before it posts a finding and writes nothing to the issue's lifecycle status.",
+      "skill://asd-ste100 — the Envoy messages and the pull-request body this change needs are read by other agents and by a person."
+    ],
+    "test": [
+      "skill://legion-worker — the tester's phase, its handoff file and the rule that a fix to a line the spec quotes may be committed and passed (the INFRA deployment instructions' faster path).",
+      "skill://legion-worker/references/pr-body.md — the tester records proofs in the same shape as the implementer, and this change's criteria each name a re-runnable command.",
+      "skill://legion-worker/references/tools.md — re-running AC3, AC5b and AC9 needs `LEGION_TEST_PG_DSN` and the cluster clients in the pod.",
+      "skill://dispatch-first — the tester searches before it raises anything, and files no issue outside this tree."
+    ],
+    "review": [
+      "skill://legion-worker — the reviewer's phase, and the rule that it fixes a prose-only finding itself and sends code back.",
+      "skill://legion-worker/references/review-threads.md — this change will carry bot findings on a contract bump and on a new Kubernetes lane; the reference says how to reply, resolve and judge them.",
+      "skill://legion-worker/references/merge-gate.md — the reviewer's approval is what moves the issue to accepting, and this change ships in its own release before INFRA-714's pull request merges.",
+      "skill://asd-ste100 — review comments and the approval summary are read by other agents."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "R9 item 1 names volumes and mounts as drift, but three of `movedInPod`'s five facets already read exactly that as `StaleAddress`, which R9 item 7 exempts into today's immediate relaunch. The two collide, and the exemption's stated reason (the worker cannot reach the daemon) is false for those three.",
+        "answer": "Plan D2 splits the five facets by that stated reason: `movedStream` and `movedLayout` keep the immediate relaunch (a moved stream is unreachable; a pre-one-container pod's workers cannot speak the op, and `live_previous_test.go:164-199` proves that path), and `movedRoleOverlays`, `movedEnrollment` and `movedSessionStore` become drift. Step 19 moves them out of `movedInPod`/`verdict`. Named to the architect for confirmation."
+      },
+      {
+        "finding": "R9 item 5 removes the only trigger that exists (a launch), and the issue does not say what a launch-free pass compares, against what, or that an untouched pod must never read as drifted. `r.podTemplate(l)` cannot be rebuilt outside a launch.",
+        "answer": "Plan D1: the launch writes a `legion.dev/pod-shape` annotation into the pod template's metadata holding the configuration the pod was built from (image, the kind's reservation, the operator's volumes and mounts, the disk size); the sweep compares it with the configuration now and names the differing keys. Read from the Sandbox's template, never the pod (Autopilot rewrites admission). Step 23 puts the pass in the orphan sweep, which already reads every claim each minute. 'A pod a launch just created is never drifted' is AC1 and is re-checked live in AC8; risk 1 names it as the change's highest-consequence failure mode."
+      },
+      {
+        "finding": "No worker on an older plugin can call `ready_for_update`: the op list is a closed enum compiled into the plugin. That covers every worker alive at this release's own roll, and permanently covers a Claude Code role on an older image, whose plugin is the image's and is never installed.",
+        "answer": "Plan D4: plugin-contract staleness on such a claim keeps today's immediate process relaunch (no disk dies, behaviour unchanged); pod drift on such a pod replaces nothing and tells the controller at once with that reason, and says so on the issue, so the operator drains it. Section 5 states the consequence for the evidence: the first roll is drained as today and AC9 can only run after it. Named to the architect for confirmation."
+      },
+      {
+        "finding": "'The stale-plugin relaunch goes through the same steps' has two readings that cost very different work, and the harm R9 names (a deleted disk) does not arise in either, since that relaunch keeps the pod and the disk.",
+        "answer": "Plan D5 takes the per-claim reading: the stale-plugin update asks that claim alone to push and signal, then relaunches that one process. R9 item 6's own words support it ('While a claim's update is pending, the daemon serves it … so the old worker can push and signal'). Step 21 implements it in `refreshPlugin`. Named to the architect for confirmation."
+      },
+      {
+        "finding": "A claim holds at most one pending `Delivery`, so the update task cannot be queued while a phase task is pending; the issue does not say whether it displaces, waits or is refused, nor what a worker that completes its phase during the round owes.",
+        "answer": "Plan D7: the update is a `Delivery` with a round-stable id, so a re-post while pending is a no-op; a claim holding a phase task is refused `ErrDeliveryPending`, which the machine calls a wait, and the minute-cadence sweep lands the task as soon as that turn ends. It never displaces a phase task. A worker that completes its phase still owes a signal; a suspended worker is resumed with the task by the existing `deliverResuming` row. Step 22 also holds a signalled claim's next task while its round is open, so no worker starts work it is about to lose."
+      },
+      {
+        "finding": "'Each worker of the pod' is not mapped onto the eleven claim states: a `queued`, `launching`, `retired`, `failed` or operator-suspended claim is undecided.",
+        "answer": "Plan D6: a claim blocks the round until it signals unless it is `retired`; it is asked when it has a session, is in `registered|ready|working|idle|suspended` and can speak the op; `queued`/`launching`/`shim_connected` block without being asked and are asked at the next sweep once they register; `failed` and operator-suspended block until the operator acts, which is R9 item 2's own rule. AC2 and AC3 check the set."
+      },
+      {
+        "finding": "Nothing bounds the whole wait: one `failed` or operator-suspended claim pins its pod forever, and the 4 h controller notice is the only consequence; the controller has no listed power here.",
+        "answer": "Plan D6 states plainly that a round never ends without every signal, because R9 says no pod disk is deleted before every worker, suspended ones included, has signalled. Step 25 gives the notice (`update-stalled`) the issue, the pod, the drift reasons and every claim that has not signalled with its state, so the controller can retry a claim or ask the operator; step 30 puts that in the controller skill's escalation reference. Risk 3 names it."
+      },
+      {
+        "finding": "The 1 h and 4 h bounds are stated as literals, against a repository convention that every such bound is a decimal-hours configuration key added so a proof can drive it inside one run; and the issue does not say what each is measured from or what a re-task re-arms.",
+        "answer": "Plan D8 adds `pod_update_retask_hours` (default 1) and `pod_update_notice_hours` (default 4) in `production_check_hours`' own convention, and separates the clocks: the re-task runs from each task send (`update_tasked_at`), the notice from the round's opening (`update_opened_at`), so a re-task does not postpone the notice, and the notice goes once per round. Without the keys AC8 and AC9 cannot observe either bound."
+      },
+      {
+        "finding": "Neither half of the acceptance names a command; the live half has no existing checkpoint (nothing in stage 4a mutates a running pod's image or template, reads a worker's pushed head, or asserts a turn was not cut).",
+        "answer": "Section 4 is a table of nine criteria, each with its surface and the exact command that re-runs it, and it names `LEGION_TEST_PG_DSN` for the state-backed ones. Building the missing live checkpoint (`pod-update`) is step 35 and AC8, with the mechanisms it reuses named: `asAgent` for the `git ls-remote` read and the `Displaced`-not-`Gone` vocabulary, plus the one assertion the rig lacks — no claim observed `Gone && !Displaced` while it was `Working`."
+      },
+      {
+        "finding": "'Each signal records the head the worker pushed' names no producer, no verifier, no value for a worker with nothing pushed, and no reader.",
+        "answer": "Plan D9: the plugin resolves the head of `legion/<issue>@origin` with the pane's own jj through the `JjRunner` `handoff-commit.ts` already defines and sends it as an optional `head`, empty when the branch is not there; the daemon records the worker's word and verifies nothing, as it does for `handoff_complete`'s commit. Step 28 puts it on `legion state --json`, `read_record` and `legion claims list`. The acceptance's `git ls-remote` check belongs to the tester and the implementer."
+      },
+      {
+        "finding": "The rollout names no performer, no operator step, and no deploy order; the acceptance needs two deploys (the R9 release itself, drained as today, then a second image change), so the pull request cannot carry its live evidence at merge.",
+        "answer": "Section 5 states it: the deploy is the operator's, the daemon, plugin and image move together through `release.yaml`, no worker alive at that roll can signal (D4), so the first roll is drained as today; the pull request carries AC1 to AC8 at merge and AC9 after the deploy, through the implementer's production check, which reports `pending` until production carries the merge. Step 31 changes the `docs/kubernetes.md` sections that today tell the operator to drain."
+      },
+      {
+        "finding": "INFRA-420's second half — a role that cannot start says why nowhere in the record — is in INFRA-420's spec but not in INFRA-484 spec.md v2, and INFRA-420 is closed as a duplicate of this issue, so it is now unowned.",
+        "answer": "Plan D10 names it out of scope for this issue as specced and sends the choice to the architect (take it here, take it into INFRA-714's own pull request, or leave it). The planner files no issue for it, per `skill://legion-worker/references/findings.md`."
+      },
+      {
+        "finding": "The 'ship together' list omits `packages/pi-shared`, which holds the op enum both plugins read, and does not say which session kinds get the new op.",
+        "answer": "Step 3 of the plan's order adds `packages/pi-shared` (`legion-phase-ops.ts` and `daemon-client.ts`), and step 12 names the session kinds: `phase-worker` and `architect`, not `controller`, and the op is not added to either host's phase-closed condition because signalling ends no phase. AC6 checks all three."
+      },
+      {
+        "finding": "A live pod is also replaced for `supersededDisk`, a lost launcher binding, a failed init container, a terminal pod and a suspended Sandbox, each deleting the unpushed work the issue exists to protect; the issue exempts only 'the pod's own failure'.",
+        "answer": "Plan D10 keeps today's immediate replacement for all of them, since R9 item 5 exempts only the pod's own failure and widening the round is scope this issue does not carry, and sends the one case caused by an operator act rather than by the pod — a lost launcher binding — to the architect to place in a later issue of the tree. Step 26 adds the message on the issue that R9 item 5 requires when a pod's own failure replaced it without signals."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Requirement 1: the daemon finds each issue pod whose Sandbox template differs from the configuration (image; resources read from the template as `templateResized` does for the repository cache; volumes; mounts).",
+      "plan": "The launch writes the configuration its pod was built from into a `legion.dev/pod-shape` annotation in the Sandbox's pod template, and the sweep compares that annotation with the configuration now, naming the differing keys. It does not compare the containers' own `Resources`, `Volumes` and `VolumeMounts` fields the way `templateResized` compares the cache container's `Resources`.",
+      "evidence": "`r.podTemplate(l)` takes a `launch` built by `prepare(spec runtime.SpawnSpec)` (manifest.go:199-233, 269), so the template a launch would build cannot be rebuilt in a sweep; `r.volumes(l)` keys the gh projection off `l.gitHubOwners`, which only `gitHubBundles` sets by minting GitHub App tokens (relaunch.go:782-805), and building a spec calls `s.repository` and `s.ensureWorkspace` (daemon/specs.go:143-154). A field-by-field template comparison would also need a second, rotting list of daemon-owned volume names to tell a removed operator volume from a daemon one.",
+      "outcome": { "kind": "unchanged" }
+    },
+    {
+      "spec": "Requirement 4: a worker that has not signalled after 1 hour gets the task again; the controller is told after 4 hours.",
+      "plan": "Both bounds become `legion.yaml` keys, `pod_update_retask_hours` (default 1) and `pod_update_notice_hours` (default 4), in decimal hours.",
+      "evidence": "Every comparable daemon bound is such a key, added expressly so a proof can drive it inside one run: `production_check_hours` at config/config.go:773-776 and config/production_check_hours_test.go:8-9. With literals, the live checkpoint and the production check would each wait four hours to observe the notice.",
+      "outcome": { "kind": "unchanged" }
+    },
+    {
+      "spec": "Requirement 7: a pod whose worker stream or daemon address moved (`StaleAddress`) keeps today's immediate relaunch.",
+      "plan": "Only `movedStream` and `movedLayout` keep the immediate relaunch; `movedRoleOverlays`, `movedEnrollment` and `movedSessionStore` move out of `StaleAddress` into the signal round.",
+      "evidence": "`movedInPod` (addresses.go:317-334) is wider than its name: three of its five facets are volumes and mounts, which Requirement 1 names as drift, and the root spec's reason for the exemption — the worker cannot reach the daemon — holds only for the first two. roleconfig_test.go:160-163 shows an added operator mount is `StaleAddress` today and replaces the pod, which is dispatch://INFRA-358 itself.",
+      "outcome": { "kind": "unchanged" }
+    },
+    {
+      "spec": "Requirement 2 and Requirement 3: each live worker gets the update task and the pod is replaced when every worker has signalled. The spec does not cover a worker whose plugin predates `ready_for_update`.",
+      "plan": "A claim whose recorded plugin contract is below the contract that introduces the op cannot signal: plugin-contract staleness on it keeps today's immediate process relaunch, and pod drift on its pod replaces nothing and tells the controller at once with that reason, with the issue told, so the operator drains it.",
+      "evidence": "The op list is a closed enum compiled into the plugin (`PHASE_OPS`, pi-shared/src/legion-phase-ops.ts:31), and a Claude Code role's plugin is the image's own, never installed (docs/kubernetes.md:2185-2194). Replacing such a pod without signals is the outage this issue exists to end; the root spec's Rollout already says this release is the last roll that needs an operator drain.",
+      "outcome": { "kind": "unchanged" }
+    }
+  ]
+}

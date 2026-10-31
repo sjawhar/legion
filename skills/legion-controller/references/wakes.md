@@ -96,6 +96,12 @@ architect's last message on the root issue. When you find none, or it is gone, r
 fresh budgets). When it stays, park the tree (`set_status` the root to `backlog`) and say why on
 the issue, because a relaunch would fail the same way.
 
+## `update-stalled on <KEY>` (`{kind: "update-stalled", reason, update}`)
+
+An update round over the issue's pod, or over one claim's own process, is not finishing. Handle
+it as `skill://legion-controller/references/escalation.md#an-update-round-that-is-not-finishing-update-stalled`
+says.
+
 ## GitHub mentions
 
 Read the mention and its artifact. Answer a mention that asks you for triage or for information

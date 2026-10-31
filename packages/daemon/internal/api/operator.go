@@ -64,6 +64,14 @@ type OperatorClaim struct {
 	// PluginContract is the contract the claim's current registration declared, 0 when none
 	// recorded, always emitted.
 	PluginContract int `json:"pluginContract"`
+	// UpdateRound is the update round the claim is in, absent when none is open: the pod's drift
+	// round (`pod:<pod uid>`), shared by every claim of that pod, or this claim's own plugin
+	// round (`plugin:<daemon contract>`). Once its worker has answered, the process is waiting to
+	// be replaced and the daemon holds the claim's next task. UpdateHead is the commit the worker
+	// reported as its issue branch's head at origin when it answered, absent until it answers and
+	// for a worker that reported none; it is the worker's word, which nothing verifies.
+	UpdateRound string `json:"updateRound,omitempty"`
+	UpdateHead  string `json:"updateHead,omitempty"`
 }
 
 // BudgetsView is the claim's retry counters (`supervise.Budgets`).
@@ -128,6 +136,8 @@ func operatorView(c supervise.Claim) OperatorClaim {
 		SuspendedBy:     string(c.SuspendedBy),
 		SuspensionHeld:  c.SuspensionHeld,
 		PluginContract:  c.PluginContract,
+		UpdateRound:     c.UpdateRound,
+		UpdateHead:      c.UpdateHead,
 	}
 	if p := c.Pending; p != nil {
 		view.Pending = &DeliveryView{

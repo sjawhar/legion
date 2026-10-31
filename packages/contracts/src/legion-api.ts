@@ -137,6 +137,15 @@ const legionClaimView = z.strictObject({
   capabilities: legionCapabilityReportView.optional(),
   /** 0 = no contract recorded. */
   pluginContract: z.number().int().nonnegative(),
+  /** The update round the claim is in, absent while none is open: `pod:<pod uid>`, the drift
+   * round every claim of that pod shares, or `plugin:<daemon contract>`, this claim's own. Once
+   * the worker has answered `ready_for_update`, the daemon holds the claim's next task until the
+   * round ends and the process is replaced (contract 44). */
+  updateRound: nonEmptyString.optional(),
+  /** The commit the worker reported as its issue branch's head at origin when it answered the
+   * round; absent until it answers, and for a worker that reported none. It is the worker's
+   * word, which nothing verifies. */
+  updateHead: nonEmptyString.optional(),
 });
 
 /** `api.PhaseView` — one phase worker's claim, its committed handoff, and the rounds it has run. */
@@ -532,6 +541,24 @@ export const LegionReadyRequest = z.strictObject({
 
 export type LegionReadyRequestBody = z.output<typeof LegionReadyRequest>;
 
+/** `claim.ReadyForUpdateRequest`, the body of `POST /legion/v1/claims/ready-for-update`: the
+ * worker's answer to its pod's update task, which says it has pushed everything it wants kept and
+ * its process may be replaced. `round` is the round the worker answers for, as the update task it
+ * read named it: the daemon takes the answer only for the round its claim stands in, and refuses
+ * one naming any other round with 409 and a sentence naming both. `head` is the commit the worker
+ * reports as the head of `legion/<issue>@origin`, empty or absent when the branch is not there (a
+ * planner before its first push); the daemon records it and verifies nothing of it. */
+export const LegionReadyForUpdateRequest = z.strictObject({
+  claimToken: nonEmptyString,
+  sessionId: nonEmptyString,
+  secret: nonEmptyString,
+  generation: z.number().int().positive(),
+  round: nonEmptyString,
+  head: z.string().optional(),
+});
+
+export type LegionReadyForUpdateRequestBody = z.output<typeof LegionReadyForUpdateRequest>;
+
 /** `api.ControllerRegisterResponse`, for a session that registered as the project's controller
  * (the `bootToken` of `POST /legion/v1/claims/register` is the secret `legion controller start`
  * fetched, or a daemon-launched controller's own boot token): the project's controller role token,
@@ -623,6 +650,15 @@ export const LegionOperatorClaimResponse = z.strictObject({
   suspensionHeld: z.literal(true).optional(),
   /** 0 = no contract recorded. */
   pluginContract: z.number().int().nonnegative(),
+  /** The update round the claim is in, absent while none is open: `pod:<pod uid>`, the drift
+   * round every claim of that pod shares, or `plugin:<daemon contract>`, this claim's own. Once
+   * the worker has answered `ready_for_update`, the daemon holds the claim's next task until the
+   * round ends and the process is replaced (contract 44). */
+  updateRound: nonEmptyString.optional(),
+  /** The commit the worker reported as its issue branch's head at origin when it answered the
+   * round; absent until it answers, and for a worker that reported none. It is the worker's
+   * word, which nothing verifies. */
+  updateHead: nonEmptyString.optional(),
 });
 
 export type LegionOperatorClaim = z.output<typeof LegionOperatorClaimResponse>;

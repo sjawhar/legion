@@ -13,10 +13,13 @@ import {
 } from "./daemon-client";
 
 /** The claim a session registered, as the phase ops need it, and as the claim boot
- * (`legion-claim-core`) records it: its own id, the daemon's answer for tree, issue and role, and
- * the secret every grant is minted with. */
+ * (`legion-claim-core`) records it: its own id, the claim token and the launch generation every
+ * claim route authenticates with, the daemon's answer for tree, issue and role, and the secret
+ * every grant is minted with. */
 export interface ClaimCapability {
   readonly sessionID: string;
+  readonly claimToken: string;
+  readonly generation: number;
   readonly tree: string;
   readonly issue: string;
   readonly role: LegionRole;
@@ -28,7 +31,12 @@ export interface ClaimCapability {
  * `legion` tool serves: pi-legion's (`packages/pi-legion/src/tools.ts`, beside the architect's and
  * the controller's operations) and claude-envoy's MCP tool (`packages/claude-envoy/src/legion-tool.ts`).
  */
-export const PHASE_OPS = ["read_record", "handoff_complete", "request_backward_move"] as const;
+export const PHASE_OPS = [
+  "read_record",
+  "handoff_complete",
+  "request_backward_move",
+  "ready_for_update",
+] as const;
 export type PhaseOp = (typeof PHASE_OPS)[number];
 
 export function isPhaseOp(op: string): op is PhaseOp {
@@ -83,6 +91,10 @@ export const PhaseOpArguments = z.discriminatedUnion(
       }),
       reason: requiredString("request_backward_move", "reason"),
     }),
+    // The signal carries one field of the agent's: the round its update task named, which the
+    // daemon takes the answer for and no other. The claim says who answers, and the plugin
+    // resolves the branch head it reports.
+    operation("ready_for_update", { round: requiredString("ready_for_update", "round") }),
   ],
   {
     error: (issue) =>
@@ -163,6 +175,10 @@ export function legionToolDescription(host: {
     "naming a closed pull request is the architect's to decide) and, for READY, each " +
     "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " +
     "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " +
+    "ready_for_update answers the daemon's update task on this issue's pod: `round` is the round id that task names, and the " +
+    "daemon takes your answer for that round alone. Push every commit you want kept to the issue branch " +
+    "first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The " +
+    "daemon holds your next task until your process comes back on the new pod, in this same session. " +
     (host.after ?? "") +
     `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`
   );
@@ -174,6 +190,11 @@ export interface PhaseOpRuntime {
   /** The commit a completion of `phase` by `role` reports (`findHandoffCommit` with the pane's
    * environment): throws naming the remedy when the handoff is not committed and pushed. */
   readonly handoffCommit: (phase: LegionPhase, role: LegionRole) => Promise<string>;
+  /** The head of `legion/<issue>@origin` the `ready_for_update` signal reports
+   * (`findPushedBranchHead` with the pane's environment): `""` when the branch is not there. A
+   * throw leaves the head out of the signal, which is still sent, and the throw's message goes
+   * to the agent in the answer's `note`. */
+  readonly branchHead: () => Promise<string>;
   /** How `handoff_complete` waits out a daemon restart (`retryWhileDaemonRestarts`): the host's
    * sentence to the agent, and a test's clock. */
   readonly restart?: DaemonRestartRetry;
@@ -205,12 +226,14 @@ const ROOT_COMPLETION_REFUSAL =
 
 /**
  * Runs one phase op and answers its JSON result: `{ record }` for `read_record`, the daemon's
- * answer for `handoff_complete`, `{}` for `request_backward_move`. A refusal throws before any
- * write, minting nothing and posting nothing: each problem `PhaseOpArguments` finds, joined by
- * `; `, a field the operation does not take named first, then a root architect's completion,
- * then each problem with the operation's own fields in the order it takes them; then what the
- * record decides (a check report's verdict, `pending` on a phase completion, the issue a move
- * names), then a refused handoff-commit lookup. A daemon refusal throws its code and sentence.
+ * answer for `handoff_complete`, `{}` for `request_backward_move`, and `{}` for
+ * `ready_for_update`, or `{ note }` when its branch-head lookup failed. A
+ * refusal throws before any write, minting nothing and posting nothing: each problem
+ * `PhaseOpArguments` finds, joined by `; `, a field the operation does not take named first,
+ * then a root architect's completion, then each problem with the operation's own fields in the
+ * order it takes them; then what the record decides (a check report's verdict, `pending` on a
+ * phase completion, the issue a move names), then a refused handoff-commit lookup. A daemon
+ * refusal throws its code and sentence.
  *
  * A completion is a phase's or the implementer's report on a look of its closed issue's
  * production check, told apart as the daemon tells them (`api.handoffComplete`): the
@@ -280,6 +303,42 @@ export async function executePhaseOp(
         ...(issue === undefined ? {} : { issue }),
       });
       return {};
+    }
+    case "ready_for_update": {
+      // The claim authenticates the signal, as it does `claims/ready`: no grant is minted. The
+      // round is the agent's own word, read from the update task it answers, and the daemon takes
+      // the answer for that round alone — an answer for a round its claim has left is refused
+      // naming both. The head is the plugin's to resolve, and a branch not yet on the remote is
+      // left out. A workspace whose jj cannot answer leaves it out too, and is told so: the round
+      // waits for every claim of the pod and only an operator's drain ends one that waits for
+      // ever, so a worker whose lookup fails must still be able to answer. The daemon verifies no
+      // head, so the missing one costs the record a line and the round nothing.
+      let head = "";
+      let failure: string | undefined;
+      try {
+        head = await runtime.branchHead();
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      }
+      await daemon.readyForUpdate({
+        claimToken: claim.claimToken,
+        sessionId: claim.sessionID,
+        secret: claim.secret,
+        generation: claim.generation,
+        round: args.round,
+        ...(head === "" ? {} : { head }),
+      });
+      // The answer names the signal the daemon has and the head it misses, and carries the
+      // lookup's own message, so the worker can repair what it names.
+      return failure === undefined
+        ? {}
+        : {
+            note:
+              "The daemon has your ready_for_update signal. The signal reports no branch head, " +
+              "because the branch-head lookup failed. The daemon checks no head, so your signal " +
+              "counts without one. Repair what the lookup's message names before your next jj " +
+              `command. The lookup said: ${failure}`,
+          };
     }
   }
 }

@@ -24,6 +24,7 @@ import (
 
 	"github.com/sjawhar/envoy/listenfd"
 	"github.com/sjawhar/legion/daemon/internal/api"
+	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/registry"
@@ -543,6 +544,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintln(stdout, blockedSummary(state.Admission.Blocked))
 	fmt.Fprintln(stdout, awaitingSummary(state.Issues))
 	fmt.Fprintln(stdout, checksSummary(openChecks(state.Issues)))
+	fmt.Fprintln(stdout, roundsSummary(state.Issues))
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
 	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims))
@@ -680,6 +682,71 @@ func checksSummary(checks []issueCheck) string {
 	}
 	return fmt.Sprintf("open production checks: %d; the oldest, %s #%d at %s, %s, bound %s",
 		len(checks), oldest.issue, oldest.check.PullRequest, merge, look, oldest.check.NextWakeAt.UTC().Format(time.RFC3339))
+}
+
+// issueRound is one update round an issue has open, and the claims in it, by role: the round a
+// pod's drift opened over every role of the issue (`pod:<pod uid>`), or one role's own plugin
+// round (`plugin:<daemon contract>`).
+type issueRound struct {
+	issue string
+	round string
+	roles []string
+}
+
+// openRounds is every update round the state's issues have open, by issue and then round, each
+// with its claims in role order: a round is the daemon holding a process back from replacement
+// until its worker has pushed its work and answered.
+func openRounds(issues map[string]api.Issue) []issueRound {
+	rounds := map[string]*issueRound{}
+	var keys []string
+	add := func(issue, role string, view api.ClaimView) {
+		if view.UpdateRound == "" {
+			return
+		}
+		key := issue + " " + view.UpdateRound
+		if _, open := rounds[key]; !open {
+			rounds[key] = &issueRound{issue: issue, round: view.UpdateRound}
+			keys = append(keys, key)
+		}
+		named := role
+		if view.UpdateHead != "" {
+			// The head is the worker's own word, which nothing verifies, so it is quoted: a
+			// newline in it would otherwise forge a row of this summary (claims.go's
+			// quotedOrNone).
+			named += " answered at " + strconv.Quote(view.UpdateHead)
+		}
+		rounds[key].roles = append(rounds[key].roles, named)
+	}
+	for key, issue := range issues {
+		if issue.Architect != nil {
+			add(key, string(legionclaim.RoleArchitect), *issue.Architect)
+		}
+		for _, role := range slices.Sorted(maps.Keys(issue.Workers)) {
+			add(key, string(role), issue.Workers[role].Claim)
+		}
+	}
+	slices.Sort(keys)
+	open := make([]issueRound, len(keys))
+	for i, key := range keys {
+		open[i] = *rounds[key]
+	}
+	return open
+}
+
+// roundsSummary is the one line an operator reads for the update rounds still open: how many, and
+// each by issue, round and the roles in it, with the head a role reported when it answered. While
+// a round is open the daemon holds those roles' next tasks and replaces nothing, so a round that
+// does not end is work that is not moving.
+func roundsSummary(issues map[string]api.Issue) string {
+	rounds := openRounds(issues)
+	if len(rounds) == 0 {
+		return "open update rounds: none"
+	}
+	named := make([]string, len(rounds))
+	for i, round := range rounds {
+		named[i] = fmt.Sprintf("%s on %s: %s", round.issue, round.round, strings.Join(round.roles, ", "))
+	}
+	return fmt.Sprintf("open update rounds: %d — %s", len(rounds), strings.Join(named, "; "))
 }
 
 // heldSummary is the one line an operator reads for the lifecycle rows the daemon holds behind

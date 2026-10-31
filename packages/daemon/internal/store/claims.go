@@ -30,6 +30,8 @@ const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.gener
 	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.last_start_row, c.serving_generation,
 	c.agent_secrets_enrollment, c.agent_secrets_enrollment_incarnation, c.suspended_by,
 	c.plugin_contract, c.plugin_relaunch_for,
+	c.update_round, c.update_reasons, c.update_opened_at, c.update_tasked_at, c.update_signalled_at,
+	c.update_head, c.update_told_at,
 	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
@@ -65,8 +67,11 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		session, session_file, locator, state, failure, launch_failures, deaths, prompt_failures, prompt_retires,
 		boot_token_hash, capability_hash, uncertain_streak, last_start_row,
 		serving_generation, agent_secrets_enrollment, agent_secrets_enrollment_incarnation, suspended_by,
-		plugin_contract, plugin_relaunch_for)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+		plugin_contract, plugin_relaunch_for,
+		update_round, update_reasons, update_opened_at, update_tasked_at, update_signalled_at,
+		update_head, update_told_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
+		$27, $28, $29, $30, $31, $32, $33)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation, tree_epoch = excluded.tree_epoch,
 		session = excluded.session, session_file = excluded.session_file,
@@ -82,6 +87,10 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		suspended_by = excluded.suspended_by,
 		plugin_contract = excluded.plugin_contract,
 		plugin_relaunch_for = excluded.plugin_relaunch_for,
+		update_round = excluded.update_round, update_reasons = excluded.update_reasons,
+		update_opened_at = excluded.update_opened_at, update_tasked_at = excluded.update_tasked_at,
+		update_signalled_at = excluded.update_signalled_at, update_head = excluded.update_head,
+		update_told_at = excluded.update_told_at,
 		updated_at = now()`,
 		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation), int64(c.TreeEpoch),
 		c.Session, c.SessionFile, locator, string(c.State), c.Failure,
@@ -89,6 +98,8 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.LastStartRow, int64(c.ServingGeneration),
 		enrollmentID, enrollmentIncarnation, string(c.SuspendedBy),
 		c.PluginContract, c.PluginRelaunchFor,
+		c.UpdateRound, c.UpdateReasons, c.UpdateOpenedAt, c.UpdateTaskedAt, c.UpdateSignalledAt,
+		c.UpdateHead, c.UpdateToldAt,
 	)
 	if err != nil {
 		return fmt.Errorf("put claim %s: %w", c.Token, err)
@@ -314,25 +325,29 @@ func (s *Store) RetireDelivery(ctx context.Context, c supervise.Claim, deliveryI
 
 func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	var (
-		c                          supervise.Claim
-		token, role, state, by     string
-		generation, treeEpoch      int64
-		locator                    []byte
-		deliveryID, task           *string
-		markedBy                   *string
-		deliveryPhase              *string
-		deliveryGeneration         *int64
-		servingGeneration          int64
-		enrollmentID, enrollmentIC *string
-		queuedAt, delivered        *time.Time
-		confirmed                  *time.Time
-		interrupted                *bool
+		c                           supervise.Claim
+		token, role, state, by      string
+		generation, treeEpoch       int64
+		locator                     []byte
+		deliveryID, task            *string
+		markedBy                    *string
+		deliveryPhase               *string
+		deliveryGeneration          *int64
+		servingGeneration           int64
+		enrollmentID, enrollmentIC  *string
+		queuedAt, delivered         *time.Time
+		confirmed                   *time.Time
+		interrupted                 *bool
+		updateOpened, updateTasked  *time.Time
+		updateSignalled, updateTold *time.Time
 	)
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &treeEpoch, &c.Session,
 		&c.SessionFile, &locator, &state, &c.Failure, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak,
 		&c.LastStartRow, &servingGeneration, &enrollmentID, &enrollmentIC, &by,
 		&c.PluginContract, &c.PluginRelaunchFor,
+		&c.UpdateRound, &c.UpdateReasons, &updateOpened, &updateTasked, &updateSignalled,
+		&c.UpdateHead, &updateTold,
 		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
@@ -342,6 +357,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	}
 	c.Token, c.Role, c.State, c.SuspendedBy = claim.Token(token), claim.Role(role), supervise.ClaimState(state), supervise.SuspendSource(by)
 	c.Generation, c.TreeEpoch, c.ServingGeneration = uint64(generation), uint64(treeEpoch), uint64(servingGeneration)
+	c.UpdateOpenedAt, c.UpdateTaskedAt, c.UpdateSignalledAt, c.UpdateToldAt = updateOpened, updateTasked, updateSignalled, updateTold
 	if locator != nil {
 		var loc runtime.Locator
 		if err := json.Unmarshal(locator, &loc); err != nil {

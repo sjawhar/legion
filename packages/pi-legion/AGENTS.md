@@ -90,7 +90,10 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 43's strict `consumers` on
+number is the one `DaemonAPIVersion` declares, last bumped by contract 44's update round (the
+`legion` tool's `ready_for_update` op, which posts `POST /legion/v1/claims/ready-for-update` with
+the round its update task named and the head of `legion/<issue>@origin`, and the `updateRound` and
+`updateHead` fields every claim view gains), after contract 43's strict `consumers` on
 `GET /legion/v1/state` (the lag of the daemon's three durable consumers, each with what
 waits, the oldest waiting message, the last handled, whether it is stalled and what NATS did not
 answer; a 42 plugin rejects it) and `repositories.withoutWebhookApp` (each served repository
@@ -509,7 +512,11 @@ a tool.
 In a phase-worker session (planner, implementer, tester, reviewer, merger: never an architect, the
 controller, a session with no Legion environment, or a `task` subagent), the phase-stall machine
 `@legion/pi-shared/phase-stall` tracks the phase: the daemon's assignment (a user message) opens it, the tool's successful
-`handoff_complete` closes it. A person's direct message the Envoy extension sent in as the user's
+`handoff_complete` closes it, and its successful `ready_for_update` (`onUpdateAnswered`), which
+closes no phase, moves it to the `waiting` state a WAITING reply buys, so the turn the worker
+answered the daemon's update task in ends with no reminder continuing it: work a continuation did
+would go with the replaced pod, and the daemon would see no turn end.
+A person's direct message the Envoy extension sent in as the user's
 own turn is a user message too (for a `/skill:`, the host's `skill-prompt` custom message), and
 counts as an Envoy delivery rather than an assignment: the Envoy extension records each turn it
 sends in, process-wide, on the shared interface (`injectedUserTurns`,

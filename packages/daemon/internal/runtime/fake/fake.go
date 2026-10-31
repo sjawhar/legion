@@ -32,6 +32,9 @@ type Call struct {
 	Previous *runtime.Locator
 	// Released is Release's claim; its Locator is nil for a claim released with no process.
 	Released runtime.Known
+	// Pod is the claim PodDrift and ReplacePod were called about; its Locator is nil for a claim
+	// with no process.
+	Pod      runtime.Known
 	Known    []runtime.Known
 	Grace    time.Duration
 	Identity runtime.GitIdentity
@@ -67,15 +70,17 @@ type Runtime struct {
 	// clock of its own replaces it before use.
 	Now func() time.Time
 
-	mu       sync.Mutex
-	pending  *sync.Cond
-	calls    []Call
-	spawns   []SpawnResult
-	resumes  []SpawnResult
-	probes   []ProbeResult
-	failures map[string]error
-	queue    []runtime.Observation
-	minted   int
+	mu          sync.Mutex
+	pending     *sync.Cond
+	calls       []Call
+	spawns      []SpawnResult
+	resumes     []SpawnResult
+	probes      []ProbeResult
+	failures    map[string]error
+	drift       map[claim.Token][]string
+	holdReplace func()
+	queue       []runtime.Observation
+	minted      int
 }
 
 // NewRuntime is a fake ready to record: no script, controller launched by the daemon, real time.
@@ -83,6 +88,7 @@ func NewRuntime() *Runtime {
 	fake := &Runtime{
 		Now:      time.Now,
 		failures: map[string]error{},
+		drift:    map[claim.Token][]string{},
 	}
 	fake.pending = sync.NewCond(&fake.mu)
 	return fake
@@ -146,6 +152,37 @@ func (r *Runtime) FailAdoptWorkingCopy(err error) { r.fail("AdoptWorkingCopy", e
 
 // FailCleanupTree makes every later CleanupTree return err; nil clears it.
 func (r *Runtime) FailCleanupTree(err error) { r.fail("CleanupTree", err) }
+
+// ScriptPodDrift makes every later PodDrift of token's claim answer reasons, as the Sandbox
+// runtime answers a pod built from a configuration the runtime has since moved on from. A claim no
+// call named has drifted from nothing, which is the uninteresting case; nil clears this claim's
+// answer.
+func (r *Runtime) ScriptPodDrift(token claim.Token, reasons ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if reasons == nil {
+		delete(r.drift, token)
+		return
+	}
+	r.drift[token] = reasons
+}
+
+// FailPodDrift makes every later PodDrift return err; nil clears it.
+func (r *Runtime) FailPodDrift(err error) { r.fail("PodDrift", err) }
+
+// FailReplacePod makes every later ReplacePod return err; nil clears it.
+func (r *Runtime) FailReplacePod(err error) { r.fail("ReplacePod", err) }
+
+// HoldReplacePod makes every later ReplacePod run hold before it asks whether the replacement is
+// still due, which is where the Sandbox runtime waits out the pod's launch turn. A test holds
+// there to do what that wait lets happen — a worker of the round starting a turn, a claim of the
+// issue being launched into the kept pod — and then lets the call go on. nil clears it; the hook
+// runs with none of the fake's own locks held, so it may drive the fake again.
+func (r *Runtime) HoldReplacePod(hold func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.holdReplace = hold
+}
 
 func (r *Runtime) fail(method string, err error) {
 	r.mu.Lock()
@@ -352,6 +389,53 @@ func (r *Runtime) LaunchBound() time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.TryBound
+}
+
+// PodDrift records its call and answers what ScriptPodDrift set for the claim, nil for a claim no
+// call named and for one with no process, as a runtime answers a claim that runs nowhere.
+func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, Call{Method: "PodDrift", Pod: copyKnown(k)})
+	if err := r.failures["PodDrift"]; err != nil {
+		return nil, err
+	}
+	if k.Locator == nil {
+		return nil, nil
+	}
+	return append([]string(nil), r.drift[k.Claim]...), nil
+}
+
+// ReplacePod plays the Sandbox runtime's own order: it waits where that runtime waits for the
+// pod's launch turn (HoldReplacePod), asks due whether the replacement is still due, and only
+// then replaces anything. A due that refuses records a ReplacePodNotDue call and changes nothing
+// — no replacement was made, so no ReplacePod call stands for one — and its error is returned as
+// the runtime hands it back. Otherwise the call is recorded, the claim's drift forgotten — the
+// place it named is gone, and the one built in its stead is built from the configuration the
+// runtime has now — and what FailReplacePod set is answered, nil by default.
+func (r *Runtime) ReplacePod(ctx context.Context, k runtime.Known, due func(context.Context) error) error {
+	r.mu.Lock()
+	hold := r.holdReplace
+	r.mu.Unlock()
+	if hold != nil {
+		hold()
+	}
+	if due != nil {
+		if err := due(ctx); err != nil {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			r.calls = append(r.calls, Call{Method: "ReplacePodNotDue", Pod: copyKnown(k)})
+			return err
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, Call{Method: "ReplacePod", Pod: copyKnown(k)})
+	if err := r.failures["ReplacePod"]; err != nil {
+		return err
+	}
+	delete(r.drift, k.Claim)
+	return nil
 }
 
 // CleanupTree records its call and answers what FailCleanupTree set, nil by default.

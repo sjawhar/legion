@@ -115,6 +115,8 @@ var liveChecks = []liveCheck{
 	{"orphan-sweep", (*liveRig).checkOrphanSweep, nil},
 	{"cleanup-reaps-the-issue", (*liveRig).checkCleanupReapsTheIssue, nil},
 	{"displaced", (*liveRig).checkDisplaced, nil},
+	{"pod-update", (*liveRig).checkPodUpdate, nil},
+	{"pod-update-fleet", (*liveRig).checkPodUpdateFleet, nil},
 	{"previous-layout", (*liveRig).checkPreviousLayout, previousLayoutBlocked},
 	{"postgres-resume", (*liveRig).checkPostgresResume, nil},
 	{"issue-suspend-resume", (*liveRig).checkIssueSuspendResume, nil},
@@ -845,7 +847,7 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	}
 	r.prompt = prompt
 
-	cacheIssue := cacheRunIssue(env.project)
+	cacheIssue, updateIssue, fleetIssue := cacheRunIssue(env.project), podUpdateRunIssue(env.project), podUpdateFleetRunIssue(env.project)
 	for _, c := range []struct {
 		name, tree, issue string
 		role              claim.Role
@@ -869,6 +871,18 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		// replaces while the displaced role still runs in it (displaced).
 		{"displaced", "S4A-6", "S4A-6", claim.RoleArchitect},
 		{"displacer", "S4A-6", "S4A-6", claim.RoleImplementer},
+		// update-a and update-b are the two workers of one more issue pod, which an update round
+		// replaces once each of them has pushed its work and answered (pod-update). Their issue is
+		// its run's own (podUpdateRunIssue), since each of them pushes the issue's branch onto the
+		// repository every run shares.
+		{"update-a", updateIssue, updateIssue, claim.RoleArchitect},
+		{"update-b", updateIssue, updateIssue, claim.RoleImplementer},
+		// fleet-a and fleet-b are the two workers of a second issue pod, which the one pod-template
+		// change drifts beside update-a and update-b's (pod-update-fleet): each issue's pod is a
+		// round of its own. Their issue is its run's own (podUpdateFleetRunIssue), since they push
+		// its branch onto the repository every run shares, as pod-update's workers push theirs.
+		{"fleet-a", fleetIssue, fleetIssue, claim.RoleArchitect},
+		{"fleet-b", fleetIssue, fleetIssue, claim.RoleImplementer},
 		// cache-b is one more issue pod on the run's repository, launched while its cache is Ready
 		// (cache-second-pod) and again after its volume is lost (cache-lost-volume). Its issue is
 		// its run's own (cacheRunIssue), since cache-lost-volume pushes the issue's branch onto the

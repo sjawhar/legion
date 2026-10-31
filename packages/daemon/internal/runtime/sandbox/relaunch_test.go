@@ -700,11 +700,16 @@ const nextImage = "ghcr.io/sjawhar/legion-worker@sha256:2e2e2e2e0000000000000000
 
 // A pod launched from another release's image — every container of it, or an init container alone,
 // since a pod is built whole from one image — runs agents that call this daemon as that release,
-// for a route it no longer serves or a variable it no longer sets. A relaunch of any of its roles
-// replaces it, as one dialing a moved stream is replaced (imageDrift beside movedInPod), the
-// daemon-launched controller's pod included, and every container of the new pod runs the configured
-// image. A pod on the configured image is kept, the role's new generation started in it.
-func TestARelaunchReplacesAPodRunningAnotherImage(t *testing.T) {
+// for a route it no longer serves or a variable it no longer sets. It has drifted, and a live
+// drifted pod a round covers is kept by every launch into it (INFRA-484, roundCovers): replacing
+// it there would end every role's turn in it and delete the issue's disk with everything unpushed
+// on it, so the pod is left to its update round, which first has every worker in it push its work.
+// The controller's pod is covered by no round — nobody in it holds an issue workspace, so there is
+// nobody to task — and is replaced by its next launch as it always was
+// (TestALaunchReplacesAPodNoRoundCoversWhoseShapeHasDrifted holds that for every key of a pod's
+// shape). A Sandbox that is not live — here one suspended under the running pod — is replaced by
+// its next start as it always was, and every container of the new pod runs the configured image.
+func TestRelaunchKeepsADriftedPodAndReplacesASuspendedSandboxs(t *testing.T) {
 	olderInit := func(pod *corev1.Pod) {
 		for i := range pod.Spec.InitContainers {
 			if pod.Spec.InitContainers[i].Name == initContainer {
@@ -714,18 +719,23 @@ func TestARelaunchReplacesAPodRunningAnotherImage(t *testing.T) {
 	}
 	plugins := &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: 24}
 	for name, tc := range map[string]struct {
-		spec     func(*testing.T) runtime.SpawnSpec
-		session  string
-		pinned   string            // the image the restarted daemon is configured with
-		stored   func(*corev1.Pod) // what the stored pod is edited to carry before the restart
-		plugins  *runtime.PluginInstall
-		replaced bool
+		spec      func(*testing.T) runtime.SpawnSpec
+		session   string
+		pinned    string            // the image the restarted daemon is configured with
+		stored    func(*corev1.Pod) // what the stored pod is edited to carry before the restart
+		plugins   *runtime.PluginInstall
+		suspended bool // the Sandbox is suspended before the start, as a stopped issue's is
+		replaced  bool
+		// drifted is whether the pod the role runs in after the start runs an image other than the
+		// configured one: a kept pod keeps the image it was built with, a replacement never does.
+		drifted bool
 	}{
-		"an issue pod on the configured image":                       {workerSpec, resumeSession, testImage, nil, nil, false},
-		"an issue pod under a release pinning another image":         {workerSpec, resumeSession, nextImage, nil, nil, true},
-		"an issue pod whose init container alone runs another image": {workerSpec, resumeSession, testImage, olderInit, nil, true},
-		"the controller's pod under a release pinning another image": {controllerSpec, controllerSession, nextImage, nil, nil, true},
-		"an installing Resume keeps a drifted pod":                   {workerSpec, resumeSession, nextImage, nil, plugins, false},
+		"an issue pod on the configured image":                       {workerSpec, resumeSession, testImage, nil, nil, false, false, false},
+		"an issue pod under a release pinning another image":         {workerSpec, resumeSession, nextImage, nil, nil, false, false, true},
+		"an issue pod whose init container alone runs another image": {workerSpec, resumeSession, testImage, olderInit, nil, false, false, true},
+		"the controller's pod under a release pinning another image": {controllerSpec, controllerSession, nextImage, nil, nil, false, true, false},
+		"an installing Resume keeps a drifted pod":                   {workerSpec, resumeSession, nextImage, nil, plugins, false, false, true},
+		"a suspended sandbox under a release pinning another image":  {workerSpec, resumeSession, nextImage, nil, nil, true, true, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			g := newRig(t, nil)
@@ -740,6 +750,9 @@ func TestARelaunchReplacesAPodRunningAnotherImage(t *testing.T) {
 				state, connected := r2.launchers.state(spec.Claim, loc.Sandbox.PodUID)
 				return connected && state.Child != nil
 			})
+			if tc.suspended {
+				suspendSandbox(t, g, r2, loc.Sandbox.Name)
+			}
 			spec.Generation, spec.BootToken, spec.ResumeSessionFile, spec.Plugins = 2, "boot-g2", tc.session, tc.plugins
 			newLoc, err := r2.Resume(g.ctx, &loc, spec)
 			if err != nil {
@@ -751,10 +764,9 @@ func TestARelaunchReplacesAPodRunningAnotherImage(t *testing.T) {
 			if newLoc.Sandbox.Generation != 2 {
 				t.Fatalf("resumed at %+v, want generation 2", newLoc.Sandbox)
 			}
-			if tc.replaced {
-				if other, drifted := imageDrift(g.pod(loc.Sandbox.Name), tc.pinned); drifted {
-					t.Fatalf("the pod the role runs in has a container on image %s, want every container on the configured %s", other, tc.pinned)
-				}
+			if other, drifted := imageDrift(g.pod(loc.Sandbox.Name), tc.pinned); drifted != tc.drifted {
+				t.Fatalf("the pod the role runs in has a container on image %s (drifted %t), want drifted %t against the configured %s",
+					other, drifted, tc.drifted, tc.pinned)
 			}
 			if tc.plugins != nil && !tc.replaced {
 				var start shimwire.LauncherStart
@@ -770,6 +782,23 @@ func TestARelaunchReplacesAPodRunningAnotherImage(t *testing.T) {
 			}
 		})
 	}
+}
+
+// suspendSandbox suspends the Sandbox named name, as a stopped issue's is, and waits for the
+// store the runtime reads to hold it.
+func suspendSandbox(t *testing.T, g *rig, r *Runtime, name string) {
+	t.Helper()
+	s, err := r.storedSandbox(name)
+	if err != nil || s == nil {
+		t.Fatalf("read sandbox %s: %+v, %v", name, s, err)
+	}
+	if err := r.setMode(g.ctx, s, modeSuspended); err != nil {
+		t.Fatalf("suspend sandbox %s: %v", name, err)
+	}
+	g.eventually("the sandbox store to see "+name+" suspended", func() bool {
+		s, err := r.storedSandbox(name)
+		return err == nil && s != nil && s.mode() == modeSuspended
+	})
 }
 
 // A suspended Sandbox's Resume with Plugins set replaces the pod — it has none to keep — and

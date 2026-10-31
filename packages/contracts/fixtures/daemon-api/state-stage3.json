@@ -80,6 +80,8 @@
     },
     "linger_hours": 72,
     "production_check_hours": 336,
+    "pod_update_retask_hours": 1,
+    "pod_update_notice_hours": 4,
     "review_round_cap": 3,
     "max_fix_attempts": 3,
     "controller": "operator",

@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { lstat, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { findHandoffCommit, type JjRunner, pathJj } from "./handoff-commit";
+import { findHandoffCommit, findPushedBranchHead, type JjRunner, pathJj } from "./handoff-commit";
 
 const ISSUE = "LEGION-208";
 const FILE = ".legion/LEGION-208/implement.json";
@@ -303,3 +303,41 @@ test.skipIf(jjOnPath === null)(
   },
   60_000
 );
+
+// The head `ready_for_update` reports: the issue branch at the remote, read with the pane's jj.
+test("the branch head is the issue bookmark at origin, and empty when the remote has no such branch", async () => {
+  const calls: string[][] = [];
+  const answer = async (head: string) => {
+    const jj: JjRunner = async (args, cwd) => {
+      expect(cwd).toBe(env.LEGION_WORKSPACE);
+      calls.push([...args]);
+      return head;
+    };
+    return findPushedBranchHead({ env, jj });
+  };
+  await expect(answer(CARRYING)).resolves.toBe(CARRYING);
+  expect(calls).toEqual([
+    [
+      "log",
+      "-r",
+      `remote_bookmarks(exact:"legion/${ISSUE}", exact:"origin")`,
+      "--no-graph",
+      "-T",
+      "commit_id",
+    ],
+  ]);
+  // A planner before its first push: no branch at the remote, and no error.
+  await expect(answer("")).resolves.toBe("");
+
+  // The issue key names the branch, and a worker sets its own environment.
+  await expect(
+    findPushedBranchHead({ env: { ...env, LEGION_ISSUE: "../x" }, jj: async () => CARRYING })
+  ).rejects.toThrow(new Error('LEGION_ISSUE "../x" is not a Dispatch issue key like LEGION-1'));
+  await expect(
+    findPushedBranchHead({ env: { ...env, LEGION_WORKSPACE: "" }, jj: async () => CARRYING })
+  ).rejects.toThrow(
+    new Error(
+      "LEGION_WORKSPACE is not set, so ready_for_update cannot find the branch head to report"
+    )
+  );
+});

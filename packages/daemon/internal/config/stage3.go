@@ -663,6 +663,12 @@ func resolveStage3(file fileConfig, configDir string, cfg *Config) error {
 	if file.ProductionCheckBound != nil {
 		cfg.ProductionCheckBound = *file.ProductionCheckBound
 	}
+	if file.PodUpdateRetask != nil {
+		cfg.PodUpdateRetask = *file.PodUpdateRetask
+	}
+	if file.PodUpdateNotice != nil {
+		cfg.PodUpdateNotice = *file.PodUpdateNotice
+	}
 	if file.ReviewRoundCap != nil {
 		cfg.ReviewRoundCap = *file.ReviewRoundCap
 	}

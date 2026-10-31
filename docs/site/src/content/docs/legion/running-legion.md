@@ -411,9 +411,12 @@ What each part is for:
   ([Start the controller](#start-the-controller)).
 - Workflow limits, all optional: `linger_hours` (72), `production_check_hours` (336: how long a
   closed issue's production check waits for its deploy before its last look, 14 days by default,
-  decimals allowed), `review_round_cap` (3), `max_fix_attempts`
-  (3), `controller_wake_interval_seconds` (3600), and the supervision budgets
-  `launch_failure_limit` (3), `prompt_failure_limit` (3) and `prompt_retire_limit` (2).
+  decimals allowed), `pod_update_retask_hours` (1: how long an update round waits before it asks
+  a worker that has not answered again, decimals allowed), `pod_update_notice_hours` (4: how long
+  an update round runs before the controller is told it is not finishing, decimals allowed),
+  `review_round_cap` (3), `max_fix_attempts` (3), `controller_wake_interval_seconds` (3600), and
+  the supervision budgets `launch_failure_limit` (3), `prompt_failure_limit` (3) and
+  `prompt_retire_limit` (2).
 - **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
   `worker_backends: {implementer: claude}`. Each key is an issue role, each value `omp` (the
   default) or `claude`. Claude Code runs the phase workers (`planner`, `implementer`, `tester`,

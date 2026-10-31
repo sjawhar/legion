@@ -54,17 +54,42 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // authenticated launcher. An existing healthy pod is never suspended or reinitialized when another
 // role starts or one role recovers. A pod is not healthy when it cannot run the role as a pod
 // created now would: it holds, for one of its roles, something fixed for its life that a pod created
-// now is not handed (movedInPod, the rule evaluate reads such a role StaleAddress by): it
-// runs the layout before one container, one launcher container per role (movedLayout), its
-// launchers dial a stream other than the one a pod created now is handed, and they never redial, or
-// it lacks the agent-secrets volumes a role that enrolls now is started against; or a container of
-// it runs an image other than the one this runtime launches every container with (imageDrift) —
-// unless the launch is installing a stale-plugin pair into this pod (spec.Plugins set,
-// LEGION-164): then drift alone is not a reason to replace it, since the install, not a fresh pod on the
-// configured image, is what brings this launch's agent onto the current plugin, and a pod replaced
-// for some other reason in the same sweep still is. The first role relaunched after any of these
-// replaces it, and its siblings resume into the new pod. Replacing a live pod — its Sandbox
-// Running, the pod its own, not ended, its init containers passed — ends the process of every role
+// now is not handed and whose worker this daemon cannot ask to push its work first (movedInPod,
+// the rule evaluate reads such a role StaleAddress by): it runs the layout before one container,
+// one launcher container per role (movedLayout), whose workers predate the update round's
+// contract, or its launchers dial a stream other than the one a pod created now is handed, and
+// they never redial, so they never reach this daemon at all. The first role relaunched after one
+// of these replaces it, and its siblings resume into the new pod.
+//
+// A live pod a round covers (roundCovers) that has merely drifted from the configuration — a
+// container on another image, the kind's reservation, an operator volume or mount, the disk size,
+// the role's overlays, the secrets broker's enrollment or the session store (PodDrift) — is kept,
+// and this role is started in it.
+// Such a pod is replaced by an update round, which first tasks every worker in it to push its work
+// and answer, and then ends the pod (ReplacePod): replacing it at a launch would end every role's
+// turn in it and delete the issue's disk with everything unpushed on it (INFRA-484). A launch into
+// a drifted pod is therefore an ordinary launch, the install of a stale-plugin pair (spec.Plugins,
+// LEGION-164) included, which brings this launch's agent onto the current plugin without a fresh
+// pod. Its role is started as the kept pod was built, from the volumes and mounts of that pod's
+// own stored template (keptBy, keptPod) and not from the configuration as it now reads: two of
+// those drift facets, the broker's enrollment and the role's overlays, are named in the role's own
+// start command, and a process started against what its pod cannot carry refuses to run, never
+// registers, and so never answers the round that is to replace that pod. A pod whose template says
+// nothing this daemon can read is replaced at the launch instead, as every drifted pod was before
+// the round.
+//
+// A live pod no round covers is replaced here for every kind of drift instead, as every launch did
+// before the round existed: no round is ever opened over such a pod, so a launch that kept it
+// would leave its role in a pod the configuration has left behind for ever (movedInPod,
+// roundCovers). Its three facets reach this launch as moved addresses, and the shape its template
+// was built from is read here (shapeDrift, the one reading PodDrift takes of a covered pod's
+// shape). A launch installing a stale-plugin pair into such a pod keeps it, as it always did
+// (spec.Plugins, LEGION-164): the install, not a fresh pod on the configured image, is what brings
+// that agent onto the current plugin, and a pod replaced for any other reason in the same sweep
+// still is.
+//
+// Replacing a live pod — its Sandbox Running, the pod its own, not ended, its init containers
+// passed — ends the process of every role
 // still running in it, wherever its turn stood, so the Suspended patch that replaces it names it
 // on the Sandbox in the same write (suspendDisplacing): evaluate then reports each of those roles
 // ended by the daemon's replacement (Displaced), which the supervisor resumes uncharged
@@ -122,17 +147,36 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	pod := r.storedPod(s.Name)
 	_, initExit := failedInit(pod)
 	live := s.mode() != modeSuspended && ownedBy(pod, s.UID) && !terminal(pod) && initExit == nil
-	_, drifted := imageDrift(pod, r.image)
 	installing := l.spec.Plugins != nil
 	migrate := supersededDisk(s, l)
-	replace := !live || (drifted && !installing) || migrate ||
-		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 })
+	// A live pod no round covers is this launch's to replace for every kind of drift: its three
+	// facets come through movedInPod, and the shape its template was built from is read here,
+	// unless this launch is installing a stale-plugin pair into it (roundCovers, shapeDrift).
+	replace := !live || migrate ||
+		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 }) ||
+		(!installing && !roundCovers(l.kind) && len(r.shapeDrift(s, l.kind)) > 0)
 	if !replace {
 		bound, err := r.launcherBound(bounded, s, pod, &l)
 		if err != nil {
 			return fail("read its pod's launcher bindings", err)
 		}
 		replace = !bound
+	}
+	if !replace {
+		// The pod is kept, so this role is started as that pod was built rather than as the
+		// configuration now reads (keptBy): a drifted pod the update round has not replaced yet
+		// carries neither an enrollment nor an overlay the configuration gained after it was
+		// created, and a start naming either would refuse to run, never register, and so never
+		// answer the round that is to replace it (INFRA-484). Where the stored template says
+		// nothing the daemon can read, it cannot tell what the pod carries, and the launch
+		// replaces the pod where it stands, which is what every launch into a drifted pod did
+		// before the round existed.
+		kept, readable := r.keptBy(s, l)
+		if !readable {
+			replace = true
+		} else {
+			l.kept = &kept
+		}
 	}
 	if installing && replace {
 		// Replaced for some other reason: the fresh pod's image is already current, so nothing is
@@ -213,7 +257,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 			return fail(fmt.Sprintf("stop its earlier generation %d", stale), err)
 		}
 	}
-	if err := r.recordAddresses(starting, s, spec.Role, spec.Generation); err != nil {
+	if err := r.recordAddresses(starting, s, spec.Role, spec.Generation, l.enrolls(r)); err != nil {
 		return fail("record the addresses its generation is handed", err)
 	}
 	if err := r.launchers.start(starting, spec.Claim, string(pod.UID), launcherCommand(l, r)); err != nil {
@@ -221,6 +265,34 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	}
 	r.join(loc)
 	return loc, nil
+}
+
+// keptBy is what the live pod of the Sandbox read as s was built with, for the role l starts in
+// it: the enrollment decision for that role in that pod (enrollsIn, which reads the broker's
+// volumes the pod carries), which of the role's own overlays its container holds
+// (heldRoleOverlays), and the session store it was built under (heldSessionStore, the URL file
+// its generation is pointed at). A launch that keeps such a pod builds its start command from
+// these rather than from the configuration as it now reads, so the role is started as its pod was
+// built (launcherCommand, roleOperatorEnv, mainEnvironment) and runs degraded until the update
+// round replaces the pod — able to push its work and answer that round, where a start naming what
+// its pod cannot carry would refuse to run at all (keptPod, INFRA-484).
+// The same enrollment decision writes the generation's address record (recordAddresses), so the
+// record says what the start said.
+//
+// It reads the Sandbox's stored pod template, the build of the pod the controller made from it,
+// and not the pod-shape annotation (podShapeAnnotation): the annotation is written only by this
+// release and records the operator's volumes and mounts alone, where every release writes the
+// template, so a pod created before this one is read as well. readable is false when the template
+// holds no container for the role — a template of another shape, or one this daemon cannot read:
+// the daemon then cannot tell what the pod carries, and relaunch replaces the pod.
+func (r *Runtime) keptBy(s *sandbox, l launch) (keptPod, bool) {
+	spec := s.Spec.PodTemplate.Spec
+	overlays, readable := r.heldRoleOverlays(spec, l.spec.Role)
+	if !readable {
+		return keptPod{}, false
+	}
+	kind, _, _ := heldSessionStore(spec)
+	return keptPod{enrolled: r.enrollsIn(&spec, l.spec.Role), overlays: overlays, store: kind}, true
 }
 
 // stopIssuedChild stops generation of token's launcher in podUID after its Start returned startErr,

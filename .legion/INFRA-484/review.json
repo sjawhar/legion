@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-484",
+  "completed": "2026-10-30T20:30:00Z",
+  "round": 3,
+  "decision": "changes_requested",
+  "reviewedCodeHead": "35f650654f53",
+  "critical": 0,
+  "important": 5,
+  "minor": 7,
+  "roundTwoFixedVerified": [
+    "plugin round end never relaunches a working or un-answered claim (reproductions re-run: resumes=0)",
+    "rotated ids keep the update:<round>: prefix (rotateTaskID)",
+    "answering turn ends after ready_for_update in both hosts (update-answered)",
+    "late notice marks answered claims, bound from last answer, escalation.md row",
+    "endPodUpdateFailed merged into leaveRound",
+    "one CannotAnswerUpdate",
+    "notice and issue message in one transaction",
+    "wording-only test deleted",
+    "prefix hand-spellings replaced; dead retired check removed",
+    "implementer's 15 round-1 replies re-posted with content"
+  ],
+  "keyFindings": [
+    {"severity": "important", "file": "packages/daemon/internal/daemon/daemon.go:1242", "description": "Round-2 #5 not fixed: refreshStalePlugins skips a no-install (Claude Code) claim only once a round is recorded; the boot pass and first sweep run before any round opens, and staleRegistration charges relaunchAfterFailure until failed. Reproduced by two subagents."},
+    {"severity": "important", "file": "packages/daemon/internal/supervise/table.go:1553", "description": "Round-2 #2 partly fixed: answeringRound guards only a confirmed ask in a working turn; late agent_start (noTurn), daemon restart (askFirst) and foreign turns still bind an answer to a round whose words the worker never read. Reproduced (prompts=1 podWordsSent=false)."},
+    {"severity": "important", "file": "packages/daemon/internal/daemon/podupdate.go:199", "description": "Round-2 #1 residual: liveGroup re-reads only snapshot members (a claim created after the snapshot is cut, reproduced), nothing re-checks after ReplacePod starts waiting on lockPod (reproduced), and Claim() blocks the sweep behind relaunch decisions."},
+    {"severity": "important", "file": "packages/daemon/internal/daemon/podupdate.go:253", "description": "New: tellPodlessRound escalates a round whose every claim answered and was then daemon-suspended; the controller's answered row then opens a false finding ask for a person. Reproduced."},
+    {"severity": "important", "file": "packages/pi-shared/src/phase-reminder.ts:406", "description": "New: the answer's wait arms no reminder; when a round ends without a replacement (drift reverts), a mid-phase worker sits idle with its phase open and nothing wakes it. Docs (phase-stall.ts, claude-envoy AGENTS.md, both fragments) still say a reminder comes back."},
+    {"severity": "minor", "file": "packages/daemon/internal/daemon/podupdate.go:125", "description": "openPodUpdate gets the snapshot group while completePodUpdate read live; a late notice can carry empty waiting, which the store refuses every tick. Reproduced."},
+    {"severity": "minor", "file": "packages/daemon/internal/supervise/table.go:1125", "description": "turnEnded returns refreshPlugin's result in place of sendPending; when the held relaunch is a no-op the queued task is not sent."},
+    {"severity": "minor", "file": "packages/daemon/internal/daemon/podupdate.go:176", "description": "podProcess(live) can pick a claim already relaunched into a fresh pod and replace that undrifted pod."},
+    {"severity": "minor", "file": "packages/daemon/internal/supervise/plugin.go:118", "description": "A held suspension skips the turn-end hold, so endHeld cuts the turn though the suspension would end it at turn end anyway."},
+    {"severity": "minor", "file": "packages/daemon/internal/daemon/podupdate.go:354", "description": "An answered plugin round kept by a lasting launch refusal never sends a late notice; liveGroup can count a claim retired mid-tick as waiting."},
+    {"severity": "minor", "file": "several", "description": "Code quality in touched files: 'answered this round' spelled three times; two parsers of the ask-id format; throwaway Claim struct in UpdateTask; awaitingUpdate mode flag outside the stall machine; keptPod.store half-filled ompsessions.Store."}
+  ],
+  "threads": "Round-1 threads all resolved with re-posted replies. Round-2 threads: replied on all 11. Accepted: PRRT_kwDORFy7ds6x9roL, x9roU, x9rod, x9roi, x9rol, x9rop, x9ros, x9rox. Reopened with what stands: PRRT_kwDORFy7ds6x9roE, x9roQ, x9rof.",
+  "proseFixedByReviewer": [
+    "supervise/table.go UpdateTask and its doc: a plugin restart waits until the turn ends (endPodUpdate relaunches no working claim); it no longer says it stops the turn.",
+    "prompts/go/worker-common.md and architect-common.md: a process restart keeps the disk and waits until the turn ends, not 'costs you the turn'.",
+    "supervise/plugin.go: PodUpdateContract doc says the stale lane relaunches once the turn ends; CanAnswerUpdate doc names its one reader.",
+    "api/state.go and contracts legion-api.ts (operator claim copy): the next task is held once the worker has answered."
+  ],
+  "thermonuclear": "deep-review CHANGES, code-quality CHANGES at code head 35f650654f53",
+  "ci": "CI run 41112709978 at code head 35f650654f53 in progress (test, pi-shared, dispatch, worker-image running; docs/build success) when read at 19:41Z; a request for changes does not wait for it."
+}

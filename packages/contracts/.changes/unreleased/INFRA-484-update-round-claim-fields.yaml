@@ -1,0 +1,9 @@
+kind: Added
+body: |-
+  The daemon's claim shapes carry the update round a claim is in. The state's claim view and the
+  operator's claim body each gain `updateRound` — `pod:<pod uid>`, the round every claim of one
+  pod shares, or `plugin:<daemon contract>`, one claim's own — and `updateHead`, the commit the
+  worker reported as the head of its issue branch at origin when it answered the round. Both are
+  absent while no round is open, and both are the worker's own report, which nothing verifies.
+  Daemon API contract 44 declares them, so a strict reader before it refuses a state that carries
+  either.

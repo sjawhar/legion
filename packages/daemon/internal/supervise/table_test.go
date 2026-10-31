@@ -148,7 +148,10 @@ func samples(t *testing.T) map[string][]Event {
 		"StreamLateRefusal":    {StreamLateRefusal{}},
 		"PromptAcked":          {PromptAcked{}},
 		"PromptRefused":        {PromptRefused{}},
+		"PodUpdateOpen":        {PodUpdateOpen{}},
+		"PodUpdateEnded":       {PodUpdateEnded{}},
 		"StalePlugin":          {StalePlugin{}},
+		"PodUpdateSignalled":   {PodUpdateSignalled{}},
 		"RequestSpawn":         {RequestSpawn{}},
 		"RequestRegister":      {RequestRegister{}},
 		"RequestReady":         {RequestReady{}},
@@ -288,6 +291,12 @@ func fenced(ev Event, c Claim) Event {
 		return Timer{Claim: c.Token, Kind: ev.Kind, Generation: c.Generation, Seq: 7777, DeliveryID: c.Pending.ID}
 	case StalePlugin:
 		return StalePlugin{Claim: c.Token}
+	case PodUpdateSignalled:
+		return PodUpdateSignalled{Claim: c.Token, Generation: c.Generation, Session: session, Head: "deadbeef"}
+	case PodUpdateOpen:
+		return PodUpdateOpen{Claim: c.Token, Round: PodRound("a-pod-uid"), Reasons: "image", Task: UpdateTask(PodRound("a-pod-uid"), "image")}
+	case PodUpdateEnded:
+		return PodUpdateEnded{Claim: c.Token}
 	case RequestSpawn:
 		return RequestSpawn{Claim: c.Token}
 	case RequestRegister:
@@ -412,7 +421,7 @@ func TestAnEventForAnotherClaimIsAnError(t *testing.T) {
 func wantsRefusal(ev Event) bool {
 	switch ev.(type) {
 	case RequestSpawn, RequestRegister, RequestReady, RequestSuspend, RequestResume, RequestStop,
-		RequestRetry, RequestOperatorRetry, RequestDeliver, RequestExit:
+		RequestRetry, RequestOperatorRetry, RequestDeliver, RequestExit, PodUpdateSignalled:
 		return true
 	}
 	return false

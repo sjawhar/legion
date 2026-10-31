@@ -374,6 +374,19 @@ func (r *Runtime) ProvisionBound() time.Duration { return 0 }
 // each invocation already bounded by its own command timeout (runTmux).
 func (r *Runtime) LaunchBound() time.Duration { return 0 }
 
+// PodDrift is nil: a pane is not a place built from a configuration — it has no pod, no image and
+// no template — so no process of this runtime ever drifts from one, and no update round is ever
+// opened over a pane.
+func (r *Runtime) PodDrift(context.Context, runtime.Known) ([]string, error) { return nil, nil }
+
+// ReplacePod does nothing and returns nil: this runtime has no pod to replace, and a pane is
+// ended by the claim's own Suspend and Release. due is never asked, because nothing here waits
+// and nothing here is ended: there is no write for a caller's re-read to come one statement
+// before.
+func (r *Runtime) ReplacePod(context.Context, runtime.Known, func(context.Context) error) error {
+	return nil
+}
+
 // CleanupTree holds nothing per tree: each pane is one claim's process, ended by its Release, and
 // each workspace is the outbox's to remove (workspace_remove).
 func (r *Runtime) CleanupTree(context.Context, string) error { return nil }

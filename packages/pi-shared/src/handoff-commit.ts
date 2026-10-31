@@ -23,6 +23,9 @@ import { staleGitLockNote } from "./git-lock";
  * it does not run (which the daemon refuses naming whose phase it is) — reports the commit the
  * workspace stands on, `@-`. The implementer's report on its closed issue's production check
  * resolves no commit at all: `legion-phase-ops.ts` never asks this module for one.
+ *
+ * The module also reads the head of `legion/<issue>@origin` that a `ready_for_update` signal
+ * reports (`findPushedBranchHead`), with the same jj and the same revset the push check uses.
  */
 
 /** Runs the pane's jj with `args` against the workspace at `cwd` and answers its trimmed stdout;
@@ -74,31 +77,64 @@ export const pathJj: JjRunner = async (args, cwd) => {
   }
 };
 
-function requiredVariable(env: NodeJS.ProcessEnv, name: string): string {
+/** A variable the pane's jj is run with, or an error naming what the caller cannot do without
+ * it (`purpose`, a clause after `so`). */
+function requiredVariable(env: NodeJS.ProcessEnv, name: string, purpose: string): string {
   const value = env[name];
   if (value === undefined || value === "") {
-    throw new Error(`${name} is not set, so handoff_complete cannot find the commit to report`);
+    throw new Error(`${name} is not set, so ${purpose}`);
   }
   return value;
+}
+
+/** The issue the pane works and the branch it names, `legion/<issue>`: the key is the worker's own
+ * environment, so a value that is no Dispatch key would otherwise name a path outside the tree's
+ * own (`.legion/<issue>/…`) and a branch that is nobody's. `purpose` is what the caller cannot do
+ * without the key. */
+function issueBranch(env: NodeJS.ProcessEnv, purpose: string): { issue: string; bookmark: string } {
+  const issue = requiredVariable(env, "LEGION_ISSUE", purpose);
+  if (!DISPATCH_KEY_PATTERN.test(issue)) {
+    throw new Error(
+      `LEGION_ISSUE ${JSON.stringify(issue)} is not a Dispatch issue key like LEGION-1`
+    );
+  }
+  return { issue, bookmark: `legion/${issue}` };
+}
+
+/** The revset of `<bookmark>@origin`: the branch head as the remote has it, which is what the push
+ * check reads and what `ready_for_update` reports. */
+function pushedBranch(bookmark: string): string {
+  return `remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:"origin")`;
+}
+
+const FOR_HANDOFF = "handoff_complete cannot find the commit to report";
+
+/** The head of `legion/<issue>@origin`, as `ready_for_update` reports it: the commit the pane's
+ * jj reads for the issue branch at the remote, and `""` when the branch is not on the remote at
+ * all — a planner before its first push has none, which is no error. */
+export async function findPushedBranchHead(input: {
+  readonly env: NodeJS.ProcessEnv;
+  readonly jj?: JjRunner;
+}): Promise<string> {
+  const { env } = input;
+  const jj = input.jj ?? pathJj;
+  const purpose = "ready_for_update cannot find the branch head to report";
+  const workspace = requiredVariable(env, "LEGION_WORKSPACE", purpose);
+  const { bookmark } = issueBranch(env, purpose);
+  return jj(["log", "-r", pushedBranch(bookmark), "--no-graph", "-T", "commit_id"], workspace);
 }
 
 /** The commit a completion of `phase` by `role` reports. */
 export async function findHandoffCommit(input: HandoffCommitInput): Promise<string> {
   const { phase, role, env } = input;
   const jj = input.jj ?? pathJj;
-  const workspace = requiredVariable(env, "LEGION_WORKSPACE");
+  const workspace = requiredVariable(env, "LEGION_WORKSPACE", FOR_HANDOFF);
   const handoff = FILE_BACKED[phase];
   if (handoff === undefined || handoff.role !== role) {
     return jj(["log", "-r", "@-", "--no-graph", "-T", "commit_id"], workspace);
   }
-  // The issue key names the handoff's directory and the branch, and a worker sets its own
-  // environment: a value such as ../x would otherwise name a path outside the tree's own.
-  const issue = requiredVariable(env, "LEGION_ISSUE");
-  if (!DISPATCH_KEY_PATTERN.test(issue)) {
-    throw new Error(
-      `LEGION_ISSUE ${JSON.stringify(issue)} is not a Dispatch issue key like LEGION-1`
-    );
-  }
+  // The issue key names the handoff's directory and the branch (issueBranch).
+  const { issue, bookmark } = issueBranch(env, FOR_HANDOFF);
   const file = `.legion/${issue}/${handoff.word}.json`;
   const fileset = `root:${JSON.stringify(file)}`;
   if ((await jj(["diff", "-r", "@", "--name-only", fileset], workspace)) !== "") {
@@ -140,16 +176,8 @@ export async function findHandoffCommit(input: HandoffCommitInput): Promise<stri
       );
     }
   }
-  const bookmark = `legion/${issue}`;
   const pushed = await jj(
-    [
-      "log",
-      "-r",
-      `${carrying} & ::remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:"origin")`,
-      "--no-graph",
-      "-T",
-      "commit_id",
-    ],
+    ["log", "-r", `${carrying} & ::${pushedBranch(bookmark)}`, "--no-graph", "-T", "commit_id"],
     workspace
   );
   if (pushed === "") {

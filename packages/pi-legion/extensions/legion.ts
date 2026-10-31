@@ -13,7 +13,7 @@ import {
 } from "@legion/envoy-client/session-settings";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { createLegionDaemonClient, type LegionDaemonClient } from "@legion/pi-shared/daemon-client";
-import { findHandoffCommit } from "@legion/pi-shared/handoff-commit";
+import { findHandoffCommit, findPushedBranchHead } from "@legion/pi-shared/handoff-commit";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
   ENVOY_PLUGIN_INTERFACE_VERSION,
@@ -392,6 +392,14 @@ export default function legionExtension(pi: PiApi): void {
     if (phaseWorkerSession(context)) phaseReminder.apply({ kind: "phase-closed" });
   };
 
+  // A successful `ready_for_update`: the worker has pushed what it wants kept and waits for the
+  // process its claim runs in to be replaced. Its phase stays open, and the reminder must not
+  // continue the turn it answered in — the work that continuation did would go with the pod, and
+  // the daemon would see no turn end.
+  const onUpdateAnswered = (context: SessionContext): void => {
+    if (phaseWorkerSession(context)) phaseReminder.apply({ kind: "update-answered" });
+  };
+
   const activateLegionTool = async (): Promise<void> => {
     const activeTools = pi.getActiveTools();
     if (activeTools.includes("legion")) return;
@@ -422,9 +430,11 @@ export default function legionExtension(pi: PiApi): void {
         },
         controllerGrant: (sessionId) => controllerSession.mintGrant(sessionId),
         onPhaseCompleted,
+        onUpdateAnswered,
         // The pane's own environment: its workspace and issue, and the identity the daemon put
         // on it; PATH's jj, the one its shell runs.
         handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env }),
+        branchHead: () => findPushedBranchHead({ env: process.env }),
         resolveDocument: async (issue, reference) => {
           // The file pi-envoy's session reads: Oh My Pi's rule, in the same process.
           const config = activeDispatchSettings(

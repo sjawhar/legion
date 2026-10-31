@@ -38,11 +38,13 @@ func endOf(t *testing.T, observations <-chan runtime.Observation, loc runtime.Lo
 
 // A daemon restarted onto a release pinning another image re-adopts a tree's architect still
 // running in its issue pod, built from the earlier image, and launches again the implementer's
-// launch its predecessor did not finish (LEGION-729). The launch replaces the drifted pod, which
-// ends the architect's process with it. That end is the daemon's own act: the runtime reports it
-// Displaced, and the architect's Machine resumes its kept session in the new pod at once, charging
-// nothing, and registers and is ready there, its process alive.
-func TestALaunchIntoADriftedPodResumesItsOtherLiveRoleOnItsSessionUncharged(t *testing.T) {
+// launch its predecessor did not finish (LEGION-729). The launch keeps the drifted pod — ending it
+// there would end the architect's turn and take the issue's disk with it — and the pod is replaced
+// only by its update round, once every worker in it has pushed (ReplacePod). That replacement is
+// the daemon's own act: the runtime reports the architect Displaced, and its Machine resumes its
+// kept session in the new pod at once, charging nothing, and registers and is ready there, its
+// process alive.
+func TestReplacingADriftedPodResumesItsOtherLiveRoleOnItsSessionUncharged(t *testing.T) {
 	g := newRig(t, nil)
 	architect := rootSpec(t)
 	before, _, _ := supervisedSandboxMachine(t, g, architect)
@@ -73,14 +75,30 @@ func TestALaunchIntoADriftedPodResumesItsOtherLiveRoleOnItsSessionUncharged(t *t
 	if obs := next(t, observations); obs.Locator != architectLoc || obs.Kind != runtime.Alive {
 		t.Fatalf("the re-adopted architect: %s at %+v (%s), want alive at its recorded locator", obs.Kind, obs.Locator, obs.Detail)
 	}
+	if drifted := driftOf(t, g.ctx, r2, architectLoc); len(drifted) == 0 {
+		t.Fatalf("the architect's pod, built from image %s under a daemon pinning %s, has drifted from nothing", testImage, nextImage)
+	}
 
 	implementer.Generation, implementer.BootToken = 2, "boot-implementer-g2"
-	relaunched, err := r2.Spawn(g.ctx, implementer)
+	kept, err := r2.Spawn(g.ctx, implementer)
 	if err != nil {
 		t.Fatalf("Spawn the implementer again: %v", err)
 	}
+	if kept.Sandbox.PodUID != architectLoc.Sandbox.PodUID {
+		t.Fatalf("the implementer's launch replaced the drifted pod %s, which its update round replaces", architectLoc.Sandbox.PodUID)
+	}
+
+	// The round is over: the pod is ended, and with it the architect's process.
+	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: implementerToken, Locator: &kept}, nil); err != nil {
+		t.Fatalf("ReplacePod: %v", err)
+	}
+	implementer.Generation, implementer.BootToken = 3, "boot-implementer-g3"
+	relaunched, err := r2.Spawn(g.ctx, implementer)
+	if err != nil {
+		t.Fatalf("Spawn the implementer into the new pod: %v", err)
+	}
 	if relaunched.Sandbox.PodUID == architectLoc.Sandbox.PodUID {
-		t.Fatalf("the implementer's launch kept the drifted pod %s", architectLoc.Sandbox.PodUID)
+		t.Fatalf("the round kept the drifted pod %s", architectLoc.Sandbox.PodUID)
 	}
 
 	ended := endOf(t, observations, architectLoc)

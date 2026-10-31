@@ -110,6 +110,36 @@ type Runtime interface {
 	// caller's own context ends is not the bound's: the supervisor reads its context's error to
 	// tell the daemon's stop from a refusal, and charges that try nothing.
 	LaunchBound() time.Duration
+	// PodDrift is why the place k's process runs in no longer matches the configuration the
+	// runtime would build it from now, one short phrase an operator reads per reason, and nil when
+	// nothing differs. Only a runtime whose processes share a place fixed at its creation has any
+	// — the Sandbox runtime's issue pod, whose image, reservation, operator volumes and mounts,
+	// disk, role overlays, secrets broker enrollment and session store are all fixed for the pod's
+	// life — and only for a claim that runs in one: it answers nothing for a claim with no
+	// process, for the project controller's own pod, which has no issue workspace and nothing to
+	// push, and when the place is not there or is not the one the locator records. The daemon
+	// opens an update round on a non-empty answer: every worker claim of that place is tasked to
+	// push its work and signal (api's claims/ready-for-update), and only once each has answered is
+	// the place replaced (ReplacePod). An error means the runtime itself could not be asked, and
+	// is never a statement that something drifted.
+	PodDrift(ctx context.Context, k Known) ([]string, error)
+	// ReplacePod ends the place k's process runs in, once its update round is over, and returns
+	// when the runtime no longer has it. It creates nothing in its stead: every process it ends is
+	// reported ended by the daemon's own act (Observation.Displaced), and the supervisor's resume
+	// of the first of them builds the place again from the current configuration. It is a no-op
+	// returning nil for a claim with no process, for a place already gone or already stopped, and
+	// for a runtime with no such place to replace.
+	//
+	// due is the caller's own last word on whether the replacement is still due, asked under
+	// whatever the runtime holds the place with and immediately before it ends anything: a
+	// runtime that waits for the place's launch turn waits first and asks after, because what the
+	// caller decided before the wait is exactly what the wait can outlive — a worker of the round
+	// starting a turn, or a claim of the issue the caller had never read. nil from due is a
+	// replacement still due, and the runtime goes on; any error is a replacement no longer due,
+	// which the runtime returns having changed nothing, so the caller tells its own refusal from
+	// a failure by the error it handed over. A nil due is always due, which is what a caller with
+	// nothing to re-read passes.
+	ReplacePod(ctx context.Context, k Known, due func(context.Context) error) error
 	// CleanupTree deletes what the runtime holds for tree beyond its claims' processes, once every
 	// claim of the tree has retired and the tree's cleanup is reserved (store.CleanupReservedTree);
 	// nil once nothing of it remains. A runtime that holds nothing per tree returns nil at once.

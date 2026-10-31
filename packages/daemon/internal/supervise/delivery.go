@@ -127,9 +127,19 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 // failure — the shim's next hello sends it. A delivery an earlier daemon may have sent is sent
 // again only after the agent says it is not already in a turn; if it is, that turn is taken as the
 // delivery's.
+//
+// Two states hand the claim nothing and hold the task instead of dropping it: a claim holding a
+// suspension (holdSuspension), and a claim that has answered its open update round
+// (openPodUpdate). The worker of an answered round has said its work is pushed and its process
+// may be replaced, so starting it on a task it is about to lose would waste both the turn and the
+// work. PodUpdateEnded releases that task once the round is over (endPodUpdate).
 func (m *Machine) sendPending(ctx context.Context) error {
 	// A claim holding a suspension is handed nothing (holdSuspension).
 	if state := m.claim.State; (state != StateReady && state != StateIdle) || m.held != nil {
+		return nil
+	}
+	// A claim that answered its open update round is handed nothing until the round ends.
+	if m.claim.UpdateRound != "" && m.claim.UpdateSignalledAt != nil {
 		return nil
 	}
 	p := m.claim.Pending
@@ -399,7 +409,7 @@ func (m *Machine) interrupted(ctx context.Context, why string) error {
 	}
 	m.log.Warn("supervise: "+why+"; the task waits for the relaunch", "delivery", p.ID)
 	next := *p
-	next.ID, next.ConfirmedAt, next.Interrupted = rand.Text(), time.Time{}, true
+	next.ID, next.ConfirmedAt, next.Interrupted = rotateTaskID(p.ID), time.Time{}, true
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
 		return err
 	}
@@ -459,7 +469,7 @@ func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
 		m.clearReadMark(p)
 	}
 	next := *p
-	next.ID = rand.Text()
+	next.ID = rotateTaskID(p.ID)
 	if err := m.saved(m.deps.Store.PutDelivery(ctx, m.claim.Token, next)); err != nil {
 		return err
 	}

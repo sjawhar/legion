@@ -203,6 +203,63 @@ type Notice struct {
 	// report, so the controller names each there and takes nothing for it. A tick with nothing
 	// blocked carries none.
 	Blocked []BlockedIssue `json:"blocked,omitempty"`
+	// Update is an update-stalled notice's account of the round that is not finishing, and is
+	// absent from every other kind. Only an UpdateStalledNotice carries one.
+	Update *UpdateStalled `json:"update,omitempty"`
+}
+
+// UpdateStalled is what an update-stalled controller notice carries: the update round the daemon
+// opened over an issue's pod, and why it has not replaced that pod. Round is the round's identity
+// (supervise.Claim.UpdateRound), Pod the pod it was opened over, and Reasons the drift the round
+// was opened for, as the task states it. Waiting is every claim the round is blocked on, so the
+// controller can retry one claim or ask the operator to drain the pod rather than read the whole
+// claims list to find out which worker the round waits on. Each entry says whether that claim has
+// already answered ready_for_update (UpdateWaiting.Answered), which is what tells the controller
+// which claims are its to prompt: its playbook publishes the update task to a claim that has not
+// answered, and that publish starts a turn, which takes the answer back, so a round stuck on a
+// turn or on a replacement the cluster keeps refusing — every claim of which has answered — is
+// one the controller prompts nobody of. The notice's issue is the outbox row's own.
+//
+// Reasons is one string, never a list: a single reason carries ", " inside it already — a moved
+// address reads `<where> <held>, now <handed>`, a pod-shape drift `image <was>, now <now>`, and a
+// plugin round's reason names both contracts — so a list built by splitting what the claim
+// records (supervise.Claim.UpdateReasons, one string) would cut each reason into pieces that read
+// as reasons of their own. It is the drift exactly as the round's task states it to the worker.
+type UpdateStalled struct {
+	Round   string          `json:"round"`
+	Pod     string          `json:"pod,omitempty"`
+	Reasons string          `json:"reasons"`
+	Waiting []UpdateWaiting `json:"waiting"`
+}
+
+// UpdateWaiting is one claim an update round is blocked on: its token, the role it holds, the
+// state it is in (supervise.ClaimState — a `failed` or operator-suspended claim waits for the
+// operator), CannotAnswer for a claim whose running process holds a plugin that predates
+// supervise.PodUpdateContract, which can never answer and which only an operator's drain
+// releases, and Answered for a claim that has already answered this round.
+//
+// Answered is what tells the controller which claims are its to prompt. Its playbook publishes
+// the update task to a claim that has not answered, and that publish starts a turn, which takes
+// the claim's answer back (supervise's takeBackSignal): told to do that for a claim that has
+// answered, it would undo the answers of exactly the round the daemon is stuck carrying
+// (skill://legion-controller/references/escalation.md).
+type UpdateWaiting struct {
+	Claim        string     `json:"claim"`
+	Role         claim.Role `json:"role,omitempty"`
+	State        string     `json:"state"`
+	CannotAnswer bool       `json:"cannotAnswer,omitempty"`
+	Answered     bool       `json:"answered,omitempty"`
+}
+
+// MarshalJSON keeps `waiting` an array on the wire, empty rather than `null`: the plugin's strict
+// reader refuses a null.
+func (u UpdateStalled) MarshalJSON() ([]byte, error) {
+	type wire UpdateStalled
+	out := wire(u)
+	if out.Waiting == nil {
+		out.Waiting = []UpdateWaiting{}
+	}
+	return json.Marshal(out)
 }
 
 // BlockedIssue is one issue Legion is waiting to start and the issues it waits on that are not
@@ -290,8 +347,11 @@ func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNot
 // the three (skill://legion-controller, "Free slots"). A tick is the daemon's periodic wake, whose
 // issue is the project key. An unslotted notice names a root admission found in the workflow with
 // neither a slot nor a place in the waiting line, which it took out of the workflow; its reason
-// names the status the root stood at. When admission sends each is its rule
-// (admit.Admission.wakeController and its callers, admit's releaseUnslotted).
+// names the status the root stood at. An update-stalled notice names an issue whose pod the
+// daemon opened an update round over and cannot replace: a worker has not answered within
+// `pod_update_notice_hours`, or one of them runs a plugin that can never answer, which only an
+// operator's drain releases (the daemon's reconcilePodUpdates). When admission sends each is its
+// rule (admit.Admission.wakeController and its callers, admit's releaseUnslotted).
 const (
 	TriageNotice         NoticeKind = "triage"
 	SlotFreeNotice       NoticeKind = "slot-free"
@@ -299,6 +359,7 @@ const (
 	TickNotice           NoticeKind = "tick"
 	UnslottedNotice      NoticeKind = "unslotted"
 	AwaitingPersonNotice NoticeKind = "awaiting-person"
+	UpdateStalledNotice  NoticeKind = "update-stalled"
 )
 
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
@@ -695,9 +756,18 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if (value.Kind == "catch-up") != (value.CatchUp != nil) {
 			return fmt.Errorf("a %s notice carries a catch-up only when it is one", value.Kind)
 		}
+		if value.Update != nil {
+			return fmt.Errorf("a %s notice carries an update round; only the controller's update-stalled notice does", value.Kind)
+		}
 	case ControllerNotice:
 		if !controllerOnlyNoticeKind(value.Kind) && !validNoticeKind(value.Kind) {
 			return fmt.Errorf("unknown controller notice kind %q", value.Kind)
+		}
+		if (value.Kind == UpdateStalledNotice) != (value.Update != nil) {
+			return fmt.Errorf("a %s notice carries an update round only when it is one", value.Kind)
+		}
+		if update := value.Update; update != nil && (update.Round == "" || len(update.Waiting) == 0) {
+			return fmt.Errorf("an update-stalled notice requires its round and the claims it waits on")
 		}
 	case SuperviseRequest:
 		if !validSuperviseOp(value.Op) {
@@ -772,7 +842,7 @@ func validNoticeKind(kind NoticeKind) bool {
 // architect's.
 func controllerOnlyNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice, AwaitingPersonNotice:
+	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice, AwaitingPersonNotice, UpdateStalledNotice:
 		return true
 	default:
 		return false
