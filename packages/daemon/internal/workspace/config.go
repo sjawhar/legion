@@ -222,7 +222,8 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 		root := jjWorkspaceRoot(command)
 		if root == "" {
 			// A jj command that names no -R is one of provisioning's two that create a repository,
-			// and jj would read and write an enclosing one as well as creating its own.
+			// and jj would read an enclosing one's configuration as well as creating its own, and
+			// write that one when it still holds a legacy .jj/repo/config.toml to migrate.
 			if err := refuseEnclosingWorkspace(command.Dir); err != nil {
 				return Result{}, err
 			}
@@ -393,11 +394,7 @@ func refuseSymlinkedLayout(root, dir string) error {
 
 // refuseEnclosingWorkspace refuses a jj command that creates a repository of its own — `jj git
 // clone` and `jj git init --colocate`, the only two provisioning runs that name no -R — when dir,
-// or any directory above it, holds a `.jj`. It completes the one rule Run's three refusals read
-// as: a child of provisioning's takes its working directory (the absolute Command.Dir every call
-// site names), its repository (this) and its git configuration (withoutGitConfigPairs and the
-// GIT_CONFIG_PARAMETERS strip) from the caller's intent, never from the process that happens to
-// start it.
+// or any directory above it, holds a `.jj`.
 //
 // jj has no ceiling option: it searches upward from the directory it runs in for the closest
 // `.jj` and opens that repository, which is how a test in a Legion issue pod came to write the
@@ -413,11 +410,12 @@ func refuseSymlinkedLayout(root, dir string) error {
 // The walk starts at the directory read physically, not at the path the caller named: a child
 // chdir'd into a path that holds a symlink asks the kernel where it stands, and the kernel
 // answers with the resolved path, so jj walks up from the link's target. A lexical walk with
-// filepath.Dir would pass over every `.jj` above that target and let the command open and write
-// it — which is exactly the state directory an operator reaches through a symlink, the one
-// refuseSymlinkedLayout deliberately allows, standing on a checkout. The refusal names both
-// paths when they differ, so an operator reading a symlinked state directory sees the path it
-// configured and the path jj stands in as one fact.
+// filepath.Dir would pass over every `.jj` above that target and let the command open that
+// repository and read its configuration, writing a config-id there when it still holds a legacy
+// `.jj/repo/config.toml` to migrate — which is exactly the state directory an operator reaches
+// through a symlink, the one refuseSymlinkedLayout deliberately allows, standing on a checkout.
+// The refusal names both paths when they differ, so an operator reading a symlinked state
+// directory sees the path it configured and the path jj stands in as one fact.
 func refuseEnclosingWorkspace(dir string) error {
 	resolved, err := resolvedPath(dir)
 	if err != nil {
@@ -431,7 +429,7 @@ func refuseEnclosingWorkspace(dir string) error {
 		enclosing := filepath.Join(above, ".jj")
 		switch info, err := os.Stat(enclosing); {
 		case err == nil && info.IsDir():
-			return fmt.Errorf("refusing to run jj in %s: %s is a Jujutsu repository, and this jj command creates a repository of its own and reads that one as well: jj migrates the enclosing repository's configuration, moving a legacy .jj/repo/config.toml into the config home and writing a config-id beside where it was, so the run writes that repository too; the directory the daemon provisions under must sit inside no Jujutsu repository — under `runtime: tmux` it is legion.yaml's state_dir, which a relative value resolves against the configuration file's own directory, so a legion.yaml kept inside a checkout puts the shared clone under that checkout's .jj", named, enclosing)
+			return fmt.Errorf("refusing to run jj in %s: %s is a Jujutsu repository, and this jj command creates a repository of its own and reads that one's configuration as well, and when it still holds a legacy .jj/repo/config.toml, migrates it, moving the file into the config home and writing a config-id beside where it was, so the run writes that repository too; the directory the daemon provisions under must sit inside no Jujutsu repository — under `runtime: tmux` it is legion.yaml's state_dir, which a relative value resolves against the configuration file's own directory, so a legion.yaml kept inside a checkout puts the shared clone under that checkout's .jj", named, enclosing)
 		case err != nil && !errors.Is(err, fs.ErrNotExist):
 			return fmt.Errorf("refusing to run jj in %s: read %s: %w", dir, enclosing, err)
 		}
@@ -530,18 +528,12 @@ func describeEntry(info fs.FileInfo, err error) string {
 
 // jjWorkspaceRoot is the workspace a jj command acts on: the value of its last -R (or
 // --repository) flag, and nothing else. Command.Dir is purely the working directory the child
-// runs in, so a command that names no -R names no workspace here and guardWorkspace is unchanged
-// for every command. Provisioning names a directory for its two rootless commands too — `jj git
-// clone` and `jj git init --colocate`, neither of which takes a -R — and reading that directory
-// as a workspace root would send them through guardWorkspace into refuseSymlinkedLayout, which
-// walks layoutDepth ancestors and would there Lstat the state directory itself, the one directory
-// deliberately left unchecked because an operator may reach it through a symlink.
-//
-// A -R does not keep jj off the repository its working directory sits in: jj 0.45.1 loads that
-// repository's configuration before it applies -R, so `jj -R <b> log` run inside a repository a
-// wrote a/.jj/repo/config-id. Every -R call site of this package is safe because its Dir is its
-// own -R target — RunCheckedIn, onClone's callers, and createWorkspace's `jj workspace add` —
-// and not because the flag fences jj in.
+// runs in, so a command that names no -R names no workspace here. Provisioning names a directory
+// for its two rootless commands too — `jj git clone` and `jj git init --colocate`, neither of
+// which takes a -R — and reading that directory as a workspace root would send them through
+// guardWorkspace into refuseSymlinkedLayout, which walks layoutDepth ancestors and would there
+// Lstat the state directory itself, the one directory deliberately left unchecked because an
+// operator may reach it through a symlink.
 func jjWorkspaceRoot(command Command) string {
 	root := ""
 	for i, arg := range command.Argv {
@@ -666,10 +658,11 @@ func RunChecked(ctx context.Context, run Runner, argv []string, env []string, di
 }
 
 // RunCheckedIn is RunChecked for a jj command run in ws's own workspace. It names the workspace
-// with -R, so jj opens ws.Dir itself and never searches its parent directories for a `.jj`, and
-// names ws's shared clone so the runner can hold the workspace's `.jj` and `.jj/repo` to it
-// (Command.Clone, guardWorkspace). Both Location paths must be non-empty: otherwise -R "" is
-// exactly the rootless command an empty guard cannot bind to a workspace.
+// with -R and runs the command in ws.Dir itself, which is what makes that -R safe
+// (runCheckedOnClone states the invariant), and names ws's shared clone so the runner can hold
+// the workspace's `.jj` and `.jj/repo` to it (Command.Clone, guardWorkspace). Both Location paths
+// must be non-empty: otherwise -R "" is exactly the rootless command an empty guard cannot bind
+// to a workspace.
 func RunCheckedIn(ctx context.Context, run Runner, ws Workspace, argv []string) (Result, error) {
 	if run == nil {
 		return Result{}, errors.New("workspace runner is required")
@@ -720,10 +713,15 @@ func onClone(cloneDir string, args ...string) ([]string, error) {
 	return append(append([]string{"jj"}, args...), "--ignore-working-copy", "--color=never", "-R", cloneDir), nil
 }
 
-// runCheckedOnClone is RunChecked for an onClone command, including its empty-clone refusal. It
-// runs in cloneDir, the directory the command's own -R names: a child of provisioning's takes its
-// working directory from the caller's intent, never from the process that starts it, and the
-// clone is there whenever a command is built against it.
+// runCheckedOnClone is RunChecked for an onClone command, including its empty-clone refusal. One
+// cloneDir reaches both the command's -R and Command.Dir, which is how every -R this package
+// builds is kept safe: a jj command that names -R is safe because it runs in that same directory,
+// not because the flag fences jj in. jj 0.45.1 loads the repository its working directory sits in
+// before it applies -R — `jj -R <b> log` run inside a repository a that still held a legacy
+// `.jj/repo/config.toml` migrated it, writing a/.jj/repo/config-id — so a -R whose Dir is some
+// other directory still opens whatever repository that directory sits in. A child of
+// provisioning's takes its working directory from the caller's intent, never from the process
+// that starts it, and the clone is there whenever a command is built against it.
 func runCheckedOnClone(ctx context.Context, run Runner, cloneDir string, args ...string) (Result, error) {
 	argv, err := onClone(cloneDir, args...)
 	if err != nil {
@@ -833,11 +831,8 @@ func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, cr
 // through the pane's env.
 func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) error {
 	for _, key := range []string{"user.name", "user.email"} {
-		probe, err := onClone(cloneDir, "config", "list", "--repo", "--include-overridden", key)
-		if err != nil {
-			return err
-		}
-		present, err := RunChecked(ctx, run, probe, nil, cloneDir)
+		probe := []string{"config", "list", "--repo", "--include-overridden", key}
+		present, err := runCheckedOnClone(ctx, run, cloneDir, probe...)
 		if err != nil {
 			return err
 		}
@@ -855,7 +850,7 @@ func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) 
 		if removed.ExitCode == 0 {
 			continue
 		}
-		rechecked, err := RunChecked(ctx, run, probe, nil, cloneDir)
+		rechecked, err := runCheckedOnClone(ctx, run, cloneDir, probe...)
 		if err == nil && strings.TrimSpace(rechecked.Stdout) == "" {
 			continue
 		}

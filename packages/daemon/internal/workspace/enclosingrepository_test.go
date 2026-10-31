@@ -54,10 +54,12 @@ func TestProvisionLeavesTheEnclosingRepositoryUntouched(t *testing.T) {
 		})
 	}
 
-	// The second row is the configuration refuseSymlinkedLayout's own comment allows — the state
-	// directory itself is not checked, because an operator may reach it through a symlink — and
-	// it is the live operator case, a legion.yaml kept inside a checkout with state_dir resolved
-	// against it. jj reads such a directory physically: a child chdir'd into a path that holds a
+	// The first row is the live operator case: a legion.yaml kept inside a checkout, whose
+	// relative state_dir resolves lexically against the configuration file's own directory
+	// (internal/config's underConfig), with no symlink anywhere in it. The second is the state
+	// directory an operator reaches through a link, the configuration refuseSymlinkedLayout's own
+	// comment allows — the state directory itself is not checked, because an operator may reach
+	// it that way. jj reads such a directory physically: a child chdir'd into a path that holds a
 	// symlink asks the kernel where it stands, and the kernel answers with the link's target, so
 	// jj walks up from inside the decoy however the caller spelled the path.
 	for name, stateDir := range map[string]func(t *testing.T, decoy string) string{
@@ -83,7 +85,7 @@ func TestProvisionLeavesTheEnclosingRepositoryUntouched(t *testing.T) {
 			req.Source = FromGitHub(staticToken(testInstallationToken), req.StateDir)
 			working, err := Provision(context.Background(), run, req)
 			if err == nil {
-				t.Fatalf("Provision with its state directory at %s made %s, want a refusal: the shared clone would sit below %s, and every jj that creates a repository there reads and writes that one as well", req.StateDir, working.Clone, decoy)
+				t.Fatalf("Provision with its state directory at %s made %s, want a refusal: the shared clone would sit below %s, and every jj that creates a repository there reads that one's configuration as well, and writes it when that repository still holds a legacy .jj/repo/config.toml to migrate", req.StateDir, working.Clone, decoy)
 			}
 			// Production names the directory read physically, so the assertion resolves the decoy
 			// too: a t.TempDir() below a symlinked TMPDIR makes the lexical path a different one.
@@ -296,8 +298,9 @@ func TestJJWorkspaceRootIsTheRepositoryFlagAlone(t *testing.T) {
 }
 
 // A jj command that creates a repository of its own is refused below a repository it does not
-// own, however far above it that repository sits, because jj reads and writes that one as well
-// as creating its own.
+// own, however far above it that repository sits, because jj reads that one's configuration as
+// well as creating its own, and writes it when that repository still holds a legacy
+// `.jj/repo/config.toml` to migrate.
 func TestAJJThatCreatesARepositoryIsRefusedInsideOne(t *testing.T) {
 	for name, tc := range map[string]struct {
 		// plant builds the tree below root and returns the directory the command would run in.
@@ -332,6 +335,20 @@ func TestAJJThatCreatesARepositoryIsRefusedInsideOne(t *testing.T) {
 				}
 				return makeDir(t, filepath.Join(root, "workspace", "state"))
 			},
+		},
+		// jj opens the repository the link points at: measured on jj 0.45.1, with `repository/.jj`
+		// a real repository and `workspace/.jj` a symlink to it, `jj log -r @` run in
+		// `workspace/state` printed a commit id rather than an error. os.Stat follows the link for
+		// that same reason, so a change back to os.Lstat fails this row and nothing else.
+		"a .jj that is a symlink to a repository's .jj": {
+			plant: func(t *testing.T, root string) string {
+				makeDir(t, filepath.Join(root, "workspace"))
+				if err := os.Symlink(makeDir(t, filepath.Join(root, "repository", ".jj")), filepath.Join(root, "workspace", ".jj")); err != nil {
+					t.Fatal(err)
+				}
+				return makeDir(t, filepath.Join(root, "workspace", "state"))
+			},
+			repository: "workspace",
 		},
 		"a directory below a repository that is not there yet": {
 			plant: func(t *testing.T, root string) string {

@@ -196,11 +196,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 // refusal.
 func undescribedMove(ctx context.Context, run Runner, workspace Workspace, local bookmarkRow) ([]string, error) {
 	revset := "(" + strings.Join(local.removed, " | ") + ")..(" + strings.Join(local.added, " | ") + ")"
-	read, err := onClone(workspace.Clone, "log", "-r", revset, "--reversed", "--no-graph", "-T", `commit_id ++ "|" ++ if(description, "1", "0") ++ "\n"`)
-	if err != nil {
-		return nil, err
-	}
-	result, err := RunChecked(ctx, run, read, nil, workspace.Clone)
+	result, err := runCheckedOnClone(ctx, run, workspace.Clone, "log", "-r", revset, "--reversed", "--no-graph", "-T", `commit_id ++ "|" ++ if(description, "1", "0") ++ "\n"`)
 	if err != nil {
 		return nil, err
 	}
