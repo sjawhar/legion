@@ -141,6 +141,7 @@ func mpStartPodAt(t *testing.T, binary, natsURL, dial, instance string, env ...s
 	}, env...)
 	held.Pass(cmd, "ENVOY_LISTEN_FD")
 	pod := &mpPod{Process: cmdtest.Start(t, "the listener "+instance, cmd), instance: instance, port: held.Port}
+	mpJournalOf(t).pod(pod)
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("%s's output, but for each delivery's lines (last 150 lines):\n%s", instance, mpTail(mpLinesWithout(pod.Output.String()), 150))
@@ -644,9 +645,11 @@ type mpPrompt struct {
 // POST /session/<id>/prompt_async 204 and records it, under the session, once the answer is
 // written. A prompt held (hold) is not answered until the listener gives up on it, and is not
 // recorded: the session never took it. A prompt to a failing session (fail) is answered 500 and
-// counted apart: the session never took it either.
+// counted apart: the session never took it either. Every prompt it sees, whichever of those it
+// is, is recorded in the row's delivery journal (mpJournal), which a failing row prints.
 type mpServingPort struct {
-	port int
+	port    int
+	journal *mpJournal
 
 	mu         sync.Mutex
 	prompts    map[string][]mpPrompt
@@ -659,7 +662,7 @@ type mpServingPort struct {
 
 func mpStartServingPort(t *testing.T) *mpServingPort {
 	t.Helper()
-	serving := &mpServingPort{prompts: map[string][]mpPrompt{}, holds: map[string]chan struct{}{}, failing: map[string]bool{}, failed: map[string]int{}, stopping: make(chan struct{})}
+	serving := &mpServingPort{journal: mpJournalOf(t), prompts: map[string][]mpPrompt{}, holds: map[string]chan struct{}{}, failing: map[string]bool{}, failed: map[string]int{}, stopping: make(chan struct{})}
 	server := httptest.NewServer(http.HandlerFunc(serving.serve))
 	t.Cleanup(server.Close)
 	// Runs before server.Close, which waits for every held prompt to return.
@@ -697,6 +700,7 @@ func (s *mpServingPort) serve(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.unexpected = append(s.unexpected, r.Method+" "+r.URL.Path+" "+text.String())
 		s.mu.Unlock()
+		s.journal.receipt(mpReceipt{session: sessionID, at: time.Now(), answer: mpPromptUnexpected})
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -710,6 +714,7 @@ func (s *mpServingPort) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 	if hold {
+		s.journal.receipt(mpReceipt{session: sessionID, event: event, at: time.Now(), answer: mpPromptHeld})
 		close(held)
 		select {
 		case <-r.Context().Done():
@@ -718,13 +723,16 @@ func (s *mpServingPort) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if failing {
+		s.journal.receipt(mpReceipt{session: sessionID, event: event, at: time.Now(), answer: mpPromptRefused})
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+	taken := time.Now()
 	s.mu.Lock()
-	s.prompts[sessionID] = append(s.prompts[sessionID], mpPrompt{event: event, at: time.Now()})
+	s.prompts[sessionID] = append(s.prompts[sessionID], mpPrompt{event: event, at: taken})
 	s.mu.Unlock()
+	s.journal.receipt(mpReceipt{session: sessionID, event: event, at: taken, answer: mpPromptTaken})
 }
 
 // hold holds the next prompt to sessionID: the serving port never answers it, until the listener
@@ -945,6 +953,7 @@ func mpConnectPublisher(t *testing.T, natsURL string) *mpPublisher {
 		t.Fatalf("connect the publisher: %v", err)
 	}
 	t.Cleanup(client.Close)
+	mpJournalOf(t).readsFrom(natsURL)
 	return &mpPublisher{t: t, client: client, consumer: bus.ListenerDurable(mpMachine)}
 }
 
@@ -986,6 +995,7 @@ func (p *mpPublisher) publishOn(target mpTarget) (mpMessage, error) {
 	}
 	m := mpMessage{event: event, session: target.session, published: time.Now()}
 	p.sent = append(p.sent, m)
+	mpJournalOf(p.t).publish(m, target.topic)
 	return m, nil
 }
 
@@ -1195,4 +1205,298 @@ func mpTail(text string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// The row's delivery journal.
+//
+// Every row of this suite publishes tens to hundreds of messages and asserts that each one
+// reached its session. When one did not, the row's output said which message was missing and
+// nothing else: the two lines a listener logs for every delivery are stripped out of the pods'
+// own output (mpLinesWithout), since a hundred messages' worth of them would bury everything
+// else, so a run that lost a message could not be told from one that was merely late with it.
+//
+// The journal is what the harness saw of each message: the publish, every prompt the serving
+// port answered for it, and - for a message the port did not take exactly once - the sequence
+// the stream holds it under, what the machine's durable has done with it, and the lines each pod
+// logged that name it, which is where an acknowledgement shows. A pod that logged
+// "listener agent delivered" prompted the message and acked it; a message the durable counts
+// neither unacknowledged nor waiting, that no pod ever logged, never reached a pod at all.
+//
+// That last reading is what this exists for. A message the stream stored, that no pod of the
+// machine ever logged and that the durable holds nothing for, was pushed by nats-server into the
+// durable's deliver subject in the moment after its only subscriber's connection went: the
+// server counts such a push undone, below zero, and the message leaves the pending list at its
+// ack wait with no redelivery (the same behaviour receive.go's hand-back keeps a subscriber for,
+// nats-server 2.10.29 consumer.go didNotDeliver, decDeliveryCount and hasMaxDeliveries). The
+// durable's own count of redeliveries rises by one for each message it loses that way.
+//
+// It is printed when the row fails, and only then: a row that passes is as quiet as before.
+
+// mpPromptTaken and the three beside it are what the serving port answered one prompt, as the
+// journal records it (mpServingPort.serve).
+const (
+	mpPromptTaken      = "204"
+	mpPromptHeld       = "held"
+	mpPromptRefused    = "500"
+	mpPromptUnexpected = "unexpected"
+)
+
+// mpJournalScanCap bounds the stream sequences a failing row reads back, so a row that published
+// more than any of this suite's do spends no longer in its cleanup.
+const mpJournalScanCap = 2000
+
+// mpJournalPodLines bounds how many messages the journal quotes the pods' own lines for, and how
+// many lines of one pod it quotes for each: a row that lost every message says so once rather
+// than in a thousand lines.
+const (
+	mpJournalPodLines    = 20
+	mpJournalPodMessages = 10
+)
+
+// mpPublication is one message the row published, with the topic it went on.
+type mpPublication struct {
+	message mpMessage
+	topic   string
+}
+
+// mpReceipt is one prompt the serving port saw and what it answered (mpPromptTaken and the three
+// beside it). event is empty for a request no session expects, which carries no event id.
+type mpReceipt struct {
+	session string
+	event   string
+	at      time.Time
+	answer  string
+}
+
+// mpJournal is one row's delivery journal (see above).
+type mpJournal struct {
+	started time.Time
+
+	mu        sync.Mutex
+	published []mpPublication
+	receipts  []mpReceipt
+	pods      []*mpPod
+	// natsURL is the row's NATS server as its own clients reach it, which the journal reads the
+	// stream and the durable through at the end (mpStreamReads). It is the publisher's
+	// (mpConnectPublisher), not a connection of its own, because a cleanup runs after the
+	// publisher's client was closed and before the server is stopped.
+	natsURL string
+}
+
+// mpJournals is each row's journal, keyed on its *testing.T: the harness's pieces are made one at
+// a time by the row - its pods, its serving port, its publisher - and share no object but the
+// test itself. A row whose pods live in a t.Run keeps the subtest's journal, with the subtest.
+var mpJournals sync.Map
+
+// mpJournalOf is t's journal, made on the first call. Its dump is registered before every pod's
+// own output is, so it is printed after them: the last thing a failing row says.
+func mpJournalOf(t *testing.T) *mpJournal {
+	if held, ok := mpJournals.Load(t); ok {
+		return held.(*mpJournal)
+	}
+	held, loaded := mpJournals.LoadOrStore(t, &mpJournal{started: time.Now()})
+	journal := held.(*mpJournal)
+	if !loaded {
+		t.Cleanup(func() { mpJournals.Delete(t) })
+		t.Cleanup(func() {
+			if t.Failed() {
+				journal.dump(t)
+			}
+		})
+	}
+	return journal
+}
+
+func (j *mpJournal) publish(m mpMessage, topic string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.published = append(j.published, mpPublication{message: m, topic: topic})
+}
+
+func (j *mpJournal) receipt(r mpReceipt) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.receipts = append(j.receipts, r)
+}
+
+func (j *mpJournal) pod(p *mpPod) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.pods = append(j.pods, p)
+}
+
+// readsFrom names the NATS server the journal reads the stream and the durable from.
+func (j *mpJournal) readsFrom(natsURL string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.natsURL = natsURL
+}
+
+// into is how long after the row's first harness call at came.
+func (j *mpJournal) into(at time.Time) string {
+	return "+" + at.Sub(j.started).Round(time.Millisecond).String()
+}
+
+// dump prints the journal. The row's own failure says which message it is about; this says where
+// that message went.
+func (j *mpJournal) dump(t *testing.T) {
+	j.mu.Lock()
+	published := slices.Clone(j.published)
+	receipts := slices.Clone(j.receipts)
+	pods := slices.Clone(j.pods)
+	natsURL := j.natsURL
+	j.mu.Unlock()
+	if len(published) == 0 && len(receipts) == 0 {
+		return
+	}
+	took := map[string][]mpReceipt{}
+	for _, receipt := range receipts {
+		took[receipt.event] = append(took[receipt.event], receipt)
+	}
+	var inQuestion []mpPublication
+	for _, publication := range published {
+		taken := 0
+		for _, receipt := range took[publication.message.event] {
+			if receipt.answer == mpPromptTaken {
+				taken++
+			}
+		}
+		if taken != 1 {
+			inQuestion = append(inQuestion, publication)
+		}
+	}
+	stored, durable := mpStreamReads(natsURL)
+	var report strings.Builder
+	fmt.Fprintf(&report, "the row's delivery journal: %d messages published, %d prompts at the serving port, %d messages the port did not take exactly once\n  the machine's durable: %s",
+		len(published), len(receipts), len(inQuestion), durable)
+	for _, publication := range published {
+		event := publication.message.event
+		fmt.Fprintf(&report, "\n  %s to %s: published %s on %s, %s; %s",
+			event, publication.message.session, j.into(publication.message.published), publication.topic,
+			mpStoredAs(stored, event), j.prompts(took[event]))
+	}
+	known := map[string]bool{}
+	for _, publication := range published {
+		known[publication.message.event] = true
+	}
+	for _, receipt := range receipts {
+		if !known[receipt.event] {
+			fmt.Fprintf(&report, "\n  a prompt to %s for %q, which the row published nothing for: %s (%s)",
+				receipt.session, receipt.event, j.into(receipt.at), receipt.answer)
+		}
+	}
+	for index, publication := range inQuestion {
+		if index == mpJournalPodMessages {
+			fmt.Fprintf(&report, "\n  and %d more messages the port did not take exactly once, whose lines are not quoted", len(inQuestion)-index)
+			break
+		}
+		event := publication.message.event
+		fmt.Fprintf(&report, "\n  what the pods logged for %s:", event)
+		for _, pod := range pods {
+			lines := mpLinesNaming(pod.Output.String(), event)
+			if len(lines) == 0 {
+				fmt.Fprintf(&report, "\n    %s logged no line that names it", pod.instance)
+				continue
+			}
+			for _, line := range lines {
+				fmt.Fprintf(&report, "\n    %s: %s", pod.instance, line)
+			}
+		}
+	}
+	t.Log(report.String())
+}
+
+// prompts is what the serving port answered for one message, in the order it answered.
+func (j *mpJournal) prompts(receipts []mpReceipt) string {
+	if len(receipts) == 0 {
+		return "the serving port saw no prompt for it"
+	}
+	answers := make([]string, len(receipts))
+	for index, receipt := range receipts {
+		answers[index] = fmt.Sprintf("prompted %s (%s)", j.into(receipt.at), receipt.answer)
+	}
+	return strings.Join(answers, ", ")
+}
+
+// mpStoredAs says what the stream holds the event under.
+func mpStoredAs(stored map[string]uint64, event string) string {
+	if seq, ok := stored[event]; ok {
+		return fmt.Sprintf("stored at stream sequence %d", seq)
+	}
+	if stored == nil {
+		return "the stream was not read"
+	}
+	return "no sequence of the stream holds it"
+}
+
+// mpLinesNaming is the lines of a pod's output that name event, at most mpJournalPodLines of
+// them. These are mostly the two lines a listener logs for every delivery, which the pod's own
+// output is stripped of (mpLinesWithout).
+func mpLinesNaming(output, event string) []string {
+	var named []string
+	for line := range strings.SplitSeq(output, "\n") {
+		if !strings.Contains(line, event) {
+			continue
+		}
+		if len(named) == mpJournalPodLines {
+			named = append(named, "... and more lines name it")
+			break
+		}
+		named = append(named, line)
+	}
+	return named
+}
+
+// mpStreamReads is what the stream and the machine's durable hold at the end of a failing row:
+// the stream sequence of every event the stream still holds, by event id, and one line describing
+// the durable. A message the serving port never took that the stream holds, that the durable
+// counts neither unacknowledged nor waiting, and that no pod ever logged, was dropped between the
+// two rather than delayed. It connects a client of its own, since a cleanup runs after the
+// publisher's was closed.
+//
+// A row whose own fault left the server down - one that stopped it and failed before it was back -
+// is answered by the dial below rather than by bus.Connect, whose ten attempts would hold the
+// cleanup of an already failing row for a minute.
+func mpStreamReads(natsURL string) (map[string]uint64, string) {
+	if natsURL == "" {
+		return nil, "not read: the row connected no publisher"
+	}
+	server, err := url.Parse(natsURL)
+	if err != nil {
+		return nil, fmt.Sprintf("not read: parse %s: %v", natsURL, err)
+	}
+	probe, err := net.DialTimeout("tcp", server.Host, time.Second)
+	if err != nil {
+		return nil, fmt.Sprintf("not read: %s did not answer: %v", server.Host, err)
+	}
+	_ = probe.Close()
+	client, err := bus.Connect([]string{natsURL})
+	if err != nil {
+		return nil, fmt.Sprintf("not read: connect %s: %v", natsURL, err)
+	}
+	defer client.Close()
+	consumer := bus.ListenerDurable(mpMachine)
+	state := ""
+	if info, err := client.JS().ConsumerInfo(bus.Stream, consumer); err != nil {
+		state = fmt.Sprintf("%s: %v", consumer, err)
+	} else {
+		state = fmt.Sprintf("%s: delivered to stream sequence %d, ack floor %d, %d unacknowledged, %d redelivered, %d waiting",
+			consumer, info.Delivered.Stream, info.AckFloor.Stream, info.NumAckPending, info.NumRedelivered, info.NumPending)
+	}
+	info, err := client.JS().StreamInfo(bus.Stream)
+	if err != nil {
+		return nil, state + fmt.Sprintf("; the stream was not read: %v", err)
+	}
+	events := map[string]uint64{}
+	for seq := info.State.FirstSeq; seq <= info.State.LastSeq && seq < info.State.FirstSeq+mpJournalScanCap; seq++ {
+		raw, err := client.JS().GetMsg(bus.Stream, seq)
+		if err != nil {
+			continue
+		}
+		var item contracts.Envelope
+		if json.Unmarshal(raw.Data, &item) == nil && item.EventID != "" {
+			events[item.EventID] = seq
+		}
+	}
+	return events, state
 }
