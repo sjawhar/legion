@@ -2128,15 +2128,13 @@ export default function envoyExtension(pi: PiApi): void {
       for (const subject of subjects) unfollow(subject);
       const id = held === "" ? sessionID : held;
       if (subjects.length === 0 || id === "") return;
-      void active?.client
-        .unsubscribe({ sessionID: id, topics: subjects })
-        .catch((error: unknown) =>
-          logger.warn("envoy: a role's notice subjects were not taken out of the registry", {
-            topics: subjects,
-            sessionID: id,
-            error: messageFor(error),
-          })
-        );
+      void active?.client.unsubscribe({ sessionID: id, topics: subjects }).catch((error: unknown) =>
+        logger.warn("envoy: a role's notice subjects were not taken out of the registry", {
+          topics: subjects,
+          sessionID: id,
+          error: messageFor(error),
+        })
+      );
     },
   });
 

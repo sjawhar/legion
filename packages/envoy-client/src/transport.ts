@@ -517,9 +517,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     // The client instance driving this session (`clientInstanceID`), omitted when the
     // caller has none so an older listener sees an unchanged body. The listener stores it
     // on the registry entry, where a soft role claim and a deregistration compare it.
-    ...(input.clientInstanceID === undefined
-      ? {}
-      : { client_instance_id: input.clientInstanceID }),
+    ...(input.clientInstanceID === undefined ? {} : { client_instance_id: input.clientInstanceID }),
     // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
     // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
     // re-subscribes on each tick). The listener stores it separately from the registering
