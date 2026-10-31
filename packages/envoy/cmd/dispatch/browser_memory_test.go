@@ -2558,15 +2558,17 @@ func TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory(t *testing.T) {
 // the Go memory limit it took from its container (requirePodGoMemoryLimit). At that default the
 // heap goal of a server whose budget is full is the limit itself, so the collector keeps every
 // byte of garbage the limit allows - and the limit bounds exactly what a pod's kernel charges,
-// what the runtime holds less what it has released. Measured on 2026-10-29, the three steps below
-// charged 2,669, 3,578 and 3,669 MiB of the pod's 4,096, 427 MiB under it at their worst, in a
-// drive of 412 s, and the keystrokes a person typed through the two heavy steps were answered in
-// 99th percentiles of 95 and 272 ms. Of what the Go limit bounds the same steps held
-// 2,772,696,200, 3,717,172,712 and 3,870,711,480 bytes, the last 5,240,914 past the limit, which
-// is the step that reads past it: over three runs it read 5,240,914, 15,501,378 and 34,453,570
-// bytes over, the allocation of a frame or a copy of tens of MiB mapped before the cycle it
-// triggers can hand anything back (podGoMemoryLimitMargin). VmRSS over the measured run read
-// 2,682, 3,587 and 4,361 MiB, the last 265 MiB past the pod itself: the difference
+// what the runtime holds less what it has released. Measured on 2026-10-31 over two runs on a
+// two-processor sandbox, the three steps below charged 2,738, 3,626 and 3,712 MiB and 2,697,
+// 3,622 and 3,705 MiB of the pod's 4,096, 384 MiB under it at their worst, in drives of 395 and
+// 408 s, and the keystrokes a person typed through the two heavy steps were answered in 99th
+// percentiles of 53 and 476 ms and of 54 and 381 ms. Of what the Go limit bounds the same steps
+// held 2,825,170,072, 3,750,493,688 and 3,874,238,088 bytes, and 2,791,115,928, 3,746,041,320
+// and 3,910,459,064, the last of each past the limit, which is the step that reads past it: it
+// read 8,767,522 and 44,988,498 bytes over, the allocation of a frame or a copy of tens of MiB
+// mapped before the cycle it triggers can hand anything back (podGoMemoryLimitMargin). VmRSS over
+// those runs read 2,774, 3,632 and 4,405 MiB, and 2,713, 3,623 and 4,512 MiB, the last of each
+// past the pod itself: the difference
 // is the pages the runtime released and gVisor keeps resident, which no unsandboxed pod is
 // charged (peakResident; the GKE Autopilot deployment names no runtimeClassName or GKE Sandbox
 // node pool, infra/gcp/dispatch_kube.go:492-501). The 4,302 and 4,424 MiB this drive once
@@ -2585,6 +2587,14 @@ func TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory(t *testing.T) {
 // their whole state back with a few words typed, two browsers open two copies of the
 // agent-rewritten document, of which the budget admits one and refuses the other with 4503 within
 // its arithmetic, and four struct-dense documents no room holds are read cold.
+//
+// Every one of those documents is built before the server starts and owes it no block index
+// (oweNoBlockIndex), so the only reads of them are the drive's own: a server left to index them
+// renders each whole within seconds of its boot, which both caches that rendering under the
+// document's stored stamp, so a cold read of it is answered from the cache and folds nothing, and
+// folds documents of a million structs beside the work the steps weigh. Each of the four cold
+// reads is then the first read of its document, and must fold its stored history under a grant of
+// the whole copy-heap bound.
 //
 // Through the cache's fill and the heavy step a person types in the small document's room, a
 // keystroke every 200 ms, each sent once the room has answered the last applied (startTyping).
@@ -2636,6 +2646,7 @@ func TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory(t *testing.
 	t.Logf("the worst case: the %d-byte budget, the %d-byte cache (%d documents of %d bytes each), the handoff's %d and the copy bound's %d come to %d bytes, against the %d-byte Go limit and the pod's %d; the documents took %s to build",
 		roomBudgetBytesForTest, documentReadBudgetForTest, len(cached), cacheWeight, heaviestHandoffEstimate, copyHeapBoundForTest, worst,
 		podGoMemoryLimit, podMemory, time.Since(building).Round(time.Second))
+	t.Logf("the drive's %d documents owe the server no block index, so the only reads of them are the drive's own", memory.oweNoBlockIndex(t))
 
 	server := memory.start(t)
 	requirePodGoMemoryLimit(t, server)
@@ -3223,6 +3234,36 @@ func (h *memoryHarness) cloneDocuments(t *testing.T, sourceID string, count int)
 		}
 	}
 	return copies
+}
+
+// oweNoBlockIndex clears the block index every document of the harness's issue owes, and returns
+// how many it cleared. Each document a drive builds owes one: every insert into artifact_versions
+// of markdown marks its document owed (migration
+// 0122_artifact_versions_block_index_trigger.up.sql), which an upload does and which
+// cloneDocuments does again for each copy's versions.
+//
+// A server reads each owed document whole on its own within seconds of its boot: its block-index
+// reconciliation lists twenty at a time, two seconds apart while a batch is full
+// (blockIndexDocumentBatch, blockIndexStep, internal/dispatch/docs/block_index.go:25-29), and
+// renders each of them through the reads a browser's would take (indexOwedDocument, :344-348).
+// Such a read stores its rendering in the cold reads' cache under the document's stored stamp
+// (foldDocument, internal/dispatch/docs/read_cache.go:331-354), and a drive's own cold read of
+// that same stamp is then served from the cache and folds nothing (coldRead, :299-301) - which is
+// what answered two of the four cold reads of
+// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory in 230 and 425 ms here on
+// 2026-10-31, against the 12.8 and 19.8 s the two that folded took, and left that drive a grant
+// of the copy-heap bound short of the one it means each cold read to hold. It also folds
+// documents of a million structs beside the work each step of a drive weighs.
+func (h *memoryHarness) oweNoBlockIndex(t *testing.T) int64 {
+	t.Helper()
+	cleared, err := h.database.Pool.Exec(context.Background(), `
+		delete from document_block_versions b
+		using artifacts a where a.id = b.artifact_id and a.issue_key = $1
+	`, h.issue)
+	if err != nil {
+		t.Fatalf("clear the block index the drive's documents owe: %v", err)
+	}
+	return cleared.RowsAffected()
 }
 
 // artifactName names a document for a log line: its name, and whether it is its issue's primary
