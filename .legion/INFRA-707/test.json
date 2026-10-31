@@ -2,62 +2,68 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-707",
-  "completed": "2026-10-31T14:25:00Z",
+  "completed": "2026-10-31T20:40:00Z",
   "verdict": "pass",
-  "headTested": "220af58097b28aaf551218b961675f687f0cdd8c",
-  "branchHead": "ad4ac56b60f286368e6d9a48f1d1998d9d2a071f",
-  "round": 7,
-  "roundShape": "A confirmation round for the pull request's own diff, with one re-measurement the architect asked for because main's ygo pin moved under it. Nothing of the real-surface verification was repeated beyond what that pin makes necessary.",
-  "roundShapeCheck": {
-    "command": "LEGION_WORKSPACE=<workspace> python3 round-shape.py 688fe778051692832d1d21f7c20d3b74fea3a5d1 220af58097b28aaf551218b961675f687f0cdd8c 2496 (version 3, both ids resolved with jj first)",
-    "result": "files whose own diff differs: 1 - .dispatch/architecture/dispatch-docs.md",
-    "reading": "One documentation file, no runtime and no test file, so a confirmation round by the rule. It is the merge's one conflict, where main's rewritten sentence was kept whole and this pull request's sentence appended, which is what the implementer records and what the fingerprint change (6da3c25e -> 51c749df) is."
-  },
-  "whyThisRoundRanTestsAnyway": {
-    "fact": "The merge moved the ygo fork pin under the pull request: packages/envoy/go.mod at 688fe778 reads `replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.4`, and at 220af580 it reads `v1.54.1-sami.1`.",
-    "consequence": "Every document this change stores and folds is a ygo document, so a confirmation on the diff alone would have left the CRDT under it unmeasured. The runs below are at the new pin."
-  },
-  "proof": [
-    {
-      "criterion": "1. A test drives an agent write racing browser updates on one warm room, and passes at the head over enough rounds - re-measured under main's new ygo pin.",
-      "surface": "Go tests against a real Postgres (the harness's 16.2 with pgvector), the whole stored-order family at the new pin",
-      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB DISPATCH_TEST_DATABASE_URL=<local> go test -p 1 ./internal/dispatch/docs/ -run 'TestStoredOrderBackfill|TestAnEditWhoseForkWentAndWhoseRoomHasCommittedIsRefusedAsUnavailable|TestStoredOrderHeld|TestStoredOrderEdit|TestStoredOrderSettlement|TestStoredOrderSnapshot|TestStoredOrderTwoBrowsers|TestStoredOrderAccept|TestStoredOrderRemeasured|TestStoredOrderChecker' -count=1 ; then the soak with -args -stored-order-rounds=300",
-      "observed": "The family is ok in 14.874s (the ten window tests, the checker's crafted faults, my backfill test and my 503 test among them). The soak gives `rounds=300 counted=300 mismatching_rounds=0 mismatching_counted_rounds=0 mismatches=0 writes=600 write_p50=123.505804ms write_p99=458.062182ms elapsed=11m23.632s`, PASS in 688.91s. The new pin is also visibly faster on this pod: the same soak at the old pin read write_p50 271.08ms and write_p99 1.174s in round 5, and 389ms / 3.295s in round 3.",
-      "headSha": "220af58097b28aaf551218b961675f687f0cdd8c",
-      "negativeControl": "Not rebuilt at this head and not needed for a pin move: the merge-base control was run at round 4's head (11 red, soak 12 of 12 counted rounds mismatching, 154 mismatches) and the pull request's own diff is unchanged since. The control that matters for THIS round's question is the backfill race test below, which is sensitive to the CRDT's behaviour and still red when the lock moves."
-    },
-    {
-      "criterion": "The backfill's lock and the two tests I added hold under the new ygo pin.",
-      "surface": "The same Go suite under the race detector",
-      "command": "cd packages/envoy && CGO_ENABLED=1 GOMAXPROCS=4 GOMEMLIMIT=12GiB DISPATCH_TEST_DATABASE_URL=<local> go test -race -p 1 ./internal/dispatch/docs/ -run TestStoredOrderBackfillDoesNotStoreTheRoomsCommittedEditTwice -count=20",
-      "observed": "ok 18.225s, twenty runs under -race at the new pin, no failure and no data race. My TestStoredOrderBackfillStampOverAnUnstoredEdit and TestAnEditWhoseForkWentAndWhoseRoomHasCommittedIsRefusedAsUnavailable are in the family run above and pass.",
-      "headSha": "220af58097b28aaf551218b961675f687f0cdd8c",
-      "negativeControl": "Round 5's: the same test red within five runs when the lock is moved back to the first append (`bob's edit is stored in 2 rows, want 1`). The mutation was not repeated at this head; what changed under it is the CRDT, not the lock, and twenty clean race runs is the measurement that pin asks for."
-    }
-  ],
-  "bareGates": {
-    "build": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB go build ./... - exit 0",
-    "vet": "the same over ./internal/dispatch/docs/ ./cmd/dispatch/ ./loadtest/browsertype/ - exit 0"
-  },
-  "memory": {
-    "why": "The tree's OOM rule, and the first run of mine under it.",
-    "how": "A bounded sampler of /sys/fs/cgroup/memory/memory.usage_in_bytes every 2 s, started as the harness's own named background job (mem-sampler-infra-707, pid 4486) and stopped with proc://mem-sampler-infra-707/kill at the end of the runs - the form that works in this shell, where $!, jobs -p, kill %1 and $BASHPID all fail.",
-    "result": "711 samples over 24m36s covering the family run, the race runs and the soak: sampled peak 2.55 GiB of the container's 19.0 GiB limit, minimum 1.95 GiB. So the docs suite under -p 1 with GOMAXPROCS=4 and GOMEMLIMIT=12GiB uses about an eighth of the limit on this pod, and nothing here approaches the OOM that stopped INFRA-771. The figure is a sampled peak: a spike shorter than 2 s is missed, and the cgroup serves no max_usage_in_bytes under gVisor to check it against."
-  },
-  "ciAtTheHead": {
-    "head": "220af58097b28aaf551218b961675f687f0cdd8c",
-    "readAt": "2026-10-31T14:20Z",
-    "failing": [],
-    "settled": ["changes", "pr-title"],
-    "unreadBecauseStillRunning": ["lint", "test", "docs / build", "envoy-go", "envoy-go-race", "envoy-go-race-api", "envoy-go-race-docs", "envoy-go-race-pmdoc", "dispatch", "dispatch-browser-multiprocess", "dispatch-memory", "dispatch-multiprocess", "envoy-session-stall", "envoy-smoke", "envoy-infra-go", "listener-server-change", "worker-image / build", "ci-filters"],
-    "skipped": ["typecheck", "pi-shared", "pi-legion", "pi-envoy", "and the other package lanes the filters skip"],
-    "note": "Eighteen lanes are still running and are therefore UNREAD; none has failed. I read once and did not wait.",
-    "thePreviousHeadsRed": "At 688fe778 the red was envoy-go-race-api with one failing test, which I read in its own job log (job 124510137519): `--- FAIL: TestAReconnectCatchesUpWhatTheListenerMissed (0.39s)`, and nothing else failed in that job. That is main's flake, and this head carries its fix: 3b0ae77e9 'test(dispatch): the reconnect catch-up test waits for the hub to settle and the listener's backend to exit (#2594)' is an ancestor of 220af580 (git merge-base --is-ancestor). So the red that sent round 6 back is answered by the merge itself, not by anything of this pull request."
+  "headTested": "e99cd22c953b841d951d0a70fc44104039be71e0",
+  "branchHead": "6f4b45aecc26b96421f0d306cdec6dafd5b351d6",
+  "round": 8,
+  "roundShape": "A full round, as the INFRA-514 architect set at 20:10Z: main 3c78856b (#2604) moved runtime code under the pull request - ygo to v1.54.1-sami.3 and every room copy through newDocumentCopy with the format cleanup off - and the implementer added a formatted-write stored-order test and carried #2604's roomLoad change into the moved roomcursor.go.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Both of its claims re-run at this head, each with its own control. The stored-order family, the backfill tests and my 503 test are ok in 24.178s, TestStoredOrderFormattedWritesReplayToEveryVersion among them; the backfill race test is ok twenty times under -race (19.207s); the soak gives rounds=300 counted=300 mismatches=0. The implementer's negative control for the new test reproduces exactly on my own mutated copy (below). I did not re-run its local real-server run, which it took at 6b5c1050: the stored-order code has not moved since, and what moved under it, the ygo pin, I measured directly with the reviewer's replay harness instead, which is a sharper instrument for that question than one 60-second server run."
   },
   "failed": 0,
   "failures": [],
+  "proof": [
+    {
+      "criterion": "The round's new test: a room's formatted writes, its own and a browser's, replay from the store to every version at ygo v1.54.1-sami.3.",
+      "surface": "Go test against a real Postgres, formatted commits through Server.Apply and a browser's updates with a named version after each, then CheckStoredOrder over the stored history",
+      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB DISPATCH_TEST_DATABASE_URL=<local> go test -p 1 ./internal/dispatch/docs/ -run 'TestStoredOrder|Backfill|TestAnEditWhoseForkWentAndWhoseRoomHasCommittedIsRefusedAsUnavailable' -count=1 -v",
+      "observed": "PASS for TestStoredOrderFormattedWritesReplayToEveryVersion (0.85s) and for the whole family beside it: the ten window tests, TestStoredOrderChecker, the three Backfill tests, my TestStoredOrderBackfillStampOverAnUnstoredEdit and TestAnEditWhoseForkWentAndWhoseRoomHasCommittedIsRefusedAsUnavailable, and the short soak - ok 24.178s in all.",
+      "headSha": "e99cd22c953b841d951d0a70fc44104039be71e0",
+      "negativeControl": "The cleanup turned back on in a scratch copy of the head's tree (tree.go:308, newDocumentCopy's crdt.WithFormatCleanup(false) changed to (true)): FAIL, `the last version holds \"seed\\n\\n*xy*\\n\\n*xy*\\n\", want the room's \"seed\\n\\n*x*y\\n\\n*xy*\\n\"` - the implementer's claimed failure, word for word, from my own mutation."
+    },
+    {
+      "criterion": "The ygo pin the merge brings is the one that makes a replica's replay match the room: the reviewer's 3,000-run replay harness finds no divergence at this head's pin with Dispatch's own copy option.",
+      "surface": "The reviewer's ygoexp harness (dispatch://INFRA-707/artifact/ygo-replay-harness-tar-gz; I copied the issue volume's source into a directory of my own and edited only my copy), 3,000 seeds of 40 random YText insert/format/delete steps, comparing CaptureSnapshot and ToDelta of the live document and of a replica replayed as renderedReplica.takeLocked does",
+      "command": "In my copy's go.mod, the replace line set to the head's pin, github.com/sjawhar/ygo v1.54.1-sami.3 (packages/envoy/go.mod:162); then `GOMAXPROCS=4 GOMEMLIMIT=4GiB GOFLAGS=-mod=mod go run .` from ygoexp (room and peer edits) and from ygoexp/localonly (room edits only), first as the reviewer wrote them, then with Dispatch's own replica option added to the `rep = crdt.New()` line of both: crdt.WithFormatCleanup(false), which is what newDocumentCopy sets (tree.go:308)",
+      "observed": "With the option, both workloads give `runs with state divergence: 0 delta divergence: 0 state-div runs where replica ran its own cleanup before: 0 delta-div runs likewise: 0`. That is the pass the reviewer named, and it is the first run of this harness at this pin.",
+      "headSha": "e99cd22c953b841d951d0a70fc44104039be71e0",
+      "negativeControl": "The same pin WITHOUT the option, which is ygo's default: mixed 700 state / 41 delta, local-only 1243 / 329, every one of them a run where the replica had committed its own cleanup transaction first. Those are the same numbers the reviewer measured at v1.54.1-sami.1, so the new pin alone does not fix the divergence - the pin plus Dispatch's cleanup-off copy does, which is exactly what #2604 and this pull request's newDocumentCopy do together."
+    },
+    {
+      "criterion": "1. A test drives an agent write racing browser updates on one warm room and passes over enough rounds - re-measured at this head.",
+      "surface": "Go tests against a real Postgres, under the tree's caps",
+      "command": "the soak with -args -stored-order-rounds=300; and CGO_ENABLED=1 go test -race -p 1 -run TestStoredOrderBackfillDoesNotStoreTheRoomsCommittedEditTwice -count=20",
+      "observed": "Soak: `rounds=300 counted=300 mismatching_rounds=0 mismatching_counted_rounds=0 mismatches=0 writes=600 write_p50=142.816374ms write_p99=521.746859ms elapsed=12m20.045s`, PASS in 743.15s. Race: ok 19.207s, twenty runs, no data race.",
+      "headSha": "e99cd22c953b841d951d0a70fc44104039be71e0",
+      "negativeControl": "Round 5's lock mutation for the race test (red within five runs with the lock moved back) and round 4's merge-base control for the soak (11 red, 154 mismatches); neither was repeated here, because what moved under them this round is the CRDT, which the harness above measures directly."
+    }
+  ],
+  "theCarryOf2604sRoomLoad": {
+    "question": "The merge carried #2604's roomLoad change out of pending_authors.go into roomcursor.go, where this pull request had moved that code. Is the carry faithful?",
+    "how": "I diffed the two functions against #2604's own text, and then checked every line #2604 adds to pending_authors.go against the head's roomcursor.go and pending_authors.go together.",
+    "result": "read(head, state) and takeState() are BYTE-IDENTICAL to #2604's (diff prints nothing for either). All 17 added lines of #2604's pending_authors.go hunk are present at the head, 0 missing. The one caller is wired: websocket.go:444 `return record.(*roomLoad).takeState()`.",
+    "reading": "The carry is faithful; nothing of #2604 was dropped or altered by the move."
+  },
+  "memory": {
+    "sampler": "bounded loop over /sys/fs/cgroup/memory/memory.usage_in_bytes every 2 s, started as the named job mem-sampler-infra-707-r8 (pid 15729) and stopped with proc://mem-sampler-infra-707-r8/kill",
+    "result": "498 samples over 18m43s covering the family run, the race runs and the soak: sampled peak 3.53 GiB of the container's 19.0 GiB limit. A sampled peak is a floor: a spike shorter than 2 s is missed, and gVisor serves no max_usage_in_bytes to check it against.",
+    "leftoverCheck": "`ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|docs.test|go test|ygoexp'` after the kill: 0 lines, judged by lines and not by exit status. Nothing of mine is left running."
+  },
+  "ciAtTheHead": {
+    "head": "e99cd22c953b841d951d0a70fc44104039be71e0",
+    "readAt": "2026-10-31T20:38Z",
+    "failing": [],
+    "settled": ["changes"],
+    "unreadBecauseStillRunning": ["lint", "test", "pr-title", "docs / build", "envoy-go", "envoy-go-race", "envoy-go-race-api", "envoy-go-race-docs", "envoy-go-race-pmdoc", "dispatch", "dispatch-browser-multiprocess", "dispatch-memory", "dispatch-multiprocess", "envoy-session-stall", "envoy-smoke", "envoy-infra-go", "listener-server-change", "worker-image / build", "ci-filters"],
+    "skipped": ["typecheck", "pi-shared", "pi-legion", "pi-envoy", "and the other package lanes the filters skip"],
+    "ciOk": "ci-ok has NOT been created at this head yet: it is the aggregate and appears when its inputs settle, so there is nothing to read for it and I name it unread with the rest.",
+    "note": "Nineteen lanes plus the aggregate are unread; none has failed. Read once, at 20:38Z, and not waited for."
+  },
   "notes": [
-    "I added no commit this round; my handoff push carries the skip-checks trailer, so the head's CI run is not restarted.",
-    "Everything else of the issue's evidence stands as rounds 3 to 5 recorded it: acceptance 2's cluster comparison at eb0fe0be (23 typed-document checks clean against a merge-base control mismatching on 5 of 6), acceptance 3's interleaved pairs, acceptance 4's three first-hand agreements, and the merge-base control for acceptance 1."
+    "I added no commit this round; the handoff push carries the skip-checks trailer, so the head's CI run is not restarted.",
+    "I edited no file of the reviewer's harness in place: its copy on the issue volume is untouched, and my edits (the pin and the cleanup-off option) are in a copy of my own under $TMPDIR.",
+    "Acceptance 2, 3 and 4 stand as rounds 3 to 5 recorded them. Nothing this round touches a load step or the cluster path; the ygo pin is the one thing that moved under them, and the harness above measures it over 3,000 replays rather than one run."
   ]
 }
