@@ -134,6 +134,7 @@ func dispatchClusterOnlyRefusals() []dispatchInput {
 		{"databaseVersion", func(a *gcp.DispatchArgs) { a.DatabaseVersion = pulumi.StringRef("POSTGRES_18") }},
 		{"databaseTier", func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef("db-custom-4-15360") }},
 		{"databaseAvailabilityType", func(a *gcp.DispatchArgs) { a.DatabaseAvailabilityType = pulumi.StringRef("REGIONAL") }},
+		{"databaseQueryInsights", func(a *gcp.DispatchArgs) { a.DatabaseQueryInsights = pulumi.BoolRef(true) }},
 		{"namespace", func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef("example-namespace") }},
 		{"existingNamespace", func(a *gcp.DispatchArgs) { a.ExistingNamespace = pulumi.BoolRef(true) }},
 		{"replicas", func(a *gcp.DispatchArgs) { a.Replicas = pulumi.IntRef(2) }},

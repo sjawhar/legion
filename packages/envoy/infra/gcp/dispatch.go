@@ -198,6 +198,11 @@ type DispatchArgs struct {
 	DatabaseVersion    *string `pulumi:"databaseVersion,optional"`
 	DatabaseTier       *string `pulumi:"databaseTier,optional"`
 	DeletionProtection *bool   `pulumi:"deletionProtection,optional"`
+	// DatabaseQueryInsights turns Cloud SQL Query Insights on (true) or off (false) for the
+	// instance, recording each query's application tags and client address with it. Unset, the
+	// instance's settings carry no insightsConfig and the component leaves Query Insights as the
+	// instance has it, since the bridged provider declares the block Optional and Computed.
+	DatabaseQueryInsights *bool `pulumi:"databaseQueryInsights,optional"`
 	// DatabaseAvailabilityType is the Cloud SQL instance's availability type: ZONAL, one zone and
 	// the default, or REGIONAL, a standby in a second zone that Cloud SQL fails over to. Switching
 	// changes the instance in place, restarting it once.
@@ -437,6 +442,7 @@ type dispatchSettings struct {
 	appClientID, appID                          string
 	appKeySecretName, appKeySecretKey           string
 	deletionProtection, existingNamespace       bool
+	databaseQueryInsights                       *bool
 	replicas                                    int
 	frontDoorReplicas, listenerReplicas         int
 	natsInCluster                               bool
@@ -639,6 +645,7 @@ func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchInput {
 		{"databaseVersion", args.DatabaseVersion != nil},
 		{"databaseTier", args.DatabaseTier != nil},
 		{"databaseAvailabilityType", args.DatabaseAvailabilityType != nil},
+		{"databaseQueryInsights", args.DatabaseQueryInsights != nil},
 		{"namespace", args.Namespace != nil},
 		{"existingNamespace", args.ExistingNamespace != nil},
 		{"replicas", args.Replicas != nil},
@@ -965,6 +972,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		}
 		s.databaseTier = *args.DatabaseTier
 	}
+	s.databaseQueryInsights = args.DatabaseQueryInsights
 	s.databaseAvailabilityType = dispatchAvailabilityZonal
 	if args.DatabaseAvailabilityType != nil {
 		switch availability := *args.DatabaseAvailabilityType; availability {

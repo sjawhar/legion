@@ -1913,6 +1913,36 @@ func TestDispatchProtectsItsInstanceServerSide(t *testing.T) {
 	}
 }
 
+// databaseQueryInsights set either way renders insightsConfig, and changes nothing else the
+// instance registers: true turns Query Insights on with each query's application tags and client
+// address, false turns all three off. The false case must render the block, since the bridged
+// provider declares it Optional and Computed and omitting it would leave Query Insights on
+// wherever it is on, making the input one-way. Unset, the settings carry no insightsConfig at
+// all, so an instance deployed before the input existed sees no change.
+func TestDispatchDatabaseQueryInsights(t *testing.T) {
+	instanceSettings := func(t *testing.T, args *gcp.DispatchArgs) map[string]any {
+		t.Helper()
+		m, err := runDispatch(t, args, true)
+		require.NoError(t, err)
+		return m.One(t, "gcp:sql/databaseInstance:DatabaseInstance").Inputs.Mappable()["settings"].(map[string]any)
+	}
+	defaults := instanceSettings(t, dispatchArgs())
+	require.NotContains(t, defaults, "insightsConfig")
+
+	for _, on := range []bool{true, false} {
+		t.Run(fmt.Sprintf("%t", on), func(t *testing.T) {
+			args := dispatchArgs()
+			args.DatabaseQueryInsights = pulumi.BoolRef(on)
+			got := instanceSettings(t, args)
+			require.Equal(t, map[string]any{
+				"queryInsightsEnabled": on, "recordApplicationTags": on, "recordClientAddress": on,
+			}, got["insightsConfig"])
+			delete(got, "insightsConfig")
+			require.Equal(t, defaults, got)
+		})
+	}
+}
+
 // The instance runs the major databaseVersion names, and POSTGRES_18 when it is unset; the
 // settings the component resolves name the same version.
 func TestDispatchInstanceRunsTheDatabaseVersion(t *testing.T) {

@@ -163,6 +163,26 @@ func newDispatchDatabase(ctx *pulumi.Context, comp *Dispatch, name string, args 
 	if err != nil {
 		return nil, err
 	}
+	settings := &sql.DatabaseInstanceSettingsArgs{
+		DeletionProtectionEnabled: pulumi.Bool(s.deletionProtection),
+		Tier:                      pulumi.String(s.databaseTier), Edition: pulumi.String("ENTERPRISE"), AvailabilityType: pulumi.String(s.databaseAvailabilityType), DiskType: pulumi.String("PD_SSD"), DiskSize: pulumi.Int(10), DiskAutoresize: pulumi.Bool(true),
+		IpConfiguration:     &sql.DatabaseInstanceSettingsIpConfigurationArgs{Ipv4Enabled: pulumi.Bool(false), PrivateNetwork: network.ID(), SslMode: pulumi.String("ENCRYPTED_ONLY")},
+		BackupConfiguration: &sql.DatabaseInstanceSettingsBackupConfigurationArgs{Enabled: pulumi.Bool(true), PointInTimeRecoveryEnabled: pulumi.Bool(true), StartTime: pulumi.String("08:00"), TransactionLogRetentionDays: pulumi.Int(7), BackupRetentionSettings: &sql.DatabaseInstanceSettingsBackupConfigurationBackupRetentionSettingsArgs{RetainedBackups: pulumi.Int(14)}},
+	}
+	// The block is rendered for either value, because the bridged Terraform provider declares
+	// settings.insights_config Optional and Computed (terraform-provider-google-beta v8.6.0,
+	// google-beta/services/sql/resource_sql_database_instance.go:899-902) and
+	// terraform-plugin-sdk/v2's diffList returns no diff for such a block that is in state and
+	// absent from the configuration (helper/schema/schema.go:1351-1353). Omitting the block for
+	// false would leave Query Insights on wherever it is already on, so the input would be
+	// one-way. Unset, the settings carry no insightsConfig and the instance keeps whatever it
+	// has, which is what an instance deployed before the input existed needs.
+	if s.databaseQueryInsights != nil {
+		on := *s.databaseQueryInsights
+		settings.InsightsConfig = &sql.DatabaseInstanceSettingsInsightsConfigArgs{
+			QueryInsightsEnabled: pulumi.Bool(on), RecordApplicationTags: pulumi.Bool(on), RecordClientAddress: pulumi.Bool(on),
+		}
+	}
 	// AvailabilityType is databaseAvailabilityType. The bridged Terraform provider declares
 	// settings.availability_type without ForceNew (terraform-provider-google-beta v8.6.0, commit
 	// e6f3d61a347c, the upstream pulumi-gcp v10.1.0 bridges:
@@ -171,12 +191,7 @@ func newDispatchDatabase(ctx *pulumi.Context, comp *Dispatch, name string, args 
 	// cannot be stopped once started.
 	instance, err := sql.NewDatabaseInstance(ctx, s.hostname, &sql.DatabaseInstanceArgs{
 		DatabaseVersion: pulumi.String(s.databaseVersion), Region: pulumi.String(s.region), DeletionProtection: pulumi.Bool(s.deletionProtection),
-		Settings: &sql.DatabaseInstanceSettingsArgs{
-			DeletionProtectionEnabled: pulumi.Bool(s.deletionProtection),
-			Tier:                      pulumi.String(s.databaseTier), Edition: pulumi.String("ENTERPRISE"), AvailabilityType: pulumi.String(s.databaseAvailabilityType), DiskType: pulumi.String("PD_SSD"), DiskSize: pulumi.Int(10), DiskAutoresize: pulumi.Bool(true),
-			IpConfiguration:     &sql.DatabaseInstanceSettingsIpConfigurationArgs{Ipv4Enabled: pulumi.Bool(false), PrivateNetwork: network.ID(), SslMode: pulumi.String("ENCRYPTED_ONLY")},
-			BackupConfiguration: &sql.DatabaseInstanceSettingsBackupConfigurationArgs{Enabled: pulumi.Bool(true), PointInTimeRecoveryEnabled: pulumi.Bool(true), StartTime: pulumi.String("08:00"), TransactionLogRetentionDays: pulumi.Int(7), BackupRetentionSettings: &sql.DatabaseInstanceSettingsBackupConfigurationBackupRetentionSettingsArgs{RetainedBackups: pulumi.Int(14)}},
-		},
+		Settings: settings,
 	}, child, pulumi.DependsOn([]pulumi.Resource{connection}))
 	if err != nil {
 		return nil, err

@@ -556,7 +556,7 @@ it.
 | VPC, subnetwork, router and Cloud NAT | Private Autopilot nodes can pull images and reach the tailnet control plane without public node addresses. | Built |
 | Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. | Not built |
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. | Built |
-| Cloud SQL instance, database, user and generated password | PostgreSQL 18 by default (`databaseVersion`), private IP only, automated backups and point-in-time recovery. | Not built |
+| Cloud SQL instance, database, user and generated password | PostgreSQL 18 by default (`databaseVersion`), private IP only, automated backups and point-in-time recovery, and, with `databaseQueryInsights`, Query Insights. | Not built |
 | Kubernetes namespace (not with `existingNamespace`), ServiceAccount `<hostname>`, Secrets, ConfigMap and SecretProviderClass | The app's and the listener's account, which Workload Identity lets mount the NATS seed; the generated application secrets (`<hostname>-dispatch`), the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the front door's auth key (`<hostname>-tailnet-auth-key`, one key `TS_AUTHKEY`), the Serve configuration (ConfigMap `<hostname>-serve`, rendered from the resolved `tailnetService`), and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). | Not built |
 | ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it, and no `update`, since the pods send merge patches), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. The pod does not automount the account's token: only `cert-publish`, which calls the API server, mounts it, so the tailnet-facing `tailscale` and `advertiser` containers hold no credential for the Secret. | Not built |
 | Secret `<hostname>-tailnet-tls` | The Tailscale Service's certificate, its key and the ACME account key (keys `tls.crt`, `tls.key` and `acme-account.key.pem`), which the front door's pods publish and seed from ([The front door](#the-front-door)). The component declares it with no data and ignores its contents, so a later preview never plans to undo what the pods wrote, and no pod template carries its checksum, so a renewed certificate rolls no pod. | Not built |
@@ -605,6 +605,20 @@ defaults to `POSTGRES_18`, `databaseTier` to `db-custom-4-15360`, `namespace` to
 `deletionProtectionEnabled`, which refuses a delete from the API or the console too, and the
 `dispatch` database's `deletionPolicy` `PREVENT` (otherwise `DELETE`), which keeps an instance
 replacement from deleting the database first.
+`databaseQueryInsights`, unset by default, set to `true` turns on Cloud SQL
+[Query Insights](https://cloud.google.com/sql/docs/postgres/using-query-insights) for the
+instance, with each query's application tags and client address recorded (`insightsConfig`
+`queryInsightsEnabled`, `recordApplicationTags` and `recordClientAddress`, all `true`). Set to
+`false` it turns the same three off, the block rendered with every field `false` rather than left
+out: the bridged Terraform provider declares `settings.insights_config` Optional and Computed, so
+a block absent from the configuration leaves the instance's own in place, and an input that only
+added the block could never turn Query Insights off again. Unset, the instance's settings carry
+no `insightsConfig` and the component leaves Query Insights as the instance has it, console-set
+or never turned on, which is what an instance deployed before the input existed needs. Turning it
+on needs no restart on PostgreSQL maintenance version `20250302.00_RC31` or later, where instance
+operations stay available; it restarts the instance only on `20250302.00_RC30` or earlier, and
+only for Query Insights for Cloud SQL Enterprise Plus edition
+([Enable query insights](https://cloud.google.com/sql/docs/postgres/using-query-insights#enable-insights)).
 `existingNamespace`, `false` by default, makes the component use
 the namespace as it exists in the cluster rather than create it, for a deployment where another
 program owns the namespace. On a stack that has already applied, turning it on removes the
