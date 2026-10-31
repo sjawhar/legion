@@ -238,6 +238,9 @@ func TestExpiryKeepsAnEntryRewrittenBetweenItsDeadlineAndItsCallback(t *testing.
 func TestRevisionFenceLeavesWithAReadAndAStaleReplayStaysAbsent(t *testing.T) {
 	const ttl = 100 * time.Millisecond
 	r := newTestRegistry(ttl)
+	// The live window is this registry's TTL, as production's is the bucket's maximum age today,
+	// so a record past its deadline is past its live window too and reads live nowhere.
+	r.liveWindow = ttl
 	const id = "ses_fenced"
 	created := time.Now()
 	stale := watchedPut(t, id, 5, created, SessionEntry{Port: 1, UpdatedAt: created.UnixMilli()})
@@ -325,8 +328,11 @@ func TestNonPositiveTTLNeverRemovesOrSchedules(t *testing.T) {
 			if _, err := r.Get("ses_kept"); err != nil {
 				t.Fatalf("Get(ses_kept): %v", err)
 			}
-			if live, size := r.LiveCount(), r.CacheSize(); live != 1 || size != 1 {
-				t.Fatalf("LiveCount %d, CacheSize %d; want 1 and 1", live, size)
+			// The row has no deadline to pass, so the cache keeps it; its registration is an hour
+			// old, so nothing counts it live. A state is the record's age, never its membership of
+			// the cache.
+			if live, size := r.LiveCount(), r.CacheSize(); live != 0 || size != 1 {
+				t.Fatalf("LiveCount %d, CacheSize %d; want 0 and 1", live, size)
 			}
 			if revision, ok := fence(r, "ses_deleted"); !ok || revision != 3 {
 				t.Fatalf("fence for ses_deleted = %d (held %v), want 3", revision, ok)
@@ -423,5 +429,47 @@ func TestLastSeenRetentionShorterThanTheTTLKeepsOneTTL(t *testing.T) {
 	r.sweep()
 	if revision, ok := fence(r, "ses_deleted"); ok {
 		t.Fatalf("a completed read left fence %d", revision)
+	}
+}
+
+// rowDeadline is the deadline the cache holds for id, and whether it holds a row for it at all.
+func rowDeadline(r *SessionRegistry, id string) (time.Time, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	cs, ok := r.cache.Get(id)
+	if !ok {
+		return time.Time{}, false
+	}
+	return cs.expiresAt, true
+}
+
+// A pass of the listener's reaper that reads another maximum age from the bucket moves every
+// cached row's deadline with it, so the cache expires rows by the age the bucket itself keeps
+// them for: a raise pushes each deadline out by the difference, leaving it one new TTL from the
+// moment the record was written, and a cut that puts a row's deadline in the past takes the row
+// at once through the expiry timer, which keeps its last heartbeat as any other expiry does.
+func TestSetTTLMovesEveryCachedRowsDeadline(t *testing.T) {
+	const id = "ses_maxage"
+	r := newTestRegistry(time.Hour)
+	r.lastSeenRetention = time.Minute
+	created := time.Now()
+	r.applyWatched(watchedPut(t, id, 1, created, SessionEntry{Port: 1, UpdatedAt: created.UnixMilli()}))
+	if got, ok := rowDeadline(r, id); !ok || !got.Equal(created.Add(time.Hour)) {
+		t.Fatalf("the row's deadline = %v (held %v), want one TTL past its record %v", got, ok, created.Add(time.Hour))
+	}
+
+	r.SetTTL(2 * time.Hour)
+	if got := r.TTL(); got != 2*time.Hour {
+		t.Fatalf("TTL after the raise = %s, want 2h", got)
+	}
+	if got, ok := rowDeadline(r, id); !ok || !got.Equal(created.Add(2*time.Hour)) {
+		t.Fatalf("the row's deadline after the raise = %v (held %v), want %v", got, ok, created.Add(2*time.Hour))
+	}
+
+	// A maximum age shorter than the row's age: its new deadline has already passed.
+	r.SetTTL(time.Millisecond)
+	waitForCacheSize(t, r, 0)
+	if got := r.LastSeen(id); got != created.UnixMilli() {
+		t.Fatalf("LastSeen after the cut took the row = %d, want its last heartbeat %d", got, created.UnixMilli())
 	}
 }

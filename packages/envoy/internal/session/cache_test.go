@@ -77,7 +77,7 @@ func TestList_ExpiredEntryReadsAbsentAndLeavesAtItsDeadline(t *testing.T) {
 	updated := now.Add(-6 * time.Minute).UnixMilli()
 	r := newTestRegistry(5 * time.Minute)
 	hold(t, r, map[string]cachedSession{
-		"ses_live":    {entry: SessionEntry{Port: 1}, expiresAt: now.Add(time.Minute)},
+		"ses_live":    {entry: SessionEntry{Port: 1, UpdatedAt: now.UnixMilli()}, expiresAt: now.Add(time.Minute)},
 		"ses_expired": {entry: SessionEntry{Port: 2, UpdatedAt: updated}, expiresAt: now.Add(-time.Minute)},
 	})
 	entries, err := r.List()

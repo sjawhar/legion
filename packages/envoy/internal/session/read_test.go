@@ -547,13 +547,17 @@ func (c *clock) advance(d time.Duration) {
 	c.offset += d
 }
 
-// While a read is under way the copy cannot see the heartbeats that renewed a session, so a row
-// whose TTL passes then stays listed; to one session's caller it is gone, as an expired row always
-// is. Once the read completes and the copy follows the bucket again, the row is pruned.
-func TestARowThatExpiresDuringAReadStaysListedUntilTheReadCompletes(t *testing.T) {
+// A row's state is its own registration's age, while a read of the bucket is under way and after
+// it: the copy cannot see the heartbeats that renewed a session while it reads, and a session
+// that heartbeated nowhere since is unresponsive either way — left out of the default listing,
+// listed with its state when the unresponsive rows are asked for, and absent to the one-session
+// read that judges a row by its deadline. The sweep that completes the read keeps the row, since
+// the bucket still holds its key, and leaves every one of those answers as it found them: only
+// the row's own deadline, the bucket's backstop, takes the row away (expireDue).
+func TestARowPastItsLiveWindowReadsUnresponsiveThroughAReadAndItsSweep(t *testing.T) {
 	client := setupNATS(t)
 	now := &clock{}
-	r, held := holdingRegistry(t, client, WithSessionClock(now.Now))
+	r, held := holdingRegistry(t, client, WithSessionClock(now.Now), WithSessionLiveWindow(time.Minute))
 	if err := r.Put("ses_old", SessionEntry{Port: 1, MachineID: "m1"}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -568,25 +572,34 @@ func TestARowThatExpiresDuringAReadStaysListedUntilTheReadCompletes(t *testing.T
 	}
 	waitClosed(t, completion.reached, "the read to deliver every record")
 	now.advance(2 * time.Minute)
-	if got := listed(t, r); !slices.Equal(got, []string{"ses_old"}) {
-		t.Fatalf("listed during the read = %v, want the expired row kept", got)
+	unresponsive := func(when string) {
+		t.Helper()
+		if got := listed(t, r); len(got) != 0 {
+			t.Fatalf("listed %s = %v, want no live session", when, got)
+		}
+		withUnresponsive, err := r.List(IncludeUnresponsive())
+		if err != nil {
+			t.Fatalf("List with the unresponsive rows %s: %v", when, err)
+		}
+		if len(withUnresponsive) != 1 || withUnresponsive[0].SessionID != "ses_old" || withUnresponsive[0].State != Unresponsive {
+			t.Fatalf("listed with the unresponsive rows %s = %+v, want ses_old unresponsive", when, withUnresponsive)
+		}
+		if entry, state := r.Lookup("ses_old"); state != Unresponsive || entry.UpdatedAt != heartbeat.UpdatedAt {
+			t.Fatalf("Lookup(ses_old) %s = %+v, %s; want its record and %s", when, entry, state, Unresponsive)
+		}
+		if _, err := r.Get("ses_old"); !errors.Is(err, natsgo.ErrKeyNotFound) {
+			t.Fatalf("Get(ses_old) %s = %v, want not found", when, err)
+		}
+		if got := r.LastSeen("ses_old"); got != heartbeat.UpdatedAt {
+			t.Fatalf("LastSeen(ses_old) %s = %d, want its last heartbeat %d", when, got, heartbeat.UpdatedAt)
+		}
 	}
-	if _, err := r.Get("ses_old"); !errors.Is(err, natsgo.ErrKeyNotFound) {
-		t.Fatalf("Get(ses_old) during the read = %v, want not found", err)
-	}
-	if got := r.LastSeen("ses_old"); got != heartbeat.UpdatedAt {
-		t.Fatalf("LastSeen(ses_old) during the read = %d, want its last heartbeat %d", got, heartbeat.UpdatedAt)
-	}
+	unresponsive("during the read")
 
 	completion.open()
 	waitClosed(t, completion.done, "the read's sweep")
 	waitFor(t, 5*time.Second, r.watcher.Following)
-	if got := listed(t, r); len(got) != 0 {
-		t.Fatalf("listed after the read = %v, want the expired row pruned", got)
-	}
-	if got := r.LastSeen("ses_old"); got != heartbeat.UpdatedAt {
-		t.Fatalf("LastSeen(ses_old) after the read = %d, want its last heartbeat %d", got, heartbeat.UpdatedAt)
-	}
+	unresponsive("after the read")
 }
 
 // A session bucket recreated with another TTL expires its rows by its own: the read of the new
