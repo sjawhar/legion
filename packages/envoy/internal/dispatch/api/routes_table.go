@@ -206,6 +206,7 @@ func (s *server) routes() []apiRoute {
 			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
 			apiRoute{http.MethodGet, "/api/v1/artifacts/{id}/_test/live", authAny, "Test hook: whether the document's room is resident in this server, {live}; loads and rebuilds nothing.", s.artifactRoomLive},
 			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/hold-admission", authAny, "Test hook: make the document's next socket wait ms before its admission, as a browser in a burst waits for its room (0 takes the hold back).", s.holdArtifactAdmission},
+			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/refuse-next-update", authAny, "Test hook: make the document's room refuse the next update a read-write browser sends it, as it refuses one whose walk it refuses.", s.refuseNextDocumentUpdate},
 			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/used-up", authAny, "Test hook: close the document's room and append a stored history whose re-scan uses up a room's scan total.", s.useUpScanTotal},
 			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/tangled", authAny, "Test hook: close the document's room and append a tangle no one apply of a browser's may scan through.", s.tangleBeyondOneApply},
 			apiRoute{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},

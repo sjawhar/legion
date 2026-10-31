@@ -396,6 +396,23 @@ func (p *memoryServer) peakResident(t *testing.T, during func()) podPeak {
 	return peak
 }
 
+// heldNow is what the server's trace reads of what the runtime has mapped and not handed back -
+// the figure the Go memory limit bounds - at a sample taken now, with whatever the step before
+// it left standing: it waits out the sample interval so the window it reads holds at least one
+// sample, where a step shorter than one interval leaves peakResident none (tracePeaks). what
+// names the moment in the line it logs.
+func heldNow(t *testing.T, server *memoryServer, what string) int64 {
+	t.Helper()
+	from := time.Now()
+	time.Sleep(3 * memoryTraceInterval)
+	peak := server.tracePeaks(t, from, time.Now())
+	if peak.samples == 0 {
+		t.Fatalf("the server's memory trace holds no sample %s, want one taken in the %s since", what, 3*memoryTraceInterval)
+	}
+	t.Logf("%s the server holds %d bytes of what its %d-byte limit bounds, from %d trace samples", what, peak.held, peak.limit, peak.samples)
+	return peak.held
+}
+
 // tracePeaks is what the server's own trace (memory_trace.go) read of its memory between from and
 // to: the charged and held peaks of podPeak, the Go memory limit the runtime held through them,
 // and how many samples it read. Its resident field is the caller's to fill. No sample falls in a

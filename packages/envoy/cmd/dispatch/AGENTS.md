@@ -197,6 +197,10 @@ resident in this server, loading and rebuilding nothing, for the real-process me
 socket wait n milliseconds (at most two minutes; 0 takes the hold back) before its admission, as a
 browser in a burst waits for its room before the server answers its upgrade, for the browser test
 of the editor's wait for its first sync.
+`POST /api/v1/artifacts/{id}/_test/refuse-next-update` makes the document's room refuse the next
+update a read-write browser sends it, as it refuses one holding content the Proof editor never
+sends, so a browser test can drive `4413 DOC_UPDATE_REFUSED` from the editor, which sends no such
+content. The update that meets the arming takes it, and arming another document forgets the first.
 `POST /api/v1/artifacts/_test/room-budget` with `{"bytes": n}` sets the memory budget over the
 open documents to n bytes, or restores the real 2 GiB with 0, and answers the budget it set, so a
 browser test can fill the budget with a few small documents and drive the editor's handling of
@@ -714,6 +718,7 @@ caller that resolves to nobody keeps the route's own `401` (`refuseChangedLogin`
 | `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
 | `/api/v1/artifacts/{id}/_test/live` | GET | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Answer `{live}`, whether the document's room is resident in this server, loading and rebuilding nothing; not mounted otherwise. |
 | `/api/v1/artifacts/{id}/_test/hold-admission` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Make the document's next socket wait `ms` (0 to 120000; 0 takes the hold back) before its admission; not mounted otherwise. |
+| `/api/v1/artifacts/{id}/_test/refuse-next-update` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Make the document's room refuse the next update a read-write browser sends it, as it refuses one holding content the editor never sends; not mounted otherwise. |
 | `/api/v1/artifacts/_test/room-budget` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Set the open documents' memory budget to `bytes` (`0` restores the real one) and answer what it set; not mounted otherwise. |
 | `/api/v1/artifacts/{id}/_test/used-up` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close the document's room and leave it a stored history whose re-scan uses up a room's scan total; not mounted otherwise. |
 | `/api/v1/artifacts/{id}/_test/tangled` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close the document's room and leave it a stored history ending in a tangle no one apply of a browser's may scan through, with far more of the room's scan total left than one apply may scan; not mounted otherwise. |

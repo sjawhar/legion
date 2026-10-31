@@ -687,6 +687,11 @@ for (const refusal of [
     notice:
       "This document has been edited so much that it must be rebuilt before it can take this edit. Your other edits are kept.",
   },
+  {
+    name: "holding content the document does not take",
+    reason: "DOC_UPDATE_REFUSED",
+    notice: "Your last edit was not saved: it holds content this document does not take.",
+  },
 ]) {
   test(`a real provider closed as ${refusal.name} drops the refused edit's row and stops for the host`, async () => {
     const artifact = artifactId();

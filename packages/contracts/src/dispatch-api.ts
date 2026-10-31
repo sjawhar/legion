@@ -3133,6 +3133,15 @@ export const DOCUMENT_TOO_TANGLED_CLOSE_REASON = "DOC_TOO_TANGLED";
  *  rebuild. Generated into Go as `contracts.DocumentNeedsRebuildCloseReason`. */
 export const DOCUMENT_NEEDS_REBUILD_CLOSE_REASON = "DOC_NEEDS_REBUILD";
 
+/** The reason the document websocket closes with `DOCUMENT_TOO_LARGE_CLOSE_CODE` when the update
+ *  holds content the document does not take: bytes the server's decoder refuses, or content the
+ *  Proof editor never sends (a subdocument, a root the schema has no place for, an entry of the
+ *  list a rebuild writes). Nothing of it is stored or relayed. Permanent like the size refusal,
+ *  and for the same reason: the one browser that sent it would send it again on every reconnect,
+ *  so the dashboard drops the refused edit and re-reads the document. Generated into Go as
+ *  `contracts.DocumentUpdateRefusedCloseReason`. */
+export const DOCUMENT_UPDATE_REFUSED_CLOSE_REASON = "DOC_UPDATE_REFUSED";
+
 /**
  * The close code the document websocket (`/ws/doc/{room}`) refuses with when the memory budget over
  * the documents it holds open is full and no room can be closed: a browser asking for one more

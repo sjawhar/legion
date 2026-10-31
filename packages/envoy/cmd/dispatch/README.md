@@ -66,6 +66,7 @@ Each item below names a variable, then its purpose.
   `POST /api/v1/artifacts/_test/room-budget` sets the open documents' memory budget, so a browser test can fill it;
   `GET /api/v1/artifacts/{id}/_test/live` answers whether the document's room is resident here;
   `POST /api/v1/artifacts/{id}/_test/hold-admission` makes the document's next socket wait before its admission;
+  `POST /api/v1/artifacts/{id}/_test/refuse-next-update` makes the document's room refuse the next update a read-write browser sends it;
   `POST /api/v1/artifacts/{id}/_test/used-up` leaves the document a history whose re-scan uses up a room's scan total;
   `POST /api/v1/artifacts/{id}/_test/tangled` leaves it one ending in a tangle no one apply of a browser's may scan through;
   and `POST /api/v1/writes/_test/slow` `{method, path, delay_ms}` makes every keyed run of that method and exact path wait `delay_ms` once its key is claimed.
@@ -1719,6 +1720,12 @@ Each item below names a path with its method and identity, then its purpose.
   the browser test of the editor's first sync uses it.
   Not mounted otherwise.
 
+- `/api/v1/artifacts/{id}/_test/refuse-next-update` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  Make the document's room refuse the next update a read-write browser sends it, as it refuses one holding content the editor never sends, so a browser test can drive `4413 DOC_UPDATE_REFUSED` from the editor, which sends no such content.
+  One update is armed, and the update that meets it takes the arming; arming another document forgets the first.
+  Not mounted otherwise.
+
 - `/api/v1/artifacts/_test/room-budget` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
 
   Set the open documents' memory budget to `bytes`, or restore the real one (2 GiB) with `0`, and answer the budget it set, so a browser test can fill the budget with a few small documents and drive the editor's handling of `4503 DOC_BUSY`;
@@ -2559,6 +2566,12 @@ Each item below names a status and code, then its meaning.
   The same close for an update the document cannot take until it is rebuilt:
   the room's scan total is used up, where it still takes an update whose scans pass 64 items or fewer so that typing in place goes on, or the browser still holds the edit history a rebuild of the document replaced, which applied would put the old document beside the rebuilt one.
   The dashboard drops the refused edit and offers the rebuild (`POST /api/v1/artifacts/{id}/rebuild`), as it does for `409 DOCUMENT_UNLOADABLE`.
+
+- `4413 DOC_UPDATE_REFUSED`
+
+  The same close for an update holding content the document does not take:
+  bytes the server's own decoder refuses, or content the Proof editor never sends - a subdocument, a root outside the document's tree and its margin, or a write of the list of clients a rebuild retired - which the server reads from the update's own bytes, without decoding it, and refuses whole, storing and relaying nothing of it.
+  Permanent like `DOC_TOO_LARGE`: the client that sent it would send it again on every reconnect, so the dashboard drops the refused edit and re-reads the document.
 
 - `4503 DOC_BUSY`
 

@@ -5,6 +5,7 @@ import {
   DOCUMENT_SCHEMA_CLOSE_CODE,
   DOCUMENT_TOO_LARGE_CLOSE_CODE,
   DOCUMENT_TOO_TANGLED_CLOSE_REASON,
+  DOCUMENT_UPDATE_REFUSED_CLOSE_REASON,
 } from "@legion/contracts";
 import type { Awareness } from "y-protocols/awareness";
 import type { Doc } from "yjs";
@@ -68,8 +69,10 @@ export function connectionLabel(
  * `DOCUMENT_TOO_LARGE_CLOSE_CODE`, by the close's reason: an edit the server could not merge into
  * the document quickly enough (`DOCUMENT_TOO_TANGLED_CLOSE_REASON`), one the document cannot take
  * until it is rebuilt (`DOCUMENT_NEEDS_REBUILD_CLOSE_REASON`: its edit history has used up what the
- * server lets it scan, or this browser held a history a rebuild replaced), or one that would make
- * the document too large.
+ * server lets it scan, or this browser held a history a rebuild replaced), one holding content the
+ * document does not take (`DOCUMENT_UPDATE_REFUSED_CLOSE_REASON`), or one that would make the
+ * document too large. Every one of them is permanent: the refused edit is dropped and the
+ * document re-read, so a reconnect cannot meet the same refusal again.
  */
 export function refusedEditNotice(reason: string): string {
   switch (reason) {
@@ -77,6 +80,8 @@ export function refusedEditNotice(reason: string): string {
       return "Your last edit was not saved: Dispatch could not merge it into this document quickly enough. Your other edits are kept.";
     case DOCUMENT_NEEDS_REBUILD_CLOSE_REASON:
       return "This document has been edited so much that it must be rebuilt before it can take this edit. Your other edits are kept.";
+    case DOCUMENT_UPDATE_REFUSED_CLOSE_REASON:
+      return "Your last edit was not saved: it holds content this document does not take.";
     default:
       return "Your last edit was not saved: it would make this document larger than a Dispatch document may be. Your other edits are kept.";
   }
@@ -99,8 +104,9 @@ export interface ConnectionCallbacks {
   /**
    * Fires when the server refused this browser's edit with `DOCUMENT_TOO_LARGE_CLOSE_CODE`, with
    * the close's reason: the edit would take the document past its size bound, the server could
-   * not merge it quickly enough (`DOCUMENT_TOO_TANGLED_CLOSE_REASON`), or the document must be
-   * rebuilt before it can take it (`DOCUMENT_NEEDS_REBUILD_CLOSE_REASON`). The connection has
+   * not merge it quickly enough (`DOCUMENT_TOO_TANGLED_CLOSE_REASON`), the document must be
+   * rebuilt before it can take it (`DOCUMENT_NEEDS_REBUILD_CLOSE_REASON`), or it holds content
+   * the document does not take (`DOCUMENT_UPDATE_REFUSED_CLOSE_REASON`). The connection has
    * stopped reconnecting and the refused edit's saved row is gone; the refused text is still in
    * this connection's document, so the host rebuilds it from a fresh read rather than let a
    * reconnect send it again.

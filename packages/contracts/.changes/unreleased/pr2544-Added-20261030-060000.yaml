@@ -1,6 +1,6 @@
 kind: Added
 body: |-
-    Four exports for the closes the document websocket refuses a browser with, generated into Go
+    Five exports for the closes the document websocket refuses a browser with, generated into Go
     beside `DOCUMENT_SCHEMA_CLOSE_CODE` so the server's closes and the dashboard's reading of them
     cannot drift apart. `DOCUMENT_TOO_LARGE_CLOSE_CODE` (4413) with `DOCUMENT_TOO_LARGE_CLOSE_REASON`
     (`DOC_TOO_LARGE`) is permanent: the update would take the document past a bound of its own - the
@@ -16,7 +16,11 @@ body: |-
     `DOCUMENT_NEEDS_REBUILD_CLOSE_REASON` (`DOC_NEEDS_REBUILD`) is a third: the document cannot take
     the update until it is rebuilt, either because its edit history has used up what the room lets its
     applies scan or because the browser still holds the history a rebuild of the document replaced, and
-    the dashboard offers that rebuild beside the notice. `DOCUMENT_BUSY_CLOSE_CODE` (4503) with
+    the dashboard offers that rebuild beside the notice.
+    `DOCUMENT_UPDATE_REFUSED_CLOSE_REASON` (`DOC_UPDATE_REFUSED`) is a fourth: the update holds content the
+    document does not take - bytes the decoder refuses, or content the Proof editor never sends - so nothing
+    of it is stored or relayed, and the dashboard drops the refused edit and says "Your last edit was not
+    saved: it holds content this document does not take." `DOCUMENT_BUSY_CLOSE_CODE` (4503) with
     `DOCUMENT_BUSY_CLOSE_REASON` (`DOC_BUSY`) is transient: the memory budget over the documents
     Dispatch holds open is full and no room can be closed, so the dashboard keeps the edit it could not
     send and lets the provider's own backoff retry it.

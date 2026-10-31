@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/persistence"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -2064,6 +2065,60 @@ func TestHoldAdmissionHookIsGatedByTestHooksEnabled(t *testing.T) {
 	}
 	if took := open("after the hold was used"); took >= hold {
 		t.Fatalf("the socket after the held one was answered after %s, want it answered without the %s hold", took, hold)
+	}
+}
+
+// The refuse-next-update hook is a browser test's alone: unmounted without DISPATCH_TEST_HOOKS,
+// and with them the one update a read-write browser sends next is refused with the close the hook
+// gives a frame its walk refuses - 4413 DOC_UPDATE_REFUSED - that browser alone closed and
+// nothing of the update in the document, while the browser that connects after it is applied, so
+// the arming is spent by the update that met it.
+func TestRefuseNextUpdateHookIsGatedByTestHooksEnabled(t *testing.T) {
+	handler := newTestHandler(t)
+	unhooked := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/00000000-0000-0000-0000-000000000001/_test/refuse-next-update", nil, "alice")
+	if unhooked.Code != http.StatusNotFound {
+		t.Fatalf("refuse-next-update hook without TestHooksEnabled: status=%d, want %d", unhooked.Code, http.StatusNotFound)
+	}
+	database := storetest.Open(t)
+	seedPeople(t, database, "alice")
+	service := docs.New(docs.Deps{Store: database, Identity: headerIdentity(database), Events: events.NewBroker(), ServerURL: "https://dispatch.example", Settle: time.Hour})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	deps, err := NewDeps(DepsInput{
+		Store:            database,
+		Identity:         headerIdentity(database),
+		AgentTokens:      sharedAgentTokens(t, "agent-token"),
+		Docs:             service,
+		ServerURL:        "https://dispatch.example",
+		TestHooksEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("new API dependencies: %v", err)
+	}
+	hooked := http.NewServeMux()
+	t.Cleanup(Register(hooked, t.Context(), deps).Wait)
+	issue := createInteractionIssue(t, hooked, "TEST", "Refused update", "A spec.")
+	artifactID := issue.PrimaryArtifactID
+	// The arming is taken by the first update that reaches the hook, so the browser syncs first:
+	// its answer to the room's sync step 1 is an update of its own.
+	peer := connectBrowserPeer(t, service, artifactID)
+	armed := dispatchRequest(t, hooked, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/_test/refuse-next-update", nil, "alice")
+	if armed.Code != http.StatusNoContent {
+		t.Fatalf("refuse-next-update hook: status=%d body=%s, want %d", armed.Code, armed.Body.String(), http.StatusNoContent)
+	}
+	peer.appendParagraph(t, "refused by the armed hook")
+	closed := peer.connection().Closed()
+	if closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode || closed.Text != contracts.DocumentUpdateRefusedCloseReason {
+		t.Fatalf("the armed update closed the browser with %v, want %d %q", closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentUpdateRefusedCloseReason)
+	}
+	if text, err := service.Text(t.Context(), artifactID); err != nil || strings.Contains(text, "refused by the armed hook") {
+		t.Fatalf("the document reads %q (%v), want the refused paragraph nowhere in it", text, err)
+	}
+	// The next browser is applied: one update was armed, and it is spent.
+	next := connectBrowserPeer(t, service, artifactID)
+	next.appendParagraph(t, "saved after the refusal")
+	next.barrier(t)
+	if text, err := service.Text(t.Context(), artifactID); err != nil || !strings.Contains(text, "saved after the refusal") {
+		t.Fatalf("the document reads %q (%v), want the paragraph typed after the refusal in it", text, err)
 	}
 }
 

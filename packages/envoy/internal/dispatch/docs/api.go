@@ -25,6 +25,7 @@ type API interface {
 	SetRoomBudgetForTest(bytes int64) int64
 	RoomLiveForTest(artifactID string) bool
 	HoldNextAdmissionForTest(artifactID string, wait time.Duration)
+	RefuseNextPeerUpdateForTest(artifactID string)
 	UseUpScanTotalForTest(ctx context.Context, artifactID string) error
 	TangleBeyondOneApplyForTest(ctx context.Context, artifactID string) error
 	Text(ctx context.Context, artifactID string) (string, error)

@@ -1631,6 +1631,27 @@ func (s *server) holdArtifactAdmission(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// refuseNextDocumentUpdate arms the document's room to refuse the next update a read-write
+// browser sends it as one whose walk it refuses (docs.Service.RefuseNextPeerUpdateForTest).
+// Test-only: mounted by routes() only when Deps.TestHooksEnabled is set, so a browser test can
+// drive 4413 DOC_UPDATE_REFUSED from the editor, which never sends content the walk refuses.
+func (s *server) refuseNextDocumentUpdate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	s.deps.Docs.RefuseNextPeerUpdateForTest(artifact.ID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // useUpScanTotal and tangleBeyondOneApply are the two document test hooks' handlers, each the
 // shared body below with one of docs.API's hooks. Each route names a method of its own rather
 // than a handler this file builds, so the static guards that read the routes table resolve the

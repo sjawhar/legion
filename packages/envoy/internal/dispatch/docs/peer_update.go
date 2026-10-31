@@ -235,20 +235,23 @@ const maxMessageBytes = 54 << 20
 //
 // Every update is walked first (walkUpdate, fromPeer), under the bound too. An update the walk
 // refuses - bytes ygo's decoder would refuse, or content the Proof editor never sends: a
-// subdocument, a root other than the fragment and the margin - is answered, unless the walk
-// reached a client group of the history a rebuild replaced before it refused (below), with the
-// walk's error and never applied, so ygo integrates nothing of it and closes that browser with
-// 4205 "Reset Connection", the close it gives every hook error that refused an update before the
-// apply ran (sjawhar/ygo v1.54.1-sami.1, provider/websocket/peer_update.go:38-52,
-// provider/websocket/server.go:137-142). Under v1.51.3-sami.7 the browser was answered
-// SyncStatus(0) and left connected; upstream reearth/ygo#304 was merged in the later form, which
-// closes it, and a hook can keep a refused browser connected only by letting the room's own apply
-// refuse the update. The provider reconnects at once and sends the frame again, and the walk
-// refuses it again: only a client that is not the Proof editor sends one of these, which is what
-// the walk is there to tell apart. The apply is not what answers such a frame either: though a
-// room's bounded document takes a failed apply back out whole (newRoomScans), ygo would first
-// decode and integrate every struct before the bad byte, at the cost the walk is there to keep off
-// the peer's read loop, and the room would have to be left to refuse what the editor never sends.
+// subdocument, a root other than the fragment and the margin - is refused, unless the walk
+// reached a client group of the history a rebuild replaced before it refused (below), with
+// DocumentTooLargeCloseCode and DocumentUpdateRefusedCloseReason (documentUpdateRefused,
+// refusedWith, which keeps the walk's own error behind the close) and never applied, so ygo
+// integrates nothing of it and closes that browser with that code and reason
+// (sjawhar/ygo v1.54.1-sami.1, provider/websocket/peer_update.go:38-52, :139-146). Under
+// v1.51.3-sami.7 the browser was answered SyncStatus(0) and left connected; upstream
+// reearth/ygo#304 was merged in the form that closes it, with 4205 "Reset Connection" for a hook
+// error that is no *websocket.PeerClose, and a hook can keep a refused browser connected only by
+// letting the room's own apply refuse the update. 4205 is what @hocuspocus/provider 2.x
+// reconnects at once after, and the client would send the refused frame again, and the walk
+// refuse it again, a loop of full syncs; 4413 is the permanent band, which the editor drops the
+// refused edit for, so every refusal of the hook made before the apply carries it. The apply is
+// not what answers such a frame either: though a room's bounded document takes a failed apply
+// back out whole (newRoomScans), ygo would first decode and integrate every struct before the bad
+// byte, at the cost the walk is there to keep off the peer's read loop, and the room would have
+// to be left to refuse what the editor never sends.
 //
 // While the room's last measured rendering plus the update's own bytes stay under
 // pmdoc.MaxDocumentBytes, the bytes admit the update. At or over it, the update is admitted only
@@ -304,7 +307,10 @@ const maxMessageBytes = 54 << 20
 // whether or not the room already holds them, and to the room's clients and deleted items. One
 // whose estimate passes applyTooHeavyBytes, all of what the Go memory limit leaves above the room
 // budget, the cold reads' cache and the pressure reserve, could not apply even alone: it is
-// answered with an error before any other rule and never applied, as a walk's refusal is. An
+// refused with DocumentTooLargeCloseCode and DocumentTooLargeCloseReason before any other rule
+// and never applied (errApplyTooHeavy), as a walk's refusal is: no document of the editor's
+// reaches it (TestAnHonestHandoffAtTheHeaviestFrameIsNeverRefusedAsTooHeavy), and a client that
+// sends such a frame would send it again on every reconnect. An
 // admitted update whose own share of the estimate passes unweighedApplyHeapBytes applies only once
 // it holds its estimate, the marks its scans can make included, out of the bound (applyHeaps), or
 // the whole bound for an estimate past it, which then applies alone, so a reconnect storm's
@@ -335,8 +341,9 @@ const maxMessageBytes = 54 << 20
 // refusals are, so the editor drops the edit, since the same frame would be refused again on every
 // reconnect. Any other error the apply returns - one that would park structs or delete ranges past
 // the room's pending cap (MaxPendingItems, which the room holds from the end of its load,
-// TestAPeerApplyIsHeldToTheRoomsPendingCapAfterTheLoad) - is returned as it is, so ygo answers that
-// browser SyncStatus(0) and leaves it connected, exactly as a room without this hook does: the
+// TestAPeerApplyIsHeldToTheRoomsPendingCapAfterTheLoad) - is returned as it is, the one error the
+// hook answers that is no *websocket.PeerClose, so ygo answers that browser SyncStatus(0) and
+// leaves it connected, exactly as a room without this hook does: the
 // apply ran, which is what keeps a refused browser connected where a refusal before the apply
 // closes it (provider/websocket/peer_update.go:136-151). The pending cap refuses such an update
 // before the apply scans or changes anything, so it costs the room neither charge nor scans
@@ -353,6 +360,9 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	}
 	weighed := peerWeighing{held: info.Doc.StateVector(), known: charge.deletes(), retired: structs.retiredClients(), entries: structs.retiredEntries()}
 	tally, err := walkUpdate(info.Update, fromPeer, &weighed)
+	if s.refusesNextPeerUpdateForTest(info.Room) && err == nil && !weighed.former {
+		err = &updateRefusal{rule: errUpdateNotFromEditor, reason: "the test hook armed this document's next browser update to be refused"}
+	}
 	// A replaced history is closed before any other rule, its walk's refusal included: a
 	// browser's whole-state message of a history the rebuild found at the decode cap, with an
 	// edit it made since, is past the cap and refused by the walk; left connected, it would hand
@@ -367,10 +377,11 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 		return documentNeedsRebuild()
 	}
 	if err != nil {
-		return err
+		return refusedWith(documentUpdateRefused(), err)
 	}
 	if weighed.forged {
-		return &updateRefusal{rule: errUpdateNotFromEditor, reason: "a change to the retired clients' list, which only a rebuild writes"}
+		return refusedWith(documentUpdateRefused(),
+			&updateRefusal{rule: errUpdateNotFromEditor, reason: "a change to the retired clients' list, which only a rebuild writes"})
 	}
 	var bytes int64
 	measured := false
@@ -384,8 +395,8 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	weighs := own > unweighedApplyHeapBytes
 	heap := own + weighed.roomApplyHeap(structs.roomStructs(info.Doc))
 	if heap > applyTooHeavyBytes {
-		return fmt.Errorf("%w: its apply is estimated to allocate %d bytes, past the %d bytes the pod lets any apply hold, even alone",
-			errApplyTooHeavy, heap, uint64(applyTooHeavyBytes))
+		return refusedWith(documentTooLarge(), fmt.Errorf("%w: its apply is estimated to allocate %d bytes, past the %d bytes the pod lets any apply hold, even alone",
+			errApplyTooHeavy, heap, uint64(applyTooHeavyBytes)))
 	}
 	atTheBound := bytes+int64(len(info.Update)) >= pmdoc.MaxDocumentBytes
 	crept := measured && bytes >= pmdoc.MaxDocumentBytes+maxPeerByteCreep
@@ -486,6 +497,27 @@ func documentNeedsRebuild() *websocket.PeerClose {
 		Code:   contracts.DocumentTooLargeCloseCode,
 		Reason: contracts.DocumentNeedsRebuildCloseReason,
 	}
+}
+
+// documentUpdateRefused is the refusal of an update the room will not read: one the walk refuses -
+// bytes ygo's decoder would refuse, or content the Proof editor never sends - and one that writes
+// the retired clients' list only a rebuild writes. Permanent as documentTooLarge is and under the
+// same code, with a reason of its own: the client that sent it sends it again on every reconnect
+// (@hocuspocus/provider 2.x reconnects at once after a close it does not read as permanent), so
+// the one answer that ends the exchange is the one the editor drops the edit for.
+func documentUpdateRefused() *websocket.PeerClose {
+	return &websocket.PeerClose{
+		Code:   contracts.DocumentTooLargeCloseCode,
+		Reason: contracts.DocumentUpdateRefusedCloseReason,
+	}
+}
+
+// refusedWith is refusal, the close ygo answers the browser with - it reads it through errors.As
+// (sjawhar/ygo v1.54.1-sami.1, provider/websocket/peer_update.go:139-146) - with cause behind it,
+// which no close frame carries: the rule that refused the update, its reason and the byte it
+// refused at, for the line ygo logs and for this package's tests.
+func refusedWith(refusal *websocket.PeerClose, cause error) error {
+	return fmt.Errorf("%w: %w", refusal, cause)
 }
 
 // refusedUnderPressure is whether the room budget's pressure, while the budget is full and nothing
@@ -1418,9 +1450,11 @@ func structTotalOf(tally updateTally, err error, pending crdt.PendingStats) uint
 	return tally.structs + splitsAStructCanCause*uint64(pending.Items+pending.DeleteRanges)
 }
 
-// errApplyTooHeavy is the hook's answer to an update whose apply alone is estimated to allocate
-// more than applyTooHeavyBytes: no turn could hold it, even alone. It is never applied, so ygo
-// closes the browser with 4205 "Reset Connection", as it closes one whose frame the walk refuses.
+// errApplyTooHeavy is why the hook refuses an update whose apply alone is estimated to allocate
+// more than applyTooHeavyBytes: no turn could hold it, even alone. It is never applied, and the
+// hook answers it with the document's own close, DocumentTooLargeCloseCode and
+// DocumentTooLargeCloseReason, this error behind it (refusedWith), as it answers a frame the walk
+// refuses.
 var errApplyTooHeavy = errors.New("the update is heavier to apply than the pod can hold")
 
 // goMemoryLimitBytes is the Go runtime's soft memory limit on the production pod: 90 per cent of

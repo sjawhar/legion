@@ -67,6 +67,25 @@ func (s *Service) HoldNextAdmissionForTest(artifactID string, wait time.Duration
 	s.admissionHolds.Store(artifactID, wait)
 }
 
+// RefuseNextPeerUpdateForTest arms the hook to refuse the next update a read-write browser sends
+// to artifactID's room as one whose walk it refuses, so a browser test can drive 4413
+// DOC_UPDATE_REFUSED from the editor itself, which never sends content the walk refuses
+// (weighPeerUpdate, update_walk.go). The update that meets it takes it: the browser's next frame,
+// and its reconnect's whole-state message, are weighed as any other. Only one document is armed at
+// a time, and arming another forgets the first. It is mounted only through Dispatch's test-hook
+// route.
+func (s *Service) RefuseNextPeerUpdateForTest(artifactID string) {
+	s.refuseNextPeerUpdate.Store(&artifactID)
+}
+
+// refusesNextPeerUpdateForTest reports whether room's next update is the armed one and takes the
+// arming, so the frame after it is weighed as any other. It is one atomic load on the peer's read
+// loop, and nil - no hook armed - in every deployment.
+func (s *Service) refusesNextPeerUpdateForTest(room string) bool {
+	armed := s.refuseNextPeerUpdate.Load()
+	return armed != nil && *armed == room && s.refuseNextPeerUpdate.CompareAndSwap(armed, nil)
+}
+
 // chainOrigin is the id of the last character of artifactID's last written text, the item the two
 // tangle hooks below chain onto. It closes artifactID's room if this server holds it, so the next
 // load reads the history the hook appends to, and decodes the stored history into a copy of its

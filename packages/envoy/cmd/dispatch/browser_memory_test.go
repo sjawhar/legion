@@ -2269,28 +2269,40 @@ func TestABrowserCannotPushADocumentPastTheDecodeCap(t *testing.T) {
 	}
 }
 
-// resetConnectionCloseCode and resetConnectionCloseReason are what ygo closes a browser with
-// whose update Server.OnPeerUpdate refused before the apply ran, matching Hocuspocus's
-// CloseEvents.ResetConnection (sjawhar/ygo v1.54.1-sami.1, provider/websocket/server.go:137-142).
-// Dispatch names no such close of its own: its own refusals carry the contracts' codes.
+// reconnectRounds is how many times the refused browser reconnects and sends the refused frame
+// again in the drive below, and reconnectRoundsMargin how much more the server may hold after
+// the last round than after the first: 16 MiB, above the garbage a round's socket, its sync of
+// the room's state and its refusal leave until the collector runs, and far under what nineteen
+// rounds would add if a refusal kept anything of the frame or of the browser it closed.
+// Measured on 2026-10-31, the runtime held 13,007,112 bytes after the first round and
+// 13,736,200 after the twentieth, 729,088 bytes more.
 const (
-	resetConnectionCloseCode   = 4205
-	resetConnectionCloseReason = "Reset Connection"
+	reconnectRounds       = 20
+	reconnectRoundsMargin = 16 << 20
 )
 
-// An update the walk refuses is not applied, over a real document socket of a real server: ygo
-// closes the browser that sent it with 4205 "Reset Connection" and the room's state vector and
-// state are what they were, for a frame of valid GC structs ending in one bad byte, which ygo's
-// own apply would integrate in part before it failed (sjawhar/ygo v1.54.1-sami.1,
-// crdt/update.go:810-935), for a subdocument and for a struct under a root the Proof editor never
-// writes (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:235-251). Only that
-// browser is closed: another reading the room goes on reading it. The stored document, once
-// settled, holds none of them.
+// An update the walk refuses is not applied, over a real document socket of a real server: the
+// room closes the browser that sent it with 4413 DOC_UPDATE_REFUSED, read from the close frame,
+// and the room's state vector and state are what they were, for a frame of valid GC structs
+// ending in one bad byte, which ygo's own apply would integrate in part before it failed
+// (sjawhar/ygo v1.54.1-sami.1, crdt/update.go:810-935), for a subdocument and for a struct under
+// a root the Proof editor never writes (Service.weighPeerUpdate,
+// internal/dispatch/docs/peer_update.go:236-254). Only that browser is closed: another reading
+// the room goes on reading it. The stored document, once settled, holds none of them.
+//
+// Then the loop the code is there to end: the browser that was refused reconnects and sends the
+// same frame again, twenty rounds of it, as @hocuspocus/provider 2.x does after a close it does
+// not read as permanent. Each round is closed with the same code and reason, the room's state is
+// what it was after every one, and the server holds no more memory at the end than at the start
+// (requireFlatAcrossRounds), so a client that does not read the close costs the pod nothing that
+// accumulates.
 //
 // Under sjawhar/ygo v1.51.3-sami.7 the room answered such a frame SyncStatus(0) and kept the
 // browser connected. Upstream reearth/ygo#304 was merged in the form that closes a browser whose
-// update the hook refused before the apply ran, and a hook cannot keep it connected
-// (provider/websocket/peer_update.go:38-52, :136-151).
+// update the hook refused before the apply ran, with 4205 "Reset Connection" for a refusal that
+// is no *websocket.PeerClose, which the provider reconnects at once after
+// (provider/websocket/peer_update.go:38-52, :139-151): every refusal the hook makes carries a
+// code and reason of Dispatch's own instead.
 func TestAnUpdateTheWalkerRefusesIsNotApplied(t *testing.T) {
 	const client = gcFloodClient
 	memory := newMemoryHarness(t)
@@ -2363,9 +2375,9 @@ func TestAnUpdateTheWalkerRefusesIsNotApplied(t *testing.T) {
 		sending := server.openBrowser(t, room)
 		applied, closed, err := sending.send(sending.updateFrame(row.update))
 		t.Logf("%s, %d bytes: applied %v, closed %v, %v", row.name, len(row.update), applied, closed, err)
-		if err != nil || applied || closed == nil || closed.Code != resetConnectionCloseCode || closed.Text != resetConnectionCloseReason {
+		if err != nil || applied || closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode || closed.Text != contracts.DocumentUpdateRefusedCloseReason {
 			t.Fatalf("%s: applied %v, closed %v, %v; want the frame refused and that browser closed %d %q",
-				row.name, applied, closed, err, resetConnectionCloseCode, resetConnectionCloseReason)
+				row.name, applied, closed, err, contracts.DocumentTooLargeCloseCode, contracts.DocumentUpdateRefusedCloseReason)
 		}
 		sending.leave()
 		if err := reader.ping(); err != nil {
@@ -2375,6 +2387,35 @@ func TestAnUpdateTheWalkerRefusesIsNotApplied(t *testing.T) {
 		if got := newBrowserDocument(t, after).doc.StateVector(); !maps.Equal(got, vector) || !bytes.Equal(after, before) {
 			t.Fatalf("%s: the room's state vector is %v and its state %d bytes, want %v and the %d bytes it held", row.name, got, len(after), vector, len(before))
 		}
+	}
+	// The loop a client that does not read the close makes: the same frame again on a socket of
+	// its own, round after round, each one closed the same way with the room's state unchanged
+	// after it. What the runtime holds after the last round is within reconnectRoundsMargin of
+	// what it held after the first, read from the server's own trace (heldNow, tracePeaks): a
+	// client that reconnects and resends for ever costs the pod nothing that accumulates.
+	resend := func(round int) {
+		sending := server.openBrowser(t, room)
+		applied, closed, err := sending.send(sending.updateFrame(badByte))
+		if err != nil || applied || closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode || closed.Text != contracts.DocumentUpdateRefusedCloseReason {
+			t.Fatalf("round %d of the reconnect loop: applied %v, closed %v, %v; want the frame refused and that browser closed %d %q",
+				round, applied, closed, err, contracts.DocumentTooLargeCloseCode, contracts.DocumentUpdateRefusedCloseReason)
+		}
+		sending.leave()
+		if after := reader.state(t); !bytes.Equal(after, before) {
+			t.Fatalf("round %d of the reconnect loop left the room a %d-byte state, want the %d bytes it held", round, len(after), len(before))
+		}
+	}
+	resend(1)
+	afterFirst := heldNow(t, server, "after the first refused round")
+	for round := 2; round <= reconnectRounds; round++ {
+		resend(round)
+	}
+	afterRounds := heldNow(t, server, fmt.Sprintf("after all %d refused rounds", reconnectRounds))
+	t.Logf("%d reconnect-and-resend rounds: the runtime holds %d bytes after the last, against %d after the first (%+d), within the %d-byte margin",
+		reconnectRounds, afterRounds, afterFirst, afterRounds-afterFirst, int64(reconnectRoundsMargin))
+	if afterRounds > afterFirst+reconnectRoundsMargin {
+		t.Fatalf("the %d rounds left the runtime holding %d bytes, past the %d it held after the first by more than the %d-byte margin",
+			reconnectRounds, afterRounds, afterFirst, int64(reconnectRoundsMargin))
 	}
 	memory.waitForSettled(t, room)
 	if storedState, want := canonicalState(t, memory.storedState(t, room)), canonicalState(t, before); !bytes.Equal(storedState, want) {

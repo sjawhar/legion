@@ -26,14 +26,18 @@ import { asUser } from "./users";
 // (DOCUMENT_TOO_LARGE_CLOSE_CODE, permanent: the edit is dropped), as one it could not merge into
 // the document quickly enough (the same code with DOC_TOO_TANGLED, permanent too: the edit is
 // dropped), as one the document cannot take until it is rebuilt (the same code with
-// DOC_NEEDS_REBUILD: the edit is dropped and the rebuild is offered), or for want of room for open
-// documents (DOCUMENT_BUSY_CLOSE_CODE, transient: the edit waits and saves once room frees).
+// DOC_NEEDS_REBUILD: the edit is dropped and the rebuild is offered), as one holding content the
+// document does not take (the same code with DOC_UPDATE_REFUSED, permanent: the edit is dropped),
+// or for want of room for open documents (DOCUMENT_BUSY_CLOSE_CODE, transient: the edit waits and
+// saves once room frees).
 
 const TOO_LARGE = "Your last edit was not saved: it would make this document larger";
 const NEEDS_REBUILD =
   "This document has been edited so much that it must be rebuilt before it can take this edit. Your other edits are kept.";
 const TOO_TANGLED =
   "Your last edit was not saved: Dispatch could not merge it into this document quickly enough. Your other edits are kept.";
+const UPDATE_REFUSED =
+  "Your last edit was not saved: it holds content this document does not take.";
 const OUT_OF_ROOM = "Dispatch is out of room for open documents right now.";
 const ROOM_BUDGET = "/api/v1/artifacts/_test/room-budget";
 /** The sentence both browsers of the used-up row write after, the end of its paragraph's text. */
@@ -492,6 +496,61 @@ test("a merge the server cannot scan through is dropped with its reason, and the
     // One refusal, and no reconnect that met it again.
     expect((await sockets()).closes.filter((code) => code === 4413)).toHaveLength(1);
     expect((await getArtifactText(artifactId)).markdown).not.toContain("tangled paste");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an edit holding content the document does not take is dropped with its reason, and the next edit saves", async ({
+  browser,
+}) => {
+  await createProject({ key: "REFUSE", name: "Refused updates" });
+  const issue = await createIssue({
+    project: "REFUSE",
+    spec: "# Refused\n\nOne paragraph of ordinary prose.\n",
+    title: "Refuse an edit the document does not take",
+  });
+  const artifactId = issue.primary_artifact_id;
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const sockets = await recordDocumentSockets(page);
+    await openSpec(page, issue.key, "One paragraph of ordinary prose.");
+    await typeAtEnd(page, "kept before the refusal");
+    await expect
+      .poll(async () => (await getArtifactText(artifactId)).markdown)
+      .toContain("kept before the refusal");
+    await expect.poll(() => pendingEditCount(page, artifactId)).toBe(0);
+
+    // The editor never sends content the server refuses to read - a subdocument, a root outside
+    // the document's tree and its margin, bytes its decoder refuses - so the hook arms the room
+    // to refuse the next update this browser sends it as it refuses one of those
+    // (docs.Service.RefuseNextPeerUpdateForTest). A paste is one update, so it is that one.
+    const armed = await postAsPage(
+      page,
+      `/api/v1/artifacts/${artifactId}/_test/refuse-next-update`
+    );
+    expect(armed.status(), await armed.text()).toBe(204);
+    await paste(page, { html: "", text: "refused content" });
+
+    await expect(page.getByText(UPDATE_REFUSED)).toBeVisible();
+    // Permanent, as the size refusal is: no rebuild is offered, the refused edit is dropped, and
+    // the editor is connected again against a fresh read.
+    await expect(page.getByRole("button", { name: "Rebuild this document" })).toHaveCount(0);
+    await expect(connectedDot(page)).toHaveText("connected");
+    await expect(documentEditor(page)).toContainText("kept before the refusal");
+    await expect(documentEditor(page)).not.toContainText("refused content");
+    await expect.poll(() => pendingEditCount(page, artifactId)).toBe(0);
+    expect((await getArtifactText(artifactId)).markdown).not.toContain("refused content");
+
+    await typeAtEnd(page, "saved after the refusal");
+    await expect
+      .poll(async () => (await getArtifactText(artifactId)).markdown)
+      .toContain("saved after the refusal");
+    await expect.poll(() => pendingEditCount(page, artifactId)).toBe(0);
+    // One refusal, and no reconnect that met it again.
+    expect((await sockets()).closes.filter((code) => code === 4413)).toHaveLength(1);
+    expect((await getArtifactText(artifactId)).markdown).not.toContain("refused content");
   } finally {
     await alice.close();
   }

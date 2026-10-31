@@ -233,6 +233,10 @@ type Service struct {
 	// admissionHolds holds, for a document, how long its next socket waits before its admission
 	// (HoldNextAdmissionForTest). Empty outside browser tests.
 	admissionHolds sync.Map
+	// refuseNextPeerUpdate is the document whose next read-write browser update the hook refuses
+	// as one its walk refuses (RefuseNextPeerUpdateForTest), taken by the update that meets it.
+	// Nil outside browser tests, and one atomic load on the peer's read loop while it is.
+	refuseNextPeerUpdate atomic.Pointer[string]
 	// inServiceTransaction runs first in every transaction a service mutation makes through
 	// Server.Apply (serviceTransact). Nil outside tests; tests use it to change the live document
 	// between the mutation's read of it and its write, where a peer's update can land: Apply runs
