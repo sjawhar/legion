@@ -58,12 +58,18 @@ test passed at the branch's own tree, before and after the merge
 41164510541 at `d7e1daaaaf` failed it too. That pair is what named the cause.
 
 The cause: the check reads the claim list under
-`#### The Dispatch identity the broker can issue` in `docs/kubernetes.md` and stops at the first
-line that is neither a bullet nor an indented continuation once it holds one claim
-(`internal/broker/oauth/claims_doc_test.go:176-190`); a relay on main had reflowed that list so a
-blank line sits between each bullet, so the parse read `session` alone against the
+`#### The Dispatch identity the broker can issue` in `docs/kubernetes.md`, and the loop in
+`documentedClaims` (`packages/envoy/internal/broker/oauth/claims_doc_test.go`), **as it stood at
+`c10800814dec`**, stopped at the first line that was neither a bullet nor an indented
+continuation once it held one claim: its comment read "the list runs to the first line that is
+neither a bullet nor a wrapped bullet's indented continuation — in the document as written, the
+blank line under it". A relay on main had reflowed that list so a blank line sits between each
+bullet, so the parse read `session` alone against the
 `person, project, project_scope, session` the exchange issues. sjawhar/legion#2598 widened the
-parser and merged as `1a9095e6cf22`. The branch was held until then, and the round that cleared
+parser and merged as `1a9095e6cf22`: the head's reader is `claimListNames`, and a blank line now
+ends the list only when the next non-blank line is neither a bullet nor an indented continuation,
+so `documentedClaims` at the head behaves the opposite way to the sentence above and is no
+citation for it. The branch was held until then, and the round that cleared
 the red changed no code at all: one merge commit, `2599248d44b3`, no conflict, fingerprint
 `756fb89b…` unchanged at both heads, pushed once with the round's handoff so the push carried a
 code commit and GitHub started a run for it.
