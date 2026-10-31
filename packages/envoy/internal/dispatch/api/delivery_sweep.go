@@ -32,7 +32,8 @@ import (
 // and no other (deliverMessageResuming and claimCommentDeliveryAttempt, bound to its number). A
 // keyed send whose process died between its message's commit and its first attempt has no attempt
 // at all; its key's recovery point names the message, and its first attempt is owed once the key's
-// holder is gone.
+// holder is gone. Only an earlier release leaves such a row: this release's createStoredMessage
+// writes attempt 1 in the transaction that stores the message.
 //
 // An owed attempt nothing can send is settled instead of sent: one whose issue closed, since every
 // sender refuses a delivery there (requireOpenIssue, lockedComment), and one whose comment no
@@ -51,6 +52,16 @@ import (
 // deliverySweepBatch bounds how many attempts of each kind one pass resumes, so a pass after a
 // crash that stranded many is bounded too; the rest are the next pass's. Undeliverable attempts
 // are read in batches of it too, until none is left.
+//
+// It also bounds how long a pass can take, and so how long the suggestion-outcome sweep's lease
+// is held while it runs: a send may now wait a listener take-over out, listenerTakeoverWindow
+// (12 s) from its first try, and the try that starts just inside that window is bounded by the
+// listener client's own five seconds, so one attempt is about 17 seconds at worst. A pass reads
+// three kinds - the owed message attempts, the keyed sends with no attempt and the owed mention
+// attempts - deliverySweepBatch of each, so 300 attempts, and sends them
+// broadcastDeliveryWorkers (4) at a time: 75 rounds of about 17 seconds, some 21 minutes, is the
+// worst case, and no other process runs a pass of that loop for the whole of it. It needs every
+// one of those 300 attempts to meet a take-over; a pass with nothing owed ends in three reads.
 const deliverySweepBatch = 100
 
 // The causes an owed attempt nothing can send is settled with (settleUndeliverable).
@@ -192,7 +203,8 @@ func (s *server) resumeOwedDelivery(ctx context.Context, owed owedDelivery) erro
 			return err
 		}
 		_, err = s.deliverResolvedCommentMention(ctx, comment, created,
-			ResolvedMention{Target: owed.target, Delivery: owed.delivery}, comment.Author, owed.attempt)
+			ResolvedMention{Target: owed.target, Delivery: owed.delivery}, comment.Author, owed.attempt,
+			s.newTakeoverRetry())
 		return err
 	}
 	message, err := s.loadMessage(ctx, s.deps.Store.Pool, "", owed.messageID)
@@ -203,7 +215,7 @@ func (s *server) resumeOwedDelivery(ctx context.Context, owed owedDelivery) erro
 	if owed.requestedBy != nil {
 		actor = *owed.requestedBy
 	}
-	if _, err := s.deliverMessageResuming(ctx, message, owed.delivery, nil, actor, nil, owed.attempt); err != nil &&
+	if _, err := s.deliverMessageResuming(ctx, message, owed.delivery, actor, nil, owed.attempt); err != nil &&
 		!errors.Is(err, errAttemptNotPending) {
 		return err
 	}

@@ -934,7 +934,10 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			key, pemText := githubapptest.Key(t)
 			app := &auth.AppConfig{ClientID: replicasTestClientID, PEM: pemText}
-			sweeper, err := webhookSweeper(client, app, "", resolveWith(t, three).NATSReplicas)
+			// The sweep's App client and redeliver-webhooks both read the GitHub rate limits
+			// every process shares, so each needs the database that holds them.
+			database := storetest.Open(t)
+			sweeper, err := webhookSweeper(client, database, app, "", resolveWith(t, three).NATSReplicas)
 			if err != nil {
 				t.Fatalf("build the webhook sweeper: %v", err)
 			}
@@ -946,6 +949,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				var stdout, stderr bytes.Buffer
 				code := runSubcommand(context.Background(), []string{"redeliver-webhooks", "--since", "1h", "--dry-run"}, envGetter(map[string]string{
 					"NATS_URLS":                url,
+					"DATABASE_URL":             database.Pool.Config().ConnString(),
 					"XDG_CONFIG_HOME":          t.TempDir(),
 					"DISPATCH_APP_CLIENT_ID":   replicasTestClientID,
 					"DISPATCH_APP_PEM_B64":     pemText,
@@ -1022,7 +1026,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				overrides["ENVOY_URL"] = listener.URL
 				request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil), "alice")
 				response := httptest.NewRecorder()
-				routerFor(t, resolveWith(t, overrides), routes.AppContextOptions{}).ServeHTTP(response, request)
+				routerFor(t, resolveWith(t, overrides), routes.AppContextOptions{Store: storetest.Open(t)}).ServeHTTP(response, request)
 				if response.Code != http.StatusOK {
 					t.Fatalf("GET /api/v1/agents: %d %s", response.Code, response.Body.String())
 				}
@@ -1646,6 +1650,27 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_ROUTE_ROSTER_TTL": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.RouteRosterTTL != 0 {
+				t.Errorf("DISPATCH_TEST_ROUTE_ROSTER_TTL unset: RouteRosterTTL = %v, want 0 (the server's own five seconds)", boot.RouteRosterTTL)
+			}
+			const longTTL = time.Minute
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":            "1",
+				"DISPATCH_TEST_ROUTE_ROSTER_TTL": longTTL.String(),
+			})
+			if boot.RouteRosterTTL != longTTL {
+				t.Errorf("DISPATCH_TEST_ROUTE_ROSTER_TTL: RouteRosterTTL = %v, want %v", boot.RouteRosterTTL, longTTL)
+			}
+			if options := appContextOptions(boot, routes.AppContextOptions{}); options.RouteRosterTTL != longTTL {
+				t.Errorf("DISPATCH_TEST_ROUTE_ROSTER_TTL: the router is handed RouteRosterTTL = %v, want %v", options.RouteRosterTTL, longTTL)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_ROUTE_ROSTER_TTL": invalid},
+					fmt.Sprintf("DISPATCH_TEST_ROUTE_ROSTER_TTL=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_ROUTE_ROSTER_TTL": "1m"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 		"DISPATCH_TEST_EDIT_NOTICE_QUIET": func(t *testing.T) {
 			const shortQuiet = 3 * time.Second
 			boot := resolveWith(t, map[string]string{
@@ -1683,7 +1708,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 						"DISPATCH_TEST_HOOKS":           "1",
 						"DISPATCH_TEST_ROSTER_UNCACHED": value,
 						"ENVOY_URL":                     listener.URL,
-					}), routes.AppContextOptions{})
+					}), routes.AppContextOptions{Store: storetest.Open(t), Lifetime: t.Context()})
 					for range 2 {
 						response := httptest.NewRecorder()
 						router.ServeHTTP(response, signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil), "alice"))
