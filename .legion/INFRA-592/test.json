@@ -2,53 +2,57 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-592",
-  "completed": "2026-10-31T11:02:00Z",
-  "round": 9,
-  "headSha": "d7182e35b67c6980dd2fbdc63a71b3c4318bac38",
-  "codeHeadSha": "530c866955816e6b04fda4d0b07859c5fe1c2a9a",
-  "loadRule": "Every run on pod 9534abcf-6826-448e-9408-b04ce8b93c7b, in adjacent base/head pairs (base 07c21242 from the worktree /legion/scratch/tmp/infra-592/basewt, head the workspace), nothing else of mine running during the pairs; each run uploaded the moment it finished (dispatch://INFRA-592/artifact/infra-592-tester-r9-t9-*-tar-gz, 10 runs); memory sampled every 2 s beside the series: sampled peak 10.80 GiB of 19, 1,239 samples.",
+  "completed": "2026-10-31T17:04:00Z",
+  "round": 10,
+  "headSha": "62d4a36178086f179719f8bc088b3c412334095a",
+  "codeHeadSha": "e9b1b005061aee7e942b23f2aff0a2b975036e05",
+  "loadRule": "Every run on pod 9534abcf-6826-448e-9408-b04ce8b93c7b; adjacent base (07c21242, worktree basewt) / head pairs; nothing else of mine ran during the load series; each run uploaded the moment it finished (dispatch://INFRA-592/artifact/infra-592-tester-r10-t10-*-tar-gz, 11 runs). Memory sampled every 2 s by a named job (mem-sampler-infra-592) beside the series: sampled peak 14.58 GiB of 19, 2,104 samples; during the red-test runs 3.96 GiB (67 samples); during the replays 3.65 GiB (107 samples).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Their 10x result reproduced in two pairs: head 8.07 and 8.18 events/s committed (theirs 8.34), base 3.85 and 3.99 (theirs 4.09), every refusal 429, 0 connection failures, request-pool waiters at most 1. Their 1x claim (head refused nothing in three pairs) did not hold in mine: one of my three head 1x runs refused 126 reads and 8 writes (the failure below); their port refusal reproduced on a fresh root."
+    "how": "Their 1x attribution reproduced with my own lock sampler (below). Their 10x shape reproduced (only 429, 0 connection failures, about 1.5x the base's committed events, about 80% of its reads) at lower absolute numbers on this round's box: head 57.7-58.7 reads/s and 5.32-5.48 events/s against their 65 and 6.02; my base also ran lower (72.7-73.2 reads/s, 3.43-3.59 events/s against their 86 and 4.12). Their 30-minute run levelled at 9.4-9.6 GB RSS; mine levelled at 10.4 GB."
   },
-  "failed": 1,
+  "failed": 2,
   "failures": [
     {
-      "criterion": "At 1x the head refuses nothing, reads or writes (the architect's round-9 check 1)",
-      "evidence": "Three adjacent 1x pairs (--events 4 --sessions 400 --requests 60): head t9-head-1x-a 0/0, t9-head-1x-b 0/0, t9-head-1x-c 126 reads (1.17%) and 8 writes (1.11%), all 429 OVERLOADED; base t9-base-1x-a 221 reads and 28 writes, t9-base-1x-b 0/0, t9-base-1x-c 0/1. t9-head-1x-c's in-window refusals fall at 10:27:58-10:28:13 (read refusal counter 38 -> 108 between the 10:27:58 and 10:28:03 samples, write 5 -> 12; loadgen logs write refusals at 10:28:09-13). In that window: no 'event horizon held back' line in Dispatch's log (none in the run); the 1 s /proc/stat sampler's ticks were 1.02-1.43 s at 50-82% CPU (no box-wide stall); Postgres's log shows 1.04 s, 2.02 s and 1.58 s executions of the artifact-listing select (stmtcache_731df244...) at 10:28:00-08 on dispatch-requests, and a dispatch-settlements backend's 'select closed_at is null from issues where key = $1 for no key update' taking 3.26 s at 10:28:09 (a row-lock wait); 33 comment writes and 27 issue reads took over 2 s each between 10:28:00 and 10:28:16. loadgen's own 5 s sampler took no sample between 10:28:03 and 10:28:16, so admission's in-flight gauges at the peak are unsampled (the 10:28:03 sample shows 15 reads and 8 writes in flight). So the burst is Postgres-side slowness (a row-lock wait and slow listing reads) filling slots for about 10 s, not the event-horizon hold of round 8 and not a box stall; which write held the issue row is not established. No red test: it appears in one of three 180 s load runs. Evidence: dispatch://INFRA-592/artifact/infra-592-tester-r9-t9-head-1x-c-tar-gz (dispatch.log, samples.json, boxcpu) and the Postgres log lines quoted here."
+      "criterion": "Background work on limits of its own: a settlement completes (CI dispatch-memory at the head)",
+      "evidence": "CI dispatch-memory (go test -tags memory ./cmd/dispatch) failed at e9b1b005 (job 124574387034), 530c8669 and 07c21242, each only on TestReturnedAnswersCannotGrowADocumentPastWhatOneUploadMayHold, 'memory_test.go:631: document <id> never settled'; it passed at b18e2678 and on main (3b0ae77e). I missed this lane in rounds 8 and 9. The memory meter cannot run on this pod (gVisor refuses /proc/<pid>/clear_refs), so I replayed the test's steps without it in throwaway copies (memreplay_test.go): at e9b1b005 the returning edit answered 200 and the document never settled in 2 min; at b18e2678 it settled in 4.1 s. Dispatch's log at e9b1b005: 'settlement withholds restored answers from their blocks' withheld=23 (document too large to store: 21,604,099 bytes past 1 MiB) and then 'document settlement left owed after reading a moving document again; its next update or the resumption settles it' passes=7, repeated: the settlement's own write reads as the document moving (docs/settlement.go:272-279, maxSettleRereads/maxSettlePasses), so each trigger gives up and the document stays owed for good. Red test: packages/envoy/internal/dispatch/api/growth_test.go TestASettlementThatWithholdsReturnedAnswersCompletes (commit 'test(dispatch): red test: a settlement that withholds returned answers completes'): 24 asks answered with 900 KB, blocks deleted, all returned in one edit, then requires doc_settlements_pending to clear within 45 s. `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 ./internal/dispatch/api/ -run TestASettlementThatWithholdsReturnedAnswersCompletes -count=1` fails at the head ('growth_test.go:668: the document still owes a settlement 45 s after the answered blocks returned in one edit', 60.5 s) and passes at b18e2678 (17.5 s). Evidence: dispatch://INFRA-592/artifact/infra-592-tester-r10-settlement-tar-gz."
+    },
+    {
+      "criterion": "10x: reads at least 60/s (the architect's round-10 check 2)",
+      "evidence": "t10-head-10x-a 10,559 and t10-head-10x-b 10,387 reads 2xx in 180 s = 58.7 and 57.7 reads/s; the 30-minute run 59.5 reads/s. Base in the same pairs 73.2 and 72.7. Marginal (2-4% under), and this round's base ran about 13% under the implementer's base on the same pod (box variance); recorded as a failure of the stated number for the architect to judge."
     }
   ],
   "architectChecks": {
-    "oneX": "FAIL in one of three pairs (above).",
-    "tenX": "PASS on the collapse criterion; read share reported. Two adjacent pairs (--events 40 --sessions 1000 --requests 600): base a/b 3.85/3.99 of 39.81 events/s committed, 14,161/15,156 of 107,355 reads served (13.2%/14.1%, 78.7/84.2 reads/s); head a/b 8.18/8.07 events/s, 8,830/8,985 reads (8.2%/8.4%, 49.1/49.9 reads/s), read p50 33/31 ms and p99 1,602/1,584 ms. Every refusal 429 OVERLOADED, 0 connection failures and 0 other non-2xx in all four; request-pool waiters (dispatch_db_pool_waiting) at most 1; goroutines waiting for a connection at most 12-14. Reads are not starved (about 50/s served, fast when served) but at 10x the head serves fewer reads than 1x offers (60/s) and 38-42% fewer than the base, while committing twice the events: the trade the PR body names. Dispatch RSS max 6.9-7.0 GB at the head against 4.4-4.7 GB at the base.",
-    "harnessPorts": "PASS. A fresh LOADTEST_ROOT's `stack.sh setup` with LOADTEST_PG_PORT=16250 refused: 'these stack ports lie inside this machine's ephemeral port range 16000-65535 (/proc/sys/net/ipv4/ip_local_port_range): postgres 16250 (LOADTEST_PG_PORT)...' (it does initdb and write stack.json before refusing); its default ports were 11280-11287. All ten pair steps started Dispatch and bound every port (0 'address already in use'), including the steps right after the two 10x runs.",
-    "realBinary": "PASS at the head. 13 slow-body writers: all 13 400 REQUEST_BODY_UNREADABLE at 61.6-62.2 s; normal writes at 5, 30, 55, 65, 70, 75 s all 201 in 0.08-0.11 s (with 24 write units the tricklers no longer hold every unit). issues locked ACCESS EXCLUSIVE 30 s: 28 reads 503 REQUEST_TIMEOUT at 20.00-20.10 s, 12 reads 429 at 1.01-1.05 s. Proxy SIGSTOPped 20 s: 60 reads and 20 writes 503 DATABASE_BUSY within 3.01 s; /healthz 200 after; 3 ERROR lines, the registry heartbeat during the freeze.",
-    "ci": "At 530c8669 at 11:00Z: changes and pr-title success; every other lane (lint, typecheck, test, ci-filters, dispatch, envoy-go, envoy-go-race, envoy-go-race-api, envoy-go-race-docs, envoy-go-race-pmdoc and the rest) queued, and ci-ok not yet created: all unread, read as queued, not waited for."
+    "oneX": "Head 0/0, 180 reads (1.67%) and 10 writes (1.39%), 0/0; base 0/2, 0/1, 0/0. The t10-head-1x-b burst (read refusals 82 -> 198 between the 15:01:37 and 15:01:42 samples, writes 10 -> 18; loadgen's write refusals at 15:01:51-54; read admission 28 in flight and 5 queued at 15:01:32) lines up with my 0.5 s lock sampler: 15:01:18 a dispatch-settlements backend waiting on 'select closed_at is null from issues where key = $1 for no key update' behind a dispatch-requests transaction idle in transaction; 15:01:33 a dispatch-requests write idle in transaction 1.53 s after its issue-open read (transaction 2.0 s old); 15:01:53 two artifact-listing reads active 2.0 and 2.6 s; 15:01:56 a settlement again waiting on an issue row behind a write idle 1.5 s; Dispatch WARN 15:01:53.906Z 'event horizon held back' 5.1 s by a write idle after 'release savepoint sp_2'. Box sampler longest tick 1.27 s. AGREES with the implementer: writes holding issue rows and the horizon during document work inside their transaction (INFRA-636's #2468 class), with slow listing reads beside them; not this PR's limits.",
+    "tenX": "Only 429 OVERLOADED, 0 connection failures, 0 other non-2xx in all four runs; head events 5.48 and 5.32/s against base 3.59 and 3.43 (+50%); head reads 58.7 and 57.7/s against base 73.2 and 72.7 (failure 2); head read in flight mean 21-22, write 17-18; goroutines waiting for a connection at most 9-14.",
+    "thirtyMinutes": "t10-head-10x-30m (1,800 s at 10x): 59.5 reads/s, 5.88 of 39.99 events/s, only 429, 0 connection failures. Per 5-minute bucket, Dispatch RSS max 7.9, 9.6, 9.7, 10.0, 10.4, 10.4 GB and heap in use max 5.6, 8.4, 8.7, 8.0, 8.5, 8.5 GiB; goroutines 2.0-2.5 thousand throughout. Heap flat from minute 10, RSS flat over the last 10 minutes (10,405 -> 10,418 MiB): it levels after its rise, at 10.4 GB.",
+    "realBinary": "PASS at the head: 13 slow-body writers all 400 REQUEST_BODY_UNREADABLE at 61.6-62.2 s, normal writes 201 in 0.08-0.19 s throughout; issues locked 30 s: 28 x 503 REQUEST_TIMEOUT at 20.00-20.11 s, 12 x 429 at 1.01-1.06 s; proxy frozen 20 s: 60 reads and 20 writes 503 DATABASE_BUSY within 3.02 s, /healthz 200 after.",
+    "ci": "At e9b1b005, 17:01Z: lint, typecheck, test, pr-title, ci-filters, dispatch, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-go-race-api, envoy-go-race-docs, envoy-go-race-pmdoc success; dispatch-memory failure (failure 1); ci-ok queued (unread)."
   },
   "proof": [
     {
-      "criterion": "10x refuses only with 429 and does not collapse; committed events against the base",
+      "criterion": "10x refuses only with 429, no dropped connection, events above the base",
       "surface": "INFRA-589's 2-core load reproduction, adjacent base/head pairs on one pod",
-      "command": "run-step.sh t9-{base,head}-10x-{a,b} --events 40 --sessions 1000 --requests 600 (r10.sh)",
-      "observed": "head 8.18 and 8.07 of 39.81 events/s committed, every refusal 429, 0 connection failures, request-pool waiters at most 1, 49-50 reads/s served",
-      "headSha": "d7182e35b67c6980dd2fbdc63a71b3c4318bac38",
-      "negativeControl": "base 07c21242 in the same pairs: 3.85 and 3.99 events/s committed"
+      "command": "run-step.sh t10-{base,head}-10x-{a,b} --events 40 --sessions 1000 --requests 600 (r11.sh)",
+      "observed": "head 5.48 and 5.32 events/s committed, every refusal 429, 0 connection failures",
+      "headSha": "62d4a36178086f179719f8bc088b3c412334095a",
+      "negativeControl": "base 07c21242 in the same pairs: 3.59 and 3.43 events/s"
     },
     {
-      "criterion": "The load harness refuses a port inside the ephemeral range, and a stack binds every time",
-      "surface": "packages/envoy/loadtest/stack.sh on the pod",
-      "command": "LOADTEST_ROOT=<fresh> LOADTEST_PG_PORT=16250 stack.sh setup; then ten run-step.sh steps on ports 11250-11257",
-      "observed": "setup refused naming the range 16000-65535 and LOADTEST_PG_PORT; ten steps, 0 bind failures",
-      "headSha": "d7182e35b67c6980dd2fbdc63a71b3c4318bac38",
-      "negativeControl": "round 8 on ports 16250-16257: two steps failed with 'bind: address already in use' after a 10x step"
+      "criterion": "Memory at 10x over 30 minutes levels",
+      "surface": "the same harness, one 1,800 s 10x step of the head",
+      "command": "run-step.sh t10-head-10x-30m --events 40 --sessions 1000 --requests 600 --duration 1800s",
+      "observed": "heap in use 8.0-8.7 GiB from minute 10; RSS 10.4 GB over the last 10 minutes; 0 connection failures",
+      "headSha": "62d4a36178086f179719f8bc088b3c412334095a",
+      "negativeControl": "none run by me for 30 minutes on the base; the implementer's base 30-minute run levelled at 8.1-8.2 GB"
     },
     {
       "criterion": "Slow bodies, request deadlines and bounded connection waits on the real binary",
       "surface": "the real envoy-dispatch, raw HTTP clients and psql",
       "command": "slowbody.py 11255 <issue>; bounds.sh",
-      "observed": "13 tricklers 400 REQUEST_BODY_UNREADABLE at 61.6-62.2 s with normal writes 201 throughout; 28 x 503 REQUEST_TIMEOUT at 20.0-20.1 s and 12 x 429; 80 x 503 DATABASE_BUSY within 3.0 s",
-      "headSha": "d7182e35b67c6980dd2fbdc63a71b3c4318bac38",
-      "negativeControl": "round 8 at 07c21242 (write limit 12): the 13th trickler 429 and normal writes 429 until the tricklers were cut"
+      "observed": "13 x 400 REQUEST_BODY_UNREADABLE at 61.6-62.2 s with normal writes 201 throughout; 28 x 503 REQUEST_TIMEOUT at 20.0-20.1 s; 80 x 503 DATABASE_BUSY within 3.0 s",
+      "headSha": "62d4a36178086f179719f8bc088b3c412334095a",
+      "negativeControl": "round 8 at 07c21242 (write limit 12): the 13th trickler 429 and normal writes refused until the tricklers were cut"
     }
   ]
 }
