@@ -515,8 +515,8 @@ jobs:
               # envoy's ./cmd/{dispatch,broker,agent-secrets,agent-secrets-helper,broker-refgen};
               # the screenshots' harness starts the Dispatch server (packages/dispatch/e2e/harness-start.ts,
               # which docs/site/media/harness.ts:21,97 imports).
-              # broker-refgen also parses broker/api, broker/config, broker/helper, cmd/broker and
-              # cmd/agent-secrets at run time (generators/broker-reference.sh:13-14).
+              # broker-refgen also parses broker/api, broker/approval, broker/config, broker/helper,
+              # cmd/broker and cmd/agent-secrets at run time (generators/broker-reference.sh:13-14).
               - *legion_command
               - *dispatch_server
               - 'packages/envoy/cmd/agent-secrets/*'

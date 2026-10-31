@@ -181,7 +181,7 @@ PACK_READS = [  # bun pm pack of pi-envoy / pi-legion runs their prepack (script
     "package.json", "bun.lock", "patches/**",
 ]
 PMDOC_GEN = [f"{ENVOY}/internal/dispatch/pmdoc/gen/**", "packages/proof-editor/**", "package.json", "bun.lock", "patches/**"]
-BROKER_REFGEN_DIRS = ("internal/broker/api", "internal/broker/helper", "internal/broker/config", "cmd/broker", "cmd/agent-secrets")
+BROKER_REFGEN_DIRS = ("internal/broker/api", "internal/broker/helper", "internal/broker/config", "internal/broker/approval", "cmd/broker", "cmd/agent-secrets")
 MODULE_SOURCES = [Read(f"{ENVOY}/**", "internal/dispatch/api/lock_level_test.go's moduleSources walks every non-test .go file "
                                       "under packages/envoy (infra included); used by :75, event_insert_guard_test.go:32, "
                                       "review_write_guard_test.go:44")]
@@ -466,6 +466,7 @@ GATES = [
         (f"{ENVOY}/cmd/broker/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/config.go:12,40)"),
         (f"{ENVOY}/internal/broker/helper/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/pages.go:16, codes.go:15)"),
         (f"{ENVOY}/cmd/agent-secrets/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/pages.go:17, codes.go:68)"),
+        (f"{ENVOY}/internal/broker/approval/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/routes.go:34,664)"),
     ) + setup_go(DOCS_JOB, f"{DAEMON}/go.mod", DOCS_SITE) + biome(at_docs("Lint the docs site"))
       + bun_job(DOCS_JOB, DOCS_SITE) + CI_SELF + DOCS_SITE_SELF),
 
