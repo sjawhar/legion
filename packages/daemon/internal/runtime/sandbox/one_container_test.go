@@ -15,6 +15,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
@@ -132,6 +133,99 @@ func TestAnIssuePodRunsEveryRoleInOneContainer(t *testing.T) {
 			t.Errorf("container %s carries %+v, want the issue pod's one reservation %+v", container.Name, container.Resources, reservation)
 		}
 	}
+}
+
+// A deployment that sets runtime.kubernetes.test_postgres gives every issue pod its own
+// PostgreSQL for tests: the roles container's launcher is told to serve it (--test-postgres), the
+// cluster lives on a disk emptyDir mounted at TestPGDir — under the roles directory, which every
+// role's namespace covers, so no role reaches the cluster's files — and every role of the pod is
+// told its DSN. A deployment that sets nothing renders none of the three, and the controller's
+// pod never serves one: it runs no tests, and its container holds its own credentials.
+func TestAnIssuePodServesItsOwnTestPostgres(t *testing.T) {
+	opts := goldenOptions()
+	opts.TestPostgres = true
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := launchOf(t, r, rootSpec(t))
+	pod := r.podTemplate(l).Spec
+	c := pod.Containers[0]
+	if !slices.Contains(c.Command, "--test-postgres") {
+		t.Errorf("the roles container runs %q, want --test-postgres", c.Command)
+	}
+	mount := mountHolding(c, TestPGDir)
+	if mount == nil || mount.Name != testPGVolume || mount.ReadOnly {
+		t.Errorf("the roles container mounts %+v at %s, want the writable volume %s", mount, TestPGDir, testPGVolume)
+	}
+	var cluster *corev1.Volume
+	for i := range pod.Volumes {
+		if pod.Volumes[i].Name == testPGVolume {
+			cluster = &pod.Volumes[i]
+		}
+	}
+	if cluster == nil || cluster.EmptyDir == nil || cluster.EmptyDir.Medium != corev1.StorageMediumDefault {
+		t.Errorf("the test database's volume is %+v, want an emptyDir on the node's disk", cluster)
+	}
+	if value := envValue(r.mainEnvironment(l), launcher.TestPGVariable); value != launcher.TestPGDSN {
+		t.Errorf("an issue pod's role is told %s=%q, want %q", launcher.TestPGVariable, value, launcher.TestPGDSN)
+	}
+	// The controller's pod runs no tests and is told nothing: its launcher serves no server.
+	controller := r.mainEnvironment(launchOf(t, r, controllerSpec(t)))
+	if value := envValue(controller, launcher.TestPGVariable); value != "" {
+		t.Errorf("the controller is told %s=%q, want nothing", launcher.TestPGVariable, value)
+	}
+	// An operator may not point that name anywhere, whether or not this deployment serves one.
+	refused := CheckPod(Pod{Env: map[string]string{launcher.TestPGVariable: "postgres://x@127.0.0.1:5433/postgres"}}, nil,
+		testOptions().Tools, []string{"ENVOY_TOKEN"}, nil, postgresStore)
+	if refused == nil || !strings.Contains(refused.Error(), launcher.TestPGVariable) {
+		t.Errorf("CheckPod with %s in the pod env = %v, want it refused", launcher.TestPGVariable, refused)
+	}
+	off, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := off.podTemplate(launchOf(t, off, rootSpec(t))).Spec
+	if slices.Contains(plain.Containers[0].Command, "--test-postgres") || mountHolding(plain.Containers[0], TestPGDir) != nil {
+		t.Errorf("a deployment that serves no test database renders %q and the mount %+v", plain.Containers[0].Command, mountHolding(plain.Containers[0], TestPGDir))
+	}
+	if value := envValue(off.mainEnvironment(launchOf(t, off, rootSpec(t))), launcher.TestPGVariable); value != "" {
+		t.Errorf("a deployment that serves no test database tells its roles %s=%q", launcher.TestPGVariable, value)
+	}
+}
+
+// The image probe proves the server where a pod runs it: the probe pod's `legion probe-image`
+// carries --test-postgres over its own volume for a deployment that serves one, so a runtime the
+// server cannot start under refuses the daemon's boot probe rather than every pod's first
+// Postgres test. A deployment that serves none passes the flag to nothing.
+func TestTheImageProbeProvesTheTestPostgres(t *testing.T) {
+	for serves, want := range map[bool]bool{true: true, false: false} {
+		opts := goldenOptions()
+		opts.TestPostgres = serves
+		r, err := configure(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
+		command := probe.Containers[0].Command
+		flag := slices.Index(command, "--test-postgres")
+		if (flag >= 0) != want {
+			t.Errorf("test_postgres %t: the probe pod runs %q", serves, command)
+		}
+		if want && command[flag+1] != RoleProbeDir+"/"+launcher.TestPGDirName {
+			t.Errorf("the probe pod serves its test database from %q, want it on its own volume under %s", command[flag+1], RoleProbeDir)
+		}
+	}
+}
+
+// envValue is name's value among env, "" when it holds none.
+func envValue(env []corev1.EnvVar, name string) string {
+	for _, entry := range env {
+		if entry.Name == name {
+			return entry.Value
+		}
+	}
+	return ""
 }
 
 // sameRequirements is whether two requirements hold the same quantities, however each is spelled.

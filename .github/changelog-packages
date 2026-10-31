@@ -1,6 +1,5 @@
 packages/pi-legion=pi-legion-v
 packages/pi-envoy=pi-envoy-v
-packages/envoy-plugin=opencode-legion-envoy-v
 packages/envoy=legion-envoy-v
 packages/claude-envoy
 packages/contracts

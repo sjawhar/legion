@@ -288,7 +288,12 @@ test("ProofDocument reports connection status and pending edits through the tool
     act(() => status("connected"));
     await waitFor(() => expect(toolbar.current?.connection).toBe("connected"));
     act(() => {
-      pending({ count: 2, readOnly: false, rebuiltAt: undefined, stored: true });
+      pending({
+        count: 2,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      });
       status("offline");
     });
     await waitFor(() =>
@@ -306,6 +311,74 @@ test("ProofDocument reports connection status and pending edits through the tool
     expect(
       within(view.container).getByText("This issue is closed. Its document is read-only.")
     ).toBeDefined();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("the margin's wait for this browser's edits is answered by a report taken after it, and by its bound", async () => {
+  const { margin, pending, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(margin.current?.documentBridge).toBeDefined());
+    const bridge = margin.current?.documentBridge;
+    if (bridge === undefined) throw new Error("expected a registered document");
+
+    // The mark the margin has just written is an update of its own, and the store counts a local
+    // update only once its IndexedDB write is through. So the report that says this browser holds
+    // nothing has to be one taken after the wait began: the last report before it was taken
+    // without that mark in it, and on a quiet document it says nothing pending, which would send
+    // the retry straight back into the refusal it is recovering from.
+    act(() =>
+      pending({
+        count: 0,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
+    let answered = false;
+    const waiting = bridge.whenSent(5000).then(() => {
+      answered = true;
+    });
+    await Promise.resolve();
+    expect(answered).toBe(false);
+
+    act(() =>
+      pending({
+        count: 1,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
+    await Promise.resolve();
+    expect(answered).toBe(false);
+
+    act(() =>
+      pending({
+        count: 0,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
+    await waiting;
+    expect(answered).toBe(true);
+
+    // A read-only admission cannot send the row it holds, and a row another tab holds is not
+    // this page's to send either: the bound is what ends the wait, and the margin sends again
+    // whatever it answers.
+    act(() =>
+      pending({
+        count: 1,
+        readOnly: true,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
+    await bridge.whenSent(0);
   } finally {
     view.unmount();
   }
@@ -525,7 +598,14 @@ test("a selection-bar action opens the margin composer for the mark and settles 
     let comment: Promise<void> | undefined;
     act(() => {
       comment = Promise.resolve(
-        onMarkAction({ from: 11, kind: "comment", markId: "m-9", quote: "brown", to: 16 })
+        onMarkAction({
+          from: 11,
+          kind: "comment",
+          markId: "m-9",
+          placement: { blockId: "b-1", prefix: "The quick ", readings: 1, suffix: " fox" },
+          quote: "brown",
+          to: 16,
+        })
       );
       void comment.catch(() => {});
     });
@@ -533,7 +613,12 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       throw new Error("The comment action did not return a promise.");
     }
     expect(margin.current?.pendingCompose).toMatchObject({
-      anchor: { artifact: artifact.id, mark_id: "m-9", quote: "brown" },
+      anchor: {
+        artifact: artifact.id,
+        mark_id: "m-9",
+        placement: { blockId: "b-1", prefix: "The quick ", readings: 1, suffix: " fox" },
+        quote: "brown",
+      },
       kind: "comment",
     });
     act(() => sendOpenCompose());
@@ -544,7 +629,14 @@ test("a selection-bar action opens the margin composer for the mark and settles 
     let suggest: Promise<void> | undefined;
     act(() => {
       suggest = Promise.resolve(
-        onMarkAction({ from: 11, kind: "suggest", markId: "m-10", quote: "brown", to: 16 })
+        onMarkAction({
+          from: 11,
+          kind: "suggest",
+          markId: "m-10",
+          placement: null,
+          quote: "brown",
+          to: 16,
+        })
       );
       void suggest.catch(() => {});
     });
@@ -559,7 +651,14 @@ test("a selection-bar action opens the margin composer for the mark and settles 
     let ask: Promise<void> | undefined;
     act(() => {
       ask = Promise.resolve(
-        onMarkAction({ from: 11, kind: "ask", markId: "m-11", quote: "brown", to: 16 })
+        onMarkAction({
+          from: 11,
+          kind: "ask",
+          markId: "m-11",
+          placement: null,
+          quote: "brown",
+          to: 16,
+        })
       );
       void ask.catch(() => {});
     });
