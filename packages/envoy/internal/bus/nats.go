@@ -246,7 +246,11 @@ type Client struct {
 	// (WithReconnectWaitTick, export_test.go) to know a publish is inside that wait, or to act at
 	// the moment the wait ends.
 	reconnectWaitTick func()
-	mu                sync.Mutex
+	// afterInstall, when not nil, runs once an install has set the connected flag and let go of
+	// mu (afterInstallForTest). It is nil outside tests: a test sets it to deliver a connection
+	// event in that moment.
+	afterInstall func(*nats.Conn)
+	mu           sync.Mutex
 
 	// deniedPublishes holds, under mu, the server's refusals of publishes per subject it refused a
 	// publish to, as the connection reported them (recordPublishDenial), queued in arrival order
@@ -313,20 +317,24 @@ type Client struct {
 	// the machine's lease record (lease.SetReceiveSignal), so a read that waits stalls the
 	// renewals with it.
 	//
-	// The connection's own callbacks keep it (noteConnection, the state callback of options): a
-	// connect or a reconnect stores the connection, and a disconnect or a close clears it, each
-	// clearing only its own connection, so a callback nats.go delivers late for a connection the
-	// client has since replaced cannot clear the replacement. A connect counts only once the
-	// client has installed that connection (installedConn): install and ensureConnWithContext make
-	// it c.Conn, then set the flag themselves (markConnected), since nats.go reports the connect of
-	// a connection the client dialled before either has run, and then clear it if it is not
-	// connected (settleConnected), so a drop around the install never leaves it reading connected.
-	// A connection the client dialled and did not install never reaches this field at all, since
-	// only an install stores one.
+	// The connection's own events are its only source: nothing asks a connection whether it is
+	// connected, since that read waits on the lock above. Every connect, reconnect, disconnect and
+	// close callback records what it reports for its connection (noteConnection, the state callback
+	// of options), installed or not, and moves this field only for the connection the client has
+	// installed. An install (markConnected) sets the field from what its connection's events have
+	// reported so far, or from how the dial returned when they have reported nothing yet. Both
+	// writers take connFlagMu, so an event lands wholly before an install or wholly after it: one
+	// before is in the record the install reads, and one after moves the field itself. A late
+	// callback of a connection the client has replaced records only into the record, which the next
+	// install prunes. Readers take no lock: Connected and ConnectedConn load this field alone.
 	connectedConn atomic.Pointer[nats.Conn]
-	// installedConn is the connection the client last made c.Conn, read by the connection
-	// callbacks without c.mu (noteConnection).
-	installedConn atomic.Pointer[nats.Conn]
+	// connFlagMu orders the writers of connectedConn (noteConnection, markConnected). installedConn
+	// is the connection the client last made c.Conn, and connUp what each connection's events have
+	// reported last, connected or not; both are under connFlagMu. No holder of connFlagMu calls
+	// into nats.go or takes mu, so a callback never waits behind a dial or the client's lock.
+	connFlagMu    sync.Mutex
+	installedConn *nats.Conn
+	connUp        map[*nats.Conn]bool
 
 	// reconnectQueue holds the connections whose connection event has still to be worked through
 	// (onReconnect), oldest first, and reconnectRunning whether a goroutine of the client's is
@@ -467,9 +475,11 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		// install that fails returns no client, so it stops the client before
 		// connectFirstInBackground closes the connection, as the foreground path does below. At the
 		// pinned nats.go (v1.50.0) it cannot fail: JetStream with these options returns no error, and
-		// there is no stream to reconcile here. The stop guards a nats.go whose JetStream can.
+		// there is no stream to reconcile here. The stop guards a nats.go whose JetStream can. The
+		// dial returned a connection nats.go has yet to connect, so it reads disconnected until its
+		// first connect reports itself (markConnected).
 		install := func(nc *nats.Conn) error {
-			if err := c.install(nc, nil); err != nil {
+			if err := c.install(nc, nil, false); err != nil {
 				c.stop()
 				return err
 			}
@@ -488,7 +498,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	if ownsStream {
 		owned = &stream
 	}
-	if err := c.install(nc, owned); err != nil {
+	if err := c.install(nc, owned, true); err != nil {
 		// The constructor returns no client, so no caller can Close it: the client is stopped
 		// before nc closes, so the recovery nc's close begins (onClosed) finds it stopped and dials
 		// nothing. Running, that recovery would dial and install a connection held by no one, which
@@ -504,8 +514,10 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 }
 
 // install makes nc the client's connection, with the JetStream context taken from it, once it has
-// reconciled stream on nc (ensureStreamWithConfig) when stream is not nil.
-func (c *Client) install(nc *nats.Conn, stream *nats.StreamConfig) error {
+// reconciled stream on nc (ensureStreamWithConfig) when stream is not nil. dialedUp is whether
+// the dial returned nc connected, which the connected flag takes until nc's own events say
+// otherwise (markConnected).
+func (c *Client) install(nc *nats.Conn, stream *nats.StreamConfig, dialedUp bool) error {
 	js, err := nc.JetStream(nats.MaxWait(10*time.Second), nats.PublishAsyncTimeout(publishAcknowledgementTimeout))
 	if err != nil {
 		return err
@@ -517,12 +529,12 @@ func (c *Client) install(nc *nats.Conn, stream *nats.StreamConfig) error {
 	}
 	c.mu.Lock()
 	c.Conn, c.js = nc, js
-	c.markConnected(nc)
+	c.markConnected(nc, dialedUp)
 	// install runs only from the constructor, before any connection is c.Conn, so nothing has
 	// been recorded (recordPublishDenial records only for c.Conn) and this clear finds it empty.
 	c.clearPublishDenials()
 	c.mu.Unlock()
-	c.settleConnected(nc)
+	c.afterInstallForTest(nc)
 	return nil
 }
 
@@ -584,31 +596,62 @@ func (c *Client) ConnectedConn() *nats.Conn {
 }
 
 // noteConnection is how a connection's own events move the client's connected flag: nc connected
-// or reconnected (connected set), or nc disconnected or closed. A connect counts only for the
-// connection the client has installed (installedConn): nats.go reports the connect of a
+// or reconnected (connected set), or nc disconnected or closed. It records the report for nc,
+// installed or not, so an install that comes after it reads it (markConnected), and moves the
+// flag only when nc is the connection the client has installed: nats.go reports the connect of a
 // connection the client dialled before the client has made it c.Conn, and a flag set then would
-// read connected while c.Conn still names the connection before it; the install sets the flag
-// itself (markConnected). A report of a connection the client has since replaced clears nothing,
-// since the clear takes only its own connection out, and a late report of one that connected
-// cannot land after its replacement's: nats.go runs a connection's callbacks in order on one
-// goroutine of that connection's, the client dials a replacement only for a connection that is
-// closed, and the close is the last event of one.
+// read connected while c.Conn still names the connection before it. A late report of a
+// connection the client has since replaced moves nothing, and a report cannot land after a later
+// one of its own connection: nats.go runs a connection's callbacks in order on one goroutine of
+// that connection's, the client dials a replacement only for a connection that is closed, and
+// the close is the last event of one.
 func (c *Client) noteConnection(nc *nats.Conn, connected bool) {
-	if connected {
-		if c.installedConn.Load() == nc {
-			c.connectedConn.Store(nc)
-		}
+	c.connFlagMu.Lock()
+	defer c.connFlagMu.Unlock()
+	if c.connUp == nil {
+		c.connUp = map[*nats.Conn]bool{}
+	}
+	c.connUp[nc] = connected
+	if c.installedConn != nc {
 		return
 	}
-	c.connectedConn.CompareAndSwap(nc, nil)
+	if connected {
+		c.connectedConn.Store(nc)
+		return
+	}
+	c.connectedConn.Store(nil)
 }
 
 // markConnected records nc as the connection the client has installed and sets the connected
-// flag to it, after c.Conn names it, so a reader that sees the flag sees c.Conn too. The caller
-// holds c.mu and runs settleConnected once it has let go of c.mu.
-func (c *Client) markConnected(nc *nats.Conn) {
-	c.installedConn.Store(nc)
-	c.connectedConn.Store(nc)
+// flag from what nc's events have reported so far (noteConnection), or from dialedUp, how the dial
+// returned nc, when they have reported nothing yet. It runs under c.mu, after c.Conn names nc, so a
+// reader that sees the flag sees c.Conn too. An event of nc that the install did not see takes
+// connFlagMu after it and moves the flag itself, so no order of the two leaves the flag at odds
+// with nc's last event. It forgets every other connection's reports: none of them moves the flag
+// again.
+func (c *Client) markConnected(nc *nats.Conn, dialedUp bool) {
+	c.connFlagMu.Lock()
+	defer c.connFlagMu.Unlock()
+	up, reported := c.connUp[nc]
+	if !reported {
+		up = dialedUp
+	}
+	c.connUp = map[*nats.Conn]bool{nc: up}
+	c.installedConn = nc
+	if up {
+		c.connectedConn.Store(nc)
+		return
+	}
+	c.connectedConn.Store(nil)
+}
+
+// afterInstallForTest runs the client's afterInstall test hook, when one is set, once an install
+// has set the connected flag and let go of c.mu: the moment a connection event can land after the
+// install. Nothing outside a test sets it.
+func (c *Client) afterInstallForTest(nc *nats.Conn) {
+	if c.afterInstall != nil {
+		c.afterInstall(nc)
+	}
 }
 
 // HookedConnectionEvents is how many connection events this client's reconnect hooks have run to
@@ -1170,26 +1213,12 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		}
 		c.Conn = nc
 		c.js = js
-		c.markConnected(nc)
+		// connectWithContext returns only a connection that connected.
+		c.markConnected(nc, true)
 		c.markHooksDueLocked()
 		c.mu.Unlock()
-		c.settleConnected(nc)
+		c.afterInstallForTest(nc)
 		return nil
-	}
-}
-
-// settleConnected finishes installing nc as the connection the connected flag names. The install
-// stores nc first and reads nc's state only then, outside c.mu (a dial that hangs holds nats.go's
-// connection lock, and no caller of c.mu may wait that long): a drop after the store clears the
-// flag through nc's own disconnect callback, and a drop before it is caught by this read. The
-// other order could read nc connected, see its disconnect callback clear nothing yet, and then
-// store it, leaving the flag connected while nc's reconnect dials hang. What this order can still
-// get wrong is a reconnect landing between the read and the clear, which reads disconnected until
-// nc's next event: a pod that then lets its lease go settles its successor for the ack wait, which
-// is safe.
-func (c *Client) settleConnected(nc *nats.Conn) {
-	if !nc.IsConnected() {
-		c.connectedConn.CompareAndSwap(nc, nil)
 	}
 }
 

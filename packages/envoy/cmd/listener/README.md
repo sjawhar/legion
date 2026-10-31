@@ -92,7 +92,9 @@ pod's packets leaves hanging for the 5 s connect timeout, and the receive loop's
 across the subscribe that waits for that same lock. The receive loop keeps its atomic current
 from each term's subscribe and end, and the bus client keeps its connected flag from its
 connection's connect, reconnect, disconnect and close callbacks (`bus.Client.Connected`), so no
-caller of it waits on a connection either. nats.go runs those callbacks one at a time on one
+caller of it waits on a connection either. Those events are the flag's only source: an install
+sets it from what its connection's events have reported so far, under the same lock the events
+take, and never asks the connection, so no event that lands around an install is lost. nats.go runs those callbacks one at a time on one
 goroutine per connection, so the client runs a connection event's own work - restoring its
 subscriptions and running the reconnect hooks, which make requests of the server - on a
 goroutine of its own (`Client.queueReconnect`): on the callback goroutine, a cut during a slow
