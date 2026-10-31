@@ -173,8 +173,9 @@ func validateUpdate(update []byte, maxPending int) error {
 // reports the sentinel wrapped in itself ("crdt: invalid update: crdt: invalid update") and no
 // reason, which invalidOnce returns as the sentinel alone so the line a refusal logs states it
 // once. The fix ships in the fork's next release
-// (dispatch://INFRA-593/artifact/ygo-truncated-reason-patch); once the pinned tag carries it, delete invalidOnce, doubledInvalidUpdate and the reasonless cases of
-// decode_reason_test.go and fold_reason_test.go, which then fail saying nothing reasonless is left.
+// (dispatch://INFRA-593/artifact/ygo-truncated-reason-patch); once the pinned tag carries it,
+// delete invalidOnce, doubledInvalidUpdate and the reasonless cases of decode_reason_test.go and
+// fold_reason_test.go, which then fail saying nothing reasonless is left.
 func decodeStoredState(doc *crdt.Doc, state []byte) error {
 	return invalidOnce(crdt.ApplyUpdateV1(doc, state, nil))
 }
