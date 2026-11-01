@@ -560,9 +560,9 @@ func runForkSteps(t *testing.T, service *Service, artifactID string, checks *ren
 // Every rendering a write hands on - to a margin write (applyMargin), to a read joined to its
 // transaction (docTree), to a version (capture), and at each fork read and its publish - is a
 // fresh read and render of its fork, in each transaction the API runs: an anchored comment, a
-// suggestion, an edit and its version, an accept, and a transaction a browser's commit moves the
-// fork under, after which no rendering is reused. Each version records the document its
-// transaction committed.
+// suggestion, an edit and its version, an accept, and a transaction a browser commits under,
+// whose fork stands where its one read left it, so every rendering after that commit is still
+// reused. Each version records the state its own transaction wrote.
 func TestForkReadsEveryReuseOfAWritesRenderingDescribesItsFork(t *testing.T) {
 	service, artifactID := newForkReadsRoom(t)
 	checks := checkRenderings(service)
@@ -712,8 +712,11 @@ func TestForkReadsEveryReuseOfAWritesRenderingDescribesItsFork(t *testing.T) {
 		}
 	})
 
-	// A browser's commit between two operations moves the fork incrementally, which drops the
-	// write's rendering: the reads after it read the fork, and none takes a rendering.
+	// A browser's commit between two operations never reaches the fork: the transaction read the
+	// room once, and its fork stands at that read, so the rendering the first operation left still
+	// describes it and the reads after the commit take it. The version is the write's own state,
+	// which the browser's edit is not in - it is stored after the write and versioned by the
+	// settlement that follows - while the committed document holds both.
 	t.Run("warm/a browser commit between operations", func(t *testing.T) {
 		const id = "s-moved"
 		var number int
@@ -727,12 +730,21 @@ func TestForkReadsEveryReuseOfAWritesRenderingDescribesItsFork(t *testing.T) {
 				},
 				sites: map[string]int{},
 			},
-			suggestionKind(id, true, false),
-			version(&number, false, false),
+			suggestionKind(id, true, true),
+			version(&number, false, true),
 		)
 		waitForLandedAppends(t, service, artifactID)
-		if fresh := requireVersionIsTheCommittedDocument(t, service, artifactID, number); !strings.Contains(fresh, "Paragraph 44 then opens") {
+		fresh, err := documentMarkdown(persistedProofTree(t, service.store, artifactID))
+		if err != nil {
+			t.Fatalf("render the committed document: %v", err)
+		}
+		if !strings.Contains(fresh, "Paragraph 44 then opens") {
 			t.Error("the committed document does not hold the browser's edit")
+		}
+		// The write's own state is the committed document with the browser's edit taken back out.
+		want := strings.Replace(fresh, "Paragraph 44 then opens", "Paragraph 44 opens", 1)
+		if stored := versionMarkdown(t, service.store, artifactID, number); stored != want {
+			t.Errorf("version %d records %d bytes of markdown, not the %d bytes the write's own state renders to", number, len(stored), len(want))
 		}
 	})
 }

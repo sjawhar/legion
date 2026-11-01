@@ -1,5 +1,505 @@
 # Changelog
 
+## [27.2.0] - 2026-11-01
+
+### Added
+
+- A typed block's schema can declare an attribute of kind `block[]` that points at blocks of
+  documents: its value is canonical block references joined by exactly one space, anything else
+  refused (a block of a comment or a message with a reason of its own), and each block it names
+  is a graph edge from the typed block of a kind named by the attribute,
+  which `GET /api/v1/references?kind=` accepts. Its `targets` limit the block types it points at:
+  an agent's or API write introducing a pointer to an existing block of another type is refused
+  (`400 INVALID_MARKDOWN`, or `INVALID_OP` on `attributes` from `POST /edits`), a browser's edit
+  never is, and every block-aware read lists a pointer's edge only while its target has an allowed
+  type (migration `20261101144855_block_pointer_links`). No shipped block type declares one yet.
+
+### Fixed
+
+- A typed block's id now reads back from the markdown Dispatch stores as the block holds it. A
+  browser can give a block any id, and the renderer wrote it `#` and the id as it was, so an id
+  holding a space, `.`, a quote or another character the shortcut cannot hold, such as `a b`, read
+  back as another id plus an undeclared attribute: the document's markdown no longer read back,
+  and a pointer from such a block was indexed as a pointer by a version write and as a mention by
+  the block-index reconciliation. Such an id is now written `id="a b"`, with `&`, `"`, line feeds
+  and carriage returns as character references, which the browser editor reads as well; an id the
+  shortcut holds is written `#id` as before. Go now reads every id the browser editor's shortcut
+  does (`q:1`, `décision`) and `id="…"`, and refuses an id written twice, an empty one, a shortcut
+  holding `&`, and a `blockId` attribute; a block schema may declare no attribute named `id` or
+  `blockId`.
+
+## [27.1.0] - 2026-11-01
+
+### Added
+
+- `envoy-infra`'s `ListenerPermissions` grants the session consumers' calls on any consumer of
+  `ENVOY_NOTIFICATIONS` (`$JS.API.CONSUMER.CREATE`, with and without a filter subject, `INFO`,
+  `DELETE` and `MSG.NEXT` on `ENVOY_NOTIFICATIONS.*`, `$JS.ACK.ENVOY_NOTIFICATIONS.*.>`, and the
+  stream's consumer list `$JS.API.CONSUMER.LIST.ENVOY_NOTIFICATIONS`, which a listener that starts
+  relaying every session at once reads instead of one info each, a listener without it reading one
+  info per session). A hub renders them for its own `listener` user: `HostPermissions` and
+  `DispatchPermissions` are built from the same base grant without them and keep their per-durable
+  scope, so a listener connecting as a `machineId` or a `dispatchMachineId` user keeps its own
+  durable alone, answers every registration that asks for consumer delivery `core` with
+  `no_grant`, and leaves those sessions on their own NATS subscriptions and `POST /v1/replay`. A
+  `gcp:NatsHub` user may instead name `listenerMachineId`, granted the new
+  `ListenerHostPermissions(listenerMachineId)`: the listener's own set, those calls included, plus
+  the plain `notifications.>` subscribe `ENVOY_SUBSCRIBE_ALL_TOPICS=1` needs, for a listener whose
+  NATS user no session shares. Every set above also subscribes on
+  `notifications.role.> envoy-roles`, beside the machine's own role-lane group, since each user
+  runs a listener.
+  `SessionPermissions` does not change. The rendered users change, so moving a hub with a
+  `listener`, a `machineId` user or a `dispatchMachineId` user to this release replaces its VM
+  once, with NATS down until the new VM starts. A hub carries the grant only after that
+  replacement or a live reload of its configuration; until then the listener answers every
+  registration `core` with `no_grant` and subscribes its role lane in its machine's group
+  (INFRA-594).
+- `packages/envoy/loadtest/` measures consumer delivery. `LOADTEST_SESSION_DELIVERY=consumer`
+  (`loadgen run -session-delivery consumer`, which `stack.sh loadgen` passes on) has each simulated
+  session subscribe its relay subject before it registers, ask for consumer delivery with one epoch
+  per NATS connection and its resume point (left out with `LOADTEST_NO_RESUME=1`), and answer each
+  relay frame `received`, then `done`, the frame being its receipt. `summary.json` gains
+  `config.session_delivery`, `sessions.delivery` (the sessions answered consumer and core, by
+  reason, and the relay frames, duplicates and redeliveries), `events.delivery_ms_from_publish`
+  (receipt time minus the frame's `Envoy-Stored-At`), and under `resources` the JetStream consumers
+  and API requests from `/jsz`, the pull requests on the stream's consumers and on session
+  consumers, and each process's CPU and RSS in the first and last third of the window. Each relay
+  frame is a row of `relay-frames.csv`, and `TABLES.md` gains the table "Session delivery, listener
+  and NATS".
+- `packages/envoy/loadtest/` measures a listener restart. `restart-step.sh <name>` runs one step
+  under consumer delivery, gives every session a resume point 60 s into the window (unless
+  `LOADTEST_NO_RESUME=1`), SIGKILLs the stack's listener at 120 s, publishes a backlog of 3
+  envelopes per session over the next 25 s (`loadgen backlog`, over JetStream under a `Nats-Msg-Id`
+  of its own, counting every failed publish), starts the listener again 30 s after the kill with
+  the same binary, arguments and environment, and then reports the run (`loadgen restart-report`):
+  how long after the restart every session had its whole backlog, per-session p50 and p99, the
+  restart to the listener's first answer, each published envelope received once or missing, and
+  every relay frame of a stream sequence its session already had, with what the real plugin would
+  do with it. A copy the plugin would write a second time (a copy of a frame the session answered
+  `done` that carries no dedupe identity) fails the report. `relay-frames.csv` gains the `identity`
+  and `done` columns the verdict rests on.
+- `/healthz` answers `503 {"status":"unhealthy","error":"role lane subscription inactive"}` when
+  the role lane's own connection is not connected or holds no valid subscription, since no role
+  message is forwarded then (INFRA-594).
+- Session consumers. `POST /v1/interests/subscribe` takes an optional `delivery`,
+  `{consumer, epoch, resume?}`. A registration that asks for a consumer, and every registration
+  with a serving port, gets a durable JetStream pull consumer of its own, `s-<session id>`, on
+  `ENVOY_NOTIFICATIONS` (explicit ack, 60 s ack wait, 1,024 pending, unlimited deliveries, 72 h
+  inactive threshold, the stream's replicas), filtered on the session's agent subject and each
+  followed topic the stream stores, and created or updated before the registration answers. Team
+  and other ad-hoc topics and role lanes stay on core NATS, live only. The answer carries
+  `delivery`: `{"mode": "consumer", "subject": "notifications.envoy.deliver.<id>", "stream_id",
+  "gap"}`, or `{"mode": "core", "reason"}` (`no_grant`, `invalid_session_id`, `consumer_error`,
+  `not_requested`); a registration with neither a `delivery` nor a port gets no field. An
+  unsubscribe and an interest DELETE set the consumer's filter before they answer. The listener
+  that owns the session (the machine id on its entry, the task holding that machine's durable
+  binding; for a serving port, the machine on its interest row) relays the consumer in stream
+  order: over NATS as a core frame on `notifications.envoy.deliver.<id>`, which the stream does not
+  store and the live topics lane skips, answered `received`, `progress`, `done` or `nak` and acked
+  only on `done`; or to a serving port as the `prompt_async` push, acked on the port's 204 and
+  pushed again after 1 s doubling to 30 s otherwise, later messages waiting behind it. A session
+  that answers no frame within 3 s is taken for unreachable: the relay sends it nothing more and
+  sends again after a backoff of 2 s doubling to 30 s, at once when the session registers, and
+  from 2 s again once the session answers a frame, so a session that was only slow has its
+  messages about 5 s after the frame it missed rather than at its next heartbeat. Every start
+  of a relay restarts the consumer at its ack floor, so a session takes its messages in stream
+  order after any break, and a missing consumer starts from the plugin's resume point when that
+  names the stream's current `envoy_stream_id`. A restart of a consumer with nothing awaiting an
+  ack keeps it, updating its filter in place, since it already goes on at the floor; one with a
+  message awaiting an ack deletes it and creates it again at the floor. A restart whose delete or
+  create fails leaves the consumer to the relay's retry, which creates it at that floor, and a
+  registration meanwhile creates it there too, so a failed restart loses no message. At most 32
+  relays of a listener restart at once, each call's 5 s timeout starting once it holds its turn,
+  so a listener restarting 1,000 sessions times none out. A listener that starts, or gains its
+  machine's durable binding, reads every session consumer with the stream's paged consumer list
+  and starts pulling each one a restart would keep unchanged with no call of its own; a pull sends
+  its own pull requests and reads no consumer info, and restarts made at once share their stream
+  reads. On the 2-CPU load-test box, 1,000 sessions of a restarted listener each had their backlog
+  within 4.1 to 9.9 s of its restart (median 5.7 s with resume points, 6.6 s without). The
+  durable path skips a session whose
+  entry records consumer delivery, so a stored message waits in its consumer, for up to 72 hours,
+  while the session restarts, its connection is down, or its owning listener restarts. Without the
+  grant below the listener answers `core` and delivery works as before: the session's own
+  subscriptions, the durable's `Skipped`, `/v1/replay`. Any rollout order works: a plugin of an
+  earlier release sends no `delivery` and stays on the core path, and a plugin of this release
+  reads an earlier listener's answer, which has no `delivery`, as `core`. No stream setting
+  changes (INFRA-594).
+
+### Changed
+
+- A role forward counts as delivered only once the stream stored it. `bus.Client.RequestCoreTo`
+  succeeds only when both the stream's acknowledgement and the holder's empty receipt arrived; a
+  receipt without the acknowledgement is the new `bus.ErrForwardNotStored`, reported
+  `delivery_failed`, so a forward whose lasting copy is missing is retried or reported, never
+  counted. The forward carries `Nats-Msg-Id` of its dedupe key and subject, so repeats leave one
+  stored copy, which reaches the holder through its session consumer across a restart. A holder
+  on a serving port, which answers no receipt, counts on the stream's acknowledgement alone
+  (`StartRequestStoredTo`), and its stored copy is pushed to the port until the port accepts it
+  (INFRA-594).
+- The role lane forwards each role message once across listeners. Every listener subscribes
+  `notifications.role.>` in one queue group, `envoy-roles`, so NATS hands each role message to one
+  listener of all of them, and the stream stores one forward per message; a listener whose grant
+  refuses that group logs it once and subscribes in its machine's group, as before. The lane has a
+  connection of its own with its pending limits off, so nothing is dropped for being queued
+  (`envoy_role_lane_slow_consumers` counts any slow-consumer error still reported). Its handler
+  resolves the holder from the watched copy of `envoy_roles` and hands the forward on: forwards to
+  one holder are published in arrival order and each waits for its outcome on its own, at most
+  4,096 at once (`envoy_role_forwards_outstanding`), so a holder slow to answer holds up no other
+  role (INFRA-594).
+- The listener durable acknowledges, before it decodes it, a stored message whose subject no
+  session of its machine needs: the subject is matched against an index of the machine's
+  interests by subject token, not against every cached interest. The push to a serving-port
+  session runs on a FIFO worker per session, off the durable's handler: the worker pushes its
+  head message until the port answers 204, waiting 1 s doubling to 30 s between tries and keeping
+  the message in progress, so a slow session holds up no other session and its own messages stay
+  in order. A delivery exception the stream stores carries `Nats-Msg-Id`
+  `exception.<reason>.<original Nats-Msg-Id or stream sequence>`, so the stream keeps one however
+  many listeners raise it (INFRA-594).
+- **Breaking:** `envoy-dispatch redeliver-webhooks` needs `DATABASE_URL`, the database the
+  Dispatch server uses, and exits 2 naming it when the variable is unset, before it connects to
+  NATS or GitHub: the GitHub rate limits it obeys now live in that database. It migrates nothing,
+  so run it against a database this release's server has already migrated. Add `DATABASE_URL` to
+  every script or job that runs the command before you deploy this release.
+- GitHub's rate limits are shared by every Dispatch process. A limit one process meets is written
+  to the new table `github_rate_limits` (migration `0160`), under the App's scope (`app`: token
+  mints, installation lookups, the webhook delivery endpoints) or one installation's
+  (`installation:<id>`), for the wait GitHub asked, and until it passes by the database's clock no
+  process sends GitHub a request under that scope. The webhook redelivery sweep's own doubling
+  backoff moved from the NATS KV bucket into the same table (scope `redelivery`), so a limit met
+  on redelivery requests no longer holds token mints past GitHub's own wait. A database that
+  cannot be read or written leaves each process to GitHub's answers, with a log line. The GitHub
+  proxy (`/api/github/rest/...`) answers a rate limit, met now or recorded by any process,
+  `503 GITHUB_RATE_LIMITED` with `Retry-After` in whole seconds (at least one), where it answered
+  `502 GITHUB_UPSTREAM` or passed GitHub's `403` through. A request a recorded limit holds fails
+  with `GitHub rate limit on <scope> recorded at <time> is in force; the request was not sent`,
+  the same text for as long as one limit lasts, so an architecture source synced under it emits
+  one `architecture.sync_failed`, not one per sync. The repository-to-installation lookup a
+  process remembers now expires after 10 minutes, so an App moved to another installation is
+  found within that rather than when the process restarts; callers that need one repository's
+  installation at once share one lookup, and one of them going away (a closed browser tab) no
+  longer fails it for the others. Installation tokens stay in each process's memory and are
+  never written to the database.
+- Dispatch's test hooks act on every process serving the database, not only the one a call
+  reached, so a browser suite against two processes works whichever process each request lands
+  on: `POST /api/v1/live/_test/disconnect`, `POST /api/v1/live/_test/rotate`,
+  `POST /api/v1/artifacts/_test/quiesce` and
+  `POST /api/v1/agents/{session_id}/stream/_test/publish` notify every process over Postgres
+  (`dispatch_test_hooks`) and answer once each has acted, or `504 TEST_HOOK_TIMEOUT` after 10 s
+  naming the lock keys of the processes that did not. With `DISPATCH_TEST_HOOKS=1` each process
+  holds one more Postgres connection, outside the shared pool, to hear them; without it nothing
+  changes. One test-only setting, accepted only with `DISPATCH_TEST_HOOKS=1`, shortens the
+  stored route list's life (`DISPATCH_TEST_ROUTE_ROSTER_TTL`).
+- The Envoy listener's live-session list an issue read with a route and `GET /api/v1/agents` use
+  is stored once for every process, the `route_roster` row (migration `0159`), at most 5 s old by
+  the database's clock, where each process kept its own copy. One listener call refreshes it for
+  every issue read and agents list on that process that asks while the call runs; an answer is
+  never stored over one from a later call. A listener that fails or does not answer is stored
+  too, and asked again only after 5 s, so the reads in that window, on every process, read
+  `route_status: unknown` and answer the agents list `503 ENVOY_UNAVAILABLE` at once. Every
+  process reads the same `route_status` and lists the same agents, so a page filtered on
+  `route_status` holds the same issues whichever process serves it; its values and the
+  `503 ENVOY_UNAVAILABLE` of a `live` or `no_holder` filter are unchanged. Such a filter, or an
+  agents list, whose read of the stored answer fails answers `500 INTERNAL`, the database's
+  failure, rather than `503 ENVOY_UNAVAILABLE`; an unfiltered list and an issue's detail read its
+  route `unknown`.
+
+### Fixed
+
+- A serving-port session gets one push per upstream event, and loses none stored before its first
+  consumer. The relay of a session's consumer judges a message on a topic the session follows by
+  the durable path's own rules (one predicate both apply): a copy under a dedupe key the session
+  already took or is already being sent is acked unpushed, and the key is recorded once the port
+  answers 204, so one GitHub comment published on a pull request's mention topic and the
+  repository's reaches the port once rather than once per topic. Only a real push records what the
+  relay reads: a path that skips a session because its own consumer holds the message -- the
+  durable path's fan-out, and a serving-port worker whose session moved to consumer delivery --
+  records neither an attempt nor a dedupe key for it, so a message another interest on the topic
+  sends down the durable path still reaches the port rather than being acked as a copy the session
+  already has. The fan-out reads the session's entry for every judgement it makes, so that rule
+  covers its own refusals too: a message whose delivery mode cannot be read -- a mode no session
+  can be shown to advertise, which any publisher can send on a followed topic -- is left to the
+  relay of a serving-port session's consumer, which acks it with one `delivery_failed` exception,
+  rather than being reported twice and leaving that relay, and the session's later messages
+  behind it, stalled for five minutes on a record of a push nobody was making. The relay judges
+  each message as if no attempt record of it stood, and reads that record only to tell a push in
+  flight, which it holds its copy for, from a refusal the fan-out recorded as it reported it,
+  which it acks without a second report.
+  So no record of a refusal holds a relay, whatever the session's entry said when the fan-out
+  judged the message: a serving port on consumer delivery, a portless one, none at all, or the
+  core-path entry a heartbeat tick whose consumer call failed transiently writes, which left
+  that five-minute stall standing for any message that arrived in its window. A refusal is left
+  to a relay only where that relay judges what it sends: a portless session's relay publishes
+  every frame unjudged, and the plugin drops a frame whose delivery mode it cannot read without a
+  word, so the fan-out publishes that session's `delivery_failed` itself, recording no attempt
+  for it. The fan-out records an attempt only once its resolution of the recipient succeeds, its
+  own refusals included, so a refusal of a session whose entry is gone -- an unreadable delivery
+  mode, which any publisher can send on a followed topic, judged before the entry is read at all
+  -- leaves nothing behind for a relay to hold a later copy of that message under once the
+  session registers again on a serving port. What that costs is the exception dedupe: a portless
+  session on consumer delivery, and a session with no entry, are sent one `delivery_failed` per
+  stored copy of the event and per redelivery of each, up to the durable's 20 deliveries, where
+  a recorded refusal gave one per dedupe key per attempt window. Each further copy of an event
+  for a session whose record is gone is reported as a failed delivery rather than skipped as an
+  attempt already made. The other side of that rule: an
+  attempt record is a push in flight, not a delivery, so the relay holds a message another path
+  is pushing -- unacked in its consumer, kept in progress, judged again every second -- rather
+  than acking it, and acks it only once the
+  dedupe key that push's 204 records says the session has it. A push that ends without landing,
+  because the worker reads the session's flipped entry, hands the push back, or lets its attempt
+  record expire, leaves the message to the relay, which pushes it itself: delivery rests on the
+  consumer's ack state rather than on a process-local record that expires, and the race between
+  the two pushes costs at worst a duplicate the session drops by its dedupe key, never the
+  message. A session whose registration was answered `core` on a transient consumer call failure,
+  and whose next registration puts it back on its consumer while a push is in flight, still gets
+  that message, however that push ends. The durable path's delivery to an agent subject records
+  nothing for a message the session's consumer holds either, as its fan-out already recorded
+  nothing. A session consumer's start sequence is recorded on the session's entry, and the durable
+  path skips only the stored messages at or after it: a message stored below that start -- a push
+  NAKed back to the durable, or one deferred as unplaceable, before the session's first consumer
+  was created -- is in no consumer, so the durable still pushes it to the port instead of
+  acknowledging it as delivered, the stored copy of a role forward to a serving-port holder
+  included (INFRA-594).
+- A server that closes a connection during a reconnect's handshake, as a restarting NATS server
+  does, is logged as a failed reconnect attempt (`envoy nats reconnect attempt failed`, WARN, on the
+  reconnect throttle) rather than as an `envoy nats async error` at ERROR, while the connection is still
+  connecting or reconnecting; every other async error stays an ERROR. nats.go reports that
+  handshake's `EOF` to the async error callback alone, so a NATS restart could leave an ERROR line
+  in the listener's log.
+- A message Dispatch accepted is no longer lost when the request that sent it, or the Dispatch
+  process serving it, stops before the send:
+  - A direct message's first delivery attempt is written in the same transaction that stores the
+    message, as a broadcast recipient's already was, so a stored message always has an attempt.
+    Before, the attempt was written only after a listener lookup, and a process that stopped in
+    between left a stored message with no attempt; the recovery that opens a first attempt for
+    such a message now serves only messages an earlier release stored.
+  - A request's own send no longer stops when its connection is cut (a closed tab, a front-door
+    pod roll): a direct message, a comment's mentions, and a Retry finish their send and record
+    its outcome after the browser has gone.
+  - Migration `0158` adds `message_deliveries.urgency`, so a message attempt the delivery sweep
+    resumes after its sender stopped keeps the urgency it was sent with, as does a person's
+    same-mode Retry of it (an attempt a Retry opens carries none). A resumed direct message is
+    more than a minute old, so its session shows it as a card rather than as its user's own
+    turn.
+  - A send that meets an Envoy listener take-over (the new pod refusing connections, answering
+    502, 503 or 504, or not yet holding the session) or a receipt timeout tries again under the
+    same attempt and idempotency key, backing off from 250 ms to 2 s, for up to 12 s from its
+    first try, and only then settles `failed`. A send during a take-over therefore reaches its
+    session, a request that sends during one answers up to 12 s later, and a send to a session
+    that is really gone reads `failed: no live session` about 12 s after it was made rather than
+    at once. Any other answer from the listener settles at once as before: a listener that
+    refuses Dispatch's `ENVOY_TOKEN` (401), a 403, a 500 or an answer that does not decode is
+    recorded `envoy listener answered: …` rather than `envoy listener: …`, which now means only a
+    listener nothing answered.
+  - A comment on an issue with a route or a session claimant, a reply to a thread, a reply on an
+    ask that has a follower, a comment on a document, or a comment on an issue whose primary
+    document credits a session resolves its mentions and the issue's route through a take-over
+    before it is written, so the sessions its route and its session fan-outs (the claimant, the
+    thread's and ask's sessions, the document's authors) skip are decided on the listener's answer
+    and a mentioned session hears the comment once; a mention whose resolution waited the
+    take-over out settles with that outcome rather than waiting a second time. Its
+    `comment.created` payload carries
+    `mentions_decide_routes: true`, and each mention's first attempt keeps that resolution when the
+    delivery sweep or a person's Retry finishes it after its sender stopped, so a mention that reached
+    nobody settles `failed` rather than reaching the route holder a second time. A comment's
+    mentions are resolved and sent at once, so a comment mentioning several ended sessions answers
+    within one 12 s window rather than one per mention.
+  - The listener client reads a 502, 503 or 504 that carries a JSON reason, such as the starting
+    listener's `503 {"error":"service starting"}`, as the listener being unavailable, keeping the
+    reason in the error's text, so a send waits it out as above. Before, it took the reason for
+    the listener's verdict on the request, and the attempt failed with it at once. Such an answer,
+    and a connection refused, reset or timed out, is also `envoy.ErrUnreachable`, which is how a
+    caller tells a take-over from the listener's own answer.
+- A webhook redelivery whose Dispatch process died after it claimed the delivery and before it
+  recorded GitHub's answer (a SIGKILL, an OOM kill, a lost node) is requested again once the claim
+  is 60 s old, even after the failed attempt has aged out of the sweep's one-hour window. Before,
+  every later sweep read the claim as a redelivery GitHub had accepted and never asked again.
+  Until the minute passes, other sweeps count the delivery `claimed_elsewhere`; a claim whose
+  answer could not be written is logged at ERROR with `claim_expires_at`.
+- Two Dispatch processes syncing one project's architecture source at once never record the older
+  of the two branch heads they read over the newer one, nor a failure one met over the other's
+  success. Each importer write now commits only while the source row's version (PostgreSQL's
+  `xmin`, changed by every write of the row, a settings save of the same branch included) is the
+  one its sync loaded before fetching, and a sync another write overtook starts again from the
+  load. Writes are ordered by when each sync read the head, not by commit date, so a force-push
+  back to an older commit still imports.
+- The two Delivery page configuration warnings (a successful run with no job matching
+  `production_job_names`, and a production job with no step named `production_apply_step_name`)
+  are logged once across every Dispatch process, not once in each: the process whose insert into
+  the new table `delivery_run_warnings` (migration `0161`) writes the run's row logs it. A
+  database that cannot record the row leaves the process to log it anyway.
+- An issue's claim time, an ask's answer time (the answer route's and a carried approval's) and
+  the "snooze must be in the future" check use the database's clock, not the clock of the host
+  that served the request, so two processes on hosts whose clocks disagree no longer order a
+  claim or an answer against the other's times wrongly or refuse a snooze the other would take.
+- Migrations `0158` to `0161` are additive (a nullable column with a check added `not valid`, and
+  three new tables), so the release before them keeps serving beside this one through a rolling
+  update, and rolling back past them is an image rollback alone. While both releases serve, only
+  this release's processes share the route list, the GitHub rate limits and the warnings; either
+  release's delivery sweep resumes a stranded delivery, and an attempt the earlier release wrote
+  is resumed without an urgency, as its first send was.
+- A document's stored updates replay to every version: a browser edit the room committed before an
+  agent's write is stored before the write's own update, the write's version is its own state
+  (no browser edit made after its read), a settlement, snapshot or named version stores the room's
+  unstored updates before it versions them, two browsers' updates are stored in the room's order,
+  and a browser update stored after a write is classed against the write's state. The new
+  `envoy-dispatch stored-order` command checks a database's stored histories and fails a run that
+  compared nothing, and `loadtest/browsertype` types into documents as browser peers for a load
+  test, leaving alone every paragraph whose text holds a `-protect` marker.
+
+## [27.0.0] - 2026-11-01
+
+### Added
+
+- The secrets broker serves the page a person approves a secret request on, and a secret request
+  is approved nowhere else. `GET /approve/{record}` prints the broker's own record of a request
+  and every other one waiting on the signed-in person, with Approve and Deny posting back to
+  `POST /approve` from the broker's own origin alone; a person signs in to the broker itself with
+  OpenID Connect through an OAuth client of the broker's own (authorization code with PKCE S256,
+  a nonce and state, no refresh token kept), and the broker keeps that sign-in as a session of
+  its own in Postgres, 24 hours at most and never extended. `BROKER_SIGNIN_ISSUER`,
+  `BROKER_SIGNIN_CLIENT_ID`, `BROKER_SIGNIN_CLIENT_SECRET_FILE` and `BROKER_SIGNIN_DOMAIN` are
+  required: a broker without one of them does not start and names the ones it misses.
+  `BROKER_SIGNIN_SESSION_SECONDS` sets how long a sign-in lasts, 86400 by default and at most.
+  `GET /signin/status` reports, to a caller with no credential and in words from two closed sets,
+  what the hourly check of the broker's client at its provider found and when, when a person last
+  signed in, when a sign-in last failed and the coded reason, and when a decision was last made
+  on the page. `envoy-broker end-sessions <login>`, run in a broker pod, ends every browser
+  session that login holds. `POST /v1/credential-requests/{record}/approve` and `/deny` now
+  answer `403 DECIDE_ON_BROKER_PAGE`, naming that page, for every caller when the record is a
+  secret request, before any credential is checked, and `agent-secrets-devrelay` has lost
+  `approve` and `deny`, the two commands the broker refuses. A machine login is decided exactly
+  as before, by an account `BROKER_API_ACCOUNTS` lists sending the login's typed code from
+  Dispatch's machine-login page, `BROKER_MACHINE_LOGIN_URL` is still required and still a machine
+  login's `verification_uri`, `agent-secrets-devrelay machine-approve` still decides one on the
+  local stack, and revokes of grants and machine logins are unchanged. `agent-secrets` prints the
+  broker's `approve_url` while it waits for a secret, as
+  `waiting for <approver> to approve it on the secrets broker: <url>`; against a broker that
+  names none it prints what it printed before.
+
+## [26.2.0] - 2026-11-01
+
+### Changed
+
+- A Dispatch migration added from now on is named for the UTC moment its author created it,
+  `YYYYMMDDHHMMSS` (`date -u +%Y%m%d%H%M%S`), with its census under the same timestamp, instead
+  of the next free number: two pull requests open at once each took the next number, nothing
+  conflicted in git, and the clash showed only once one of them merged. The numbered versions
+  keep the numbers they landed with, a timestamp orders after every number, and a migration that
+  merges below one a database has already applied still runs there exactly once, since the
+  runner applies every version `schema_migrations` does not record. A migration must therefore
+  not depend on its order relative to one written in a concurrent pull request: a deployed
+  database applies each one as the release carrying it deploys, so it can apply them in the
+  other order than a fresh database does. `schema_migrations.version` is now a `bigint`, which a
+  14-digit version needs; a database that has the table as an `integer` keeps it until the first
+  boot whose set holds a timestamped migration, which widens it once, in the locked transaction
+  the runner creates the table in, so the previous release's health probe keeps answering during
+  this one's roll. Roll this release out before any release that carries a timestamped
+  migration. `schema_version` in `/healthz` is unchanged, the highest version applied rather
+  than proof that every version below it is applied; the auto-deployer's rollback guard now
+  compares the whole set of versions `schema_migrations` records, and records it in
+  `compose/.env` as `ENVOY_IMAGE_SCHEMA=<tag>:<max>-<count>-<digest>`.
+
+## [26.1.1] - 2026-11-01
+
+### Changed
+
+- Dispatch's change-driven background loops send no statement while nothing is written. The
+  embedding queue (which scanned every 5 s), the reference excerpt reconciliation (every five
+  minutes, and every 2 s while a batch came back full), the suggestion outcome sweep (every
+  minute) and both GitHub intakes' delivery settings (read every 30 s, and by the job intake on
+  every message) now run a pass at start and then only when a Postgres notification says their
+  work may have changed or a due time they asked for comes round, never more often than the timer
+  each replaced. Each process holds one more Postgres connection for this, a shared listener
+  logged as `dispatch background wakes`, with its keep-alive ping; it signals every loop after
+  each LISTEN, so a change made while it was reconnecting is caught up then. The embedding
+  coverage pass and the task progress reconciliation run once at start instead of every 10 and 5
+  minutes: coverage repeats only its identity steps, and only while another embedder identity's
+  rows remain, and task progress retries the rows another writer held for about a minute. The
+  delivery reconcile, the architecture import and the webhook redelivery sweep keep their timers;
+  all three now draw their jitter afresh every period, so two processes' passes drift apart. The
+  `Idempotency-Key` rows past their 24 hours and the deliveries a process that died left owed,
+  which the suggestion outcome sweep's pass carried, keep a once-a-minute leased timer of their
+  own (`api.RunMaintenanceSweep`, still under the `suggestion-outcomes` lease, so one process
+  sweeps per minute however many serve the database): no notification announces an expired key
+  or a dead process's owed delivery (`cmd/dispatch/README.md`, "Background loops").
+- Migrations `0151`–`0156` back those loops: `embeddings_enqueue` and `delivery_settings_changed`
+  notify `dispatch_embeddings` and `dispatch_delivery_settings`, a new row trigger on `refs`
+  notifies `dispatch_excerpts_owed`, and `reference_excerpt_backoff`,
+  `suggestion_outcome_cursor` and `write_suggestions.swept` (with two partial indexes) are new.
+  All are additive, every census answers `0`, and the release before them keeps working beside
+  them during a roll. The suggestion outcome sweep moves `suggestion_outcome_cursor` only up to
+  the event log's safe horizon, the id at or below which every event is final, as the live event
+  feed reads: event ids are not commit order, so a cursor past an event that could still commit
+  would never judge by it.
+- A delivery settings change (the deploy repository, the workflow paths) reaches the running
+  intakes as soon as it commits, through the shared listener, instead of within 30 s.
+- The GitHub intake handles up to four pull requests or workflow runs at once, its consumer's
+  `MaxAckPending`, where it handled one message at a time: messages about one pull request or one
+  run still run in order, one after the other, so an older GitHub fetch is never written over a
+  newer one. A message whose subject cannot carry a pull request or a run (checks, comments,
+  pushes, jobs, `pr.<n>.review`) is acknowledged without decoding it. The consumer's `AckWait`,
+  `MaxAckPending` and filter subject are unchanged.
+- When the GitHub intake stops, it drains its subscription, the one its bus client bound again on
+  a new connection when the client replaced its connection, and holds the messages queued behind a
+  busy pull request or run, and those NATS hands it meanwhile, until no handler is running. The
+  messages in a handler get up to 15 s from the stop to finish and be acknowledged; the handlers
+  still running then are given up, their GitHub calls cancelled, and their messages handed back to
+  NATS. Only then are the held messages handed back, so the next holder never runs a pull
+  request's or run's next message while this process still runs the one before it. The intake
+  then waits for the drain to end and releases the subscription, so a reconnect does not bind the
+  stopped one again. Dispatch's shutdown waits for that stop, which begins at the signal, before
+  it closes its database pool, so a handler GitHub answers during the stop writes what it fetched
+  rather than failing on a closed pool with its message acknowledged (`cmd/dispatch/README.md`,
+  "Background loops").
+- A document whose reference excerpts cannot be read or stored is retried one minute after its
+  first failure, doubling to at most six hours, plus up to a fifth again of jitter, instead of on
+  every pass, and is left out of the batches meanwhile, so documents that keep failing no longer
+  hold the reconciliation at its 2 s step nor keep the documents after them waiting. The
+  excerpts a pre-`0092` build left stale are marked owed once per process at its first pass,
+  rather than on every pass for the hour after start.
+- The suggestion outcome sweep reads only the events written since its last pass and the
+  suggestions recorded since, so its work follows what changed rather than how many suggestions
+  are still pending; it judges a suggestion once the suggestion and the events that resolve it are
+  a minute old, and the first pass on a database judges every pending suggestion once, as before.
+- The edit notice sweep sends no statement while no notice is due. It swept `document_edit_notices` every 5 s; it now runs a sweep at start and then only when a new migration, `0157`, announces a notice given a due time on `dispatch_edit_notices` (a row trigger, so notices the release before writes during a roll wake it too), or when the earliest due time it read comes round. Sweeps stay at least 5 s apart, so a notice still goes within 5 s of the end of its quiet window. The census answers `0`, and the release before keeps sweeping on its timer beside it (`cmd/dispatch/README.md`, "Background loops").
+- The webhook redelivery sweep still sweeps at start, but then waits two minutes plus up to a tenth again after each sweep, drawn afresh every period, as the delivery reconcile and the architecture import do, in place of a plain two-minute ticker, so two processes started together no longer reach its lease in step every two minutes.
+
+## [26.1.0] - 2026-11-01
+
+### Added
+
+- A Google Compute Engine VM logs in to the secrets broker and enrolls itself with the identity
+  token its metadata server signs, with no stored credential and no person approving it. With
+  `BROKER_GOOGLE_OIDC_AUDIENCE` set, the broker discovers Google's issuer at startup (one
+  `google vm identity` log line), and `POST /v1/launcher-credentials/token` also takes a VM's
+  token (`format=full`) whose account `BROKER_VM_SERVICES` binds, from the project
+  `BROKER_VM_PROJECTS` names and with an instance name `BROKER_VM_INSTANCES` matches; anything else
+  is `403 ACCOUNT_NOT_LISTED` naming what did not match, or `401 TOKEN_INVALID`. Each token goes to
+  the one verifier whose issuer it names, so a VM's token never makes the broker read the
+  cluster's keys, nor a cluster token Google's. Each VM holds its own launcher credential and its
+  own `vm` enrollment, keyed by `<account>@<project>/<zone>/<instance id>`, so VMs that share an
+  account never move or end each other's. No launcher credential ends a VM's enrollment
+  (`DELETE /v1/enrollments/{id}` is `403 VM_ENDS_BY_LOGIN_REVOKE`), so a token copied off the VM
+  cannot end or take over its live enrollment; revoking the VM's machine login, or its lease,
+  ends it. A revoke does not revoke the copied token, which logs in again within its hour; taking
+  the VM out of the fleet's settings ends that. `POST /v1/enrollments` takes kind `vm` with `vm_token`
+  (`403 VM_IDENTITY_MISMATCH`, `403 VM_TOKEN_EXPIRED`), every renewal of one carries the VM's
+  current token (`403 VM_TOKEN_REQUIRED` without it), and a VM service's secrets go to its own VMs
+  at once. A VM its fleet's settings no longer allow (its account dropped, or another project or
+  instance-name glob configured) has no identity from then on: every call it signs is refused
+  `401`, as an ended session's is, so it releases no grant it holds, opens no request and renews
+  nothing, and a person's approval of a request it left pending grants nothing; its launcher
+  credential no longer authenticates (`401 LAUNCHER_INVALID` on a new enrollment), and its next
+  login is `403 ACCOUNT_NOT_LISTED`. On the client, `agent-secrets enroll --vm --service <name>
+  [--audience <aud>] [--out <dir>]` fetches the token, logs in with a key it keeps in memory,
+  enrolls `key.pem`, and prints the enrollment id; run again over the same directory it keeps
+  `key.pem` and extends the lease. `agent-secrets renew --vm` renews with a fresh token each time
+  and stops (exit 76) on `VM_TOKEN_REQUIRED`, `VM_NOT_LISTED` or `ENROLLMENT_NOT_LIVE`. Both ask
+  the metadata server directly, never through a proxy `HTTP_PROXY` names, since the token logs
+  in as the VM. With no
+  Google audience nothing changes: kind `vm` is still `400 INVALID_KIND`, and the Kubernetes and
+  GitHub paths are untouched.
+
 ## [25.2.0] - 2026-11-01
 
 ### Changed

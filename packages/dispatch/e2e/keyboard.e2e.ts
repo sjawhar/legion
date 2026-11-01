@@ -226,7 +226,11 @@ test("c opens the create dialog; project and title create an issue the API retur
 
     await expect(page).toHaveURL(/\/issues\/OPS-1(\/|$)/);
     await expect(dialog).toHaveCount(0);
-    await expect(page.getByRole("heading", { name: "Keyboard-created issue" })).toBeVisible();
+    await expect(
+      page
+        .getByTestId("issue-header")
+        .getByRole("heading", { level: 1, name: "Keyboard-created issue" })
+    ).toBeVisible();
     await expect
       .poll(() => getIssue("OPS-1"))
       .toMatchObject({

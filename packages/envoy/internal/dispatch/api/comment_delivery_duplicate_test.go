@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -17,12 +18,16 @@ import (
 // message's, and its claim path resumes only a pending row, so a mention whose send landed and
 // then missed the listener client's window was recorded failed and its retry reached the agent a
 // second time. The key is now scoped to the mention's target and mode, so the stream recognises
-// the repeat and the retry's row records it as a duplicate rather than a fresh delivery.
+// the repeat and the retry's row records it as a duplicate rather than a fresh delivery. A missed
+// receipt is tried again inside the listener take-over window (takeoverRetry) under the same key,
+// so the attempt is recorded failed only when every try of that window missed; this listener
+// misses every one until the comment's own request has answered.
 func TestCommentMentionThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(t *testing.T) {
 	var listenerState struct {
 		sync.Mutex
 		keys      []string
 		delivered map[string]struct{}
+		answering bool
 	}
 	listenerState.delivered = map[string]struct{}{}
 	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
@@ -42,12 +47,12 @@ func TestCommentMentionThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(
 			}
 			listenerState.Lock()
 			listenerState.keys = append(listenerState.keys, request.IdempotencyKey)
-			first := len(listenerState.keys) == 1
+			missing := !listenerState.answering
 			key := request.IdempotencyKey + "@" + request.TargetSession
 			_, held := listenerState.delivered[key]
 			listenerState.delivered[key] = struct{}{}
 			listenerState.Unlock()
-			if first {
+			if missing {
 				// The send lands; the answer misses the client's window.
 				time.Sleep(400 * time.Millisecond)
 			}
@@ -66,6 +71,12 @@ func TestCommentMentionThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "The mention landed; the answer did not.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
+	if len(comment.Deliveries) != 1 || comment.Deliveries[0].State != "failed" {
+		t.Fatalf("first attempt = %#v, want it recorded failed once every try missed its receipt", comment.Deliveries)
+	}
+	listenerState.Lock()
+	listenerState.answering = true
+	listenerState.Unlock()
 
 	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/deliveries", map[string]any{
 		"delivery": "steer",
@@ -79,8 +90,8 @@ func TestCommentMentionThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(
 	delivered := len(listenerState.delivered)
 	listenerState.Unlock()
 	original := comment.ID + ":session:s1:steer"
-	if len(keys) != 2 || keys[0] != original || keys[1] != original {
-		t.Fatalf("mention send keys = %#v, want both sends under the target-and-mode key %q", keys, original)
+	if len(keys) < 2 || slices.ContainsFunc(keys, func(key string) bool { return key != original }) {
+		t.Fatalf("mention send keys = %#v, want every send under the target-and-mode key %q", keys, original)
 	}
 	if delivered != 1 {
 		t.Fatalf("the listener delivered %d distinct keys %#v, want the agent to receive the mention once", delivered, keys)

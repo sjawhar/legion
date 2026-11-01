@@ -9,14 +9,16 @@ var testPaths = Paths{Legion: "/opt/legion/bin/legion", Claude: "/usr/local/bin/
 
 // The agent command as words, which is what a pod's argv carries and what a pane's shell renders:
 // the bridge around `claude -p` in stream-json both ways (--verbose, which stream-json output
-// requires), every permission granted, only the configured MCP server, both plugin directories and
-// the session. It stops before --append-system-prompt, which each runtime adds its own way.
+// requires) re-emitting each user message it takes (--replay-user-messages), every permission
+// granted, only the configured MCP server, both plugin directories and the session. It stops
+// before --append-system-prompt, which each runtime adds its own way.
 func TestArgv(t *testing.T) {
 	session := "11111111-2222-4333-8444-555555555555"
 	got := Argv(testPaths, "/state/claude-mcp.json", session, false)
 	want := []string{
 		"/opt/legion/bin/legion", "claude-bridge", "--", "/usr/local/bin/claude",
 		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+		"--replay-user-messages",
 		"--permission-mode", "bypassPermissions",
 		"--strict-mcp-config", "--mcp-config", "/state/claude-mcp.json",
 		"--plugin-dir", "/opt/legion/claude-envoy",

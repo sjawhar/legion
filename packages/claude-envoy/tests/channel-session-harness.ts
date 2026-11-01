@@ -10,12 +10,13 @@ import { randomBytes } from "node:crypto"
 import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { deliverSubject, RelayHeader } from "@legion/envoy-client/consumer-delivery"
 import { sessionConfigFile } from "@legion/envoy-client/session-settings"
 import type {
   EnvoyClient,
-  Interest,
   ReplayInput,
   ReplayResult,
+  SubscribeResult,
 } from "@legion/envoy-client/transport"
 import type {
   ChannelBrokerMessage,
@@ -145,6 +146,56 @@ export class FakeNats implements ChannelForwarderConnection {
     const waiter = queue.waiter
     queue.waiter = undefined
     waiter.resolve(message)
+  }
+
+  /**
+   * The owning listener relays a stored message to `sessionID`'s relay subject (consumer
+   * delivery), with the relay headers and a reply inbox of its own.
+   */
+  emitRelay(
+    sessionID: string,
+    frame: {
+      readonly subject: string
+      readonly seq: number
+      readonly raw: string
+      readonly reply: string
+      readonly delivered?: number
+      readonly storedAt?: string
+      readonly streamID?: string
+      readonly gap?: boolean
+    },
+  ): void {
+    const subject = deliverSubject(sessionID)
+    const queue = this.subscriptions.get(subject)
+    if (queue === undefined) throw new Error(`no subscription for ${subject}`)
+    const headers = new Map<string, string>([
+      [RelayHeader.subject, frame.subject],
+      [RelayHeader.streamSeq, String(frame.seq)],
+      [RelayHeader.streamID, frame.streamID ?? "stream-1"],
+      [RelayHeader.delivered, String(frame.delivered ?? 1)],
+      [RelayHeader.storedAt, frame.storedAt ?? new Date().toISOString()],
+      ...(frame.gap === true ? [[RelayHeader.gap, "true"] as [string, string]] : []),
+    ])
+    const message: ChannelBrokerMessage = {
+      subject,
+      data: new TextEncoder().encode(frame.raw),
+      reply: frame.reply,
+      headers: { get: (name) => headers.get(name) },
+    }
+    if (queue.waiter === undefined) {
+      queue.messages.push(message)
+      return
+    }
+    const waiter = queue.waiter
+    queue.waiter = undefined
+    waiter.resolve(message)
+  }
+
+  /** The bodies published on `subject` so far, decoded: a relay frame's replies on its inbox. */
+  repliesOn(subject: string): string[] {
+    return this.published
+      .filter((entry) => entry.subject === subject)
+      .map((entry) => new TextDecoder().decode(entry.data))
   }
 }
 
@@ -289,12 +340,15 @@ export async function scratchState(): Promise<string> {
   return mkdtemp(join(tmpdir(), "claude-envoy-state-"))
 }
 
-export function noInterest(): Interest {
+/** A registration answer with no interest and no consumer delivery, as a listener of an earlier
+ *  release leaves it (`parseSubscribeAnswer` fills the core mode in). */
+export function noInterest(): SubscribeResult {
   return {
     session_id: "ses_claude",
     machine_id: "devbox",
     dir: "/tmp",
     topics: [directSubject],
+    delivery: { mode: "core", reason: "not_answered" },
   }
 }
 

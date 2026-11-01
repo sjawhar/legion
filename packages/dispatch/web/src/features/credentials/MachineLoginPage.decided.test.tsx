@@ -52,7 +52,6 @@ for (const [button, word] of [
     const lookup = spyOn(api, "lookupMachineCredential").mockResolvedValue(machineRecord());
     const approve = spyOn(api, "approveCredentialRecord").mockResolvedValue({
       credential_id: "cred-9",
-      grant_id: null,
       state: "approved",
     });
     const deny = spyOn(api, "denyCredentialRecord").mockResolvedValue({ state: "denied" });
