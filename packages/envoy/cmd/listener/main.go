@@ -38,6 +38,11 @@ type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
 	sessions *session.SessionRegistry
+	// known is the store of every session that registered in the last 30 days
+	// (session.KnownSessions), nil on a listener whose NATS user may not open its bucket and in a
+	// test that builds the handlers without it. Every method of it is safe on a nil store, so no
+	// call site checks.
+	known *session.KnownSessions
 	// ciStore is nil on a listener that mounts no GitHub webhook route, the one route that uses it.
 	ciStore *cistore.Store
 	// roleLane is the role lane's own client (bus.ConnectRoleLane), nil in a test that builds the
@@ -918,6 +923,22 @@ func main() {
 	}
 	sessionCacheReadyCancel()
 
+	// The known-session store answers which sessions registered in the last 30 days, whether or
+	// not they are registered now; no delivery depends on it, so it never stops a start. A
+	// listener whose NATS user may not open the bucket - its grant not yet applied, which is what
+	// production runs until the hub is replaced - logs this one line naming the bucket and keeps
+	// running on a nil store, whose reads answer no record and whose writes do nothing
+	// (session.KnownSessions).
+	known, knownErr := session.OpenKnownSessions(
+		client.Conn,
+		session.WithKnownSessionReplicas(cfg.NATSReplicas),
+		session.WithKnownSessionLogger(logger.Slog()),
+	)
+	if knownErr != nil {
+		logger.Warn("the known-session store is not open; no session's 30-day record is written or read until this listener's NATS user may open the bucket",
+			slog.String("bucket", bus.KnownSessionBucket), slog.String("error", knownErr.Error()))
+	}
+
 	// KV watchers are not bus subscriptions, so recreate them after every
 	// recovered NATS connection, and end them in the drain before the connection's own.
 	caches := listenerCaches(registry, sessions, ciStore)
@@ -927,6 +948,13 @@ func main() {
 	client.AddDrainHook(func(ctx context.Context) {
 		endListenerKVWatchers(ctx, caches)
 	})
+	// The known-session store keeps its own watcher the same way, outside listenerCaches: a
+	// listener that could not open its bucket has no store to name there, and the self-health
+	// monitor must not restart a listener over a cache no delivery reads.
+	if known != nil {
+		client.AddReconnectHook(func(conn *nats.Conn) error { return known.Rewatch(conn) })
+		client.AddDrainHook(func(ctx context.Context) { known.EndWatch(ctx) })
+	}
 
 	deliver := session.Deliverer{
 		MachineID:    cfg.MachineID,
@@ -1072,6 +1100,7 @@ func main() {
 		consumers:  delivery,
 		registry:   registry,
 		sessions:   sessions,
+		known:      known,
 		ciStore:    ciStore,
 		caches:     caches,
 		consumer:   consumer,

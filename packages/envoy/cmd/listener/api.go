@@ -639,7 +639,13 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 // no body, as this route always has. The delete runs within sendRequestBudget of the request's
 // own context, so one the bus does not answer is the bus-unavailable 503 with Retry-After: 1
 // inside the caller's attempt (writeStoreError).
-func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
+//
+// A delete that removed the entry moves the session's known-session record on, keeping its topics
+// (session.KnownSessions.TouchWithin): the session stopped cleanly, and a publish on a topic it
+// followed still counts it as a recipient, since Envoy keeps its messages for 72 hours and it can
+// resume under the same id. A delete that removed nothing leaves the record alone, and a known
+// store this listener could not open does nothing at all; neither outcome changes this answer.
+func deleteSessionHandler(sessions *session.SessionRegistry, known *session.KnownSessions, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -653,11 +659,26 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 		instanceID := strings.TrimSpace(r.URL.Query().Get("client_instance_id"))
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
+		// Whether the delete removes an entry is read before it runs: Delete is idempotent and
+		// EntryDeleted counts a key that was already absent, so neither answer tells a stop from
+		// a repeat of one. A session this listener never held is left alone, with no write.
+		_, entryErr := sessions.Get(sessionID)
+		held := entryErr == nil
+		stopped := func() {
+			if !held {
+				return
+			}
+			if err := known.TouchWithin(ctx, sessionID); err != nil {
+				logger.Warn("known-session record not moved on at a clean stop",
+					slog.String("session_id", sessionID), slog.String("error", err.Error()))
+			}
+		}
 		if instanceID == "" {
 			if err := sessions.Delete(ctx, sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 				writeStoreError(ctx, w, err, http.StatusInternalServerError)
 				return
 			}
+			stopped()
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -668,6 +689,7 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 		}
 		switch outcome {
 		case session.EntryDeleted:
+			stopped()
 			writeJSON(w, http.StatusOK, deleteSessionResponse{Deleted: true})
 		case session.EntryKeptForAnotherInstance:
 			writeJSON(w, http.StatusOK, deleteSessionResponse{
@@ -1538,6 +1560,25 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 				d.consumers.relay.registered(body.SessionID, epochChanged)
 			}
 		}
+		// The session is known for the next 30 days, with the topics just stored - the registered
+		// ones, which carry the team and other topics the consumer's filter drops. The record is
+		// written only when no consumer call failed (recorded): a registration whose Ensure was
+		// refused left the consumer's filter where it was, and a record claiming the topics that
+		// filter never took would count the session as a recipient of them. A failed write is this
+		// WARN and nothing else: the registration is answered whatever it did
+		// (session.KnownSessions).
+		if delivery.recorded() {
+			if err := d.known.RecordWithin(ctx, session.KnownSession{
+				SessionID:        body.SessionID,
+				Title:            body.Title,
+				Capabilities:     body.Capabilities,
+				Topics:           item.Topics,
+				ClientInstanceID: body.ClientInstanceID,
+			}); err != nil {
+				logger.Warn("listener known-session record not written",
+					slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
+			}
+		}
 		warningCtx, cancelWarnings := context.WithTimeout(ctx, unwiredRepositoryWarningTimeout)
 		defer cancelWarnings()
 		warnedRepositories := make(map[string]struct{})
@@ -1610,7 +1651,7 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 		d.consumers.refollow(ctx, d, sessionID)
 	}))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))
-	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
+	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions, d.known, logger))
 	v1.HandleFunc("/v1/messages/send", sendHandler(d, logger))
 	v1.HandleFunc("/v1/messages/publish", publishHandler(d, logger))
 	v1.HandleFunc("/v1/replay", replayHandler(d))

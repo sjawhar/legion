@@ -40,6 +40,16 @@ const (
 	// SessionBucket holds each live session's registration, keyed by session id
 	// (internal/session).
 	SessionBucket = "envoy_sessions"
+	// KnownSessionBucket holds one record per session that registered in the last 30 days, keyed
+	// by session id (internal/session). A record says the session was known in the last 30 days,
+	// never that it is registered now: it outlives both stores that answer liveness, the session
+	// entry (SessionBucket, which ends 5 minutes after the session's last write) and the interest
+	// row (InterestBucket, 15 minutes), so a send to a suspended session is queued rather than
+	// refused and a publish counts that session as a recipient. The code that needs a live
+	// session or a role holder therefore never reads it: registered in
+	// cmd/listener/role_holder.go, laneHolderFresh in cmd/listener/delivery.go and the interest
+	// reaper each ask the store whose record ends when the session stops.
+	KnownSessionBucket = "envoy_known_sessions"
 	// CIStateBucket holds the CI state of each commit of a pull request (internal/cistore).
 	CIStateBucket = "envoy_ci_state"
 	// WebhookRedeliveryBucket holds the cursor and records of Dispatch's sweep of the GitHub App
@@ -48,14 +58,16 @@ const (
 )
 
 // ListenerBuckets reports the KV buckets envoy-listener opens, in the order its NATS grant lists
-// them: the interest and role-claim buckets (internal/store), the session registry
-// (internal/session), and the CI state bucket, which only a listener with the GitHub webhook route
-// opens (internal/cistore). The listener's keeper raises each of them (WithKeptBuckets), and
-// envoy-infra grants the listener and the host each one's calls
+// them: the interest and role-claim buckets (internal/store), the session registry and the
+// known-session store (internal/session), and the CI state bucket, which only a listener with the
+// GitHub webhook route opens (internal/cistore). The listener's keeper raises each of them
+// (WithKeptBuckets), and envoy-infra grants the listener and the host each one's calls
 // (packages/envoy/infra/core/permissions.go), so a bucket named here is both kept and granted.
+// A bucket named here is granted to the host and Dispatch users too, which that file's comment
+// beside the known-session grant says what it widens.
 // Each call returns a fresh slice, so no caller changes another's list.
 func ListenerBuckets() []string {
-	return []string{InterestBucket, RoleClaimBucket, SessionBucket, CIStateBucket}
+	return []string{InterestBucket, RoleClaimBucket, SessionBucket, KnownSessionBucket, CIStateBucket}
 }
 
 // NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the

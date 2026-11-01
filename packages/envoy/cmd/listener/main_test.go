@@ -1040,7 +1040,7 @@ func TestSendHandler_AcceptsHumanSource(t *testing.T) {
 // answers 200 with no body at all, as this route always has.
 func TestDeleteSessionHandler_IsIdempotent(t *testing.T) {
 	_, sessions := setupSessionsTest(t, nil, map[string]int{"ses_closed": 1234})
-	handler := deleteSessionHandler(sessions)
+	handler := deleteSessionHandler(sessions, nil, logging.New("test"))
 
 	for i := range 2 {
 		rr := httptest.NewRecorder()
@@ -1071,7 +1071,7 @@ func TestDeleteSessionHandler_DeletesTheSameClientInstancesRegistration(t *testi
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/sessions/"+sessionID+"?client_instance_id="+instanceID, nil)
-	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+	deleteSessionHandler(sessions, nil, logging.New("test")).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -1098,7 +1098,7 @@ func TestDeleteSessionHandler_KeepsAnotherClientInstancesRegistration(t *testing
 		"/v1/sessions/"+sessionID+"?client_instance_id=4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a",
 		nil,
 	)
-	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+	deleteSessionHandler(sessions, nil, logging.New("test")).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -1141,7 +1141,7 @@ func TestDeleteSessionHandler_RejectsOtherMethods(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/ses_closed", nil)
-	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+	deleteSessionHandler(sessions, nil, logging.New("test")).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", rr.Code)

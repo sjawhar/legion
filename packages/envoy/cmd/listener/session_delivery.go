@@ -92,6 +92,26 @@ func (o sessionDeliveryOutcome) relayed() bool {
 	return o.answer != nil && o.answer.Mode == deliveryModeConsumer
 }
 
+// recorded reports whether the registration may be written to the known-session store: nothing
+// about its consumer is unsettled. A registration that got its consumer (relayed), one that asked
+// for none and registered no port (the zero outcome), one that carried delivery without asking
+// (deliveryReasonNotRequested) and one whose session id names no consumer at all
+// (deliveryReasonInvalidSessionID) are each settled, and each is recorded. A consumer call that
+// failed is not: deliveryReasonConsumerError is a create or filter update that did not land, and
+// deliveryReasonNoGrant is the same call refused for want of a grant, or skipped during that
+// refusal's backoff. In both the consumer's filter is not the topics this registration stored, so
+// a record of those topics would claim what nothing filters.
+func (o sessionDeliveryOutcome) recorded() bool {
+	if o.answer == nil {
+		return true
+	}
+	switch o.answer.Reason {
+	case deliveryReasonConsumerError, deliveryReasonNoGrant:
+		return false
+	}
+	return true
+}
+
 // sessionRelay is what the relay of session consumers hears from registrations.
 type sessionRelay interface {
 	// registered reports a registration of sessionID that recorded consumer delivery on its entry.
@@ -286,6 +306,11 @@ func (m *sessionDelivery) granted() {
 // on the core path, or whose consumer is gone, is left alone, and its next registration sets the
 // filter. A failure is logged, not returned: the consumer then still delivers a topic the session
 // no longer follows, and the plugin drops a frame no followed topic matches.
+//
+// A filter the consumer took is also the session's known-session record brought up to date, with
+// the topics the registration stored rather than the filter's own (session.KnownSessions). A
+// refollow whose update failed, and one whose consumer is gone, write nothing: the filter is not
+// what this record would claim. A failed write is logged like the rest and fails nothing.
 func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, sessionID string) {
 	if m == nil || m.consumers == nil {
 		return
@@ -305,8 +330,21 @@ func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, session
 	unlock := m.locks.lock(sessionID)
 	err = m.consumers.UpdateFilter(ctx, sessionID, sessionConsumerFilter(sessionID, topics))
 	unlock()
-	if err != nil && !errors.Is(err, bus.ErrSessionConsumerNotFound) {
-		m.logger.Warn("session consumer filter update failed", slog.String("session_id", sessionID), slog.String("error", err.Error()))
+	if err != nil {
+		if !errors.Is(err, bus.ErrSessionConsumerNotFound) {
+			m.logger.Warn("session consumer filter update failed", slog.String("session_id", sessionID), slog.String("error", err.Error()))
+		}
+		return
+	}
+	if err := d.known.RecordWithin(ctx, session.KnownSession{
+		SessionID:        sessionID,
+		Title:            entry.Title,
+		Capabilities:     entry.Capabilities,
+		Topics:           topics,
+		ClientInstanceID: entry.ClientInstanceID,
+	}); err != nil {
+		m.logger.Warn("known-session record not written after a filter change",
+			slog.String("session_id", sessionID), slog.String("error", err.Error()))
 	}
 }
 
