@@ -1,0 +1,191 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-958",
+  "previousHandoff": "",
+  "plan": "dispatch://INFRA-958/artifact/plan-md (version 1). It holds thirteen decisions (D1-D13), fifteen tasks in six phases, a surface and a command for every acceptance criterion, and six departures from the spec.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase, the workspace binding, the push and handoff_complete; this issue's work crosses four Go binaries and five TypeScript packages, so the one-commit-per-phase-path rule is what keeps the next role able to read it.",
+      "skill://legion-worker/references/pr-body.md: defines what a proof is (criterion, surface, command, observed, headSha, negativeControl), which is the shape the plan's proof table has to be recorded in, and holds the simplify pass a change this size needs.",
+      "skill://legion-worker/references/cleanup-deletion.md: Task 4 deletes the VM token-login path, the vm enrollment kind, four blocks of enroll.Service, the agent-secrets VM client and two docs-site sections; the skill's rule is to find the sites by grep rather than from a list.",
+      "skill://legion-worker/references/tools.md: every Go suite here needs a Postgres through LEGION_TEST_PG_DSN (BROKER_TEST_DATABASE_URL and DISPATCH_TEST_DATABASE_URL both take it), and the skill names the shared sessions database that must never be used and the packages a gVisor pod cannot run.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md: dispatch://INFRA-454 is in progress on cmd/agent-secrets/main.go, machine.go, vm.go, cmd/agent-secrets-helper/main.go, cmd/broker/main.go and packages/daemon/cmd/legion/controller.go, so this branch expects to rebase onto it.",
+      "skill://plain-words: Task 15 rewrites packages/envoy/AGENTS.md, two broker docs-site pages and eleven architecture docs, all of which a person reads.",
+      "skill://ce-simplify-code: the simplify pass pr-body.md calls for, over a change that touches most of packages/envoy."
+    ],
+    "test": [
+      "skill://legion-worker: the phase and the committed test handoff.",
+      "skill://legion-worker/references/pr-body.md: what a proof is and the negative control each one needs; the plan's proof table gives ten criteria and the tester re-runs each.",
+      "skill://legion-worker/references/tools.md: the pod's own Postgres and the packages a pod cannot run - cmd/agent-secrets, cmd/agent-secrets-helper and internal/broker/helper fail under gVisor on SO_PEERPIDFD, so CI's run at the head is the citation for those, and the plan's A6 rig needs the pod's Postgres."
+    ],
+    "review": [
+      "skill://legion-worker: the phase and the review round.",
+      "skill://legion-worker/references/merge-gate.md: the approval of a head by SHA, what READY compares above it, and the production check this issue owes after the close.",
+      "skill://legion-worker/references/review-threads.md: how to reply on, list and resolve threads, and how to judge a bot's finding; a change of this size draws many.",
+      "skill://plain-words: the reviewer fixes a prose-only finding itself, in its own commit, and Task 15 is a large block of prose."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The spec is not recorded as approved: dispatch read of INFRA-958/spec prints no Approval line, while INFRA-884/spec ends 'Approval: approved v14 by sami@theorem.dev'.",
+        "answer": "Not a gap. The design gate is gates.design: root-issues, so only a root's spec carries a human approval; INFRA-958 is a child of INFRA-884, whose spec is approved at v14. The related claim that the blocked_by arrow is reversed is also wrong: INFRA-958's record lists the link under 'Referenced by', so INFRA-267 is blocked by INFRA-958, which is what the spec says."
+      },
+      {
+        "finding": "R2 deletes POST /v1/launcher-credentials/token's VM path, which is the only thing that gives a machine a launcher credential; every secrets route wants one, so after R2 agent-secrets on a machine reads no secret.",
+        "answer": "Plan D1 and Task 4. The Google machine exchange creates or re-uses the machine's launcher credential in the exchange's own transaction and returns its id in the token answer's extras (oauthwire.ExtraCredentialID/ExtraCredentialExpiresAt already exist and decide already reads the first), keyed on launcher_credentials.subject from migration 0015 and the DPoP thumbprint. enroll, renew, every secrets route and the second exchange are then unchanged, except enroll.AuthenticateLauncher/tokenLoginListed, which learns the new subject shape. The alternative, a fifth authentication kind on /v1/enrollments, was rejected: it adds a routeAuth, a caller member and a second identity path through enroll.Service.Create."
+      },
+      {
+        "finding": "A token that names a service and no person has no field to carry the service in, at four layers: exchange.Claims, the stored claims, oauthwire.Introspection and brokertoken.Caller.",
+        "answer": "Plan D2 and Task 5. One field at each layer, brokertoken.live relaxed unconditionally to admit a session with either a person or a service, decide's session.Subject/Username set to the principal rather than the empty person, the access-log line naming the service when there is no person, and an audit of every Dispatch read of caller.Person, api/project_scope.go's brokerCredentialActor included."
+      },
+      {
+        "finding": "Relaxing brokertoken.live changes Dispatch and the listener at once; is it unconditional or an Options flag, and which Dispatch paths dereference caller.Person?",
+        "answer": "Plan D2: unconditional, because both callers want it, with the caller.Person audit named as part of Task 9."
+      },
+      {
+        "finding": "The listener holds none of brokertoken.Options' five required fields: no outbound identity, no replay store, no origin, no address rule, and no way to carry a caller to a handler.",
+        "answer": "Plan D7 and Task 11. Account becomes a one-method interface with a Compute Engine metadata implementation; Replay is a new JetStream KV bucket with a per-key TTL answered by bus.KeyValue.Create, since the listener has no database and an in-memory store would let a proof be replayed against another replica; Origin and Address become listener settings; the caller is carried on the request context. The plan names the new settings (ENVOY_BROKER_URL, ENVOY_BROKER_ACCOUNT_TOKEN_FILE or ENVOY_BROKER_GOOGLE_AUDIENCE, ENVOY_PUBLIC_URL) and says the session check runs on the five routes that act as a session, not on the read routes that name another session by design."
+      },
+      {
+        "finding": "R7's 'added if the broker lacks it' is a whole new RFC 8414 surface, and Dispatch reads no broker metadata today, so gating the machine-code page needs a relay.",
+        "answer": "Plan D8 and Tasks 8 and 10. A new public broker route with its route-table comment and named response struct, and a new Dispatch route GET /api/v1/credentials/capabilities answering {\"machine_code_page\": bool} from a cached metadata read, which the web app gates the route and the link on. packages/dispatch/e2e/fake-broker.ts gains the metadata route."
+      },
+      {
+        "finding": "R3 makes the broker check the device-flow client's audience, but nothing says where agent-secrets reads that client's id and secret, and A9 does not reach the client's settings.",
+        "answer": "Plan D5 and D13 and Task 13: the client's new settings are named in cmd/agent-secrets' usageEnvironment block and documented in packages/envoy/AGENTS.md beside the broker's and the listener's, extending A9 rather than meeting it narrowly."
+      },
+      {
+        "finding": "DPoP in TypeScript is not a token swap: every request site must sign a proof, and openid-client covers the token endpoint rather than resource requests.",
+        "answer": "Plan D10 and Task 14. openid-client runs the device flow and the exchange; the per-request proof (htm, htu, ath, the use_dpop_nonce retry) is signed with jose at the version already in the lockfile, mirroring internal/broker/helper/dpop.go, and the four TypeScript sites that read a token or emit a scheme are named."
+      },
+      {
+        "finding": "R4 implies two new broker routes and two new Dispatch routes that no requirement names.",
+        "answer": "Plan Tasks 7 and 10 name each: two accountAuth(relaysDecisions) rows on the broker with their comments and response structs, two relay methods on internal/dispatch/agentsecrets/client.go, and two Dispatch rows with their writeClasses entry."
+      },
+      {
+        "finding": "BROKER_SIGNIN_DOMAIN cannot be set alone: it is one of four settings a broker must configure together, so a deployment wanting the person exchange must also configure the approval page.",
+        "answer": "Plan D5: the coupling is kept, as R3 asks, because Theorem's broker already sets all four and splitting the domain out is speculative generality. packages/envoy/AGENTS.md says so plainly."
+      },
+      {
+        "finding": "R1's no-pin entry and R2's 'two VMs of one account, neither can end or take over the other's access' were read as conflicting, since two no-pin tokens are byte-identical.",
+        "answer": "Plan D4: no conflict. The property is delivered by the DPoP key, not by the token's claims - each machine's access token is bound to its own key, each machine's launcher credential is keyed on that thumbprint under the live-unique index, and nothing in the exchange lets a machine revoke another's token (POST /v1/oauth/revoke needs relaysDecisions, which only Dispatch holds). The residual, two machines of one account colliding on a session name, is neither ending nor taking over access and is inside one trust boundary by the root spec's decision 'The machine's account is its credential'. A1's check is written against the property that holds."
+      },
+      {
+        "finding": "'Dispatch refuses its writes' is ambiguous: 146 mutating rows in four write classes, or project writes only?",
+        "answer": "Plan D3: every write class, scopeSession included, refused at the one writeScope chokepoint with 403 and the new code BROKER_TOKEN_NO_PERSON, declared in packages/contracts and generated into Go so the dispatch CLI can key its wording on it. Reads are untouched."
+      },
+      {
+        "finding": "The spec says the settings are the four #2531 reads, extended, and also that names are the implementer's; config.go:827-832 forbids R1's no-pin entry outright, and BROKER_EXCHANGE_ACCOUNTS has no service field.",
+        "answer": "Plan D5: the four names stay, the two pins become optional per account with a half-pinned entry still refused at boot, and three settings are added - BROKER_GOOGLE_EXCHANGE_ACCOUNTS (the BROKER_EXCHANGE_ACCOUNTS grammar, naming a fleet's person and project; an account absent from it gets a service-only token), BROKER_GOOGLE_ISSUER (default https://accounts.google.com, which R1 asks for and which replaces a constant whose comment said no variable would name it), and BROKER_GOOGLE_SIGNIN_AUDIENCE."
+      },
+      {
+        "finding": "Nothing says whether the clients are new packages or modules of existing ones.",
+        "answer": "Plan D10: internal/brokerclient in Go, and a new workspace package packages/broker-client (@legion/broker-client) in TypeScript, with the root workspaces entry, the exact zod pin, no barrel file, the claude-envoy build-inputs.txt entry and its own architecture doc."
+      },
+      {
+        "finding": "'One shared test set' for two languages is undefined.",
+        "answer": "Plan D11: a JSON corpus, packages/broker-client/testdata/wire.json, one entry per exchange the contract defines, replayed by the Go suite and the Bun suite against their own stub brokers, so a field added on one side with no corpus entry fails the other. CI runs both through the envoy-go and envoy-client filters, which both name the corpus."
+      },
+      {
+        "finding": "agent-secrets login's state has no stated path, and no rule for a second person on one box.",
+        "answer": "Plan Task 13: the box key and Google's refresh token are kept together under the key directory, owner-readable only, one record per person; with one sign-in on the box agent-secrets uses it, and with more than one it refuses until told which, naming them."
+      },
+      {
+        "finding": "Revoking a sign-in refuses only the next trade, leaving live tokens for up to an access token's life.",
+        "answer": "Plan D9 and Task 7: the revoke ends the sign-in and the tokens minted under it in one transaction, the way enroll.go:1086-1101 already ends a machine login's tokens. It costs one statement."
+      },
+      {
+        "finding": "'The broker refuses the device grant' has no stated shape, and oauth.New refuses an empty VerificationURL.",
+        "answer": "Plan D8: POST /v1/oauth/device_authorization answers 404 because the row is not mounted, and the metadata's grant_types_supported excludes the device-code URN. Task 8 relaxes oauth.New's unconditional VerificationURL check (provider.go:115-117) as well as the composition in cmd/broker/main.go."
+      },
+      {
+        "finding": "A6's 'one Oh My Pi session and one Claude Code session' and 'a broker stopped for more than 5 minutes' are not machine-checkable as written.",
+        "answer": "Plan Task 2 and the A6 block. Task 2 builds packages/envoy/scripts/dev-stack.sh, the broker, Dispatch and listener in one stack, because no surface reaches these criteria today. The Claude Code path is driven through the bundled packages/claude-envoy/dist entry, so the bundler is what is proven; the Oh My Pi path through packages/pi-envoy/src/dispatch-session.ts. The outage check runs with BROKER_ACCESS_TOKEN_SECONDS=1, stops the broker until the client has reported two failed renewals, starts it and asserts the next write answers 201 with no step by a person - the five minutes came from refresh-token rotation and the new grant issues no refresh token. Recorded as departure 5."
+      },
+      {
+        "finding": "A8's 'fails at the commit before this change' is literally 0 tests, exit 0.",
+        "answer": "Plan A8 block: the new e2e/signins.e2e.ts is applied alone onto the parent commit and run there, both runs quoted on the pull request; only that spec is run, since CI runs the suite at the head. Recorded as departure 6."
+      },
+      {
+        "finding": "A9 asks the pull request to edit packages/envoy/CHANGELOG.md, which the repository forbids.",
+        "answer": "Plan D13: each setting is named in packages/envoy/AGENTS.md and in changie fragments, with go run ./cmd/broker-refgen as the machine check for the broker's half. Recorded as departure 3."
+      },
+      {
+        "finding": "A10 names <id>.md rather than <slug>.md, and the issue's six components do not cover the broker, dispatch-api or dispatch-web.",
+        "answer": "Plan D12: each changed path is mapped through the paths: front matter and the file it lands in is updated; eleven docs are named, re-read by the implementer at its own head. The architect is asked to re-attach the issue's components. Recorded as departure 4."
+      },
+      {
+        "finding": "A1's 'A VM token sent to POST /v1/launcher-credentials/token is refused' does not name a code.",
+        "answer": "Plan Task 4 and the A1 proof row: the route keeps serving Kubernetes logins, and a Google token reaches no verifier there, so the refusal is the existing vocabulary of writeTokenLoginRefusal and the test asserts the code."
+      },
+      {
+        "finding": "A7's 'the boot log has no Google line' is checkable only once a Google line has a shape.",
+        "answer": "Plan A7 proof row: the boot-log test asserts the captured slog output equals the golden the existing test holds, not the absence of a word."
+      },
+      {
+        "finding": "The spec's one-line account of dispatch://INFRA-454 is incomplete, and the two trees touch the same files.",
+        "answer": "Plan 'Coordination and risks': INFRA-454's spec v3 is described from its own record, the six shared files are listed, this tree expects to rebase since INFRA-454 is closer to merge, Task 13 adopts whatever shared retry package it lands, and the implementer tells its architect when Task 13 starts."
+      },
+      {
+        "finding": "R2's reason, 'agent-infra sets none of its settings', is unverifiable from this repository and load-bearing.",
+        "answer": "Verified and false: theorem-labs/agent-infra main sets all four at broker/main.go:185-189 (brokerGoogleOIDCAudience = \"agent-secrets-vm\") and broker/deployment.go:259-262. Plan D5 keeps the four settings so a broker from this head boots on the deployed configuration. Recorded as departure 1."
+      },
+      {
+        "finding": "internal/broker/enroll/vmtoken.go refuses a token with no google.compute_engine claims, which is exactly the token R1's no-pin entry must accept.",
+        "answer": "Verified at vmtoken.go:116-119. Plan D6 splits VerifyVM into a Google check (signature, issuer, audience, expiry, email, email_verified, Compute Engine claims when present) and the pin check, which moves into the entry's rule. Recorded as departure 2."
+      },
+      {
+        "finding": "The access_token subject type the Design relies on for the second exchange is registered but refuses an empty approver and an empty credential id.",
+        "answer": "Plan D1 gives every machine a launcher credential, so the credential id is present, and D2's service-only claims replace the empty-approver refusal for a machine that no fleet entry names."
+      },
+      {
+        "finding": "The issue holds 15 to 17 separately reviewable units, and one pull request may not be able to carry it, while A8-A10 assume one.",
+        "answer": "Plan 'Size': one branch and one pull request, because the issue is one issue and the deployment forbids deferral into follow-ups; the phases are ordered so each lands as its own commit. The measurement is reported to the architect, which owns decomposition."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "R2: the VM token login 'moves onto this grant and its VM path is removed, since agent-infra sets none of its settings'.",
+      "plan": "The four Google settings (BROKER_GOOGLE_OIDC_AUDIENCE, BROKER_VM_SERVICES, BROKER_VM_PROJECTS, BROKER_VM_INSTANCES) are kept and become the new grant's machine entries, with the two pins optional per account; only the VM login route and the vm enrollment kind are removed.",
+      "evidence": "theorem-labs/agent-infra main sets all four: broker/main.go:185-189 holds brokerGoogleOIDCAudience = \"agent-secrets-vm\", brokerVMServices, brokerVMProjects and brokerVMInstances, and broker/deployment.go:259-262 puts each on the broker's container (read with gh api on 2026-11-01). A broker that stopped reading them would refuse to start on the deployed configuration.",
+      "outcome": { "kind": "unchanged" }
+    },
+    {
+      "spec": "Design: 'The Google verifier is the one sjawhar/legion#2527 and #2615 built (internal/broker/enroll/vmtoken.go)'.",
+      "plan": "VerifyVM is split: a Google check that returns the Compute Engine claims when present, and the pin check, which moves into the entry's own rule.",
+      "evidence": "vmtoken.go:116-119 returns ErrVMComputeEngineClaims when any of project_id, zone, instance_name or instance_id is empty. R1 requires an entry with no pins to accept exactly that token, and the Acceptance preamble says the real token from the test pod's metadata server carries none of those claims, so the named verifier refuses R1's headline path.",
+      "outcome": { "kind": "unchanged" }
+    },
+    {
+      "spec": "A9: 'The pull request names each new setting of the broker, Dispatch and the listener in packages/envoy/AGENTS.md and packages/envoy/CHANGELOG.md, with its form and default.'",
+      "plan": "Each setting is named in packages/envoy/AGENTS.md and in changie fragments under packages/envoy/.changes/unreleased/, never in CHANGELOG.md; the client's settings are named too. go run ./cmd/broker-refgen is the machine check for the broker's half.",
+      "evidence": "The repository's AGENTS.md says 'Never edit a CHANGELOG.md: .github/workflows/changelog-fold.yaml writes it', packages/envoy/.changie.yaml repeats it, and the two newest commits on main are 'chore: fold changelog fragments [skip ci]'. A pull request that edits the file fights the fold.",
+      "outcome": { "kind": "changed", "acceptance": ["A9's 'and packages/envoy/CHANGELOG.md' becomes 'and a changelog fragment under packages/envoy/.changes/unreleased/', and the settings it covers include the token client's."] }
+    },
+    {
+      "spec": "A10: 'The pull request updates .dispatch/architecture/<id>.md for each component whose code it changes', with the issue attached to claude-envoy-bridge, dispatch-auth, envoy-client, envoy-listener, pi-envoy and pi-shared.",
+      "plan": "Each changed path is mapped through the paths: front matter of .dispatch/architecture/*.md and the file it lands in is updated; on today's file set that is envoy.md, dispatch-api.md, dispatch-web.md, dispatch-server.md, envoy-listener.md, envoy-client.md, pi-envoy.md, pi-shared.md, claude-envoy-bridge.md, contracts.md and the new broker-client.md.",
+      "evidence": "The files are <slug>.md, not <id>.md. No component's paths: names packages/envoy/internal/broker, so the broker falls only under envoy.md (paths: [packages/envoy]); dispatch-auth.md's paths are packages/envoy/internal/dispatch/auth, githubapp and githubapi, which do not hold internal/dispatch/api/broker_token.go - that is dispatch-api.",
+      "outcome": { "kind": "changed", "acceptance": ["A10's component set is wrong for this work; the issue's components want re-attaching to include the broker's (envoy), dispatch-api and dispatch-web."] }
+    },
+    {
+      "spec": "A6: 'A broker stopped for more than 5 minutes and started again leaves the client working with no step by a person.'",
+      "plan": "The broker runs with BROKER_ACCESS_TOKEN_SECONDS=1, is stopped until the client has reported at least two failed renewals, and is started again; the next write answers 201 with no step by a person.",
+      "evidence": "The five minutes came from refresh-token rotation (INFRA-884's Problem: 'a rotated refresh token comes back more than 5 minutes after its rotation'). R2's grant issues no refresh token, so there is no rotation window and any outage past one access token's life is the same event. BROKER_ACCESS_TOKEN_SECONDS' minimum is 1 (config.go:897). A five-minute wall-clock sleep in CI is a tax that tests nothing the new design has.",
+      "outcome": { "kind": "changed", "acceptance": ["A6's 'stopped for more than 5 minutes' becomes 'stopped until the client has reported at least two failed renewals, with the access token's life set to its minimum'. If the literal five minutes is wanted, it belongs in dispatch://INFRA-959's deploy check."] }
+    },
+    {
+      "spec": "A8: 'a test in Dispatch's browser suite that fails at the commit before this change and passes at its head'.",
+      "plan": "The new e2e/signins.e2e.ts is applied alone onto the parent commit and run there with bun run e2e --grep, and that run's failure is quoted beside the head run's pass.",
+      "evidence": "The test file does not exist at the parent commit, so the literal run of the suite there answers 0 tests, exit 0, which is not a failure and proves nothing about the page.",
+      "outcome": { "kind": "unchanged" }
+    }
+  ]
+}
