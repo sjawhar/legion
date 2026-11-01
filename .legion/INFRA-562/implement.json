@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-562",
-  "completed": "2026-11-01T04:13:46Z",
+  "completed": "2026-11-01T07:41:06Z",
   "proof": [
     {
       "criterion": "Items 1 and 2: a message or mention whose request is cancelled after commit reaches its recipient without a retry; pending attempts a killed process left are sent by the other process under their own key",
@@ -275,6 +275,14 @@
       "observed": "envoy-go job 124706936608: `--- FAIL: TestEditNoticeRestart ... no edit notice within 10s`, the test main's own run 41226348622 (job 124623150839) also failed and that passed 20 of 20 on main and on the head before. envoy-smoke job 124706936632: TestLiveListener/AdoptionPreviews/SeedReachesNATS/GoConsumers each failed at `build the plugin: ... link: mapping output file failed: no space left on device` on the runner, in packages/envoy/infra/host, which this PR does not touch (its diff against its fork point holds no packages/envoy/infra path). Merge 4a6d06a7 with main d09b46d7: routes_table.go takes main's routeRow table with this PR's four every-process test-hook descriptions; server.go keeps main's comment (decideBrokerToken) with this PR's test-hooks sentences; server_test.go keeps both constants (testTakeoverWindow, testServerURL) and every DepsInput field of both sides (ListenerTakeoverWindow, TestHookTimeout, BrokerTokens); cmd/dispatch/AGENTS.md keeps this PR's five test-hook rows and main's /ws/doc row. Main's #2541 took 0150_dpop_proofs, so this PR's migrations moved 0150-0153 -> 0151-0154 with every reference (file headers, README, AGENTS.md, Go comments, pr2387 fragments), main's dpop references untouched; SQL unchanged. api ok 1738.379s; the routes-table tests ok; both migration guard tests PASS; check-ci-filters 28 gates; layout check clean on both guides; go build/vet (plain, multiprocess, memory)/gofmt clean. The rescue branch legion/INFRA-562-rescue (6b081600) has the same tree as 4a6d06a7.",
       "headSha": "4a6d06a72cc0",
       "negativeControl": "Before the resolution jj resolve --list reported 2-sided conflicts in cmd/dispatch/AGENTS.md, api/routes_table.go, api/server.go and api/server_test.go; before the renumbering the merged tree held two version-0150 migrations (0150_dpop_proofs and 0150_message_delivery_urgency), which TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny refuses."
+    },
+    {
+      "criterion": "CI red at bd852fdc (code 4a6d06a7): attempt 1's dispatch job failed main's flaky overlapping-marks browser test; attempt 2 is green, with no code change",
+      "surface": "GitHub Actions CI run 41270335139 on the pull request's merge ref, attempts 1 and 2",
+      "command": "gh api 'repos/sjawhar/legion/actions/runs/41270335139/jobs?filter=all&per_page=100'; gh api repos/sjawhar/legion/actions/jobs/124744759459/logs",
+      "observed": "Attempt 1: dispatch job 124744759459 `1 failed`, `1448 passed`, the one failure `e2e/overlapping-marks.e2e.ts:311` (a wider and a narrower ask, the narrower made first, @phone, chromium), a 30 s timeout: main's known flaky browser test, in a spec this PR does not touch. Attempt 2 (started by the reviewer; mine was refused as already running): dispatch job 124768418607 `completed success`, ci-ok job 124784811061 `completed success`. No code changed; the code head stays 4a6d06a7, which merges with current main without conflict (git merge-tree exit 0).",
+      "headSha": "4a6d06a72cc0",
+      "negativeControl": "Attempt 1 of the same job on the same commit failed that one test, so attempt 2's pass comes from the rerun, not a change."
     }
   ],
   "filesChanged": [
