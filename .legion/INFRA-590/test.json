@@ -2,39 +2,31 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-590",
-  "completed": "2026-11-01T02:01:00Z",
-  "round": 28,
+  "completed": "2026-11-01T06:24:00Z",
+  "round": 29,
   "testedHead": "d99681cece964276e4a5427500fd94c7e9b39f2a",
-  "previousTestedHead": "b52f6b3442f4eeb5def72e74ad1ceb0bec8b23d5",
-  "roundShape": "Narrow round on the renumbering, as briefed: main f93dd6895 (#2541) took 0150_dpop_proofs; this PR's migrations moved to 0151_duty_holds and 0152_outbox_claim. round-shape.py v3, b52f6b3442f4eeb5def72e74ad1ceb0bec8b23d5 -> d99681cece964276e4a5427500fd94c7e9b39f2a, pull request 2395: files whose own diff differs: 0; equal only after migration numbers were normalised: 9 (.dispatch/architecture/dispatch-outbox.md, the changelog fragment, packages/envoy/AGENTS.md, cmd/dispatch/README.md, outbox/batch.go, and the four duty_holds/outbox_claim forward and census files). Read: the four SQL files are byte-identical to their old numbers except one comment in 0152_outbox_claim.up.sql (migration 0150 -> 0151); batch.go's only change is the comment's migration 0151 -> 0152. Control: 2678be4b84 -> b5e8445e62 still prints 4 files. Round 26's live evidence at 1b15f353 stands for the rest.",
+  "previousTestedHead": "d99681cece964276e4a5427500fd94c7e9b39f2a",
+  "roundShape": "Confirmation round, as briefed: the code head is unchanged at d99681ce; the implementer re-ran the failed jobs of CI run 41262122784 (attempt 2) and pushed only a handoff, 67ac7a4d. Round 28's evidence at d99681ce stands, and round 26's live evidence at 1b15f353 for the rest.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at d99681ce on the issue volume's superuser Postgres 17 (127.0.0.1:55490, not the pod's LEGION_TEST_PG_DSN), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, one package at a time: TestMigrationSetIsNumberedOneToN and TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny pass; store, duty and outbox ok; the head binary migrates a fresh database through 0152."
+    "how": "gh api repos/sjawhar/legion/compare/d99681ce...67ac7a4d: ahead 3, behind 0, files .legion/INFRA-590/implement.json and .legion/INFRA-590/test.json only. Run 41262122784 attempt 2 completed success at 06:09:22Z."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The renumbering is complete: no gap or shared version, and a fresh database migrates through 0152 with duty_holds and the outbox claim's indexes present",
-      "surface": "store's migration tests, and the real envoy-dispatch built at d99681ce on a fresh database",
-      "command": "go test -run 'TestMigrationSetIsNumberedOneToN|Version' ./internal/dispatch/store/; envoy-dispatch (DISPATCH_NATS_DISABLED=1) on a new database t590mig28; GET /healthz; psql: schema_migrations >= 148, to_regclass('duty_holds'), to_regclass('dpop_proofs'), events indexes like 'events_outbox%'",
-      "observed": "TestMigrationSetIsNumberedOneToN, TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny, TestMigrateSkipsVersionRecordedOutsideTheRunner and the census/version tests pass. The binary started and listened; /healthz schema_version 152; versions 148,149,150,151,152 recorded; duty_holds and main's dpop_proofs both exist; events_outbox_fresh, events_outbox_owner and events_outbox_retry present.",
-      "headSha": "d99681cece964276e4a5427500fd94c7e9b39f2a",
-      "negativeControl": "TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny passes: a set with a shared version is refused before any applies, which is the clash this renumbering avoids."
+      "criterion": "67ac7a4d over d99681ce changes only .legion/INFRA-590/",
+      "surface": "GitHub compare API",
+      "command": "gh api repos/sjawhar/legion/compare/d99681cece964276e4a5427500fd94c7e9b39f2a...67ac7a4d",
+      "observed": "status ahead, ahead_by 3, behind_by 0; files: .legion/INFRA-590/implement.json, .legion/INFRA-590/test.json.",
+      "headSha": "67ac7a4d571126b662a56ed3517fd99e020d01f8",
+      "negativeControl": "none: a read of the compare"
     },
     {
-      "criterion": "store, duty and outbox suites; vet",
-      "surface": "packages/envoy on the issue volume's superuser Postgres, -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, one package at a time",
-      "command": "go test -count=1 ./internal/dispatch/store/; ./internal/dispatch/duty/; ./internal/dispatch/outbox/; go vet ./internal/dispatch/... ./cmd/dispatch",
-      "observed": "store ok 257.0 s, duty ok 22.4 s, outbox ok 275.2 s; vet clean. Sampled memory peak 2.83 GiB of 19, 344 samples every 2 s (named job mem-sampler-INFRA-590, stopped by proc kill). Leftover check after the kill (ps -eo pid,args | grep -E 'memory.usage_in_bytes|sleep 2|mem-sampler|mem.samples|r28/envoy-dispatch'): printed no lines.",
-      "headSha": "d99681cece964276e4a5427500fd94c7e9b39f2a",
-      "negativeControl": "none: suites"
-    },
-    {
-      "criterion": "Every lane with ci-ok at d99681ce",
-      "surface": "GitHub check runs",
-      "command": "gh api repos/sjawhar/legion/commits/d99681cece964276e4a5427500fd94c7e9b39f2a/check-runs --paginate",
-      "observed": "At 01:59Z: CI run 41262122784 queued since 01:41:24Z with only its changes job created (queued); pr-title queued (run 41262249602), three earlier pr-title runs cancelled. Unread: lint, typecheck, test, pr-title, envoy-go, envoy-go-race, ci-ok and every other CI job. #2395 MERGEABLE.",
+      "criterion": "ci-ok and every lane at d99681ce on attempt 2; merge state; main's highest migration",
+      "surface": "GitHub check runs, the pull request, main@origin",
+      "command": "gh api repos/sjawhar/legion/commits/d99681cece964276e4a5427500fd94c7e9b39f2a/check-runs?filter=latest --paginate; gh api repos/sjawhar/legion/actions/runs/41262122784; gh pr view 2395 --json mergeable; jj file list -r main@origin packages/envoy/internal/dispatch/store/migrations; gh pr view 2391 / 2444 --json state",
+      "observed": "At 06:21Z: 32 success, 1 skipped (worker-image / attest), 3 cancelled (earlier pr-title runs, superseded by a pr-title success). ci-ok, lint, typecheck, test, pr-title, envoy-go, envoy-go-race and docs / build all success; no lane failed or is pending. Run 41262122784 attempt 2 completed success at 06:09:22Z. #2395 MERGEABLE at 67ac7a4d. main@origin (ed9113e7c0) ends at 0150_dpop_proofs, so 0151_duty_holds and 0152_outbox_claim stay the next free numbers; #2391 and #2444 are both still OPEN.",
       "headSha": "d99681cece964276e4a5427500fd94c7e9b39f2a",
       "negativeControl": "none: a read of CI"
     }
