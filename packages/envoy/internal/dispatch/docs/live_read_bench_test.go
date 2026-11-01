@@ -185,7 +185,7 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 							if err := crdt.ApplyUpdateV1(info.Doc, info.Update, info.Origin); err != nil {
 								return err
 							}
-							replica.observe("bench", nil)
+							replica.observe("bench")
 							return nil
 						})
 						latencies = append(latencies, time.Since(start))
@@ -300,7 +300,7 @@ func observedReplica(tb testing.TB, service *Service, live *crdt.Doc, markdown *
 	tb.Cleanup(log.Close)
 	replica := service.keepReplica(live, log, markdown, nil)
 	live.Transact(func(*crdt.Transaction) {})
-	replica.observe("bench", nil)
+	replica.observe("bench")
 	if replica.hold() == nil {
 		tb.Fatal("the replica holds no document after its first drain")
 	}

@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -24,16 +28,24 @@ import (
 
 	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
+	natsgo "github.com/nats-io/nats.go"
 	"github.com/reearth/ygo/crdt"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // promptShutdown bounds a SIGTERM's whole ordered shutdown with a dashboard open. Closing the
@@ -487,7 +499,7 @@ func TestShutdownWaitsForDeliveryWorkBeforeClosingThePool(t *testing.T) {
 			close(entered)
 			<-release
 			background.Wait()
-		}, func() {})
+		}, func() {}, func() {})
 	}()
 	select {
 	case <-entered:
@@ -508,6 +520,220 @@ func TestShutdownWaitsForDeliveryWorkBeforeClosingThePool(t *testing.T) {
 	}
 	if _, err := database.Pool.Exec(context.Background(), "select 1"); err == nil {
 		t.Fatal("shutdown left the pool open")
+	}
+}
+
+// githubAnswersAfterSignal is how long into the stop the fake GitHub of
+// TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool holds a merged pull request's fetch.
+const githubAnswersAfterSignal = 3 * time.Second
+
+// An intake handler waiting on GitHub when the signal comes holds no database connection, so on an
+// otherwise idle server nothing else keeps the pool open. Shutdown waits for the handler before it
+// closes the pool: GitHub answers a few seconds into the stop, and the handler's writes land and its
+// message is acknowledged, or, given up, the message is handed back for the next process. With the
+// pool closed under it, the handler's write failed and its message was acknowledged all the same,
+// which left the event to the reconcile minutes later.
+func TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool(t *testing.T) {
+	database := storetest.Open(t)
+	// The fetched pull request's author is outside the population, so the handler deletes any row
+	// it has and records the event's time: two writes to the pool once GitHub has answered.
+	if _, err := delivery.PutSettings(context.Background(), database.Pool, delivery.DeliverySettings{
+		DeployRepo:           "acme/deploy",
+		DeployWorkflowPath:   ".github/workflows/deploy.yaml",
+		PRChecksWorkflowPath: ".github/workflows/pr.yaml",
+		ProductionJobNames:   []string{"production"},
+		PopulationAuthors:    []string{"octocat"},
+	}, model.Actor{Kind: "user", ID: dispatchTestLogin}); err != nil {
+		t.Fatalf("seed the delivery settings: %v", err)
+	}
+	_, natsURL := testnats.Start(t)
+	publisher, err := bus.ConnectOwningStream([]string{natsURL})
+	if err != nil {
+		t.Fatalf("connect the publisher: %v", err)
+	}
+	t.Cleanup(publisher.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entered := make(chan struct{})
+	var enter sync.Once
+	github := http.NewServeMux()
+	github.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": 1, "app_slug": "shutdown-test",
+			"permissions": map[string]string{"contents": "read", "actions": "read", "pull_requests": "read"},
+		})
+	})
+	github.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"token": "ghs_shutdown", "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339)})
+	})
+	github.HandleFunc("GET /repos/acme/widgets/pulls/7", func(w http.ResponseWriter, r *http.Request) {
+		enter.Do(func() { close(entered) })
+		select {
+		case <-ctx.Done():
+		case <-r.Context().Done():
+			return
+		}
+		select {
+		case <-time.After(githubAnswersAfterSignal):
+		case <-r.Context().Done():
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number": 7, "title": "Widgets", "html_url": "https://github.com/acme/widgets/pull/7",
+			"user": map[string]any{"login": "someone-else"}, "created_at": "2026-10-01T00:00:00Z",
+			"merged_at": time.Now().UTC().Format(time.RFC3339),
+		})
+	})
+	github.HandleFunc("GET /repos/acme/widgets/pulls/7/commits", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"sha": "abc", "commit": map[string]any{"author": map[string]any{"date": "2026-10-01T00:00:00Z"}}}})
+	})
+	githubServer := httptest.NewServer(github)
+	t.Cleanup(githubServer.Close)
+	app := testGitHubApp(t, githubServer.URL)
+
+	stopIntakes, err := delivery.StartIntakes(ctx, func(name string) (*bus.Client, error) {
+		return bus.Connect([]string{natsURL}, bus.WithName(name))
+	}, database.Pool, app, events.NewBroker(), nil)
+	if err != nil {
+		t.Fatalf("start the intakes: %v", err)
+	}
+	t.Cleanup(stopIntakes)
+	consumer := func() *natsgo.ConsumerInfo {
+		info, err := publisher.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
+		if err != nil {
+			return nil
+		}
+		return info
+	}
+	waitUntil(t, 30*time.Second, "the intake's durable to be bound", func() bool {
+		info := consumer()
+		return info != nil && info.PushBound
+	})
+	payload, err := json.Marshal(map[string]string{
+		"kind": "pr", "action": "closed", "merged": "true", "repo": "acme/widgets", "number": "7", "author": "octocat",
+	})
+	if err != nil {
+		t.Fatalf("encode the payload: %v", err)
+	}
+	if err := publisher.Publish(contracts.Envelope{
+		EventID: "shutdown-pr-7", Source: "github", SourceEventID: "shutdown-pr-7", TraceID: "shutdown-pr-7",
+		Topic: contracts.GithubResourceSubject("acme", "widgets", "pr", "7"), Payload: string(payload), IssuedAt: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("publish the merged pull request: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the intake never fetched the merged pull request")
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	documentService := docs.New(docs.Deps{Store: database, Events: events.NewBroker()})
+	served := make(chan error, 1)
+	go func() {
+		// As main does: the stop of the intakes, which begins as ctx is cancelled, is what shutdown
+		// waits for beside the delivery sockets.
+		served <- serveUntilStopped(ctx, cancel, &http.Server{Handler: http.NotFoundHandler()}, listener, documentService,
+			database.Pool, func() {}, stopIntakes, func() {}, nil)
+	}()
+	cancel()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("serveUntilStopped: %v", err)
+		}
+	case <-time.After(stopGrace):
+		t.Fatal("the shutdown did not end within stopGrace")
+	}
+
+	reader, err := pgx.Connect(context.Background(), database.Pool.Config().ConnString())
+	if err != nil {
+		t.Fatalf("connect to read the delivery settings: %v", err)
+	}
+	defer reader.Close(context.Background())
+	var recorded *time.Time
+	if err := reader.QueryRow(context.Background(), `select last_event_at from delivery_settings`).Scan(&recorded); err != nil {
+		t.Fatalf("read last_event_at: %v", err)
+	}
+	// GitHub answers well inside the intakes' stop, so the handler finishes rather than being given
+	// up. Its acknowledgement is on its way to the server once the stop returns.
+	var info *natsgo.ConsumerInfo
+	waitUntil(t, 10*time.Second, "the message to be acknowledged", func() bool {
+		info = consumer()
+		return info != nil && info.AckFloor.Consumer >= 1 && info.NumAckPending == 0
+	})
+	if recorded == nil {
+		t.Fatalf("the message was acknowledged but its handler's writes never landed (last_event_at null): the pool closed "+
+			"under the handler; consumer delivered=%d ack_floor=%d", info.Delivered.Consumer, info.AckFloor.Consumer)
+	}
+}
+
+// testGitHubApp is a GitHub App client signing with a key of the test's own and asking baseURL.
+func testGitHubApp(t *testing.T, baseURL string) *githubapp.Client {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate the test App key: %v", err)
+	}
+	app, err := githubapp.New(&auth.AppConfig{
+		ClientID: "Iv1.shutdown",
+		PEM:      string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})),
+	}, baseURL)
+	if err != nil || app == nil {
+		t.Fatalf("build the GitHub App client: %v", err)
+	}
+	return app
+}
+
+// A panic in main once the intakes have started runs main's deferred stop of them on its way out
+// (stopIntakesOnExit), and the panic still reaches the runtime, which prints it and ends the
+// process. The intakes' Runs return only once the process context ends, and main's only cancel of
+// it is deferred before the intakes start, so it runs after their stop: a stop that waited for them
+// without cancelling first never returned, and the process hung with the panic unprinted while its
+// intake kept consuming.
+func TestAPanicAfterTheIntakesStartEndsTheProcess(t *testing.T) {
+	database := storetest.Open(t)
+	_, natsURL := testnats.Start(t)
+	// The publisher owns the stream, as the server's does, so the intakes bind their durables.
+	publisher, err := bus.ConnectOwningStream([]string{natsURL})
+	if err != nil {
+		t.Fatalf("connect the publisher: %v", err)
+	}
+	t.Cleanup(publisher.Close)
+	githubServer := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(githubServer.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopIntakes, err := delivery.StartIntakes(ctx, func(name string) (*bus.Client, error) {
+		return bus.Connect([]string{natsURL}, bus.WithName(name))
+	}, database.Pool, testGitHubApp(t, githubServer.URL), events.NewBroker(), nil)
+	if err != nil {
+		t.Fatalf("start the intakes: %v", err)
+	}
+	t.Cleanup(stopIntakes)
+
+	const boot = "boot failed after the intakes started"
+	recovered := make(chan any, 1)
+	go func() {
+		defer func() { recovered <- recover() }()
+		defer stopIntakesOnExit(cancel, stopIntakes)
+		panic(boot)
+	}()
+	select {
+	case got := <-recovered:
+		if got != boot {
+			t.Fatalf("the panic that reached the top of the stack = %v, want %q", got, boot)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("a panic after the intakes started never got past their deferred stop: it waited for intakes nothing had stopped")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("the deferred stop returned with the process context still live")
 	}
 }
 

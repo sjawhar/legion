@@ -19,7 +19,9 @@ import { asUser } from "./users";
 // `/auth/whoami` answers), so a key pressed before the page renders reaches no handler.
 async function openIssue(page: Page, issueKey: string, title: string): Promise<void> {
   await page.goto(`/issues/${issueKey}`);
-  await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
+  await expect(
+    page.getByTestId("issue-header").getByRole("heading", { level: 1, name: title })
+  ).toBeVisible();
   await page.locator("body").focus();
 }
 
@@ -256,7 +258,9 @@ test("/ searches only, and a query that is no action's start lists the hits abov
     await input.press("Enter");
     await expect(dialog).toHaveCount(0);
     await expect(
-      page.getByRole("heading", { level: 1, name: "Astrolabe issue calibration" })
+      page
+        .getByTestId("issue-header")
+        .getByRole("heading", { level: 1, name: "Astrolabe issue calibration" })
     ).toBeVisible();
     await expect(page.getByRole("button", { exact: true, name: "Close issue" })).toBeVisible();
     expect(statusWrites).toEqual([]);
@@ -566,7 +570,9 @@ test("a fresh open starts on an empty query, so it lists the new page's actions"
       .first()
       .click();
     await expect(
-      page.getByRole("heading", { level: 1, name: "Astrolabe calibration" })
+      page
+        .getByTestId("issue-header")
+        .getByRole("heading", { level: 1, name: "Astrolabe calibration" })
     ).toBeVisible();
     await page.locator("body").focus();
     await page.keyboard.press("Control+k");

@@ -473,7 +473,7 @@ func scanCeilingRoom(b *testing.B, runner crdt.ClientID, run int) (*crdt.Doc, *r
 			*unlocked = time.Now()
 		}
 	})
-	room.OnUpdate(func([]byte, any) { replica.observe("bench", nil) })
+	room.OnUpdate(func([]byte, any) { replica.observe("bench") })
 	return room, replica, unlocked
 }
 

@@ -324,7 +324,7 @@ func TestAPeerUpdateThatParksBehindAGapLeavesTheReplicaHoldingWhatTheRoomHolds(t
 
 	requireReplicaHoldsTheRoom := func(when string) {
 		t.Helper()
-		replica.observe("room", nil)
+		replica.observe("room")
 		room, err := renderDocument(live)
 		if err != nil {
 			t.Fatalf("%s: render the room: %v", when, err)

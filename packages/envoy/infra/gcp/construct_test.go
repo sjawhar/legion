@@ -62,6 +62,11 @@ func plainInputs() map[string]property.Value {
 				"nkey":              property.New(keyC),
 				"dispatchMachineId": property.New("example-dispatch"),
 			})),
+			property.New(property.NewMap(map[string]property.Value{
+				"name":              property.New("example-listener-a"),
+				"nkey":              property.New(keyD),
+				"listenerMachineId": property.New("example-listener-a"),
+			})),
 		})),
 		"hostname":       property.New("example-hub"),
 		"tailnetDnsName": property.New("example-tailnet.ts.net"),

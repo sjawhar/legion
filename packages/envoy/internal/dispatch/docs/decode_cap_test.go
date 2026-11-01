@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"maps"
 	"runtime"
 	"strings"
@@ -21,17 +20,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
-
-// captureLogs sends the service's log to the returned sink until the test ends, so a test can read
-// what a write logged as well as what it left in the document.
-func captureLogs(t *testing.T) *storetest.LockedLog {
-	t.Helper()
-	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-	return logs
-}
 
 // roomDocument is artifactID's room document, which the test must already have loaded.
 func roomDocument(t *testing.T, service *Service, artifactID string) *crdt.Doc {

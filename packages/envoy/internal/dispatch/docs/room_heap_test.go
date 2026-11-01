@@ -366,7 +366,7 @@ func loadAndType(t *testing.T, state []byte, updates [][]byte) *typedResidentRoo
 	replica := service.keepReplica(live, live.OpenUpdateLog(), &markdown, decoded.doc)
 	replica.scans.rescanned(decoded.scans)
 	charge := service.chargeLoadedRoom("room", live, replica)
-	live.OnUpdate(func([]byte, any) { replica.observe("room", nil) })
+	live.OnUpdate(func([]byte, any) { replica.observe("room") })
 	browser := new(int)
 	for index, update := range updates {
 		info := websocket.PeerUpdateInfo{Room: "room", Doc: live, Update: update, Origin: browser}

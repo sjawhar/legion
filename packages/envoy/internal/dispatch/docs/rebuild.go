@@ -88,17 +88,19 @@ func nearACap(doc *crdt.Doc) (why string, near bool) {
 //
 // Every refusal comes before the first write: a room resident in this server whose document is far
 // from both caps, a history that loads and is not near a cap, a closed issue (for supplied
-// markdown, which changes the document), and markdown that is not a Proof document or drops an
-// open ask block. Supplied markdown is caller text: it is parsed as an upload is, and its
-// rendering is weighed as a new document's is (SeedText). The latest version is the server's own
-// rendering of the document, read back as every stored rendering is (pmdoc.ParseRendering), so a
-// document whose version is past what one write may make - stored before that bound, or grown past
-// it by browser edits - still rebuilds. Supplied markdown that differs from the latest version is a
-// document change, so the same transaction writes its version, which moves the open approval
-// request to it (writeVersionTx, MoveApprovalAsk); the VersionResult is what the caller's
-// artifact.version event names. A failure anywhere rolls the whole rebuild back with the
-// transaction. The room refuses loads until that transaction ends (Ledger.holdRebuild): a load
-// before the commit would read the old history, and a second rebuild would preflight against it.
+// markdown, which changes the document), and markdown that is not a Proof document, drops an open
+// ask block, or introduces a block pointer to a block of a type its attribute does not allow
+// (refuseBlockPointers, against the latest version). Supplied markdown is caller text: it is
+// parsed as an upload is, and its rendering is weighed as a new document's is (SeedText). The
+// latest version is the server's own rendering of the document, read back as every stored
+// rendering is (pmdoc.ParseRendering), so a document whose version is past what one write may
+// make - stored before that bound, or grown past it by browser edits - still rebuilds. Supplied
+// markdown that differs from the latest version is a document change, so the same transaction
+// writes its version, which moves the open approval request to it (writeVersionTx,
+// MoveApprovalAsk); the VersionResult is what the caller's artifact.version event names. A
+// failure anywhere rolls the whole rebuild back with the transaction. The room refuses loads
+// until that transaction ends (Ledger.holdRebuild): a load before the commit would read the old
+// history, and a second rebuild would preflight against it.
 //
 // A document near a cap is one people are typing into when they are refused, so its room is
 // usually resident, and a refusal of every resident room would leave no way to rebuild it. Its
@@ -239,6 +241,18 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		if err := weighRendering("", canonical); err != nil {
 			return RebuildReport{}, VersionResult{}, err
 		}
+		// Supplied markdown is a caller's write, so a block pointer it introduces over the
+		// latest version is checked. That version is read back only when the schema declares a
+		// pointer attribute; one that does not read back holds no pointer.
+		var prior *pmdoc.Node
+		if pmdoc.HasLinkKinds() {
+			if latestTree, err := pmdoc.ParseRendering(latest.markdown); err == nil {
+				prior = latestTree
+			}
+		}
+		if err := refuseBlockPointers(ctx, tx, artifactID, tree, prior, offsets); err != nil {
+			return RebuildReport{}, VersionResult{}, err
+		}
 	}
 	seed, err := rebuiltSeed(tree, retired)
 	if err != nil {
@@ -270,7 +284,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	}
 	// RebuildTx holds the document's advisory lock until this transaction ends, so the pending
 	// authors read here are the ones the version's commit deletes.
-	capture, err := s.capturePendingAuthors(ctx, tx, artifactID, nil, &actor)
+	capture, err := s.capturePendingAuthors(ctx, tx, artifactID, nil, &actor, everyCredit)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
