@@ -689,7 +689,9 @@ test("raw unsupported HTML renders as literal text with no element created", asy
   try {
     expect(await within(view.container).findByText("<img src=x onerror=alert(1)>")).not.toBeNull();
     expect(view.container.querySelector("img")).toBeNull();
-    expect(view.container.firstElementChild?.getAttribute("data-markdown-fallback")).toBe("true");
+    await waitFor(() =>
+      expect(view.container.firstElementChild?.getAttribute("data-markdown-fallback")).toBe("true")
+    );
   } finally {
     view.unmount();
   }
@@ -1092,6 +1094,12 @@ function markdownElement(container: HTMLElement): HTMLElement {
   return container.firstElementChild as HTMLElement;
 }
 
+/** Both marks are React state: the commit that clears `data-markdown-pending`, and the one that
+ *  sets `data-markdown-fallback`, are queued when the painter's last piece is in, after the
+ *  painter has written the body itself straight into the element. A row that waits on what the
+ *  painter wrote - its items, its paragraphs, its text - is therefore through that wait before
+ *  the commit lands, so a read of a mark the commit changes is waited for rather than read at
+ *  once (sjawhar/legion#2519). */
 function pendingMark(container: HTMLElement): string | null {
   return markdownElement(container).getAttribute("data-markdown-pending");
 }
@@ -1210,7 +1218,7 @@ describe("A long body parsed in the worker", () => {
 
       await act(() => worker.answer(0));
       await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
-      expect(pendingMark(view.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
       expect(fallbackMark(view.container)).toBeNull();
       expect(view.container.textContent).not.toContain("- x");
     } finally {
@@ -1238,7 +1246,7 @@ describe("A long body parsed in the worker", () => {
         "dispatch://CORE-1/artifact/shot-png@v1"
       );
       expect(shot?.getAttribute("data-picture-caption")).toBe("shot.png");
-      expect(pendingMark(view.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
       expect(fallbackMark(view.container)).toBeNull();
     } finally {
       view.unmount();
@@ -1267,7 +1275,7 @@ describe("A long body parsed in the worker", () => {
       await act(() => worker.answer(1));
       await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 50));
       expect(topItems(view.container).at(-1)?.textContent).toBe("y");
-      expect(pendingMark(view.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
       expect(fallbackMark(view.container)).toBeNull();
     } finally {
       view.unmount();
@@ -1309,7 +1317,7 @@ describe("A long body parsed in the worker", () => {
       await act(() => worker.answer(1));
       await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 100));
       expect(topItems(view.container).at(-1)?.textContent).toBe("z");
-      expect(pendingMark(view.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
       expect(fallbackMark(view.container)).toBeNull();
     } finally {
       view.unmount();
@@ -1351,7 +1359,7 @@ describe("A long body parsed in the worker", () => {
       // body ends on it, marked neither pending nor as the fallback.
       await act(() => worker.answer(2));
       await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 80));
-      expect(pendingMark(view.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
       expect(fallbackMark(view.container)).toBeNull();
     } finally {
       view.unmount();
@@ -1381,7 +1389,7 @@ describe("A long body parsed in the worker", () => {
       expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 51);
 
       await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 51));
-      expect(pendingMark(view.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
       expect(fallbackMark(view.container)).toBeNull();
     } finally {
       view.unmount();
@@ -1418,12 +1426,12 @@ describe("A long body parsed in the worker", () => {
       // element stays marked pending, since that frame is owed.
       view.rerender(<MarkdownBody markdown={editedAgain} />);
       await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 51));
-      expect(pendingMark(view.container)).toBe("true");
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
       expect(fallbackMark(view.container)).toBeNull();
 
       await act(() => worker.answer(2));
       await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 101));
-      expect(pendingMark(view.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
       expect(fallbackMark(view.container)).toBeNull();
     } finally {
       view.unmount();
@@ -1476,7 +1484,7 @@ describe("A long body parsed in the worker", () => {
       await act(() => worker.answer(1));
       await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 51));
       expect(looseText(view.container).length).toBe(0);
-      expect(pendingMark(view.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
       expect(fallbackMark(view.container)).toBeNull();
     } finally {
       view.unmount();
@@ -1556,7 +1564,7 @@ describe("A long body parsed in the worker", () => {
       expect(pendingMark(view.container)).toBe("true");
 
       await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
-      expect(pendingMark(view.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
       expect(fallbackMark(view.container)).toBeNull();
     } finally {
       view.unmount();
@@ -1621,7 +1629,7 @@ describe("A long body parsed in the worker", () => {
       // worker that cannot be created is never the parser refusing the body.
       await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
       expect(worker.created).toBeGreaterThan(0);
-      expect(pendingMark(view.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
       expect(fallbackMark(view.container)).toBeNull();
     } finally {
       view.unmount();
@@ -1635,7 +1643,7 @@ describe("A long body parsed in the worker", () => {
     try {
       await act(() => worker.crash(0));
       await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
-      expect(pendingMark(view.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
       expect(fallbackMark(view.container)).toBeNull();
     } finally {
       view.unmount();
@@ -1657,7 +1665,7 @@ describe("A long body parsed in the worker", () => {
         interval: 250,
         timeout: 25_000,
       });
-      expect(pendingMark(view.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
       expect(fallbackMark(view.container)).toBeNull();
     } finally {
       setParseDeadline();
@@ -1697,7 +1705,7 @@ describe("A long body parsed in the worker", () => {
 
       await act(() => worker.answer(1));
       await waitFor(() => expect(topItems(back.container)).toHaveLength(longItems));
-      expect(pendingMark(back.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(back.container)).toBeNull());
       expect(fallbackMark(back.container)).toBeNull();
     } finally {
       setParseDeadline();
@@ -1732,7 +1740,7 @@ describe("A long body parsed in the worker", () => {
 
       expect(worker.requests).toHaveLength(1);
       expect(topItems(view.container)).toHaveLength(longItems);
-      expect(pendingMark(view.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
       expect(fallbackMark(view.container)).toBeNull();
     } finally {
       view.unmount();
@@ -1760,7 +1768,7 @@ describe("A long body parsed in the worker", () => {
 
       await act(() => worker.answer(0));
       await waitFor(() => expect(topItems(staying.container)).toHaveLength(longItems));
-      expect(pendingMark(staying.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(staying.container)).toBeNull());
       expect(fallbackMark(staying.container)).toBeNull();
     } finally {
       staying.unmount();
@@ -1786,7 +1794,7 @@ describe("A long body parsed in the worker", () => {
     const later = render(<MarkdownBody markdown={markdown} />);
     try {
       await waitFor(() => expect(topItems(later.container)).toHaveLength(longItems));
-      expect(pendingMark(later.container)).toBeNull();
+      await waitFor(() => expect(pendingMark(later.container)).toBeNull());
       expect(fallbackMark(later.container)).toBeNull();
       await flushTasks();
       expect(worker.requests).toHaveLength(1);
