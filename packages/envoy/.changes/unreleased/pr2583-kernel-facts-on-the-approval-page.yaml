@@ -1,0 +1,10 @@
+kind: Added
+body: |-
+  A credential request a machine session's helper signs now carries what the kernel answered about
+  the process that asked — its executable, working directory, start time, control group and pid,
+  read through the pidfd the helper had pinned and signed with the session's key — and the broker's
+  approval page prints them under "What the kernel says about the asking process", with the instant
+  they were read, apart from the session id that process states for itself. A pod's claim is
+  refused, since a pod has no helper to read one.
+custom:
+  Issue: pr2583

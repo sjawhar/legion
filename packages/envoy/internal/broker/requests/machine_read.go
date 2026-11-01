@@ -758,6 +758,10 @@ type RecordDetail struct {
 	RequestedAt     time.Time
 	Decided         *RecordDecision
 	Session         Session
+	// Peer is what the kernel said about the process that asked, as the helper read it through
+	// the pidfd it had pinned and signed into the request object; nil for a machine login, for a
+	// request no helper signed (a pod's, a box's) and for one made before the claim existed.
+	Peer *record.PeerFacts
 }
 
 // ReadRecord reads a credential-request record's full detail by id, for the broker's approval page
@@ -801,7 +805,7 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 		RecordID: recordID, Kind: kind, State: "pending", Approver: approver, Enrollment: enr,
 		Identifiers: identifiers, Service: service, Reason: obj.Reason, LifetimeSeconds: body.LifetimeSeconds,
 		RulesVersion: body.RulesVersion, ExpiresAt: expiresAt, RequestedAt: createdAt,
-		Session: Session{Request: requestSession, Enrollment: enrollmentSession},
+		Session: Session{Request: requestSession, Enrollment: enrollmentSession}, Peer: obj.Peer,
 	}
 	// Whether the record is still pending follows PendingForApprover's rule: an agent_secret record
 	// by its request's state, a machine login by its terminal event. A decided record's terminal

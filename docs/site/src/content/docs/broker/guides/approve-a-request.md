@@ -49,6 +49,18 @@ along:
 - **Approver**: who may decide it: an email, or anyone signed in for a shared secret.
 - **State**: pending, or how it was decided, by whom and when.
 
+When the request came from a machine session, the page prints one group more, **What the kernel
+says about the asking process**. Its sentence says when the agent-secrets helper read those values
+and that the session's key signed them; on a machine session the helper runs, the asking process
+never holds that key, so it cannot have written or changed them.
+
+- **Process ID**, **Executable**, **Working directory**, **Started**, **Control group**: what the
+  kernel answered about the process that asked, read through the handle the helper had pinned on
+  its own socket. A process chooses what it runs and what it calls itself; these are what it is
+  actually running and where.
+- The group is absent when the broker holds no such reading: a machine login, a request a pod or a
+  box signed with a key of its own, and every request made before the broker recorded this.
+
 The page header names who you are signed in as. Signed in as someone the request does not name,
 the page says who may decide it and offers no buttons, only **Sign in as someone else**, which
 sends you through the sign-in again with an account chooser and back to the same request.
