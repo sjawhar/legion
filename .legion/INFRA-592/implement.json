@@ -2,43 +2,58 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-592",
-  "completed": "2026-10-31T19:03:15Z",
+  "completed": "2026-11-01T00:30:47Z",
   "proof": [
     {
-      "criterion": "A settlement that withholds returned answers completes: the tester's red test TestASettlementThatWithholdsReturnedAnswersCompletes (b35eb407) passes unmodified (architect round 11, blocking)",
+      "criterion": "A body still arriving holds no write unit; bodies and answers are bounded by idle time and a rate floor, so honest slow transfers complete (review 2, PRRT_kwDORFy7ds6yULlZ)",
       "surface": "go test against a real Postgres 16 (UTF-8), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB",
-      "command": "go test -count=3 -run 'TestASettlementThatWithholdsReturnedAnswersCompletes$' ./internal/dispatch/api/",
-      "observed": "ok (3 of 3); growth_test.go unchanged since 96408bc6",
-      "headSha": "44aada0bdac58a1dae25bd2775c9e46ffed2202c",
-      "negativeControl": "Before the fix: 'document settlement left owed after reading a moving document again ... passes=7' and growth_test.go:668 'the document still owes a settlement 45 s after the answered blocks returned in one edit'"
+      "command": "go test -run 'TestABodyThatKeepsArrivingIsTakenHoweverLongItTakes|TestATricklingBodyDoesNotHoldItsWriteUnitWithoutEnd|TestASlowButSteadyReaderOfALargeAnswerIsAnsweredInFull|TestAPinnedReadGivesItsConnectionBackWhenItsClientStopsReading' ./internal/dispatch/api/",
+      "observed": "all pass in the api suite at the head; a write beside two trickling bodies is admitted at once, a steady body past the old total bound is taken, a slow-but-steady reader of a large answer is answered in full",
+      "headSha": "1176657a34d07c50da022dbb68c305b37ee45c78",
+      "negativeControl": "At 44aada0b the tricklers held the write units and a body arriving past 60 s total was answered 400 REQUEST_BODY_UNREADABLE (the reviewer's finding; the new tests encode both)"
     },
     {
-      "criterion": "CI's dispatch-memory lane's TestReturnedAnswersCannotGrowADocumentPastWhatOneUploadMayHold settles",
-      "surface": "go test -tags memory ./cmd/dispatch on this pod (gVisor: no /proc/<pid>/clear_refs or VmHWM, so every memory test's peak reading fails here regardless of code; run with a temporary local shim of peakAboveIdle that is not in the diff, so the functional assertions are real and the peak assertions are not exercised)",
-      "command": "go test -tags memory -count=1 -timeout 60m -run 'TestReturnedAnswersCannotGrowADocumentPastWhatOneUploadMayHold' -v ./cmd/dispatch; then the whole lane",
-      "observed": "after the fix: 'returning 24 answered blocks in one 1540-byte edit answered 200 and left a 903545-byte document', PASS; the whole lane ok (1790 s). The peak-memory assertions need CI's real kernel",
-      "headSha": "44aada0bdac58a1dae25bd2775c9e46ffed2202c",
-      "negativeControl": "Before the fix, same command: 'memory_test.go:631: document ... never settled', FAIL (136 s), as on CI since 07c21242"
+      "criterion": "A commit timeout with the client gone logs its ERROR line; gone clients (queued, mid-body, asset branches) are recorded 499 (PRRT_kwDORFy7ds6yULlc, PRRT_kwDORFy7ds6yULld)",
+      "surface": "go test against a real Postgres 16 (UTF-8), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB",
+      "command": "go test -run 'TestACommitPastItsBoundIsLoggedWhenItsClientHasGone|TestARequestWhoseClientLeavesWhileItIsQueuedIsLoggedClientGone' ./internal/dispatch/api/; go test ./internal/dispatch/accesslog/ ./internal/dispatch/routes/",
+      "observed": "pass; accesslog and routes ok",
+      "headSha": "1176657a34d07c50da022dbb68c305b37ee45c78",
+      "negativeControl": "At 44aada0b the queued case logged status=200 and the commit timeout with the client gone only a DEBUG 499 line"
     },
     {
-      "criterion": "Settlement behaviour otherwise unchanged",
+      "criterion": "planRepairs decides the settlement pass's ending; MaxAdmittedUnits derived from store.SharedPoolSize; keyedUploads, keyedReplays and issueUploadRoute folded onto the rows; editArtifact publishes before it releases; a related check waits for its meaning stage (PRRT_kwDORFy7ds6yULlf, \u2026Llg, \u2026Llh, \u2026Llm, review body)",
       "surface": "go test against a real Postgres 16 (UTF-8), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB",
-      "command": "gofmt; go build ./... && go vet ./...; go test -p 1 -count=1 ./internal/dispatch/docs/; go test -p 1 -count=1 -run 'Settle|Settlement|Ask|Answer|Growth|Withhold|CopyLock|KeyedWrite' ./internal/dispatch/api/",
-      "observed": "build and vet clean; docs ok (1248 s); the api selection ok (305 s); TestCopyLock* ok at the head",
-      "headSha": "44aada0bdac58a1dae25bd2775c9e46ffed2202c",
-      "negativeControl": "copy_lock_order_test fails when a pass takes the copy lock after a pending row (round 7's guard)"
+      "command": "go test -run 'TestASettlementThatWithholdsReturnedAnswersCompletes|TestCopyLock|TestEveryRoutesOversizedBodyIsAnsweredByItsRowsLimit|TestARelatedCheckWaitsForItsHeldMeaningStagesConnection|TestRoutesTable' ./internal/dispatch/api/; go test ./internal/dispatch/docs/ ./internal/dispatch/store/ ./internal/dispatch/admission/; infra gcp ConnectionsPer",
+      "observed": "all pass; docs ok (1236 s), store ok, admission ok; ConnectionsPerProcess 89 = dispatchConnectionsPerPod 89; the oversized-body test covers 66 non-GET rows",
+      "headSha": "1176657a34d07c50da022dbb68c305b37ee45c78",
+      "negativeControl": "TestARelatedCheckWaitsForItsHeldMeaningStagesConnection fails without the wait: 'the check answered ... while its meaning stage still held a request-pool connection'"
+    },
+    {
+      "criterion": "The suites pass at the merged head",
+      "surface": "go test against a real Postgres 16 (UTF-8), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB",
+      "command": "go test ./internal/dispatch/api/ ./cmd/dispatch/ ./internal/dispatch/admission/ ./internal/dispatch/accesslog/ ./internal/dispatch/routes/ ./loadtest/ at 1176657a; check-ci-filters.sh; semantic-line-breaks on packages/envoy/AGENTS.md and cmd/dispatch/README.md",
+      "observed": "api: every test but TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (collation); cmd/dispatch, admission, accesslog, routes, loadtest ok; filters: 28 gates covered; both guides pass the layout check",
+      "headSha": "1176657a34d07c50da022dbb68c305b37ee45c78",
+      "negativeControl": "Before the merge resolution docs/marks.go conflicted with main's #2548/#2604"
     }
   ],
   "filesChanged": [
+    "packages/envoy/internal/dispatch/api/{body_drain,server,request_keys,routes_table,artifacts,suggestions}.go and tests",
     "packages/envoy/internal/dispatch/docs/settlement.go",
-    "packages/envoy/AGENTS.md"
+    "packages/envoy/internal/dispatch/admission/admission.go",
+    "packages/envoy/internal/dispatch/store/{pools,store,pool,acquire}.go",
+    "packages/envoy/internal/dispatch/routes/router.go",
+    "packages/envoy/cmd/dispatch/conn_age.go",
+    "packages/envoy-client/src/dispatch-http.ts",
+    "docs and fragments named in the review"
   ],
   "trickyParts": [
-    "applyAnswers drops every repair when the withheld answers' blocks already stand as an earlier repair left them; the pass must read the repair count after that decision, not before"
+    "The ticket is parked inside drainedBody's reads, so every layer that reads a body (keyed spool, decode, multipart, drain) is covered once",
+    "TestEveryRoutesOversizedBodyIsAnsweredByItsRowsLimit is a guard, not a red test: a missing keyedUploads entry was not observable before"
   ],
   "deviations": [
-    "The architect's other three items are accepted risks, written into the PR body's Not proven / risk with the tester's numbers: 10x reads 57.7-59.5/s on the tester's pod, the 1x burst behind a 5.1 s horizon hold (#2468's class), memory levelling at heap 8.0-8.7 GiB and RSS 10.4 GB",
-    "Leftover check after this round (ps -eo pid,args | grep -E 'memory.usage_in_bytes|sleep 2|go test|run-step|loadgen'): it listed nothing; no load run or sampler ran this round"
+    "No load run this round: the changes are request-path bounds, refactors and prose; leftover check (ps -eo pid,args | grep -E 'memory.usage_in_bytes|sleep 2|go test|run-step|loadgen') listed nothing",
+    "Work from the pod before its restart came back through legion/INFRA-592-rescue (3f43e99c), verified by its tests and committed as fe08fb02 and 0647b935; the rescue branch is deleted"
   ],
   "openQuestions": []
 }
