@@ -9,14 +9,16 @@ var testPaths = Paths{Legion: "/opt/legion/bin/legion", Claude: "/usr/local/bin/
 
 // The agent command as words, which is what a pod's argv carries and what a pane's shell renders:
 // the bridge around `claude -p` in stream-json both ways (--verbose, which stream-json output
-// requires), every permission granted, only the configured MCP server, both plugin directories and
-// the session. It stops before --append-system-prompt, which each runtime adds its own way.
+// requires) re-emitting each user message it takes (--replay-user-messages), every permission
+// granted, only the configured MCP server, both plugin directories and the session. It stops
+// before --append-system-prompt, which each runtime adds its own way.
 func TestArgv(t *testing.T) {
 	session := "11111111-2222-4333-8444-555555555555"
 	got := Argv(testPaths, "/state/claude-mcp.json", session, false)
 	want := []string{
 		"/opt/legion/bin/legion", "claude-bridge", "--", "/usr/local/bin/claude",
 		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+		"--replay-user-messages",
 		"--permission-mode", "bypassPermissions",
 		"--strict-mcp-config", "--mcp-config", "/state/claude-mcp.json",
 		"--plugin-dir", "/opt/legion/claude-envoy",
@@ -33,11 +35,15 @@ func TestArgv(t *testing.T) {
 }
 
 // A Claude Code worker's own environment, in order: its configuration directory, and Claude Code's
-// background tasks and scheduled prompts off.
+// scheduled prompts off. Its background tasks are not turned off, under any runtime: a task that
+// finishes wakes a turn the bridge reports to the daemon.
 func TestEnvironment(t *testing.T) {
 	got := strings.Join(Environment("/state/claude/c"), " ")
-	if got != "CLAUDE_CONFIG_DIR=/state/claude/c CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_DISABLE_CRON=1" {
+	if got != "CLAUDE_CONFIG_DIR=/state/claude/c CLAUDE_CODE_DISABLE_CRON=1" {
 		t.Errorf("Environment = %s", got)
+	}
+	if strings.Contains(got, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS") {
+		t.Errorf("Environment = %s, want nothing turning Claude Code's background tasks off", got)
 	}
 }
 

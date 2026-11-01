@@ -339,6 +339,13 @@ func TestARedirectsTargetIsNotPrinted(t *testing.T) {
 // released no value, and the source: line of request, status and self - names the broker
 // AGENT_SECRETS_URL names and the store's kind, and no host, account, region or project, for
 // each store kind the broker's settings can describe; each outcome keeps its exit code.
+//
+// One line is excepted, and only for the exact string the fake broker answered with: a pending
+// request's waiting line names approve_url, the record's page on the broker, because a person
+// must open that page to decide the request (A12). Its host is the broker's, which
+// AGENT_SECRETS_URL already names, so the page tells a reader nothing the command's own
+// configuration does not. Everything the invariant forbids is still forbidden, the host anywhere
+// else in the output included: the exception removes that one URL and then checks the list.
 func TestNoSessionLineNamesAHostOrAStoreID(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	keyDir := newKeyDir(t)
@@ -390,6 +397,14 @@ func TestNoSessionLineNamesAHostOrAStoreID(t *testing.T) {
 				if !strings.Contains(output, kind.source) {
 					t.Fatalf("stdout %q, stderr %q; want them to name %q", redactSecrets(stdout), redactSecrets(stderr), kind.source)
 				}
+				// The one exception, and only the exact URL this broker answered with: a
+				// pending request's waiting line names the page a person must open to decide
+				// it. Taking that string out and then checking the list is what keeps the
+				// exception narrow — the host anywhere else, 127.0.0.1 outside that URL, the
+				// account, the region and "the broker at" are all still refused below.
+				if page := approveURLOf(form.args, broker.URL); page != "" {
+					output = strings.ReplaceAll(output, page, "")
+				}
 				for _, absent := range []string{host, "127.0.0.1", "000000000000", "111122223333", "us-east-1", "the broker at"} {
 					if strings.Contains(output, absent) {
 						t.Fatalf("stdout %q, stderr %q name %q", redactSecrets(stdout), redactSecrets(stderr), absent)
@@ -398,6 +413,20 @@ func TestNoSessionLineNamesAHostOrAStoreID(t *testing.T) {
 			})
 		}
 	}
+}
+
+// approveURLOf is the approve_url fakeBroker answers a form with, and "" for a form that reaches
+// no pending request or one the fake broker answers as an older broker would. It reads the
+// fixtures rather than matching on text, so the exception covers the exact string the broker
+// returned and nothing that merely looks like it.
+func approveURLOf(args []string, brokerURL string) string {
+	for _, arg := range args {
+		p, ok := fakePending[arg]
+		if ok && p.page {
+			return brokerURL + "/approve/" + p.recordID
+		}
+	}
+	return ""
 }
 
 // TestWhatAScriptReadsIsUnchanged pins the bytes a script parses: --json stdout is the broker's

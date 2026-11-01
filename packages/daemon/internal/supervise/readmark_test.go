@@ -100,52 +100,72 @@ func TestARefusalAfterTheBoundStillTakesTheTaskBackUnread(t *testing.T) {
 	}
 }
 
-// The run a claim's worker is on, which is what a completion is attributed to. The order matters
-// in both directions: a task whose turn is running answers over the run the claim was left
-// serving, and a task the agent may have read answers only for a claim that has served no run —
-// a worker holding an unread next run's task while still finishing the last run's work reports
-// the last run's, which is the sequence the run fencing exists for.
+// The run and the assignment a claim's worker is on, which is what a completion is attributed to.
+// The order matters in both directions: a task whose turn is running answers over what the claim
+// was left serving, and a task the agent may have read answers only for a claim that has served
+// none — a worker holding an unread next task while still finishing the last one's work reports
+// the last one's, which is the sequence the fencing exists for. The two accessors read the same
+// three sources the same way, so one table holds both; where they part is a task that carries a
+// run but no assignment — a resume, a production check's look — which moves the run on and leaves
+// the assignment the claim serves alone, so a resumed worker's in-flight completion is never
+// refused for an assignment it was never given.
 func TestTheRunAClaimServes(t *testing.T) {
 	at := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
-		name    string
-		claim   Claim
-		serving uint64
+		name       string
+		claim      Claim
+		serving    uint64
+		assignment string
 	}{
 		{name: "no task, no run", claim: Claim{}},
-		{name: "a run served, no task", claim: Claim{ServingGeneration: 4}, serving: 4},
+		{name: "a run served, no task", claim: Claim{ServingGeneration: 4, ServingAssignmentID: "a4"}, serving: 4, assignment: "a4"},
 		{
 			name: "the task whose turn is running",
-			claim: Claim{ServingGeneration: 4, Pending: &Delivery{
-				Generation: 5, DeliveredAt: at, ConfirmedAt: at}},
-			serving: 5,
+			claim: Claim{ServingGeneration: 4, ServingAssignmentID: "a4", Pending: &Delivery{
+				Generation: 5, Assignment: "a5", DeliveredAt: at, ConfirmedAt: at}},
+			serving: 5, assignment: "a5",
 		},
 		{
 			name:    "a first task the agent may have read",
-			claim:   Claim{Pending: &Delivery{Generation: 5, DeliveredAt: at}},
-			serving: 5,
+			claim:   Claim{Pending: &Delivery{Generation: 5, Assignment: "a5", DeliveredAt: at}},
+			serving: 5, assignment: "a5",
 		},
 		{
 			name: "an unread task on a claim already serving a run",
-			claim: Claim{ServingGeneration: 4, Pending: &Delivery{
-				Generation: 5, DeliveredAt: at}},
-			serving: 4,
+			claim: Claim{ServingGeneration: 4, ServingAssignmentID: "a4", Pending: &Delivery{
+				Generation: 5, Assignment: "a5", DeliveredAt: at}},
+			serving: 4, assignment: "a4",
 		},
 		{
 			name:    "a task the agent refused, which it never read",
-			claim:   Claim{Pending: &Delivery{Generation: 5}},
+			claim:   Claim{Pending: &Delivery{Generation: 5, Assignment: "a5"}},
 			serving: 0,
 		},
 		{
-			name: "an operator's task, which belongs to no run",
-			claim: Claim{ServingGeneration: 4, Pending: &Delivery{
+			name: "an operator's task, which belongs to no run and no assignment",
+			claim: Claim{ServingGeneration: 4, ServingAssignmentID: "a4", Pending: &Delivery{
 				DeliveredAt: at, ConfirmedAt: at}},
+			serving: 4, assignment: "a4",
+		},
+		{
+			name: "a resume's task, whose turn is running: a run of its own, the assignment it had",
+			claim: Claim{ServingGeneration: 4, ServingAssignmentID: "a4", Pending: &Delivery{
+				Generation: 5, DeliveredAt: at, ConfirmedAt: at}},
+			serving: 5, assignment: "a4",
+		},
+		{
+			name: "a claim upgraded in place: a run served, no assignment either side",
+			claim: Claim{ServingGeneration: 4, Pending: &Delivery{
+				Generation: 4, DeliveredAt: at, ConfirmedAt: at}},
 			serving: 4,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.claim.ServingRun(); got != tc.serving {
 				t.Fatalf("ServingRun() = %d, want %d", got, tc.serving)
+			}
+			if got := tc.claim.ServingAssignment(); got != tc.assignment {
+				t.Fatalf("ServingAssignment() = %q, want %q", got, tc.assignment)
 			}
 		})
 	}

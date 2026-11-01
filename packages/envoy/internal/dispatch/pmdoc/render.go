@@ -1170,7 +1170,7 @@ func attrsHoldNul(attrs Attrs) bool {
 // (nulAsReplacement). node may be asWritten's input, so the copy's attributes and marks are its
 // own before any is written. A typed block's other attributes are written quoted
 // (renderTypedAttributes), U+0000 as the escape \x00 that its parser unquotes back, so they keep
-// it; its id is written bare, `#` and the id.
+// it; its id is written as TypedBlockIDAttribute writes it, with no such escape.
 func withNulsWritten(node *Node) *Node {
 	out := &Node{Type: node.Type, Attrs: cloneAttrs(node.Attrs), Text: nulAsReplacement(node.Text), Marks: cloneMarks(node.Marks), Children: node.Children}
 	if !IsTypedBlock(out.Type) {

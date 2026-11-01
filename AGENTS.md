@@ -85,11 +85,11 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   Type check one package against its own tsconfig.
   The root has no tsconfig.json, so a bare `bunx tsc --noEmit` there checks nothing: it prints tsc's help and exits 1.
   CI runs this command in each of these, in a job of ci.yaml that runs when a change touches a file it reads:
-  packages/contracts, envoy-client, envoy-plugin, claude-envoy, pi-shared, pi-envoy, pi-legion, proof-editor and dispatch, and docs/site
+  packages/contracts, envoy-client, claude-envoy, pi-shared, pi-envoy, pi-legion, proof-editor and dispatch, and docs/site
 
-- `bunx tsc --noEmit -p scripts/dispatch && bunx tsc --noEmit -p scripts/github-apps`
+- `bunx tsc --noEmit -p scripts/dispatch && bunx tsc --noEmit -p scripts/github-apps && bunx tsc --noEmit -p scripts/sessions`
 
-  Type check the two script directories that are no workspace, as ci.yaml's `test` job does
+  Type check the three script directories that are no workspace, as ci.yaml's `test` job does
 
 - `(cd packages/daemon && go vet -tags e2e ./...)`
 
@@ -147,7 +147,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   the shim also answers the daemon's `adopt-working-copy` frame by running the shared `jj metaedit --update-author` in its workspace;
   with `--pod-safety` (the Sandbox runtime passes it;
   a tmux pane never does), the shim starts Oh My Pi on Legion's pod baseline (`packages/daemon/internal/podsafety`), which names no model, provider or route and holds nothing of a repository's settings off:
-  the turn-scoping overlay (`bash.autoBackground` and `async` off, the two keys a takeover's abort depends on) written to `LEGION_STATE_DIR` and named first in `PI_CONFIG_FILES`, so the operator's overlay outranks it and both outrank a repository's `.omp/config.yml`, and `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file` each set only when the pod leaves it unset (the runtime refuses both in an operator's pod, since they place the sessions a resume reads);
+  `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file`, each set only when the pod leaves it unset (the runtime refuses both in an operator's pod, since they place the sessions a resume reads), and nothing else — Legion writes no settings overlay of its own, so `PI_CONFIG_FILES` rides through as the runtime composed it, the operator's own overlays with the role's own (`role_config_files`) after them, and background work is on for every role, the pinned binary's own default under `--mode rpc`;
   with `--warm-codegraph` (the Sandbox runtime passes it for a role in an issue pod;
   never for a tmux pane, whose workspace the daemon warms itself, nor for the controller, which has no workspace;
   refused without `LEGION_WORKSPACE`), the shim builds the CodeGraph index of the workspace `LEGION_WORKSPACE` names in the background once Oh My Pi has written its first frame, under a cross-process lease at `.codegraph/legion-warm.lock` so the six role shims sharing an issue's workspace never build it twice, and a stop mid-build ends the warm-up with Oh My Pi (the shim exits only once the lease is released, so the relaunch never reads a live build;
@@ -162,7 +162,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 
   What `legion worker-shim` runs in Oh My Pi's place for a phase worker whose role `worker_backends` puts on claude, under either runtime (the daemon builds the argv, `claude -p --input-format stream-json --output-format stream-json …` with `--session-id <new id>` on a fresh launch or `--resume <id>` on a relaunch;
   one definition of it, `packages/daemon/internal/claudelaunch`):
-  turns the daemon's prompt, abort, get_state and negotiate_protocol frames into Claude Code's stream-json and its results into agent_start/agent_end, seeds a fresh session with `/rename` so its transcript exists before registration, takes Envoy deliveries as user turns from the unix socket it exports as LEGION_CLAUDE_INBOX, and exits with Claude Code's status.
+  turns the daemon's prompt, get_state and negotiate_protocol frames into Claude Code's stream-json and its results into agent_start/agent_end, with the prompt_result behind each turn's agent_end that names which prompt that turn was — a background task finishing makes Claude Code start a turn of its own, reported as agent_start…agent_end like any other, and the result is the only thing that tells the daemon which of the turns was its task's — seeds a fresh session with `/rename` so its transcript exists before registration, takes Envoy deliveries as user turns from the unix socket it exports as LEGION_CLAUDE_INBOX, and exits with Claude Code's status.
   It is transport: the phase reminder runs in the worker's own MCP server (`packages/claude-envoy`), driven by Claude Code's hooks
 
 - `legion launcher --connect tcp://<host>:<port> --sandbox <name> --roles-dir <dir> --role <r>… [--pod-uid <uid>] [--stop-grace <d>] [--session-instance <project:region:instance> --session-database <name> --session-user <login>] | legion launcher --connect tcp://<host>:<port> --token-file <path> --sandbox <name> --role <role> [--pod-uid <uid>] [--stop-grace <d>] [--session-instance <project:region:instance> --session-database <name> --session-user <login>] --private-dir <dir>`
@@ -346,7 +346,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 - `LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=<worker image@sha256> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> LEGION_E2E_DISPATCH_URL=<dispatch> LEGION_E2E_ENVOY_URL=<listener> LEGION_E2E_NATS_URL=nats://<nats>:4222 LEGION_E2E_DISPATCH_TOKEN_FILE=<0600 file> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> LEGION_E2E_SESSION_DB_PORT=<port> bash scripts/e2e/stage4b-sandbox-tree.sh`
 
   Stage 4b's live proof, devbox only: the Go daemon drives three real issue trees on the Agent Sandbox runtime in the production cluster (namespace legion), against production Dispatch (project LEGSMOKE), Envoy and NATS, with real agents, every pod keeping its Oh My Pi session in a scratch Postgres of the run's own at `LEGION_E2E_SESSION_DB_PORT` (required, no default:
-  the lane's third port) — admission under the cap, specs, the daemon bound to every interface with every pod dialing its advertise_host, issue independence (a root and two of its children at once, each pod on a disk of its own with no affinity, none able to read another's workspace) and a done child's release of its Sandbox, its pod and the disk that pod owned, while its parent runs, the repository-configuration fixture, the whole workflow to done with the review pair and a review round no review decides until the architect asks, then a changes-requested round whose approval does not wait for its thread to resolve, and a READY with every thread resolved, CI going red mid-test interrupting the tester's turn before the implementer starts, every worker's phase completion answered in the live session it keeps in its first pod until its issue closes, a finished role answering while another phase runs, token rotation, kill and fence, a daemon restart mid-tree relaunching nothing, a restart with only `envoy_url` respelled relaunching every role in its own issue pod and one with the worker stream and API moved replacing every issue pod, the operator's controller, a worker that dies with its task outstanding, a merge that leaves the root open while two children of its tree still run, told to its architect once and closing the root on the last of their parks, each park taking the child's Sandbox, pod and disk, the close suspending every role and taking each pod with its disk, node release, linger close, a re-admission that comes back on a pod and disk of its own with no lost-volume line anywhere in the daemon's log, every pod's shape and reservation, the pod watch, and an audit that the run wrote nothing outside LEGSMOKE;
+  the lane's third port) — admission under the cap, specs, the daemon bound to every interface with every pod dialing its advertise_host, issue independence (a root and two of its children at once, each pod on a disk of its own with no affinity, none able to read another's workspace) and a done child's release of its Sandbox, its pod and the disk that pod owned, while its parent runs, the repository-configuration fixture, the whole workflow to done with the review pair and a review round no review decides until the architect asks, then a changes-requested round whose approval does not wait for its thread to resolve, and a READY with every thread resolved, CI going red mid-test starting the implementer at once while the tester's turn, its background job and its session run on untouched, with the tester told on its own role topic that its phase ended, every worker's phase completion answered in the live session it keeps in its first pod until its issue closes, a finished role answering while another phase runs, token rotation, kill and fence, a daemon restart mid-tree relaunching nothing, a restart with only `envoy_url` respelled relaunching every role in its own issue pod and one with the worker stream and API moved replacing every issue pod, the operator's controller, a worker that dies with its task outstanding, a merge that leaves the root open while two children of its tree still run, told to its architect once and closing the root on the last of their parks, each park taking the child's Sandbox, pod and disk, the close suspending every role and taking each pod with its disk, node release, linger close, a re-admission that comes back on a pod and disk of its own with no lost-volume line anywhere in the daemon's log, every pod's shape and reservation, the pod watch, and an audit that the run wrote nothing outside LEGSMOKE;
   one run at a time, `STAGE4B_UNTIL=<checkpoint>` for a development run (scripts/e2e/README.md)
 
 ## Configuration
@@ -451,7 +451,7 @@ Each item below names a task and where its code is, then notes on it.
 
 - Get a tool a role's work needs into the pod — `skills/legion-worker/references/tools.md`
 
-  The image's five clients (`psql`, `redis-cli`, `sqlite3`, `nc`, `dig`, once your deployment pins a digest carrying them), the pinned runner forms for everything else (`uvx --from <package>@<version> <command>`, `bunx --package <name>@<version> <binary>`, `go run <module>@<version>`, and `uv run --with <package>==<version>` for a library rather than a command), and the resolution test that tells a harness's own extraction prefix from a client on a role's `PATH`;
+  The image's five clients (`psql`, `redis-cli`, `sqlite3`, `nc`, `dig`, once your deployment pins a digest carrying them), the pod's own test PostgreSQL every test variable points at (`LEGION_TEST_PG_DSN`, started by the roles container's launcher where the deployment sets `runtime.kubernetes.test_postgres`; `docs/kubernetes.md`, "A test database in the pod") and never the sessions database `OMP_SESSION_SQL_DSN_FILE` names, the pinned runner forms for everything else (`uvx --from <package>@<version> <command>`, `bunx --package <name>@<version> <binary>`, `go run <module>@<version>`, and `uv run --with <package>==<version>` for a library rather than a command), and the resolution test that tells a harness's own extraction prefix from a client on a role's `PATH`;
   a tool no runner reaches is an image change, whose sites that reference finds with a grep rather than listing them.
   The other half of the question is the *Run a database, broker or server the work needs* item:
   a tool works on the issue's checkout, a service the work talks to runs in the cluster.
@@ -536,8 +536,9 @@ Each item below names a task and where its code is, then notes on it.
 
 - **Changelog entries are fragment files**
   — a change that earns a changelog line adds a fragment to each package it changes that has a `.changie.yaml`:
-  the seven packages `.github/workflows/changelog-fold.yaml` lists in `CHANGELOG_PACKAGES` (`pi-legion`, `pi-envoy`, `envoy-plugin`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`).
+  the six packages `.github/changelog-packages` lists (`pi-legion`, `pi-envoy`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`), the one list the fold and the check below both read.
   A package without one, such as `packages/daemon`, has no fold.
+  `ci.yaml`'s lint job (`release-push.sh fold-orphans`) fails a pull request that adds a file under the `.changes/` of a package that list does not name, and the fold on main warns about such a file and folds the rest.
   Write it with `go run github.com/miniscruff/changie@v1.26.0 new --kind <kind> --body '<text>' --custom Issue=pr<number>` from the package directory, `<number>` being this pull request's own number.
   Every `.changie.yaml` sets `fragmentFileFormat: '{{.Custom.Issue}}-{{.Kind}}-{{.Time.Format "20060102-150405"}}'`, so the file lands at `packages/<pkg>/.changes/unreleased/pr<number>-<Kind>-<YYYYMMDD-HHMMSS>.yaml`.
   The number exists only once the pull request is open, so open the pull request first and add the fragment in a later commit on the same branch.
@@ -659,6 +660,12 @@ a dedicated project hands its issues over the same way.
 Work reaches Legion by a person's decision or as a clear defect a Legion role reported:
 a human sets the label from the issue header in the Dispatch dashboard, or asks the controller to (a direct message, a Slack request, or the answer to a finding ask), and the controller sets it with `dispatch issue` or `dispatch
 issue-update`.
+A person's `legion` label on an unrecorded root in `triage` is queued by the daemon: the daemon writes the root's `todo` through its outbox (a `dispatch_status` row marked a person's handover), and no agent's write admits it.
+A session's label on such a root wakes the controller with `triage`, and the daemon writes nothing for it.
+A person's approval of the primary document of a parked (`backlog` or `icebox`) labelled root with no parent and no live tree is queued by the daemon the same way, which re-admits a root that ran before as a new generation.
+A carried approval (the review Dispatch writes in the person's name when their answer to a decision block was the whole change) queues nothing.
+Each such write holds only while the status it answered and the label still stand when it is delivered.
+A recorded root a person moved back to `triage` is never queued again.
 The controller starts no other work on its own:
 a free admission slot is no reason to label or admit an issue (`skills/legion-controller/SKILL.md`, "Free slots").
 No other Legion agent files an issue for a finding outside its own issue.

@@ -1,10 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -51,6 +53,48 @@ func TestOutboxDropsSupersededStatusWrite(t *testing.T) {
 	}
 	if len(client.statuses) != 0 {
 		t.Fatalf("status writes = %#v, want superseded row dropped", client.statuses)
+	}
+}
+
+// A person's handover row (StatusWrite.PersonHandover) answers a person's legion label on a triage
+// root, or a person's approval of a parked labelled root's spec. Its delivery writes todo only
+// while the issue still shows the status the row answered and still carries the label: a person
+// who parked the root since is let stand silently, as any superseded status write is, and one who
+// took the label off withdrew the handover, which is dropped with one log line (R4 of
+// dispatch://LEGION-755 and the plan's D2). A hand-over row of the workflow (HandOver) is not held
+// to the label: TestAHandOverWritesTheStatusAndTheLabelTogether's unlabelled cases PATCH it on.
+func TestOutboxWritesAPersonsHandoverOnlyWhileItsLabelAndStatusStand(t *testing.T) {
+	const dropped = "outbox: a person's handover is not written; the label is gone"
+	for _, tc := range []struct {
+		name     string
+		shown    dispatch.Issue
+		statuses []string
+		logged   int
+	}{
+		{name: "parked since", shown: dispatch.Issue{Key: "LEGION-208", Status: "backlog", Labels: []string{"legion"}, HandedOver: true}},
+		{name: "label gone", shown: dispatch.Issue{Key: "LEGION-208", Status: "triage"}, logged: 1},
+		{name: "label and status stand", shown: dispatch.Issue{Key: "LEGION-208", Status: "triage", Labels: []string{"legion"}, HandedOver: true}, statuses: []string{"todo"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{Status: "todo", ObservedStatus: "triage", PersonHandover: true}, time.Now())
+			client := &outboxDispatch{issue: tc.shown}
+			var logs bytes.Buffer
+			runner := &outbox{log: slog.New(slog.NewJSONHandler(&logs, nil)), dispatch: client}
+
+			if err := runner.execute(context.Background(), row); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if !slices.Equal(client.statuses, tc.statuses) {
+				t.Fatalf("status writes = %v, want %v", client.statuses, tc.statuses)
+			}
+			lines := loggedLines(t, logs.String(), dropped)
+			if len(lines) != tc.logged {
+				t.Fatalf("logged %q %d times, want %d: %s", dropped, len(lines), tc.logged, logs.String())
+			}
+			if tc.logged == 1 && lines[0]["issue"] != "LEGION-208" {
+				t.Fatalf("the drop line names issue %v, want LEGION-208", lines[0]["issue"])
+			}
+		})
 	}
 }
 
@@ -1586,9 +1630,7 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	if err != nil || result.Refusal != nil {
 		t.Fatalf("complete implementing = %+v, %v", result.Refusal, err)
 	}
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
-		t.Fatalf("end the turn: %v", err)
-	}
+	endTurn(ctx, t, machine, token)
 	implementerLaunches := func() int {
 		n := 0
 		for _, call := range rt.Calls() {
@@ -1742,9 +1784,7 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			// moved to testing: the round-2 task still pending is the finished phase's, and is dropped.
 			apply("handoff:implementer:implementing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: implementer, Commit: "impl-round-2"})
 			due("the move to testing")
-			if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer}); err != nil {
-				t.Fatalf("end the steer's turn: %v", err)
-			}
+			endTurn(ctx, t, machine, implementer)
 			if got := machine.Claim(); got.State != supervise.StateIdle || got.Pending != nil || len(rt.CallsOf("Suspend")) != 0 {
 				t.Fatalf("after round 2's turn the implementer is %s holding %+v with %d suspensions, want idle, holding nothing, never stopped",
 					got.State, got.Pending, len(rt.CallsOf("Suspend")))

@@ -8,6 +8,8 @@ import serverBlockSchema from "../../../../envoy/internal/dispatch/pmdoc/schema/
 import { resetReachability } from "../api/reachability";
 import type { BlockSchema } from "../api/types";
 import { blockSchemaCache } from "../features/doc/schema";
+import { resetAnswerDrafts } from "../features/inbox/answer-drafts";
+import { resetOutstandingAnswers } from "../features/inbox/outstanding-answers";
 import { resetReplyDrafts } from "../features/inbox/reply-drafts";
 import { resetPinState } from "../features/issue/pin-write";
 import { resetWriteStorage } from "../features/writes/write-storage";
@@ -80,9 +82,13 @@ Object.defineProperty(Node.prototype, Bun.inspect.custom, {
 // so assertions after setQueryData do not wait on a stalled timer.
 notifyManager.setScheduler((callback) => callback());
 
-// Ask-reply drafts live in a module-level store that outlives every render, so a draft one test
-// leaves behind would pre-fill the next test's composer for the same ask id.
+// Ask-reply and ask-answer drafts live in module-level stores that outlive every render, so a
+// draft one test leaves behind would pre-fill the next test's composer or answer box for the
+// same ask id. An answer still out when a test ends is held in one of its own
+// (`outstanding-answers.ts`), which would keep the next test's reading column on that ask id.
 afterEach(resetReplyDrafts);
+afterEach(resetAnswerDrafts);
+afterEach(resetOutstandingAnswers);
 
 // A write a test leaves out keeps writing what it keeps, and the next test's signed-in app would
 // take it up again (`Writes.resume`): each test's are let go, their trying stopped first, since a

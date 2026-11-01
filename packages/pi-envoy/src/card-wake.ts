@@ -11,23 +11,31 @@ import type {
  * How an Envoy card is delivered, and the wake for a card the host folds into the context with no
  * turn.
  *
- * A card that finds a turn running goes as an aside, since a card in the host's steering queue
- * held a person's Send back a step; a targeted Aside is an aside always; a card that finds the
- * host idle, or a host with no `isIdle`, goes as a steer with `triggerTurn`, which starts a turn.
+ * Every card goes as an aside with `triggerTurn`, busy host or idle, outside the startup phase
+ * (below). The host takes every queued aside at its next step boundary (`IrcBridge.drainPending`),
+ * and an idle host starts a turn for a `triggerTurn` aside, in plan mode and after an earlier
+ * interrupt too, unless the person interrupts after the send (Oh My Pi v18.12.2-sami.20261027 and
+ * later, `agent-session.ts` `#dispatchCustomMessage`'s `turnRequested`); one that turned busy in
+ * the meantime queues it behind that run as an aside (v18.13.2-sami.20261027 and later). A steer
+ * would join the host's one steering queue, the one a person's typed message waits in, which the
+ * agent loop releases one message per step boundary: cards that arrive faster than the session
+ * takes steps then wait without end, and every card ahead of a person's message holds it back a
+ * step. A steer handed to a host seen idle is no exception: the host reads `isIdle` here, at the
+ * hand-off, and checks `isStreaming` only after its own awaits, so of several cards handed
+ * together to an idle host the first starts the run and the rest join the steering queue.
  *
  * The host folds an aside left over when a run settles (one taken after the run's last step,
- * during its post-run maintenance or auto-compaction) into the context with no turn while an
- * interrupt's latch is set or plan mode is on, emitting the record's `message_end` and persisting
- * it (`agent-session.ts` `#resumeStrandedIrcAsides`), and folds an aside that reaches an idle host
- * in either state the same way (`#sendCustomMessage`). A card sent as an aside while a turn ran
- * would then sit unread, where as a steer it started a turn. So a card's `message_end` arms one
- * check on the host's managed timer, and the check sends one wake when the host is idle, no run
- * started since the card's, no interrupt is in effect, and no assistant message follows the card
- * in the branch. The branch's order decides rather than the events', because the host emits the
- * extension `agent_end` unawaited after its post-run maintenance and does not serialise separate
- * emits: a fold's `message_end` can reach this module before or after it. A card a run read has
- * the model's reply after it, and one not yet in the branch has nothing after it, since the host
- * persists every `message_end` in one first-in, first-out chain (`#queueMessageEndPersistence`).
+ * during its post-run maintenance or auto-compaction) into the context with no turn when the
+ * person interrupted since the aside was sent, emitting the record's `message_end` and persisting
+ * it (`agent-session.ts` `#resumeStrandedIrcAsides`), and a card folded that way would sit unread.
+ * So a card's `message_end` arms one check on the host's managed timer, and the check sends one
+ * wake when the host is idle, no run started since the card's, no interrupt is in effect, and no
+ * assistant message follows the card in the branch. The branch's order decides rather than the
+ * events', because the host emits the extension `agent_end` unawaited after its post-run
+ * maintenance and does not serialise separate emits: a fold's `message_end` can reach this module
+ * before or after it. A card a run read has the model's reply after it, and one not yet in the
+ * branch has nothing after it, since the host persists every `message_end` in one first-in,
+ * first-out chain (`#queueMessageEndPersistence`).
  *
  * The wake goes as `nextTurn` with `triggerTurn`: on an idle host that starts a turn with no latch
  * or plan-mode check, and on a host that turned busy since the check it waits in the hidden
@@ -86,13 +94,13 @@ import type {
  * the phase needs `ctx.mode` "rpc": RPC mode reads nothing until the drain returns. ACP
  * initialises extensions with "rpc" too (`acp-agent.ts` ~2732), so the phase holds there as well,
  * at no cost: ACP's bridge defers a turn the agent starts (`agent-session.ts` ~9301-9303), so the
- * wake becomes hidden next-turn context there, as main's idle steer did. Print and JSON mode
+ * wake becomes hidden next-turn context there, as an idle card's turn did. Print and JSON mode
  * prompt right after their own awaits that follow it (`print-mode.ts`, MCP readiness and a tool
  * refresh, ~250-254; `session.prompt`, ~286), and that prompt throws `AgentBusyError`
  * (`agent-session.ts` ~7710-7717) if a wake started a turn first. A terminal applies its
  * plan-mode default and subscribes to the agent only after the drain (`interactive-mode.ts`
  * ~2458-2498), so a wake's turn could start ahead of both. In those modes, and on a context with
- * no `mode`, an idle card is a steer with `triggerTurn` from the start unless the start-turn mark
+ * no `mode`, an idle card is an aside with `triggerTurn` from the start unless the start-turn mark
  * holds.
  *
  * So with mode "rpc", or in any mode while the start-turn mark holds, a card that finds the host
@@ -115,7 +123,7 @@ import type {
  * it, and so does a send that throws) and waits the check no longer. A seen startup card is in the
  * context: a running turn reads it, so a busy check keeps it and the run's `agent_end` checks
  * again, and an idle check wakes for it whatever the run. It also wakes for one whatever the
- * interrupt latch, as the steer it replaces started a turn after an interrupt too, unless the card
+ * interrupt latch, as an idle card's own turn starts after an interrupt too, unless the card
  * is owed (below): an interrupt then stopped the start turn that card waited for.
  *
  * The start turn. A session whose first turn is a start sent after Oh My Pi's startup, the Legion
@@ -126,8 +134,8 @@ import type {
  * Pi runs after its startup, sends the start and marks it sent; the daemon's controller in RPC
  * mode is marked sent right before it reports ready, which is when the daemon writes the start
  * prompt, read only once the drain has returned. That start must be the session's first turn,
- * and every startup card still gets a turn after it. Without the mark, a terminal's idle card is a
- * steer whose turn runs ahead of the start command, and an RPC card's wake fires once the host is
+ * and every startup card still gets a turn after it. Without the mark, a terminal's idle card
+ * starts a turn that runs ahead of the start command, and an RPC card's wake fires once the host is
  * idle after the drain, which can be before the daemon's prompt arrives. So while the mark holds —
  * it names this session (the instance's own and the host's live one), and its start is unsent
  * and this module first read that unsent mark less than `STARTUP_TURN_CAP_MS` ago, or was sent
@@ -205,7 +213,7 @@ export interface CardWakeContext {
 
 /** How one card goes to the host: `pi.sendMessage`'s options, and the marker for its `details`. */
 export interface CardDelivery {
-  readonly deliverAs: "steer" | "aside" | "followUp";
+  readonly deliverAs: "aside" | "followUp";
   readonly triggerTurn: boolean;
   readonly details: EnvoyCardMarker;
 }
@@ -350,11 +358,7 @@ export class CardWake {
       this.#unseenStartup.set(details.envoyCard, this.#deps.now());
       return { deliverAs: "followUp", triggerTurn: false, details };
     }
-    return {
-      deliverAs: targetedAside || idle === false ? "aside" : "steer",
-      triggerTurn: true,
-      details,
-    };
+    return { deliverAs: "aside", triggerTurn: true, details };
   }
 
   /** A host `message_end`: an interrupt holds the wake back, and a card the host appended arms

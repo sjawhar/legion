@@ -767,9 +767,14 @@ func TestAReconnectCatchesUpWhatTheListenerMissed(t *testing.T) {
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
 	snapshot := conn.snapshot(t, 5*time.Second, "t")
 	rig.waitFor(t, 0, 5*time.Second, "the listener's first connection", func(note deliveryHubNote) bool { return note.what == "connected" })
+	// The first connection's catch-up may have dirtied the view behind the snapshot (the seeded
+	// settings' changes), and a recompute still to run would read the merge below and send it as
+	// though the listener had heard it: the hub settles first.
+	rig.settle(t)
 	start := rig.mark()
 
-	// The listener loses its connection and cannot dial again; a merge commits while it is blind.
+	// The listener loses its connection and cannot dial again; a merge commits while it is blind,
+	// once the listener's backend is gone (terminateListener).
 	blind.Store(true)
 	terminateListener(t, rig.database)
 	upsertPR(t, rig.database, hubPR(1, rig.clock.Now().Add(-time.Hour)))
@@ -784,17 +789,36 @@ func TestAReconnectCatchesUpWhatTheListenerMissed(t *testing.T) {
 }
 
 // terminateListener ends every backend of this test's database that holds a LISTEN, whose last
-// statement was the listener's LISTEN or its idle ping.
+// statement was the listener's LISTEN or its idle ping, and returns once each has left
+// pg_stat_activity. pg_terminate_backend answers as soon as it has signalled the backend, which
+// exits after: a NOTIFY committed in between still reaches the listener through that backend, so
+// a test that must commit a change the listener cannot hear waits for the backend to be gone.
 func terminateListener(t *testing.T, database *store.Store) {
 	t.Helper()
-	var ended int
+	var ended []int32
 	if err := database.Pool.QueryRow(context.Background(), `
-		select count(*) from (
-			select pg_terminate_backend(pid) from pg_stat_activity
+		with listener as materialized (
+			select pid from pg_stat_activity
 			where datname = current_database() and (query like 'listen %' or query = '-- ping') and pid <> pg_backend_pid()
-		) ended
-	`).Scan(&ended); err != nil || ended == 0 {
-		t.Fatalf("terminate the listener's backend: ended %d, err %v", ended, err)
+		)
+		select coalesce(array_agg(pid), '{}') from listener where pg_terminate_backend(pid)
+	`).Scan(&ended); err != nil || len(ended) == 0 {
+		t.Fatalf("terminate the listener's backend: ended %v, err %v", ended, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var left int
+		if err := database.Pool.QueryRow(context.Background(),
+			`select count(*) from pg_stat_activity where pid = any($1)`, ended).Scan(&left); err != nil {
+			t.Fatalf("read whether the listener's backend has exited: %v", err)
+		}
+		if left == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the listener's terminated backends %v are still in pg_stat_activity 5s later", ended)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -1059,7 +1083,7 @@ func TestAResetEventLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 	if _, err := rig.database.Pool.Exec(t.Context(), `update projects set last_seq = 5 where key = 'HUB'`); err != nil {
 		t.Fatalf("move the project's sequence: %v", err)
 	}
-	notifyChannel(t, rig.database, dispatchEventsChannel, "")
+	notifyChannel(t, rig.database, EventsChannel, "")
 	delta = conn.delta(t, eventFeedWait, "t")
 	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship every widget" {
 		t.Fatalf("after the second reset the delta's issue_titles = %v, want %s retitled", got, key)
@@ -1092,7 +1116,7 @@ func TestACatchUpPastIgnoredEventsAdvancesTheCursor(t *testing.T) {
 	if err := rig.database.Pool.QueryRow(t.Context(), `select max(id) from events`).Scan(&newest); err != nil {
 		t.Fatalf("read the newest event: %v", err)
 	}
-	notifyChannel(t, rig.database, dispatchEventsChannel, "")
+	notifyChannel(t, rig.database, EventsChannel, "")
 	rig.waitFor(t, start, eventFeedWait, "the catch-up", func(note deliveryHubNote) bool {
 		return note.what == "events caught up" && note.through == newest
 	})
@@ -1102,7 +1126,7 @@ func TestACatchUpPastIgnoredEventsAdvancesTheCursor(t *testing.T) {
 		t.Fatalf("catch-ups from the cursor before the 500 events = %d, want 1", n)
 	}
 	second := rig.mark()
-	notifyChannel(t, rig.database, dispatchEventsChannel, "")
+	notifyChannel(t, rig.database, EventsChannel, "")
 	rig.waitFor(t, second, 3*time.Second, "the second catch-up", func(note deliveryHubNote) bool { return note.what == "events caught up" })
 	if n := rig.count(second, func(note deliveryHubNote) bool { return note.what == "events caught up" && note.from != newest }); n != 0 {
 		t.Fatalf("the second notification scanned from below %d again", newest)
