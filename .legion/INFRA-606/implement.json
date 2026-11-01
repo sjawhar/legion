@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-11-01T08:47:29Z",
+  "completed": "2026-11-01T10:26:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -284,6 +284,14 @@
       "observed": "All pass; the PR's own diff unchanged (fingerprint 9bdec658 before and after); MERGEABLE. Sampled memory peak 3.56 GiB of 19 over 283 samples; the leftover check (ps) listed nothing.",
       "headSha": "92d2faba5e8b9a634c7f329aa50979186b225232",
       "negativeControl": "Run 41275846182 at 253a1afc failed pi-legion and dispatch on main's merge ref before #2621."
+    },
+    {
+      "criterion": "Tester round 23: the fallback table's migration has a number no other migration uses (main took 0151-0157 in #2391); the architect's chain gives #2406 0161.",
+      "surface": "The merged tree against a superuser Postgres 16 on the issue volume",
+      "command": "go test -p 1 ./internal/dispatch/store/... ./internal/pgmigrate/...; go test -p 1 ./internal/dispatch/api/; go test -p 1 ./internal/dispatch/{outbox,deliveryaudit,events}/... ./internal/pglisten/...; go test -p 1 ./cmd/dispatch/ (and -tags multiprocess); bun test scripts/semantic-line-breaks.guides.test.ts",
+      "observed": "0161_comment_fallback_copies collides with nothing; TestMigrationSetIsNumberedOneToN fails only on the 0158-0160 gap, as the architect intends; every other store and pgmigrate test passes; the API package passes but the collation test this Postgres cannot run; outbox, deliveryaudit, events, pglisten, cmd/dispatch and multiprocess pass; guides 3 of 3; MERGEABLE. Sampled peak 4.63 GiB of 19 over 1536 samples; the leftover check (ps) listed nothing.",
+      "headSha": "b29a1a0aac06a503b066e7b6121326af46ef2477",
+      "negativeControl": "At 92d2faba, 0151_comment_fallback_copies collided with main's 0151_embeddings_notify (tester round 23), which pgmigrate's shared-version guard refuses."
     }
   ],
   "filesChanged": [
@@ -364,8 +372,8 @@
     "packages/envoy/internal/dispatch/outbox/publisher.go",
     "packages/envoy/internal/dispatch/outbox/publisher_claimant_test.go",
     "packages/envoy/internal/dispatch/outbox/publisher_mentions_test.go",
-    "packages/envoy/internal/dispatch/store/migrations/0151_comment_fallback_copies.census.sql",
-    "packages/envoy/internal/dispatch/store/migrations/0151_comment_fallback_copies.up.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0161_comment_fallback_copies.census.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0161_comment_fallback_copies.up.sql",
     "packages/envoy/internal/dispatch/store/pool.go",
     "packages/envoy/loadtest/README.md",
     "packages/envoy/loadtest/live.go",
@@ -435,7 +443,9 @@
     "Forward merge at 25206ba7 (main 1a9095e6, #2598) for a fresh CI run; the PR's own diff unchanged.",
     "Forward merge at 4c1149eb (main d09b46d7): main took 0150_dpop_proofs, so the fallback table is 0151_comment_fallback_copies; main's Retry-After in writeHandlerError carried into handler_errors.go.",
     "The mention dedupe key is <comment>:<target>:<the mention's own mode> (review round 9): main's key for every automatic send; a Retry in any mode of a mention that already reached the session is still recorded duplicate.",
-    "Forward merge at 92d2faba (main 7285fd05) for a fresh CI run; no conflict, the PR's own diff unchanged; 0151 stands (main took no migration since 0150)."
+    "Forward merge at 92d2faba (main 7285fd05) for a fresh CI run; no conflict, the PR's own diff unchanged; 0151 stands (main took no migration since 0150).",
+    "Forward merge at b29a1a0a (main 225f2bea, #2391): EventsChannel moved into the relay; listenerConnections is 4 (main's wake hub); the no-LISTEN claim narrowed to the live paths because main's suggestion outcome sweep reads the event log; fallback table renumbered to 0161 in the architect's chain, so TestMigrationSetIsNumberedOneToN fails until 0158-0160 land.",
+    "Fixed two main breakages in files this PR touches: shutdown_mentions_test.go's renamed api.MaintenanceSweepInterval, and #2615's AGENTS.md paragraph that failed the guides layout check (R1)."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -444,7 +454,8 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 23,
-  "answersTest": "2a6d5ffa2dc6096a6c3ba219be2bbec4851f60e0",
-  "answersReview": "45530037436dbb21120f3299dedbded3b74b9c1a"
+  "round": 24,
+  "answersTest": "ff59a79f689c85026feafc486b177bb07835879e",
+  "answersReview": "45530037436dbb21120f3299dedbded3b74b9c1a",
+  "previousHandoff": "1e9ff3b3fb54adb4baaa861583d3b12a023db538"
 }
