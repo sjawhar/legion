@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-593",
+  "completed": "2026-11-01T13:27:02Z",
+  "round": 13,
+  "headReviewed": "e1928187cc7a6bdca21cefa26e42090abfcb796c",
+  "codeMerged": "b0fa30f7a84bd3e424306bb5948dc53b0f4da34d",
+  "reviewerCommits": ["e1928187cc7a6bdca21cefa26e42090abfcb796c"],
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "roundShape": "round-shape.py v3, old a50f4960c8a2a66995fa55d81c1c9d850049f187 (last approved code) -> new b0fa30f7a84bd3e424306bb5948dc53b0f4da34d: 10 files whose own diff differs, runtime among them (cmd/dispatch/main.go, store/pool.go, infra/gcp/dispatch.go); 5 equal only after migration normalisation. A full round. The merge against its main parent 225f2beae4 touches exactly the PR's 74 files: nothing of main reverted.",
+  "ci": "At e1928187, read 13:26 UTC: required lint, typecheck, test and pr-title passed; dispatch, dispatch-memory, dispatch-multiprocess, envoy-go-race-docs, -api, -pmdoc and every other lane passed except envoy-go and envoy-go-race, each red on internal/dispatch/store TestMigrationSetIsNumberedOneToN alone (0160 after main's 0157, the gap the INFRA-514 architect set until #2395's 0158-0159 land); ci-ok queued.",
+  "thermonuclear": "Both run once on the merge (a50f4960..b0fa30f7): deep review APPROVE (92 connections = ConnectionsPerProcess = dispatchConnectionsPerPod; main's woken loops kept beside RunCompactionSweep; the lease test's document-compaction assertion cannot flake in practice), code quality prose findings, all fixed by the reviewer in e1928187.",
+  "proseFixedByReviewer": "e1928187: changelog 91 -> 92; main.go's loop list and cmd/dispatch/README.md (lines 584, 732) name the hourly compaction sweep instead of the outbox's daily compaction main's #2391 text still described; the migration test's seed messages say 0159; retro's lessons name TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses, 0160_doc_compaction_owed.up.sql and the move to v1.54.1-sami.3. PR body: migration 0160, main's 90 to 92.",
+  "keyFindings": [],
+  "notDefects": [
+    "TestMigrationSetIsNumberedOneToN red in envoy-go and envoy-go-race: the deliberate gap until #2395 merges, per the INFRA-514 architect; no required check is red."
+  ]
+}
