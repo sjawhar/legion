@@ -2,33 +2,28 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "previousHandoff": "f5a29bac37be5d85eea56e54217e37cacd1b6a61",
+  "previousHandoff": "8a1a9a42a0d2994f4cad9f4adcd40f556a61384b",
   "proof": [
     {
-      "criterion": "Forward merge of main d86f8de8 raises the Dispatch closing to main's highest numbered migration, 0157_document_edit_notices_notify (#2391 added 0151-0157); the daemon closing stays at 0067_phase_assignment, still main's highest",
-      "surface": "the merged tree's Go tests on the pod's test PostgreSQL 18.6 with pgvector",
-      "command": "go test ./migrationid/ ./internal/pgmigrate/... ./internal/broker/store/ ./internal/dispatch/store/ (on a database the test role owns) ./cmd/dispatch -run 'Healthz|Census|Migrat' in packages/envoy; go test ./internal/store/... in packages/daemon",
-      "observed": "migrationid, pgmigrate, pgmigratetest, broker store, the whole Dispatch store suite, cmd/dispatch, daemon store and store/migrations all ok, the tester's red tests (next_number_test.go in both series) and the timestamped-migration tests among them",
-      "headSha": "0b2f1d887b0ac5fc3fe041a57da56cc212989f85",
-      "negativeControl": "a throwaway 0158_t588_next.up.sql (with a census) added alone to Dispatch's embedded set: TestMigrationSetTakesNumbersThenTimestamps fails, naming 0158 and the numbered migrations ending at 157; a throwaway 20261101100000 timestamped migration passes; both removed"
+      "criterion": "The red ci-ok at 888cc421 (code 0b2f1d88) was envoy-go-race-api alone, one test in packages/envoy/internal/dispatch/api, which this pull request does not touch; it was a flake",
+      "surface": "GitHub Actions CI run 41295232664 on the code head 8a1a9a42a0d2",
+      "command": "gh run rerun 41295232664 --failed --repo sjawhar/legion",
+      "observed": "attempt 2: envoy-go-race-api success (job 124841853837), ci-ok success (job 124845414599)",
+      "headSha": "8a1a9a42a0d2994f4cad9f4adcd40f556a61384b",
+      "negativeControl": "attempt 1: TestAnUploadHoldsNoIssueLockWhileTheStoreWrites failed at files_test.go:306 with 'could not obtain lock on row in relation issues (SQLSTATE 55P03)', job 124818887175"
     },
     {
-      "criterion": "The texts naming the closing files agree with migrationid",
-      "surface": "packages/envoy/cmd/dispatch/README.md, packages/daemon/internal/store/migrations/embed.go, docs/kubernetes.md",
-      "command": "grep for the old closing names; bun scripts/semantic-line-breaks.ts packages/envoy/cmd/dispatch/README.md",
-      "observed": "the Dispatch README names 0157_document_edit_notices_notify.up.sql; embed.go and docs/kubernetes.md already name the daemon's 0067_phase_assignment.up.sql, which is unchanged; no text names 0150_dpop_proofs.up.sql as a closing; layout checker exit 0",
+      "criterion": "The failing test does not fail more often on this merge than on main",
+      "surface": "the test under the race detector on the pod's PostgreSQL 18.6",
+      "command": "CGO_ENABLED=1 go test -race -count=20 -run '^TestAnUploadHoldsNoIssueLockWhileTheStoreWrites$' ./internal/dispatch/api/, at the merge 0b2f1d88 and at main d86f8de8",
+      "observed": "20 of 20 pass at the merge and 20 of 20 pass at main",
       "headSha": "0b2f1d887b0ac5fc3fe041a57da56cc212989f85",
-      "negativeControl": "before the edit the README named 0150_dpop_proofs.up.sql, a closing the merged tree's set would refuse"
+      "negativeControl": "a two-goroutine canary run with -race printed WARNING: DATA RACE, so the detector was live"
     }
   ],
-  "filesChanged": [
-    "merge of main d86f8de8 (clean)",
-    "packages/envoy/migrationid/migrationid.go: Dispatch closing 0157_document_edit_notices_notify.up.sql",
-    "packages/envoy/cmd/dispatch/README.md: the closing file name"
-  ],
+  "filesChanged": [],
   "trickyParts": [
-    "Main was re-read from origin right before the push: still d86f8de8, highest numbered Dispatch 0157 and daemon 0067",
-    "The three census tests that need superuser rights were left out: the pod's test role lacks them, and they fail the same way at main"
+    "No code changed this round: the head's code is the merge 0b2f1d88 of the previous round"
   ],
   "deviations": [],
   "openQuestions": []
