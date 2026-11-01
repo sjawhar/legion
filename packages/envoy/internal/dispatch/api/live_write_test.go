@@ -600,6 +600,14 @@ func (s *recordingVersionedStore) AppendUpdateWithCredit(ctx context.Context, ro
 	return version, err
 }
 
+func (s *recordingVersionedStore) AppendRoomFlush(ctx context.Context, room string, flush *docs.RoomFlush, through uint64, credit *docs.UpdateCredit) (persistence.Version, error) {
+	version, err := s.PgVersioned.AppendRoomFlush(ctx, room, flush, through, credit)
+	if err == nil {
+		s.signal()
+	}
+	return version, err
+}
+
 func (s *recordingVersionedStore) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
 	version, err := s.PgVersioned.AppendUpdate(ctx, room, update)
 	if err == nil {

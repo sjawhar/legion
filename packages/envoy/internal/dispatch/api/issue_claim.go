@@ -137,8 +137,9 @@ var errHolderUnjudged = errors.New("claim holder was not covered by the liveness
 // fetchHolderLiveness asks the listener about the holder's own session, by id, and answers
 // with that one session's record, or with none when the session store holds no record of it.
 // It must be called with nothing held: it is a cross-service HTTP call of up to five seconds,
-// and production runs four pool connections, so a held connection or row lock across it
-// stalls unrelated requests. An unreachable or unconfigured listener is a 503, never
+// and each process's pool is bounded (store.sharedPoolSize), so a connection held across it is
+// one fewer for that process's other requests, and a row lock held across it stalls every
+// process that writes the issue. An unreachable or unconfigured listener is a 503, never
 // "unknown, therefore free" — Dispatch does not hand one session's work to another on a
 // transport error. Only a session holder is ever asked about: judgeHolder reaches this
 // through errHolderUnjudged, which a holder of any other kind never produces, so no read is
@@ -265,6 +266,8 @@ func (s *server) readIssueClaim(ctx context.Context, key string) (*model.IssueCl
 	return claim.resolve(key)
 }
 
+<<<<<<< conflict 1 of 5
++++++++ lntxprnt d3218a11 "review: record handoff"
 // issueClaimStatement is the one statement that moves an issue's two claim columns together; a
 // nil claim clears them, and the issue's status is never touched here. updated_at moves as every
 // issue write moves it (issueUpdatedNow), from the statement's own clock, unless the caller read
@@ -294,10 +297,50 @@ func issueClaimStatement(key string, claim *model.IssueClaim, updatedAt time.Tim
 // issue patch's close, which runs its writes directly, and the tests that seed a claim.
 func writeIssueClaim(ctx context.Context, tx pgx.Tx, key string, claim *model.IssueClaim) error {
 	sql, args, err := issueClaimStatement(key, claim, time.Time{})
+%%%%%%% diff from: rwloyrmo dbdf9318 "chore(claude-envoy): rebuild dist/ and legion/ from ff93d6c4df9e [skip ci]"
+\\\\\\\        to: orsoxnss f8f0425b "chore: fold changelog fragments [skip ci]"
+-// writeIssueClaim sets or clears an issue's claim; a nil claim clears it. The two claim
+-// columns always move together, and the issue's status is never touched here. updated_at moves
+-// as every issue write moves it (issueUpdatedNow).
+-func writeIssueClaim(ctx context.Context, tx pgx.Tx, key string, claim *model.IssueClaim) error {
+-	if claim == nil {
++// issueClaimedNow is the value a claim write stamps updated_at with: the transaction's now(),
++// never below what the row already holds, as issueUpdatedNow is never below it. A claim writes
++// three times the reader compares - claimed_at, updated_at and its issue.claimed event's
++// created_at - and all three are that transaction's now(); issueUpdatedNow's clock_timestamp()
++// would put updated_at past the other two, which the one write produced together.
++const issueClaimedNow = "greatest(updated_at, now())"
++
++// writeIssueClaim sets the issue's claim to holder, or clears it when holder is nil. The two claim
++// columns always move together, and the issue's status is never touched here. claimed_at is the
++// transaction's now(): each process's host keeps its own clock, and a claim's time is compared
++// with times other processes wrote.
++func writeIssueClaim(ctx context.Context, tx pgx.Tx, key string, holder *model.Actor) error {
++	if holder == nil {
+ 		_, err := tx.Exec(ctx, `
+-			update issues set claimed_by = null, claimed_at = null, updated_at = `+issueUpdatedNow+` where key = $1
++			update issues set claimed_by = null, claimed_at = null, updated_at = `+issueClaimedNow+` where key = $1
+ 		`, key)
+ 		return err
+ 	}
+-	actor, err := encodeJSON(claim.Actor)
++	actor, err := encodeJSON(*holder)
+>>>>>>> conflict 1 of 5 ends
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, sql, args...)
+<<<<<<< conflict 2 of 5
+%%%%%%% diff from: rwloyrmo dbdf9318 "chore(claude-envoy): rebuild dist/ and legion/ from ff93d6c4df9e [skip ci]"
+\\\\\\\        to: lntxprnt d3218a11 "review: record handoff"
+-	_, err = tx.Exec(ctx, `
+-		update issues set claimed_by = $2, claimed_at = $3, updated_at = `+issueUpdatedNow+` where key = $1
+-	`, key, actor, claim.At)
++	_, err = tx.Exec(ctx, sql, args...)
++++++++ orsoxnss f8f0425b "chore: fold changelog fragments [skip ci]"
+	_, err = tx.Exec(ctx, `
+		update issues set claimed_by = $2, claimed_at = now(), updated_at = `+issueClaimedNow+` where key = $1
+	`, key, actor)
+>>>>>>> conflict 2 of 5 ends
 	return err
 }
 
@@ -336,12 +379,21 @@ func claimEvent(
 	})
 }
 
-// claimChange is what the locked decision asks for: the claim to store (nil clears it), the
-// event to append, whose claim it replaced, and why. changed false means there is nothing to
-// write. A claim's At is stamped by claimWrite, with the database's clock at the write, so the
-// row, the answer and the event carry one value.
+<<<<<<< conflict 3 of 5
+%%%%%%% diff from: rwloyrmo dbdf9318 "chore(claude-envoy): rebuild dist/ and legion/ from ff93d6c4df9e [skip ci]"
+\\\\\\\        to: lntxprnt d3218a11 "review: record handoff"
+ // claimChange is what the locked decision asks for: the claim to store (nil clears it), the
+ // event to append, whose claim it replaced, and why. changed false means there is nothing to
+-// write.
++// write. A claim's At is stamped by claimWrite, with the database's clock at the write, so the
++// row, the answer and the event carry one value.
++++++++ orsoxnss f8f0425b "chore: fold changelog fragments [skip ci]"
+// claimChange is what the locked decision asks for: the holder to store (nil clears the claim),
+// the event to append, whose claim it replaced, and why. changed false means there is nothing to
+// write.
+>>>>>>> conflict 3 of 5 ends
 type claimChange struct {
-	claim     *model.IssueClaim
+	holder    *model.Actor
 	eventType string
 	previous  *model.IssueClaim
 	reason    string
@@ -485,6 +537,8 @@ func (s *server) claimWrite(
 	managed := claimLegionManagedStatus(ctx, tx, key)
 	applied := claimApplied{issue: before, legionManagedStatus: managed}
 	if change.changed {
+<<<<<<< conflict 4 of 5
++++++++ lntxprnt d3218a11 "review: record handoff"
 		// The moment the claim is stamped with, read where the update's own clock_timestamp()
 		// would have run and written explicitly below, as a comment's created_at is
 		// (comment_create.go). `select clock_timestamp()` takes no transaction id, so the
@@ -494,6 +548,11 @@ func (s *server) claimWrite(
 		// row alone while this transaction waited for it.
 		var now time.Time
 		if err := tx.QueryRow(ctx, `select clock_timestamp()`).Scan(&now); err != nil {
+%%%%%%% diff from: rwloyrmo dbdf9318 "chore(claude-envoy): rebuild dist/ and legion/ from ff93d6c4df9e [skip ci]"
+\\\\\\\        to: orsoxnss f8f0425b "chore: fold changelog fragments [skip ci]"
+-		if err := writeIssueClaim(ctx, tx, key, change.claim); err != nil {
++		if err := writeIssueClaim(ctx, tx, key, change.holder); err != nil {
+>>>>>>> conflict 4 of 5 ends
 			return claimApplied{}, err
 		}
 		if change.claim != nil {
@@ -603,8 +662,15 @@ func (s *server) claimIssue(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		return claimChange{
+<<<<<<< conflict 5 of 5
++++++++ lntxprnt d3218a11 "review: record handoff"
 			// claimWrite stamps At with the database's clock where it writes the claim.
 			claim:     &model.IssueClaim{Actor: actor},
+%%%%%%% diff from: rwloyrmo dbdf9318 "chore(claude-envoy): rebuild dist/ and legion/ from ff93d6c4df9e [skip ci]"
+\\\\\\\        to: orsoxnss f8f0425b "chore: fold changelog fragments [skip ci]"
+-			claim:     &model.IssueClaim{Actor: actor, At: time.Now().UTC()},
++			holder:    &actor,
+>>>>>>> conflict 5 of 5 ends
 			eventType: "issue.claimed",
 			previous:  previous,
 			reason:    reason,

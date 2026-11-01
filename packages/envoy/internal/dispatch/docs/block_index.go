@@ -69,10 +69,10 @@ type BlockIndexTick struct {
 // BlockIndexReconcileInterval once none is, until ctx ends.
 //
 // The ticks are duty.RunLeasedAfterEachPass's, each one the wait the pass before it asked for after
-// that pass returned, and so is the period each runs under: that wait, as in
-// RunReferenceExcerptReconciliation, so a tick inside it is one some process already made. A tick
-// whose lease another process holds, or whose period that process has already served, waits the
-// full interval: that process is doing this work.
+// that pass returned, and so is the period each runs under: that wait, blockIndexStep while a batch
+// is full and the full interval once none is, so a tick inside it is one some process already
+// made. A tick whose lease another process holds, or whose period that process has already served,
+// waits the full interval: that process is doing this work.
 func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
 	var cursor string
@@ -425,6 +425,8 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 		}
 		markdown, blocks = held, heldBlocks
 	}
+<<<<<<< conflict 1 of 1
++++++++ lntxprnt d3218a11 "review: record handoff"
 	if _, err := s.indexRenderedVersion(queued, tx, document.id, version, versionAt, markdown, blocks); err != nil {
 		return false, false, err
 	}
@@ -432,6 +434,14 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 		return false, false, err
 	}
 	if err := ledger.runQueue(ctx, nil); err != nil {
+%%%%%%% diff from: rwloyrmo dbdf9318 "chore(claude-envoy): rebuild dist/ and legion/ from ff93d6c4df9e [skip ci]"
+\\\\\\\        to: orsoxnss f8f0425b "chore: fold changelog fragments [skip ci]"
+-	if _, err := s.indexRenderedVersion(ctx, tx, document.id, version, versionAt, markdown, blocks); err != nil {
++	if _, err := s.indexRenderedVersion(ctx, tx, document.id, version, versionAt, markdown, blocks, nil); err != nil {
+ 		return false, false, err
+ 	}
+ 	if err := stampVersionEvent(ctx, tx, owner, document.id, version, versionAt); err != nil {
+>>>>>>> conflict 1 of 1 ends
 		return false, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {

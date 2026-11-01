@@ -1,11 +1,15 @@
 package bus
 
 import (
+	"bufio"
 	"cmp"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go"
 )
@@ -37,6 +41,99 @@ func TestAConsumerNotActiveReportIsAWarning(t *testing.T) {
 	}
 	if got, want := strings.Join(levels, " "), "_INBOX.watcher=WARN _INBOX.other=ERROR _INBOX.recreate=ERROR _INBOX.drained=ERROR"; got != want {
 		t.Fatalf("async error levels = %s, want %s", got, want)
+	}
+}
+
+// A server that closes the connection during a reconnect's handshake - one restarting, as in
+// TestListenerFollowsTheInterestRegistryAcrossNATSRestarts - makes nats.go report the read's
+// io.EOF to the async error callback with no subscription, and to nothing else. That is a failed
+// reconnect attempt, logged as one: a WARN on the reconnect throttle, never an ERROR, which an
+// operator's alert reads as a fault. The server here is a fake that completes the first
+// handshake, drops that connection, and closes every later one after reading its CONNECT, so
+// the client's real reconnect loop reports exactly that EOF. Every other async error stays an
+// ERROR: the same EOF reported for a connected connection, and a slow consumer.
+func TestAHandshakeTheServerClosedIsAFailedReconnectAttempt(t *testing.T) {
+	logs := captureLogs(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	connected := make(chan net.Conn, 1)
+	go func() {
+		for first := true; ; first = false {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = io.WriteString(conn, `INFO {"server_id":"fake","version":"2.10.29","proto":1,"max_payload":1048576}`+"\r\n")
+			reader := bufio.NewReader(conn)
+			if _, err := reader.ReadString('\n'); err != nil { // CONNECT
+				_ = conn.Close()
+				continue
+			}
+			if !first {
+				_ = conn.Close() // the handshake's PING is never answered
+				continue
+			}
+			if _, err := reader.ReadString('\n'); err != nil { // PING
+				_ = conn.Close()
+				continue
+			}
+			_, _ = io.WriteString(conn, "PONG\r\n")
+			connected <- conn
+		}
+	}()
+
+	url := "nats://" + listener.Addr().String()
+	opts := options("handshake-eof-test", []string{url}, nil, nil, nil, nil)
+	opts.ReconnectWait = 50 * time.Millisecond
+	nc, err := opts.Connect()
+	if err != nil {
+		t.Fatalf("connect to the fake server: %v", err)
+	}
+	t.Cleanup(nc.Close)
+	_ = (<-connected).Close()
+
+	lines := func() []string {
+		var out []string
+		for _, record := range logs.records(t) {
+			// The disconnect's own INFO line carries the EOF that ended the first connection.
+			if record["name"] == "handshake-eof-test" && record["error"] == "EOF" && record["msg"] != "envoy nats disconnected" {
+				out = append(out, fmt.Sprint(record["level"], " ", record["msg"]))
+			}
+		}
+		return out
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(lines()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the client never reported the handshake the server closed")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got, want := lines()[0], "WARN envoy nats reconnect attempt failed"; got != want {
+		t.Fatalf("a reconnect handshake the server closed logged %q, want %q", got, want)
+	}
+	for _, line := range lines() {
+		if strings.HasPrefix(line, "ERROR") {
+			t.Fatalf("a reconnect handshake the server closed logged %q", line)
+		}
+	}
+
+	// The same EOF for a connection that is connected, and a slow consumer, stay ERRORs.
+	other := captureLogs(t)
+	report := options("other-async-error-test", nil, nil, nil, nil, nil).AsyncErrorCB
+	report(&nats.Conn{}, nil, io.EOF)
+	report(nil, &nats.Subscription{Subject: "_INBOX.slow"}, nats.ErrSlowConsumer)
+	var levels []string
+	for _, record := range other.records(t) {
+		if record["name"] == "other-async-error-test" {
+			levels = append(levels, fmt.Sprint(record["level"], " ", record["msg"], " ", record["error"]))
+		}
+	}
+	if got, want := strings.Join(levels, " | "), "ERROR envoy nats async error EOF | ERROR envoy nats async error nats: slow consumer, messages dropped"; got != want {
+		t.Fatalf("other async errors logged %q, want %q", got, want)
 	}
 }
 

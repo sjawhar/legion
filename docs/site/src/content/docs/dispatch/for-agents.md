@@ -5,8 +5,8 @@ sidebar:
   order: 6
 ---
 
-An agent works in Dispatch through one shell command, `dispatch`. The Envoy plugin for the agent's
-host (Oh My Pi, Claude Code, or OpenCode) puts it on the agent's `PATH` and tells it which session
+An agent works in Dispatch through one shell command, `dispatch`. The Envoy plugin for the
+agent's host (Oh My Pi or Claude Code) puts it on the agent's `PATH` and tells it which session
 it acts for. `dispatch --help` lists the commands, `dispatch <command> --help` gives a command's
 flags and an example, and `--dry-run` checks a command's arguments as the call would and prints
 them as given (before the call fills in an issue from `LEGION_ISSUE` or a ref), sending nothing.
@@ -33,15 +33,14 @@ goes through a `dispatch` command.
    }
    ```
 
-   A session under an Oh My Pi profile other than `default`, a Claude Code `CLAUDE_CONFIG_DIR` or
-   an OpenCode `OPENCODE_CONFIG_DIR` reads the `envoy.json` in that directory and no other. Any
-   other session reads the file `ENVOY_CONFIG_FILE` names when it is set, else
-   `~/.config/legion/envoy.json` (`$XDG_CONFIG_HOME/legion/envoy.json` when that is set). The
-   `dispatch` command reads the file its session's plugin chose, which the plugin hands it in
-   `ENVOY_CONFIG_FILE`; in a Claude Code shell that gets nothing the plugin hands on, as a
-   subagent's can, it still reads the session's `CLAUDE_CONFIG_DIR`. A token written as
-   `!<command>`, such as `!secrets get DISPATCH_TOKEN`, is a command, and what it prints is the
-   token.
+   A session under an Oh My Pi profile other than `default` or a Claude Code `CLAUDE_CONFIG_DIR`
+   reads the `envoy.json` in that directory and no other. Any other session reads the file
+   `ENVOY_CONFIG_FILE` names when it is set, else `~/.config/legion/envoy.json`
+   (`$XDG_CONFIG_HOME/legion/envoy.json` when that is set). The `dispatch` command reads the
+   file its session's plugin chose, which the plugin hands it in `ENVOY_CONFIG_FILE`; in a
+   Claude Code shell that gets nothing the plugin hands on, as a subagent's can, it still reads
+   the session's `CLAUDE_CONFIG_DIR`. A token written as `!<command>`, such as
+   `!secrets get DISPATCH_TOKEN`, is a command, and what it prints is the token.
 
    The environment variables `DISPATCH_URL` and `DISPATCH_TOKEN` override the file's other fields,
    but a `dispatch.enabled: false` in the file keeps Dispatch off. The file's token goes only to
@@ -251,11 +250,15 @@ an issue update, a new document version, or opening or rewording an ask. A perso
 reach the issue's route, when that is your session. Each write's result names that topic.
 
 If your connection to Envoy drops, or your session stops and is resumed, what was sent to you
-directly or published on an issue topic you follow in the meantime still arrives once you are
-back, each message once and marked as published while your connection was down, for up to 72
-hours. A person's Send, Aside or BTW that arrives this way is shown as a message only: nothing
-runs and no reply goes back on its own, so answer it with `dispatch message` and its
-`--in-reply-to` if it still matters. Messages to a role you hold are not recovered.
+directly, what was sent to a role you hold, and what was published on an issue topic you follow in
+the meantime still arrives once you are back, each message once and in the order it was
+published, for up to 72 hours. A person's BTW that arrives late this way starts no side turn, so
+answer it with `dispatch message` and its `--in-reply-to` if it still matters. Where your listener
+cannot keep a consumer for your session (its NATS user lacks the grant, or it is of an earlier
+release), a missed message is recovered from the stream instead, marked as published while your
+connection was down: a person's Send, Aside or BTW that arrives that way is shown as a message
+only, nothing runs and no reply goes back on its own, and messages to a role you hold are not
+recovered.
 
 A person can also message you from the Agents page:
 

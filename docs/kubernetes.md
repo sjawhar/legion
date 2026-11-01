@@ -1042,7 +1042,7 @@ Those rights are the ones `postgres` needs too: Oh My Pi creates and migrates `o
 
 ### Starting fresh when a session is lost or wedged
 
-Use this recovery when a stopped claim's session was lost with its volume, or when its agent is wedged after a provider refusal.
+Use this recovery when a stopped claim's session was lost with its volume, after importing its file session before its volume can be reaped, or when its agent is wedged after a provider refusal.
 Read the claim's recorded session from `legion claims list`, then run:
 
 ```sh
@@ -1062,6 +1062,16 @@ Resuming a suspended claim starts a fresh session with its pending task.
 This runbook, and `scripts/sessions-import-pods.sh`, copy only from the release before issue pods, `legion-v10.0.0`, whose every role runs in a Sandbox of its own and keeps its session on its tree's volume; the script refuses any other release by name.
 A deployment on `legion-v10.1.0` to `legion-v10.2.x`, which runs one pod per issue, has no copy path: its switch to `postgres` is a drain at a pushed boundary, every tree closed, and the sessions on those volumes are lost.
 There is no way back either, and nothing to go back to: this release has no second store, and nothing copies a row out to a file.
+
+Before it reaps a Sandbox-owned volume, including a disk-shape replacement, an issue or tree cleanup, an orphan cleanup, or a controller cleanup, the daemon reads the retiring Sandbox's pod template.
+Under `postgres`, the providers volume's `OMP_SESSION_SQL_DSN` item proves the Sandbox stored sessions in a database; under `cloudsql-iam`, the launcher command's `--session-instance`, `--session-database`, and `--session-user` flags do.
+Either marker permits the reap.
+Without a database marker, the daemon refuses when a matching claim records a session; it has no providers-Secret read permission or session-store connection, so it cannot inspect the session database.
+Its refusal names the claim, session, and volume.
+To keep the session's contents, run the import procedure below first, then [clear the stopped claim's recorded session](#starting-fresh-when-a-session-is-lost-or-wedged).
+When `issue_close` already cleared its resume path, the importer searches `<tree-volume>/sessions/*/*_<session>.jsonl` by the retained session id; exactly one match imports, no match reports the claim and id, and several matches are refused.
+Only clearing that record permits the reap.
+The next generation starts fresh, while the imported session row remains in the database.
 
 On `legion-v10.0.0`, a deployment whose sessions are files on its tree volumes copies each one into the table once, while those volumes still exist, after the last write to any of them and before any agent writes the same session under SQL storage.
 The order below is what keeps a copy current: nothing checks, at a resume, that a row still matches the file it was copied from, so a session written after its copy would resume from the older row without a word.
@@ -1093,9 +1103,10 @@ Its Sandbox goes, and its volume and session go with it, so step 5 clears the se
    Before anything it refuses a project whose Sandboxes are issue pods (a later release), one with a Sandbox not `Suspended`, whose pod could still start, and one with a pod that has not ended (any phase but `Succeeded` or `Failed`): each would be a writer the copy misses.
    It deletes a pod an interrupted run left before creating one, reports a pod that fails at once, exits 1 when any tree's import did, names a tree whose volume or root Sandbox is gone, and names every claim that records a session and belongs to no tree, the cleared controller's among them, which step 5 clears.
 
-   For each claim of that tree it reads the recorded session file from the volume (its path below the agents' sessions directory, below `<tree-volume>/sessions`; without `--tree-volume` it reads the recorded path itself) and writes it as one row keyed by that recorded path: the whole file as `content`, `byte_len` its size, `mtime_ms` the file's, no title and no parts, which is how Oh My Pi reads a row an older release of it wrote.
+   For each claim with a recorded session file it reads that file from the volume (its path below the agents' sessions directory, below `<tree-volume>/sessions`; without `--tree-volume` it reads the recorded path itself) and writes it as one row keyed by that recorded path: the whole file as `content`, `byte_len` its size, `mtime_ms` the file's, no title and no parts, which is how Oh My Pi reads a row an older release of it wrote.
+   When `issue_close` already cleared a claim's resume path, the importer finds `*_<session>.jsonl` below the volume's sessions directory from the retained session id; exactly one match imports, none names the claim and session as missing, and several are refused by name.
    It creates the two tables with Oh My Pi's own statements when the database has none.
-   It prints one line per claim of the tree — `copied`, `copied before (identical …)`, `recorded no session`, `failed` (a file the volume does not hold) or `refused` (the table already holds that session with other content, which it leaves as it is) — then a `missing` line for every claim of the whole list, any tree's, whose recorded session the table does not hold, then a count of each.
+   It prints one line per claim of the tree — `copied`, `copied before (identical …)`, `recorded no session`, `failed` (a file or retained session the volume does not hold) or `refused` (several files for one retained session id, or a table row with other content, which it leaves as it is) — then a `missing` line for every claim of the whole list, any tree's, whose recorded session the table does not hold, then a count of each.
    It exits 1 on any `failed` or `refused`, on a `missing` of the claims it was asked to copy (another tree's is reported only), and when `--tree` selects no claim of the list, which is a mistyped key.
 
 4. **Copy every tree again.**
@@ -1173,8 +1184,7 @@ Once the roles have stopped, the daemon sets that issue's Sandbox to `Suspended`
 Then it deletes the Sandbox, whatever the close was:
 a child set `done`, one set `backlog`, `icebox` or `triage`, and a root leaving the workflow with its tree are one case now, since a Sandbox kept behind would hold nothing (`SuspendIssue`, `internal/runtime/sandbox/issue_suspend.go`), logging `sandbox runtime: deleted the closed issue's
 Sandbox and the role Secrets it owned` — the six role Secrets go with it by owner reference.
-A `done` child's stops were `issue_close` supervise rows, which retire each of its claims with the session it recorded dropped, so a later `todo` starts it fresh;
-every other close keeps the claims' sessions in the table for a re-admission to resume.
+An `issue_close` retires the claim and keeps its session id as volume-reap evidence, clears the resume path, and so makes a later admission fresh once cleanup succeeds.
 The parent's Sandbox is another issue's and is never touched.
 A daemon restart retries the stored effect.
 Re-admission during linger makes the Sandbox, the pod and its disk afresh and resumes the recorded sessions;
@@ -1259,6 +1269,21 @@ Once the store opens and before it migrates, the daemon refuses a claim that sti
 A deployment of an earlier layout clears all of it before it upgrades ([Upgrading a deployment with running trees](#upgrading-a-deployment-with-running-trees)).
 The daemon runs on a host its pods can reach and serves the worker stream they dial.
 The controller is `legion controller start` on the operator's machine, or, under `controller: daemon`, a pod of its own with one launcher that the daemon launches ([The controller](#the-controller)).
+
+### Daemon migration identifiers and release order
+
+A migration's version is the leading digits of its file name (`internal/store/migrations`).
+The numbered migrations are the sequence the daemon grew up with, 1 to the number its series closed at (`0067_phase_assignment.up.sql`, recorded once in `migrationid`), each taken once;
+every migration added since takes the UTC moment its author created it, 14 digits `YYYYMMDDHHMMSS`, so two branches open at the same time cannot both claim one version.
+A timestamp sorts after every number, so a fresh database applies the numbered migrations in their old order and the timestamped ones in the order they were written.
+
+`schemaVersion` is the highest version applied, not proof that every version below it is applied:
+`Migrate` applies every version `schema_version` lacks, in version order, so a migration that merges below one a database already has still runs there, once.
+A deployed database applies each migration as the release carrying it deploys, so it can apply two migrations written on branches open at the same time in the other order than a fresh database does;
+a migration must not depend on that order, and one that needs another's effect is written after that one has merged.
+
+The release that reads the version cast to `bigint` goes out before any release that carries a timestamped migration:
+the release before it reads `max(version)` uncast, so a deployment that skips it costs the daemon it replaces one failed state read on each connection that prepared the uncast read, which pgx then drops.
 
 ### Upgrading a deployment with running trees
 
@@ -1723,8 +1748,10 @@ In this order:
    The earlier release's `Migrate` checks each migration it has by its own number and reads no highest row;
    only its `legion state` reports one, the `schemaVersion` it reads as `max(version)` (`schemaVersion` in `internal/store/store.go`, the state read in `internal/daemon/daemon.go`), which reads 53 once the row is gone, the earlier release's own last migration (`0053_issue_taken_back.up.sql`, which this rollback leaves applied with `0052_dispatch_issues.up.sql`).
    The SQL changes only these locators and that row, so Oh My Pi's session tables, wherever they are, keep every turn taken under this release.
-   The `54` in the `delete` is the number of the migration that renames the container, `0054_issue_pod_roles_container.up.sql`;
-   where that file carries another number in the release you roll back from, use that number.
+   The `54` in the `delete` is the version of the migration that renames the container, `0054_issue_pod_roles_container.up.sql`;
+   where that file carries another version in the release you roll back from, use that version.
+   A migration written after the numbered series takes the UTC moment it was created as its version, the 14 digits its file name begins with (`20261030120000_<slug>.up.sql` records `version = 20261030120000`), so reversing one deletes that 14-digit value and not a small number.
+   What the recorded versions do and do not prove, and which release goes out first, are [Daemon migration identifiers and release order](#daemon-migration-identifiers-and-release-order).
 
 4. **Return every one-container issue Sandbox to the earlier layout's template.**
    With `<namespace>` and `<project>` as in [Upgrading a deployment with running trees](#upgrading-a-deployment-with-running-trees) step 4, each patch suspends the Sandbox, which ends its pod and with it the pod's disk, and replaces its containers with the six role names alone;
@@ -4323,7 +4350,7 @@ each issue's pod (every role of it alike) and the image probe's.
   The limit is 30 s by default, so the deadline is then 25,000 ms.
   A review of a long session can take longer, a review that times out lets the write post unreviewed, and three timeouts in a row stop the gate for the rest of that session.
   Set `extensionHandlers.toolCallTimeoutMs: 120000` in the operator's `overlay.yml`, as the example overlay does (pi-envoy's README, "The time limit").
-  Legion's own turn-scoping overlay does not set it.
+  Legion writes no settings overlay of its own, so nothing but the operator's own overlays sets it.
   Without it, the gate logs one warning at start, `AskGate: the review deadline is 25000 ms`, through Oh My Pi's logger.
   A limit under 15,000 ms leaves no room for a verdict:
   the gate does not bind there, and a gate that did not load refuses every Dispatch write it would have reviewed.
@@ -4384,9 +4411,8 @@ each issue's pod (every role of it alike) and the image probe's.
 
   (beside the block's other volumes and mounts).
 
-- Both runtimes name a role's own files right after the operator's overlays, so each outranks them, and keep the turn-scoping overlay where they always have:
-  in a pod the shim names it first (so the operator's overlays, and now a role's own, outrank it), in a pane the runtime names it last.
-  Such a role's `PI_CONFIG_FILES` in a pod is therefore the turn-scoping overlay, then the `pod.env` value, then its own files in order;
+- Both runtimes name a role's own files right after the operator's overlays, so each outranks them, and Legion names no overlay of its own anywhere in the list: it writes none.
+  Such a role's `PI_CONFIG_FILES` in a pod is therefore the `pod.env` value, then its own files in order;
   the overlays reach the role with its start command, so its pod is the one it would be without the key, and a role the key leaves out is told exactly what it was told before.
   The loader refuses, at `legion start --check-config` too, an unknown role, an empty list, a relative path, a path named twice or one `pod.env`'s `PI_CONFIG_FILES` already names, a role `worker_backends` puts on `claude`, and a file under no `volume_mounts` mount (or, under a whole ConfigMap or Secret volume that lists `items`, a file no item writes), since a pod sees only the image and the operator's mounts.
   Whether the ConfigMap holds the key is the cluster's:
@@ -4444,6 +4470,8 @@ each issue's pod (every role of it alike) and the image probe's.
   — naming the pod UID it recorded at spawn (the enrollment carries no issue or approver at all;
   each secret's owner and tier tags pick the approver for the pod's later credential requests at request time)
   — hands the enrollment id back to the shim, and revokes it wherever it lets the pod go (a death, the registration deadline, a suspension, a stop, the tree's close).
+  That person decides each of those requests on the secrets broker's own page, `<broker>/approve/<record>`, signed in to the broker itself: the agent's output names that page, their Dispatch Inbox links it, and Dispatch decides no secret request at all.
+  A broker that is not given its four `BROKER_SIGNIN_*` settings does not start, so a pin move that drops them stops at its first new pod while the old pods go on serving.
   The shim's renewer, `agent-secrets renew --pod-token-file <the projected token>`, sends the pod's current token with every renewal, and the broker refuses a renewal whose token names another pod UID or service account than the enrollment's (`POD_IDENTITY_MISMATCH`, which the renewer retries until the lease ends, since the broker also answers it while its token issuer is unreachable).
   The token is not yet required: once any enrollment naming a pod UID has renewed with that pod's token, the broker refuses a renewal without one (`POD_TOKEN_REQUIRED`, on which the renewer stops) from every enrollment naming that pod, whichever machine login made it, so the copied-token gap closes for every pod UID a current-image pod has renewed under.
   A pod on an older worker image never sends one and renews as before, each renewal logged at WARN, so the gap stays open for old-image UIDs until the release that requires the token (the broker's operate page, "The renew token check").
@@ -4485,8 +4513,8 @@ each issue's pod (every role of it alike) and the image probe's.
 
 - **Settings order.**
   Oh My Pi reads `PI_CONFIG_FILES` in order, each overlay outranking the ones before it and all of them outranking a repository's `.omp/config.yml`.
-  Legion writes one overlay, the turn-scoping one (`bash.autoBackground.enabled` and `async.enabled` off, the two keys a takeover's abort depends on, `packages/daemon/internal/podsafety/turnscope.yml`), and names it first, ahead of the operator's, so the operator's overlay outranks it.
-  Nothing of a repository's settings is held off: they reach a pod's agent as they reach any agent session, under the operator's overlay.
+  Legion writes no overlay at all: the list a role reads is the operator's own overlays with that role's own (`role_config_files`) after them, composed by the runtime that starts the role, and the shim passes it through untouched.
+  So nothing of Legion's holds a repository's settings off — they reach a pod's agent as they reach any agent session, under the operator's overlay — and nothing of Legion's turns a pinned binary's own defaults off either: background work (`async.enabled`, `bash.autoBackground.enabled`) is on for every role, as it is for `--mode rpc`.
   The pod sets `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file` on the agent where the pod leaves them unset, which an operator's pod may not set, since they decide where Oh My Pi keeps the session a resume reads.
 
 - **Model roles.**
@@ -4845,7 +4873,7 @@ in a root architect's or phase worker's session it needs the operator's capabili
 Sandbox `legion-<project>-controller` in `runtime.kubernetes.namespace` runs the pod an issue's Sandbox runs ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)) with a one-role list, on the Legion pool under gVisor, with the operator's pod (`runtime.kubernetes.pod`) and the providers Secret, so it reaches models by the route every worker does.
 Its one container, `controller`, runs `legion launcher --role controller`:
 it authenticates to the worker stream with its own launcher token and starts and stops the controller's `legion worker-shim` and Oh My Pi, on the pod baseline (`--pod-safety`:
-the turn-scoping overlay first in `PI_CONFIG_FILES`, the two session-placing variables, [Settings order](#operator-configuration), and Oh My Pi's profile directory made under its state home, `/legion/scratch/state/controller`), on the daemon's command, as an issue pod's launcher does each role's, so a relaunch in a healthy pod is a new generation of that child rather than a new pod.
+the two session-placing variables, [Settings order](#operator-configuration), and Oh My Pi's profile directory made under its state home, `/legion/scratch/state/controller`), on the daemon's command, as an issue pod's launcher does each role's, so a relaunch in a healthy pod is a new generation of that child rather than a new pod.
 Its role Secret, `legion-<project>-controller-controller-boot`, holds the launcher's token and its gh bundle (each owner's `github-hosts-<owner>` and `github-config-<owner>`, the review App's read-only `hosts.yml` and `config.yml` for every owner of the project, and `github-default`, the first owner), refreshed every minute as every role's are, and is the only Secret its launch writes:
 there is no provisioning `-boot` Secret.
 Its Sandbox owns a volume of its own, where an issue's owns none (`issue-legion-<project>-controller`, from its one `issue` claim template, of `runtime.kubernetes.issue_volume` and `storage_class`), mounted at `/legion`, which is the working root the controller runs in, so what one of its pods leaves there the next one finds;

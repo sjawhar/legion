@@ -23,10 +23,23 @@ type Leases interface {
 // internal/dispatch/docs already fills - a document's room, a project's rank allocation, an agent's
 // artifacts and the migration runner are each a single key (the enumeration in docs/copied_asks.go,
 // at lockProjectCopies) - so a lease can never collide with one of those, whatever its name hashes
-// to. Within the two-key space the other namespaces are the copy locks'
-// (docs.copiedAsksLockNamespace) and the owner locks' (store's ownerLockNamespace, "OWNR"), so a
-// lease's second key, its name's hashtext, separates the leases from each other and from nothing
-// else.
+<<<<<<< conflict 1 of 1
+%%%%%%% diff from: rwloyrmo dbdf9318 "chore(claude-envoy): rebuild dist/ and legion/ from ff93d6c4df9e [skip ci]"
+\\\\\\\        to: lntxprnt d3218a11 "review: record handoff"
+-// to. Within the two-key space the only other namespace is the copy locks'
+-// (docs.copiedAsksLockNamespace), so a lease's second key, its name's hashtext, separates the leases
+-// from each other and from nothing else.
++// to. Within the two-key space the other namespaces are the copy locks'
++// (docs.copiedAsksLockNamespace) and the owner locks' (store's ownerLockNamespace, "OWNR"), so a
++// lease's second key, its name's hashtext, separates the leases from each other and from nothing
++// else.
++++++++ orsoxnss f8f0425b "chore: fold changelog fragments [skip ci]"
+// to. Within the two-key space the only other namespaces are the copy locks'
+// (docs.copiedAsksLockNamespace, "COPY") and the test hooks' (the api package's
+// testHookLockNamespace, "HOOK", taken only under DISPATCH_TEST_HOOKS), each a first key of its
+// own, so a lease's second key, its name's hashtext, separates the leases from each other and from
+// nothing else.
+>>>>>>> conflict 1 of 1 ends
 const leaseNamespace int32 = 0x4C4F4F50
 
 // takeLease tries for a lease without queueing behind its holder, and freeLease gives it back. Both
@@ -63,15 +76,13 @@ const (
 // tick's delay, and no tolerance constant has to be chosen to make that true.
 //
 // The period is stored and compared beside the boundary because a boundary means nothing on
-// another period's scale. docs.RunReferenceExcerptReconciliation varies its own period between
-// ticks - two seconds while drift remains, five minutes when none does - and its two-second
-// boundary lies at or after the current five-minute one for all but the first two seconds of
-// every five-minute bucket, so a comparison that ignored the scale would refuse that loop's
-// interval tick about 149 times in 150 (measured; and under the bucket-number form this
-// replaces, which was scale-dependent in the same way, it refused every later tick for ever).
-// A record made on another scale therefore serves nothing: the first tick of a changed period
-// runs, and the loop is on its own scale from then on. That costs one pass at each change, which
-// is the direction to err in - the other direction is a loop that stops.
+// another period's scale: a two-second boundary lies at or after the current five-minute one for
+// all but the first two seconds of every five-minute bucket, so a comparison that ignored the scale
+// would refuse a five-minute tick after a two-second record about 149 times in 150. A lease's
+// period changes when a release changes its loop's interval and runs beside the release before it
+// during a roll. A record made on another scale therefore serves nothing: the first tick of a
+// changed period runs, and the loop is on its own scale from then on. That costs one pass at each
+// change, which is the direction to err in - the other direction is a loop that stops.
 //
 // The boundary is on this process's clock, the clock the tick's own timer runs on, so two
 // processes judge the same period by their hosts' clocks, which NTP keeps within milliseconds of

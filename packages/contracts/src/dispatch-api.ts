@@ -30,6 +30,12 @@ export type Actor =
       /** The subject of the verified service token that authenticated the write
        *  (`system:serviceaccount:<namespace>:<name>`); absent under any other bearer. */
       readonly service?: string;
+      /** The one project key the write's credential may write. The server reads it from an
+       *  access token the secrets broker issued for that project and never from a body, as it
+       *  reads `service` from a service token; it is absent under every credential that names
+       *  none, a browser cookie, a personal token and a broker token scoped to its person
+       *  included. */
+      readonly project?: string;
     }
   /** A server-owned writer, such as the architecture importer
    *  (`{kind: "system", id: "architecture-importer"}`). */
@@ -59,15 +65,27 @@ export function serviceSubjectLabel(subject: string): string {
   return subject;
 }
 
-export type BlockAttributeKind = "string" | "bool" | "enum" | "string[]" | "actor" | "timestamp";
+export type BlockAttributeKind =
+  | "string"
+  | "bool"
+  | "enum"
+  | "string[]"
+  | "block[]"
+  | "actor"
+  | "timestamp";
 
 export type BlockContentRule = "paragraph+" | "block+" | "paragraph+ bullet_list?";
 
+// A `block[]` attribute points at blocks: canonical block references (parseBlockPointerValue in
+// dispatch-block-ref.ts), each making an edge of the attribute's name (GraphEdgeKind). `targets`,
+// which only a `block[]` attribute carries, limits the types of the blocks it points at; absent
+// or empty, it points at any block.
 export interface BlockAttributeSchema {
   readonly kind: BlockAttributeKind;
   readonly choices?: readonly string[];
   readonly default?: string | boolean | readonly string[];
   readonly server?: boolean;
+  readonly targets?: readonly string[];
 }
 
 export interface BlockTypeSchema {
@@ -2119,6 +2137,10 @@ export interface ArtifactReferences {
   readonly referenced_by: ReferencedBy[];
 }
 
+// GraphEdgeKind is an edge's kind: one of the structural kinds, or the name of a typed block's
+// `block[]` attribute (BlockAttributeSchema), whose pointers are edges of that kind. The block
+// schema decides those names (Go's pmdoc.LinkKinds), so any other string is admitted beside the
+// structural ones, which keep their completion; none of them is ever an attribute's name.
 export type GraphEdgeKind =
   | "mentions"
   | "child_of"
@@ -2130,7 +2152,8 @@ export type GraphEdgeKind =
   | "followed_by"
   | "part_of"
   | "depends_on"
-  | "affects";
+  | "affects"
+  | (string & {});
 
 // GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
 // session node has none. A component node's id is `<project>/<component id>`.
@@ -2829,10 +2852,20 @@ export interface ListUsersResponse {
 
 /** GET /api/v1/whoami: a person by lowercase email (`login`), or an agent with its personal
  *  token's owner (a lowercase email) — null under the shared token or a verified service token —
- *  and that service token's subject, null unless one authenticated the request. */
+ *  and that service token's subject, null unless one authenticated the request. `session` is the
+ *  session the credential itself proved, which only an access token the secrets broker issued
+ *  does, and `project` the one project key that credential lets the caller write, null where it
+ *  names none. Both are absent from a Dispatch older than broker-issued tokens, which a client
+ *  reads as an older build rather than as null. */
 export type WhoamiResponse =
   | { readonly kind: "user"; readonly login: string }
-  | { readonly kind: "agent"; readonly owner: string | null; readonly service: string | null };
+  | {
+      readonly kind: "agent";
+      readonly owner: string | null;
+      readonly service: string | null;
+      readonly session?: string | null;
+      readonly project?: string | null;
+    };
 
 export interface CreateAskInput {
   readonly question: string;

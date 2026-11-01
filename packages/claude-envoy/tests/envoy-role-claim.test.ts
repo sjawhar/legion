@@ -2,7 +2,7 @@ import { expect, jest, test } from "bun:test"
 import { rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Interest } from "@legion/envoy-client/transport"
+import type { Interest, SubscribeResult } from "@legion/envoy-client/transport"
 import type {
   ChannelConnectionStatus,
   ChannelForwarderConnection,
@@ -63,13 +63,18 @@ function interest(): Interest {
   }
 }
 
+/** The listener's answer to a registration: the interest, and the core delivery mode. */
+function registered(): SubscribeResult {
+  return { ...interest(), delivery: { mode: "core", reason: "not_answered" } }
+}
+
 test("reasserts a role claimed after channel startup on the next heartbeat", async () => {
   jest.useFakeTimers()
   const stateDirectory = join(tmpdir(), `claude-envoy-claim-${crypto.randomUUID()}`)
   const reasserted = Promise.withResolvers<void>()
   const setRoles: unknown[] = []
   const client: FakeClient = {
-    subscribe: async () => interest(),
+    subscribe: async () => registered(),
     getInterest: async () => interest(),
     unsubscribe: async () => undefined,
     unregisterSession: async () => undefined,
@@ -93,6 +98,7 @@ test("reasserts a role claimed after channel startup on the next heartbeat", asy
       heartbeatMs: 25,
       configFile: { path: join(stateDirectory, "envoy.json"), error: null },
       stateDirectory,
+      clientInstanceID: "a1b2c3d4e5f60718293a4b5c6d7e8f90",
       pluginVersion: "source",
     })
 

@@ -6,17 +6,20 @@ The secrets broker's client. An agent session runs it to use a secret:
 agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
 ```
 
-It asks the broker for the named secrets, waits while a person approves them in Dispatch if the
-secret's owner and tier require it, and runs the command with each granted value in its
+It asks the broker for the named secrets, waits while a person approves them on the broker's own
+approval page if the secret's owner and tier require it, and runs the command with each granted
+value in its
 environment, writing one line to standard error first: the names it injected, that the broker
 `AGENT_SECRETS_URL` names gave them, and that store's kind, as `agent-secrets: NAME from the broker
 AGENT_SECRETS_URL names (GCP Secret Manager)`, never a value. Every other line about a secret names
 its source the same way - `request`, `status` and `self` as a `source:` line, a denial, a pending
 request and every refusal as `; asked the broker AGENT_SECRETS_URL names (<store kind>)` - so an
 answer of this CLI's is never taken for another secrets CLI's about the same name. Those lines are
-quoted wherever an agent's output is, so none names the broker's host or the store's account,
-region or project (only a broker that could not be reached is named, by its URL, so a stale
-address reads as one); the secret forms below, which a person runs under their own cloud
+quoted wherever an agent's output is, so none names the store's account, region or project, and
+none names the broker's host but two: a broker that could not be reached, named by its URL so a
+stale address reads as one, and a pending secret request, whose line names the page on the broker
+where its approver decides it, the `approve_url` the broker's own answer carries. The secret
+forms below, which a person runs under their own cloud
 sign-in, name the account or project they write to. No output of `agent-secrets`,
 `agent-secrets-helper` or `agent-secrets-devrelay` prints a credential the broker's URL carries:
 the URL prints only when it is provably a plain http(s) URL (no user info, query, fragment,
@@ -44,6 +47,29 @@ form, and each form answers `-h`.
 On a machine that runs agents directly, `agent-secrets-helper` (`../agent-secrets-helper`) holds
 each session's key and signs for it; in a container or a Kubernetes pod, the session's key lives in
 `AGENT_SECRETS_KEY_DIR`.
+
+A Google Cloud VM needs no credential a person installs and no machine login a person approves: it
+logs in and enrols itself with the identity token its own metadata server signs. It then holds a
+session key and its enrollment id in its key dir, as a box does, and a machine login, which
+Dispatch's machine-login page lists; each `enroll --vm` run logs in again with a launcher key it
+keeps only in memory.
+
+```sh
+export AGENT_SECRETS_URL=https://broker.example AGENT_SECRETS_KEY_DIR=/run/agent-secrets
+export AGENT_SECRETS_AUDIENCE=example-vm-audience
+agent-secrets enroll --vm --service example-fleet
+agent-secrets renew --vm &
+agent-secrets DEMO_API_KEY --reason "Run the lane" -- ./lane.sh
+```
+
+`enroll --vm` writes `key.pem` and `enrollment` into `AGENT_SECRETS_KEY_DIR` (`--out` names
+another directory) and prints the enrollment id, alone, on stdout. Re-running it on the same
+directory keeps that key, gets its own live enrollment back and renews that enrollment's lease,
+so a VM that re-runs `enroll --vm` often enough needs no `renew --vm` at all; concurrent runs on
+one directory take turns on `<out>/enroll.lock`. `renew --vm` is the other way to hold the lease:
+it asks the metadata server for a fresh token before every renewal, since a VM enrollment's
+renewal must carry one. `GCE_METADATA_HOST` replaces the metadata server's host. Every other
+form then reads the key dir as a box's or a pod's.
 
 The docs site's "Secrets Broker" section, built from `docs/site/src/content/docs/broker/`, has the
 quickstart, the guides and the generated CLI reference.

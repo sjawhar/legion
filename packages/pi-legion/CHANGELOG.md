@@ -3,6 +3,87 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [16.1.0] - 2026-11-01
+
+### Changed
+
+- The controller's skill no longer writes `todo` for a root a person handed over: a person's `legion` label on a new issue in `triage`, and a person's approval of a parked labelled issue's spec, are queued by the daemon. `triage.md` reads the label's setter as the newest event that added it, keeps the controller's `todo` write for the roots it labels or files itself, and `backlog-stewardship.md` says a root the weekly plan says to defer is parked at the next backlog pass.
+
+## [15.9.0] - 2026-11-01
+
+### Added
+
+- A real-binary test holds the pinned Oh My Pi to running a role's `deep-worker` in the
+  background: a role pane dispatches it, the `task` call's turn ends while the subagent's own
+  model request is still held on the stand-in gateway, a role-lane message published over NATS
+  in the meantime is in the role's context at its next model turn well inside the 30 seconds
+  that bound it, and the finished job's result wakes the role into a turn carrying the worker's
+  report. The pane loads this package's root, so `agents/` is discovered, and maps the `deep`
+  model role `deep-worker` asks for as `@deep`; a pin whose defaults turned background work off,
+  or a `blocking: true` put back into an agent, fails it.
+
+### Changed
+
+- `legion.daemonApiVersion` is 44. Contract 44 drops
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` from a Claude Code role's start command and pane, so
+  the worker environment the contract covers is one variable smaller; a daemon at 44 and a
+  plugin at 43 are refused by the boot gate, which is why the two move together.
+- The `legion` tool's description and the `legion-worker` skill name the daemon's new refusal,
+  `HANDOFF_STALE_ASSIGNMENT`: the issue left your phase and came back while your turn ran, so the
+  completion is of the assignment before the one the phase hands you now. The refusal records
+  nothing, as `HANDOFF_STALE_GENERATION` does, but its remedy is not that one's: a phase entered
+  again hands work of its own, so the worker ends the turn without completing, tells the
+  architect, and does the new task's work and completes it with a handoff of its own rather than
+  reporting the refused commit again.
+- Every Legion skill that dispatches a task subagent now says to read its result with Oh My Pi's
+  `wait` tool, since a subagent runs as a background job under the pinned binary's own defaults:
+  the worker's merge gate, the architect's design gate and decomposition, the oracle's research
+  steps, retro's second reading and the simplify pass. The worker skill's stop rules say that the
+  phase reminder keeps still while a role waits on background work of its own, and that the
+  workspace is read-only from the moment the phase ends — a CI red that takes it back stops no
+  turn, so the role stops writing itself and leaves what it has uncommitted. `skills/AGENTS.md`
+  states the pairing as a rule. A new case in this package's skills guard holds the repository's
+  skills, this package's agents and a fresh build of the Claude Code plugin to naming none of the
+  retired sentences and to pairing every dispatch with `wait`.
+
+### Removed
+
+- No agent the plugin ships declares `blocking` any more: `deep-worker`, `plan-gap-analyst` and
+  `plan-reviewer` drop `blocking: true`, so a Legion pod with async jobs and bash
+  auto-background on runs each of them as a background task. A caller that must have a result
+  before its next step waits for it in its own prompt, and the shipped-agents test now holds
+  every agent file to declaring no `blocking` field, true or false.
+
+### Fixed
+
+- A worker whose turn ends while an Oh My Pi background job of its own is still running gets no
+  phase reminder: the pinned runtime holds `session_stop` back until its agent-owned async jobs
+  are idle, and the job's own result wakes the session into the next turn. The real-binary test
+  is what holds the pin to that.
+
+## [15.7.0] - 2026-10-31
+
+### Changed
+
+- `legion-worker`'s tools reference opens with the database a role's tests use: never the URL in
+  the file `OMP_SESSION_SQL_DSN_FILE`, the live sessions database every pod shares, whose login
+  can create and drop databases there, but `$LEGION_TEST_PG_DSN`, the pod's own PostgreSQL, which
+  the worker image now carries and the roles container's launcher starts at container start. The
+  rule names every Postgres variable a test reads, how a suite that resets the database it is
+  given makes one of its own with `createdb`, and what a role on a digest that predates the
+  server does instead.
+
+## [15.6.0] - 2026-10-31
+
+### Changed
+
+- A phase worker's handoff carries no `completed` time: a handoff's time is the committer date of
+  the commit that carries it. Each handoff instead carries `previousHandoff`, the newest commit on
+  the branch that changed that handoff's file (usually the role's previous handoff of the phase),
+  so a round that repeats its predecessor's words still writes a new commit; a reviewer's also
+  carries `headReviewed`. Every worker, architect and controller is told that a time or date it
+  writes comes from a command, a task result or its own task, never from an estimate.
+
 ## [15.5.1] - 2026-10-31
 
 ### Changed

@@ -1,62 +1,52 @@
-// Package agentsecrets relays Dispatch's credential-request UI to the secrets broker's
-// named-caller API (its UI routes: https://sjawhar.github.io/legion/broker/reference/api/). Reads
-// and the machine-login lookup carry and return
-// json.RawMessage, so a broker read-shape change never requires a Dispatch code change. Every
-// decision (approve, deny, revoke) instead carries a Decision Dispatch builds itself: its
-// approver is the login Dispatch's own session resolved, so nothing the browser sends can name
-// who decided.
+// Package agentsecrets relays Dispatch's credential pages to the secrets broker's named-caller
+// API (its account routes: https://sjawhar.github.io/legion/broker/reference/api/). Dispatch lists
+// the credential requests waiting on a person, each secret request linking to the broker's own
+// page, where that person, signed in to the broker, decides it; it relays a machine login's
+// decision with the code the person typed; and it relays a person's revoke of a grant or a
+// machine login. Reads and the machine-login lookup carry and return json.RawMessage, so a broker
+// read-shape change never requires a Dispatch code change. Every decision (a machine login's
+// approve or deny, a revoke) instead carries a Decision Dispatch builds itself: its approver is
+// the login Dispatch's own session resolved, so nothing the browser sends can name who decided.
 //
 // Dispatch authenticates to the broker as itself: every call carries Dispatch's own projected
 // Kubernetes ServiceAccount token, which the broker verifies against its cluster issuer and
-// matches against BROKER_API_ACCOUNTS. That names the caller and nothing more — the broker still
-// takes each decision's approver from the body, on the word of that listed caller, and
-// dispatch://INFRA-314 is what replaces that trust with a credential the approver's own session
-// holds.
+// matches against BROKER_API_ACCOUNTS. That names the caller and nothing more: the broker takes a
+// machine login's approver, and the person a revoke names, from the body, on the word of that
+// listed caller. It decides no secret request on that word: it refuses an approve or deny of one
+// with 403 DECIDE_ON_BROKER_PAGE carrying the record's approve_url, an *Error the routes relay
+// like any other.
 package agentsecrets
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/brokertoken"
 )
 
 // defaultTimeout is the window every broker call gets, matching envoy.Client's default.
 const defaultTimeout = 5 * time.Second
 
-// tokenCacheTTL is how long a Client reuses the token bytes it last read. Opening the file on
-// every call would cost a read per relayed click for a credential that changes a few times a
-// day: the kubelet rewrites a projected token in place well before it expires, and the broker
-// refuses one that lives longer than an hour from its issue, so bytes this fresh are never near
-// expiry and a rewrite reaches the broker within this window of it.
-const tokenCacheTTL = 30 * time.Second
-
 // Client relays Dispatch's UI calls to the broker, authenticating each one with the projected
-// ServiceAccount token TokenFile holds. A nil *Client (the broker URL is unconfigured) means the
+// ServiceAccount token Account reads. A nil *Client (the broker URL is unconfigured) means the
 // feature is off; the api's pending list answers null then, and every other api handler 404
 // FEATURE_OFF.
 type Client struct {
 	URL string
-	// TokenFile is the path of Dispatch's own projected Kubernetes ServiceAccount token
+	// Account reads Dispatch's own projected Kubernetes ServiceAccount token
 	// (DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE), the credential the broker resolves its caller
-	// from. A projected token rotates, so the path is read at call time, never once at boot.
-	TokenFile string
-	HTTP      *http.Client
-	// tokenTTL is how long token reuses what it read, tokenCacheTTL for every client New builds;
-	// the in-package test that proves a rewritten file is picked up lapses the cache by zeroing
-	// it. tokenMu guards cached and readAt.
-	tokenTTL time.Duration
-	tokenMu  sync.Mutex
-	cached   string
-	readAt   time.Time
+	// from. The reader is internal/brokertoken's, the same one the token introspection there
+	// presents its bearer from, so a projected token's path, its cache and the error for a file
+	// Dispatch cannot read are one reading rather than two.
+	Account *brokertoken.AccountToken
+	HTTP    *http.Client
 }
 
 // Option configures a Client.
@@ -69,15 +59,14 @@ func WithTimeout(timeout time.Duration) Option {
 
 // New returns a client for the secrets broker's named-caller API. tokenFile names the file
 // holding Dispatch's own projected Kubernetes ServiceAccount token, which every call presents:
-// the broker reads the calling service's identity from it (BROKER_API_ACCOUNTS) and then trusts
-// the approver login Dispatch sends — resolved by Dispatch's own session, not read from an env
-// var here.
+// the broker reads the calling service's identity from it (BROKER_API_ACCOUNTS) and then takes a
+// machine login's approver, and a revoke's, from the login Dispatch sends — resolved by
+// Dispatch's own session, not read from an env var here.
 func New(baseURL, tokenFile string, options ...Option) *Client {
 	client := &Client{
-		URL:       strings.TrimSuffix(baseURL, "/"),
-		TokenFile: tokenFile,
-		HTTP:      &http.Client{Timeout: defaultTimeout},
-		tokenTTL:  tokenCacheTTL,
+		URL:     strings.TrimSuffix(baseURL, "/"),
+		Account: brokertoken.NewAccountToken(tokenFile),
+		HTTP:    &http.Client{Timeout: defaultTimeout},
 	}
 	for _, option := range options {
 		option(client)
@@ -100,53 +89,18 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("agent-secrets: broker returned %d", e.Status)
 }
 
-// AccountTokenError is a call that never reached the broker because Dispatch could not read
-// its own ServiceAccount token from Path: the file is missing or unreadable, or holds nothing.
-// It is its own type because what is wrong is Dispatch's deployment, not the broker, and the
-// routes must say so rather than send the operator to a broker that was never asked.
-type AccountTokenError struct {
-	// Path is the token file Dispatch tried to read (DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE).
-	Path string
-	// Err is why it could not: the read's own error, or errEmptyAccountToken.
-	Err error
-}
-
-func (e *AccountTokenError) Error() string {
-	return fmt.Sprintf("agent-secrets: read the ServiceAccount token %s: %v", e.Path, e.Err)
-}
-
-func (e *AccountTokenError) Unwrap() error { return e.Err }
-
-// errEmptyAccountToken is an AccountTokenError's reason when the file reads but holds nothing.
-var errEmptyAccountToken = errors.New("the file is empty")
-
-// token is the bearer every call presents: TokenFile's trimmed contents, read again once the
-// copy it cached is older than tokenTTL. A file that cannot be read, or that holds nothing, is an
-// *AccountTokenError naming the path and no request at all, never an empty bearer for the broker
-// to refuse: a projected token Dispatch cannot read is Dispatch's own misconfiguration.
-func (c *Client) token() (string, error) {
-	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
-	if c.cached != "" && time.Since(c.readAt) < c.tokenTTL {
-		return c.cached, nil
-	}
-	data, err := os.ReadFile(c.TokenFile)
-	if err != nil {
-		return "", &AccountTokenError{Path: c.TokenFile, Err: err}
-	}
-	token := strings.TrimSpace(string(data))
-	if token == "" {
-		return "", &AccountTokenError{Path: c.TokenFile, Err: errEmptyAccountToken}
-	}
-	c.cached, c.readAt = token, time.Now()
-	return token, nil
-}
+// AccountTokenError is a call that never reached the broker because Dispatch could not read its
+// own ServiceAccount token: the file is missing or unreadable, or holds nothing. It is the reader's
+// own error type, shared with every other call Dispatch makes to the broker, because what is
+// wrong is Dispatch's deployment rather than the broker, and the routes must say so rather than
+// send the operator to a broker that was never asked.
+type AccountTokenError = brokertoken.AccountTokenError
 
 // do sends a request relaying body (nil for a bodyless GET) and returns the broker's response
 // body verbatim, or *Error for a non-2xx response, an *AccountTokenError for a token it could not
 // read, which stops the call before it is built, or a plain wrapped error for a transport failure.
 func (c *Client) do(ctx context.Context, method, path string, body json.RawMessage) (json.RawMessage, error) {
-	token, err := c.token()
+	token, err := c.Account.Read()
 	if err != nil {
 		return nil, err
 	}
@@ -196,8 +150,8 @@ func (c *Client) Record(ctx context.Context, recordID string) (json.RawMessage, 
 }
 
 // Decision is every approve, deny and revoke body Dispatch sends: Approver is the deciding
-// human's canonical login as Dispatch's session resolved it, and Code, for a machine login only,
-// is the typed confirmation code the human entered.
+// human's canonical login as Dispatch's session resolved it, and Code, for a machine login, is the
+// typed confirmation code the human entered.
 type Decision struct {
 	Approver string  `json:"approver"`
 	Code     *string `json:"code,omitempty"`
@@ -211,7 +165,9 @@ func (d Decision) body() (json.RawMessage, error) {
 	return body, nil
 }
 
-// Approve relays an approver's decision to grant a credential request.
+// Approve relays a person's approval of a machine login, which carries its typed code. The broker
+// refuses one of a secret request, writing nothing, with 403 DECIDE_ON_BROKER_PAGE naming the page
+// where a person signed in to the broker decides it.
 func (c *Client) Approve(ctx context.Context, recordID string, d Decision) (json.RawMessage, error) {
 	body, err := d.body()
 	if err != nil {
@@ -220,7 +176,8 @@ func (c *Client) Approve(ctx context.Context, recordID string, d Decision) (json
 	return c.do(ctx, http.MethodPost, "/v1/credential-requests/"+url.PathEscape(recordID)+"/approve", body)
 }
 
-// Deny relays an approver's decision to refuse a credential request.
+// Deny relays a person's refusal of a machine login, which carries its typed code. The broker
+// refuses one of a secret request as it refuses Approve.
 func (c *Client) Deny(ctx context.Context, recordID string, d Decision) (json.RawMessage, error) {
 	body, err := d.body()
 	if err != nil {

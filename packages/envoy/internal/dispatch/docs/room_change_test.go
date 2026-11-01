@@ -38,11 +38,12 @@ func dropBlock(t *testing.T, prefix string) func(*pmdoc.Node) *pmdoc.Node {
 	}
 }
 
-// A browser DELETE the room gains under the transaction moves the fork exactly as an insertion
-// does - the text is gone from the fork - so the snapshot must render the moved document. A
-// deletion is the case an insertion-shaped signal misses: it creates no Yjs struct and advances
-// no client's clock, and the version must not be written from text the browser has removed.
-func TestAForkThatLosesRoomContentIsRenderedAgain(t *testing.T) {
+// A browser DELETE the room takes after a transaction's write read the document is not in the
+// transaction's version: the version is the write's own state, the fold of the stored updates
+// through the write's last (captureWrite), and the browser's update is stored after the write's.
+// The settlement that follows the write's publish versions the deletion. A deletion creates no Yjs
+// struct and advances no client's clock, the case a clock-only signal would miss.
+func TestADeletionTheRoomTakesAfterAWritesReadIsVersionedAfterTheWrite(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before\n\ndoomed paragraph")
@@ -69,18 +70,23 @@ func TestAForkThatLosesRoomContentIsRenderedAgain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("capture live text: %v", err)
 	}
-	if strings.Contains(markdown, "doomed paragraph") {
-		t.Fatalf("snapshot markdown = %q, want the paragraph the browser deleted to be gone", markdown)
+	if !strings.Contains(markdown, "doomed paragraph") || !strings.Contains(markdown, "after") {
+		t.Fatalf("snapshot markdown = %q, want the write's own state: its edit, and the paragraph the browser deleted after its read", markdown)
 	}
-	if !strings.Contains(markdown, "after") {
-		t.Fatalf("snapshot markdown = %q, want it to carry the transaction's own edit", markdown)
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the joined edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if latest := latestVersionMarkdown(t, service, artifactID); strings.Contains(latest, "doomed paragraph") || !strings.Contains(latest, "after") {
+		t.Fatalf("the settlement's version = %q, want the write's edit with the browser's deletion", latest)
 	}
 }
 
-// The version write skips its anchor refresh when the transaction's own operation already
-// refreshed that identical tree. A browser deletion the room gained since makes that tree no
-// longer the document, so the skipped pass would be the only one that could have seen the
-// anchored quote disappear. The ask anchored to the deleted paragraph must be orphaned.
+// A browser deletion the room takes after a transaction's write read the document is not in the
+// transaction's version, which is the write's own state: its anchors stand as the write's own
+// refresh left them, so the ask anchored to the deleted paragraph is still anchored there. The
+// version the settlement then writes holds the deletion, and its refresh, the only one that sees
+// the quote gone, must orphan the ask.
 func TestAnAnchorWhoseQuoteTheRoomDeletedIsOrphanedByTheVersionWrite(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -109,28 +115,56 @@ func TestAnAnchorWhoseQuoteTheRoomDeletedIsOrphanedByTheVersionWrite(t *testing.
 	if _, err := service.SnapshotVersion(joinedCtx, artifactID, alice); err != nil {
 		t.Fatalf("snapshot version: %v", err)
 	}
-	// The version's anchor refresh is a write, which the transaction's write phase runs at Commit.
+<<<<<<< conflict 1 of 1
+%%%%%%% diff from: rwloyrmo dbdf9318 "chore(claude-envoy): rebuild dist/ and legion/ from ff93d6c4df9e [skip ci]"
+\\\\\\\        to: lntxprnt d3218a11 "review: record handoff"
++	// The version's anchor refresh is a write, which the transaction's write phase runs at Commit.
++	if err := ledger.Commit(ctx); err != nil {
++		t.Fatalf("commit the snapshot: %v", err)
++	}
+ 	var encoded []byte
+-	if err := tx.QueryRow(ctx, `select anchor from asks where id = $1`, askID).Scan(&encoded); err != nil {
++	if err := service.store.Pool.QueryRow(ctx, `select anchor from asks where id = $1`, askID).Scan(&encoded); err != nil {
+ 		t.Fatalf("read the ask's anchor: %v", err)
+ 	}
+ 	var anchor model.Anchor
+ 	if err := json.Unmarshal(encoded, &anchor); err != nil {
+ 		t.Fatalf("decode the ask's anchor: %v", err)
+ 	}
+ 	if !anchor.Orphaned {
+ 		t.Fatalf("anchor = %#v, want it orphaned: the browser deleted the paragraph it quotes", anchor)
++++++++ orsoxnss f8f0425b "chore: fold changelog fragments [skip ci]"
+	anchorOf := func(q Queryer) model.Anchor {
+		t.Helper()
+		var encoded []byte
+		if err := q.QueryRow(ctx, `select anchor from asks where id = $1`, askID).Scan(&encoded); err != nil {
+			t.Fatalf("read the ask's anchor: %v", err)
+		}
+		var anchor model.Anchor
+		if err := json.Unmarshal(encoded, &anchor); err != nil {
+			t.Fatalf("decode the ask's anchor: %v", err)
+		}
+		return anchor
+	}
+	if anchor := anchorOf(tx); anchor.Orphaned {
+		t.Fatalf("anchor = %#v after the write's version, want it anchored: that version still holds the quote", anchor)
+	}
 	if err := ledger.Commit(ctx); err != nil {
-		t.Fatalf("commit the snapshot: %v", err)
+		t.Fatalf("commit the joined edit: %v", err)
 	}
-	var encoded []byte
-	if err := service.store.Pool.QueryRow(ctx, `select anchor from asks where id = $1`, askID).Scan(&encoded); err != nil {
-		t.Fatalf("read the ask's anchor: %v", err)
-	}
-	var anchor model.Anchor
-	if err := json.Unmarshal(encoded, &anchor); err != nil {
-		t.Fatalf("decode the ask's anchor: %v", err)
-	}
-	if !anchor.Orphaned {
-		t.Fatalf("anchor = %#v, want it orphaned: the browser deleted the paragraph it quotes", anchor)
+	settleCurrentGeneration(t, service, artifactID)
+	if anchor := anchorOf(service.store.Pool); !anchor.Orphaned {
+		t.Fatalf("anchor = %#v after the settlement's version, want it orphaned: the browser deleted the paragraph it quotes", anchor)
+>>>>>>> conflict 1 of 1 ends
 	}
 }
 
-// One room change costs one re-render. Once the fork has absorbed what the room gained, an
-// unchanged room must not look like another change: the contended case is a browser and an
-// agent writing together, where every spurious invalidation is a full document render back
-// under the issue row.
-func TestOneAbsorbedRoomChangeCostsOneRender(t *testing.T) {
+// A room change after a transaction's write read the document costs its version no render: the
+// version is the write's own state (captureWrite), which the write's latest operation rendered
+// already, and the room's change is versioned by the settlement that follows. The contended case
+// is a browser and an agent writing together, where every spurious invalidation is a full document
+// render back under the issue row.
+func TestARoomChangeAfterAWritesReadCostsItsVersionNoRender(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
@@ -151,7 +185,7 @@ func TestOneAbsorbedRoomChangeCostsOneRender(t *testing.T) {
 		t.Fatalf("first joined edit: %v", err)
 	}
 	editLiveTree(t, service, artifactID, appendBlocks(t, "gained in the room"))
-	// The next operation absorbs the room's change and renders the document it leaves.
+	// The next operation runs on the transaction's fork, which takes in nothing the room gained.
 	if _, err := service.ApplyOps(joinedCtx, artifactID, []model.EditOp{{
 		Op: "replace", Find: "after", With: "AFTER",
 	}}, alice, nil); err != nil {
@@ -168,10 +202,10 @@ func TestOneAbsorbedRoomChangeCostsOneRender(t *testing.T) {
 		t.Fatalf("capture live text: %v", err)
 	}
 	if tree != write.tree {
-		t.Fatal("the snapshot rendered the document again though the room stood still")
+		t.Fatal("the snapshot rendered the document again though the write's own state had not moved")
 	}
-	if !strings.Contains(markdown, "gained in the room") || !strings.Contains(markdown, "AFTER") {
-		t.Fatalf("snapshot markdown = %q, want the room's content and the transaction's", markdown)
+	if strings.Contains(markdown, "gained in the room") || !strings.Contains(markdown, "AFTER") {
+		t.Fatalf("snapshot markdown = %q, want the transaction's content alone", markdown)
 	}
 }
 
