@@ -574,6 +574,9 @@ jobs:
               - 'scripts/third-party-notices.ts'
               # The built site's private-name check.
               - '.github/scripts/check-private-names.sh'
+              # The site's own URL, base and edit links are the repository's name, which it reads
+              # from this script (docs/site/repo-paths.ts) rather than holding as literals.
+              - '.github/scripts/repo-paths.sh'
             contracts:
               - '.github/workflows/ci.yaml'
               - *bun_install
@@ -1082,6 +1085,8 @@ jobs:
               # The Pulumi CLI the live tests run, and the image pull before the build and tests.
               - '.github/actions/install-pulumi/**'
               - '.github/actions/pull-test-images/**'
+              # The download URL the schema step stamps into the plugin and asserts on.
+              - '.github/scripts/repo-paths.sh'
             # The local acceptance run drives the Go listener and renders every frame with the
             # shared TypeScript renderer, so a change to either side, or to the contracts both
             # read, runs it.
@@ -1645,6 +1650,9 @@ jobs:
       - name: Test the release credential check
         run: .github/scripts/check-release-credentials.test.sh
 
+      - name: Test the repository path derivation
+        run: .github/scripts/repo-paths.test.sh
+
       # The proof selector e2e.yaml's select job runs, over fixture trees and over this
       # repository's own .github/e2e-scripts.json and scripts/e2e/.
       - name: Test the e2e proof selector
@@ -1772,7 +1780,8 @@ jobs:
 
   # Builds the documentation site (docs/site) on every pull request and merge group that could
   # change it. A push to main runs no docs job here: docs-pages.yaml builds and publishes main's
-  # site to GitHub Pages (https://sjawhar.github.io/legion/), one push at a time in push order.
+  # site to GitHub Pages, at the address .github/scripts/repo-paths.sh derives from the repository
+  # it runs in (https://sjawhar.github.io/legion/ today), one push at a time in push order.
   # Both callers run the steps of docs-site.yaml, which holds them once. The site's reference
   # pages are generated from packages/ and skills/ at build time, scripts/third-party-notices.ts
   # writes the THIRD_PARTY_NOTICES.txt it publishes, and the built site is checked with the
@@ -3006,10 +3015,22 @@ jobs:
         working-directory: packages/envoy/infra
         env:
           ENVOY_INFRA_DOCKER_PLUGIN: ${{ steps.docker-plugin.outputs.tarball }}
-      - name: The envoy-infra plugin's schema carries the version it was built with
-        run: >-
-          go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra &&
-          pulumi package get-schema /tmp/pr | jq -e '.version == "1.2.3"'
+      # The schema carries both of the things the release build stamps into the plugin: the
+      # version, and the download URL .github/scripts/repo-paths.sh derives from the repository
+      # the run is in (release-envoy-infra.yaml's "Derive the plugin's download URL" and its
+      # build step). That workflow runs on main alone, so this build is what proves the stamp
+      # before a merge, and it proves it under the name the transfer gives the repository rather
+      # than today's: a provider.go that pinned the address instead of taking the -X would still
+      # serve sjawhar/legion here and fail. ${VERSION} is Pulumi's own placeholder, filled in at
+      # install, so the URL is compared literally. The step runs in the module, so the script is
+      # reached by its path from the repository root, and the binary goes under $RUNNER_TEMP as
+      # the docker provider's tarball above does.
+      - name: The envoy-infra plugin's schema carries the version and the download URL it was built with
+        run: |
+          url=$(GITHUB_REPOSITORY=cybermonklabs/legion ../../../.github/scripts/repo-paths.sh plugin_download_url)
+          go build -ldflags "-X main.version=1.2.3 -X 'github.com/sjawhar/envoy/infra/provider.downloadURL=$url'" -o "$RUNNER_TEMP/pr" ./cmd/pulumi-resource-envoy-infra
+          # shellcheck disable=SC2016 # ${VERSION} is Pulumi's placeholder, not a shell expansion
+          pulumi package get-schema "$RUNNER_TEMP/pr" | jq -e '.version == "1.2.3" and .pluginDownloadURL == "https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}"'
         working-directory: packages/envoy/infra
 
   # packages/envoy/scripts/e2e-local.sh: signed GitHub fixtures and a direct message through a real

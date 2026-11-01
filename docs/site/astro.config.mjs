@@ -13,6 +13,7 @@ import {
   viteBundleInputs,
   viteRuntimeGeneratedCode,
 } from "../../scripts/third-party-notices.ts";
+import { repoPaths } from "./repo-paths.ts";
 
 // A section's sidebar: its written pages, ordered by `sidebar.order` and then by slug, followed by
 // its generated Reference group when scripts/generate.ts has written one. Reference is a group of
@@ -102,11 +103,12 @@ function thirdPartyNotices() {
 }
 
 // Built by the docs job of .github/workflows/ci.yaml on pull requests and merge groups, and
-// built and published to GitHub Pages at https://sjawhar.github.io/legion/ by
-// .github/workflows/docs-pages.yaml on a push to main.
+// built and published to GitHub Pages by .github/workflows/docs-pages.yaml on a push to main, at
+// the address .github/scripts/repo-paths.sh derives from the repository the build runs in -
+// https://sjawhar.github.io/legion/ today (repo-paths.ts).
 export default defineConfig({
-  site: "https://sjawhar.github.io",
-  base: "/legion",
+  site: repoPaths.docs_site,
+  base: repoPaths.docs_base,
   integrations: [
     // astro-mermaid must come before Starlight so it sees the ```mermaid fences first.
     mermaid({ autoTheme: true, enableLog: false }),
@@ -114,8 +116,8 @@ export default defineConfig({
       title: "Legion",
       description:
         "Documentation for Legion, which runs coding agents on Dispatch issues; Dispatch, where those issues and every human decision live; and the Secrets Broker, which gives agents credentials a human approved.",
-      social: [{ icon: "github", label: "GitHub", href: "https://github.com/sjawhar/legion" }],
-      editLink: { baseUrl: "https://github.com/sjawhar/legion/edit/main/docs/site/" },
+      social: [{ icon: "github", label: "GitHub", href: repoPaths.repository_url }],
+      editLink: { baseUrl: repoPaths.docs_edit_base },
       sidebar: [
         { label: "Overview", items: ["index", "how-it-fits"] },
         section("Legion", "legion"),

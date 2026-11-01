@@ -1,6 +1,8 @@
 # Legion documentation site
 
-The source of <https://sjawhar.github.io/legion/>: an [Astro Starlight](https://starlight.astro.build/)
+The source of the site GitHub Pages serves this repository at, <https://sjawhar.github.io/legion/>
+today and derived from the repository the build runs in (`repo-paths.ts`, from
+`.github/scripts/repo-paths.sh`): an [Astro Starlight](https://starlight.astro.build/)
 site covering Legion, Dispatch and the Secrets Broker. The `docs` job of `.github/workflows/ci.yaml`
 builds it on every pull request and merge group whose change its `docs` filter matches.
 `.github/workflows/docs-pages.yaml` builds it on every push to `main` whose change the same list

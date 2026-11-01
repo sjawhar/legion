@@ -682,6 +682,8 @@ credential as `example-sessions`. The users' public keys are the placeholders `c
 and the listener's and the session user's are placeholders too: put in the ones
 `envoy-infra seed generate` printed for your users and your listener, and one whose seed you
 discarded for the session user.
+Its `pluginDownloadURL` is the address the release built into the plugin from the repository it
+ran in, `https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}` today.
 
 ```yaml
 name: envoy-nats

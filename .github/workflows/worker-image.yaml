@@ -35,12 +35,17 @@ on:
         type: string
         required: false
         default: ""
+      image:
+        description: The image repository an attest-only call attests under, which the caller read from the `image` output of its earlier build call; empty in every other call, where the build job derives it for itself
+        type: string
+        required: false
+        default: ""
     outputs:
       ref:
-        description: The pushed image, pinned by digest (ghcr.io/sjawhar/legion-worker@sha256:…)
+        description: The pushed image, pinned by digest (the `image` output below, then @sha256:…)
         value: ${{ jobs.build.outputs.ref }}
       image:
-        description: The pushed image's repository (ghcr.io/sjawhar/legion-worker)
+        description: The pushed image's repository, which the build job derives from $GITHUB_REPOSITORY with .github/scripts/repo-paths.sh
         value: ${{ jobs.build.outputs.image }}
       digest:
         description: The pushed image's digest (sha256:…)
@@ -78,10 +83,6 @@ on:
 permissions:
   contents: read
   packages: write # ghcr.io push
-
-# The image the build pushes and the attest job attests a digest of.
-env:
-  IMAGE: ghcr.io/sjawhar/legion-worker
 
 jobs:
   build:
@@ -136,6 +137,17 @@ jobs:
           ref: ${{ env.BUILT_SHA }}
           # This job never pushes with git.
           persist-credentials: false
+
+      # The image this build pushes and whose digest attest attests, derived from
+      # $GITHUB_REPOSITORY rather than written here, so moving the repository to another owner or
+      # name moves the image with it (.github/scripts/repo-paths.sh). It is derived here, in the
+      # build job, and not once at the workflow level, because the attest job below holds
+      # `id-token` and `attestations: write` and so runs no script at all
+      # (.github/scripts/check-release-credentials.sh); it reads the repository from this job's
+      # `image` output, or from the caller's `image` input when this job skipped. $GITHUB_ENV
+      # gives the steps after this one the same `${IMAGE}` they always read.
+      - name: Derive the image repository
+        run: echo "IMAGE=$(.github/scripts/repo-paths.sh worker_image)" >> "$GITHUB_ENV"
 
       # The sha- tag alone: release.yaml's worker_image_release adds the legion version tag to this
       # image's digest once publish has released that version, so a version tag still means
@@ -273,6 +285,12 @@ jobs:
   # `--cert-identity …/worker-image.yaml@refs/heads/main`, `--source-ref refs/heads/main`) refuses
   # it. release.yaml's own attest-only call attests only the digest its build-only call pushed in
   # the same run. `!cancelled()` lets it run past the build job an attest-only call skips.
+  #
+  # The subject's repository is the build job's own `image` output, which that job derived with
+  # .github/scripts/repo-paths.sh; this job holds `id-token` and `attestations: write`, so it runs
+  # no script of its own to derive it. In an attest-only call the build job skipped and has no
+  # output, so the caller passes the `image` its earlier build call reported (release.yaml's
+  # worker_image_attest, from needs.worker_image.outputs.image) and that value wins here.
   attest:
     needs: build
     if: ${{ !cancelled() && github.event_name != 'pull_request' && !inputs.skip_attest && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.attest_digest != '')) }}
@@ -286,5 +304,5 @@ jobs:
     steps:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-name: ${{ env.IMAGE }}
+          subject-name: ${{ inputs.image || needs.build.outputs.image }}
           subject-digest: ${{ inputs.attest_digest || needs.build.outputs.digest }}
