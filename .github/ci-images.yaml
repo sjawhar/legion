@@ -51,11 +51,17 @@ images:
     tag: pgvector-2358fcba
     digest: sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
 
-  # NATS: the `services:` NATS of the pi-envoy and pi-legion jobs, both testnats.Image constants,
-  # the envoy-client job's pre-pull, nats-server.ts and scripts/e2e/lib/nats-stream.test.ts.
+  # NATS 2.10: the envoy-client job's pre-pull, nats-server.ts, scripts/e2e/lib/nats-stream.test.ts
+  # and packages/daemon's testnats.Image.
   - upstream: docker.io/library/nats:2.10
     tag: nats-2.10-5498ba57
     digest: sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+
+  # NATS 2.15.1, the version the listener requires and the deployment runs: the `services:` NATS of
+  # the pi-shared and pi-legion jobs, and packages/envoy's testnats.Image.
+  - upstream: docker.io/library/nats:2.15.1@sha256:023a08c46caa5aff878fb86841187bebfdad9a6e3c552ba5c1a1e18938bbf88a
+    tag: nats-2.15.1-023a08c4
+    digest: sha256:023a08c46caa5aff878fb86841187bebfdad9a6e3c552ba5c1a1e18938bbf88a
 
   # The NATS hub the two-image natslive matrix runs against: testnats.HubImage.
   - upstream: docker.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6
