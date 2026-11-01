@@ -2,24 +2,18 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-562",
-  "previousHandoff": "412024b409042417ed18b35cec0c75112a02e46a",
-  "completed": "2026-11-01T11:14:04Z",
-  "round": 21,
-  "headReviewed": "ec0a16ae1aeb8c4bc5463ce5036a19d8b158d43a",
-  "codeHead": "e7f4a1f4a385b1e3c0165685805cfdc3eb385198",
-  "decision": "changes_requested",
+  "previousHandoff": "61aedbdab31fd5484f3cbca7ed7ced9efca0ba9d",
+  "completed": "2026-11-01T14:11:36Z",
+  "round": 22,
+  "headReviewed": "79859691a509c918a0baab051f73d58ef0963ad3",
+  "codeHead": "d7db0bfdc47ee3dff4d7fb0705f35443aca9657c",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "scope": "Merge e7f4a1f4 of main 225f2bea (#2391), by the INFRA-63 architect's scope; then, at the architect's direction, the flake CI run 41293708339 met.",
-  "mergeChecks": "Hold. With migration numbers normalised the PR's diff differs from round 20's approval only in comments of cmd/dispatch/main.go, store/pool.go and internal/pglisten/listener.go and text of AGENTS.md and cmd/dispatch/README.md; main.go's resolution drops no non-comment line; 0158-0161 match the old 0151-0154 byte for byte apart from the number (up.sql and census.sql); main ac501976's highest is 0157, no version shared and no duplicate; pool.go and pglisten keep main's code (listenerPoolSize unchanged); go vet clean on store, pglisten, cmd/dispatch.",
-  "ci": "Run 41293708339 attempt 1 at e7f4a1f4: lint, typecheck, test, envoy-go, pr-title success; dispatch-multiprocess (job 124811971054) failure on TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy.",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/cmd/dispatch/multiprocess_test.go",
-      "description": "startGitHubFake answers [] to every path, so a delivery reconcile pass (first pass drawn over [0, 5 min) by duty.RunJittered) landing on the standby inside the test's window logs 'GitHub App permission check ... decode installation: json: cannot unmarshal array' and fails the test. Fix: answer each path the reconcile and permission check read with GitHub's shape (installation object with actions and pull_requests read for /repos/{o}/{r}/installation, token object for /app/installations/{id}/access_tokens, the search and actions run/job listings' object shapes); failing-first proof by forcing the first pass into the window via a test hook or zero jitter, not a sleep; 20/20 under -tags multiprocess with counts in the PR body; no production change unless reconcile.go mishandles a real GitHub answer, told to the architect first."
-    }
-  ],
-  "threads": "No open thread."
+  "scope": "Narrowed by the INFRA-63 architect: only the round-21 fix (d7db0bfd), then ci-ok and pr-title.",
+  "checks": "startGitHubFake answers in GitHub's shapes (installation object with actions and pull_requests read, token mint 201, installation repositories, GraphQL search, workflow run and job listings) and 404 otherwise; DISPATCH_TEST_RECONCILE_AT_START is refused without DISPATCH_TEST_HOOKS=1 (main.go parse, settings_test subtest PASS here), unset leaves Reconcile.Run on the unchanged duty.RunJittered, and the PR body's risk list names it; the failing-first proof (old fake fails with CI's 'decode installation' error) and 20 of 20 are in the PR body; go vet (with and without -tags multiprocess) and gofmt clean.",
+  "ci": "CI run 41303159329 attempt 1 at head SHA d7db0bfd success: ci-ok job 124872494479, lint, typecheck, test, envoy-go, dispatch-multiprocess; PR Title run 41303159396 success. Commits above d7db0bfd touch only .legion/INFRA-562/.",
+  "threads": "No open thread.",
+  "keyFindings": []
 }
