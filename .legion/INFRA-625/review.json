@@ -2,30 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-625",
-  "completed": "2026-11-01T06:30:00Z",
-  "round": 4,
-  "reviewedCodeHead": "66d570f51739c269f6178ee575e292d157688621",
+  "completed": "2026-11-01T11:53:00Z",
+  "round": 5,
+  "reviewedCodeHead": "a7c72b55e772",
+  "codeUnderReview": "3c7c64c189 plus the reviewer's prose commit a7c72b55",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 6,
-  "ciRead": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. Run 41277300426 at 66d570f5 (the commit the branch holds; run 41275754608 on the dropped c25b344b was cancelled and does not count): at 06:2xZ 2 jobs done, 27 queued, dispatch, dispatch-memory, lint and test among them. Compare 66d570f5...58fe2f68: handoffsOnly true. A request for changes does not wait on CI.",
-  "thermonuclear": "Both run once at 66d570f5: deep-review CHANGES (1 medium, 1 minor), code-quality CHANGES (1 medium, 6 low/nit). Both reproduced the residual D3 race independently against a test Postgres with one scratch seam before applyRoom's loadsBegun read.",
-  "roundThreeFindings": "H1 holds (useRenderedMarkdown.tsx:467, running flag; the fresh-mount row fails on b5f010eb's code with 2,793 characters of loose text). M1 holds (kept waiters; expire/giveUp/dropAbandoned check anyoneIsWaiting; row fails on pre-fix code); its doc overstated and I fixed it. D3 stands in part: refusals now fail their own load on the load's goroutine, and ErrServerShutdown/ErrInvalidRoomName/ErrTooManyRooms and errors from a mutate that ran are filtered; but applyRoom/failUnfinishedLoad still find the load by room name after Apply returns, and the after/number numbering matches the next load when the failing load's record was already dropped (after=0) or when a waiter joined a load that then panicked. Minors: restore row, write-row spec split and docblock, keepAPostedParse doc, one cap formatter, stale comments - all hold.",
-  "mergesChecked": "ca076c5d keeps main's two-phase load (takeLoadedState/applyLoadedState, LoadDoc returning nil data) and this PR's header check; a9f93ce9 imports only; 66d570f5 takes main's accept/edit/mark signatures plus this PR's backs argument and main's flattenedTextSize. Nothing of either side lost or applied twice.",
+  "minor": 0,
+  "ciRead": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. Run 41288413692 at a7c72b55 (the run at 3c7c64c1, 41285902474, was cancelled by that push). Attempt 1: lint, typecheck, test, dispatch-memory and every other lane green; dispatch red in 'Test dispatch dashboard', job 124798054818: MarkdownBody.test.tsx:1241 'rebuilds a body holding a picture…' expect(pendingMark).toBeNull() received \"true\", so Playwright never ran. I re-ran the failed job once (attempt 2, job 124821220790): unit tests and 'Browser-test dispatch dashboard' green, 1512 passed, 34 skipped, none flaky; among them in WebKit and Firefox the page-parsed rows ('49 list markers … just under the worker's threshold', '500 list items, just under …'), the write row (heavy-document-writes, chromium, ratio and 1,000 ms bound), and the streamed-turn row in all three engines.",
+  "thermonuclear": "Both run once at 3c7c64c1: deep-review APPROVE (2 minor), code-quality CHANGES (3 low). Every finding was prose; fixed by the reviewer in a7c72b55.",
+  "roundFourFindings": "D3 holds: LoadDoc's own defer recovers a panic and calls failRoomLoad on the load's goroutine before ygo's barrier closes; applyRoom, failUnfinishedLoad, roomLoadWaitedOn, roomLoadNumber, loadsBegun and the numbering are deleted; the ten call sites are s.srv.Apply as on main. TestALoadThatPanicsFailsItsRoomWhereThePanicIsMet, TestLoadFailureMakesDocumentServiceUnavailable and TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable pass against a test Postgres (reviewer's run, with DISPATCH_TEST_DATABASE_URL). The three minors hold: the write spec runs in chromium only, sawAFrameText is gone and the streamed-turn row is its own spec, and the fragment's '53 MiB where it allocated 98' is measured against main with #2522 (deep review re-measured 44 % less on a one-paragraph document).",
   "proseFixedByReviewer": [
-    "worker-queue.ts wait() doc and packages/dispatch/AGENTS.md:548: a kept place does take a page-parse answer when a live waiter shares the key; only a job that kept places alone wait on runs no page parse.",
-    "INFRA-625-one-word-edit-allocates-less.yaml: dropped the quote-finder clause, which is main's #2522 (its own fragment records it).",
-    "pmdoc/find.go buildFlattenedText comment credits sjawhar/legion#2522, not #2519.",
-    "MarkdownBody.test.tsx:1464: about 2,800 characters, not 20,000."
+    "heavy-bodies-page.ts docblock: only the streamed-turn spec reads loose text.",
+    "heavy-streamed-turn.e2e.ts header: 'Heavy bodies drawn where a reader only opens them', not 'The same bodies'.",
+    "heavy-document-writes.e2e.ts: the 8,000 items and the bracket run are the first document write of their shape, not the first parse: heavy-bodies.e2e.ts creates comments holding the same bytes first on the same server.",
+    "websocket.go LoadDoc: the panic error no longer repeats 'loading room %q', which ygo already wraps (server.go:1916).",
+    "PR body: removed the D3-window bullet, the load-identity sentence naming deleted code, and the old two-count annotation."
   ],
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/websocket.go", "description": "Residual D3: applyRoom/failUnfinishedLoad still blame a load found by room name after Apply returns; names() matches load.after == waited.after, so a caller whose load's record was already CompareAndDeleted (after=0 for the next) or that joined a load that panicked can fail the next load's room and drop its record. Both reviewers reproduced it. The only failure left for this machinery is a LoadDoc panic (LoadDoc hands ygo nil data): recover it inside LoadDoc and failRoomLoad on the load's own goroutine, then delete applyRoom's failure branch, failUnfinishedLoad, roomLoadWaitedOn, roomLoadNumber, loadsBegun, number/after and the test hook; the ten call sites go back to s.srv.Apply."},
-    {"severity": "minor", "file": "packages/envoy/.changes/unreleased/INFRA-625-one-word-edit-allocates-less.yaml", "description": "'about a third less' was measured against a base #2522 has since changed; re-measure against main or drop the figure."},
-    {"severity": "minor", "file": "packages/dispatch/e2e/heavy-document-writes.e2e.ts", "description": "The spec drives no browser but runs in three projects against one server, so the 'first write of its shape in the server process' sentence and annotation are false in the second and third; run it in one project."},
-    {"severity": "minor", "file": "packages/dispatch/e2e/heavy-bodies.e2e.ts", "description": "The sawAFrameText guard always passes (every fresh mount shows the first frame's text before any paint); and the file is 1,059 lines again with the live-view row; move that row to its own spec."},
-    {"severity": "minor", "file": "packages/dispatch/web/src/features/refs/worker-queue.ts", "description": "Doc said a kept place is left unanswered by a deadline; fixed by the reviewer. The two-predicate shape (kept flag plus waiters.length) is the quality review's optional simplification."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/find.go", "description": "Credited main's #2522 work to #2519; fixed by the reviewer."},
-    {"severity": "minor", "file": "(PR body)", "description": "Not proven / risk lacked the residual D3 window; Look at first and Thermo overstated; fixed by the reviewer in the body."}
+    {"severity": "important", "file": "packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx", "description": "The sliced-paint rows race the paint's done(): the last batch ends its task on 'page', and done() (which clears data-markdown-pending) runs in the next setTimeout task, so a waitFor on the item count can pass while the element is still pending and the next line's expect(pendingMark).toBeNull() reds. It red the dispatch lane at a7c72b55 (job 124798054818, :1241) and passed on re-run. Thirteen rows share the pattern (waitFor on topItems/topParagraphs, then pendingMark null at :1212, :1235, :1268, :1310, :1353, :1383, :1420, :1425, :1477, :1558, :1622, :1637, :1656). Wait for the settled state inside the waitFor (pending cleared and the count) in each."}
   ]
 }
