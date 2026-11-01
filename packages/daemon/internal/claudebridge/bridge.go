@@ -609,6 +609,15 @@ func answerAll(deliveries []delivery, err error) {
 // with the bridge's own sequence (turnoutcome.go): a step the provider refused is the turn
 // refused, and a step that ran clears what an earlier failed one left, since the provider
 // answered after all.
+//
+// Which turn a delivery belongs to is decided by the queue as this result reads it, and by
+// nothing else. A delivery already queued is sent as the next step of this turn, so a refusal
+// before it is not that turn's outcome; one that arrives after this result starts a turn of its
+// own, and the refused turn is reported as it ended. A delivery in flight — written to the inbox
+// and not yet taken from the loop's channel — is therefore the second case, deliberately: the
+// bridge reports the turn it actually ended rather than waiting to see whether something more is
+// on its way, since such a wait would hold every refused turn open for as long as the inbox might
+// still speak, and the daemon's count of refusals is of turns that ended.
 func (b *bridge) result(subtype string, isError bool, errs []string) {
 	if b.seeding {
 		b.seeding = false

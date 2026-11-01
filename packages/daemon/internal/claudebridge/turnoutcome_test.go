@@ -135,12 +135,53 @@ func TestOnlyTheStepsTheProviderRefusedAreReportedRefused(t *testing.T) {
 		t.Fatalf("the turn Claude Code's own turn cap ended was reported %+v, want it clean", report)
 	}
 
-	r.prompt("p2", "fail-then the CI is green")
+	// The second turn's step is refused with a delivery already queued behind it, so the bridge
+	// sends that delivery as the next step of the same turn and the turn ends on a step that ran.
+	// The order is the test's to fix, not a race to be hoped for: the delivery goes in first, the
+	// bridge's own log says it is queued, and only then is the refusal let go.
+	inbox := r.dialInbox()
+	r.prompt("p2", "fail-when go")
 	r.expect("agent_start", nil)
+	inbox.deliver("ev1", "say the CI is green")
+	r.logged("Envoy delivery ev1 waits for the next step")
+	r.release("go")
 	r.untilTurnEnds()
 
 	if report := r.reported(); report.Outcome != claim.TurnClean || report.Message != "" {
 		t.Fatalf("the turn whose last step ran was reported %+v, want it clean: the provider answered after all", report)
+	}
+}
+
+// The other order, which is the rule the one above could be mistaken for: a step the provider
+// refused with nothing queued behind it ends its turn, and that turn is reported refused. A
+// delivery that arrives after it starts a turn of its own rather than continuing the one that
+// ended, and the step that runs there is a turn of its own, reported clean — which is what clears
+// the refused run the daemon counts (bridge.go's result).
+func TestARefusalWithNothingQueuedEndsItsTurnAndTheNextDeliveryIsANewOne(t *testing.T) {
+	r := newReportingRig(t, "-p", "--resume", sessionID)
+	inbox := r.dialInbox()
+
+	r.prompt("p1", "fail-when now")
+	r.expect("agent_start", nil)
+	r.release("now")
+	r.untilTurnEnds()
+
+	refused := r.reported()
+	if refused.Outcome != claim.TurnRefused || refused.Sequence != 1 || refused.Message == "" {
+		t.Fatalf("the refused turn was reported %+v, want the run's first turn refused with the provider's words", refused)
+	}
+
+	inbox.deliver("ev1", "say the CI is green")
+	r.expect("agent_start", nil)
+	for r.next()["type"] != "agent_end" {
+	}
+
+	clean := r.reported()
+	if clean.Outcome != claim.TurnClean || clean.Sequence != 2 || clean.Message != "" {
+		t.Fatalf("the delivery's turn was reported %+v, want the run's second turn clean: it is a turn of its own, and it clears the refusal", clean)
+	}
+	if answer := inbox.answer(); !answer.OK || answer.ID != "ev1" {
+		t.Fatalf("the inbox answered %+v, want ev1 taken", answer)
 	}
 }
 
