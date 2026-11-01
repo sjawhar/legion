@@ -7,8 +7,7 @@ description: |
 model: ["@review"]
 # bash reads the diff, the events and the head; the Constraints hold it to reads.
 tools: read, glob, grep, bash, todo
-# The reviewer waits for the findings.
-blocking: true
+# No blocking field: this pod runs Oh My Pi with async jobs on, so the reviewer `wait`s for it.
 color: red
 ---
 
