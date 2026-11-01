@@ -51,7 +51,7 @@ func (d *DPoPProofs) CheckAndSetDPoPProofUsed(ctx context.Context, jti, _, _, _,
 // Sweep deletes every record whose proof can no longer be presented, on the expiry index, and
 // answers how many it deleted. A record lives for the proof's acceptance window and a minute, so
 // what one pass finds is the proofs of the last few minutes rather than a day's worth; the
-// maintenance pass runs it beside the idempotency-key sweep (api.RunSuggestionOutcomeSweep).
+// maintenance pass runs it beside the idempotency-key sweep (api.RunMaintenanceSweep).
 func (d *DPoPProofs) Sweep(ctx context.Context) (int64, error) {
 	tag, err := d.pool.Exec(ctx, `delete from dpop_proofs where expires_at <= now()`)
 	if err != nil {

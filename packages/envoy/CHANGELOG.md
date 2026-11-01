@@ -1,5 +1,189 @@
 # Changelog
 
+## [26.1.0] - 2026-11-01
+
+### Added
+
+- A Google Compute Engine VM logs in to the secrets broker and enrolls itself with the identity
+  token its metadata server signs, with no stored credential and no person approving it. With
+  `BROKER_GOOGLE_OIDC_AUDIENCE` set, the broker discovers Google's issuer at startup (one
+  `google vm identity` log line), and `POST /v1/launcher-credentials/token` also takes a VM's
+  token (`format=full`) whose account `BROKER_VM_SERVICES` binds, from the project
+  `BROKER_VM_PROJECTS` names and with an instance name `BROKER_VM_INSTANCES` matches; anything else
+  is `403 ACCOUNT_NOT_LISTED` naming what did not match, or `401 TOKEN_INVALID`. Each token goes to
+  the one verifier whose issuer it names, so a VM's token never makes the broker read the
+  cluster's keys, nor a cluster token Google's. Each VM holds its own launcher credential and its
+  own `vm` enrollment, keyed by `<account>@<project>/<zone>/<instance id>`, so VMs that share an
+  account never move or end each other's. No launcher credential ends a VM's enrollment
+  (`DELETE /v1/enrollments/{id}` is `403 VM_ENDS_BY_LOGIN_REVOKE`), so a token copied off the VM
+  cannot end or take over its live enrollment; revoking the VM's machine login, or its lease,
+  ends it. A revoke does not revoke the copied token, which logs in again within its hour; taking
+  the VM out of the fleet's settings ends that. `POST /v1/enrollments` takes kind `vm` with `vm_token`
+  (`403 VM_IDENTITY_MISMATCH`, `403 VM_TOKEN_EXPIRED`), every renewal of one carries the VM's
+  current token (`403 VM_TOKEN_REQUIRED` without it), and a VM service's secrets go to its own VMs
+  at once. A VM its fleet's settings no longer allow (its account dropped, or another project or
+  instance-name glob configured) has no identity from then on: every call it signs is refused
+  `401`, as an ended session's is, so it releases no grant it holds, opens no request and renews
+  nothing, and a person's approval of a request it left pending grants nothing; its launcher
+  credential no longer authenticates (`401 LAUNCHER_INVALID` on a new enrollment), and its next
+  login is `403 ACCOUNT_NOT_LISTED`. On the client, `agent-secrets enroll --vm --service <name>
+  [--audience <aud>] [--out <dir>]` fetches the token, logs in with a key it keeps in memory,
+  enrolls `key.pem`, and prints the enrollment id; run again over the same directory it keeps
+  `key.pem` and extends the lease. `agent-secrets renew --vm` renews with a fresh token each time
+  and stops (exit 76) on `VM_TOKEN_REQUIRED`, `VM_NOT_LISTED` or `ENROLLMENT_NOT_LIVE`. Both ask
+  the metadata server directly, never through a proxy `HTTP_PROXY` names, since the token logs
+  in as the VM. With no
+  Google audience nothing changes: kind `vm` is still `400 INVALID_KIND`, and the Kubernetes and
+  GitHub paths are untouched.
+
+## [25.2.0] - 2026-11-01
+
+### Changed
+
+- A Dispatch document edit repeats less work for the same answer: a tree the edit touches is
+  validated once for the batch's reads that take its validated value rather than once a read,
+  every quote of a batch is resolved against one flattened text of its tree, the document-level
+  blocks a write changed are found in one walk and read by every refusal that needs them, and the
+  quote finder's text is built in buffers of its own size.
+  The reads of a write transaction's fork before and after its write go through the lock-free
+  reader, without ygo's ToDelta, and the renders of the write's own operation take the tree it
+  validated rather than validating it again. A conditional edit encodes its tree once: the token
+  its precondition check computed is the token its batch starts from. Every answer, token,
+  version, anchor and CRDT update is what it was.
+
+## [25.1.0] - 2026-11-01
+
+### Added
+
+- Dispatch takes a fifth credential: an access token the secrets broker issued, presented under
+  RFC 9449's DPoP scheme (`Authorization: DPoP <token>` with a `DPoP:` proof header). The server
+  decides a request by its authentication scheme before it reads any token, so such a
+  presentation is never retried as a bearer and the bearer credentials are untouched. Dispatch
+  asks the broker what the token is and holds the caller to the key it is bound to, and the
+  caller writes as the session that token names, acting for the person it names: a body with no
+  `actor` is accepted, one naming that same session is accepted and its `origin` kept, and one
+  naming any other writer is `403 ACTOR_SESSION_MISMATCH` naming the session the token carries.
+  A token scoped to one project carries that project on every actor it writes, set from the
+  token and never from a request body; one scoped to its person carries none. Each refusal has
+  its own code and none repeats the token: `401 BROKER_TOKEN_NOT_ACTIVE`,
+  `401 BROKER_TOKEN_PROOF_INVALID`, `401 BROKER_TOKEN_KEY_MISMATCH`,
+  `401 BROKER_TOKEN_NOT_A_SESSION` for a live token that is no session's credential — one the
+  broker names no session or person for, or that it issued to a client other than the exchange,
+  which a machine login's own access token is — so a request body can never name the session a
+  credential does not prove, `429 BROKER_TOKEN_RATE_LIMITED` with the wait in `Retry-After`,
+  and `503 BROKER_UNAVAILABLE` for
+  a broker that answered nothing, so a caller comes back rather than reading its token as
+  refused. The verifier is built from settings Dispatch already has —
+  `DISPATCH_AGENT_SECRETS_URL`, `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` and
+  `DISPATCH_SERVER_URL` — and adds none; a deployment with no broker has no such credential,
+  and a DPoP presentation there is the `401 UNAUTHORIZED` any Authorization header that is not
+  a bearer has always been.
+- The broker: a pod exchanges its projected token (RFC 8693) under a session name only while a
+  registration says that pod may. A deployment's own daemon writes it as it starts the pod —
+  `POST /v1/oauth/exchange/pod-sessions`, `{"pod_token", "session"}`, authenticated by the
+  account `BROKER_SERVICE_LOGINS` lets log in as a service, the list it already holds for its
+  token login — and the exchange reads it in its own transaction, asking the cluster nothing. The
+  session name still belongs to the listed service account, so a registered successor keeps what
+  its predecessor held and a relaunched pod is not locked out; what the registration adds is the
+  one thing the claim on a name cannot do, which is tell two pods of one account apart, so a pod
+  naming a session of another issue of its own project is now `invalid_grant` naming that
+  session. An entry that fixes a session needs no registration: its name is the configuration's
+  and every pod of that account writes under it, so the replacement pod of a fixed-session
+  account and the next run of a fixed-session workflow are answered as before. A registration is
+  kept 24 hours past its last write, the longest a presented pod token can live, and the
+  authority is the registrar's: a daemon that stops registering costs its pods their writes
+  within that window.
+- Dispatch: a credential that names one project now writes that project and nothing else. Every
+  mutating route declares what its write belongs to — a project's (the issue-key, project-key,
+  artifact-id, ask-id and comment-id rows, and the message rows that carry an issue), a project
+  the body names (the issue create, the one write whose address names no project, whose handler
+  makes the same check the moment it has read one), the
+  calling session's (an agent conversation's own artifact and messages, the two routes a session
+  answers its own delivery on, and the caller-private `me` rows), or the deployment's (the
+  project create, the repository-to-project map, the delivery settings and session groups, the
+  broadcast, and the credential and machine-login decisions) — and two checks in front of every
+  one of them decide it. The project check resolves the project the addressed object belongs to
+  and lets through only a target of the caller's own project: another project's, one that
+  belongs to no project, and one that resolves to nothing at all (no such row, or an id
+  Postgres will not read as a uuid) are each `403 PROJECT_SCOPE`, naming the project the
+  credential covers and the project the write belongs to where one resolved, and nothing of the
+  credential; a deployment-wide write is `403 PROJECT_SCOPE_DEPLOYMENT`, naming that project and
+  the route. Refusing a target it cannot resolve is what keeps the check closed, and it says
+  nothing about which ids exist outside the caller's project. The session check holds the rows
+  whose path names a session — an agent conversation's writes and the caller's own agent view
+  state — to the session the caller's credential proved: another session's is
+  `403 SESSION_SCOPE`. Both are a no-op for every credential that carries no project and proves
+  no session — a browser cookie, a personal agent token, a Kubernetes service-account token, the
+  shared token, and an access token the secrets broker scoped to a person rather than to one
+  project — so no caller that exists today is affected; that is the rule and not a transitional
+  measure.
+- The broker ends one of its own access tokens on demand: `POST /v1/oauth/revoke`, OAuth 2.0
+  token revocation (RFC 7009), whose form names the `token`, optionally which kind to look for
+  first (`token_type_hint`), and the `client_id` it was issued to —
+  `dispatch-token-exchange` for a pod's or a workflow run's exchanged token, the machine-login
+  client for a dev box session's. It is the only way an exchanged token can be ended before its
+  own expiry, since such a token carries no credential id for a credential revocation to reach.
+  The route takes a listed caller's own Kubernetes ServiceAccount token and needs the power that
+  relays a person's decisions, so `dispatch` reaches it and `listener`, listed to read a token
+  back, is `403 ACCOUNT_LACKS_POWER`; a token issued to another client than the request names is
+  `400 unauthorized_client`, and a token the broker never issued is `200` exactly as a token it
+  just ended is. A revoked access token is `active: false` to `POST /v1/oauth/introspect` from
+  the moment the revocation commits, so a resource server that cached an affirmative
+  introspection refuses it within that cache's life and no longer. Ending an access token ends
+  that token alone: the machine login behind it still refreshes, and only a caller presenting
+  that login's own refresh token ends the whole family and the login with it.
+
+### Changed
+
+- The broker: a caller's name in `BROKER_API_ACCOUNTS` now decides which of its named-caller
+  routes that ServiceAccount reaches, where being listed once reached all ten. Each such route
+  declares the power it needs — reading one of the broker's access tokens back
+  (`POST /v1/oauth/introspect`), or relaying a person's decisions (the nine approval, denial,
+  revocation and listing routes Dispatch's server calls) — and the broker's own table says which
+  powers each caller name carries: `dispatch` both, `listener` introspection alone. A listed
+  caller reaching a route its name does not carry is `403 ACCOUNT_LACKS_POWER`, naming the caller
+  and the route; an account the list does not name at all stays `403 ACCOUNT_NOT_LISTED`. A
+  `BROKER_API_ACCOUNTS` entry whose caller name the broker does not know refuses the boot, naming
+  that name and the names it knows, so a typo cannot quietly produce a caller that reaches
+  nothing.
+- `GET /api/v1/whoami` answers `session` and `project` beside `owner` and `service`: the session
+  the caller's credential itself proved, which only an access token the secrets broker issued
+  does, and the one project key that credential may write. Both are null for every other
+  credential, which proves neither, and every existing field keeps its meaning.
+
+### Removed
+
+- The document editor's live connection (`GET /ws/doc/{room}`) no longer takes a bearer. It was
+  a second, weaker door into Dispatch: the shared agent token alone opened it, and the acting
+  session came from a header the caller wrote. The socket now resolves a person through the
+  identity service and nothing else, which is how the browser has always connected (a
+  same-origin cookie); no caller outside Dispatch's own tests presented a bearer to it.
+
+## [25.0.2] - 2026-10-31
+
+### Fixed
+
+- Dispatch's `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES` descriptions now state the real bound between the warning `envoy nats reconnect hook failed; it is retried` and the error `envoy nats reconnect hooks have not succeeded`: Dispatch reconciles the stream on its first connection, retrying until that reconcile succeeds, the minute runs from that first connection to NATS, not from the first retry, and `stall_ms` on both lines is how long the reconcile has been due.
+
+## [25.0.1] - 2026-10-31
+
+### Fixed
+
+- A document whose formatted text a write or a settlement repair had partly removed no longer reads back with its formatting changed (`*x*y` as `*xy*`) in a read, a version or after its room reloads. Since the ygo pin moved to v1.54.1-sami.1, ygo cleaned up the format markers after every update it applied as remote, and the room's reads and the fold of its stored history (which compaction stores) applied the room's own writes that way, where the room itself had run no cleanup. Dispatch's ygo pin moves to v1.54.1-sami.3, which adds a switch to turn that cleanup off (reearth/ygo#369, open upstream), and every copy of a room now replays the room's writes with it off. A room's load also applies its stored history with the cleanup off, so a loaded room holds the state its history holds. The room still cleans up after a browser's edit and a write's publish, and stores that cleanup.
+- A comment, suggestion or ask written on a document keeps its anchor however long the composer
+  stays open. The provisional mark a composer writes is no longer swept while its author still
+  has the document open, and its one-minute life is counted from the author's last presence, so
+  an idle reconnect no longer costs the mark while a tab that closes still loses a stray one a
+  minute later. Send writes the mark again over the reader's own words when it is gone anyway,
+  then sends once more under a key of its own: it finds them by the mark itself, by the text
+  around them in the block they were selected in, or by the one reading the whole document
+  surrounds the same way, a selection that runs across a paragraph break included. Words that
+  read in more than one place with nothing to tell them apart attach nothing, and each refusal
+  says which case it is - the words were changed or deleted, they read elsewhere but not where
+  they were selected, the text around them changed, they read alike in more than one place, or
+  their document is not open - and keeps the draft. An agent's client still reads the server's
+  `ANCHOR_MISSING` wording unchanged.
+
 ## [25.0.0] - 2026-10-31
 
 ### Changed
