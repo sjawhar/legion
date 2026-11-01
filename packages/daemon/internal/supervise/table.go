@@ -150,7 +150,6 @@ type RequestRegister struct {
 	Generation     uint64
 	Session        string
 	SessionFile    string
-	SessionStore   string
 	CapabilityHash []byte
 	// PluginContract is the contract the registering process's plugin declared, 0 when it
 	// declared none.
@@ -1143,7 +1142,7 @@ func spawn(m *Machine, ctx context.Context, _ Event) error { return m.revive(ctx
 // (staleRegistration): the agent that just registered is not the one that relaunch starts.
 func register(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
-	m.claim.Session, m.claim.SessionFile, m.claim.SessionStore = r.Session, r.SessionFile, r.SessionStore
+	m.claim.Session, m.claim.SessionFile = r.Session, r.SessionFile
 	m.claim.CapabilityHash = bytes.Clone(r.CapabilityHash)
 	m.claim.PluginContract = r.PluginContract
 	if r.PluginContract == m.deps.PluginContract {
@@ -1170,9 +1169,6 @@ func register(m *Machine, ctx context.Context, ev Event) error {
 func reregister(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
 	m.claim.SessionFile = r.SessionFile
-	if m.claim.SessionStore == "" {
-		m.claim.SessionStore = r.SessionStore
-	}
 	m.claim.CapabilityHash = bytes.Clone(r.CapabilityHash)
 	m.claim.PluginContract = r.PluginContract
 	if r.PluginContract == m.deps.PluginContract {
@@ -1288,28 +1284,26 @@ func treeClose(m *Machine, ctx context.Context, _ Event) error { return m.end(ct
 // disk it owns go with the separately fenced IssueSuspend, or with the tree cleanup once every
 // claim of the tree has retired. That is why a merged close leaves the implementer's pod standing:
 // its five siblings take this close and no IssueSuspend is queued (workflow/linger.go). The claim
-// ends as a tree close ends it, and the session it recorded goes first — the session is a row in
-// the session database rather than a file on any disk, so what is dropped is the record of which
-// session this claim held. Nothing of the workspace is recovered, and a later start of the issue,
-// re-entered by a person's todo, is a fresh spawn on a pod and a disk of its own. A release that
-// fails changes nothing, so the close can be asked again.
+// keeps its session id as the reaping guard's evidence but clears its resume path because the
+// volume is gone. Nothing of the workspace is recovered, and a later start of the issue, re-entered
+// by a person's todo, is a fresh spawn on a pod and a disk of its own. A release that fails changes
+// nothing, so the close can be asked again.
 func issueClose(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.release(ctx); err != nil {
 		return err
 	}
-	m.dropIssueSession()
+	m.clearIssueResumePath()
 	return m.retire(ctx)
 }
 
 // issueCloseRetired is the issue's close reaching a claim already retired (a tree's close retired it
-// with its session kept): the issue is finished, so the session goes with it — a later start of the
-// issue, re-entered by a person's todo, is a fresh one — and a claim recording none is left as it
-// is.
+// with its session kept): the issue is finished, so its resume path goes with the volume while the
+// session id remains as reaping evidence. Once its resume path is gone, it is left as it is.
 func issueCloseRetired(m *Machine, ctx context.Context, _ Event) error {
-	if m.claim.Session == "" && m.claim.SessionFile == "" {
+	if m.claim.SessionFile == "" {
 		return nil
 	}
-	m.dropIssueSession()
+	m.clearIssueResumePath()
 	return m.persist(ctx)
 }
 
@@ -1327,15 +1321,10 @@ func forgetSession(m *Machine, ctx context.Context, ev Event) error {
 	return m.persist(ctx)
 }
 
-// dropIssueSession leaves a file-backed session id as the reaping guard's
-// durable evidence but clears its resume path, so a later admission starts
-// fresh once the volume is gone.
-func (m *Machine) dropIssueSession() {
-	if m.claim.SessionStore == "pvc" {
-		m.claim.SessionFile = ""
-		return
-	}
-	m.forgetSession()
+// clearIssueResumePath leaves the session id as the reaping guard's durable evidence but clears its
+// resume path, so a later admission starts fresh once the volume is gone.
+func (m *Machine) clearIssueResumePath() {
+	m.claim.SessionFile = ""
 }
 
 // operatorClose is the operator's own close, asked of a claim through the API. TreeClosable is

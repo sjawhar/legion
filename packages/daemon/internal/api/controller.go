@@ -298,7 +298,7 @@ func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Reque
 	defer s.controllerMu.Unlock()
 	if err := m.Handle(ctx, supervise.RequestRegister{
 		Claim: launch.Claim, Generation: launch.Generation, Session: req.SessionID, SessionFile: req.OmpSessionFile,
-		SessionStore: string(s.sessionStore), CapabilityHash: capabilityHash(secret), PluginContract: req.PluginContract,
+		CapabilityHash: capabilityHash(secret), PluginContract: req.PluginContract,
 	}); err != nil {
 		s.claimFailure(w, "register", launch.Claim, err)
 		return

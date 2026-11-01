@@ -94,7 +94,6 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 		Generation:     launch.Generation,
 		Session:        req.SessionID,
 		SessionFile:    req.OmpSessionFile,
-		SessionStore:   string(s.sessionStore),
 		CapabilityHash: capabilityHash(secret),
 		PluginContract: req.PluginContract,
 	})

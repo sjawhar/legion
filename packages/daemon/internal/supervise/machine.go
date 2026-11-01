@@ -104,11 +104,8 @@ type Claim struct {
 	// A cleanup reservation closes that epoch before a later claim/launch can write or run.
 	TreeEpoch uint64
 	// Session and SessionFile are the agent's reported session id and absolute transcript path.
-	// SessionStore is where that session was registered, so a later runtime can retain a
-	// file-backed session before reaping the volume that may still hold it.
-	Session      string
-	SessionFile  string
-	SessionStore string
+	Session     string
+	SessionFile string
 	// ServingGeneration is the issue generation of the last confirmed delivery this claim retired:
 	// the run it goes on working until another delivery of a run replaces it. It is the second of
 	// the three sources a completion is attributed from (api/handoff.go): the pending delivery

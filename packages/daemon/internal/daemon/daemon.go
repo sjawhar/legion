@@ -37,7 +37,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
-	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
@@ -267,14 +266,6 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	}
 	applied, err := st.Migrate(boot)
 	if err != nil {
-		st.Close()
-		return err
-	}
-	sessionStore := "pvc"
-	if cfg.Runtime.Kubernetes != nil && cfg.Runtime.Kubernetes.SessionStore.Kind != "" {
-		sessionStore = string(cfg.Runtime.Kubernetes.SessionStore.Kind)
-	}
-	if err := st.ResolveUnknownSessionStores(boot, sessionStore); err != nil {
 		st.Close()
 		return err
 	}
@@ -1487,10 +1478,6 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	if cfg.ControllerLaunch == config.ControllerLaunchDaemon {
 		keeper = newControllerKeeper(s.supervisor.ctx, s.supervisor, p.project, p.controllerRetry, s.log)
 	}
-	sessionStore := ompsessions.StoreVolume
-	if cfg.Runtime.Kubernetes != nil {
-		sessionStore = cfg.Runtime.Kubernetes.SessionStore.Kind
-	}
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{
 		State: &source{
 			store:        st,
@@ -1518,7 +1505,6 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		DesignGate:         cfg.Gates.Design,
 		ControllerLaunched: keeper != nil,
 		PluginRelaunchable: p.pluginRelaunchable,
-		SessionStore:       sessionStore,
 		Stopping:           s.stopping,
 		Drained:            s.draining,
 		Decisions:          s.decided,

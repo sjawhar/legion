@@ -21,15 +21,14 @@ func at(minute int) time.Time {
 
 func tmuxClaim(token claim.Token) supervise.Claim {
 	return supervise.Claim{
-		Token:        token,
-		Project:      "legion",
-		Tree:         "LEGION-208",
-		Issue:        "LEGION-209",
-		Role:         claim.RoleImplementer,
-		Generation:   4,
-		Session:      "ses_implementer",
-		SessionFile:  "/state/sessions/implementer.jsonl",
-		SessionStore: "pvc",
+		Token:       token,
+		Project:     "legion",
+		Tree:        "LEGION-208",
+		Issue:       "LEGION-209",
+		Role:        claim.RoleImplementer,
+		Generation:  4,
+		Session:     "ses_implementer",
+		SessionFile: "/state/sessions/implementer.jsonl",
 		Locator: &runtime.Locator{
 			Runtime:     runtime.RuntimeTmux,
 			Claim:       token,
@@ -53,9 +52,6 @@ func tmuxClaim(token claim.Token) supervise.Claim {
 // Postgres hands a timestamptz back in the session's zone, not the one it was written in.
 func sameClaim(t *testing.T, got, want supervise.Claim) {
 	t.Helper()
-	if want.SessionStore == "" {
-		want.SessionStore = "pvc"
-	}
 	gotPending, wantPending := got.Pending, want.Pending
 	got.Pending, want.Pending = nil, nil
 	if !reflect.DeepEqual(got, want) {

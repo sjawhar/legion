@@ -679,14 +679,15 @@ Closing the terminal leaves the project without one, and the daemon logs
    with the providers Secret holding that key — before the daemon boots: the loader refuses the
    file otherwise ([legion.yaml](#legionyaml)). Before rolling that change, follow
    [Copying file sessions before turning it on](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#copying-file-sessions-before-turning-it-on).
-   A later reaping of an older Sandbox-owned volume refuses while its claim records a file-store
-   session; import it, or stop the claim and use `legion claims forget-session` when the session is
-   lost. An issue whose Sandbox still owns the volume of the earlier shape keeps it until its next
-   launch, which deletes that Sandbox and the volume with it and starts the issue on a pod-owned
-   disk, so stop each issue with its work pushed and start it again rather than letting a relaunch
-   choose the moment. The repository's `docs/kubernetes.md` ("Cutting over to the pod-owned disk")
-   has the procedure, the audit that finds any claim left behind, and what rolling the image back
-   needs.
+   A later reaping of an older Sandbox-owned volume reads the retiring Sandbox's pod template:
+   `OMP_SESSION_STORAGE=sql` proves that the Sandbox used the session database and permits the
+   reap. Without that setting, it refuses when the matching claim records a session; import it, or
+   stop the claim and use `legion claims forget-session` when the session is lost. An issue whose
+   Sandbox still owns the volume of the earlier shape keeps it until its next launch, which deletes
+   that Sandbox and the volume with it and starts the issue on a pod-owned disk, so stop each issue
+   with its work pushed and start it again rather than letting a relaunch choose the moment. The
+   repository's `docs/kubernetes.md` ("Cutting over to the pod-owned disk") has the procedure, the
+   audit that finds any claim left behind, and what rolling the image back needs.
 
 3. **Restart the daemon** with the new binary: stop it through your supervisor (or
    `legion stop --config legion.yaml`) and start it again. `legion restart <PROJECT>` does both in

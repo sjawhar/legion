@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -13,15 +14,19 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// claimsForReap is the runtime's durable claim record for a reaping test. A
-// claim from before session-store tracking has no SessionStore value, which is
-// conservatively a file-store session.
+// claimsForReap is the runtime's durable claim record for a reaping test. The
+// retiring Sandbox's pod template, not claim metadata, identifies SQL-backed
+// sessions.
 type claimsForReap struct {
 	*fakeStore
 	claims []supervise.Claim
+	err    error
 }
 
 func (s *claimsForReap) Claims(context.Context) ([]supervise.Claim, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
 	return s.claims, nil
 }
 
@@ -52,13 +57,15 @@ func TestReplacementRefusesToReapAVolumeWithALegacySession(t *testing.T) {
 
 func TestReplacementReapsOnlyDatabaseBackedOrEmptySessions(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		sql   bool
-		claim supervise.Claim
+		name      string
+		sql       bool
+		claimsErr error
+		claim     supervise.Claim
 	}{
 		{
-			name: "the retiring Sandbox uses the session database",
-			sql:  true,
+			name:      "the retiring Sandbox uses the session database",
+			sql:       true,
+			claimsErr: errors.New("claims are unavailable"),
 			claim: supervise.Claim{
 				Token: rootToken, Project: testProject, Tree: testTree, Issue: testTree,
 				Session: "ses_imported", SessionFile: "/sessions/ses_imported.jsonl",
@@ -67,12 +74,12 @@ func TestReplacementReapsOnlyDatabaseBackedOrEmptySessions(t *testing.T) {
 		{
 			name: "the claim records no session",
 			claim: supervise.Claim{
-				Token: rootToken, Project: testProject, Tree: testTree, Issue: testTree, SessionStore: "pvc",
+				Token: rootToken, Project: testProject, Tree: testTree, Issue: testTree,
 			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store := &claimsForReap{fakeStore: newFakeStore(), claims: []supervise.Claim{tc.claim}}
+			store := &claimsForReap{fakeStore: newFakeStore(), claims: []supervise.Claim{tc.claim}, err: tc.claimsErr}
 			g := supersededIssue(t, withOptions(func(o *Options) { o.Store = store }))
 			if tc.sql {
 				s := g.sandbox(SandboxName(workerToken))
@@ -99,7 +106,7 @@ func TestSessionVolumeReapGuardCoversEveryDeletionPath(t *testing.T) {
 	legacy := func(token claim.Token, tree, issue string) supervise.Claim {
 		return supervise.Claim{
 			Token: token, Project: testProject, Tree: tree, Issue: issue,
-			Session: "ses_unimported", SessionFile: "/sessions/ses_unimported.jsonl", SessionStore: "pvc",
+			Session: "ses_unimported", SessionFile: "/sessions/ses_unimported.jsonl",
 		}
 	}
 	refusal := func(t *testing.T, err error, g *rig, name string) {

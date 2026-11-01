@@ -5,16 +5,17 @@ import (
 	"fmt"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// guardSessionVolumeReap refuses to delete a Sandbox-owned volume when the
-// recorded claim session predates database storage. The daemon deliberately
-// has no session-database credentials, so this is a conservative decision from
-// the store recorded with the claim, rather than a lookup of the session table.
+// guardSessionVolumeReap refuses to delete a Sandbox-owned volume when its pod
+// template does not name SQL session storage and a matching claim records a
+// session. The daemon deliberately has no session-database credentials, so the
+// template is the discriminator rather than a lookup of the session table.
 func (r *Runtime) guardSessionVolumeReap(ctx context.Context, s *sandbox) error {
 	matches, ok := r.sessionVolumeClaims(s)
-	if !ok {
+	if !ok || sandboxStoresSessionsInDatabase(s) {
 		return nil
 	}
 	claims, err := r.store.Claims(ctx)
@@ -22,7 +23,7 @@ func (r *Runtime) guardSessionVolumeReap(ctx context.Context, s *sandbox) error 
 		return fmt.Errorf("read claims before reaping volume %s: %w", issueVolume+"-"+s.Name, err)
 	}
 	for _, c := range claims {
-		if !matches(c) || c.Session == "" || sandboxStoresSessionsInDatabase(s) {
+		if !matches(c) || c.Session == "" {
 			continue
 		}
 		return fmt.Errorf("refuse to reap volume %s: claim %s records file-store session %s; run legion sessions import before retrying, or run legion claims forget-session --claim %s --session %s after the claim has no live process",
@@ -68,7 +69,7 @@ func ownsIssueVolume(s *sandbox) bool {
 func sandboxStoresSessionsInDatabase(s *sandbox) bool {
 	for _, container := range s.Spec.PodTemplate.Spec.Containers {
 		for _, env := range container.Env {
-			if env.Name == "OMP_SESSION_STORAGE" && env.Value == "sql" {
+			if env.Name == ompsessions.StorageVariable && env.Value == ompsessions.SQLStorage {
 				return true
 			}
 		}

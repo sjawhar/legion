@@ -1063,11 +1063,12 @@ This runbook, and `scripts/sessions-import-pods.sh`, copy only from the release 
 A deployment on `legion-v10.1.0` to `legion-v10.2.x`, which runs one pod per issue, has no copy path: its switch to `postgres` is a drain at a pushed boundary, every tree closed, and the sessions on those volumes are lost.
 There is no way back either, and nothing to go back to: this release has no second store, and nothing copies a row out to a file.
 
-The daemon records the session store with every claim registration.
-Before it reaps a Sandbox-owned volume, including a disk-shape replacement, an issue or tree cleanup, an orphan cleanup, or a controller cleanup, it refuses when a matching claim still records a file-store session.
-The daemon does not mount the providers Secret, so it cannot inspect the session database to decide whether that file was already imported.
+Before it reaps a Sandbox-owned volume, including a disk-shape replacement, an issue or tree cleanup, an orphan cleanup, or a controller cleanup, the daemon reads the retiring Sandbox's pod template.
+`OMP_SESSION_STORAGE=sql` on a template container proves that the Sandbox stored sessions in a database, so its matching claims do not block the reap.
+Without that setting, the daemon refuses when a matching claim records a session.
+The daemon has no providers-Secret read permission or session-store connection, so it cannot inspect the session database.
 Its refusal names the claim, session, and volume; import the session with the procedure below and retry the reap, or, when the session is lost, stop the claim and [start it fresh](#starting-fresh-when-a-session-is-lost-or-wedged).
-A reap proceeds when the matching claims record database sessions or no session.
+An issue close keeps the recorded session id as this evidence but clears its resume path, so a later admission starts fresh after the volume is gone.
 
 On `legion-v10.0.0`, a deployment whose sessions are files on its tree volumes copies each one into the table once, while those volumes still exist, after the last write to any of them and before any agent writes the same session under SQL storage.
 The order below is what keeps a copy current: nothing checks, at a resume, that a row still matches the file it was copied from, so a session written after its copy would resume from the older row without a word.
