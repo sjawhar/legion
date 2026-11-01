@@ -448,7 +448,9 @@ A token's encoding (`pmdoc.EncodeTokenJSON`) is held once per call, in one buffe
 LEGION-504's concern was more copies per token and their retention, and neither holds.
 Until the handler ends the transaction with `ledger.Commit`, the transaction is in its read phase:
 it takes its locks, reads, runs every document operation's work (renders, anchor walks, version capture, reference extraction, approval carry) and its write advice, and writes nothing.
-Every document operation's write and every write of the handler's own is queued on the ledger instead (`docs.WriteStep`: `Ledger.Queue`, which in package `api` the route calls itself or through `queueExec`, `queueEvent` and `queueStampedEvent`, `api/write_queue.go`), at the point the transaction makes it, so the queue holds the transaction's statements, the document operations' and the handler's, in the order they were made, and so its events append in the order they were made.
+In such a handler every document operation's write and every write of the handler's own is queued on the ledger instead (`docs.WriteStep`: `Ledger.Queue`, which in package `api` the route calls itself or through `queueExec`, `queueEvent` and `queueStampedEvent`, `api/write_queue.go`), at the point the transaction makes it, so the queue holds the transaction's statements, the document operations' and the handler's, in the order they were made, and so its events append in the order they were made.
+Not every writing route takes these two phases:
+the delivery replies (`POST /api/v1/comments/{id}/reply`, `POST /api/v1/messages/{id}/reply`) join no ledger and write as they go, each statement at the point they make it, so the one repair they may owe first, the index of the item whose block the reply names, runs at once with them (`api.replyBlockOf`, `store.RunWrite`).
 A read that would have seen one of the transaction's own writes reads it from the ledger:
 a pending append counts toward the document's head (`withOwnAppends`), a pending anchor toward the anchors a refresh walks (`RegisterPendingAnchor`), a pending version's number, time and markdown (`NextVersion`, `Now`, `PendingVersionMarkdown`).
 `ledger.Commit` first runs the transaction's write phase:
@@ -1727,7 +1729,7 @@ Three rules enforce `targets`.
 An agent's or API write is refused when a pointer it introduces names an existing block of a type the attribute does not allow (`pmdoc.CheckBlockPointers`, called by `docs.refuseBlockPointers` from `applyLive`, `SeedText`, and `RebuildDocument` given markdown):
 a pointer is introduced when the tree before the write holds no pointer with the same typed block id, typed block type, attribute and reference (a new pointer, a changed value, or a block retyped into a type declaring the attribute, whatever the type before declared under that name), and every pointer is when there is no such tree (a new document, a repair of a tree outside the schema, a rebuild whose latest version does not read back).
 `refs.BlockTypes` reads each target's type as the block index will hold it:
-a target in the written document from the blocks the write's render leaves (the first holder of a repeated id, as `refs.IndexBlocks` takes it), any other from its current `document_blocks` rows (one query for all of a write's introduced pointers), and a target no block holds is accepted.
+a target in the written document from the blocks the write's render leaves (the first holder of a repeated id, as `refs.PlanBlocks` takes it), any other from its current `document_blocks` rows (one query for all of a write's introduced pointers), and a target no block holds is accepted.
 The refusal is `400 INVALID_OP` on `attributes` on the edit route and `400 INVALID_MARKDOWN` on every other;
 a pointer the write leaves unchanged is never refused.
 A browser's write and the block-index reconciliation are never refused, and store the pointer as any other.
@@ -1739,10 +1741,10 @@ The editor's typed-block commands refuse what they can see:
 a value that is not canonical, and a pointer to a block of their own document of a disallowed type (`packages/proof-editor/AGENTS.md`).
 
 A pointer is written in its typed block's opening line, so the extraction also finds it as a mention that typed block holds.
-`refs.IndexBlocks` writes one edge of the attribute's kind per typed block, attribute and target, and keeps the typed block's own `mentions` edge to a target only while the block holds more references to it than its pointers do (a string attribute citing it too, say).
+`refs.PlanBlocks` plans one edge of the attribute's kind per typed block, attribute and target, which `BlockIndexing.Queue` writes, and keeps the typed block's own `mentions` edge to a target only while the block holds more references to it than its pointers do (a string attribute citing it too, say).
 Prose in the typed block's children is held by those children, so a pointer and a prose citation of one target are two edges.
 A pointer whose typed block is no graph node writes no row.
-A typed block repeating the id of a typed block before it in document order holds no pointer (`pmdoc.BlockPointers`), and `refs.IndexBlocks` writes a pointer only from the id's node, the first holder of the id that the render gives an offset, when that node is the typed block holding it (its type):
+A typed block repeating the id of a typed block before it in document order holds no pointer (`pmdoc.BlockPointers`), and `refs.PlanBlocks` plans a pointer only from the id's node, the first holder of the id that the render gives an offset, when that node is the typed block holding it (its type):
 a later typed holder's values are neither edges, nor charged against the first holder's mentions.
 Only typed ids count in `BlockPointers` because only they are written in the markdown, each so that it reads back as the tree holds it (`pmdoc.TypedBlockIDAttribute`;
 a U+0000 is written U+FFFD, and `BlockPointers` lists the id so), and so are the same in the tree a version write indexes and in the markdown the reconciliation reads back (a paragraph's id is not written there): both paths write the same rows.
@@ -2089,9 +2091,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 - Answering an approval ask (humans only;
   `Request changes` requires text) writes an `artifact_reviews` row pinned to the version it names, which is the latest settled version at answer time, and appends `artifact.approved` or `artifact.changes_requested` (`{artifact_id, name, version, actor, reason, ask_id}`) on the document's owner alongside `ask.answered`.
   `POST /api/v1/artifacts/{id}/reviews` `{state, reason?}` (humans only) writes the same review from the document header, pinned to the version settled when the request arrives, and answers the open approval ask when present so the review keeps its thread.
-  Both write their row through `docs.WriteReview`, which appends the review's event and keeps that event's sequence on the owner in the row (`artifact_reviews.event_seq`, migration 0120, in the same transaction; null for a review recorded before it).
+  Both write their row through `docs.QueueReview`, which appends the review's event and keeps that event's sequence on the owner in the row (`artifact_reviews.event_seq`, migration 0120, in the same transaction; null for a review recorded before it).
   Migration 0120's deferred constraint trigger `artifact_reviews_event_seq` writes the same column at the commit of any transaction that inserted a review without it - the release before 0120, still serving during a rollout and again during a rollback, inserts every review naming no `event_seq` - from that transaction's own event of the review's type, document and version on the owner, which the owner's lock keeps the newest there until the commit;
-  a row `WriteReview` already sequenced is left as it is.
+  a row `QueueReview` already sequenced is left as it is.
   The third review is the carry (`docs.carryApproval`, `docs/approval_carry.go`, run by `writeVersionTx` after `MoveApprovalAsk` inside the version's own transaction):
   a human's answer to a decision block, when it is the whole change since the version he approved, carries his approval to the version it writes rather than leaving it stale and asking him to approve again what he just decided.
   Who answered what is the asks rows of this document (`block_artifact_id` and `block_id`, read by `loadAskBlocks` as settlement reads them, under the owner lock every version write holds), never N's block attributes:
@@ -2130,9 +2132,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   The last three take the first entry of the document's range in `artifact_reviews_by_artifact_event_seq` (migration 0120, that order per document) rather than sort its reviews, which `docs/review_order_plan_test.go` holds:
   it explains each query of `newestReviewQueries` and refuses a query constant of `docs/approval_review.go` that reads one row of the table and is not in that list.
   `created_at` is the review's transaction start, so two reviews written at once can carry it in the other order than they committed in, and the owner's lock their events take is what orders them;
-  every review committed after migration 0120 carries a sequence, whichever release wrote it (`WriteReview` writes it, and the migration's trigger gives one to a review the previous release writes), and every row without one was committed before it, so every sequenced row is newer than every unsequenced one, which `nulls last` says.
-  That holds only while `WriteReview` is the table's one writer, which `TestOnlyWriteReviewWritesReviews` (`api/review_write_guard_test.go`) enforces:
-  it refuses an insert into or an update of `artifact_reviews` in any other non-test Go file of the module, and fails when it can no longer see `WriteReview`'s own two statements.
+  every review committed after migration 0120 carries a sequence, whichever release wrote it (`QueueReview` writes it, and the migration's trigger gives one to a review the previous release writes), and every row without one was committed before it, so every sequenced row is newer than every unsequenced one, which `nulls last` says.
+  That holds only while `QueueReview` is the table's one writer, which `TestOnlyQueueReviewWritesReviews` (`api/review_write_guard_test.go`) enforces:
+  it refuses an insert into or an update of `artifact_reviews` in any other non-test Go file of the module, and fails when it can no longer see `QueueReview`'s own two statements.
   A read written outside the docs package is held to the order by `TestEveryReviewReadOrdersByReviewOrder` (`api/review_order_guard_test.go`), which refuses, over the same module scan, a statement that reads `artifact_reviews` and orders its rows by anything but `ReviewOrder`.
   `changesRequestedSince`, which asks whether anyone requested changes after an approval, compares the same way one row at a time:
   by the two sequences when both carry one, a sequenced request after one that carries none, and by `(created_at, id)` when neither does.

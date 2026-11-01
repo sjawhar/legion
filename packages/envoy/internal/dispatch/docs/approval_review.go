@@ -34,7 +34,7 @@ const ReviewColumns = `id::text, artifact_id::text, version, state, actor, reaso
 // carries a sequence is newer than every row without one, which `nulls last` says. created_at is
 // the review's transaction start, so it places two reviews only when neither carries a sequence.
 // This holds only while QueueReview is the one writer of the table: the api package's
-// TestOnlyWriteReviewWritesReviews refuses an insert into or update of artifact_reviews anywhere
+// TestOnlyQueueReviewWritesReviews refuses an insert into or update of artifact_reviews anywhere
 // else in the module. Its id is the table's column, artifact_reviews.id: a bare `id` in an order by
 // names the output column ReviewColumns selects, `id::text`, which orders the same and which no
 // index holds, so artifact_reviews_by_artifact_event_seq could not give the order whole. Every read

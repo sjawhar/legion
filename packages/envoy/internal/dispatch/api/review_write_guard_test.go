@@ -23,7 +23,7 @@ var (
 	reviewUpdateStatement = regexp.MustCompile(`(?i)\bupdate\s+(?:only\s+)?` + reviewTable)
 )
 
-// TestOnlyWriteReviewWritesReviews enforces what docs.ReviewOrder's `event_seq desc nulls last`
+// TestOnlyQueueReviewWritesReviews enforces what docs.ReviewOrder's `event_seq desc nulls last`
 // rests on: every review committed after migration 0120 carries the sequence of its artifact.*
 // event, so a row without one is older than every row with one. docs.QueueReview inserts the row
 // and then writes the sequence of the event it appended; the migration's trigger covers the
@@ -40,7 +40,7 @@ var (
 // A table name built at run time is beyond it. A test writes reviews directly on purpose -- the
 // previous release's insert, a row recorded before the column -- so test sources are outside it,
 // as are the migrations, which are SQL files the scan does not read.
-func TestOnlyWriteReviewWritesReviews(t *testing.T) {
+func TestOnlyQueueReviewWritesReviews(t *testing.T) {
 	sources := moduleSources(t, "../../..")
 	constants, err := stringConstants(sources)
 	if err != nil {
