@@ -519,9 +519,13 @@ different question than the one you asked.
   green on a developer's kernel. A whole block of such tests failing in a pod is that one
   property of the environment, not one defect per test. The fix shape holds on both kernels: the
   walk cannot trust the flag, so `lstat` the component, `fstat` the descriptor it opened, compare
-  `st_dev` and `st_ino`, and refuse when they differ or when the `lstat` says `S_IFLNK`. The
-  probe used plain `openat` with `O_NOFOLLOW`; `openat2` with `RESOLVE_NO_SYMLINKS` was out of
-  scope and is untested.
+  `st_dev` and `st_ino`, and refuse when they differ or when the `lstat` says `S_IFLNK`.
+  `openat2` is not the alternative there: a lane measured it returning `ENOSYS` under gVisor for
+  every flag combination it tried, so the `lstat` and `fstat` comparison above is the portable
+  check rather than a fallback. The transferable question is not which tool to use but whether
+  anything you run calls `openat2` at all: two builds of one tool reporting an identical
+  `--version` behaved differently, and only the package version and the binary's checksum told
+  them apart.
 - **Set `ulimit -s` to exactly 131072 under gVisor, soft and hard, never `unlimited`.** gVisor
   maps the whole stack at exec and caps it at a constant, `maxStackSize = 128 << 20` in
   `MapStack` (`pkg/sentry/mm/syscalls.go`), so 128 MiB is the main thread's ceiling and nothing
