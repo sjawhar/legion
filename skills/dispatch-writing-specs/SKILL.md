@@ -9,7 +9,7 @@ description: "Use in a session with Dispatch before you write or change a spec, 
 
 Reach shared understanding with the person at the least cost of their time. A Legion phase worker writes no spec (`skill://legion-worker`).
 
-Before choosing a design or writing options, and before each approval request: `skill://following-best-practices`.
+Before choosing a design, writing options or requesting approval: `skill://following-best-practices`.
 
 ## The outline
 
