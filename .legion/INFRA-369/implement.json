@@ -2,51 +2,50 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-369",
-  "completed": "2026-11-01T16:20:00Z",
-  "round": "the migration rename: one forward merge of main at 4644a072, which closed the numbered Dispatch series at 0157 and took both numbers this branch held, so the two migrations took UTC timestamp identifiers. The merge head is c9518102fd1233bc39acb9197ad82a22ba286712.",
+  "completed": "2026-11-01T18:05:00Z",
+  "round": "the conflict merge: one forward merge of main at 816e03f8 (f3a5fbb314bf) and one commit restoring prose its resolution dropped (59b2423cc658783a43b40ee29242504bb17d8c69)",
   "proof": [
     {
-      "criterion": "The renamed pair applies, in order, from nothing: a Dispatch server boots against an empty database and migrates it.",
+      "criterion": "The merge's own resolution and the whole migration set hold: a server boots against an empty database and applies all 163 migrations in order, this branch's two timestamped ones last.",
       "surface": "The real Go server in the issue's pod, booted by packages/dispatch/e2e/run-server.sh against a database created empty for the run.",
-      "command": "psql -c 'DROP DATABASE IF EXISTS infra369_proof' -c 'CREATE DATABASE infra369_proof'; then DATABASE_URL=postgres://…/infra369_proof DISPATCH_E2E_PORT=18777 FAKE_ENVOY_PORT=18778 FAKE_GITHUB_PORT=18779 FAKE_BROKER_PORT=18780 bash e2e/run-server.sh",
-      "observed": "The server migrated the empty database and reached `dispatch: listening addr=127.0.0.1:18777`, with the whole set applied in version order: every number 1 to 0157, then 20261101143211_ask_blocks and 20261101143212_asks_block_parts_trigger, which is the order the trigger needs.",
-      "headSha": "c9518102fd1233bc39acb9197ad82a22ba286712",
-      "negativeControl": "Before the rename the directory held 0150 and 0151 twice (beside main's 0150_dpop_proofs and 0151_embeddings_notify), which pgmigrate.Load refuses outright, so no server booted at all."
+      "command": "psql -c 'create database dispatch_prove_head'; DATABASE_URL=postgres://…/dispatch_prove_head DISPATCH_E2E_PORT=19801 FAKE_ENVOY_PORT=19802 FAKE_GITHUB_PORT=19803 FAKE_BROKER_PORT=19804 bash e2e/run-server.sh; psql -c 'select version, applied_at from schema_migrations order by applied_at desc limit 8'",
+      "observed": "The boot migrated the empty database and reached `dispatch: listening`; schema_migrations holds 163 rows with 20261101143211 and 20261101143212 applied last, after 0161.",
+      "headSha": "59b2423cc658783a43b40ee29242504bb17d8c69",
+      "negativeControl": "The same guard that proves the order, pgmigrate's duplicate-version refusal, is what refused the set before the earlier rename; a number this branch cannot take is still refused by migrationid.Check, which is the test main is red on."
     },
     {
-      "criterion": "The acceptance lines of the issue still hold at the rename head: A6, A11/R12, A15, R7, R10 and R11 for ask parts, and the reader-facing change.",
+      "criterion": "The acceptance lines of the issue hold at the merge head: A6, A11/R12, A15, R7, R10 and R11 for ask parts, and the reader-facing change.",
       "surface": "The same running Dispatch, through the real dispatch CLI, HTTP and a real Chromium on the production SPA bundle.",
-      "command": "DISPATCH_URL=http://127.0.0.1:18777 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=18779 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; then bunx playwright test --config e2e/playwright.config.ts ask-part-references.e2e.ts",
+      "command": "DISPATCH_URL=http://127.0.0.1:19801 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=19803 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; then bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts ask-part-references.e2e.ts",
       "observed": "EXIT=0, PASS=171 FAIL=0 SKIP=0 with the ask-parts section whole; and 2 passed.",
-      "headSha": "c9518102fd1233bc39acb9197ad82a22ba286712",
+      "headSha": "59b2423cc658783a43b40ee29242504bb17d8c69",
       "negativeControl": "GET /api/v1/references?to=dispatch://CORE-3/ask/<id>%23b-b9 answered 404 {\"code\":\"NOT_FOUND\",\"error\":\"no part \\\"b9\\\" in ask <id>\"} while %23b-b2 answered 200 with that option's own text and its parent the ask."
     },
     {
-      "criterion": "Every identifier check and the store's own suite pass on a database built from nothing.",
-      "surface": "The Go suites against a real PostgreSQL 17 with pgvector, the store run on a dropped and recreated database.",
-      "command": "go build ./... && go vet ./internal/... && gofmt -l internal; go test ./migrationid/...; go test ./internal/pgmigrate/...; go test ./internal/dispatch/store/ -timeout 40m; go test ./internal/dispatch/refs/ ./internal/dispatch/api/ -timeout 60m; bunx biome check packages",
-      "observed": "Build, vet and gofmt clean; migrationid ok; pgmigrate and pgmigratetest ok; store ok at 328.9 s on the fresh database; refs ok; api's only failure is TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses itself on this pod's byte-order collation and judges migration 0049; biome clean.",
-      "headSha": "c9518102fd1233bc39acb9197ad82a22ba286712",
-      "negativeControl": "migrationid's own tests are what refuse a name that is neither a number of the closed series nor a real UTC timestamp, and pgmigrate refuses a duplicated version; both were run rather than assumed."
+      "criterion": "Every other lane is green at the merge head.",
+      "surface": "The Go suites against a real PostgreSQL 17 with pgvector, and the TypeScript lanes.",
+      "command": "go build ./... && go vet ./internal/... && gofmt -l internal; go test ./migrationid/... ./internal/pgmigrate/...; go test ./internal/dispatch/store/ ./internal/dispatch/refs/; go test ./internal/dispatch/docs/ -timeout 90m; tsc in contracts, envoy-client, pi-legion, claude-envoy and dispatch; bun test in envoy-client and contracts; bunx biome check packages",
+      "observed": "All green, except TestMigrationSetTakesNumbersThenTimestamps, which is main's failure (below).",
+      "headSha": "59b2423cc658783a43b40ee29242504bb17d8c69",
+      "negativeControl": "The store suite ran on a dropped and recreated database, so a migration that only applies on top of an existing schema would have failed it."
     }
   ],
   "filesChanged": [
-    "store/migrations/0150_ask_blocks.{up,census}.sql renamed to 20261101143211_ask_blocks.{up,census}.sql, and 0151_asks_block_parts_trigger.{up,census}.sql to 20261101143212_asks_block_parts_trigger.{up,census}.sql, one second apart so the trigger still sorts after the tables it attaches to.",
-    "Every citation of the two identifiers: the four files' own headers and censuses, store/ask_blocks_migrations_test.go (askBlockTables is now the timestamp, beforeAskBlocks is 157), api/ask_rows.go, docs/block_index.go, api/ask_parts_test.go, refs/ask_blocks_test.go, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md.",
-    "Three of this pull request's own docs/solutions/ pages, whose paths to the migration files had gone dangling; the envoy one also records this fourth merge's outcome beside the three numbered ones it already listed."
+    "packages/envoy/internal/dispatch/docs/approval_carry.go: the one conflicted file, resolved keeping both sides - main's answer time from the transaction's now(), and this branch's serverURL parameter for the part index - with the doc comment saying the same time is when the answer's part is written.",
+    "packages/envoy/internal/dispatch/store/ask_blocks_migrations_test.go: beforeAskBlocks raised to 161, the version this branch's pair applies directly after, with a comment saying a numbered migration merging above it moves the constant again.",
+    "packages/envoy/cmd/dispatch/README.md: restored in 59b2423cc658 to the merge's own auto-merged content after a mistaken restore took main's whole file."
   ],
   "trickyParts": [
-    "A timestamp sorts above every number, so beforeAskBlocks is 157, the last migration that sorts before ours, rather than one less than our own identifier. That reading holds while ours are the only timestamped migrations in the set; the constant's comment says so.",
-    "The rename lives in the merge commit, because the merge is what makes it necessary: main's 0150 and 0151 arrive in the same commit that would otherwise leave the directory with two of each, which pgmigrate.Load refuses."
+    "Backing a change out of a merge with `jj restore --from main@origin <file>` takes main's whole file, not the lines you added: it dropped this branch's ask-part prose from cmd/dispatch/README.md. The content was recovered by merging the branch head with main in a scratch commit and taking that file, and fixed forward rather than by rewriting the pushed merge.",
+    "The merge's conflict list in the task was stale: at main 816e03f8 only docs/approval_carry.go conflicted, and the five files named had already merged cleanly."
   ],
   "deviations": [
-    "The fingerprint changed, 38855df2 to ed2bc802, and the change is the rename and its citations alone.",
-    "main's 0150_dpop_proofs and 0151_embeddings_notify, and every citation of them, were left untouched.",
-    "T7 stays with dispatch://INFRA-370 by the tree's architect's ruling.",
+    "TestMigrationSetTakesNumbersThenTimestamps is red at this head and on main itself: #2387 added numbered migrations 0158-0161 after #2411 closed numbering at 157. I fixed it here (raising migrationid's Dispatch closing to 0161) and backed the fix out on the tree's architect's ruling that it is main's to land; migrationid.go and the README's closing sentence are byte-identical to main.",
+    "The fingerprint changed, ed2bc802 to 0002d540, by the resolution and the two constants alone.",
     "This round writes .legion/INFRA-369/ again; the next retro removes it before READY."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "A migration identifier is not only a file name: it is a constant in the tests that migrate through it, a sentence in two guides and a path in this pull request's own learnings. The rename is done when a grep for the old identifier returns only the base's own migrations of that number."
+    "A forward merge can need a constant moved that no conflict marks: beforeAskBlocks named 157 and stayed compilable while main's 0158-0161 arrived, so only reading the set showed it no longer named the version just before ours."
   ]
 }
