@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-11-01T10:26:00Z",
+  "completed": "2026-11-01T22:35:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -292,6 +292,38 @@
       "observed": "0161_comment_fallback_copies collides with nothing; TestMigrationSetIsNumberedOneToN fails only on the 0158-0160 gap, as the architect intends; every other store and pgmigrate test passes; the API package passes but the collation test this Postgres cannot run; outbox, deliveryaudit, events, pglisten, cmd/dispatch and multiprocess pass; guides 3 of 3; MERGEABLE. Sampled peak 4.63 GiB of 19 over 1536 samples; the leftover check (ps) listed nothing.",
       "headSha": "b29a1a0aac06a503b066e7b6121326af46ef2477",
       "negativeControl": "At 92d2faba, 0151_comment_fallback_copies collided with main's 0151_embeddings_notify (tester round 23), which pgmigrate's shared-version guard refuses."
+    },
+    {
+      "criterion": "Round 25, the merge: this branch's post-response mention sender and main's listener take-over (#2446) meet without a session hearing a comment twice or missing it, and suppress_route is still decided on what the listener answered.",
+      "surface": "internal/dispatch/api on a superuser Postgres 16 (the load stack's pgserver), the whole package; the merged comment path is main's resolveCommentDeliveries/readCommentRoutes with this branch's unanswered route pin, and each lane send carries the take-over its own resolution started (mentionSend.takeover).",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:16230/postgres?sslmode=disable GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -timeout 60m ./internal/dispatch/api/ ./cmd/dispatch/ -count=1; and at the final merge head the same with -run 'Mention|Comment|Delivery|Route|Sweep|Fallback|Supersede|Claim|Lane|Keyed|Retry|Duplicate|Receipt|Silent|Abandoned|Bound|TakeOver|Message|Targeted'",
+      "observed": "At 15e57958 the whole api package passes but for TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, the collation test whose own message says this database cannot tell its fix apart from no fix; cmd/dispatch ok 389.593s. At the merge head 2a806f36 the named groups pass: ok 439.773s.",
+      "headSha": "2a806f3659b64304d8bd5052badffc277d71de97",
+      "negativeControl": "Before the resolution nine tests failed and named both halves: main's take-over tests read what a session received at the 201 (ReachesTheRouteHolderOnce: '0 mention steer(s) and 0 route fan-out(s)'; ReachesTheClaimantOnce: 'the outbox left 1 of 1 comment.created events unpublished'), and this branch's send counts saw main's take-over retry (SweepSettlesAnOvertakenAttempt: '2 sends ... want the Retry's alone')."
+    },
+    {
+      "criterion": "The architect's question: what holds the shared pool's connections in the first minute after a restart with 50 resuming sockets, at this head and on main, and whether the merge left too few.",
+      "surface": "The committed load reproduction (packages/envoy/loadtest) on one seeded stack: real envoy-dispatch, envoy-listener, NATS and Postgres 16 on the issue volume, 400 sessions, 50 resuming /ws/live sockets, a Dispatch restart 90 s into the window, with a pg_stat_activity sample a second beside each step.",
+      "command": "loadtest/run-step.sh pool-main|pool-head|pool-head2 --events 4 --sessions 400 --requests 60 --live 50 --live-resume 1 --live-stale 10 --restart-at 90s --mention-frac 0.2 --mentions 3 --envoy-rtt 200ms --rng-seed 1, pool-main under LOADTEST_DISPATCH_COMMIT=f8f0425b; the probe is psql 'select ... from pg_stat_activity where backend_type = ''client backend''' once a second.",
+      "observed": "In the 60 s after the restart, Dispatch backends per sample mean/peak: main 70.3/80, this branch 74.1/80, this head 74.1/80 (store.ConnectionsPerProcess allows 90, the shared pool 64). idle 36.1/34.9/36.4, idle in transaction 24.7/23.9/24.0, active 9.6/15.4/13.7. Samples at or above 64: 27 of 32, 26 of 28, 26 of 28. resources.pool_acquire_goroutines p50/max 1062/1872, 1297/1698, 1339/1740. Dispatch CPU-s in that minute 14.24, 10.96, 14.07. What holds them is the same on both sides: the document settlement's 'select coalesce(max(version), 0) from doc_updates ...' parked idle in transaction at 6.3-6.7 concurrent, then the issue lock's '... for no key update' and pg_advisory_xact_lock. The merge left no fewer connections and adds no holder. The tester's round-24 storm did not recur: 0 GET /ws/live 500s and 0 'record person ... context canceled' in all three runs.",
+      "headSha": "15e5795835b269bcefc4073e3a91d2fdfa3b9a16",
+      "negativeControl": "main's own Dispatch (LOADTEST_DISPATCH_COMMIT=f8f0425b) measured the same way on the same seed and load, which is the comparison the question asks for; and the PR's own effect is visible in the same runs, 54,630 live frames on main against 16,529 and 17,220 here for the same committed events."
+    },
+    {
+      "criterion": "The fallback table's migration takes a version no other branch can take, and the set it joins is the one Dispatch accepts.",
+      "surface": "packages/envoy/internal/dispatch/store/migrations, and the migration applied for real: every load-test step above boots the head's envoy-dispatch on a database seeded by main's build, so 20261101180039_comment_fallback_copies runs at that boot.",
+      "command": "cd packages/envoy && go test ./internal/dispatch/store/ -run TestMigrationSetTakesNumbersThenTimestamps -count=1; loadtest/run-step.sh pool-head2 ... (its reset restores the main-seeded template and the head's Dispatch migrates it forward)",
+      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/store 0.016s at the merge head, and the pool-head2 step's Dispatch answered /healthz and served the whole window on the migrated database.",
+      "headSha": "2a806f3659b64304d8bd5052badffc277d71de97",
+      "negativeControl": "Before main's #2633 and this rename, the same test failed at this head naming every file: 'migration 0161_comment_fallback_copies.up.sql is numbered 161 where 158 comes next' in round 24, and after the first merge 'migration 0158_message_delivery_urgency.up.sql takes version 158: the numbered migrations ended at 157'."
+    },
+    {
+      "criterion": "A targeted message's renew during a listener take-over records the listener's own failure, not an empty one: the comment's 250 ms lookup bound does not reach it.",
+      "surface": "internal/dispatch/api, the message path against a listener that never answers, with the client's window at 300 ms.",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test -p 1 ./internal/dispatch/api/ -count=1 -run 'Message|Targeted'",
+      "observed": "ok: TestTargetedMessagePrefixesUnavailableListenerErrors/timeout passes with the attempt's error carrying the 'envoy listener: ' prefix.",
+      "headSha": "15e5795835b269bcefc4073e3a91d2fdfa3b9a16",
+      "negativeControl": "With the merge's own value (mentionLookupTimeout on renewMessageDeliveryClaim) the same test fails: the renew's read is cut at 250 ms inside the client's 300 ms window, so the attempt is left unanswered with no resolve error and settles naming nothing."
     }
   ],
   "filesChanged": [
@@ -387,7 +419,14 @@
     "scripts/e2e/dispatch-claimant-delivery.ts",
     "scripts/e2e/lib/operator-dispatch.sh",
     "scripts/e2e/stage3-4b13b-acceptance.sh",
-    "scripts/e2e/stage3-devbox-workflow.sh"
+    "scripts/e2e/stage3-devbox-workflow.sh",
+    "round 25: packages/envoy/internal/dispatch/api/comment_create.go (merge: main's resolveCommentDeliveries/readCommentRoutes with this branch's unanswered route pin and mentionedSession loop; the lane keeps the sends)",
+    "round 25: packages/envoy/internal/dispatch/api/comment_mention_sender.go (mentionSend.takeover; sendCommentMention passes it)",
+    "round 25: packages/envoy/internal/dispatch/api/comment_delivery.go, envoy_resolve.go, message_delivery.go (resolveMentionTargets removed, every caller resolves one target; the message's renew resolves unbounded)",
+    "round 25: packages/envoy/internal/dispatch/store/migrations/20261101180039_comment_fallback_copies.{up,census}.sql (renamed from 0161_*)",
+    "round 25: packages/envoy/AGENTS.md, cmd/dispatch/README.md, loadtest/README.md, loadtest/{run,sample,sessions}.go, loadtest/stack.sh, .changes/unreleased/pr2406-Changed-20261028-113305.yaml (merge resolutions, the migration's new name, the cross-deploy dedupe exception)",
+    "round 25: scripts/e2e/dispatch-claimant-delivery.ts, internal/dispatch/api/delivery_sweep_test.go, packages/envoy/AGENTS.md:3284 (the three stale <comment id>:<target> key passages the reviewer named)",
+    "round 25: packages/envoy/internal/dispatch/api/{comment_mention_takeover,listener_takeover,delivery_bound_send,comment_delivery_sender,comment_mentions}_test.go (main's take-over tests read the send after the response; refuseSends answers a host refusal rather than 503)"
   ],
   "trickyParts": [
     "Relay and hub generations: start and stop under one mutex; a stopped generation publishes only into its own subscriber-less stream; Add on the WaitGroup only while not closed (event_stream_relay.go, delivery_live_hub.go).",
@@ -445,17 +484,23 @@
     "The mention dedupe key is <comment>:<target>:<the mention's own mode> (review round 9): main's key for every automatic send; a Retry in any mode of a mention that already reached the session is still recorded duplicate.",
     "Forward merge at 92d2faba (main 7285fd05) for a fresh CI run; no conflict, the PR's own diff unchanged; 0151 stands (main took no migration since 0150).",
     "Forward merge at b29a1a0a (main 225f2bea, #2391): EventsChannel moved into the relay; listenerConnections is 4 (main's wake hub); the no-LISTEN claim narrowed to the live paths because main's suggestion outcome sweep reads the event log; fallback table renumbered to 0161 in the architect's chain, so TestMigrationSetIsNumberedOneToN fails until 0158-0160 land.",
-    "Fixed two main breakages in files this PR touches: shutdown_mentions_test.go's renamed api.MaintenanceSweepInterval, and #2615's AGENTS.md paragraph that failed the guides layout check (R1)."
+    "Fixed two main breakages in files this PR touches: shutdown_mentions_test.go's renamed api.MaintenanceSweepInterval, and #2615's AGENTS.md paragraph that failed the guides layout check (R1).",
+    "Round 25: the merge drops this branch's resolveCommentLookups for main's resolveCommentDeliveries, which resolves every target at once through the listener take-over. The branch's bounded fan-out (mentionLookupConcurrency, ceil(k/8) timeouts) went with it: every caller of resolveMentionTargets passed one target afterwards, and bounding the fan-out again would serialise a take-over window per batch. A comment's lookups now all run at once (ten mentions at most), so a listener that answers none costs one 250 ms timeout. AGENTS.md, the release note, the sender test's comment and the PR body say so.",
+    "Round 25: the branch's keep-the-mentions-across-resolution-passes optimisation is gone with resolveCommentLookups. A ROUTE_CHANGED retry re-resolves every mention rather than the route alone. TestCommentRouteResolutionIsVerifiedAgainstTheLockedIssue still counts exactly two role lookups, since it counts the route's.",
+    "Round 25: refuseSends in the api tests answers 403 with a reason rather than a bodyless 503. Under #2446 a 503 is a listener being replaced, which a sender retries inside the take-over window, so a test counting one comment's sends counted a try the window's timing decided.",
+    "Round 25: commit 45ade47e reflowed cmd/dispatch/README.md with the checker's own --write, because the guides layout test was red on main and on every branch merging it. main's #2640 then landed the same fix with different line breaks, and the third merge takes main's wording, which leaves 45ade47e a no-op in the tree."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves cannot run on this pod's Postgres (byte-order collation only; the pgserver build has no ICU); CI runs it.",
     "internal/dispatch/files needs Docker and internal/dispatch/pmdoc needs node_modules; neither is touched by this change.",
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
-    "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
+    "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands.",
+    "Round 25: main moved three times during the round (f8f0425b, 0642a37a #2633, f0fe8da8 #2640 + #2620), so the branch carries three merges. #2633 closes the numbered migrations at 0161, which is what makes TestMigrationSetTakesNumbersThenTimestamps pass here.",
+    "Round 25: the merge of #2446 put this branch's 250 ms comment-lookup bound on renewMessageDeliveryClaim, which main leaves unbounded. A clean three-way merge changed that call's meaning; only the message path's own test caught it."
   ],
-  "round": 24,
-  "answersTest": "ff59a79f689c85026feafc486b177bb07835879e",
+  "round": 25,
+  "answersTest": "138b2a202af19ec84f40fb04881f5943d1b5506e",
   "answersReview": "45530037436dbb21120f3299dedbded3b74b9c1a",
-  "previousHandoff": "1e9ff3b3fb54adb4baaa861583d3b12a023db538"
+  "previousHandoff": "d25a64e55373b73179f4cc552ffe8aa1f2b057a6"
 }
