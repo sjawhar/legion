@@ -221,6 +221,21 @@ func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 	return tree, nil
 }
 
+// treeOfUnshared is treeOf for a document nothing else reads or writes while the call runs - a
+// write transaction's fork, read on the request goroutine that holds it (readFork, startTree) -
+// which it reads through pmdoc.ReadUnshared, without ygo's ToDelta, and hands back validated once
+// (pmdoc.ValidDocument), so the renders and reads that follow do not validate it again.
+func treeOfUnshared(doc *crdt.Doc) (pmdoc.ValidDocument, error) {
+	if doc == nil {
+		return pmdoc.ValidDocument{}, errDocUnloaded
+	}
+	valid, err := pmdoc.ReadUnshared(doc.GetXmlFragment(fragmentName))
+	if err != nil {
+		return pmdoc.ValidDocument{}, documentSchemaError(err)
+	}
+	return valid, nil
+}
+
 func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmdoc.Node, error) {
 	if fragment == nil {
 		return nil, errDocUnloaded
@@ -287,6 +302,19 @@ func documentMarkdown(tree *pmdoc.Node) (string, error) {
 // same render.
 func documentMarkdownWithOffsets(tree *pmdoc.Node) (string, []pmdoc.BlockOffset, error) {
 	markdown, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
+	return markdown, offsets, documentSchemaError(err)
+}
+
+// documentMarkdownValid is documentMarkdown of a tree readFork already validated, which the render
+// then does not validate again (pmdoc.ValidDocument.RenderWithBlockOffsets).
+func documentMarkdownValid(tree pmdoc.ValidDocument) (string, error) {
+	markdown, _, err := documentMarkdownValidWithOffsets(tree)
+	return markdown, err
+}
+
+// documentMarkdownValidWithOffsets is documentMarkdownWithOffsets of a validated tree.
+func documentMarkdownValidWithOffsets(tree pmdoc.ValidDocument) (string, []pmdoc.BlockOffset, error) {
+	markdown, offsets, err := tree.RenderWithBlockOffsets()
 	return markdown, offsets, documentSchemaError(err)
 }
 

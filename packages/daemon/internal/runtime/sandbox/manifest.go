@@ -90,12 +90,12 @@ const podUser = 1000
 // mainEnvironment sets for a tree agent, a Claude Code one or the controller
 // (TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime), which the shared validator refuses
 // in a spec's Env and as a secret's pointer, and CheckPod in the operator's pod. The image probe's
-// container sets none of its own. The three CLAUDE_* names and claudelaunch.SessionVariable are told
+// container sets none of its own. The two CLAUDE_* names and claudelaunch.SessionVariable are told
 // a Claude role alone, as the controller's Slack channels are the controller's, and owned in every
-// pod: an operator that could place a Claude Code worker's configuration directory, turn its
-// background work back on or name another session for its launcher to keep would be undoing the
-// launch (claudelaunch.Environment). CLAUDE_CODE_USE_FOUNDRY and the rest of Claude Code's own
-// variables are not here, and stay the operator's to set.
+// pod: an operator that could place a Claude Code worker's configuration directory, let the clock
+// prompt it or name another session for its launcher to keep would be undoing the launch
+// (claudelaunch.Environment). CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, CLAUDE_CODE_USE_FOUNDRY and
+// the rest of Claude Code's own variables are not here, and stay the operator's to set.
 var runtimeOwned = func() map[string]bool {
 	owned := map[string]bool{
 		"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true, "LEGION_CONTROLLER": true,
@@ -109,7 +109,7 @@ var runtimeOwned = func() map[string]bool {
 		"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
 		"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true, slackChannelsVariable: true,
 		"UV_PYTHON_INSTALL_DIR": true, "UV_CACHE_DIR": true, "UV_LINK_MODE": true,
-		"CLAUDE_CONFIG_DIR": true, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": true, "CLAUDE_CODE_DISABLE_CRON": true,
+		"CLAUDE_CONFIG_DIR": true, "CLAUDE_CODE_DISABLE_CRON": true,
 		claudelaunch.SessionVariable: true, ompsessions.StorageVariable: true, ompsessions.DSNFileVariable: true,
 		// The pod's own test database, which an issue pod's roles are told where the deployment
 		// serves one (runtime.kubernetes.test_postgres): owned in every pod, since a spec or an
@@ -1075,12 +1075,13 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 		add(slackChannelsVariable, r.slackChannelsValue())
 	}
 	if l.runsClaude() {
-		// Claude Code's own three (claudelaunch.Environment): where its state lives, and its
-		// background tasks and scheduled prompts off. The last two are not a nicety — they are
-		// Claude Code's analogue of the turn scoping `--pod-safety` writes for Oh My Pi
-		// (internal/podsafety): a turn is quiescable only while nothing of the harness may run
-		// after the result the bridge reports it on. All three are the runtime's (runtimeOwned),
-		// so neither a spec nor an operator's pod.env may place them.
+		// Claude Code's own two (claudelaunch.Environment): where its state lives, and its
+		// scheduled prompts off, since a prompt of the clock's is a turn no task of the daemon's
+		// asked for. Its background tasks stay on: a task that finishes wakes Claude Code into a
+		// turn of its own, which the bridge reports to the daemon as a turn (internal/claudebridge),
+		// so the result is read in a turn the daemon sees rather than after one it thinks has
+		// ended. Both names are the runtime's (runtimeOwned), so neither a spec nor an operator's
+		// pod.env may place them.
 		for _, pair := range claudelaunch.Environment(claudeConfigDir(spec.Role)) {
 			name, value, _ := strings.Cut(pair, "=")
 			add(name, value)

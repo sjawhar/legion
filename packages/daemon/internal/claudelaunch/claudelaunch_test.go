@@ -33,11 +33,15 @@ func TestArgv(t *testing.T) {
 }
 
 // A Claude Code worker's own environment, in order: its configuration directory, and Claude Code's
-// background tasks and scheduled prompts off.
+// scheduled prompts off. Its background tasks are not turned off, under any runtime: a task that
+// finishes wakes a turn the bridge reports to the daemon.
 func TestEnvironment(t *testing.T) {
 	got := strings.Join(Environment("/state/claude/c"), " ")
-	if got != "CLAUDE_CONFIG_DIR=/state/claude/c CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_DISABLE_CRON=1" {
+	if got != "CLAUDE_CONFIG_DIR=/state/claude/c CLAUDE_CODE_DISABLE_CRON=1" {
 		t.Errorf("Environment = %s", got)
+	}
+	if strings.Contains(got, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS") {
+		t.Errorf("Environment = %s, want nothing turning Claude Code's background tasks off", got)
 	}
 }
 

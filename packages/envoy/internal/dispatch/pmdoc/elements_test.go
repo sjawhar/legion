@@ -234,7 +234,7 @@ func TestATableRowInsertIsChargedItsRowsAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	budget := NewWriteBudget()
-	if _, inserted, err := InsertTableRows(doc, anchor, "| y |\n", true, budget); err != nil || !inserted {
+	if _, inserted, err := insertTableRows(doc, anchor, "| y |\n", true, budget); err != nil || !inserted {
 		t.Fatalf("insert one row: inserted=%v, %v", inserted, err)
 	}
 	if want := 3 + width*4 + 1; budget.elements.made != want {
@@ -242,7 +242,7 @@ func TestATableRowInsertIsChargedItsRowsAlone(t *testing.T) {
 	}
 	budget = NewWriteBudget()
 	budget.elements.made = MaxDocumentElements - 10
-	_, _, err = InsertTableRows(doc, anchor, "\n| y |\n", true, budget)
+	_, _, err = insertTableRows(doc, anchor, "\n| y |\n", true, budget)
 	if !errors.Is(err, ErrTooManyElements) || !strings.Contains(err.Error(), "passing that at line 2;") {
 		t.Fatalf("a row past what the batch has left: %v, want a refusal at line 2, the row's", err)
 	}
