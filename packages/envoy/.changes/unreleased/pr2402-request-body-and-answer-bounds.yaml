@@ -5,6 +5,12 @@ body: |-
   ends either, and so does an average below 32 KB/s once it has had a minute's grace. An upload
   over a slow uplink is therefore taken however long it needs - a 26 MiB file at 1 Mbit/s takes
   about three and a half minutes - and a large answer read over a slow downlink is written in full.
+  An answer's writes are given the time the kernel's send buffer takes to drain at that floor
+  besides the 20 seconds, because a write blocks until the kernel drains what it already holds
+  rather than until the client's next read: a client that stops reading is cut within 20 seconds
+  and 4 MiB at 32 KB/s, about two and a half minutes, while one that keeps reading at or above the
+  floor is never cut by a blocked write, where a 4 MiB answer written in one call was cut at 15 to
+  17 seconds for every reader below about 200 KB/s.
   A write whose client is already sending now reads its whole body off the connection before it
   asks admission for room, where the server has none for it: it waits for room holding no unit,
   with nothing of its request left on the wire, so the time its body takes is none of its wait

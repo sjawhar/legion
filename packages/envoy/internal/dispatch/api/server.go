@@ -798,7 +798,7 @@ func servedAsRead(deadline time.Duration, bounds transferBounds, pin bool, handl
 		control := http.NewResponseController(w)
 		answer := &boundedAnswer{
 			ResponseWriter: w,
-			movingDeadline: movingDeadline{set: control.SetWriteDeadline, bounds: bounds},
+			movingDeadline: movingDeadline{set: control.SetWriteDeadline, bounds: bounds, buffered: true},
 			control:        control,
 		}
 		defer answer.lift()

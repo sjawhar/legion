@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1122,5 +1124,84 @@ func TestAReaderSteadilyAboveTheFloorIsAnsweredInFullOverARealConnection(t *test
 		if err != nil {
 			t.Fatalf("a reader at 200 KiB/s was cut %v in, after %d of %d bytes: %v", time.Since(started).Round(time.Millisecond), read, answer, err)
 		}
+	}
+}
+
+// A reader that stops reading a large answer is still cut, within the idle bound and the time
+// the kernel's send buffer takes to drain at the floor: what a slice's write is given for that
+// buffer (movingDeadline.drain) is a bound and not a reprieve. This is the other side of
+// TestAReaderSteadilyAboveTheFloorIsAnsweredInFullOverARealConnection, where a reader at six
+// times the floor drains the buffer well inside that time; here the reader drains none of it, so
+// the write that filled the buffer waits out the whole bound and fails. The deployment's bounds
+// make that wait 20 s plus 4 MiB at 32 KiB/s, about two and a half minutes; the floor here is
+// 1 MiB/s, so it is a second plus four.
+func TestAReaderThatStopsReadingIsCutWithinTheSendBuffersDrain(t *testing.T) {
+	const idle, floor, chunk, deadline = time.Second, 1 << 20, 16 << 10, 5 * time.Minute
+	// Larger than the send buffer and the reader's receive buffer together, so the handler's one
+	// Write blocks with the whole of that buffer handed over.
+	answer := 2 * int(maxSendBuffer())
+	// The bound the answer is cut within: the idle bound and the drain the write is allowed for
+	// what the kernel holds, with a margin for a loaded pod's scheduling.
+	const margin = 3 * time.Second
+	bound := idle + time.Duration(min(int64(answer), maxSendBuffer()))*time.Second/floor
+
+	_, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	// The grace outlasts the test, so what cuts the answer is the write's own deadline rather
+	// than the floor judgment on the bytes already handed over (movingDeadline.tooSlow).
+	served.transfer = transferBounds{idle: idle, grace: time.Minute, floor: floor}
+	const pattern = "/api/v1/stopped-reader-test"
+	cut := make(chan error, 1)
+	route := apiRoute{routeRow: routeRow{Method: http.MethodGet, Pattern: pattern, Auth: authAny, Handler: func(w http.ResponseWriter, r *http.Request) {
+		_, err := w.Write(make([]byte, answer))
+		cut <- err
+	}}}
+	mux := http.NewServeMux()
+	mux.HandleFunc(route.Method+" "+pattern, served.serveRoute(route, admission.New(admission.DefaultLimits()), deadline))
+	httpServer := httptest.NewServer(mux)
+	t.Cleanup(httpServer.Close)
+
+	connection, err := net.Dial("tcp", httpServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the server: %v", err)
+	}
+	t.Cleanup(func() { connection.Close() })
+	if err := connection.(*net.TCPConn).SetReadBuffer(chunk); err != nil {
+		t.Fatalf("size the reader's receive buffer: %v", err)
+	}
+	if _, err := fmt.Fprintf(connection, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", pattern, httpServer.Listener.Addr()); err != nil {
+		t.Fatalf("send the read: %v", err)
+	}
+	started := time.Now()
+	if err := connection.SetDeadline(time.Now().Add(bound + margin)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil {
+		t.Fatalf("read the answer's head: %v", err)
+	}
+	defer response.Body.Close()
+	// The reader takes the answer's first bytes and then stops, leaving the rest to fill the
+	// kernel's buffers; nothing but the bound can end the handler's write.
+	if _, err := io.ReadFull(response.Body, make([]byte, chunk)); err != nil {
+		t.Fatalf("read the answer's first %d bytes: %v", chunk, err)
+	}
+
+	select {
+	case err := <-cut:
+		elapsed := time.Since(started)
+		switch {
+		case err == nil:
+			t.Fatalf("the whole %d-byte answer was written %v in to a reader that read %d bytes of it", answer, elapsed, chunk)
+		case !errors.Is(err, os.ErrDeadlineExceeded):
+			t.Fatalf("the answer failed %v in with %v, want the bound's own deadline", elapsed, err)
+		case elapsed < idle:
+			t.Fatalf("the answer was cut %v in, want it given its %v idle bound at the least", elapsed, idle)
+		case elapsed > bound+margin:
+			t.Fatalf("a reader that stopped reading was cut %v in, want within %v: the %v idle bound and the %d-byte send buffer draining at %d bytes a second",
+				elapsed, bound+margin, idle, maxSendBuffer(), int64(floor))
+		}
+	case <-time.After(bound + margin):
+		t.Fatalf("a reader that stopped reading was not cut within %v: the %v idle bound and the %d-byte send buffer draining at %d bytes a second",
+			bound+margin, idle, maxSendBuffer(), int64(floor))
 	}
 }

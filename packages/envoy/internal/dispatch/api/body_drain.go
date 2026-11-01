@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
@@ -36,7 +38,11 @@ import (
 // average of floor bytes a second or better. The bound is on the silence and on the rate, never on
 // the transfer's length, so a body or an answer that keeps moving is carried however long it takes
 // - a 26 MiB upload over a slow uplink takes minutes - while one that stops is cut within idle of
-// its last bytes and one that dribbles for ever is cut at the floor.
+// its last bytes and one that dribbles for ever is cut at the floor. An answer's writes go into
+// the connection's kernel send buffer, which holds megabytes and wakes a blocked writer only once
+// much of it has drained, so each of them is given what that buffer takes to drain at the floor
+// besides the idle bound (movingDeadline.drain): an answer whose client stopped reading is cut
+// within idle plus that drain rather than within idle alone.
 //
 // One bound covers every layer that reads a request's body - the read before admission
 // (drainedBody.readWhole), the keyed layer's spool (readKeyedBody), the handler's own decode
@@ -77,9 +83,10 @@ func (b transferBounds) orDefault() transferBounds {
 // movingDeadline is the deadline a transfer keeps on its connection: set at its first bytes and
 // pushed out at every read or write after them (arm), taken off at its end (lift). One type serves
 // both directions - the read deadline a request's body arrives under (drainedBody) and the write
-// deadline its answer goes out under (boundedAnswer) - differing only in which deadline set is. A
-// writer with no connection of its own (a test's recorder) bounds nothing: set answers
-// http.ErrNotSupported, which nothing here reads.
+// deadline its answer goes out under (boundedAnswer) - differing only in which deadline set is and
+// in whether the kernel holds what has already been handed over (buffered). A writer with no
+// connection of its own (a test's recorder) bounds nothing: set answers http.ErrNotSupported,
+// which nothing here reads.
 type movingDeadline struct {
 	set     func(time.Time) error
 	bounds  transferBounds
@@ -87,14 +94,20 @@ type movingDeadline struct {
 	started time.Time
 	// moved is how many bytes of the transfer have moved, which the floor is judged on.
 	moved int64
+	// buffered is whether the kernel holds what has been handed over, so that the read or write
+	// about to run waits on that buffer draining rather than on the far end's next byte: an
+	// answer's writes are buffered that way (boundedAnswer), a body's reads are not, since a
+	// read returns with whatever has arrived.
+	buffered bool
 }
 
-// arm gives the bytes about to move until the idle bound from now to move, pushing the deadline out
-// from wherever it stood, so a transfer that keeps moving is never cut and one that stops is cut
-// within the idle bound of its last bytes. A transfer that has had its grace and is moving slower
-// than the floor is given no time at all: the deadline is now, so the read or write about to run
-// fails as the idle bound fails one. Both are a deadline on the connection, which net/http sees
-// and closes the connection over, rather than an error only this layer knows.
+// arm gives the bytes about to move the idle bound from now to move, and what the kernel already
+// holds of the transfer the time that takes to drain at the floor besides (drain), pushing the
+// deadline out from wherever it stood, so a transfer that keeps moving is never cut and one that
+// stops is cut within that bound of its last bytes. A transfer that has had its grace and is
+// moving slower than the floor is given no time at all: the deadline is now, so the read or write
+// about to run fails as the idle bound fails one. Both are a deadline on the connection, which
+// net/http sees and closes the connection over, rather than an error only this layer knows.
 func (d *movingDeadline) arm() {
 	now := time.Now()
 	if !d.armed {
@@ -103,8 +116,50 @@ func (d *movingDeadline) arm() {
 		_ = d.set(now)
 		return
 	}
-	_ = d.set(now.Add(d.bounds.idle))
+	_ = d.set(now.Add(d.bounds.idle + d.drain()))
 }
+
+// drain is how long what the kernel already holds of the transfer takes to leave at the floor,
+// which is time the deadline allows on top of the idle bound. The layer writing an answer cannot
+// see the connection's queue - a handler is given a http.ResponseWriter and nothing else - so the
+// bound accounts for it instead: a write hands its bytes to a send buffer of up to maxSendBuffer
+// and blocks once that buffer is full, and the kernel wakes it not at the next byte the client
+// reads but once a large share of the buffer has drained. A client reading at the floor drains
+// what the buffer holds within min(moved, maxSendBuffer) over the floor, so no client at or above
+// the floor is cut by a blocked write, while one that stops reading is still cut within idle plus
+// that drain (148 s at the deployment's 20 s, 4 MiB and 32 KiB/s). A transfer whose bytes the
+// kernel does not hold this way (a body's reads) and one with no floor (a test's bounds) are given
+// nothing: their deadline stays the idle bound.
+func (d *movingDeadline) drain() time.Duration {
+	if !d.buffered || d.bounds.floor <= 0 {
+		return 0
+	}
+	return time.Duration(min(d.moved, maxSendBuffer())) * time.Second / time.Duration(d.bounds.floor)
+}
+
+// sendBufferLimit is what a connection's kernel send buffer is taken to hold at most where the
+// kernel does not say: Linux's own default maximum, 4 MiB.
+const sendBufferLimit = 4 << 20
+
+// maxSendBuffer is the most a connection's kernel send buffer grows to, which is the most a
+// blocked write may be waiting for the kernel to drain (drain). It is the third field of
+// /proc/sys/net/ipv4/tcp_wmem, read once because it is a boot-time setting; a file that is
+// missing (every system but Linux), unreadable or not three numbers is sendBufferLimit.
+var maxSendBuffer = sync.OnceValue(func() int64 {
+	limits, err := os.ReadFile("/proc/sys/net/ipv4/tcp_wmem")
+	if err != nil {
+		return sendBufferLimit
+	}
+	fields := strings.Fields(string(limits))
+	if len(fields) < 3 {
+		return sendBufferLimit
+	}
+	largest, err := strconv.ParseInt(fields[2], 10, 64)
+	if err != nil || largest <= 0 {
+		return sendBufferLimit
+	}
+	return largest
+})
 
 // tooSlow reports whether the transfer has moved its bytes slower than the floor allows, once it
 // has had its grace. A transfer with no floor (a test's) is never too slow.
@@ -649,7 +704,11 @@ func (w *drainingWriter) Unwrap() http.ResponseWriter {
 // The bound is the silence between the answer's bytes and the rate they keep, not the answer's
 // length, as it is for the body a request arrives with (drainedBody): a client reading a large
 // answer over a slow downlink is answered all of it however long that takes, where the read's own
-// deadline cut it off at twenty seconds, and one that stops reading is cut within the idle bound.
+// deadline cut it off at twenty seconds. What one write waits for is not one read of the client's:
+// the kernel takes the answer into a send buffer of megabytes and wakes the blocked write only
+// once much of that buffer has drained, so each write is allowed the time that buffer takes to
+// drain at the floor on top of the idle bound (movingDeadline.drain), and a client that stops
+// reading is cut within idle plus that drain.
 // Only a read is wrapped (serveRoute), and the websockets are mounted outside it, so no
 // long-lived connection is bounded here.
 type boundedAnswer struct {
@@ -667,7 +726,10 @@ type boundedAnswer struct {
 // between its slices rather than on the whole call, and the floor on the rate they keep. Handed
 // to net/http whole, a 25 MiB answer had to leave the server inside one idle bound, which cut
 // off every client below about 1.3 MB/s, where the rule is twenty seconds of silence and
-// 32 KiB/s after the first minute.
+// 32 KiB/s after the first minute. A slice's own write waits on the kernel's send buffer
+// draining rather than on the client's next read, which is why its deadline carries that drain
+// as well as the idle bound (movingDeadline.arm): armed with the idle bound alone, a 4 MiB
+// answer written in one call cut off every reader below about 200 KB/s.
 const answerSlice = 64 << 10
 
 func (a *boundedAnswer) WriteHeader(status int) {

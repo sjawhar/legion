@@ -2777,12 +2777,14 @@ The document and delivery websockets are neither admitted nor bounded.
 
 A slow client is bounded as well, so that it holds neither the admission units it was admitted with nor the database connection its read pinned for as long as it cares to, while a client that is merely slow is served in full.
 A request's body, and a read's answer, are bounded on the silence between their bytes and on the rate those bytes keep, never on how long the whole transfer takes:
-20 seconds without a byte ends it, and so does an average below 32 KB/s once the transfer has had a minute's grace.
+20 seconds without a byte ends it, and so does an average below 32 KB/s once the transfer has had a minute's grace;
+an answer's writes are given what the kernel's send buffer takes to drain at that floor on top of the 20 seconds, since a blocked write waits for the kernel to drain what it already holds and not for the client's next read.
 So an upload over a slow uplink is taken however long it needs - a 26 MiB file at 1 Mbit/s takes about three and a half minutes - and a large answer read over a slow downlink is written in full, where both were once cut off at a fixed 60 and 20 seconds.
 Past either bound the read of the body fails, and the request is answered `400 REQUEST_BODY_UNREADABLE` - or with whatever its layer had already answered, such as a refused upload's `409 ISSUE_CLOSED` - with the connection closed after it;
 a body whose framing Dispatch cannot read at all is the same `400`, its client being still there;
 a client that went away instead is answered nothing and recorded as `status=499`.
-A client that stops reading an answer has the connection closed under it within the same 20 seconds.
+A client that stops reading an answer has the connection closed under it within those 20 seconds and the drain of what the kernel still holds for it: at most 4 MiB at 32 KB/s, so about two and a half minutes in all.
+Given the 20 seconds alone, a 4 MiB answer written in one call was cut at 15 to 17 seconds for every reader below about 200 KB/s, though such a reader is never silent.
 A write whose client is already sending, and whose class has no room for it, reads its whole body off the connection before it asks for room at all: it waits holding nothing, its wait counts from the body's end, and a client that hangs up while it waits is noticed there and then - the request leaves the queue at once and is recorded as `status=499`, where a queued write with an unread body held its place for its whole wait and was answered a 429 nobody read.
 A write admitted before its body - one the server had room for, and one whose client asked to be told to continue (`Expect: 100-continue`) and so has sent nothing - gives its admission units back while the body arrives and takes them again once it has arrived, at the place it arrived in the queue, so clients trickling bodies cannot hold the server's room for writes either way, and a body that arrives to find no room left is answered `429 OVERLOADED` with its body already read, its handler cancelled by the refusal so that nothing of the write runs or commits and the whole of it may be sent again.
 Each route also bounds its body in bytes: 1 MiB for a JSON route (`413 REQUEST_TOO_LARGE`) and 26 MiB for an upload (`413 CAP_EXCEEDED`).
