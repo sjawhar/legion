@@ -1,7 +1,6 @@
 package docs
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -67,38 +66,38 @@ func testAReplicaKeepsARunTheRoomLeftPlain(t *testing.T) {
 	// The run's tail loses its italics: the marker that ends them stands in the gap the later
 	// writes add their own markers to, which is what gives the cleanup two markers of one key
 	// there to call the first redundant.
-	writeInRoom(t, service, artifactID, "unitalicise the tail", func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
+	writeInRoom(t, service, artifactID, "unitalicise the tail", serviceWrite, func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
 		text := xmlTextWithPrefix(t, fragment, formattingRun)
 		return func(txn *crdt.Transaction) {
 			text.Format(txn, 2, 3, crdt.Attributes{"emphasis": nil})
 		}
 	})
-	replicaReplaysTheRoom(t, live, replica, "the tail lost its italics")
+	replicaHoldsTheRoom(t, live, replica, "the tail lost its italics")
 
 	// A bold character typed at the head of the run, and taken out again: the room keeps the
 	// markers it left, since nothing cleans up after a local transaction.
-	writeInRoom(t, service, artifactID, "insert a bold character", func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
+	writeInRoom(t, service, artifactID, "insert a bold character", serviceWrite, func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
 		text := xmlTextWithPrefix(t, fragment, formattingRun)
 		return func(txn *crdt.Transaction) {
 			text.Insert(txn, 0, "x", crdt.Attributes{"strong": markOn})
 		}
 	})
-	replicaReplaysTheRoom(t, live, replica, "a bold character was inserted")
+	replicaHoldsTheRoom(t, live, replica, "a bold character was inserted")
 
-	writeInRoom(t, service, artifactID, "delete the character after it", func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
+	writeInRoom(t, service, artifactID, "delete the character after it", serviceWrite, func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
 		text := xmlTextWithPrefix(t, fragment, "x")
 		return func(txn *crdt.Transaction) { text.Delete(txn, 1, 1) }
 	})
-	replicaReplaysTheRoom(t, live, replica, "the character after it was deleted")
+	replicaHoldsTheRoom(t, live, replica, "the character after it was deleted")
 
 	// The second character loses both marks, which leaves the plain run between two marked ones.
-	writeInRoom(t, service, artifactID, "unmark the second character", func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
+	writeInRoom(t, service, artifactID, "unmark the second character", serviceWrite, func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
 		text := xmlTextWithPrefix(t, fragment, "x")
 		return func(txn *crdt.Transaction) {
 			text.Format(txn, 1, 1, crdt.Attributes{"strong": nil, "emphasis": nil})
 		}
 	})
-	replicaReplaysTheRoom(t, live, replica, "the second character was unmarked")
+	replicaHoldsTheRoom(t, live, replica, "the second character was unmarked")
 
 	// The room's own runs, so a change in what the writes above leave is told apart from a
 	// replica that drifted from them. The tail keeps the bold the seeded markdown wrote, whose
@@ -120,7 +119,7 @@ func testAReplicaKeepsARunTheRoomLeftPlain(t *testing.T) {
 // delta for every text node of the fragment.
 func testAReplicaReplaysInterleavedFormatting(t *testing.T) {
 	seeds, steps := []uint64{1, 2, 3, 4}, 160
-	if stormRaceEnabled || testing.Short() {
+	if raceEnabled || testing.Short() {
 		seeds, steps = []uint64{1, 2}, 60
 	}
 	for _, seed := range seeds {
@@ -144,29 +143,6 @@ func formattingRound(t *testing.T, seed uint64, steps int) {
 			return crdt.Attributes{mark: nil}
 		}
 		return crdt.Attributes{mark: markOn}
-	}
-	// markedRunIn is a run of the text that carries marks, as the text stands. Deleting one
-	// strands the markers that open and close it in one gap, where the cleanup calls the first of
-	// each key redundant - it is the editing a user does, bold a word and then change their mind -
-	// and a storm that deleted only at random would reach that gap by chance. The offsets are read
-	// afresh for every delete, since every other write moves them.
-	markedRunIn := func(text *crdt.YXmlText) (at, run int, ok bool) {
-		var runs [][2]int
-		for _, delta := range text.ToDelta() {
-			length := 1
-			if inserted, isText := delta.Insert.(string); isText {
-				length = len(inserted)
-			}
-			if len(delta.Attributes) > 0 {
-				runs = append(runs, [2]int{at, length})
-			}
-			at += length
-		}
-		if len(runs) == 0 {
-			return 0, 0, false
-		}
-		found := runs[rng.IntN(len(runs))]
-		return found[0], found[1], true
 	}
 	// textOp is one write on text: a word typed with or without marks, a run marked or unmarked,
 	// or characters deleted. It answers no change where the text is too short for the op drawn,
@@ -194,7 +170,7 @@ func formattingRound(t *testing.T, seed uint64, steps int) {
 				return "", nil
 			}
 			at, run := rng.IntN(length-3), 1+rng.IntN(2)
-			if marked, markedRun, ok := markedRunIn(text); ok && markedRun < length && rng.IntN(2) == 0 {
+			if marked, markedRun, ok := markedRunOf(rng, text); ok && markedRun < length && rng.IntN(2) == 0 {
 				at, run = marked, markedRun
 			}
 			return "delete", func(txn *crdt.Transaction) { text.Delete(txn, at, run) }
@@ -222,7 +198,7 @@ func formattingRound(t *testing.T, seed uint64, steps int) {
 		made := ""
 		switch kind := rng.IntN(10); {
 		case kind < 5: // the service's own write, a local transaction of the room's
-			writeInRoom(t, service, artifactID, "the storm's local write", func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
+			writeInRoom(t, service, artifactID, "the storm's local write", serviceWrite, func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
 				text := focused(textsUnder(fragment, true))
 				if text == nil {
 					return nil
@@ -265,7 +241,7 @@ func formattingRound(t *testing.T, seed uint64, steps int) {
 			continue
 		}
 		kinds[made]++
-		replicaReplaysTheRoom(t, live, replica, fmt.Sprintf("step %d, %s", step, made))
+		replicaHoldsTheRoom(t, live, replica, fmt.Sprintf("step %d, %s", step, made))
 	}
 
 	waitForLandedAppends(t, service, artifactID)
@@ -303,17 +279,35 @@ func newFormattingRoom(t *testing.T) (*Service, string, *renderShadow, *crdt.Doc
 	return service, artifactID, sh, live, replica
 }
 
-// writeInRoom commits change on the room's live document as one of the service's own writes
-// (serviceTransact), the way Dispatch's in-room writes commit: a local transaction of the room's,
-// which ygo runs no format cleanup after. prepare runs before the transaction opens and answers
-// the change to commit, or nil for nothing to write: reading a shared type takes the document's
-// lock, which the open transaction holds, so the nodes a change writes are found first
-// (commitWithNoOrigin). made names the write in a failure.
-func writeInRoom(t *testing.T, service *Service, artifactID, made string, prepare func(fragment *crdt.YXmlFragment) func(*crdt.Transaction)) {
+// roomCommit names which of the two kinds of local transaction writeInRoom commits on the room.
+type roomCommit int
+
+const (
+	// serviceWrite is one of the service's own in-room writes (Server.Apply, serviceTransact),
+	// the way Dispatch's in-room writes commit: a local transaction of the room's, which ygo
+	// runs no format cleanup after and whose origin the room's observer reads as the service's.
+	serviceWrite roomCommit = iota
+	// noOrigin is the way ygo's own formatting cleanup commits: doc.Transact with no origin
+	// argument at all (crdt.Doc.Transact takes the origin variadically). Server.Apply captures
+	// only what its own transact helper commits, so such a transaction is not captured and Apply
+	// answers ErrNoChanges - which is the point of it: the commit reaches the room's update
+	// observers, and ygo's persistence, naming no one.
+	noOrigin
+)
+
+// writeInRoom commits change on the room's live document, as the commit kind names. prepare runs
+// before the transaction opens and answers the change to commit, or nil for nothing to write:
+// reading a shared type takes the document's lock, which the open transaction holds, so the nodes
+// a change writes are found first. made names the write in a failure.
+func writeInRoom(t *testing.T, service *Service, artifactID, made string, kind roomCommit, prepare func(fragment *crdt.YXmlFragment) func(*crdt.Transaction)) {
 	t.Helper()
 	err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		change := prepare(doc.GetXmlFragment(fragmentName))
 		if change == nil {
+			return
+		}
+		if kind == noOrigin {
+			doc.Transact(change)
 			return
 		}
 		wrapped, release := service.serviceTransact(transact)
@@ -322,41 +316,6 @@ func writeInRoom(t *testing.T, service *Service, artifactID, made string, prepar
 	})
 	if err != nil && !errors.Is(err, ygws.ErrNoChanges) {
 		t.Fatalf("write %s into the room: %v", made, err)
-	}
-}
-
-// replicaReplaysTheRoom asserts that the replica, once it holds every commit the room has logged,
-// carries the room's formatting and nothing else: the same state vector and the same delete set -
-// a cleanup of its own would commit under the replica's own client and tombstone markers the room
-// keeps - the same runs and marks for every text node of the fragment, walked in order, and the
-// same whole state. It is replicaHoldsTheRoom read through the formatting, and it stops the test
-// at the first commit that diverges, since every later one compares a replica that has already
-// drifted. The room is read first, with nothing else writing it, so neither read walks a document
-// another holds.
-func replicaReplaysTheRoom(t *testing.T, live *crdt.Doc, replica *renderedReplica, after string) {
-	t.Helper()
-	clocks, deletes := live.StateVector(), crdt.DeleteSetFromDoc(live)
-	state := crdt.EncodeStateAsUpdateV1(live, nil)
-	want := allTextRuns(live)
-	doc := heldReplica(t, replica)
-	defer replica.mu.Unlock()
-	if got := doc.StateVector(); !maps.Equal(got, clocks) {
-		t.Fatalf("after %s the replica stands at state vector %v and the room at %v", after, got, clocks)
-	}
-	if got := crdt.DeleteSetFromDoc(doc); !sameDeletes(deletes, got) {
-		t.Fatalf("after %s the replica tombstones what the room does not: %s", after, deleteDifference(got, deletes))
-	}
-	got := allTextRuns(doc)
-	if len(got) != len(want) {
-		t.Fatalf("after %s the replica holds %d text nodes and the room %d", after, len(got), len(want))
-	}
-	for index, runs := range got {
-		if runs != want[index] {
-			t.Fatalf("after %s the replica's text node %d reads %s and the room's %s", after, index, runs, want[index])
-		}
-	}
-	if encoded := crdt.EncodeStateAsUpdateV1(doc, nil); !bytes.Equal(encoded, state) {
-		t.Fatalf("after %s the replica's whole state is %d bytes and the room's %d", after, len(encoded), len(state))
 	}
 }
 
@@ -404,6 +363,30 @@ func marksAt(text *crdt.YXmlText, index int) crdt.Attributes {
 		}
 	}
 	return marks
+}
+
+// markedRunOf is a run of the text that carries marks, drawn at random as the text stands.
+// Deleting one strands the markers that open and close it in one gap, where the cleanup calls the
+// first of each key redundant - it is the editing a user does, bold a word and then change their
+// mind - and a storm that deleted only at random would reach that gap by chance. The offsets are
+// read afresh for every delete, since every other write moves them.
+func markedRunOf(rng *rand.Rand, text *crdt.YXmlText) (at, run int, ok bool) {
+	var runs [][2]int
+	for _, delta := range text.ToDelta() {
+		length := 1
+		if inserted, isText := delta.Insert.(string); isText {
+			length = len(inserted)
+		}
+		if len(delta.Attributes) > 0 {
+			runs = append(runs, [2]int{at, length})
+		}
+		at += length
+	}
+	if len(runs) == 0 {
+		return 0, 0, false
+	}
+	found := runs[rng.IntN(len(runs))]
+	return found[0], found[1], true
 }
 
 // roomText is the room's text node whose text starts with prefix.

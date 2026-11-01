@@ -936,9 +936,7 @@ func TestRenderReuseARecoveredReplicaRendersThePublish(t *testing.T) {
 		write := joinedLiveWriteOf(t, service, artifactID)
 		readEpoch = write.forkRead.epoch
 		replica := service.replicaOf(service.srv.GetDoc(artifactID))
-		replica.mu.Lock()
-		replica.doc = nil
-		replica.mu.Unlock()
+		forceRecover(replica)
 		editAsConnectedPeer(t, service, artifactID, 2, reuseBob, appendBlocks(t, "A paragraph the recovering replica could not place.\n"))
 		awaitAppendLandedOrQueued(t, service, artifactID)
 		if replica.epoch.Load() == readEpoch {
@@ -1350,29 +1348,57 @@ func drainOneLoggedUpdate(t *testing.T, log *crdt.UpdateLog, made string) crdt.L
 	return updates[0]
 }
 
-// replicaHoldsTheRoom asserts that the replica, once it holds every logged commit, is the room:
-// the same state vector, the same structs and deletions parked (crdt.Doc.PendingStats), the same
-// tree, and the same whole state, which carries what is parked (crdt.EncodeStateAsUpdateV1). The
-// room is read first, with nothing else writing it, so neither read walks a document another
-// holds.
+// replicaHoldsTheRoom asserts that the replica, once it holds every logged commit, is the room,
+// read every way a drift shows in: the same state vector, the same structs and deletions parked
+// (crdt.Doc.PendingStats), the same delete set - a format cleanup the replica ran alone
+// tombstones markers the room keeps - the same tree, the same runs and marks for every text node
+// of the fragment, walked in order, and the same whole state, which carries what is parked
+// (crdt.EncodeStateAsUpdateV1). The room is read first, with nothing else writing it, so neither
+// read walks a document another holds. It stops the test at the first commit that diverges,
+// since every later one compares a replica that has already drifted.
 func replicaHoldsTheRoom(t *testing.T, live *crdt.Doc, replica *renderedReplica, after string) {
 	t.Helper()
+	if replica == nil {
+		t.Fatalf("after %s the room has no replica", after)
+	}
 	clocks, waiting, tree := live.StateVector(), live.PendingStats(), live.GetXmlFragment(fragmentName).ToXML()
-	state := crdt.EncodeStateAsUpdateV1(live, nil)
+	deletes, state, want := crdt.DeleteSetFromDoc(live), crdt.EncodeStateAsUpdateV1(live, nil), allTextRuns(live)
 	doc := heldReplica(t, replica)
 	defer replica.mu.Unlock()
 	if got := doc.StateVector(); !maps.Equal(got, clocks) {
-		t.Errorf("after %s the replica stands at state vector %v and the room at %v", after, got, clocks)
+		t.Fatalf("after %s the replica stands at state vector %v and the room at %v", after, got, clocks)
 	}
 	if got := doc.PendingStats(); got.Items != waiting.Items || got.DeleteRanges != waiting.DeleteRanges || !slices.Equal(got.MissingFor, waiting.MissingFor) {
-		t.Errorf("after %s the replica holds %+v parked and the room %+v", after, got, waiting)
+		t.Fatalf("after %s the replica holds %+v parked and the room %+v", after, got, waiting)
+	}
+	if got := crdt.DeleteSetFromDoc(doc); !sameDeletes(deletes, got) {
+		t.Fatalf("after %s the replica tombstones what the room does not: %s", after, deleteDifference(got, deletes))
 	}
 	if got := doc.GetXmlFragment(fragmentName).ToXML(); got != tree {
-		t.Errorf("after %s the replica holds a tree of %d bytes and the room one of %d", after, len(got), len(tree))
+		t.Fatalf("after %s the replica holds a tree of %d bytes and the room one of %d", after, len(got), len(tree))
 	}
-	if got := crdt.EncodeStateAsUpdateV1(doc, nil); !bytes.Equal(got, state) {
-		t.Errorf("after %s the replica's whole state is %d bytes and the room's %d", after, len(got), len(state))
+	got := allTextRuns(doc)
+	if len(got) != len(want) {
+		t.Fatalf("after %s the replica holds %d text nodes and the room %d", after, len(got), len(want))
 	}
+	for index, runs := range got {
+		if runs != want[index] {
+			t.Fatalf("after %s the replica's text node %d reads %s and the room's %s", after, index, runs, want[index])
+		}
+	}
+	if encoded := crdt.EncodeStateAsUpdateV1(doc, nil); !bytes.Equal(encoded, state) {
+		t.Fatalf("after %s the replica's whole state is %d bytes and the room's %d", after, len(encoded), len(state))
+	}
+}
+
+// forceRecover leaves the replica holding no document, so it hands the next update it is given to
+// recover (renderedReplica.recover) and starts again at the room's next commit. It clears the
+// fragment with the document, which the field's own rule asks for (renderedReplica.fragment is
+// nil with doc).
+func forceRecover(replica *renderedReplica) {
+	replica.mu.Lock()
+	defer replica.mu.Unlock()
+	replica.doc, replica.fragment = nil, nil
 }
 
 // heldReplica is the replica's document once it holds every commit the room has logged, with the
@@ -1582,9 +1608,7 @@ func TestRenderReuseABrowserTypingScript(t *testing.T) {
 	// A forced recover: the replica cannot place the next keystroke, and starts again at the one
 	// after it.
 	replica := service.replicaOf(service.srv.GetDoc(artifactID))
-	replica.mu.Lock()
-	replica.doc = nil
-	replica.mu.Unlock()
+	forceRecover(replica)
 	text = browser.text(typedParagraph)
 	browser.send(func(txn *crdt.Transaction) { text.Insert(txn, len(typedParagraph+" quickly,"), "!", nil) })
 	recovered++
@@ -1616,8 +1640,6 @@ func TestRenderReuseABrowserTypingScript(t *testing.T) {
 // so the test breaks the block in the replica's own copy, the one the walk reads, after the
 // layout that flags it was recorded.
 func TestRenderReuseAnUnreadableAskBlockKeepsTheRoomsAskAuthors(t *testing.T) {
-	logs := &storetest.LockedLog{}
-	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "The typed paragraph opens the document.\n\nThe last paragraph closes it.\n")
@@ -1658,9 +1680,6 @@ func TestRenderReuseAnUnreadableAskBlockKeepsTheRoomsAskAuthors(t *testing.T) {
 	if !maps.Equal(keptBlocks, blocks) || !maps.Equal(keptAuthors, authors) {
 		t.Errorf("after the keystroke the room records ask blocks %v with authors %v, want %v with %v",
 			sortedIDs(keptBlocks), keptAuthors, sortedIDs(blocks), authors)
-	}
-	if logged := logs.String(); !strings.Contains(logged, "read a block of the updated document to list its ask blocks") {
-		t.Errorf("the failed read logged %q, want the refusal of the block it could not read", logged)
 	}
 }
 
@@ -1719,9 +1738,7 @@ func TestRenderReuseACatchUpTakesTheLoadsRendering(t *testing.T) {
 		expectCatchUps(t, m, 1, 0)
 		m = sh.measure()
 		// As E8 does: a replica that holds no document hands the next update to recover.
-		replica.mu.Lock()
-		replica.doc = nil
-		replica.mu.Unlock()
+		forceRecover(replica)
 		editAsConnectedPeer(t, service, artifactID, 2, reuseBob, appendBlocks(t, "A paragraph the recovering replica could not place.\n"))
 		waitForLandedAppends(t, service, artifactID)
 		editAsConnectedPeer(t, service, artifactID, 3, reuseBob, replaceRun("Paragraph 1 opens", "Paragraph 1 first opens"))

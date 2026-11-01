@@ -3,16 +3,13 @@ package docs
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/reearth/ygo/crdt"
-	ygws "github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -236,61 +233,6 @@ func reportLogged(t *testing.T, logged []*shadowUpdate, seen []nilOriginCommit) 
 	}
 }
 
-// docState is one document's CRDT state, read three independent ways: the state vector, the
-// delete set alone (the whole state encoded against the document's own state vector, which carries
-// no struct), and the XML of the document fragment.
-type docState struct {
-	stateVector []byte
-	deleteSet   []byte
-	xml         string
-}
-
-func readDocState(doc *crdt.Doc, fragment *crdt.YXmlFragment) docState {
-	return docState{
-		stateVector: crdt.EncodeStateVectorV1(doc),
-		deleteSet:   crdt.EncodeStateAsUpdateV1(doc, doc.StateVector()),
-		xml:         fragment.ToXML(),
-	}
-}
-
-func (s docState) equal(other docState) bool {
-	return bytes.Equal(s.stateVector, other.stateVector) &&
-		bytes.Equal(s.deleteSet, other.deleteSet) &&
-		s.xml == other.xml
-}
-
-func (s docState) String() string {
-	return fmt.Sprintf("stateVector=%d bytes deleteSet=%d bytes xml=%d bytes", len(s.stateVector), len(s.deleteSet), len(s.xml))
-}
-
-// expectReplicaHoldsTheRoom asserts that the room's replica, once it holds every commit the room
-// has made, holds the room's state.
-func expectReplicaHoldsTheRoom(t *testing.T, service *Service, room *crdt.Doc) {
-	t.Helper()
-	replica := service.replicaOf(room)
-	if replica == nil {
-		t.Fatal("the room has no replica")
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for replica.hold() == nil {
-		if time.Now().After(deadline) {
-			t.Fatal("the replica never stood at the room's latest commit")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	defer replica.mu.Unlock()
-	roomState := readDocState(room, room.GetXmlFragment(fragmentName))
-	replicaState := readDocState(replica.doc, replica.fragment)
-	t.Logf("the room:    %s", roomState)
-	t.Logf("the replica: %s", replicaState)
-	if !replicaState.equal(roomState) {
-		t.Errorf("the replica does not hold the room's state: stateVector equal=%t, deleteSet equal=%t, xml equal=%t",
-			bytes.Equal(replicaState.stateVector, roomState.stateVector),
-			bytes.Equal(replicaState.deleteSet, roomState.deleteSet),
-			replicaState.xml == roomState.xml)
-	}
-}
-
 // paragraphLine is the line of markdown that starts with prefix.
 func paragraphLine(t *testing.T, markdown, prefix string) string {
 	t.Helper()
@@ -301,67 +243,6 @@ func paragraphLine(t *testing.T, markdown, prefix string) string {
 	}
 	t.Fatalf("the rendering holds no line starting %q", prefix)
 	return ""
-}
-
-func copiedRoomMarkdown(t *testing.T, room *crdt.Doc) string {
-	t.Helper()
-	copied, err := snapshotDocument(room)
-	if err != nil {
-		t.Fatalf("copy the room: %v", err)
-	}
-	markdown, _, err := shadowRender(copied)
-	if err != nil || markdown == nil {
-		t.Fatalf("render the room: %v", err)
-	}
-	return *markdown
-}
-
-// xmlTextWithPrefix is the text node under fragment whose text starts with prefix, wherever it
-// stands, as a peer's own finder reads its copy (roomPeer.text).
-func xmlTextWithPrefix(t *testing.T, fragment *crdt.YXmlFragment, prefix string) *crdt.YXmlText {
-	t.Helper()
-	var find func(parent *crdt.YXmlFragment) *crdt.YXmlText
-	find = func(parent *crdt.YXmlFragment) *crdt.YXmlText {
-		for _, child := range parent.Children() {
-			switch node := child.(type) {
-			case *crdt.YXmlText:
-				if strings.HasPrefix(node.ToString(), prefix) {
-					return node
-				}
-			case *crdt.YXmlElement:
-				if found := find(&node.YXmlFragment); found != nil {
-					return found
-				}
-			}
-		}
-		return nil
-	}
-	text := find(fragment)
-	if text == nil {
-		t.Fatalf("the document holds no text starting %q", prefix)
-	}
-	return text
-}
-
-// commitWithNoOrigin commits on the room's live document the way ygo's own formatting cleanup
-// commits: doc.Transact with no origin argument at all, so the commit's origin is nil
-// (crdt.Doc.Transact takes the origin variadically). Server.Apply holds the room for the call and
-// captures only what its own transact helper commits, so this transaction is not captured and
-// Apply answers ErrNoChanges - which is the point here: the commit reaches the room's update
-// observers, and ygo's persistence, naming no one.
-//
-// prepare runs before the transaction opens and answers the change to commit: reading a shared
-// type takes the document's lock, which the open transaction holds, so the nodes a change writes
-// are found first.
-func commitWithNoOrigin(t *testing.T, service *Service, artifactID string, prepare func(fragment *crdt.YXmlFragment) func(*crdt.Transaction)) {
-	t.Helper()
-	err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		change := prepare(doc.GetXmlFragment(fragmentName))
-		doc.Transact(change)
-	})
-	if err != nil && !errors.Is(err, ygws.ErrNoChanges) {
-		t.Fatalf("commit on the room with no origin: %v", err)
-	}
 }
 
 // TestRenderReuseANilOriginCommitCreditsNoOne holds that a commit no one made - one ygo makes for
@@ -407,7 +288,7 @@ func testADeleteThatDanglesABoldRun(t *testing.T) {
 		bolded.Format(txn, boldAt, len(nilOriginWord), crdt.Attributes{"strong": map[string]any{}})
 	})
 	waitForLandedAppends(t, service, artifactID)
-	boldLine := paragraphLine(t, copiedRoomMarkdown(t, room), nilOriginParagraph)
+	boldLine := paragraphLine(t, renderOfRoom(t, room), nilOriginParagraph)
 	if !strings.Contains(boldLine, "**"+nilOriginWord+"**") {
 		t.Fatalf("the room's paragraph reads %q, which holds no bold %q", boldLine, nilOriginWord)
 	}
@@ -492,8 +373,8 @@ func testADeleteThatDanglesABoldRun(t *testing.T) {
 	}
 
 	sh.check(t)
-	expectReplicaHoldsTheRoom(t, service, room)
-	line := paragraphLine(t, copiedRoomMarkdown(t, room), nilOriginParagraph)
+	replicaHoldsTheRoom(t, room, service.replicaOf(room), "the browser's delete and ygo's cleanup of it")
+	line := paragraphLine(t, renderOfRoom(t, room), nilOriginParagraph)
 	t.Logf("the room's paragraph after the delete: %q", line)
 	if strings.Contains(line, nilOriginWord) || strings.Contains(line, "**") {
 		t.Errorf("the room's paragraph reads %q: the deleted bold run is still there", line)
@@ -540,13 +421,11 @@ func testANilOriginCommitAfterARecover(t *testing.T) {
 	if replica == nil {
 		t.Fatal("the room has no replica")
 	}
-	replica.mu.Lock()
-	replica.doc = nil
-	replica.mu.Unlock()
+	forceRecover(replica)
 
 	m := sh.measure()
 	mark := watch.mark()
-	commitWithNoOrigin(t, service, artifactID, func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
+	writeInRoom(t, service, artifactID, "the cleanup ygo commits", noOrigin, func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
 		text := xmlTextWithPrefix(t, fragment, nilOriginParagraph)
 		at := text.Len()
 		return func(txn *crdt.Transaction) { text.Insert(txn, at, " Cleaned up.", nil) }
@@ -595,5 +474,5 @@ func testANilOriginCommitAfterARecover(t *testing.T) {
 	alice.send(func(txn *crdt.Transaction) { typed.Insert(txn, typed.Len(), "!", nil) })
 	waitForLandedAppends(t, service, artifactID)
 	sh.check(t)
-	expectReplicaHoldsTheRoom(t, service, room)
+	replicaHoldsTheRoom(t, room, service.replicaOf(room), "the nil-origin commit and the keystroke after it")
 }

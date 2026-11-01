@@ -122,6 +122,14 @@ func (p *roomPeer) editTree(edit func(*pmdoc.Node) *pmdoc.Node) {
 // text is the text node of the peer's document whose text starts with prefix, wherever it stands.
 func (p *roomPeer) text(prefix string) *crdt.YXmlText {
 	p.t.Helper()
+	return xmlTextWithPrefix(p.t, p.fragment, prefix)
+}
+
+// xmlTextWithPrefix is the text node under fragment whose text starts with prefix, wherever it
+// stands. It finds in any document's fragment: a peer's (roomPeer.text), a room's (roomText) or
+// a copy of one.
+func xmlTextWithPrefix(t *testing.T, fragment *crdt.YXmlFragment, prefix string) *crdt.YXmlText {
+	t.Helper()
 	var find func(parent *crdt.YXmlFragment) *crdt.YXmlText
 	find = func(parent *crdt.YXmlFragment) *crdt.YXmlText {
 		for _, child := range parent.Children() {
@@ -138,9 +146,9 @@ func (p *roomPeer) text(prefix string) *crdt.YXmlText {
 		}
 		return nil
 	}
-	text := find(p.fragment)
+	text := find(fragment)
 	if text == nil {
-		p.t.Fatalf("the peer's document holds no text starting %q", prefix)
+		t.Fatalf("the document holds no text starting %q", prefix)
 	}
 	return text
 }
@@ -154,7 +162,7 @@ func (p *roomPeer) markableTexts() []*crdt.YXmlText { return textsUnder(p.fragme
 
 // textsUnder is every text node under fragment, in document order. markable leaves out the text
 // of a code block, which the schema carries no mark in. It walks any document's fragment: a
-// peer's, a room's, or the room's replica's (replicaReplaysTheRoom).
+// peer's, a room's, or the room's replica's (replicaHoldsTheRoom).
 func textsUnder(fragment *crdt.YXmlFragment, markable bool) []*crdt.YXmlText {
 	var found []*crdt.YXmlText
 	var walk func(parent *crdt.YXmlFragment)

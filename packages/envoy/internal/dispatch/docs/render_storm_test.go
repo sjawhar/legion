@@ -69,7 +69,7 @@ var stormMarks = []string{"strong", "emphasis", "inlineCode", "strike_through", 
 // from the test, which is what the pmdoc differential cannot reach.
 func TestRenderReuseARandomisedEditStorm(t *testing.T) {
 	seeds, edits := []uint64{1, 2, 3, 4, 5, 6, 7, 8}, 320
-	if stormRaceEnabled || testing.Short() {
+	if raceEnabled || testing.Short() {
 		seeds, edits = []uint64{1, 2}, 80
 	}
 	for _, seed := range seeds {
@@ -268,10 +268,7 @@ func stormRound(t *testing.T, seed uint64, edits int) {
 			// from a base the room's load never rendered. The next update is a keystroke, so
 			// recover's own class for an update it could not place - a content change with no
 			// ask blocks, which main answers too - is what the document did.
-			replica := service.replicaOf(service.srv.GetDoc(artifactID))
-			replica.mu.Lock()
-			replica.doc = nil
-			replica.mu.Unlock()
+			forceRecover(service.replicaOf(service.srv.GetDoc(artifactID)))
 			bob.sync()
 			if text := pickText(bob); text != nil {
 				typeInto(bob, text)
