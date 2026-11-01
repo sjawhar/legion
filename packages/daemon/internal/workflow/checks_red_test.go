@@ -207,8 +207,13 @@ func TestACheckRerunOnTheHandoffHeadAboveTheCodeHeadDecidesIt(t *testing.T) {
 		t.Fatalf("the settlement stands at %q with %v failing, want it standing at the handoff head with nothing failing: pr-title passed there",
 			got.CheckedHead, got.Failing)
 	}
-	if want := []record.AttemptRun{{Name: "build", ID: 1}, {Name: "pr-title", ID: 2}, {Name: "unit", ID: 1}}; !reflect.DeepEqual(got.CheckRuns, want) {
-		t.Fatalf("the runs recorded are %v, want %v: the newest run of each name over the two heads", got.CheckRuns, want)
+	// Each run carries the head GitHub reported it on and what it concluded, so pr-title's run on
+	// the handoff head decides that name and the code head's runs decide theirs.
+	wantRuns := []record.AttemptRun{{Name: "build", ID: 1, Head: "code", Conclusion: record.RunSucceeded},
+		{Name: "pr-title", ID: 2, Head: "handoff", Conclusion: record.RunSucceeded},
+		{Name: "unit", ID: 1, Head: "code", Conclusion: record.RunSucceeded}}
+	if !reflect.DeepEqual(got.CheckRuns, wantRuns) {
+		t.Fatalf("the runs recorded are %v, want %v: the newest run of each name over the two heads", got.CheckRuns, wantRuns)
 	}
 	if got := issuePhase(t, pool); got != phase.Testing {
 		t.Fatalf("the issue is in %s, want it left in testing: no settlement moves it", got)
@@ -293,6 +298,90 @@ func TestACheckThatRanOnlyOnTheCodeHeadKeepsItsConclusionAboveIt(t *testing.T) {
 	if got := recordedPR(t, pool, "LEGION-208"); got.CheckedHead != "handoff" || len(got.Failing) != 1 || got.Failing[0] != "unit" {
 		t.Fatalf("the settlement stands at %q with %v failing, want it at the handoff head with unit still failing from the code head",
 			got.CheckedHead, got.Failing)
+	}
+}
+
+// Once a handoff-only push stands above the code head, the two heads hold one tree and the
+// settlements of both merge into one fence - and a settlement of either is newer for some check
+// names and older for others. The handoff head's settlement reports the check that runs per pull
+// request at the run it has there and nothing of the checks that ran only below it; the code
+// head's reports that same check at the older run it had there, beside the ones that are its own.
+// Each name is decided by its own newest run across the two heads (classify.ApplySettlement over
+// classify.mergeAttemptSets), so neither settlement is thrown away for being a mixture. The rule
+// this replaced called such a set a conflict and dropped the whole settlement: a red that arrived
+// from the code head after the handoff head had settled was never recorded and the roles were
+// told green over it, and a check re-run and passed at the code head after it left failing as it
+// was.
+func TestACodeHeadSettlementUnderAHandoffHeadDecidesItsOwnChecks(t *testing.T) {
+	handoffPush := pushedFromTo("code", "handoff", ".legion/LEGION-208/test.json", "legion-tester[bot]")
+	for _, tc := range []struct {
+		name string
+		// facts are the settlements that arrived, in order.
+		facts []intake.Fact
+		// pushAt is the settlement the tester's handoff push and the head it left arrive before.
+		pushAt int
+		// settled is the line the roles are told after each settlement.
+		settled []string
+		// failing is what the record holds failing at the end.
+		failing []string
+	}{
+		{
+			name: "the code head's red arrives after the handoff head has settled",
+			facts: []intake.Fact{
+				settledRunsAt("handoff", 1, []record.AttemptRun{{Name: "pr-title", ID: 5}}),
+				settledRunsAt("code", 1, codeHeadRuns(1), "unit"),
+			},
+			settled: []string{
+				"CI settled at handoff: \"pr-title\" succeeded",
+				"CI settled at handoff: \"build\" succeeded, \"pr-title\" succeeded, \"unit\" failed",
+			},
+			failing: []string{"unit"},
+		},
+		{
+			name:   "the code head's check is re-run and passes after the handoff head has settled",
+			pushAt: 1,
+			facts: []intake.Fact{
+				settledRunsAt("code", 1, codeHeadRuns(1), "unit"),
+				settledRunsAt("handoff", 1, []record.AttemptRun{{Name: "pr-title", ID: 5}}),
+				// The re-run of the code head's own workflow: new runs of the checks that run
+				// there, and the title check still at the run it had on that commit.
+				settledRunsAt("code", 2, []record.AttemptRun{{Name: "build", ID: 7}, {Name: "pr-title", ID: 1}, {Name: "unit", ID: 7}}),
+			},
+			settled: []string{
+				"CI settled at code: \"build\" succeeded, \"pr-title\" succeeded, \"unit\" failed",
+				"CI settled at handoff: \"build\" succeeded, \"pr-title\" succeeded, \"unit\" failed",
+				"CI settled at handoff: \"build\" succeeded, \"pr-title\" succeeded, \"unit\" succeeded",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "code"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
+			engine := mergingEngine()
+			var want []record.RoleMessage
+			for i, fact := range tc.facts {
+				if i == tc.pushAt {
+					applyRefusingNothing(t, pool, engine, handoffPush, syncedTo("handoff"))
+				}
+				applyRefusingNothing(t, pool, engine, fact)
+				for _, role := range []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer} {
+					want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody(tc.settled[i])})
+				}
+				assertRoleMessages(t, pool, "LEGION-208", want)
+			}
+			got := recordedPR(t, pool, "LEGION-208")
+			if !reflect.DeepEqual(got.Failing, tc.failing) {
+				t.Fatalf("the record holds %v failing, want %v: each name is decided by its own newest run over the two heads", got.Failing, tc.failing)
+			}
+			if got := issuePhase(t, pool); got != phase.Testing {
+				t.Fatalf("the issue is in %s, want it left in testing: no settlement moves it", got)
+			}
+		})
 	}
 }
 

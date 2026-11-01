@@ -53,18 +53,27 @@ type CiOutcome struct {
 }
 
 // ClassifySettlement decides whether a listener settlement may update the stored CI fence.
+//
+// A set that is newer for some check names and older for others is applied rather than thrown
+// away. It is the ordinary set across two heads of one tree, not a disagreement: the code head's
+// settlement reports the title check at the run it had there while the handoff head above it has
+// run that check again, and the handoff head's settlement reports no run at all of the checks
+// that ran only on the code head. Each name is then decided on its own by the newest run of it
+// (mergeAttemptSets, and the conclusion that run came to), so neither head's facts are lost; the
+// rule this replaced called such a set a conflict and dropped the whole settlement, which lost
+// the code head's red for as long as the handoff heads stood above it. Every other
+// classification is as it was: a set older for every name it reports is stale, and a settlement
+// of the same generation and snapshot is the same observation delivered again.
 func ClassifySettlement(pr record.PullRequest, in SettlementCandidate) SettlementClassification {
 	if pr.CheckRuns == nil {
 		return SettlementNewer
 	}
 
 	switch CompareAttemptSets(pr.CheckRuns, in.CheckRuns) {
-	case AttemptSetNewer:
+	case AttemptSetNewer, AttemptSetMixed:
 		return SettlementNewer
 	case AttemptSetOlder:
 		return SettlementStale
-	case AttemptSetMixed:
-		return SettlementConflict
 	}
 
 	if in.Generation < pr.Generation {
@@ -82,6 +91,14 @@ func ClassifySettlement(pr record.PullRequest, in SettlementCandidate) Settlemen
 // EffectiveOutcome preserves the failures and cancellations an incomplete listener observation
 // omits: a check the stored settlement names failing or cancelled that the new one does not report
 // at all stays as it was.
+//
+// It is kept exported and unchanged now that each name the fence holds a run for is decided by
+// that run's own conclusion (concludedBy, which ApplySettlement layers over this). The two
+// answer different questions and only one of them could be folded into the other: a settlement
+// may name a check failing and report no run of it - an aggregate job whose needs: never ran, so
+// GitHub started nothing - and no run means no conclusion to read, so what the lists say is all
+// there is for such a name. Keeping it apart also keeps it the one place that rule lives, which
+// the recorded contract fixtures replay by name (contracts/fixtures/classification).
 func EffectiveOutcome(pr record.PullRequest, in SettlementCandidate) CiOutcome {
 	reported := make(map[string]struct{}, len(in.CheckRuns)+len(in.Failing)+len(in.Cancelled))
 	for _, run := range in.CheckRuns {
@@ -102,4 +119,75 @@ func EffectiveOutcome(pr record.PullRequest, in SettlementCandidate) CiOutcome {
 		return names
 	}
 	return CiOutcome{Failing: kept(in.Failing, pr.Failing), Cancelled: kept(in.Cancelled, pr.Cancelled)}
+}
+
+// stampedRuns is in's check runs with the two facts the listener's report leaves implicit: the
+// head GitHub reported each run on, which is the head the settlement is of, and what the run
+// concluded, which the settlement's own lists give - a name in Failing failed, one in Cancelled
+// was cancelled, and one in neither concluded without either, since the listener settles a
+// commit only once every check it has seen there is terminal. They travel with the run into the
+// fence, where a name merged over two heads needs them to say which head its newest run was on
+// and what that run came to (mergeAttemptSets, concludedBy).
+func stampedRuns(in SettlementCandidate) []record.AttemptRun {
+	concluded := make(map[string]record.RunConclusion, len(in.Failing)+len(in.Cancelled))
+	for _, name := range in.Cancelled {
+		concluded[name] = record.RunCancelled
+	}
+	// The listener keeps the two lists apart (intake's PullRequestChecks), so a name in both is a
+	// report no listener writes; it is read as failed, which is what the roles are told for such
+	// a name (workflow's settledChecks) and the conclusion a reader acts on. One run has one
+	// conclusion, so that name is failing and not cancelled.
+	for _, name := range in.Failing {
+		concluded[name] = record.RunFailed
+	}
+	runs := make([]record.AttemptRun, 0, len(in.CheckRuns))
+	for _, run := range in.CheckRuns {
+		run.Head = in.Head
+		if run.Conclusion = concluded[run.Name]; run.Conclusion == "" {
+			run.Conclusion = record.RunSucceeded
+		}
+		runs = append(runs, run)
+	}
+	return runs
+}
+
+// concludedBy is what outcome comes to once the fence has spoken: a name the fence holds a
+// concluded run for is failing or cancelled exactly as that run concluded, whatever an older run
+// of it concluded and whatever list the settlements put it in, and every other name keeps the
+// conclusion outcome gives it. The fence is the newest run of each name over the code head and
+// the handoff-only heads above it (mergeAttemptSets), so this is where a check re-run and passed
+// on either head stops being red and one that failed there starts being red, whichever head's
+// settlement arrived last.
+//
+// A name with no run in the fence at all keeps outcome's reading: a settlement can name a check
+// failing and report no run of it (EffectiveOutcome), and there is no conclusion to read for
+// such a name. So does a name whose newest run is a row stored before runs carried a conclusion,
+// which says nothing and so decides nothing (record.AttemptRun).
+func concludedBy(fence []record.AttemptRun, outcome CiOutcome) CiOutcome {
+	decided := make(map[string]record.RunConclusion, len(fence))
+	for _, run := range fence {
+		if run.Conclusion != "" {
+			decided[run.Name] = run.Conclusion
+		}
+	}
+	names := func(listed []string, conclusion record.RunConclusion) []string {
+		var kept []string
+		seen := make(map[string]bool, len(listed))
+		for _, name := range listed {
+			if got, found := decided[name]; found && got != conclusion {
+				continue
+			}
+			if !seen[name] {
+				seen[name], kept = true, append(kept, name)
+			}
+		}
+		// The fence is sorted by name, so a name the lists never carried joins in name order.
+		for _, run := range fence {
+			if run.Conclusion == conclusion && !seen[run.Name] {
+				seen[run.Name], kept = true, append(kept, run.Name)
+			}
+		}
+		return kept
+	}
+	return CiOutcome{Failing: names(outcome.Failing, record.RunFailed), Cancelled: names(outcome.Cancelled, record.RunCancelled)}
 }

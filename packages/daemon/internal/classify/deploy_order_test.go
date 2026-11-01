@@ -26,20 +26,21 @@ import (
 // They are not the digests of the release before, and cannot be: that release's judgement carried
 // the fix-attempt accounting a CI result moved an issue by, which moves nothing now
 // (dispatch://INFRA-714/spec R1), and its histories carried reads of what the base branch
-// requires, which this release has no fact for. The run fuzz's two digests moved again when the
-// settlements of the heads a handoff-only push links began to merge instead of replacing one
-// another (SettlementFor): that fuzz settles several such heads, so a settlement of one of them
-// now leaves the runs of the others standing, where it used to start the fence afresh. The move
-// fuzz's four are unchanged, since it settles one head. What they fence is this release against
-// itself: a daemon running ahead of its listener judges as recorded here, so a later change that
-// moves that judgement is seen rather than deployed.
+// requires, which this release has no fact for. Every digest of both fuzzes moved again when each
+// run of the fence gained the head GitHub reported it on and what it concluded
+// (record.AttemptRun), which the judgement carries: both fuzzes settle heads, so every judgement
+// with a check run in it reads differently, and a settlement that is newer for some names and
+// older for others is applied per name now rather than dropped whole (ClassifySettlement), which
+// moves what the fences of the run fuzz's several heads come to. What they fence is this release
+// against itself: a daemon running ahead of its listener judges as recorded here, so a later
+// change that moves that judgement is seen rather than deployed.
 var noMoveNamedDigests = map[string]string{
-	"run-1":          "0ba72527ad5380956c543ae5d2db5ef16c01199b0a20e59fdcd21e4d21045c54",
-	"run-7":          "bd167d665a73c670587c2e3779127b9e9a238b71a5dc54ff5bc81d6218ae1473",
-	"move-1-random":  "ac7efab1a791ef8e9b87e204a72575a6bfd715c55ef708936a59e793c9ed2a6e",
-	"move-1-bounded": "ef9fa20996e1fa085bd46d5a75a57a351ae0a972d2d1ef96350181c348196135",
-	"move-7-random":  "a241f44556a1816e342e5e268357a2e1cf543c57faf147fd70bbfa4fb99ae633",
-	"move-7-bounded": "a6a788b915f63401cefd5e9be86b45359c395fcf6a6a1efa084745804a389e48",
+	"run-1":          "95fe2681af7920ce2cc0b6a55a862e8628e2131d1c0d3427a5c19e3c9c2f897d",
+	"run-7":          "b676a8896374d0f0509d9a9368d8fdfd596510e55f20c00a222f5c44ddda42fa",
+	"move-1-random":  "ebecb476bf4a9bfc0c72bac4a0a161168b5dd0f86cee30908fcc96dccf6182e7",
+	"move-1-bounded": "a10d761a320284fbe4ee7452e3e7b6eaf8dbb4adb27e8195eb2244853dedfba8",
+	"move-7-random":  "5ccb7f082039de4bb57d5b7c5837b0b82955fd2209d14a68c189fe54b549c7dd",
+	"move-7-bounded": "19fe08f73426fbd139a4e5b631cbf4d88dce76293f3d103e24d162922825c0b1",
 }
 
 // The same histories, every arrival naming its before but no sender, judge to these digests, made
@@ -47,12 +48,12 @@ var noMoveNamedDigests = map[string]string{
 // sender either way - and the move fuzz's are not: there the sender is what tells two pushes of
 // the same two heads apart.
 var noSenderNamedDigests = map[string]string{
-	"run-1":          "0ba72527ad5380956c543ae5d2db5ef16c01199b0a20e59fdcd21e4d21045c54",
-	"run-7":          "bd167d665a73c670587c2e3779127b9e9a238b71a5dc54ff5bc81d6218ae1473",
-	"move-1-random":  "947d057f0a566e8a653e139d064884013d9b78eeffdbd0bb8343fd7d350c384b",
-	"move-1-bounded": "82b1143b7850f419e6ddbfb145909b56a73a32fdaf6c31d2bb5266e4271b0de5",
-	"move-7-random":  "068f61fd1eee983be9a93101569145eb16d981e80972e440fe965f9d3f070b68",
-	"move-7-bounded": "be56e62d04211082c9833beb45b60831fde30157a81b395ba7d2f520924906cb",
+	"run-1":          "95fe2681af7920ce2cc0b6a55a862e8628e2131d1c0d3427a5c19e3c9c2f897d",
+	"run-7":          "b676a8896374d0f0509d9a9368d8fdfd596510e55f20c00a222f5c44ddda42fa",
+	"move-1-random":  "ee393d5b499e2f98fa2cb0e0a899adf26d95f8a284154d31bceee50df3fb4cee",
+	"move-1-bounded": "cbb68ad5774c6d7bed3810fe4699b5a17a6cc3ecbf106537203253ba68da75a9",
+	"move-7-random":  "897f374c666b62e9de5c4c0485e1fe2d7ede8a771b5e0fcd8befde6ee9780473",
+	"move-7-bounded": "0d7072b9597aa10822e492dec312c7099f472f71df46f38f4d838020fc8aeff1",
 }
 
 // A daemon of this release behind a listener that sends a synchronize's before but not its sender

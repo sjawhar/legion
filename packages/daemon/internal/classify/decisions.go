@@ -667,13 +667,45 @@ func chainOf(pushes []record.ClassifiedPush, from, to string) []record.Classifie
 // trailer and start no CI of its own). A checked head is recorded only with a settlement
 // (SettlementFor, then ApplySettlement), and cleared with it (a new generation, migration 0028).
 //
-// The listener settles a commit only once every check it has seen there is terminal, so a
-// settlement standing for the head is the daemon's one account of every check GitHub reported on
-// that head having concluded, and the absence of one is a check that may still be running: which
-// is what the round of an approval waiting on GitHub's merge state reads before it reports a head
-// GitHub will not merge from (workflow's reviewRound).
+// A settlement carried back this way is an account of the code the head carries, which is what
+// SettlementFor reads it for. It is no account of the current head's own CI: the push that
+// carried it can have run checks of its own, and what they came to is in no settlement of the
+// head it replaced. A reader that needs the current head's own checks asks
+// ChecksConcludedOnHead.
 func Settled(pr record.PullRequest) bool {
 	return pr.CheckedHead != "" && carriedBack(pr.Pushes, pr.HeadSHA, pr.CheckedHead)
+}
+
+// ChecksConcludedOnHead says whether GitHub has reported a check run on the pull request's
+// current head itself and every check run reported there has concluded. The fence holds the
+// newest run of each check name with the head GitHub reported it on (record.AttemptRun), and a
+// run reaches the fence only through a settlement, which the listener publishes for a commit only
+// once every check it has seen there is terminal: so a run of the fence stamped with the current
+// head is a run that concluded there, and its settlement is the account of every check GitHub
+// had reported on that head having concluded.
+//
+// It is what an approval waiting on GitHub's merge state reads before it reports the head one
+// GitHub will not merge (workflow's reviewRound). A check the base requires holds the head
+// `blocked` while it runs, which says nothing about the round, and a settlement carried back
+// from a lower head never answers for the current head's own checks: the handoff push that left
+// this head carries no skip-checks trailer unless its author wrote one, so GitHub does run CI
+// here and answers `blocked` while it does. A head GitHub reports no check run on at all - one
+// whose push carried the trailer, so no workflow started there - never satisfies this, so such a
+// round is never reported stuck. That is the rule's cost, and it is the smaller one: GitHub's
+// verdict for the head below is carried across such a push (advance), so an approval carrying a
+// verdict GitHub would merge reaches accepting without asking this at all, and one carrying a
+// verdict GitHub would not merge waits on the reads that follow rather than telling a finding
+// the daemon cannot tell apart from a check it has not been told of yet.
+//
+// A run stored before the fence carried the head it ran on names no head, so it is no run on the
+// current head and such a record waits for the head's next settlement (record.AttemptRun).
+func ChecksConcludedOnHead(pr record.PullRequest) bool {
+	for _, run := range pr.CheckRuns {
+		if run.Head != "" && run.Head == pr.HeadSHA {
+			return true
+		}
+	}
+	return false
 }
 
 // SettlementFor says whether a CI settlement of candidate.Head may stand for the pull request's
@@ -1050,9 +1082,18 @@ func boundedPushes(pushes []record.ClassifiedPush, head string) ([]record.Classi
 	return withoutKeys(pushes, gone), gone
 }
 
-// ApplySettlement applies a listener CI settlement only when ClassifySettlement says it is newer,
-// merging its attempt set into the fence. It returns false for stale, duplicate, and conflicting
-// observations.
+// ApplySettlement applies a listener CI settlement whenever ClassifySettlement says it is newer,
+// merging its check runs into the fence per check name. It returns false for stale, duplicate
+// and conflicting observations.
+//
+// Each run is stamped with the head it was reported on and the conclusion the candidate gives it
+// (stampedRuns) before it is merged, since the fence keeps the newest run of each name over
+// several heads and those facts are that run's. What the pull request then reports failing and
+// cancelled follows from the fence: each name the fence holds a concluded run for comes to that
+// run's own conclusion, and a name with no run anywhere keeps what the lists say of it
+// (concludedBy over EffectiveOutcome). So a check re-run and passed is no longer failing however
+// the older run ended, and one that failed on the head whose settlement arrived last is failing
+// even when the settlement applied after it reported nothing of that name.
 //
 // The listener's generation and snapshot number the settlements of one head's own record, so they
 // are taken only from a settlement of the head the fence stands at (SettlementFor, which moves
@@ -1063,8 +1104,9 @@ func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (reco
 	if ClassifySettlement(pr, candidate) != SettlementNewer {
 		return pr, false
 	}
-	outcome := EffectiveOutcome(pr, candidate)
-	pr.CheckRuns = mergeAttemptSets(pr.CheckRuns, candidate.CheckRuns)
+	fence := mergeAttemptSets(pr.CheckRuns, stampedRuns(candidate))
+	outcome := concludedBy(fence, EffectiveOutcome(pr, candidate))
+	pr.CheckRuns = fence
 	if candidate.Head == pr.CheckedHead {
 		pr.Generation = candidate.Generation
 		pr.Snapshot = candidate.Snapshot

@@ -183,28 +183,59 @@ func settledChecks(pr record.PullRequest) string {
 	if pr.CheckedHead == "" {
 		return ""
 	}
-	conclusions := make(map[string]string, len(pr.CheckRuns)+len(pr.Failing)+len(pr.Cancelled))
+	conclusions := make(map[string]record.RunConclusion, len(pr.CheckRuns)+len(pr.Failing)+len(pr.Cancelled))
 	for _, run := range pr.CheckRuns {
-		conclusions[run.Name] = "succeeded"
+		conclusions[run.Name] = record.RunSucceeded
 	}
 	for _, name := range pr.Cancelled {
-		conclusions[name] = "cancelled"
+		conclusions[name] = record.RunCancelled
 	}
 	for _, name := range pr.Failing {
-		conclusions[name] = "failed"
+		conclusions[name] = record.RunFailed
 	}
 	if len(conclusions) == 0 {
 		return "CI settled at " + pr.CheckedHead + " reporting no check"
 	}
+	return "CI settled at " + pr.CheckedHead + ": " + namedConclusions(conclusions)
+}
+
+// headChecks is every check run GitHub reported on the pull request's current head with what that
+// run concluded, in name order; "" when the record holds none. It is the line the notice of a head
+// GitHub will not merge from names (stuckMergeStateReason), where the settlement's own line would
+// not be true: a settlement standing for the head can be of the code head below it, and a name
+// whose newest run is there ran on other heads of the tree and not on this one. What GitHub
+// weighs for the merge is the current head, so that is the head whose checks the notice names,
+// and a required check whose run is missing here is the thing its reader looks for.
+//
+// Each run of the fence carries the head it ran on and its conclusion (record.AttemptRun), so
+// this is a reading of the fence and not of a settlement: a check run on this head that a newer
+// run of the same name on another head has replaced in the fence is not named, and nor is a run
+// stored before the fence carried its head.
+func headChecks(pr record.PullRequest) string {
+	conclusions := make(map[string]record.RunConclusion, len(pr.CheckRuns))
+	for _, run := range pr.CheckRuns {
+		if run.Head != "" && run.Head == pr.HeadSHA {
+			conclusions[run.Name] = run.Conclusion
+		}
+	}
+	if len(conclusions) == 0 {
+		return ""
+	}
+	return "GitHub reported on head " + pr.HeadSHA + ": " + namedConclusions(conclusions)
+}
+
+// namedConclusions is each check name with what it came to, in name order, as both lines above
+// spell it.
+func namedConclusions(conclusions map[string]record.RunConclusion) string {
 	names := make([]string, 0, len(conclusions))
 	for name := range conclusions {
 		names = append(names, name)
 	}
 	slices.Sort(names)
 	for i, name := range names {
-		names[i] = strconv.Quote(name) + " " + conclusions[name]
+		names[i] = strconv.Quote(name) + " " + string(conclusions[name])
 	}
-	return "CI settled at " + pr.CheckedHead + ": " + strings.Join(names, ", ")
+	return strings.Join(names, ", ")
 }
 
 // tellChecks tells the roles that work the issue what the settlement now standing for the pull
@@ -501,11 +532,17 @@ func (r round) stuckAs(other round) bool {
 
 // stuckMergeStateReason is what the architect and the reviewer are told of an approval standing
 // on a head GitHub answers for with a merge state it would not merge from: the head, the pull
-// request, the state in GitHub's own spelling, and every check GitHub reported on that head with
-// the conclusion it gave (settledChecks), which is the whole of what the daemon knows of the
-// head's CI. The round reports a head only once that settlement stands for it (reviewRound), so
-// the checks named here have all concluded; the sentence for a head none stands for is kept for
-// a reader of this function, which judges no round of its own.
+// request, the state in GitHub's own spelling, and every check run GitHub reported on that head
+// with the conclusion it came to (headChecks), which is the whole of what the daemon knows of
+// the head's own CI. The round reports a head only once GitHub has reported a check run on it
+// and every one of them has concluded (classify.ChecksConcludedOnHead), so the checks named here
+// have all concluded; the sentence for a head GitHub has reported none on is kept for a reader
+// of this function, which judges no round of its own.
+//
+// It names the head's own check runs rather than everything the settlement standing for the head
+// reports, which can be the code head's below it: GitHub weighs the current head for the merge,
+// so a name whose newest run ran on another head of the tree says nothing about why this head is
+// held, and naming it here would read as a run GitHub made on this one.
 //
 // The daemon reads no repository ruleset, so it does not know which checks the base requires
 // (dispatch://INFRA-714/spec R1): a required check that has never run is in no list GitHub gives
@@ -515,9 +552,9 @@ func (r round) stuckAs(other round) bool {
 // nothing of what clears the state: a push that earns what the base requires is one way, and a
 // check the base requires finishing on the head as it stands is another.
 func stuckMergeStateReason(pr record.PullRequest) string {
-	reported := settledChecks(pr)
+	reported := headChecks(pr)
 	if reported == "" {
-		reported = "No CI settlement stands for the head, so the daemon knows of no check GitHub reported on it"
+		reported = "GitHub has reported no check run on the head, so the daemon knows of none"
 	}
 	return fmt.Sprintf("the reviewer approved head %s on pull request #%d, and GitHub reports that head %s rather than one it would merge. %s. The daemon reads no ruleset and so names no required check: one the base requires that has never run is in nothing GitHub reports for the head, so it is absent here rather than named as missing, which makes the missing check the thing to look for. The issue waits in reviewing until GitHub reports the head clean, unstable or has_hooks",
 		pr.HeadSHA, pr.Number, pr.MergeState, reported)
@@ -533,12 +570,18 @@ func stuckMergeStateReason(pr record.PullRequest) string {
 // unread, or `unknown` while GitHub computes it - waits where it stands, and the read that lands
 // moves it (mergeability, the ladder behind daemon's readMergeState). So does an approval whose
 // head still has a check running: a check the base requires holds the head `blocked` while it
-// runs, which says nothing about the round, and the daemon's one account of every check GitHub
-// reported on the head having concluded is the CI settlement standing for it (classify.Settled).
-// An approval GitHub answers with a state it would not merge from, on a head whose checks have
-// all concluded, is stuck (stuckMergeState): the architect and the reviewer are told, once for
-// each head and state (record.ReviewDecision.ToldStuckHead), since the checks that would have
-// cleared it are over and nothing else is on its way to move the issue.
+// runs, which says nothing about the round. What tells the two apart is the head's own check
+// runs (classify.ChecksConcludedOnHead): the round reports a head only once GitHub has reported
+// a check run on that head itself and every one of them has concluded. A settlement carried
+// back from the code head through handoff-only pushes never satisfies it, and must not: the
+// handoff push that left this head carries no skip-checks trailer unless its author wrote one,
+// so GitHub runs CI here too and answers `blocked` while it does - the rule this replaced took
+// the carried settlement for an account of this head and reported the round stuck at once,
+// marking the head told before the checks that would clear it had finished.
+// An approval GitHub answers with a state it would not merge from, on a head whose own checks
+// have all concluded, is stuck (stuckMergeState): the architect and the reviewer are told, once
+// for each head and state (record.ReviewDecision.ToldStuckHead), since the checks that would
+// have cleared it are over and nothing else is on its way to move the issue.
 // The round reads no CI verdict: what a check concluded moves nothing and
 // decides no round - only whether every check reported has concluded, which is what GitHub's own
 // state is waiting for - and the reviewer reads the head's checks on GitHub itself. A completed round
@@ -569,10 +612,11 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 		}
 		// Everything below here waits on GitHub's answer for this head: the unread state and
 		// `unknown` because GitHub has given none yet, every other because the one it gave can
-		// change under the head, and a head a check is still running on because the check is what
-		// the state is waiting for. The daemon reads for each (settleRound), and the settlement
-		// that ends the last check is itself a fact that asks for a read.
-		if pr.MergeState == record.MergeStateUnread || pr.MergeState == record.MergeStateUnknown || !classify.Settled(*pr) {
+		// change under the head, and a head GitHub has reported no concluded check run on
+		// because a check still running there is what the state is waiting for. The daemon reads
+		// for each (settleRound), and the settlement that ends the last check is itself a fact
+		// that asks for a read.
+		if pr.MergeState == record.MergeStateUnread || pr.MergeState == record.MergeStateUnknown || !classify.ChecksConcludedOnHead(*pr) {
 			return round{waitsOnMergeState: true}
 		}
 		return round{outcome: roundStuck, cause: stuckMergeState, head: pr.HeadSHA, state: pr.MergeState,

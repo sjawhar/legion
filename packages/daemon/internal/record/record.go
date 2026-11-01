@@ -17,11 +17,40 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
-// AttemptRun is the latest check-run id the daemon observed for one check name.
+// AttemptRun is the latest check-run id the daemon observed for one check name (ID), with the
+// head GitHub reported that run on (Head) and what the run came to (Conclusion). Those two are
+// facts of the run rather than of the settlement that carried it, and they are kept with the id
+// because the fence is merged per check name over the code head and the handoff-only heads above
+// it (classify's mergeAttemptSets): each name keeps its highest run id, so the head and the
+// conclusion must be the ones of that run and never a mixture of two runs'. What they answer is
+// which names are red (classify.ApplySettlement derives Failing and Cancelled from them) and
+// whether GitHub has reported a check run on the pull request's current head itself
+// (classify.ChecksConcludedOnHead).
+//
+// Both are optional in the stored JSON, so a row written before dispatch://INFRA-714 added them
+// still parses, and such a row carries neither. It fails closed on both readings: an empty Head
+// is no head, so the run is never one on the current head, and an empty Conclusion is no
+// conclusion, so it never makes its name red. The names of such a row come to what the stored
+// Failing and Cancelled lists say of them, which is what they came to before.
 type AttemptRun struct {
-	Name string `json:"name"`
-	ID   int64  `json:"id"`
+	Name       string        `json:"name"`
+	ID         int64         `json:"id"`
+	Head       string        `json:"head,omitempty"`
+	Conclusion RunConclusion `json:"conclusion,omitempty"`
 }
+
+// RunConclusion is what one check run concluded, as the settlement reporting it said: the
+// listener names a run that failed and a run that was cancelled, and a run it reports as neither
+// succeeded, since it settles a commit only once every check it has seen there is terminal
+// (classify.ApplySettlement, which reads a candidate's Failing and Cancelled lists for it). ""
+// is a run recorded before the conclusion was kept beside the id.
+type RunConclusion string
+
+const (
+	RunSucceeded RunConclusion = "succeeded"
+	RunFailed    RunConclusion = "failed"
+	RunCancelled RunConclusion = "cancelled"
+)
 
 // ClassifiedPush is one branch push as its changed paths classify it: a fact about two commits,
 // the head it replaced (Before) and the head it left (SHA), true whenever it is learned.
@@ -437,11 +466,16 @@ type PullRequest struct {
 	// counts. A settlement moves no issue (dispatch://INFRA-714/spec R1): what it names is told to
 	// the roles that work the issue and judged by them (workflow's checks).
 	CheckedHead string
-	// Failing and Cancelled are the checks the settlement names as failed and as cancelled, and
-	// CheckRuns the latest run observed of each check name. They hold every head that shares the
+	// CheckRuns is the latest run observed of each check name, and Failing and Cancelled the
+	// checks that come to failed and to cancelled. All three hold every head that shares the
 	// checked head's tree, not the checked head alone: a settlement of a head the current one
-	// replaced with handoffs merges into them, so each name reads the newest run of it over those
-	// heads (classify.SettlementFor). A check with no concluded run anywhere is in none of them.
+	// replaced with handoffs merges into them per check name, so each name reads the newest run
+	// of it over those heads (classify.SettlementFor). That run's own conclusion is what puts its
+	// name in Failing, in Cancelled, or in neither (classify.ApplySettlement), so a name whose
+	// newest run passed is in none of them however an older run of it concluded. A name the
+	// settlements report no run for at all - a check GitHub never started - keeps the conclusion
+	// the lists were given (classify.EffectiveOutcome), and a check with no concluded run
+	// anywhere is in none of them.
 	Failing    []string
 	Cancelled  []string
 	CheckRuns  []AttemptRun

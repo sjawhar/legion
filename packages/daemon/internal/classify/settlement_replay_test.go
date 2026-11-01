@@ -304,7 +304,10 @@ func TestAPassedCheckStaysRetiredWhileAnotherCheckSettlesRepeatedly(t *testing.T
 	if want := []verdictChange{{"title fails", "red"}, {"title passes", "green"}}; !slices.Equal(changes, want) {
 		t.Fatalf("verdicts changed %v, want %v", changes, want)
 	}
-	if want := []record.AttemptRun{{Name: "ci", ID: 30}, {Name: "title", ID: 11}}; !slices.Equal(pr.CheckRuns, want) {
+	// Each run of the fence carries what it concluded, which is what retires the title failure:
+	// title's passing run outranks it, so the name is green however the older run ended.
+	want := []record.AttemptRun{{Name: "ci", ID: 30, Conclusion: record.RunSucceeded}, {Name: "title", ID: 11, Conclusion: record.RunSucceeded}}
+	if !slices.Equal(pr.CheckRuns, want) {
 		t.Fatalf("fence = %v, want %v", pr.CheckRuns, want)
 	}
 }
