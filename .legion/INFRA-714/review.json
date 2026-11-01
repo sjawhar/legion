@@ -2,18 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-714",
-  "previousHandoff": "80acedfde75ca2044e9e1ec9c365813067fe772c",
-  "round": 5,
-  "headReviewed": "the head this push makes: my prose commit c6828246 on 30f9655f; code head 15c215e87c (forward merge of main 0cf0edcd9e)",
+  "previousHandoff": "2914c6dfaa194eb1e35cdf455156d1b7b692a904",
+  "round": 6,
+  "headReviewed": "the head this push makes: my prose commit 46320892 on a56690be; code head 4cfed344a3",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 1,
-  "minor": 0,
-  "fingerprint": "80acedfde7 (fork 7285fd05) 460b8cb42317c9f1096260f5862056dd70a7c6fa7216115c2b7c9296382c1db5 -> 30f9655fe5 (fork 0cf0edcd) 5055cf1b3aec4f5ffbd2bd023fc0886b19f9fd5bd30f0737adf5ade4cff7d934: changed. One file's diff moved, packages/daemon/internal/workflow/boot_status_test.go (the branch's statusWrites helper dropped for main's identical one). The text conflicts (record.go, store.go: DisarmPending dropped, PersonHandoverPending kept) are resolved correctly and no line of main was lost.",
-  "thermonuclear": "deep-review and code-quality both ran on the merge at 30f9655f; both CHANGES on the same finding, each reproduced with its own probe (a unit probe with a fake that refuses once, and a scratch-Dispatch probe with a person's comment interleaved).",
-  "ci": "Run 41301854655 at b42d5725 concluded success (the branch's first green). Run 41311771011 at merge head 15c215e8 queued since 14:05Z; not read as a verdict.",
+  "important": 2,
+  "minor": 2,
+  "thermonuclear": "deep-review and code-quality both ran at a56690be; both CHANGES. Finding 2 reproduced by both with their own overlay probes; finding 1 by the deep pass with two probes. I read both in the code.",
+  "ci": "Run 41316087657 at 2914c6df concluded success. Run 41347976379 at code head 4cfed344 queued since 20:39Z; no verdict.",
+  "roundFiveVerified": "personHandoverStands (outbox.go:603-609) is asked by the first attempt (:475) and every retry (:573-578); a handover retry runs no applyRead (:558-562); ordinary rows keep applyRead + statusStillWanted; HandOver rows return before writeStatus. Reverting the rule turns all four refuse-once cases red; reverting only the applyRead skip turns the triage case red.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/daemon/internal/daemon/outbox.go:568", "description": "Blocks: a semantic merge defect between main's LEGION-755 person-handover rows (admit.go:420, gate.go:574: todo observed from triage, backlog or icebox) and this branch's ISSUE_CHANGED retry. On a refusal, the retry calls statusStillWanted, which judges OutOfWorkflow(read.Status) - true for the very status the row was queued from - so the row finishes without writing ('its issue left the workflow'). Any comment or edit between the read and the write loses a person's handover; on the triage path applyRead's unprepared ReadIssue also queues a triage wake the controller's skill says to ignore. Probes: statuses=[] for triage, backlog and icebox; scratch Dispatch ends at triage with only a controller_notice triage row. Fix: judge a PersonHandover row's retry by its own rule (read still at ObservedStatus and HandedOver -> write again; label gone -> drop with the existing log), keep applyRead from waking the controller for it, and add a test whose fake refuses once, for both sources."}
+    {"severity": "important", "file": "packages/daemon/internal/daemon/outbox.go:558", "description": "Blocks. The round-5 defect class remains for main's other out-of-workflow row: sessionStatusWrite's re-assert (workflow/engine.go:298, StatusWrite{Status: daemon's, ObservedStatus: the session's done|backlog|icebox}). On one ISSUE_CHANGED the retry runs applyRead; intake.ReadIssue carries no actor and StatusMove=true, so the engine takes the agent's done/park for a person's move (DropStatusWrites, leave: the tree lingers and its slot is freed), then statusStillWanted drops the re-assert. Probes: status writes [] for done, backlog, icebox; admit-level probe shows the root phase=done and lingering after applyRead. Fix: mark re-assert rows and judge their retry by the first attempt's rule with nothing of the read applied; decide whether ReadIssue may stand for a person's move the record never saw through an actor-carrying event."},
+    {"severity": "important", "file": "packages/daemon/internal/store/migrations/20261029120500_approval_carry.up.sql:10", "description": "Blocks. 20261029120500 and 20261029120600 rewrite outbox_kind_check without main's phase_ended (0066); only 20261029120800 restores it. ADD CONSTRAINT validates existing rows, and phase_ended rows retry forever, so a main database at 0067 holding a pending phase_ended row fails the upgrade at boot (probe: SQLSTATE 23514 at 20261029120500) on every restart. Add phase_ended to both lists (never shipped, safe to edit), and seed a row of every main kind in the store test, building its list from record.LaneKinds."},
+    {"severity": "minor", "file": "packages/daemon/internal/daemon/outbox.go:536", "description": "The handover-retry explanation is written three times (writeStatus doc, personHandoverStands doc, the test doc), and the claim that the handover is the only row that brings an issue into the workflow is false (finding 1); rewrite with that fix."},
+    {"severity": "minor", "file": "(PR body)", "description": "Lines 102 and 119 still name migrations 0069-0081; they are timestamps now."}
   ],
-  "proseFixedByReviewer": "c6828246: docs/solutions/daemon/...-pr2619.md:28 cited DisarmPending, which the merge deletes; it now cites PersonHandoverPending."
+  "proseFixedByReviewer": "46320892: migration_0049_test.go:11 named 20261029120100 for the move to merging (it is 20261029120700); bridge.go:613-616 now says a queued delivery is the next step only in a turn the bridge stepped, matching :662."
 }
