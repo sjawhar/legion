@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-31T08:54:52Z",
+  "completed": "2026-11-01T05:15:31Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -268,6 +268,14 @@
       "observed": "Build and vet clean; guides 3 of 3; the PR's own diff is byte-identical (fingerprint unchanged, 0 of 112 files differ).",
       "headSha": "25206ba7ab966c710745e882522af7bfb99dcadf",
       "negativeControl": "At 9e5642ed's merge base (main before #2598), envoy-go failed TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries (run 41170407259)."
+    },
+    {
+      "criterion": "Review round 9 finding 1 / tester round 21: a mention the previous build delivered reaches its session once across the deploy; the PR merges into main with its migration renumbered.",
+      "surface": "The API handler, the post-response sender, main's delivery sweep and a Retry, through the test listener with repeat-dropping on, against a superuser Postgres 16 on the issue volume; main's claimant-delivery live proof (real envoy-dispatch, the run's own NATS, the fake listener)",
+      "command": "go test -p 1 ./internal/dispatch/api/ -run TestAMentionThePreviousBuildDeliveredIsDroppedAsARepeatAfterTheDeploy -count=1; go test -p 1 ./internal/dispatch/outbox/... ./internal/dispatch/deliveryaudit/... ./internal/dispatch/store/... ./internal/pgmigrate/...; DATABASE_URL=<scratch> DISPATCH_BIN=<built from 253a1afc> bash scripts/e2e/dispatch-claimant-delivery.sh",
+      "observed": "s1 is handed one frame for a sweep resend and a same-mode Retry of a send the previous build made under main's key; outbox, deliveryaudit, store (TestMigrationSetIsNumberedOneToN) and pgmigrate pass; the live proof reads 9 ok, 0 FAIL; GitHub reports MERGEABLE. Sampled memory peak 2.48 GiB of 19 over 255 samples; the leftover check (ps) listed nothing.",
+      "headSha": "253a1afccf556c7f90d96901ce909400d9572342",
+      "negativeControl": "With the key <comment>:<target> (45530037's), s1 is handed 2 frames in both cases."
     }
   ],
   "filesChanged": [
@@ -302,6 +310,7 @@
     "packages/envoy/internal/dispatch/api/comment_create.go",
     "packages/envoy/internal/dispatch/api/comment_delivery.go",
     "packages/envoy/internal/dispatch/api/comment_delivery_claim_test.go",
+    "packages/envoy/internal/dispatch/api/comment_delivery_deploy_test.go",
     "packages/envoy/internal/dispatch/api/comment_delivery_duplicate_test.go",
     "packages/envoy/internal/dispatch/api/comment_delivery_fallback_copy_test.go",
     "packages/envoy/internal/dispatch/api/comment_delivery_receipt_test.go",
@@ -347,8 +356,8 @@
     "packages/envoy/internal/dispatch/outbox/publisher.go",
     "packages/envoy/internal/dispatch/outbox/publisher_claimant_test.go",
     "packages/envoy/internal/dispatch/outbox/publisher_mentions_test.go",
-    "packages/envoy/internal/dispatch/store/migrations/0150_comment_fallback_copies.census.sql",
-    "packages/envoy/internal/dispatch/store/migrations/0150_comment_fallback_copies.up.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0151_comment_fallback_copies.census.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0151_comment_fallback_copies.up.sql",
     "packages/envoy/internal/dispatch/store/pool.go",
     "packages/envoy/loadtest/README.md",
     "packages/envoy/loadtest/live.go",
@@ -415,7 +424,9 @@
     "refreshHeldClaims records a refreshed claim only over the one it snapshotted (a test-exposed race, not a product defect: the row's claim only moves forward, so no sweep sees a live queued attempt as free).",
     "Forward merge at ae4d4fee (main 21b40359): AGENTS.md and cmd/dispatch/README.md take #2422's one sentence per line with this PR's content; round-shape.py lists docs and one test only (confirmation round).",
     "Forward merge at 3d5c31a9 (main f4ec92ee, #2474): scripts/e2e/README.md in one-sentence-per-line layout with this PR's passages, its audit fallback corrected to the /ws/live replay; packages/envoy/AGENTS.md's mention-rule bullet split for the 50-row limit.",
-    "Forward merge at 25206ba7 (main 1a9095e6, #2598) for a fresh CI run; the PR's own diff unchanged."
+    "Forward merge at 25206ba7 (main 1a9095e6, #2598) for a fresh CI run; the PR's own diff unchanged.",
+    "Forward merge at 4c1149eb (main d09b46d7): main took 0150_dpop_proofs, so the fallback table is 0151_comment_fallback_copies; main's Retry-After in writeHandlerError carried into handler_errors.go.",
+    "The mention dedupe key is <comment>:<target>:<the mention's own mode> (review round 9): main's key for every automatic send; a Retry in any mode of a mention that already reached the session is still recorded duplicate."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -424,7 +435,7 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 21,
-  "answersTest": "2a896bca00f230e3d82defaf1fb578e8c81c29cb",
-  "answersReview": "d8b5a38fcddc4e3a4c504d787c6371812805bec0"
+  "round": 22,
+  "answersTest": "2a6d5ffa2dc6096a6c3ba219be2bbec4851f60e0",
+  "answersReview": "45530037436dbb21120f3299dedbded3b74b9c1a"
 }
