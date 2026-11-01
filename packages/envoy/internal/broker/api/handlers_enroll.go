@@ -17,17 +17,18 @@ import (
 // enrollment, and a slot names one of several independent enrollments of the same pod
 // (enroll.Enrollment.Slot), chosen by the launcher whose proof authenticates the call.
 type createEnrollmentBody struct {
-	// What the session is: "session" (an agent session on a machine its person logged in) or
-	// "pod".
+	// What the session is: "session" (an agent session on a machine its person logged in), "pod",
+	// or "vm" (a Google Compute Engine VM enrolling itself; only on a broker that trusts Google VM
+	// identity tokens, BROKER_GOOGLE_OIDC_AUDIENCE).
 	Kind string `json:"kind"`
-	// The session's runtime: a pod's UID, or whatever names the session on its machine (the
-	// helper's host:pid:start time, a container's id). A launcher enrolls one live session per
-	// runtime id (and slot).
+	// The session's runtime: a pod's UID, a VM's <service account email>@<project>/<zone>/<instance
+	// id>, or whatever names the session on its machine (the helper's host:pid:start time, a
+	// container's id). A launcher enrolls one live session per runtime id (and slot).
 	RuntimeID string `json:"runtime_id"`
 	// A pod only, optional: which of the pod's independent enrollments this is.
 	Slot string `json:"slot"`
 	// Optional: the operator the session runs for. The broker records the machine credential's own
-	// operator whatever is sent, and refuses any other login. Absent or null for a pod.
+	// operator whatever is sent, and refuses any other login. Absent or null for a pod or a VM.
 	Operator *string `json:"operator"`
 	// The RFC 7638 JWK thumbprint of the session's P-256 signing key.
 	Thumbprint string `json:"thumbprint"`
@@ -36,6 +37,10 @@ type createEnrollmentBody struct {
 	SessionID *string `json:"session_id"`
 	// A pod only: its projected service-account token, which proves the runtime id is its UID.
 	PodToken *string `json:"pod_token"`
+	// A VM only: its Google identity token (the metadata server's, format=full), which proves the
+	// runtime id is its own; the launcher credential the call is signed with must be that VM's own
+	// login's.
+	VMToken *string `json:"vm_token"`
 }
 
 // enrollmentResponse is POST /v1/enrollments's answer: 201 for a new enrollment, 200 when the same
@@ -62,6 +67,10 @@ type renewEnrollmentBody struct {
 	// service account the enrollment was made for. Required once the enrollment has renewed with
 	// it (enroll.Service.Renew).
 	PodToken *string `json:"pod_token"`
+	// A VM only, and required on every renewal of a VM's enrollment: its current Google identity
+	// token, which must prove the VM and service account the enrollment was made for
+	// (enroll.Service.RenewVM).
+	VMToken *string `json:"vm_token"`
 }
 
 // selfResponse is GET /v1/enrollments/self's answer: the calling session as the broker knows it.
@@ -70,11 +79,11 @@ type selfResponse struct {
 	EnrollmentID string `json:"enrollment_id"`
 	// The session's live grants, soonest to expire first.
 	Grants []requests.Grant `json:"grants"`
-	// "session" or "pod".
+	// "session", "pod" or "vm".
 	Kind string `json:"kind"`
 	// When the session's lease lapses unless it is renewed.
 	LeaseExpiresAt time.Time `json:"lease_expires_at"`
-	// The person the session runs for; null for a pod.
+	// The person the session runs for; null for a pod or a VM.
 	Operator *string `json:"operator"`
 	// The pod slot it holds; null for every enrollment without one.
 	Slot *string `json:"slot"`
@@ -82,14 +91,20 @@ type selfResponse struct {
 
 // createEnrollment authenticates by launcher proof now (payload carries "lid"), never a bearer
 // token; cred is the launcher credential's own identity, read by server.authenticate from the
-// verified proof's launcher id.
+// verified proof's launcher id. Kind "vm" is refused 400 INVALID_KIND, as any unknown kind is, on a
+// broker that trusts no Google VM identity token.
 func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
 	var body createEnrollmentBody
 	if !readJSON(w, r, &body, "INVALID_ENROLLMENT") {
 		return
 	}
-	if body.Kind != "session" && body.Kind != "pod" {
-		writeError(w, http.StatusBadRequest, "INVALID_KIND", `kind must be "session" or "pod"`)
+	vms := s.deps.Enroll.VM != nil
+	if body.Kind != "session" && body.Kind != "pod" && (body.Kind != "vm" || !vms) {
+		if vms {
+			writeError(w, http.StatusBadRequest, "INVALID_KIND", `kind must be "session", "pod" or "vm"`)
+		} else {
+			writeError(w, http.StatusBadRequest, "INVALID_KIND", `kind must be "session" or "pod"`)
+		}
 		return
 	}
 	kind := body.Kind
@@ -102,6 +117,7 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 		Thumbprint: body.Thumbprint,
 		SessionID:  body.SessionID,
 		PodToken:   derefOr(body.PodToken, ""),
+		VMToken:    derefOr(body.VMToken, ""),
 	})
 	switch {
 	case errors.Is(err, enroll.ErrUnauthenticated):
@@ -121,6 +137,15 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 		return
 	case errors.Is(err, enroll.ErrPodIdentity):
 		writeError(w, http.StatusForbidden, "POD_IDENTITY_MISMATCH", err.Error())
+		return
+	case errors.Is(err, enroll.ErrVMNotListed):
+		writeError(w, http.StatusForbidden, "VM_NOT_LISTED", err.Error())
+		return
+	case errors.Is(err, enroll.ErrVMTokenExpired):
+		writeError(w, http.StatusForbidden, "VM_TOKEN_EXPIRED", err.Error())
+		return
+	case errors.Is(err, enroll.ErrVMIdentity):
+		writeError(w, http.StatusForbidden, "VM_IDENTITY_MISMATCH", err.Error())
 		return
 	case err != nil:
 		writeInternal(w, "create enrollment", err)
@@ -147,6 +172,8 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 // enrolled the pod (enroll.Service.Revoke says why, and what that leaves a restarted Legion daemon)
 // — so a mismatch is always 403 (OPERATOR_MISMATCH, or NOT_ENROLLING_CREDENTIAL for another
 // service credential's pod), never a no-op 204, regardless of whether the target enrollment is live.
+// A VM's enrollment is never ended here: 403 VM_ENDS_BY_LOGIN_REVOKE, since a VM's credential
+// follows whoever last logged in with that VM's token; revoking the VM's machine login ends it.
 func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
 	id, ok := pathUUID(w, r, "id", "ENROLLMENT_ID_INPUT", "enrollment")
 	if !ok {
@@ -159,6 +186,9 @@ func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request, cred e
 		return
 	case errors.Is(err, enroll.ErrNotEnrollingCredential):
 		writeError(w, http.StatusForbidden, "NOT_ENROLLING_CREDENTIAL", err.Error())
+		return
+	case errors.Is(err, enroll.ErrVMEndsByRevokingItsLogin):
+		writeError(w, http.StatusForbidden, "VM_ENDS_BY_LOGIN_REVOKE", err.Error())
 		return
 	case err != nil && !errors.Is(err, enroll.ErrNotLive):
 		writeInternal(w, "revoke enrollment", err)
@@ -173,7 +203,10 @@ func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request, cred e
 // its current projected token in the body, which enroll.Service.Renew verifies against the pod UID
 // and service account the enrollment was made for; a pod enrollment that has never renewed with
 // one still renews with no body, logged here, naming the enrollment, until the token-less path is
-// removed (Renew says when).
+// removed (Renew says when). A VM's renewal carries its current Google identity token, every time
+// (enroll.Service.RenewVM): 403 VM_TOKEN_REQUIRED without it, VM_IDENTITY_MISMATCH for another VM's
+// or a token that does not verify, VM_TOKEN_EXPIRED for an expired one. A body carrying both tokens
+// is 400 INVALID_RENEWAL.
 func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id string) {
 	urlID, ok := pathUUID(w, r, "id", "ENROLLMENT_ID_INPUT", "enrollment")
 	if !ok {
@@ -187,7 +220,17 @@ func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id stri
 	if r.ContentLength != 0 && !readJSON(w, r, &body, "INVALID_RENEWAL") {
 		return
 	}
-	renewal, err := s.deps.Enroll.Renew(r.Context(), id, derefOr(body.PodToken, ""))
+	if body.PodToken != nil && body.VMToken != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_RENEWAL", "a renewal carries a pod_token or a vm_token, not both")
+		return
+	}
+	var renewal enroll.Renewal
+	var err error
+	if body.VMToken != nil {
+		renewal, err = s.deps.Enroll.RenewVM(r.Context(), id, *body.VMToken)
+	} else {
+		renewal, err = s.deps.Enroll.Renew(r.Context(), id, derefOr(body.PodToken, ""))
+	}
 	switch {
 	case errors.Is(err, enroll.ErrNotLive):
 		writeError(w, http.StatusUnauthorized, "ENROLLMENT_NOT_LIVE", "enrollment is not live")
@@ -201,6 +244,18 @@ func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id stri
 	case errors.Is(err, enroll.ErrPodTokenRequired):
 		slog.Warn("broker: pod enrollment renewal refused: projected token required", "enrollment", id)
 		writeError(w, http.StatusForbidden, "POD_TOKEN_REQUIRED", err.Error())
+		return
+	case errors.Is(err, enroll.ErrVMNotListed):
+		writeError(w, http.StatusForbidden, "VM_NOT_LISTED", err.Error())
+		return
+	case errors.Is(err, enroll.ErrVMTokenExpired):
+		writeError(w, http.StatusForbidden, "VM_TOKEN_EXPIRED", err.Error())
+		return
+	case errors.Is(err, enroll.ErrVMIdentity):
+		writeError(w, http.StatusForbidden, "VM_IDENTITY_MISMATCH", err.Error())
+		return
+	case errors.Is(err, enroll.ErrVMTokenRequired):
+		writeError(w, http.StatusForbidden, "VM_TOKEN_REQUIRED", err.Error())
 		return
 	case err != nil:
 		writeInternal(w, "renew enrollment", err)

@@ -1,8 +1,9 @@
 kind: Changed
 body: |-
-    A Dispatch process with no open live socket and no open Delivery view reads nothing from the
-    event log and holds no `LISTEN` connection for it. While anything subscribes, one read per commit
-    serves every events subscription and every Delivery view, and each event's frame is encoded once.
+    The live paths of a Dispatch process with no open live socket and no open Delivery view read
+    nothing from the event log and hold no `LISTEN` connection for it: the event stream relay and the
+    delivery hub run only while something subscribes. While anything does, one read per commit serves
+    every events subscription and every Delivery view, and each event's frame is encoded once.
 time: 2026-10-28T11:33:03.744894989Z
 custom:
     Issue: pr2406

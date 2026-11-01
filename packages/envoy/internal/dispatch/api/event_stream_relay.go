@@ -41,9 +41,12 @@ const (
 	eventRelayGapMax = 250 * time.Millisecond
 )
 
-// dispatchEventsChannel carries no payload and is notified as an event commits (migration 0107);
-// the relay alone listens on it, and the delivery hub takes the events from the relay's feed.
-const dispatchEventsChannel = "dispatch_events"
+// EventsChannel carries no payload and is notified as an event commit announces itself
+// (events_notify, migration 0107), whichever process committed it. Of the live paths the relay
+// alone listens on it, while something subscribes to it, and the delivery hub takes the events
+// from the relay's feed; it is also the channel whose pglisten.Hub wake cmd/dispatch passes to
+// RunSuggestionOutcomeSweep.
+const EventsChannel = "dispatch_events"
 
 // eventGapReread schedules a generation's re-read while a gap stands open above the safe horizon
 // (run): timer is the scheduled re-read, nil while none is; wait the current delay, zero while no
@@ -308,7 +311,7 @@ func (r *eventStreamRelay) startLocked(cursor int64, cursorAt time.Time) *relayG
 	listener := &pglisten.Listener{
 		Owner:       "dispatch",
 		Dial:        dial,
-		Channels:    []string{dispatchEventsChannel},
+		Channels:    []string{EventsChannel},
 		ListenIdle:  r.listenIdle,
 		PingTimeout: r.pingTimeout,
 		Backoff:     r.backoff,

@@ -168,7 +168,7 @@ func relayPublished(relay *eventStreamRelay) int64 {
 // relayListenBackend selects, in pg_stat_activity, the backends whose last statement is the
 // relay's LISTEN. The delivery hub listens on its two channels in one statement, so its backend
 // is not selected.
-const relayListenBackend = `datname = current_database() and query = 'listen ` + dispatchEventsChannel + `'`
+const relayListenBackend = `datname = current_database() and query = 'listen ` + EventsChannel + `'`
 
 // endRelayGeneration ends the relay's running generation, which closes every subscription it
 // holds, as a reset of the event log does (resetCursor).

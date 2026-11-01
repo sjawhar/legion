@@ -236,21 +236,23 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 	return version, nil
 }
 
-// listenerPoolSize bounds the pool Listener takes its connections from. Three listeners dial
-// through it - the delivery hub, the event stream relay and the stale-room evictor - and each
-// connection is hijacked as soon as it is opened, so it leaves with its caller and the pool holds
-// none between dials: what one bounds is dials in flight, not connections held. A listener
-// redialling while another dials waits that dial out, which is what a loop that dials and then
-// waits for notifications for as long as it runs can afford.
+// listenerPoolSize bounds the pool Listener takes its connections from. Four listeners dial
+// through it - the delivery hub, the event stream relay, the stale-room evictor and the shared
+// hub cmd/dispatch's woken background loops wait on (pglisten.Hub, one connection for all of their
+// channels) - and each connection is hijacked as soon as it is opened, so it leaves with its caller
+// and the pool holds none between dials: what one bounds is dials in flight, not connections
+// held. A listener redialling while another dials waits that dial out, which is what a loop that
+// dials and then waits for notifications for as long as it runs can afford.
 const listenerPoolSize = 1
 
 // Listener returns one connection of its own for LISTEN, from a one-connection pool opened from the
 // shared pool's configuration and hijacked, so it holds no shared connection. The caller closes it.
-// The document rooms' stale-room evictor (docs/stale_room.go) holds one for the life of the
-// process; the delivery hub (api/delivery_live_hub.go) and the event stream relay
-// (api/event_stream_relay.go) each hold one while something subscribes to them, and close it when
-// the last subscriber leaves. A connection of the shared pool held that long would be one fewer
-// for every request, and a LISTEN on a pooled connection would end when the pool recycled it.
+// The document rooms' stale-room evictor (docs/stale_room.go) and the background loops' shared
+// wake hub (cmd/dispatch) each hold one for the life of the process; the delivery hub
+// (api/delivery_live_hub.go) and the event stream relay (api/event_stream_relay.go) each hold one
+// while something subscribes to them, and close it when the last subscriber leaves. A connection
+// of the shared pool held that long would be one fewer for every request, and a LISTEN on a
+// pooled connection would end when the pool recycled it.
 func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	listen, err := p.separate(&p.listen, listenerPoolSize, "listener")
 	if err != nil {
@@ -268,19 +270,22 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // the whole requirement, and it is a caller and not a lease that needs one: Exclusive takes its
 // connection before it learns whether the lease is held, so a pass that skips because the other
 // process holds the lease holds a connection for that round trip too. Thirteen names are leased -
-// the document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation,
-// the block-index reconciliation, the term-statistics refresh, the GitHub webhook redelivery
-// sweep, the architecture import, the delivery reconcile, the edit-notice sweep, the repair of
-// closed and reopened issues' asks (api.RunIssueAskRepair), one per delivery durable for the
-// consumers' reconciliation (delivery.consumerLease, a name each for delivery-events and
-// delivery-jobs) and the server process registry's prune (processes.RunPrune) - taken by thirteen
-// callers, since each delivery intake takes its own durable's name from a bind poll of its own,
-// so thirteen callers can be inside Exclusive at once. Thirteen connections are exactly those
-// thirteen: the headroom is zero, not one, and the next leased loop added here makes a fourteenth
-// caller that waits for a connection rather than failing, for as long as the longest pass then
-// holding one. They cannot come from the shared pool: a lease is held for the whole pass, which
-// is minutes for the compaction, and the shared pool's sharedPoolSize connections are what every
-// request reads through.
+// the document compaction, the keyed writes' maintenance sweep (api.RunMaintenanceSweep, which
+// keeps the lease name suggestion-outcomes the suggestion sweep carried that work under), the
+// reference-excerpt reconciliation, the block-index reconciliation, the term-statistics refresh,
+// the GitHub webhook redelivery sweep, the architecture import, the delivery reconcile, the
+// edit-notice sweep, the repair of closed and reopened issues' asks (api.RunIssueAskRepair), one
+// per delivery durable for the consumers' reconciliation (delivery.consumerLease, a name each for
+// delivery-events and delivery-jobs) and the server process registry's prune (processes.RunPrune)
+// - taken by thirteen callers, since each delivery intake takes its own durable's name from a
+// bind poll of its own, so thirteen callers can be inside Exclusive at once. The suggestion
+// outcome sweep is not among them: it takes no lease, since the cursor row each of its pages
+// holds for update serialises two processes by itself (api/suggestion_outcomes.go). Thirteen
+// connections are exactly those thirteen: the headroom is zero, not one, and the next leased loop
+// added here makes a fourteenth caller that waits for a connection rather than failing, for as
+// long as the longest pass then holding one. They cannot come from the shared pool: a lease is
+// held for the whole pass, which is minutes for the compaction, and the shared pool's
+// sharedPoolSize connections are what every request reads through.
 const leasePoolSize = 13
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
@@ -305,10 +310,11 @@ const registryPoolSize = 1
 
 // listenerConnections is how many connections the listener pool dials and hands off at once: the
 // delivery hub's and the event stream relay's, each held only while something subscribes to them,
-// and the stale-room evictor's, held for the life of the process (Listener). A process nobody
-// streams from and no Delivery page is open on holds one of the three; the count is what it may
-// hold at once.
-const listenerConnections = 3
+// and the stale-room evictor's and the shared wake hub's (cmd/dispatch's woken background loops,
+// which main.go dials through database.Pool.Listener), held for the life of the process
+// (Listener). A process nobody streams from and no Delivery page is open on holds two of the
+// four; the count is what it may hold at once.
+const listenerConnections = 4
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres:
 // every pool's size, the registry's own pool (processes.Register) and the event horizon's

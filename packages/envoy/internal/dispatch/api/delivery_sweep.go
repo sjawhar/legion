@@ -21,10 +21,11 @@ import (
 // attempt before its send and settles it after. A process that dies between the two leaves the
 // attempt pending under a claim no process holds; once that claim lapses
 // (model.DeliveryClaimFreeSQL, a minute) the attempt is owed. Nobody has to ask again for it:
-// every pass of the maintenance loop
-// (RunSuggestionOutcomeSweep) sends each owed attempt, once, under its own attempt number and so
-// its own idempotency key, as a repeat under the write's key does, so the listener drops a frame
-// that did land (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts).
+// every pass of the maintenance loop (RunMaintenanceSweep, once a minute across the processes)
+// sends each owed attempt, once, under the idempotency key its write gives it (one key for every
+// attempt of a comment mention, model.CommentMentionIdempotencyKey), as a repeat under the write's
+// key does, so the listener drops a frame that did land (DELIVERY_DUPLICATE_WINDOW_MS in
+// packages/contracts).
 //
 // An attempt is owed when it is its message's latest attempt, or its mention's to send still -
 // no later attempt of that mention stands in its place, every later one having failed

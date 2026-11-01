@@ -21,8 +21,8 @@ import (
 )
 
 // deliverySweepInterval is how often the maintenance loop runs the delivery sweep
-// (api.SuggestionSweepInterval), in whichever process holds its lease for that interval.
-const deliverySweepInterval = api.SuggestionSweepInterval
+// (api.MaintenanceSweepInterval), in whichever process holds its lease for that interval.
+const deliverySweepInterval = api.MaintenanceSweepInterval
 
 // sweepMargin is how long past the bound a test states the last send may land: one pass the
 // leased loop may skip, because another process held the lease for that interval, plus the boot
