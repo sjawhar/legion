@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-904",
+  "previousHandoff": "",
+  "proof": [
+    {
+      "criterion": "A2. Shortfall replays of four original approvals, 3 runs each on the change's text and on main's: all 12 runs of the change end in REQUEST_CHANGES that names the case's requirement, and at most 5 of the 12 control runs name it.",
+      "surface": "a real Oh My Pi reviewer session, its whole --append-system-prompt composed by the production composer (prompts.New + Composer.Compose) inside each arm's own packages/daemon module, with that arm's @sjawhar/pi-legion loaded by package root and a gh and dispatch stand-in first on PATH answering the case's frozen inputs",
+      "command": "cd $TMPDIR/infra-904/harness && bash arms.sh && bun run.ts --criterion A2 && bun score.ts && bun report.ts --criterion A2",
+      "observed": "change 12/12 (INFRA-122 3/3, INFRA-180 3/3, INFRA-195 3/3, INFRA-497 3/3), control 4/12 (2/3, 1/3, 1/3, 0/3) against the bar of 5. Every change run is REQUEST_CHANGES; the control approves INFRA-497 3 times and INFRA-195 twice.",
+      "headSha": "c60e16a807dbbd042405b4b4d354c91bfdf20b8c",
+      "negativeControl": "the control arm itself: the same 24 sessions, same task text, same frozen inputs, built from the branch's merge base with main (151d2d799), which carries no goal-red-team agent and the old texts. It names the requirement in 4 of 12 where the change names it in 12 of 12, and approves INFRA-497 where the change requests changes."
+    },
+    {
+      "criterion": "A5. Every run of A2 to A4 on the change writes a Goal check: block naming the spec version and listing the goal, each requirement and each red-team finding with what the reviewer did with it, and its transcript holds one goal-red-team dispatch.",
+      "surface": "the same reviewer sessions' written verdict files and their session transcripts under runs/<id>/sessions",
+      "command": "cd $TMPDIR/infra-904/harness && bun report.ts --criterion A5",
+      "observed": "23 of 26 change-arm runs carry the block with all three facts and exactly one goal-red-team tool call. Three miss: A2-INFRA-122-change-1 and A4-INFRA-497.agent-record-change-3 state the goal but carry no verdict for the goal itself (every requirement is judged), and A4-INFRA-497.owner-record-change-1 carries the whole block but dispatched the subagent 0 times.",
+      "headSha": "c60e16a807dbbd042405b4b4d354c91bfdf20b8c",
+      "negativeControl": "the 26 control-arm runs of the same cases: 0 carry a Goal check block, 0 name a spec version in one, and 0 dispatch goal-red-team, which does not exist in that arm."
+    },
+    {
+      "criterion": "A7. The architect's acceptance on INFRA-497's frozen inputs, two variants, 3 runs each on the changed skill: no run signs off, and each names item 1.",
+      "surface": "a real Oh My Pi root-architect session, its prompt composed by cmd/goal-pane overlaid into the arm's daemon module (daemon-pane.go refuses a tree architect, so the program calls the composer itself) under gates.design: root-issues",
+      "command": "cd $TMPDIR/infra-904/harness && bun run.ts --criterion A7 && bun report.ts --criterion A7",
+      "observed": "change 6/6: every run answers request_backward_move and names item 1, with the constructed Goal check approval and with the original approval alike. Control 5/6: main's skill signs INFRA-497 off in 2 of 3 original-approval runs.",
+      "headSha": "c60e16a807dbbd042405b4b4d354c91bfdf20b8c",
+      "negativeControl": "the control arm of the same 6 runs, main's skills/legion-architect at 151d2d799, which signs the issue off twice on the original approval that carries no Goal check block."
+    },
+    {
+      "criterion": "A8. The production check on INFRA-492's merged pull request at the check's last look, 3 runs on the changed prompt: every run reports fail, names acceptance 4 and writes the dispatch ask it would open.",
+      "surface": "a real Oh My Pi implementer session on the production-check task text the daemon really sends (internal/workflow/check.go, unchanged), with the frozen request-log fixture whose only Dispatch tab is an agent's own",
+      "command": "cd $TMPDIR/infra-904/harness && bun run.ts --criterion A8 && bun report.ts --criterion A8",
+      "observed": "change 3/3 fail, each naming the request log, the caller kind and the served times; control 1/3 (main's prompt passes the check twice on an agent's own tab).",
+      "headSha": "c60e16a807dbbd042405b4b4d354c91bfdf20b8c",
+      "negativeControl": "the control arm's 3 runs on main's prompt against the identical fixture: 2 report pass, which is the defect INFRA-492 shipped."
+    },
+    {
+      "criterion": "A1. jj diff --name-only from main to the head lists no *.go file, and a grep of the changed texts for the name and email of each person who is a user actor in the replayed issues' events finds none.",
+      "surface": "the change's own diff at the pushed head, and the frozen events of every case",
+      "command": "cd $TMPDIR/infra-904/harness && bun a1-names.ts",
+      "observed": "30 changed files, no *.go, no person's name or email in any line this change writes, from 2 harvested tokens. Two pre-existing lines in docs/kubernetes.md (66 and 911) carry 'sami'; neither is a line this change writes, and AGENTS.md exempts docs/ from the no-person rule.",
+      "headSha": "c60e16a807dbbd042405b4b4d354c91bfdf20b8c",
+      "negativeControl": "the same program greps the whole file at the head as well, which does find those two pre-existing lines and prints them, so the grep is not vacuous."
+    },
+    {
+      "criterion": "R9, the owner's condition on the approval: each changed text is a few sentences, and the skills must not grow overall; the architect set the numbers (each role prompt +100 words net, roles/reviewer.md +150, goal-red-team 300 words and 45 lines, skills/**/*.md no growth in lines or words).",
+      "surface": "the files at the pushed head against the branch's merge base with main",
+      "command": "cd $TMPDIR/infra-904/harness && bun linecounts.ts",
+      "observed": "every budget held: skills/**/*.md 4952 -> 4951 lines and 65602 -> 65602 words; core/reviewer.md +100, roles/reviewer.md +149, planner.md +87, core/implementer.md +57, architect-root.md +25, architect.md +25, go/architect-common.md +58, go/implementer.md +51, core/common.md +27, go/claude-mechanics.md +1; goal-red-team.md 300 words, 40 lines.",
+      "headSha": "c60e16a807dbbd042405b4b4d354c91bfdf20b8c",
+      "negativeControl": "the same program exits 1 and names the breach: it did so three times during the work (core/reviewer.md at +101 and +102, roles/reviewer.md at +151, goal-red-team.md at 301 words), each of which I fixed before pushing."
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/prompts/roles/core/common.md — the deferral-dressed-as-documentation clause",
+    "packages/daemon/internal/prompts/roles/core/reviewer.md — the goal stance and what a requirement is; the plan-gate step that defers a requirement",
+    "packages/daemon/internal/prompts/roles/reviewer.md — the base version, the owner's acts, the goal-red-team dispatch, the Goal check: block, the parent's last round",
+    "packages/pi-legion/agents/goal-red-team.md — new",
+    "packages/pi-legion/src/shipped-agents.test.ts — goal-red-team joins the blocking read-only agent table",
+    "packages/daemon/internal/prompts/roles/planner.md — the plan-reviewer assignment carries the base and the owner's acts; the goal rejection is not one of the three rounds",
+    "packages/pi-legion/agents/plan-reviewer.md — check 5, and the goal verdict outside the three-issue cap",
+    "skills/legion-architect/references/decomposition.md — the red team names every root requirement no child carries",
+    "skills/legion-architect/SKILL.md — section 6's sign-off bar",
+    "skills/legion-architect/references/acceptance.md — Accepting, and where a parked child's criterion goes",
+    "skills/legion-architect/references/wake-routing.md — Narrow drops no requirement; Split moves one only to a released, open child",
+    "skills/legion-architect/references/design-gate.md — an owner's act after the approval binds with no new version",
+    "packages/daemon/internal/prompts/roles/architect-root.md, roles/architect.md, go/architect-common.md — the goal and the requirements as acceptance evidence",
+    "skills/legion-worker/references/merge-gate.md — the reviewer's goal REQUEST_CHANGES, pending on an open child, and the production check's deploy-only requirements",
+    "skills/legion-worker/references/pr-body.md — a requirement on Not proven / risk: is unmet; Fast-follow: never carries one",
+    "packages/daemon/internal/prompts/roles/core/implementer.md, roles/implementer.md, go/implementer.md, AGENTS.md, docs/site/.../concepts.md, using-legion.md — the production check covers each deploy-only requirement",
+    "packages/daemon/internal/prompts/go/claude-mechanics.md, docs/kubernetes.md, packages/pi-legion/README.md, packages/pi-legion/AGENTS.md — goal-red-team joins the shipped-agent lists",
+    "packages/pi-legion/.changes/unreleased/pr2618-Added-*.yaml, packages/claude-envoy/.changes/unreleased/pr2618-Added-*.yaml"
+  ],
+  "trickyParts": [
+    "The control arm is the branch's merge base with main (151d2d799), not origin/main's tip. main moved under this branch in merge-gate.md, decomposition.md, design-gate.md and roles_test.go while the work ran, and an arm carrying that drift would differ from the change arm by this change plus other people's work, which is no control. arms.sh says so at the line that resolves it.",
+    "Each arm extracts four parts from its own commit and stages its own skills with its own scripts/pi-plugin-prepack.sh, as the plan's D7 says, plus packages/envoy, which the daemon module's go.mod replace needs to compile at all. The change arm is copied from the live working tree rather than a commit, so an uncommitted edit is never silently compared against itself.",
+    "Every replay session logged `Failed to load extension … Cannot find package '@legion/envoy-client'`: the arm has no node_modules, so the plugin's JS entry did not load. The skills and the agents directory still reached the session — a transcript holds skill://legion-worker's text in a tool result, and goal-red-team resolved and was dispatched — so what this change touches was under test, but no session had the legion tool, which is right for a replay with LEGION_ROLE unset.",
+    "Oh My Pi's --max-time does not interrupt a tool call already running. The first control batch spent 45 minutes inside the thermonuclear pair's go test and produced nothing. run.ts now kills the process group at the limit plus two minutes, and the reviewer task text says in both arms that the pair for this head has already run and is not the session's to run again."
+  ],
+  "deviations": [
+    "Two stance revisions were spent of the three the plan's D5 allows, both to make a criterion pass without adding a rule. The first names what a requirement is in core/reviewer.md (each statement of what the change delivers or how it is accepted, whatever its heading, each non-goal as a bound, each decision the person settled): before it, A2's INFRA-195 case was 1/3 because two runs read the Acceptance section as proof rather than as requirements; after it, 3/3. The second makes roles/reviewer.md ask that a waived requirement carry a link to the owner's act, as the spec's own red-team wording does: before it, A4's owner-record variant was 1/3 on the link; after it, 3/3.",
+    "A1's grep is scoped to the lines this change writes, not to whole changed files. Two pre-existing lines of docs/kubernetes.md name a person, and the repository's own rule (AGENTS.md, 'A skill, a role prompt and an AGENTS.md name no person') exempts docs/, which 'keeps its text'. The whole-file hits are printed as context so the reading is visible.",
+    "The plan's D11 supplementary replay was built and run (6 runs, 2/3 hold on each arm). It is evidence beside A6, not a gate, as the plan says."
+  ],
+  "openQuestions": [
+    "A3 is 3 of 9: the full-delivery replays flag the goal or a requirement as unmet in six runs. The flags look true to me (three INFRA-184 runs mark the goal unmet on a walk-failure path, two INFRA-210 runs mark acceptance 6 unmet, one INFRA-87 run marks one requirement unmet), so by the architect's own instruction on this criterion I did not change the stance to hide them. The architect decides whether the cases are wrong; the transcripts and the frozen inputs are on the issue.",
+    "A6's as-written variant is 2 of 3 (control 1/3). It asks the plan reviewer to reject INFRA-184's plan against a goal whose text entered that spec at version 5, after the version 4 the plan was written to; the plan named it as the hardest run to hit three times in three.",
+    "A4's agent-record variant is 2 of 3 by the phrase list SPEC.md fixed before any run. The third run does request the change, and its title reads 'Requirement 1e unmet', naming the requirement by the spec's own sub-item letter, which the list (setup, card, item 1) cannot see. I did not widen the list after seeing which run it misses.",
+    "Three of 26 A5 runs miss: two state the goal without a verdict for it while judging every requirement, and one carries the whole block but did not dispatch goal-red-team."
+  ],
+  "discoveredComplexity": [
+    "The scorer's phrase match is the measurement's weakest part. A phrase is matched on prose only (backticked spans and path:line tokens are stripped), after a run was counted on the word 'card' inside a file name; and the three counts are printed separately (adverse verdict, phrase, both) with the matched line quoted under each table, so a reader of the pull request can judge every counted row.",
+    "The gh stand-in's GraphQL route answers one fixed document whatever the query asked, because a query the call keeps in a shell variable cannot be read. A field outside reviews and reviewThreads answers null, which a session cannot tell from a pull request that genuinely has none. A case needing more wants its own frozen GraphQL fixture.",
+    "The pod's volume is the issue's and dies with the pod. A restart mid-run wiped the harness, its fixtures and every result; the harness source is now kept on the issue as an artifact and the fixtures are rebuilt by one command. The tester re-runs from dispatch://INFRA-904/artifact/harness-src-tgz plus replay-fixtures-tgz."
+  ]
+}
