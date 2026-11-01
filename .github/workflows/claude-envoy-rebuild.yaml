@@ -34,34 +34,42 @@ name: Rebuild Claude Envoy plugin
 # already. A failed run lands nothing and is red on its own; the next run builds again.
 #
 # A push to main that changes a build input starts a run, and only a newer run replaces a pending
-# one, so the newest main is always built. A push that changes no build input - a document, a
-# daemon or listener source, a workflow this build never reads - builds the same bundles main
-# already holds, so it starts no run at all. `paths:` below is what decides
-# that, and packages/claude-envoy/tests/build-inputs.test.ts holds it to every file
-# packages/claude-envoy/scripts/build-inputs.txt matches, the same list release-push.sh push-built
-# reads, so the two cannot drift. The list is the pathspecs' whole directories, with none of their
-# exclusions: a file the list calls a non-input costs one run that lands nothing, where a missed
-# input would leave main's build behind until the daily run.
+# one, so the newest main is built. A push that changes no build input - a document, a daemon or
+# listener source, a package's tests, a workflow this build never reads - would rebuild the
+# bundles main already holds, so it starts no run at all. `paths:` below is what decides that,
+# and packages/claude-envoy/tests/build-inputs.test.ts holds the two decisions equal over every
+# tracked file: the one `paths:` makes and the one
+# packages/claude-envoy/scripts/build-inputs.txt's pathspecs make, which is the list
+# release-push.sh push-built already reads. A file either list takes and the other leaves fails
+# that test, naming the file, so the trigger and the list cannot drift.
 #
-# The daily run is there for a push that started no run of this workflow: a commit carrying
-# GitHub's skip keyword, such as a release's version bump, that changed a build input, and now
-# also a push `paths:` leaves out, whatever changed it.
+# One push can still change a build input and start nothing: GitHub leaves a path filter
+# unsatisfied when the push's diff holds more than 3,000 files and no matching file is in the
+# first 3,000 ("Workflow syntax for GitHub Actions", on.<push>.<paths>). The daily run below
+# covers that push, as it covers a push carrying GitHub's skip keyword, such as a release's
+# version bump, that changed a build input. So main's build is behind its inputs for at most a
+# day in those two cases, and one run otherwise.
 #
 # A pull request that changes this workflow, release-push.sh or verify-build.sh runs `build` on its
 # merge commit, its own proof before merge; `push` runs only on main.
 on:
   push:
     branches: [main]
-    # Every positive pathspec of packages/claude-envoy/scripts/build-inputs.txt, as a glob. The
-    # pathspecs that name no file of the repository today (.gitattributes, bunfig.toml,
-    # packages/.gitignore, packages/.gitattributes) are left out: the test above adds a pattern
-    # here on the change that creates such a file.
+    # Every pathspec of packages/claude-envoy/scripts/build-inputs.txt, in its order, as GitHub
+    # reads a path filter: a directory as `<dir>/**`, an exclusion as a `!` pattern after the
+    # patterns it narrows, since a later match decides. The four paths that name no file today
+    # (bunfig.toml and the .gitattributes files) are here all the same: the push that creates one
+    # changes a build input, and no job of this repository would otherwise run on it.
     paths:
       - ".bun-version"
       - "bun.lock"
       - "package.json"
+      - "bunfig.toml"
       - "patches/**"
       - ".gitignore"
+      - ".gitattributes"
+      - "packages/.gitignore"
+      - "packages/.gitattributes"
       - "packages/claude-envoy/**"
       - "packages/envoy-client/**"
       - "packages/contracts/**"
@@ -74,6 +82,17 @@ on:
       - ".github/scripts/release-push.sh"
       - ".github/workflows/claude-envoy-rebuild.yaml"
       - ".github/actions/setup-bun/**"
+      # The build's own outputs, and the known non-inputs inside the packages above.
+      - "!packages/claude-envoy/dist/**"
+      - "!packages/claude-envoy/legion/**"
+      - "!packages/*/.changes/**"
+      - "!packages/*/CHANGELOG.md"
+      - "!packages/*/AGENTS.md"
+      - "!packages/*/README.md"
+      - "!packages/*/tests/**"
+      - "!packages/*/test/**"
+      - "!packages/**/__tests__/**"
+      - "!packages/**/*.test.ts"
   schedule:
     - cron: "23 5 * * *"
   workflow_dispatch:

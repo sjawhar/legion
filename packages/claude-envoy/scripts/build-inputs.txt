@@ -18,10 +18,10 @@
 #   .gitattributes files, scripts/third-party-notices.ts (and any other module build.ts imports
 #   from outside the packages below), scripts/pi-plugin-prepack.sh and the four .github paths at
 #   the end. A change that makes build.ts, verify-build.sh or the workflow read a new file adds it
-#   here. The same test holds .github/workflows/claude-envoy-rebuild.yaml's on.push.paths to the
-#   files these pathspecs match, so a push that changes a build input starts a rebuild and one that
-#   changes none starts nothing: a pathspec added here that matches a file of the repository is
-#   owed a pattern there in the same change.
+#   here. The same test holds .github/workflows/claude-envoy-rebuild.yaml's on.push.paths and
+#   these pathspecs to the same answer on every tracked file, exclusions included, so a push that
+#   changes a build input starts a rebuild and one that changes none starts nothing: a pathspec
+#   added or excluded here is owed its pattern there in the same change.
 #
 # The rule: whole package directories are listed and only known non-inputs are excluded, so a file
 # nobody thought of counts as an input. That is the safe direction: a false "changed" costs one

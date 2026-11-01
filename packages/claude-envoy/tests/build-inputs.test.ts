@@ -125,31 +125,63 @@ test("scripts/build-inputs.txt matches every file the build reads", async () => 
   }
 }, 120_000)
 
-// The rebuild's `on.push.paths` decides which pushes to main are built at all, so it must name
-// every file the list above matches and nothing else: a build input no pattern covers changes the
-// build and starts no run, which leaves main's built plugin behind its source until the daily run,
-// and a pattern no input matches is a name that has moved with nothing saying so. Both directions
-// are read against the repository's tracked files, which is what GitHub matches a push against.
-test(".github/workflows/claude-envoy-rebuild.yaml's push paths cover the build inputs", async () => {
+/** `pattern` as GitHub matches an `on.push.paths` entry against a repository path: `*` matches any
+ *  run of characters but `/`, `**` any run at all, and every other character is itself. GitHub's
+ *  filter patterns also take `+`, `?` and character ranges, which this does not model, so a
+ *  pattern holding one throws rather than being read wrongly as a literal. */
+function pathFilter(pattern: string): RegExp {
+  let expression = "^"
+  for (let i = 0; i < pattern.length; i++) {
+    const character = pattern[i] as string
+    if (character === "*") {
+      if (pattern[i + 1] === "*") {
+        expression += ".*"
+        i++
+      } else {
+        expression += "[^/]*"
+      }
+    } else if ("+?[]".includes(character)) {
+      throw new Error(
+        `the path filter ${pattern} holds ${character}, which this test does not read`,
+      )
+    } else {
+      expression += character.replace(/[.^${}()|\\]/g, "\\$&")
+    }
+  }
+  return new RegExp(`${expression}$`)
+}
+
+// The rebuild's `on.push.paths` decides which pushes to main are built at all, and
+// scripts/build-inputs.txt decides, in the push job, whether a move of main changed the build.
+// The two must name the same files: an input the paths leave out changes the build and starts no
+// run, and a file the paths take and the list calls a non-input starts a run that lands nothing.
+// So this holds the two decisions equal over every tracked file, git making the one and GitHub's
+// rules the other.
+test(".github/workflows/claude-envoy-rebuild.yaml's push paths are the build inputs", async () => {
   const workflow = ".github/workflows/claude-envoy-rebuild.yaml"
   const parsed = Bun.YAML.parse(await readFile(join(repoRoot, workflow), "utf8")) as {
     on?: { push?: { paths?: string[] } }
   }
   const patterns = parsed.on?.push?.paths ?? []
   expect(patterns.length).toBeGreaterThan(0)
+  const rules = patterns.map((pattern) => ({
+    negated: pattern.startsWith("!"),
+    matches: pathFilter(pattern.replace(/^!/, "")),
+  }))
+  // GitHub reads the patterns in order and the last one that matches decides, so a `!` pattern
+  // after the pattern it narrows excludes the path.
+  const starts = (path: string) =>
+    rules.reduce((on, rule) => (rule.matches.test(path) ? !rule.negated : on), false)
 
-  const pathspecs = await buildInputPathspecs()
-  const inputs = (await run(["git", "ls-files", "-z", "--", ...pathspecs], repoRoot))
-    .split("\0")
-    .filter((path) => path !== "")
-  // An empty listing (no git repository, say) would hold the patterns to nothing.
-  expect(inputs.length).toBeGreaterThan(0)
+  const lsFiles = async (pathspecs: string[]) =>
+    (await run(["git", "ls-files", "-z", "--", ...pathspecs], repoRoot))
+      .split("\0")
+      .filter((path) => path !== "")
+  const inputs = new Set(await lsFiles(await buildInputPathspecs()))
+  // An empty listing (outside a git checkout, say) would hold the patterns to nothing.
+  expect(inputs.size).toBeGreaterThan(0)
+  const tracked = await lsFiles(["."])
 
-  const globs = patterns.map((pattern) => [pattern, new Bun.Glob(pattern)] as const)
-  expect(inputs.filter((input) => !globs.some(([, glob]) => glob.match(input)))).toEqual([])
-  expect(
-    globs
-      .filter(([, glob]) => !inputs.some((input) => glob.match(input)))
-      .map(([pattern]) => pattern),
-  ).toEqual([])
+  expect([...inputs].filter((input) => !starts(input)).sort()).toEqual([])
+  expect(tracked.filter((path) => !inputs.has(path) && starts(path)).sort()).toEqual([])
 })
