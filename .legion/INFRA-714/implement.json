@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-714",
-  "completed": "2026-11-01T21:00:00Z",
+  "completed": "2026-11-02T00:40:00Z",
   "proof": [
     {
       "criterion": "A3 / R1 - a red CI settlement moves no issue and reaches the phase holder, the implementer and the architect as one message naming each check and its conclusion, and the result they are told is the code head's latest attempt, carried by a handoff-only head.",
@@ -315,6 +315,30 @@
       "observed": "Each hundred-run prints `0` failures (`grep -c '^--- FAIL'`) and ends `ok github.com/sjawhar/legion/daemon/internal/claudebridge`, 2.787s and 2.408s; the package is ok over ten runs under -race in 74.9s; and the whole daemon tree under load reports no failure. The cause was the fake sending a delivery and then failing its step: the two reach the bridge through two cases of one select, so which arrived first decided whether the refusal was the turn's outcome, and the fake cannot order them because a queued delivery emits no frame it can see. The test orders them instead — it sends the delivery itself, waits for the bridge's own `Envoy delivery ev1 waits for the next step`, and only then opens the gate the fake's step is held at. The fake's fail-then case, which both delivered and failed, is replaced by fail-when, the held step alone.",
       "headSha": "4cfed344a3d16ebf00cb3fe0deb5bc20531b9dff",
       "negativeControl": "The tester's own measurement is the control for the race, and it is a count rather than a run: at the previous head the same command printed 19 failures in 100 while its sibling printed 0 over the same 100, and it prints 0 now. For the behaviour, the second test is the control of the first: TestARefusalWithNothingQueuedEndsItsTurnAndTheNextDeliveryIsANewOne drives the other order and requires the opposite answer — the turn reported refused with the provider's words at sequence 1, then the delivery's own turn reported clean at sequence 2 — so a bridge that waited for an in-flight delivery, or one that attributed it to the ended turn, fails one of the two whichever way it erred."
+    },
+    {
+      "criterion": "Review round 6, finding 1: the ISSUE_CHANGED retry lost the daemon's re-assert of its own status over one a session wrote, and ended that session's tree on the way.",
+      "surface": "The real outbox runner over the pod's PostgreSQL with the workflow engine and admission wired, and the real Dispatch client against a scratch Dispatch for the read's own half.",
+      "command": "cd packages/daemon && go test ./internal/daemon/ ./internal/admit/ ./internal/workflow/ ./internal/record/ ./internal/store/ -count=1 -p 1",
+      "observed": "All ok. The retry no longer applies what it read: that read carries no actor, so the engine could only take every change it showed for a person's, and two of the daemon's own rows are queued precisely because a change was not a person's — a session's own done, backlog or icebox, which the re-assert undoes, was ending the tree as if a person had, lingering it and freeing its slot, after which the ordinary rule dropped the re-assert for sitting at a status out of the workflow. A change Dispatch recorded reaches the engine through its own event, with its actor (R4), and this read decides one thing: whether to write. Each kind of status row carries the rule its retry is judged by, in one switch with a case for each and a default that fails the row rather than lending it another kind's rule (statusRowKind, stillWanted), which TestEveryStatusRowKindHasAStillWantedRule asks of every kind for real. TestTheDaemonsReassertIsWrittenAfterDispatchRefusesItsFirstWrite drives done, backlog and icebox: the re-assert is written at the re-read's sequence and the tree queues no linger row.",
+      "headSha": "78e66771d40b60f5466e0dcd842d05ce2463bdce",
+      "negativeControl": "Two reverts in a copy under $TMPDIR, never in the shared workspace. Judging the re-assert by the ordinary rule gives `--- FAIL: TestTheDaemonsReassertIsWrittenAfterDispatchRefusesItsFirstWrite` with `status writes = [], want the daemon's own status written after the refusal` for each of the three. Putting applyRead back gives `--- FAIL: TestAPersonsHandoverIsWrittenAfterDispatchRefusesItsFirstWrite` with `triage wakes queued for the controller = 1, want none: the retry applies nothing of its read`."
+    },
+    {
+      "criterion": "Review round 6, finding 2: a database main had deployed could not be upgraded, and the daemon failed its boot on every restart.",
+      "surface": "The store's own migration suite against a real PostgreSQL, migrating a database as main left it.",
+      "command": "cd packages/daemon && go test ./internal/store/ -count=1 -run TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan -v",
+      "observed": "Four cases pass, the new one being `a database at main's newest migration`: it applies main's migrations through 0067, queues a pending row of every kind that release runs — phase_ended among them — and then migrates to this branch's head. Two of this branch's migrations rewrote outbox_kind_check without phase_ended, which only a later one added back, and a rewritten CHECK validates the rows the table already holds, so the upgrade was refused and the boot failed on every restart. Both lists name it now, edited in place since neither version has shipped. The test's kind list is read from record.LaneKinds rather than kept by hand, which is the omission that caused this in the first place.",
+      "headSha": "78e66771d40b60f5466e0dcd842d05ce2463bdce",
+      "negativeControl": "phase_ended taken back out of both lists in the $TMPDIR copy: `--- FAIL: …/a_database_at_main's_newest_migration`, `store_test.go:732: migrate: apply migration 20261029120500_approval_carry.up.sql: ERROR: check constraint \"outbox_kind_check\" of relation \"outbox\" is violated by some row (SQLSTATE 23514)` — the reviewer's own probe, now a case."
+    },
+    {
+      "criterion": "Review round 6, item 4: every other CHECK constraint this branch rewrites, read against main's values.",
+      "surface": "The committed migrations and their tests, read rather than run: the tester did this reading at 1557e486 and the architect recorded it.",
+      "command": "the tester's reading of the branch's CHECK rewrites at 1557e486, reported on the issue's role topic",
+      "observed": "Three rewrites exist beyond the two this round edits, and each is sound with its own data step and test. 20261029120800 rewrites outbox_kind_check to 16 kinds against main's 17: merge_queue_publish, auto_merge_disable and ready_merge gone, which is R2, and approval_carry and role_message added; its line 10 deletes the rows of those three kinds before the swap, so the 23514 cannot arise, and TestTheDaemonsMergeRowsAndNoticesAreDroppedAt20261029120800 inserts a row of each. 20261029120700 rewrites issues_phase_check and issues_held_from_check, each differing from main by awaiting_merge alone, with both updates running before the swap and TestAwaitingMergeMigratesToMergingAndTheConstraintsSwap holding them. No migration on main after 0066 touches outbox_kind_check and 0067 is main's newest, so 0066's list is the whole of what the comparison is against.",
+      "headSha": "78e66771d40b60f5466e0dcd842d05ce2463bdce",
+      "negativeControl": "Nothing was changed here, so there is no control to run and none is claimed: this entry records a reading, with its reader and the commit read named, and the two rewrites that did need changing are the entry above."
     }
   ],
   "filesChanged": [
@@ -359,5 +383,5 @@
     "cmd/legion's TestProbeImageReadsEachRolesOwnOverlaysAsTheRoleStarts fails in a Kubernetes issue pod on this branch's base as well; it was reproduced at the parent commit with every changed file restored. internal/intake's TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead starts a NATS container and internal/runtime/tmux's TestNewRefusesLaunchersItCannotRun wants tmux on PATH, neither of which a pod has, and nine internal/daemon tests are the known gVisor and Docker cases. CI's run at this head is the proof for all of them.",
     "TestTheKeeperRetriesAControllerWhoseLaunchesRanOut was a race rather than a pre-existing failure, which two workers reported it as. Its three refused launches and the keeper's retry all fell between two ten-millisecond polls, so the wait read zero spawns and then four and never the failure it exists to prove. The retry is now two seconds; the test ran five times green."
   ],
-  "previousHandoff": "4a35a271a2b932699ea52cb1833ec3af40bce4e3"
+  "previousHandoff": "dacfc72af0167568b51d66333743ccb92e27f2be"
 }
