@@ -2,7 +2,7 @@
  "schemaVersion": 1,
  "phase": "implement",
  "issue": "INFRA-625",
- "completed": "2026-10-31T15:52:00Z",
+ "completed": "2026-11-01T06:05:00Z",
  "proof": [
   {
    "criterion": "Round 3's second failure: the dispatch-memory lane. The tester's red (a four-column table at 260 MiB against 256) is not a regression of this change, and the lane's distribution is moved away from its bound rather than left where it was.",
@@ -155,6 +155,46 @@
    "observed": "exit 0. At cc1b7726 the ci-filters job red with 12 problems, each naming a packages/envoy/internal/contracts file that envoy-go-race-pmdoc reads but its filter does not match; this change's pmdoc/heavy_bodies_test.go:10 reads contracts.DispatchBodyMax, so the filter now names that package.",
    "headSha": "fbf0819bb529cf86b32f6fb02e64a7e4c855762a",
    "negativeControl": "Run 41194315652 at cc1b7726: ci-filters failure, ci-ok failure, every other lane green."
+  },
+  {
+   "criterion": "Review round 3, defect 1: on a fresh mount a frame arriving during the first sliced paint leaves no raw text in front of the body.",
+   "surface": "The Dispatch live session view in Chromium, WebKit and Firefox against the real Go server and Postgres 17 (the pod harness), plus the render path's own unit surface.",
+   "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts heavy-bodies.e2e.ts --project=<engine>; and bun test web/src/features/refs/MarkdownBody.test.tsx",
+   "observed": "New browser row 'a reader who opens the live view while a long turn streams is never shown a frame's text in front of the body': a 4,000-paragraph turn, then a frame every 80 ms for 60 frames, recorded by a MutationObserver installed with page.addInitScript. Green in all three engines at this head (chromium 18 passed, webkit 18 passed, firefox 3 skipped 15 passed), with 92-107 / 71-79 / 149-162 samples recorded and 35-44 / 19-23 / 96-102 of them a part-built body mid-stream. The cure: the pending branch returns when a paint is still filling the element (`painting.current`), which `done()` clears before it records the painted source.",
+   "headSha": "c25b344b0e7037e3aaa697625e2d893c475fad4c",
+   "negativeControl": "With web/src/features/refs/*.ts(x) restored to the code before the fix and the bundle rebuilt, the same row reds in all three engines: 57 of 155 recorded samples held raw text in front of blocks in Chromium (widest 63,864 characters in front of 250 blocks), 33 of 97 in WebKit, 15 of 152 in Firefox. The unit row reds at 2,793 characters of raw text."
+  },
+  {
+   "criterion": "Review round 3, defect 2: an abandoned body is never parsed on the reader's own thread when the worker misses its deadline.",
+   "surface": "The markdown render path's unit surface with the real worker queue and a fake worker (jsdom).",
+   "command": "cd packages/dispatch && bun test web/src/features/refs/MarkdownBody.test.tsx",
+   "observed": "New row 'parses nothing on the page when the deadline passes for a body its reader left' passes: 2 requests, 2 workers, no page parse. A waiter is now `Waiter { answer, kept }`; `keepIfPosted`'s cancel marks its place kept, `answered()` still settles a kept place, and `expire()`, `giveUp()` and `dropAbandoned()` ask `anyoneIsWaiting`, so the queue never makes an answer for a render that has gone. A live element whose worker misses its deadline still gets the page's own parse, and that row is unchanged and green.",
+   "headSha": "c25b344b0e7037e3aaa697625e2d893c475fad4c",
+   "negativeControl": "Against the code before the fix the row reads 'The engine sent the parse worker 1 bodies, not 2' - one request, one worker, the abandoned body parsed on the page and cached."
+  },
+  {
+   "criterion": "Review round 3, defect 3: a load failure answers for its own load and never fails or drops a newer load's record.",
+   "surface": "The document service's Go package against a real Postgres (the pod harness lane).",
+   "command": "source /legion/harness/env.sh && export DISPATCH_TEST_DATABASE_URL=\"$DATABASE_URL\" && cd packages/envoy && go test -count=1 -p 1 -timeout 50m ./internal/dispatch/docs/ ./internal/dispatch/pmdoc/",
+   "observed": "ok docs 1385.773s and ok pmdoc 857.528s at the merged head. `applyRoom` captures the record's number before Apply and the count of loads begun after it (`roomLoadWaitedOn`), so the pair names the load Apply waited on; `onLoadDocument`'s own refusals drop their own record on the loading goroutine; and the stored history's decode, which main's merge moved into that hook, fails the room there. TestALoadFailureAnswersForItsOwnLoadAndNotTheLoadAfterIt, TestTheStoreJudgesAnUpdateByItsHeader, TestLoadFailureMakesDocumentServiceUnavailable and TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable all PASS; pending_authors.go is 922 lines.",
+   "headSha": "c25b344b0e7037e3aaa697625e2d893c475fad4c",
+   "negativeControl": "With the identity fix reverted to the by-name lookup the row reports 'the first load's caller dropped the record of the load that began after it' and 'the first load's caller failed the room the load after it is building'. Before the hook failed the room, the merge left TestTheStoreJudgesAnUpdateByItsHeader red with 'the refused load left the room healthy, so nothing reloads the document'."
+  },
+  {
+   "criterion": "Review round 3, minors: the restore row, the write row's own file and docblock, the keepAPostedParse doc and AGENTS.md, and one cap-message formatter.",
+   "surface": "The unit surface, the browser suite's two spec files, and the Go document service.",
+   "command": "cd packages/dispatch && bun run test && bun run typecheck; bunx biome check . ; bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts heavy-document-writes.e2e.ts --project=chromium --retries=0, five times",
+   "observed": "3,127 dispatch tests pass, 261 proof-editor tests pass, tsc and biome clean. The restore row 'holds none or all of the body it was reading while a part-built paint is replaced' passes. The write row and its pieces are now heavy-document-writes.e2e.ts (279 lines) with the generators in heavy-bodies.ts (57); its drain waits on the block index as well as the settlement, since the 8,000-item body and its half hold 8,001 and 4,001 blocks against the 2,000 bound. Five Chromium runs: four green, one '8,000 list items: the write took 1039 ms'. The cap message has one formatter, itemCapRefusal, and the test matches ErrDocumentTooLarge rather than restating it.",
+   "headSha": "c25b344b0e7037e3aaa697625e2d893c475fad4c",
+   "negativeControl": "With element.replaceChildren(held) disabled the restore row fails at 750 of 868 held nodes. The block-index wait was chosen from the server's own log of the 8,000-item write - 'left its blocks to the block-index reconciliation ... blocks=8001 bound=2000' - and document_blocks, which shows only those two bodies past the bound."
+  },
+  {
+   "criterion": "The pull request is mergeable with main, twice over, with both features kept.",
+   "surface": "GitHub's own mergeability for #2519, and the Go and TypeScript suites on each merged tree.",
+   "command": "jj git fetch && jj new legion/INFRA-625 main@origin -m 'merge: ...' (conflicts resolved) && gh pr view 2519 --json mergeable; then the package suites above",
+   "observed": "MERGEABLE at c25b344b. The first merge (f93dd689) was two import hunks plus the onLoadDocument interaction above; the second (c656fc4f) was fifteen hunks across five files, each this change's `backs` read-back parameter meeting main's ValidDocument/matchBlocks shape, both sides kept, plus three TypeScript test helpers the text merge could not see as conflicting, which now call main's own loadedEngine().",
+   "headSha": "c25b344b0e7037e3aaa697625e2d893c475fad4c",
+   "negativeControl": "Before the three helpers were corrected, `bunx tsc --noEmit` failed on all three with TS2554: Expected 3-4 arguments, but got 1, so the merged tree did not typecheck."
   }
  ],
  "filesChanged": [
@@ -180,7 +220,8 @@
   "The write now reads its markdown once instead of five times (the architect had asked only for a batched index; the index was already one statement per table, which CopyFrom would improve by 30-50 ms at the cost of the on-conflict-do-update that makes a re-index idempotent, so that was rejected and this was done instead).",
   "The document-write row holds the one parse-bound body ('- ' x 49 padded with blank lines to the cap) to its steady state: the row writes it once to warm the process, records that first write's time as an annotation, and asserts the second under 1,000 ms. The architect directed this after the measurement. The cost is goldmark's own blankLines slice, which grows with depth times lines (~3.1 M entries, ~75 MB at the cap); the goldmark change that would fix it is ruled out.",
   "The simplify pass applied 14 findings and skipped 2 (a per-parse registry in block-nesting.ts, which the reviewer itself rated 0.55; and the deliberately independent constants in the proof-editor test, which restate the Go bound on purpose). Two of the applied findings were regressions this change had introduced: a forced layout on every paint, and a per-exit re-slice in the directive-container split.",
-  "Round 2 of review: the architect ruled a quarter-size baseline at 2.5x for the write row's linearity assertion, then accepted the correction - a quarter is two doublings, so a linear write reads about 4x (measured 4.25x and 4.69x) and 2.5x would have asserted the write is sublinear. Shipped: a half-size body of the same shape, the full body timed first (whichever size is written first pays ~200 ms of shape warm-up, and body-first keeps the absolute bound measuring what it has always measured), 3.5x, on the three parse-dominated rows, with the 1,000 ms bound unconditional on all eight."
+  "Round 2 of review: the architect ruled a quarter-size baseline at 2.5x for the write row's linearity assertion, then accepted the correction - a quarter is two doublings, so a linear write reads about 4x (measured 4.25x and 4.69x) and 2.5x would have asserted the write is sublinear. Shipped: a half-size body of the same shape, the full body timed first (whichever size is written first pays ~200 ms of shape warm-up, and body-first keeps the absolute bound measuring what it has always measured), 3.5x, on the three parse-dominated rows, with the 1,000 ms bound unconditional on all eight.",
+  "The suite gained a browser row for the fresh-mount streaming defect, on the tester's recipe and at its suggestion: the defect reached review twice and no existing row drove a reader opening the live view mid-stream. It carries two vacuity guards (a part-built body and a frame's text must each have been recorded), because the same shape at 900 paragraphs and 150 ms frames is green against the defective code."
  ],
  "openQuestions": [
   "The write row's 1,000 ms absolute assertion reds about 1 in 5 runs on a two-core Broadwell pod for main@origin as well as for this head; CI's runners are where the architect judges it, and the tester judges linearity on the pod. If CI's own runners turn out to be that slow, the bound is the architect's to revisit with the head-against-base table in the body."
@@ -190,5 +231,6 @@
   "A hover card over a long body closed in WebKit and Firefox before its preview formatted, because the late paint's own scroll fired the close path, and then a synthetic pointermove at the unchanged pointer position fired it again. The reader never saw the formatted preview in those engines. Both are fixed in RefPreview.tsx and proven by the row in all three engines.",
   "The reader's-place row's 1-in-10 WebKit failure was not the late paint: the deep link marks the conversation read, every card loses its 24 px unread pill, the page loses 312 px and WebKit's scroll anchoring absorbs it. The failing run's own log shows the late paint moved the content 0 px. The row now takes its first measurement once the page has held it for 600 ms.",
   "goldmark's blank-line bookkeeping is superlinear in depth times lines for a body that holds blocks open across thousands of blank lines. It is the one shape of this issue's family left unfixed, and it is in the vendored parser."
- ]
+ ],
+ "previousHandoff": "e3b97935392484af607da29d8dcec1e19d50d3c5"
 }
