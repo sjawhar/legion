@@ -2,31 +2,33 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "previousHandoff": "323d7449c977f1fd3c0ad46ba7131d1f8e499afa",
+  "previousHandoff": "f5a29bac37be5d85eea56e54217e37cacd1b6a61",
   "proof": [
     {
-      "criterion": "Forward merge of main ed9113e7 (#2599 removes OpenCode support, #2609) takes main's removal everywhere and keeps #2411's own changes",
-      "surface": "the merged tree b1bfb073: ci.yaml, ci_job_reads.py and the fold scripts",
-      "command": "bash .github/scripts/check-ci-filters.sh; bash .github/scripts/check-image-trigger-paths.sh; .github/scripts/release-push.sh fold-orphans $(<.github/changelog-packages); fold-plan over the same list",
-      "observed": "the two conflicts (ci.yaml five hunks, ci_job_reads.py one) resolved by keeping the conflicts-script job, filter, gate and ci-ok entries and dropping the envoy-plugin ones main deleted; check-ci-filters passes (28 gates) and check-image-trigger-paths passes; fold-orphans exits 0; fold-plan plans claude-envoy, envoy, envoy-client, pi-envoy and pi-legion with nothing on stderr; .github/changelog-packages already holds main's six packages; #2411's own diff names no OpenCode or envoy-plugin",
-      "headSha": "b1bfb073a9a9989f33c4aa5f5711196be3427dce",
-      "negativeControl": "the unchanged-diff fingerprint is 20ed0b8aa8b0ba86 before and after: the merge changed none of #2411's own lines"
+      "criterion": "Forward merge of main d86f8de8 raises the Dispatch closing to main's highest numbered migration, 0157_document_edit_notices_notify (#2391 added 0151-0157); the daemon closing stays at 0067_phase_assignment, still main's highest",
+      "surface": "the merged tree's Go tests on the pod's test PostgreSQL 18.6 with pgvector",
+      "command": "go test ./migrationid/ ./internal/pgmigrate/... ./internal/broker/store/ ./internal/dispatch/store/ (on a database the test role owns) ./cmd/dispatch -run 'Healthz|Census|Migrat' in packages/envoy; go test ./internal/store/... in packages/daemon",
+      "observed": "migrationid, pgmigrate, pgmigratetest, broker store, the whole Dispatch store suite, cmd/dispatch, daemon store and store/migrations all ok, the tester's red tests (next_number_test.go in both series) and the timestamped-migration tests among them",
+      "headSha": "0b2f1d887b0ac5fc3fe041a57da56cc212989f85",
+      "negativeControl": "a throwaway 0158_t588_next.up.sql (with a census) added alone to Dispatch's embedded set: TestMigrationSetTakesNumbersThenTimestamps fails, naming 0158 and the numbered migrations ending at 157; a throwaway 20261101100000 timestamped migration passes; both removed"
     },
     {
-      "criterion": "The release, layout, measurement, migration and store checks pass at the merge",
-      "surface": "repository scripts and Go suites on the pod's test PostgreSQL 18.6 with pgvector",
-      "command": "release-push.test.sh; check-release-credentials.sh and its test; semantic-line-breaks.ts on AGENTS.md, docs/kubernetes.md, packages/envoy/cmd/dispatch/README.md and scripts/conflicts/README.md; biome, tsc and bun test on scripts/conflicts; go test ./migrationid/ ./internal/pgmigrate/... ./internal/broker/store/ ./internal/dispatch/store/ ./cmd/dispatch (Healthz|Census|Migrat) in packages/envoy; go test ./internal/store/... in packages/daemon",
-      "observed": "release-push.test.sh 635 passed, 0 failed; check-release-credentials PASS and its test PASS; each guide exit 0; scripts/conflicts 40 pass; migrationid, pgmigrate, broker store, Dispatch store (whole suite, on a database the test role owns) and cmd/dispatch ok; daemon store ok on the second run, the one test that failed once (TestTheCatchUpCursorIsNullForIssuesRecordedBeforeIt) passing three times alone",
-      "headSha": "b1bfb073a9a9989f33c4aa5f5711196be3427dce",
-      "negativeControl": "the three census tests that need superuser rights were left out: the pod's test role lacks them, and they fail the same way at main"
+      "criterion": "The texts naming the closing files agree with migrationid",
+      "surface": "packages/envoy/cmd/dispatch/README.md, packages/daemon/internal/store/migrations/embed.go, docs/kubernetes.md",
+      "command": "grep for the old closing names; bun scripts/semantic-line-breaks.ts packages/envoy/cmd/dispatch/README.md",
+      "observed": "the Dispatch README names 0157_document_edit_notices_notify.up.sql; embed.go and docs/kubernetes.md already name the daemon's 0067_phase_assignment.up.sql, which is unchanged; no text names 0150_dpop_proofs.up.sql as a closing; layout checker exit 0",
+      "headSha": "0b2f1d887b0ac5fc3fe041a57da56cc212989f85",
+      "negativeControl": "before the edit the README named 0150_dpop_proofs.up.sql, a closing the merged tree's set would refuse"
     }
   ],
   "filesChanged": [
-    "merge of main ed9113e7: .github/workflows/ci.yaml and .github/scripts/ci_job_reads.py resolved to main's removal of envoy-plugin plus #2411's conflicts-script job"
+    "merge of main d86f8de8 (clean)",
+    "packages/envoy/migrationid/migrationid.go: Dispatch closing 0157_document_edit_notices_notify.up.sql",
+    "packages/envoy/cmd/dispatch/README.md: the closing file name"
   ],
   "trickyParts": [
-    "Main's highest numbered migrations are still daemon 0067 and Dispatch 0150, so migrationid's closings are unchanged",
-    "Main moved to cafa38b7 after the merge with one changelog fold commit, which neither conflicts nor adds a migration, so no second merge"
+    "Main was re-read from origin right before the push: still d86f8de8, highest numbered Dispatch 0157 and daemon 0067",
+    "The three census tests that need superuser rights were left out: the pod's test role lacks them, and they fail the same way at main"
   ],
   "deviations": [],
   "openQuestions": []
