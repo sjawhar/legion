@@ -940,8 +940,8 @@ func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, 
 // (issue_key) where state = 'open', which a $-parameterized state would lose. A document's asks
 // read asks_artifact_id (0032) and filter the state, whatever state is asked for:
 // asks_open_artifact, the partial index 0009 built for the open case, went unused for the nine
-// days the index audit measured and migration 0153 drops it. An issue's asks with no state
-// filter read asks_issue_key (0151). They are vars, not consts, because askReadFrom builds its
+// days the index audit measured and migration 0154 drops it. An issue's asks with no state
+// filter read asks_issue_key (0152). They are vars, not consts, because askReadFrom builds its
 // anchor join from store.CastableUUID.
 var (
 	listIssueAsksQueryAll = `select ` + askReadColumns + ` ` + askReadFrom + `

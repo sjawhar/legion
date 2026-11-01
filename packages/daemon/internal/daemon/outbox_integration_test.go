@@ -770,9 +770,7 @@ func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
 	})
 	prompts := len(conn.Prompts())
 
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
-		t.Fatalf("end the foreign turn: %v", err)
-	}
+	endTurn(ctx, t, machine, token)
 
 	if got := machine.Claim().Pending; got != nil {
 		t.Fatalf("the finished phase's task is still pending as %+v, want it dropped", got)

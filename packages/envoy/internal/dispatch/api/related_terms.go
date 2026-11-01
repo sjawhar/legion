@@ -38,7 +38,7 @@ const (
 )
 
 // SearchTermStatsInterval is how often RunSearchTermStatsRefresh brings every project's term
-// statistics up to date: it applies the items 0159's triggers queued since the last pass, and
+// statistics up to date: it applies the items 0160's triggers queued since the last pass, and
 // counts every item of a project again only where no pass of this build has counted it. A lexeme
 // written since the last pass is probed live (relatedProbeLimit), so a stale table costs probes,
 // not results.
@@ -62,11 +62,11 @@ with q as (select $1::tsquery as tsq, $4::text as term, ''::text as own_key),
 // reads), a comment or an ask by its issue's project or else its document's, a message by its
 // issue's.
 //
-// The document arm reads document_search (migration 0154) where it read each artifact's latest
+// The document arm reads document_search (migration 0155) where it read each artifact's latest
 // version through a lateral join over artifact_versions, for two reasons. Search's own document
 // arm reads that table, so counting any other vector would give the check a df for words search
 // cannot find; and the queue's document rows are written from document_search too (migration
-// 0159), so a step pass and a full build hold one definition of a document's words. The two
+// 0160), so a step pass and a full build hold one definition of a document's words. The two
 // readings differ only for a document whose latest version carries no markdown, which
 // document_search does not hold and the lateral read as a null vector.
 const searchTermItemsSQL = `
@@ -275,7 +275,7 @@ returning t.items`
 
 // searchTermQueueSweep drops the queued changes no pass can apply: a row whose owner names no
 // project, which is an item whose issue or artifact has been deleted, and a document row for an
-// artifact that is no doc, which no project's counts ever held - migration 0155 puts no kind
+// artifact that is no doc, which no project's counts ever held - migration 0156 puts no kind
 // filter on document_search, deliberately, because every reader of it joins artifacts. A row is
 // read only once its writer's transaction has committed, and that writer could not have written
 // an item whose owner it could not see, so a row naming no project here names none later either.
@@ -566,7 +566,7 @@ select l.lexeme, l.tf, quote_literal(l.lexeme),
 
 // relatedProbeSQL answers which of the given lexemes some item of the project holds, leaving out
 // the excluded owner's items. Issues, comments, asks and messages each probe their search index
-// with an exists; documents probe document_search (migration 0154), the GIN-indexed vector of
+// with an exists; documents probe document_search (migration 0155), the GIN-indexed vector of
 // each document's latest version, which they are read through once for all the lexemes: the
 // vector is tested against the lexemes ORed, and only a document that matches is unnested. An
 // item on no document (an issue's comment or ask) is never the excluded document's, so the

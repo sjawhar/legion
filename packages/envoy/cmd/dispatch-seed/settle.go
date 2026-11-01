@@ -22,7 +22,7 @@ func (r *seedRun) settleOwedWork(ctx context.Context) error {
 	if _, err := r.database.Pool.Exec(ctx, `delete from block_grammar_owed`); err != nil {
 		return fmt.Errorf("empty the block grammar queue: %w", err)
 	}
-	// The related-terms refresh queue (0157, filled by 0159's triggers on the seed's own
+	// The related-terms refresh queue (0158, filled by 0160's triggers on the seed's own
 	// inserts) needs no truncation here: buildTermStatistics empties it. Every project starts
 	// with no search_term_totals row, so each takes a full build, whose `drained` CTE deletes
 	// the queue rows its snapshot saw. A truncate added here would only duplicate that drain.

@@ -27,7 +27,7 @@ const anchoredMarkTimingLimit = 20
 // mutation.go (lockTableAnchorRows). Their gain is their own text and no index this change adds.
 // Both indexes the new texts reach were already there - comments_anchor_artifact is migration
 // 0032 and asks_anchor_artifact_id migration 0148, both below this branch's block, which starts
-// at 0150 - and what each read gained is the uuid comparison beside its text comparison, which
+// at 0151 - and what each read gained is the uuid comparison beside its text comparison, which
 // is what makes the index eligible at all. One schema therefore holds both sides, and the pair
 // is the committed regression check: main's text cannot use the index, so the day a read loses
 // that comparison its median goes back to main's and the pair fails.

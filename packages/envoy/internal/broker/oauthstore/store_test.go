@@ -205,8 +205,9 @@ func TestARotatedRefreshTokenIsRedeemableOnlyWithinItsGrace(t *testing.T) {
 	}
 }
 
-// TestRevokeRefreshTokenEndsTheWholeFamily: the library revokes a family only on a reuse, so the
-// store ends the family's tokens and hands its credential to Reused, in the reuse's transaction.
+// TestRevokeRefreshTokenEndsTheWholeFamily: the library revokes a family on a reuse, and on a
+// revocation request presenting one of its refresh tokens, so the store ends the family's tokens
+// and hands its credential to Reused, in that caller's transaction.
 func TestRevokeRefreshTokenEndsTheWholeFamily(t *testing.T) {
 	ctx := context.Background()
 	s, pool := newStore(t)

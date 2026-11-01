@@ -77,7 +77,7 @@ func seedTestDatabase(t *testing.T) (*store.Store, *seedRun) {
 
 // TestSeedBuildsTermStatisticsOnMainsSchema seeds the shape the measurement protocol's "before"
 // side seeds: a database migrated from a checkout of main, filled by this tool with
-// --no-migrate. Its search_term_totals carries no snapshot column (migration 0158) and the build
+// --no-migrate. Its search_term_totals carries no snapshot column (migration 0159) and the build
 // of this release reads one, so without the step choosing its build by the schema every project
 // fails and the seed reports a data set whose term statistics were never built.
 //
@@ -91,7 +91,7 @@ func TestSeedBuildsTermStatisticsOnMainsSchema(t *testing.T) {
 	database := storetest.Open(t)
 	if _, err := database.Pool.Exec(ctx,
 		`alter table search_term_totals drop column snapshot, drop column snapshot_at`); err != nil {
-		t.Fatalf("drop the snapshot columns 0158 added: %v", err)
+		t.Fatalf("drop the snapshot columns 0159 added: %v", err)
 	}
 
 	started := time.Now()

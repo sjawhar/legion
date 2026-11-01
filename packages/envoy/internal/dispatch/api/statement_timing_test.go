@@ -45,11 +45,11 @@ const (
 //
 //   - Protocol 2, head text alone: listIssueAsksQueryAll, listIssueRootMessagesQuery and
 //     listArtifactAsksQueryOpen, whose texts this change does not edit at all - their gain is
-//     asks_issue_key (0151) and messages_issue_roots (0152), and for the artifact list the drop
-//     of asks_open_artifact (0153), whose before side needs that index present. And the five
+//     asks_issue_key (0152) and messages_issue_roots (0153), and for the artifact list the drop
+//     of asks_open_artifact (0154), whose before side needs that index present. And the five
 //     statements of search's document arm - searchQuery, searchQueryMeaning,
 //     relatedKeywordQuery, relatedMeaningQuery and relatedProbeSQL - whose head text reads
-//     document_search (0154), a table that must be absent for the before side and present for
+//     document_search (0155), a table that must be absent for the before side and present for
 //     the after. One database cannot be both, so each of these is measured here as its head
 //     side, with its plan, and seam 7's two-commit run takes the before side by running this
 //     same measurement against a database migrated from a checkout of main.

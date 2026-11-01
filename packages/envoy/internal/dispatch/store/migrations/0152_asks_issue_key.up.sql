@@ -1,0 +1,16 @@
+-- 0152_asks_issue_key.up.sql
+-- GET /api/v1/issues/{key}/asks with no state filter reads every ask of one issue
+-- (api/asks.go listIssueAsksQueryAll), and no index serves it: asks_open (0001) is partial on
+-- state = 'open', which Postgres cannot apply to a read that asks for every state, and every
+-- other index of asks is keyed on something else, so the read scans the whole table. The
+-- reference closure reads asks by issue_key the same way (refs/closure.go).
+-- The read orders its rows by created_at, id within the issue, so an index on
+-- (issue_key, created_at, id) would be strictly better than this one: it would answer the
+-- order as well as the predicate and leave the plan no sort. This migration keeps the plain
+-- (issue_key) key the approved spec names, because the sort is over one issue's asks, which is
+-- a short list, and the statement is not changed by this release; the composite is the shape to
+-- take if a later measurement finds that sort costly.
+-- A plain `create index`, as every migration's is (the runner applies each inside one
+-- transaction, where `concurrently` cannot run): the build holds `SHARE` on asks while it reads
+-- the table, so an ask write waits for it and no read does.
+create index asks_issue_key on asks (issue_key);

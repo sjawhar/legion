@@ -12,9 +12,6 @@ model: ["@oracle"]
 # Oh My Pi has no per-agent command limit (bash.patterns is one setting for the whole session), so
 # the Constraints below hold the agent to commands that read, as a rule holds an engineer.
 tools: read, glob, grep, bash, todo
-# The planner and the architect wait for the analysis before they draft or request approval.
-# Without this, Oh My Pi runs a task agent in the background whenever async jobs are on.
-blocking: true
 color: yellow
 ---
 
