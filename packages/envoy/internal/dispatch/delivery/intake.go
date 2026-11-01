@@ -239,17 +239,22 @@ func flatPayload(fields map[string]json.RawMessage) (map[string]string, error) {
 //
 // One subject rather than the set this once carried -- the wildcard pull-request subject
 // notifications.github.*.*.pr.* beside one notifications.github.<owner>.<repo>.workflow.<file>.>
-// per configured workflow file, through FilterSubjects -- because nats-server 2.10.29 does not
-// hand that set's workflow messages over. Measured on one stream holding five pull-request and
-// twelve workflow-run messages (TestWhichFilterShapeDeliversAWorkflowSubject): a durable carrying
-// the set reports all of them in NumPending, then delivers the five pull requests and none of the
-// runs, by pull fetch or push subscription alike. Each filter alone delivers its own messages,
-// and so do two workflow filters together, or a concrete pull-request subject beside the
-// workflow filter; only the wildcard pull-request filter beside it withholds the workflow
-// messages, in either order. A withheld message is silent -- the consumer reports it pending and
-// never errors -- so this takes the one shape that delivers everything and filters in the
-// handler. It also means the filter no longer depends on the settings row, so a settings change
-// needs no rebind.
+// per configured workflow file, through FilterSubjects -- because a nats-server below v2.15 does
+// not hand that set's workflow messages over. Measured on 2.10.29, on one stream holding five
+// pull-request and twelve workflow-run messages: a durable carrying the set reports all of them in
+// NumPending, then delivers the five pull requests and none of the runs, by pull fetch or push
+// subscription alike. Each filter alone delivers its own messages, and so do two workflow filters
+// together, or a concrete pull-request subject beside the workflow filter; only the wildcard
+// pull-request filter beside it withholds the workflow messages, in either order. A withheld
+// message is silent -- the consumer reports it pending and never errors -- so this takes the one
+// shape that delivers everything and filters in the handler. It also means the filter no longer
+// depends on the settings row, so a settings change needs no rebind.
+//
+// nats-server v2.15.2, the server the Go tests link from the release that requires v2.15.0 or
+// later, hands every one of those shapes every message, the whole old set included
+// (TestWhichFilterShapeDeliversAWorkflowSubject, which measures the table on the linked server).
+// The one subject stays: it is what a hub below v2.15 needs, it costs nothing on one at or above
+// it, and the durables this release replaces were created against the older servers.
 const githubIntakeSubject = "notifications.github.>"
 
 // intakeMessageTimeout bounds how long one envelope's own handling may take -- its GitHub calls
@@ -570,9 +575,9 @@ func reconcileDurableConsumer(ctx context.Context, js natsgo.JetStreamContext, w
 		return false
 	case len(info.Config.FilterSubjects) > 0:
 		// A durable an earlier release left carrying a filter-subject set, which withholds the
-		// workflow runs this slice exists to record (githubIntakeSubject). It is replaced rather
-		// than updated in place, and replaced at its own ack floor, so the replacement neither
-		// replays what the old durable acknowledged nor skips what it had not
+		// workflow runs this slice exists to record on a hub below v2.15 (githubIntakeSubject). It
+		// is replaced rather than updated in place, and replaced at its own ack floor, so the
+		// replacement neither replays what the old durable acknowledged nor skips what it had not
 		// (TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor).
 		//
 		// Re-read the durable immediately before the delete: the read above is two round trips

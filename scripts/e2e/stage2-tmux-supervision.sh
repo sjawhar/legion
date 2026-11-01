@@ -413,9 +413,9 @@ if [ -z "${LEGION_E2E_PG_DSN:-}" ]; then
   LEGION_E2E_PG_DSN="postgres://legion:legion@127.0.0.1:$(docker port "$pg_container" 5432/tcp | head -1 | sed 's/.*://')/legion"
 fi
 
-# NATS and the Envoy listener on the host: nats:2.10 with JetStream, and the listener built from
+# NATS and the Envoy listener on the host: nats:2.15.1 with JetStream, and the listener built from
 # packages/envoy with its API bearer, which reaches every pane as a 0600 file (envoy_token_file).
-docker run -d --name "$nats_container" --cpus 1 --memory 512m -p 127.0.0.1::4222 nats:2.10 -js >/dev/null
+docker run -d --name "$nats_container" --cpus 1 --memory 512m -p 127.0.0.1::4222 nats:2.15.1 -js >/dev/null
 until_true 60 "NATS to be ready" sh -c "docker logs '$nats_container' 2>&1 | grep -q 'Server is ready'"
 nats_url="nats://127.0.0.1:$(docker port "$nats_container" 4222/tcp | head -1 | sed 's/.*://')"
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/envoy-token" &&

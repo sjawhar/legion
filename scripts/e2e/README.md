@@ -442,7 +442,7 @@ What it stands up, all of it the run's own:
   — tmpfs rather than the image's anonymous volume, which a box whose docker volume subsystem stalls would hang on.
 
 - **NATS and the Envoy listener** on the host:
-  a `nats:2.10 -js` container (`legion-e2e2-nats-<pid>`), and `packages/envoy`'s `cmd/listener` built into the work directory and started with a fresh API bearer, which reaches every pane as the 0600 file `envoy_token_file` names, on a socket [`lib/held-port.py`](#libheld-portpy) opened on a port the kernel chose (`ENVOY_LISTEN_FD`).
+  a `nats:2.15.1 -js` container (`legion-e2e2-nats-<pid>`), and `packages/envoy`'s `cmd/listener` built into the work directory and started with a fresh API bearer, which reaches every pane as the 0600 file `envoy_token_file` names, on a socket [`lib/held-port.py`](#libheld-portpy) opened on a port the kernel chose (`ENVOY_LISTEN_FD`).
 
 - **The plugins**: this checkout's `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, each packed as the release packs it, installed into the OMP profile `legion-e2e2-<pid>-<epoch>` by `lib/install-plugin-profile.sh` (`--package pi-envoy`, then `--package pi-legion`), under the run's own Oh My Pi home `<work>/omp-home` ([`lib/omp-home.sh`](#libomp-homesh)).
   The daemons run with that `HOME` and with `OMP_PROFILE` naming the profile, so the gate and every pane load both, and the operator's `~/.omp/profiles` holds none of the run;
@@ -2851,7 +2851,7 @@ It differs from [`dispatch-user-turns.sh`](#dispatch-user-turnssh) in these ways
   The rig creates a database of its own in it and drops it on any exit.
   In a pod, start one without root as `docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md` says.
 
-- **NATS is a pinned `nats-server`**: `LEGION_E2E_NATS_BIN`, or v2.10.22, which the rig installs once with `go install`.
+- **NATS is a pinned `nats-server`**: `LEGION_E2E_NATS_BIN`, or v2.15.1, which the rig installs once with `go install`.
   In an issue pod it installs into `/legion/scratch/bin`, on the issue's volume, and otherwise into the run's own directory.
   The server starts with JetStream on a port the kernel picks, as `merged-root-waits.sh` starts it.
 
@@ -2884,7 +2884,7 @@ Each item below names an input and its default, then what it means.
 
   a loopback PostgreSQL with pgvector; the run makes and drops its own database there
 
-- `LEGION_E2E_NATS_BIN` — the pinned `nats-server` v2.10.22, installed as above
+- `LEGION_E2E_NATS_BIN` — the pinned `nats-server` v2.15.1, installed as above
 
   another `nats-server`
 
@@ -3412,7 +3412,7 @@ LEGION_TEST_PG_DSN=postgres://<user>@<host>:<port>/<database>?sslmode=disable \
 Runs on any Linux host with `go` — no Docker, no cluster.
 `LEGION_TEST_PG_DSN` is required and names the PostgreSQL the daemon migrates and runs on;
 the script starts none, so CI's service, a devbox container and a pod's own embedded PostgreSQL all satisfy it.
-The broker is the run's own: the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.10.22` the script installs with `go install` into a GOBIN of its own, started with JetStream on a port the kernel picks for it (`-p -1`, read back from its log) and stopped on any exit.
+The broker is the run's own: the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.15.1` the script installs with `go install` into a GOBIN of its own, started with JetStream on a port the kernel picks for it (`-p -1`, read back from its log) and stopped on any exit.
 The four checks below are [`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'s, the run `no-required-checks.sh` makes too.
 
 | check | what it holds |
@@ -3562,7 +3562,7 @@ LEGION_TEST_PG_DSN=postgres://<user>@<host>:<port>/<database>?sslmode=disable \
 Runs on any Linux host with `go` — no Docker, no cluster.
 `LEGION_TEST_PG_DSN` is required and names the PostgreSQL the daemon migrates and runs on;
 the script starts none, so CI's service, a devbox container and a pod's own embedded PostgreSQL all satisfy it.
-The broker is the run's own: the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.10.22` the script installs with `go install` into a GOBIN of its own, started with JetStream on a port the kernel picks for it (`-p -1`, read back from its log) and stopped on any exit.
+The broker is the run's own: the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.15.1` the script installs with `go install` into a GOBIN of its own, started with JetStream on a port the kernel picks for it (`-p -1`, read back from its log) and stopped on any exit.
 The four checks below are [`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'s, the run `merged-root-waits.sh` and `no-required-checks.sh` make too.
 
 | check | what it holds |
@@ -3614,7 +3614,7 @@ LEGION_TEST_PG_DSN=postgres://<user>@<host>:<port>/<database>?sslmode=disable \
 Runs on any Linux host with `go` — no Docker, no cluster.
 `LEGION_TEST_PG_DSN` is required and names the PostgreSQL the daemon migrates and runs on;
 the script starts none, so CI's service, a devbox container and a pod's own embedded PostgreSQL all satisfy it.
-The broker is the run's own: the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.10.22` the script installs with `go install` into a GOBIN of its own, started with JetStream on a port the kernel picks for it (`-p -1`, read back from its log) and stopped on any exit.
+The broker is the run's own: the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.15.1` the script installs with `go install` into a GOBIN of its own, started with JetStream on a port the kernel picks for it (`-p -1`, read back from its log) and stopped on any exit.
 A run takes about seven minutes: the daemon reads what each base branch requires at boot and every two minutes after (`requiredChecksInterval`), and the proof waits for three of those reads.
 The four checks below are [`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'s, the run `merged-root-waits.sh` makes too.
 

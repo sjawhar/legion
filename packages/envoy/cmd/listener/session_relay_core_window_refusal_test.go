@@ -16,7 +16,7 @@ import (
 
 // A message whose delivery mode cannot be read, sent to a serving-port session whose entry one
 // tick wrote on the core path, is reported once and leaves no hold for the relay of that session:
-// its later messages arrive at once rather than waiting out attemptCacheTTL.
+// its later messages arrive at once rather than waiting out dedupe.AttemptedAge.
 //
 // The window is the ordinary one. A session re-registers on every heartbeat, and a tick whose
 // consumer call fails transiently answers core, which writes the entry with no delivery
@@ -30,7 +30,7 @@ import (
 // the fan-out has already reported, and acks the message unpushed and unreported; only a message
 // it would otherwise push is held under a record (holdWhilePushedElsewhere). With the relay
 // finding the record before the mode, it held this message instead, and the session's later
-// messages behind it, for the five minutes of attemptCacheTTL (INFRA-594).
+// messages behind it, for the five minutes of dedupe.AttemptedAge (INFRA-594).
 //
 // TestAnUnreadableDeliveryModeToASessionWithNoEntryLeavesNoHoldForItsRelay is the same stall
 // through a session with no entry, and TestARefusedMessageNeverHoldsTheRelayWhateverTheEntrySaid
@@ -137,7 +137,7 @@ func TestAnUnreadableDeliveryModeInACoreWindowLeavesNoHoldForItsRelay(t *testing
 	}
 
 	// The relay starts and must reach the later message. The bound is twenty seconds, where a
-	// hold under the refusal's attempt record lasts attemptCacheTTL, five minutes.
+	// hold under the refusal's attempt record lasts dedupe.AttemptedAge, five minutes.
 	rig.relays.setOwned(true)
 	select {
 	case body := <-relayedPushes:

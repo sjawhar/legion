@@ -18,7 +18,7 @@ import (
 // A message whose delivery mode cannot be read, sent to a session on consumer delivery whose
 // entry has lapsed, leaves no attempt record behind, so the relay of that session holds nothing
 // when it registers again on its serving port: its later messages arrive at once rather than
-// waiting out attemptCacheTTL.
+// waiting out dedupe.AttemptedAge.
 //
 // The lapse is the ordinary one. An entry expires while its interest stays for at least ten
 // minutes (store.InterestReapGrace plus store.InterestRefreshAge) and its consumer for three days
@@ -136,7 +136,7 @@ func TestAnUnreadableDeliveryModeToASessionWithNoEntryLeavesNoHoldForItsRelay(t 
 	}
 
 	// The relay starts and must reach the later message. The bound is twenty seconds, where a
-	// hold under an attempt record naming no push lasts attemptCacheTTL, five minutes.
+	// hold under an attempt record naming no push lasts dedupe.AttemptedAge, five minutes.
 	rig.relays.setOwned(true)
 	select {
 	case body := <-relayedPushes:

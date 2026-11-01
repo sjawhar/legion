@@ -469,9 +469,10 @@ func TestARefusedRaiseNamesTheReplicaSetting(t *testing.T) {
 }
 
 // With one server of three stopped and the stream and a bucket already at three copies, a start
-// succeeds and writes nothing to either; a create at three copies with one server stopped fails,
-// naming the setting.
-func TestOneServerStoppedAStartOfAThreeCopyDeploymentWritesNothing(t *testing.T) {
+// succeeds and writes nothing to either, and a create of a bucket at three copies succeeds as
+// well: nats-server v2.15 places a copy on the stopped peer and serves the bucket from the two
+// running ones. (nats-server v2.10.29 refused such a create, naming the replica setting.)
+func TestOneServerStoppedAStartWritesNothingAndANewThreeCopyBucketIsCreated(t *testing.T) {
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes))
 	const bucket = "envoy_stopped_test"
@@ -501,25 +502,63 @@ func TestOneServerStoppedAStartOfAThreeCopyDeploymentWritesNothing(t *testing.T)
 		t.Fatalf("a start with one server stopped wrote %v, want nothing", writes)
 	}
 
-	_, err := EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: "envoy_new_test", Storage: nats.FileStorage, Replicas: 3})
-	if err == nil || !strings.HasPrefix(err.Error(), ReplicasEnvVar+"=3: ") {
-		t.Fatalf("create a three-copy bucket with one server stopped = %v, want a refusal naming %s=3", err, ReplicasEnvVar)
+	created, err := EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: "envoy_new_test", Storage: nats.FileStorage, Replicas: 3})
+	if err != nil {
+		t.Fatalf("create a three-copy bucket with one server stopped: %v", err)
+	}
+	if _, err := created.Put("key", []byte("value")); err != nil {
+		t.Fatalf("write to the new bucket with one server stopped: %v", err)
+	}
+	info, err := js.StreamInfo("KV_envoy_new_test")
+	if err != nil {
+		t.Fatalf("read the new bucket's stream: %v", err)
+	}
+	if info.Config.Replicas != 3 {
+		t.Fatalf("the new bucket's stream carries %d copies, want 3", info.Config.Replicas)
 	}
 }
 
-// A create of the stream at three copies with one server of three stopped fails the start, and the
-// error names the replica setting.
-func TestOneServerStoppedACreateAtThreeCopiesFailsNamingTheSetting(t *testing.T) {
+// A create of the stream at three copies with one server of three stopped comes up on nats-server
+// v2.15: the server assigns the copies, the stopped peer among them, and the stream serves the two
+// running ones, so a pod that starts while a server is down has its bus. (nats-server v2.10.29
+// refused that create, naming the replica setting; what a cluster still refuses is a count it has
+// no servers for, TestACreateAtFiveCopiesOnThreeServersFailsNamingTheSetting.)
+func TestOneServerStoppedACreateAtThreeCopiesComesUp(t *testing.T) {
 	cluster := testnats.StartCluster(t, 3)
 	cluster.Servers[2].Stop(t)
 	cluster.AwaitReady(t)
 	client, err := ConnectOwningStream(cluster.URLs(), WithReplicas(3))
+	if err != nil {
+		t.Fatalf("a start at three copies with one server of three stopped: %v", err)
+	}
+	t.Cleanup(client.Close)
+	info, err := client.JS().StreamInfo(Stream)
+	if err != nil {
+		t.Fatalf("read the created stream: %v", err)
+	}
+	if info.Config.Replicas != 3 {
+		t.Fatalf("the created stream carries %d copies, want 3", info.Config.Replicas)
+	}
+	if err := client.Publish(contracts.Envelope{
+		EventID: "stopped-server-create", Source: "dispatch",
+		Topic: "notifications.agent.stopped", DedupeKey: "stopped.create",
+	}); err != nil {
+		t.Fatalf("publish to the stream created with one server stopped: %v", err)
+	}
+}
+
+// A create at more copies than the cluster has servers fails the start, and the error names the
+// replica setting, as a refused raise to the same count does (TestARefusedRaiseNamesTheReplicaSetting).
+func TestACreateAtFiveCopiesOnThreeServersFailsNamingTheSetting(t *testing.T) {
+	cluster := testnats.StartCluster(t, 3)
+	client, err := ConnectOwningStream(cluster.URLs(), WithReplicas(5))
 	if err == nil {
 		client.Close()
-		t.Fatal("a start created the stream at three copies with one server of three stopped")
+		t.Fatal("a start created the stream at five copies on three servers")
 	}
-	if !strings.HasPrefix(err.Error(), ReplicasEnvVar+"=3: ") {
-		t.Fatalf("start error = %q, want it to name %s=3", err, ReplicasEnvVar)
+	var apiErr *nats.APIError
+	if !strings.HasPrefix(err.Error(), ReplicasEnvVar+"=5: ") || !errors.As(err, &apiErr) {
+		t.Fatalf("start error = %q, want the server's refusal naming %s=5", err, ReplicasEnvVar)
 	}
 }
 

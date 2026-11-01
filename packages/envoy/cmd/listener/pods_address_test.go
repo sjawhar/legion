@@ -53,15 +53,18 @@ func (p *sessionPort) prompted() []string {
 }
 
 // podDeliveryConfig is the harness's delivery configuration as the pod podHost, whose bridge is
-// bridge, sees it: its prompts go to port.
-func podDeliveryConfig(harness listenerDeliveryHarness, port *sessionPort, bridge, podHost string) listenerDeliveryHandlerConfig {
+// bridge, sees it: its prompts go to port. The deliverer is a seam of the configuration the
+// delivery workers keep by value, so the copy is wired again (wireTestDeliveryWorkers) and the
+// durable path's pushes go through this pod's deliverer rather than the harness's.
+func podDeliveryConfig(t *testing.T, harness listenerDeliveryHarness, port *sessionPort, bridge, podHost string) listenerDeliveryHandlerConfig {
+	t.Helper()
 	cfg := harness.config
 	deliverer := *cfg.deliverer
 	deliverer.HostBridge = bridge
 	deliverer.PodHost = podHost
 	deliverer.HTTPClient = port.client()
 	cfg.deliverer = &deliverer
-	return cfg
+	return wireTestDeliveryWorkers(t, cfg)
 }
 
 // A port session whose address is local to the delivering pod (a loopback bridge) and whose
@@ -78,7 +81,7 @@ func TestAPodLocalAddressOfASessionAnotherPodAcceptedIsReportedNotPrompted(t *te
 		t.Run(name, func(t *testing.T) {
 			harness := newListenerDeliveryHarness(t, nil)
 			port := newSessionPort(t)
-			cfg := podDeliveryConfig(harness, port, "127.0.0.1", "pod-b")
+			cfg := podDeliveryConfig(t, harness, port, "127.0.0.1", "pod-b")
 			if _, err := harness.registry.Upsert(store.Interest{SessionID: "ses_elsewhere", MachineID: "test-machine"}, []string{topic}); err != nil {
 				t.Fatalf("register the interest: %v", err)
 			}
@@ -136,7 +139,7 @@ func TestAPortSessionIsPromptedWhereItsAddressReachesIt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			harness := newListenerDeliveryHarness(t, nil)
 			port := newSessionPort(t)
-			cfg := podDeliveryConfig(harness, port, tc.bridge, "pod-b")
+			cfg := podDeliveryConfig(t, harness, port, tc.bridge, "pod-b")
 			item := listenerTestEnvelope(contracts.AgentSubject("ses_reachable"), "reachable")
 			if _, err := harness.registry.Upsert(store.Interest{SessionID: "ses_reachable", MachineID: "test-machine"}, []string{item.Topic}); err != nil {
 				t.Fatalf("register the interest: %v", err)

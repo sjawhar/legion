@@ -1010,11 +1010,11 @@ func (m *sessionRelays) followedTopicVerdict(sessionID string, item contracts.En
 //   - the worker's 204 records the dedupe key: the session has the message, so it is acked;
 //   - the worker drops its push (its session is relayed now) or hands it back, either of which
 //     clears the attempt: the relay pushes the message itself;
-//   - neither happens and the record expires (attemptCacheTTL, 5 minutes from when it was
+//   - neither happens and the record expires (dedupe.AttemptedAge, 5 minutes from when it was
 //     written): the relay pushes the message itself. A copy that lands from both pushes is one the
 //     session drops by its dedupe key, so an expiry race costs a duplicate, never the message.
 //
-// The hold is therefore bounded by attemptCacheTTL plus one relayHeldRecheck, and it stalls
+// The hold is therefore bounded by dedupe.AttemptedAge plus one relayHeldRecheck, and it stalls
 // nothing beyond the session's own later messages, which wait behind it in stream order as they
 // wait behind a head message the port keeps refusing (pushUntilAccepted) -- a wait with no bound at
 // all. The message is kept in progress, so the consumer's ack wait (bus.SessionConsumerAckWait)

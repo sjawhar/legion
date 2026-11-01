@@ -158,7 +158,7 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 // by nobody. The fan-out records no attempt for it: judgeFollowedTopic is what reads such a
 // record back, and the relay of a serving-port session's consumer applies that same judgement,
 // so a record would make the relay of this session hold its copy -- and the session's later
-// messages behind it -- until it expired (attemptCacheTTL) once the session is on a serving port
+// messages behind it -- until it expired (dedupe.AttemptedAge) once the session is on a serving port
 // (INFRA-594).
 func TestTheFanoutReportsARefusalOfAPortlessSessionOnConsumerDelivery(t *testing.T) {
 	const corePort = 4097

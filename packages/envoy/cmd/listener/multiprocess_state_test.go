@@ -540,3 +540,76 @@ func TestTwoPodsReportALapsedHoldersLastSeenAlike(t *testing.T) {
 	}
 	requireSameLapsedAnswer(t, a, b, onA, onB, "holder", "last_seen", "claim_released")
 }
+
+// Both sides of this merge in one row: the machine's shared delivery ledger, which records what a
+// session has already taken, and the delivery lease released by a holder whose receive connection
+// is down.
+//
+// A serving-port session's first messages are delivered by the active pod, from the relay of the
+// session's own consumer, and the acknowledgements that relay sends never reach that consumer:
+// the lane relay drops every `$JS.ACK.` the pod's session-consumer connection carries. So the
+// consumer still holds all three, above its ack floor. The pod's receive connection is then cut:
+// it releases the lease, its relays stop with the receive term, the standby takes the lease and
+// starts the session's relay, which restarts the consumer at that floor and is given the three
+// messages again. The messages published after the take-over reach the machine through that
+// standby alone.
+//
+// Every message reaches the session exactly once. None twice, because the standby reads the three
+// in the shared ledger as delivered and acknowledges them unpushed: without that record it pushes
+// all three again, which is a repeat of a push that landed, not the duplicate the design allows
+// ("The worst case, relay and worker pushing at once, is a duplicate the session drops by its
+// dedupe key, never a lost message", packages/envoy/AGENTS.md, "Session consumers" - a push whose
+// outcome is unknown, where these three are recorded as taken). And none lost, because the lease
+// the cut pod cannot deliver on is released to a pod that can: without that release the cut pod
+// holds it and the standby never serves the machine at all.
+func TestTwoPodsEveryQueuedMessageReachesTheSessionOnceAcrossAReceiveLostTakeOver(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a := mpStartPodBehindLanes(t, binary, uri, "pod-a")
+	mpWaitActive(t, a, 30*time.Second)
+	b := mpStartPod(t, binary, uri, "pod-b")
+	mpWaitStandby(t, b, 30*time.Second)
+	serving := mpStartServingPort(t)
+	const sessionID = "ses_mp_queued_once"
+	a.registerPort(t, serving, sessionID)
+	publisher := mpConnectPublisher(t, uri)
+
+	// Every acknowledgement the active pod's relays send is dropped, so the messages it delivers
+	// stay above its session consumer's ack floor and the standby's relay is given them again.
+	t.Cleanup(a.lanes.dropRequests(mpSessionConsumerConnection, "$JS.ACK."))
+
+	var delivered []mpMessage
+	for range 3 {
+		delivered = append(delivered, publisher.mustPublish(t, sessionID))
+	}
+	serving.awaitAll(t, delivered, 20*time.Second)
+
+	heal := a.lanes.cut(mpReceiveConnection(a.instance))
+	cut := time.Now()
+	t.Cleanup(heal)
+	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
+	taken := time.Since(cut)
+	if released := mpLineWith(a.Output.String(), `"msg":"listener lease released: the receive connection is down"`); released == "" {
+		t.Fatalf("%s kept the lease its lost receive connection cannot deliver on:\n%s", a.instance, mpTail(mpLinesWithout(a.Output.String()), 40))
+	}
+
+	// Published once the cut pod relays nothing: only the standby can deliver them.
+	var afterTheTakeOver []mpMessage
+	for range 3 {
+		afterTheTakeOver = append(afterTheTakeOver, publisher.mustPublish(t, sessionID))
+	}
+	serving.awaitAll(t, afterTheTakeOver, mpHardBound+5*time.Second)
+	serving.requireWithin(t, afterTheTakeOver, mpHardBound, cut)
+	for _, m := range delivered {
+		b.awaitEventLine(t, 30*time.Second, "session relay skipped a copy the session already has", m.event)
+	}
+
+	messages := append(slices.Clone(delivered), afterTheTakeOver...)
+	// Past the durable's ack wait, so a message a pod took and held back would have come again.
+	time.Sleep(mpQuiet)
+	serving.requireOnce(t, messages)
+	serving.requireKnown(t, messages)
+	serving.requireOrder(t, messages)
+	t.Logf("%s took the lease %s after the cut of %s's receive connection; the %d messages %s had delivered were given back and skipped, the %d published after the take-over arrived, each of the %d exactly once",
+		b.instance, taken.Round(time.Millisecond), a.instance, len(delivered), a.instance, len(afterTheTakeOver), len(messages))
+}

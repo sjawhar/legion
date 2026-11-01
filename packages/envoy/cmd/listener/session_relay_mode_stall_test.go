@@ -21,7 +21,7 @@ import (
 // TestServePortRelayRefusesAnUnadvertisedModeTheFanoutAlsoRefused proves the refused message is
 // acked and reported once, which says the stream is not stalled. This says what that costs a
 // session when it goes wrong: with the fan-out recording an attempt for its own refusal, the
-// relay holds its copy, and everything stored behind it waits out attemptCacheTTL - five minutes
+// relay holds its copy, and everything stored behind it waits out dedupe.AttemptedAge - five minutes
 // in which the session is given nothing at all (INFRA-594).
 func TestAnUnreadableDeliveryModeDoesNotStallTheSessionsLaterMessages(t *testing.T) {
 	const (
@@ -93,7 +93,7 @@ func TestAnUnreadableDeliveryModeDoesNotStallTheSessionsLaterMessages(t *testing
 	awaitFanoutFinished(t, rig, durable, second.Sequence)
 
 	// The relay starts and must reach the later message. The bound is thirty seconds, where a
-	// hold under an attempt record naming no push lasts attemptCacheTTL, five minutes.
+	// hold under an attempt record naming no push lasts dedupe.AttemptedAge, five minutes.
 	rig.relays.setOwned(true)
 	select {
 	case body := <-relayedPushes:

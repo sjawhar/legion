@@ -51,20 +51,6 @@ const unplaceableDeferralCap = consumerMaxAckPending / 4
 // TestUnplaceableRetryWindowFitsTheBoundsItDependsOn pins both.
 const defaultUnplaceableRetryWindow = 60 * time.Second
 
-// pushFailedDeferrals is how many times a push_failed delivery (session.ReasonPushFailed) is
-// deferred, whatever the window would buy the other two causes: one, so such a message is
-// delivered at most twice. The other causes push nothing, so retrying them repeats nothing; this
-// one is different. A deferral clears the ledger attempt the delivery recorded (ledgerAttempt),
-// the attempt that otherwise keeps a redelivery from pushing a second time, and
-// session.Deliverer's prompt returns the same error for a session server that refused the prompt,
-// a connection that never reached it, and an answer lost after the server had taken the prompt -
-// so every retry of a push that may have landed repeats an instruction the session may already
-// have. One retry covers the blip the retry exists for, a peer restarting or a connection refused
-// for a moment, and bounds that repeat at one; a window's dozen would let the same instruction
-// arrive thirteen times. TestAPushFailureIsDeferredOnceWhereOtherCausesAreDeferredFurther pins
-// it.
-const pushFailedDeferrals = 1
-
 // unplaceableDeferralExpiry is how long a slot in unplaceableDeferrals lasts after the deferral
 // that took it, the longest a deferred message can legitimately stay pending before a delivery of
 // it reaches this listener's handler again and gives the slot back. That is two waits:
@@ -186,20 +172,20 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	// to the port it names did not land. Each can be true of a session that is about to be
 	// placeable - a record still propagating from the bucket, a server still binding its
 	// serve port, a session process restarting - so the message is kept in the stream and
-	// redelivered for as long as cfg.unplaceableRetryWindow, or once for a push that failed
-	// (pushFailedDeferrals), and only then given up, with a record and a counter of its own
-	// rather than the ACKed skip that lost it.
+	// redelivered for as long as cfg.unplaceableRetryWindow, and only then given up, with a
+	// record and a counter of its own rather than the ACKed skip that lost it.
 	//
 	// reason names which of the two causes this is, for the operator and for the counter label.
-	// session.ReasonNone and session.ReasonPushFailed keep no_push_target's label only because
-	// the switch needs a default: in a deployed listener nothing reaches here with either.
-	// HandleAgentMessage answers undelivered, error-free and ReasonNone only for a session
-	// another listener owns (session.ErrWrongMachine), which it reports as OwnedElsewhere, and
-	// agentSubjectDelivery acknowledges that result before it calls here; a push that fails is no
-	// longer this path's either, since the durable hands every push to a serving-port session to
-	// that session's worker, which pushes it until the port accepts it (servePortWorkers), and
-	// the live and core lanes' own failed push is answered delivery_failed by the interest path.
-	// Both arms are defensive, and no_push_target on a dashboard never means them.
+	// session.ReasonNone and session.ReasonPushFailed keep no_push_target's label because the
+	// switch needs a default and neither is worth a label of its own. HandleAgentMessage answers
+	// undelivered, error-free and ReasonNone only for a session another listener owns
+	// (session.ErrWrongMachine), which it reports as OwnedElsewhere, and agentSubjectDelivery
+	// acknowledges that result before it calls here, so that arm is defensive. A push that failed
+	// is hardly this path's either: the durable hands every push to a serving-port session to that
+	// session's worker, which pushes it until the port accepts it (servePortWorkers), and the live
+	// and core lanes' own failed push is answered delivery_failed by the interest path. What is
+	// left is the registry path's failed push - a session with a port and no stored interest -
+	// which TestAFailedCorePushIsGivenUpAtOnceUnderTheFoldedLabel pins under this label.
 	reason := "no_push_target"
 	giveUpStatus := "unplaceable_no_push_target"
 	if result.Reason == session.ReasonNoSessionRecord {

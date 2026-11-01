@@ -28,7 +28,7 @@ import (
 
 // TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft holds what bind does to the
 // durable production already has. An earlier release left it with a filter-subject set that
-// withholds every workflow run (TestWhichFilterShapeDeliversAWorkflowSubject), and with the
+// withholds every workflow run on a hub below v2.15 (githubIntakeSubject), and with the
 // server's own flow control, 1,000 messages outstanding against a 30-second ack wait, which
 // redelivers faster than a handler doing its GitHub calls inline can acknowledge. Neither can be
 // set once and forgotten, since the durable already exists: bind has to correct both without an
@@ -98,12 +98,15 @@ func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) 
 	}
 }
 
-// TestWhichFilterShapeDeliversAWorkflowSubject pins why the durable an earlier release left never
-// recorded a workflow run. It stores the same workflow-run messages, then reads them through each
-// filter shape in turn, and reports both what each shape claims (NumPending) and what it hands
-// over. Every shape claims all of them. The old filter set -- the wildcard pull-request subject
-// beside the workflow subject -- hands over none of the runs while handing over every pull
-// request, and the comment on githubIntakeSubject rests on that.
+// TestWhichFilterShapeDeliversAWorkflowSubject measures, on the server this module links, what
+// each filter shape hands over. It stores the same workflow-run messages, then reads them through
+// each shape in turn, and reports both what each claims (NumPending) and what it hands over. Every
+// shape claims all of them. On nats-server v2.15.2 every shape hands all of them over too, the old
+// filter set -- the wildcard pull-request subject beside the workflow subject -- included; below
+// v2.15 that set handed over none of the runs while handing over every pull request, which is why
+// the durable an earlier release left never recorded a workflow run and why githubIntakeSubject is
+// one subject. The table below is this measurement, and githubIntakeSubject's comment carries the
+// older servers' one.
 func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 	natsClient := intakeTestClient(t)
 	const stored = 12
@@ -199,8 +202,8 @@ func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 		t.Logf("fetch %s: %d of %d workflow runs and %d pull requests delivered (batch error %v)", name, runs, stored, prs, batch.Error())
 		return runs, prs
 	}
-	// The table the PR body and githubIntakeSubject's comment give, row for row: how many of the
-	// stored workflow runs each shape hands over.
+	// The table this test measures, row for row: how many of the stored workflow runs each shape
+	// hands over on the server this module links.
 	for _, row := range []struct {
 		name    string
 		plural  bool
@@ -211,9 +214,9 @@ func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 		{"plural, the workflow subject alone", true, []string{oldSet[1]}, stored},
 		{"plural, the workflow subject then the PR-checks workflow subject", true, []string{oldSet[1], oldSet[2]}, stored},
 		{"plural, a concrete PR subject then the workflow subject", true, []string{"notifications.github.acme.widgets.pr.1", oldSet[1]}, stored},
-		{"plural, the PR subject then the workflow subject", true, []string{oldSet[0], oldSet[1]}, 0},
-		{"plural, the workflow subject then the PR subject", true, []string{oldSet[1], oldSet[0]}, 0},
-		{"plural, the whole old set", true, oldSet, 0},
+		{"plural, the PR subject then the workflow subject", true, []string{oldSet[0], oldSet[1]}, stored},
+		{"plural, the workflow subject then the PR subject", true, []string{oldSet[1], oldSet[0]}, stored},
+		{"plural, the whole old set", true, oldSet, stored},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if runs, _ := fetch(t, row.name, row.plural, stored, row.filters...); runs != row.runs {
@@ -241,9 +244,9 @@ func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 	t.Logf("whole old config matched %d of %d stored messages", old.NumPending, stored)
 
 	// Bound with an empty subject, the only one nats.go accepts against a plural-filter consumer.
-	// Against the whole old set nothing arrives -- but the fetches above show the server hands that
-	// set none of these messages however it is read. A plural set the server does deliver, bound
-	// the same way, separates the empty subject from the filter set.
+	// On this server the whole old set delivers its messages that way, as the fetches above show it
+	// does however it is read; below v2.15 nothing arrived here, and a plural set the server did
+	// deliver, bound the same way, separated the empty subject from the filter set.
 	pushed := func(name, consumer, subject string, want int) {
 		t.Helper()
 		got := drain(t, natsClient, consumer, subject)
@@ -252,7 +255,7 @@ func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 			t.Errorf("%s: %d of %d arrived, want %d", name, got, stored, want)
 		}
 	}
-	pushed("bound to the old config with an empty subject", "probe-old-config", "", 0)
+	pushed("bound to the old config with an empty subject", "probe-old-config", "", stored)
 	if _, err := natsClient.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
 		Durable:        "probe-plural-delivering",
 		DeliverSubject: natsgo.NewInbox(),
@@ -286,8 +289,9 @@ func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 	t.Logf("verdict: pull single=%d plural-one=%d plural-all=%d | push single=%d plural-one=%d plural-all=%d wide=%d (of %d stored)",
 		singleWorkflow, pluralOne, pluralAll, pushSingle, pushPluralOne, pushPluralAll, pushWide, stored)
 
-	// The old set does deliver pull requests. Add pull-request messages, which its first filter
-	// names, and count by kind what a fresh durable of the whole old set hands over.
+	// The old set delivers pull requests as well. Add pull-request messages, which its first filter
+	// names, and count by kind what a fresh durable of the whole old set hands over: on this server
+	// both kinds, where below v2.15 it handed over the pull requests alone.
 	const prs = 5
 	for n := range prs {
 		payload, err := json.Marshal(map[string]string{"kind": "pr", "repo": "acme/widgets", "number": strconv.Itoa(n + 1)})
@@ -304,8 +308,8 @@ func TestWhichFilterShapeDeliversAWorkflowSubject(t *testing.T) {
 		}
 	}
 	gotRuns, gotPRs := fetch(t, "plural, the whole old set, with pull requests stored too", true, stored+prs, oldSet...)
-	if gotPRs != prs || gotRuns != 0 {
-		t.Fatalf("the old filter set delivered %d of %d pull requests and %d of %d workflow runs; the intake's filter comment says it delivers every pull request and no workflow run, so revisit githubIntakeSubject's comment",
+	if gotPRs != prs || gotRuns != stored {
+		t.Fatalf("the old filter set delivered %d of %d pull requests and %d of %d workflow runs; this table and githubIntakeSubject's comment say it delivers both kinds on this server, so revisit both",
 			gotPRs, prs, gotRuns, stored)
 	}
 }
@@ -357,10 +361,11 @@ func TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor(t *testing.T) {
 
 	// A plural-filter durable part way through its stream, which is what bind replaces. Its filter
 	// set is the two workflow subjects alone rather than the whole set an earlier release carried:
-	// that set never hands a workflow run over (TestWhichFilterShapeDeliversAWorkflowSubject), so
-	// it could not acknowledge one, and the replacement keys on the stream sequence of the ack
-	// floor whichever plural set the durable carries. The first messages are acknowledged through
-	// a pull fetch, which reaches them in stream order, so the ack floor sits at the last of them.
+	// on the hubs that set ran against, below v2.15, it never handed a workflow run over
+	// (githubIntakeSubject), so it could not acknowledge one, and the replacement keys on the
+	// stream sequence of the ack floor whichever plural set the durable carries. The first messages
+	// are acknowledged through a pull fetch, which reaches them in stream order, so the ack floor
+	// sits at the last of them.
 	if _, err := natsClient.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
 		Durable: bus.DispatchDeliveryDurable,
 		FilterSubjects: []string{

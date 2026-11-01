@@ -306,20 +306,19 @@ the original delivery fields:
 
 An agent subject's `no_holder` is published once per message, at give-up rather than on the first
 attempt that failed to place it, and only after the give-up itself is recorded. A delivery this
-listener cannot place — no session record it could read, a record naming nothing to push to, or a
-push that failed — is NAKed for redelivery every five seconds, counted from the message's first
-delivery rather than from its age in the stream: `ENVOY_UNPLACEABLE_RETRY_WINDOW` (default 60 s) is
+listener cannot place — no session record it could read, or a record naming nothing to push to —
+is NAKed for redelivery every five seconds, counted from the message's first delivery rather than
+from its age in the stream: `ENVOY_UNPLACEABLE_RETRY_WINDOW` (default 60 s) is
 spent as whole five-second deferrals, so it buys twelve of them at that default, and the delivery
-count stops the retries at 18 whatever the window says. The first two causes push nothing, so
-retrying them repeats nothing, and they keep the window's whole allowance. A push that failed is
-deferred once, however long the window, and the give-up after it is terminal whether or not its
-notice can be published, so it is pushed at most twice: it may have landed — the session server
-refusing the prompt, a connection that never reached it and an answer lost after the server took
-the prompt all come back as the same failure — and a deferral clears the delivery-ledger attempt
-that otherwise keeps a redelivery from pushing again, so each retry can repeat an instruction the
-session already has. One retry covers a peer restarting or a connection refused for a moment;
-twelve would let the same
-instruction arrive thirteen times. At most 64 agent deliveries are held deferred at once — a
+count stops the retries at 18 whatever the window says. Both causes push nothing, so retrying
+them repeats nothing, and each keeps the window's whole allowance; no cause carries an allowance
+of its own. A push that failed hardly reaches this branch at all: on the durable path a
+serving-port session's push is its worker's, which repeats it until the port answers 204, and on
+the live and core lanes a failed push comes back through the interest path, which reports it
+`delivery_failed` and NAKs. What is left — a session with a port and no stored interest, pushed
+from a core lane — is given up on its first delivery, since nothing redelivers a core message,
+and is counted and logged under `no_push_target`, the label every reason this branch cannot act
+on falls to. At most 64 agent deliveries are held deferred at once — a
 quarter of the durable's 256 ack-pending slots, one of which a deferred message holds for its whole
 window — and a message that arrives while that cap is reached is given up at once. The 64 is one
 budget for the whole listener: a single set, made once at start and shared by every delivery
@@ -335,7 +334,7 @@ hold, with margin. That is the longest a deferred message can legitimately stay 
 slots cannot hold the budget
 for longer than that. Each deferral logs
 `listener agent delivery deferred` with `reason`, `attempt` and `window_deferrals`, the deferrals
-that message's cause is allowed; only the give-up counts
+the window buys; only the give-up counts
 `unplaceable_no_record` or `unplaceable_no_push_target`, logs WARN
 `listener agent delivery given up`, and then publishes the exception. A notice that cannot be
 published — it embeds the original payload, so an envelope near the server's max payload has its

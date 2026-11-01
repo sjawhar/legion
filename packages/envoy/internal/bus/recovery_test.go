@@ -1074,7 +1074,7 @@ func closedConnectionIsReplacedOnce(t *testing.T, through func(uri string) []bus
 // until its server went and then, with MaxReconnect -1, reconnecting for the rest of the process,
 // logging `envoy nats reconnect attempt failed` once a minute into whatever then holds the default
 // logger: TestAStuckDeliveryStillEndsTheKVWatchers failed on the ones TestARefusedRaiseNamesTheReplicaSetting
-// and TestOneServerStoppedACreateAtThreeCopiesFailsNamingTheSetting left. A single server refuses
+// and TestACreateAtFiveCopiesOnThreeServersFailsNamingTheSetting left. A single server refuses
 // a create at three copies. The server lists a connection the client closed until its read loop
 // sees the close, so the test polls its connection list rather than reading it once: on main the
 // replacement stays listed for good, and the poll runs out.

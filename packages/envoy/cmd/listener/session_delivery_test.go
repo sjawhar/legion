@@ -435,6 +435,24 @@ func listenerGrantBeforeSessionConsumers() []string {
 			"$JS.FC."+stream+".>",
 		)
 	}
+	// The listener state bucket is part of every listener's grant, before session consumers as
+	// after: the machine's delivery lease, its pods' clean-hand-back marks, its delivery ledger
+	// and every session's last-seen record (infra/core listenerGrant).
+	stateStream := "KV_" + bus.ListenerStateBucket
+	allow = append(allow,
+		"$JS.API.STREAM.INFO."+stateStream,
+		"$JS.API.STREAM.CREATE."+stateStream,
+		"$JS.API.STREAM.UPDATE."+stateStream,
+		"$JS.API.DIRECT.GET."+stateStream+".>",
+		"$JS.API.STREAM.MSG.GET."+stateStream,
+		"$KV."+bus.ListenerStateBucket+"."+bus.ListenerLeaseKey("test-machine"),
+		"$KV."+bus.ListenerStateBucket+"."+bus.ListenerHandBackPrefix(durable)+">",
+		"$KV."+bus.ListenerStateBucket+"."+bus.ListenerLedgerPrefix(durable)+">",
+		"$KV."+bus.ListenerStateBucket+"."+bus.LastSeenPrefix+">",
+		"$JS.API.CONSUMER.CREATE."+stateStream+".>",
+		"$JS.API.CONSUMER.DELETE."+stateStream+".>",
+		"$JS.FC."+stateStream+".>",
+	)
 	return append(allow, "$JS.API.STREAM.PURGE.KV_"+bus.InterestBucket)
 }
 

@@ -1281,7 +1281,7 @@ until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" p
 docker exec "$pg_container" createdb -U legion legion
 # NATS binds bind_host on the run's port: every pod's agent dials it there, directly or through the
 # bridge.
-docker run -d --name "$nats_container" -p "$bind_host:$port_nats:4222" nats:2.10 -js >/dev/null
+docker run -d --name "$nats_container" -p "$bind_host:$port_nats:4222" nats:2.15.1 -js >/dev/null
 until_true 60 "NATS to be ready" sh -c "docker logs '$nats_container' 2>&1 | grep -q 'Server is ready'"
 # The run's session database (lib/session-db.sh's session_db_start): every pod keeps its sessions in
 # it (session_store postgres, which the daemon requires, since an issue pod's disk dies with the

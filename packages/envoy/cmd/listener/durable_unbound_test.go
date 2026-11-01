@@ -74,7 +74,7 @@ func healthzFor(t *testing.T, client *bus.Client, receiver *durableReceiver) fun
 	}
 	subscribeRoleLane(t, client)
 	state := &atomic.Pointer[listenerDeps]{}
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: listenerCaches(registry, sessions, nil), receiver: receiver})
+	state.Store(&listenerDeps{client: client, roleLane: client, registry: registry, sessions: sessions, caches: listenerCaches(registry, sessions, nil), receiver: receiver})
 	return func() (int, map[string]any) { return serveHealthz(state) }
 }
 

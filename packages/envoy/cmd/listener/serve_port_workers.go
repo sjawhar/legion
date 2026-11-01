@@ -25,9 +25,11 @@ const (
 	// port never accepts holds at most this many of the durable's pending messages.
 	servePortQueueLimit = 32
 	// servePortProgressInterval is how often a worker's queued messages are kept in progress, well
-	// inside the durable's AckWait (applyListenerConsumerPolicy), so none is delivered again while
-	// it waits for its port.
-	servePortProgressInterval = 20 * time.Second
+	// inside the durable's AckWait (applyListenerConsumerPolicy, consumerAckWait: 6 s, short
+	// because every holder keeps the messages it holds alive this way, so a dead holder's are
+	// redelivered to the standby that takes the lease over quickly), so none is delivered again
+	// while it waits for its port.
+	servePortProgressInterval = 2 * time.Second
 )
 
 // durableSettle settles one durable message once its handler and every push the handler handed to

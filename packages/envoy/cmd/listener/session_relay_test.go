@@ -1058,7 +1058,7 @@ func requireRelayedPush(t *testing.T, pushes <-chan string, item contracts.Envel
 // session's entry for every verdict and leaves a message that entry says the session's consumer
 // relays to that consumer's relay, whatever the verdict. An attempt record of a refusal nobody
 // pushed is a record naming no push in flight, and the relay would hold its copy under it -- and
-// the session's later messages behind that -- until it expired (attemptCacheTTL, INFRA-594).
+// the session's later messages behind that -- until it expired (dedupe.AttemptedAge, INFRA-594).
 func TestServePortRelayRefusesAnUnadvertisedModeTheFanoutAlsoRefused(t *testing.T) {
 	const (
 		relayedPort = 4096
@@ -1217,7 +1217,7 @@ func deliveryExceptionsFor(t *testing.T, exceptions *natsgo.Subscription, sessio
 // session's consumer does not ack the message on the attempt that path recorded: it holds it
 // unacked while the push is in flight (holdWhilePushedElsewhere) and pushes it itself once that
 // record is gone. So the message survives both ways the worker's push can end without delivering
-// it -- the attempt record expiring (attemptCacheTTL) and the push being handed back on a
+// it -- the attempt record expiring (dedupe.AttemptedAge) and the push being handed back on a
 // sessions.Get miss, whose durable redelivery the consumer's hold on the sequence skips -- rather
 // than being lost with no exception (INFRA-594).
 func TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer(t *testing.T) {
@@ -1260,7 +1260,13 @@ func TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer(t *testing
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rig := newRelayRig(t)
+			// The relay gains the durable binding only once the worker's push is pinned below:
+			// unowned, no relay runs, so the push this test hands to the worker is the worker's
+			// by construction rather than by timing. With a relay running from the first
+			// registration, its pull and the entry's flip to core delivery race, and a relay that
+			// pulled the message first pushes it itself - the same message, to the same port, with
+			// no hold to observe.
+			rig := newRelayRigUnowned(t, relayPauseFirst, relayPauseMax)
 			sessionID := "ses_flip_back_" + id.New()
 			topic := "notifications.github.acme.flip-" + id.New() + ".mention"
 			var accepting atomic.Bool
@@ -1337,14 +1343,15 @@ func TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer(t *testing
 			}
 
 			// The next registration finds the consumer and its original start, so the entry is
-			// back on consumer delivery with the message in the consumer's window, and its relay
-			// restarts.
+			// back on consumer delivery with the message in the consumer's window. The relay
+			// starts on that entry, with the worker's push already in flight.
 			rig.subscribe(t, registration)
 			entry := rig.entry(t, sessionID)
 			if entry.Delivery != session.DeliveryConsumer || entry.ConsumerStart > ack.Sequence {
 				t.Fatalf("after registering again the entry records delivery %q and consumer start %d, want the consumer's and a start at or below %d",
 					entry.Delivery, entry.ConsumerStart, ack.Sequence)
 			}
+			rig.relays.setOwned(true)
 			// The relay has pulled the message and judged it against the attempt record of the
 			// push pinned above: it holds it, and the steps below run after that judgement rather
 			// than racing it.

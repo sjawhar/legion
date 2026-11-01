@@ -20,7 +20,7 @@
 # Inputs, each refused when missing, naming it:
 #   LEGION_TEST_PG_DSN          a loopback PostgreSQL with pgvector, as merged-root-waits.sh takes it;
 #                               the run creates a database of its own in it and drops it on any exit
-#   LEGION_E2E_NATS_BIN         a nats-server; default the pinned v2.10.22, installed once with
+#   LEGION_E2E_NATS_BIN         a nats-server; default the pinned v2.15.1, installed once with
 #                               `go install` into /legion/scratch/bin on an issue pod's volume, else
 #                               into the run's own directory
 #   LEGION_TEST_OMP             the Oh My Pi binary; default the `omp` on PATH, else the worker
@@ -55,9 +55,10 @@ anthropic_key=${ANTHROPIC_API_KEY:-}
 openai_key=${OPENAI_API_KEY:-}
 unset ANTHROPIC_API_KEY OPENAI_API_KEY
 
-# The nats-server the run installs when the caller names none: the 2.10 line the daemon's own NATS
-# tests pin (packages/daemon/internal/testnats/nats.go), as merged-root-waits.sh installs it.
-nats_version=v2.10.22
+# The nats-server the run installs when the caller names none: the version the Envoy listener
+# requires and the deployment runs (packages/envoy/internal/testnats/nats.go's images), as
+# merged-root-waits.sh installs it.
+nats_version=v2.15.1
 # The pi-envoy the older-plugin session runs: a release before the settings frame.
 older_pi_envoy=10.24.0
 

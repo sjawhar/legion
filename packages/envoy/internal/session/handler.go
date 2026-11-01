@@ -32,10 +32,13 @@ const (
 	// unreachable peer, a session process restarting, a connection refused, or a server that
 	// answered with anything but 204. The attempt failed and cannot tell whether the session
 	// took the prompt, so a caller may ask again only at the cost of repeating it. The listener's
-	// delivery never reaches its unplaceable policy with it: on the durable path a serving-port
+	// delivery hardly reaches its unplaceable policy with it: on the durable path a serving-port
 	// session's push is its worker's, which pushes until the port accepts it
 	// (cmd/listener/serve_port_workers.go), and on the live and core lanes a failed push comes
-	// back through the interest path, which reports it delivery_failed and NAKs.
+	// back through the interest path, which reports it delivery_failed and NAKs. What is left,
+	// the registry path's failed push to a session with a port and no stored interest, is given
+	// up under the no_push_target label this reason folds into
+	// (cmd/listener/unplaceable_delivery.go).
 	ReasonPushFailed
 )
 

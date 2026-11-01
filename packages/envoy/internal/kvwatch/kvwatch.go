@@ -71,6 +71,12 @@ type Watcher struct {
 	// falls back to the full read (watch).
 	openResumed func(kv bus.KeyValue, conn *nats.Conn, from uint64) (nats.KeyWatcher, error)
 
+	// openBucket takes the bucket handle a Rewatch watches from the connection it is given,
+	// bus.OpenKeyValue unless a test replaced it (WithBucketOpener, export_test.go), so a test
+	// gives the watch a handle whose stream state it chooses: the state no server this release
+	// links still produces is read through here.
+	openBucket func(js nats.JetStreamContext, bucket string) (bus.KeyValue, error)
+
 	mu sync.RWMutex
 	// kv is the handle the store reads and writes through: first, until a watch moves it together
 	// with the watcher, so the store writes through the connection its cache reads.
@@ -182,6 +188,7 @@ func New(name string, kv bus.KeyValue, apply func(nats.KeyValueEntry), reset fun
 		kv:              kv,
 		after:           func(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) },
 		openResumed:     openResumedWatch,
+		openBucket:      bus.OpenKeyValue,
 	}
 	for _, option := range options {
 		option(w)
@@ -254,7 +261,7 @@ func (w *Watcher) Rewatch(conn *nats.Conn) error {
 	if err != nil {
 		return fmt.Errorf("open %s JetStream: %w", w.name, err)
 	}
-	kv, err := bus.OpenKeyValue(js, w.bucket)
+	kv, err := w.openBucket(js, w.bucket)
 	if err != nil {
 		return fmt.Errorf("open %s KV bucket: %w", w.name, err)
 	}

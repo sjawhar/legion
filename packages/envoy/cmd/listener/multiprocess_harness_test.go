@@ -157,6 +157,11 @@ func mpStartPodAt(t *testing.T, binary, natsURL, dial, instance string, env ...s
 // tells them apart by that name.
 func mpReceiveConnection(instance string) string { return "envoy-listener " + instance }
 
+// mpSessionConsumerConnection is the client name of the connection a pod's session relays pull
+// and acknowledge their session consumers on (`bus.SessionConsumers`, which names it for every
+// pod alike; an mpLaneRelay stands in front of one pod, so the name is that pod's there).
+const mpSessionConsumerConnection = "envoy-session-consumers"
+
 // mpConnectName reads the client name out of a CONNECT frame's JSON.
 var mpConnectName = regexp.MustCompile(`"name":"([^"]*)"`)
 
@@ -1225,10 +1230,13 @@ func mpTail(text string, n int) string {
 // That last reading is what this exists for. A message the stream stored, that no pod of the
 // machine ever logged and that the durable holds nothing for, was pushed by nats-server into the
 // durable's deliver subject in the moment after its only subscriber's connection went: the
-// server counts such a push undone, below zero, and the message leaves the pending list at its
-// ack wait with no redelivery (the same behaviour receive.go's hand-back keeps a subscriber for,
-// nats-server 2.10.29 consumer.go didNotDeliver, decDeliveryCount and hasMaxDeliveries). The
-// durable's own count of redeliveries rises by one for each message it loses that way.
+// server counts such a push undone, and through v2.14.x it counted it below zero, so the message
+// left the pending list at its ack wait with no redelivery (the same behaviour receive.go's
+// hand-back keeps a subscriber for; v2.10.29 consumer.go didNotDeliver, decDeliveryCount and
+// hasMaxDeliveries). The listener requires nats-server v2.15.0 or later, whose decDeliveryCount
+// leaves a first delivery's count alone, so on the server these tests link such a message comes
+// back one ack wait later and this reading should find none (durable_backlog_cut_test.go).
+// The durable's own count of redeliveries rises by one for each message it loses that way.
 //
 // It is printed when the row fails, and only then: a row that passes is as quiet as before.
 

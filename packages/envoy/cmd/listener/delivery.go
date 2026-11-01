@@ -694,8 +694,13 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	if entryErr == nil {
 		entryPtr = &entry
 	}
+	// The delivery ledger is asked for a pair this pod prompts over HTTP (promptsHere), and for
+	// one whose session no record was resolved for: that delivery ends in the unplaceable path,
+	// whose give-up keeps its attempt so a redelivery a lost ACK brings is an attempt-dedupe skip
+	// rather than a second give-up, on this pod or the one that takes delivery over. A
+	// self-subscribed session and another listener's cost no ledger write, as before.
 	var attempt dedupe.Attempt
-	if promptsHere(cfg.machineID, interestPtr, entryPtr) {
+	if entryPtr == nil || promptsHere(cfg.machineID, interestPtr, entryPtr) {
 		var deliver bool
 		var retryIn time.Duration
 		if attempt, deliver, retryIn = ledgerAttempt(cfg, message, item, sessionID, false); !deliver {
@@ -975,11 +980,14 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		relayJudges := relayed && target.Port > 0
 		// The delivery ledger is asked after the echo check and before the delivery-mode checks,
 		// so a duplicate of a message already delivered is skipped before the recipient's current
-		// capabilities can refuse it, and only for a recipient this pod prompts over HTTP
-		// (promptsHere) whose push this path makes: a self-subscribed recipient costs no ledger
-		// write, and a session whose own consumer relays the message is its relay's to claim.
+		// capabilities can refuse it, and for every recipient this path judges, a portless one
+		// included: the exception it reports is deduped by the pair's record as the push of a
+		// serving-port recipient is, so one `delivery_failed` holds across the copies of an event
+		// stored on several of the session's topics and across the pods of the machine. Only a
+		// session whose own consumer relays the message is left out: that pair is its relay's to
+		// claim (sessionRelays.followedTopicVerdict).
 		var attempt dedupe.Attempt
-		if !relayed && promptsHere(cfg.machineID, &interest, target) {
+		if !relayed {
 			var deliver bool
 			var wait time.Duration
 			if attempt, deliver, wait = ledgerAttempt(cfg, message, item, interest.SessionID, false); !deliver {
@@ -1062,10 +1070,11 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 				log: func(logger *logging.Logger) {
 					logger.DeliveryLog(slog.LevelError, "listener delivery failed", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
 				},
-				// A push that failed gives the ledger attempt up, so the next copy of the same
-				// event is pushed rather than skipped as one already on its way; a resolution
-				// that failed took none to give up.
-				settle: settleClearIf(retryable),
+				// Both failures give the ledger attempt up: a push that failed, so the next copy
+				// of the same event is pushed rather than skipped as one already on its way, and
+				// a resolution that failed, which pushed nothing and may not leave a record the
+				// relay of a session's consumer would hold its copy under.
+				settle: settleClear,
 				retry:  retryable,
 			}) {
 				retryIn = max(retryIn, durableRetryDelay)

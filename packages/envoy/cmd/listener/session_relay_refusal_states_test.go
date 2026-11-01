@@ -19,7 +19,7 @@ import (
 // A message on a followed topic that is refused -- its delivery mode cannot be read, which any
 // publisher can send -- never leaves the session's relay holding anything, whatever the session's
 // entry said when the fan-out judged it, and the session's later messages arrive at once rather
-// than waiting out attemptCacheTTL.
+// than waiting out dedupe.AttemptedAge.
 //
 // The rows are the four entry states a refusal is judged against, each of which left that stall
 // behind in its turn (INFRA-594, review rounds 5 to 8). The relay no longer answers them one at a
@@ -180,7 +180,7 @@ func TestARefusedMessageNeverHoldsTheRelayWhateverTheEntrySaid(t *testing.T) {
 			awaitFanoutFinished(t, rig, durable, second.Sequence)
 
 			// The relay starts and must reach the later message. The bound is twenty seconds,
-			// where a hold under an attempt record lasts attemptCacheTTL, five minutes.
+			// where a hold under an attempt record lasts dedupe.AttemptedAge, five minutes.
 			rig.relays.setOwned(true)
 			if tc.portless {
 				awaitRelayFrame(t, standIn, later, 20*time.Second)

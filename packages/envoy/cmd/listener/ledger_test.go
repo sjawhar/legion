@@ -29,7 +29,16 @@ func settledMessage(t *testing.T, conn *natsgo.Conn, data []byte) (*natsgo.Msg, 
 		t.Fatalf("subscribe the settlement inbox: %v", err)
 	}
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
-	return &natsgo.Msg{Data: data, Reply: inbox, Sub: sub}, func(t *testing.T) string {
+	// The durable's handler reads the subject before it decodes the message (durableNeedsDelivery),
+	// so a message handed to it by hand carries the subject a publisher would have stored it on:
+	// its envelope's topic.
+	var stored struct {
+		Topic string `json:"topic"`
+	}
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatalf("read the topic of the message handed to the durable: %v", err)
+	}
+	return &natsgo.Msg{Subject: stored.Topic, Data: data, Reply: inbox, Sub: sub}, func(t *testing.T) string {
 		t.Helper()
 		settlement, err := sub.NextMsg(5 * time.Second)
 		if err != nil {
@@ -251,11 +260,17 @@ type undeletableKV struct {
 
 func (undeletableKV) Delete(string, ...natsgo.DeleteOpt) error { return natsgo.ErrTimeout }
 
-// A prompt that failed in a way worth retrying gives its ledger attempt up (Clear) and NAKs the
-// message. When that clear cannot be written, the attempted record stays in the bucket under this
-// process's boot, but no prompt of this process is behind it: the redelivery the NAK asks for takes
-// the record over and prompts the session, rather than acking, as an attempt-dedupe skip, a message
-// nothing delivered.
+// A prompt that failed in a way worth retrying gives its ledger attempt up (Clear). When that
+// clear cannot be written, the attempted record stays in the bucket under this process's boot,
+// but no prompt of this process is behind it: the next delivery of the message takes the record
+// over and prompts the session, rather than acking, as an attempt-dedupe skip, a message nothing
+// delivered.
+//
+// It runs on the core lane, which pushes the recipient in the handler. On the durable path a
+// serving-port session's push is its worker's, which keeps the message at the head of the
+// session's queue and pushes it again until the port accepts it (servePortWorkers), so no failed
+// prompt there NAKs the message or clears its attempt; that path's retry is pinned by
+// TestServePortHolderMessagesArriveInOrderBehindARefusedOneOnTheDurablePath.
 func TestARedeliveryAfterAFailedPromptWhoseClearFailedPromptsTheSession(t *testing.T) {
 	var prompts atomic.Int32
 	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
@@ -277,28 +292,20 @@ func TestARedeliveryAfterAFailedPromptWhoseClearFailedPromptsTheSession(t *testi
 		Boot:          "boot-clear-failed",
 		TakeoverAfter: 5*time.Second + ledgerTakeoverMargin,
 	})
-	handler := jetStreamDeliveryHandler(cfg)
+	handler := coreNATSDeliveryHandler(cfg)
 	data := marshalListenerEnvelope(t, item)
 
-	msg, settlement := settledMessage(t, harness.client.Conn, data)
-	handler(context.Background(), msg)
-	if delay := nakDelay(t, settlement(t)); delay != durableRetryDelay {
-		t.Fatalf("NAK delay of the failed prompt = %s, want %s", delay, durableRetryDelay)
-	}
+	handler(&natsgo.Msg{Data: data})
 	if logs := harness.logs.String(); !strings.Contains(logs, `"operation":"clear"`) {
 		t.Fatalf("the failed prompt's clear did not fail, as this test needs it to:\n%s", logs)
 	}
 
-	msg, settlement = settledMessage(t, harness.client.Conn, data)
-	handler(context.Background(), msg)
-	if got := settlement(t); got != "+ACK" {
-		t.Fatalf("settlement of the redelivery = %q, want the message delivered and acked", got)
-	}
+	handler(&natsgo.Msg{Data: data})
 	if got := prompts.Load(); got != 2 {
-		t.Fatalf("the session was prompted %d times, want 2: the redelivery of the failed prompt must reach it", got)
+		t.Fatalf("the session was prompted %d times, want 2: the delivery after the failed prompt must reach it", got)
 	}
 	if logs := harness.logs.String(); strings.Contains(logs, "listener attempt-dedupe skip") {
-		t.Fatalf("the redelivery was acked as an attempt-dedupe skip, unprompted:\n%s", logs)
+		t.Fatalf("the second delivery was acked as an attempt-dedupe skip, unprompted:\n%s", logs)
 	}
 }
 
@@ -348,8 +355,11 @@ func TestADeliveryExceptionsIDIsItsEventRecipientAndReason(t *testing.T) {
 	}
 }
 
-// A redelivery that ends in no_holder again publishes the same exception: one id, and one message
-// in the stream.
+// A delivery that ends in no_holder again, once the first one's record has aged out, publishes
+// the same exception: one id, and one message in the stream. Inside the attempt window the give-up
+// keeps its ledger attempt and the second delivery is an attempt-dedupe skip instead
+// (TestAGiveUpWhoseNoticeCanNeverBePublishedIsStillTerminal), so the record is aged out between
+// the two, which is what dedupe.AttemptedAge does on its own.
 func TestARepeatedDeliveryExceptionCarriesOneIDAndIsStoredOnce(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	item := listenerTestEnvelope(contracts.AgentSubject("ses_nowhere"), "agent.ses_nowhere.0123456789abcdef0123456789abcdef")
@@ -365,6 +375,7 @@ func TestARepeatedDeliveryExceptionCarriesOneIDAndIsStoredOnce(t *testing.T) {
 
 	data := marshalListenerEnvelope(t, item)
 	harness.handler(&natsgo.Msg{Data: data})
+	forgetLedgerRecord(t, harness, item.DedupeKey, "ses_nowhere")
 	harness.handler(&natsgo.Msg{Data: data})
 	first := assertDeliveryException(t, probe, item, "no_holder")
 	second := assertDeliveryException(t, probe, item, "no_holder")
