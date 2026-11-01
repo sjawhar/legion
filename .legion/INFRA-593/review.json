@@ -2,20 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-593",
-  "completed": "2026-10-31T17:59:22Z",
-  "round": 10,
-  "headReviewed": "6bc39af6e5ddde93cc87659549136006300aaf61",
-  "reviewerCommits": ["bad4567067da8a5018852ac68c56f86e83be7494"],
+  "completed": "2026-11-01T03:12:19Z",
+  "round": 11,
+  "headReviewed": "e22b1dfa74632c1efaee2314f2c676fe93f6068b",
+  "reviewerCommits": ["3590d0f6cabb724c50146cb2e1e17738520a8ce0"],
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
   "minor": 0,
-  "roundShape": "round-shape.py v3, old 843f4c6856282b3e44041b86f13ff56e4493c976 (last reviewed head, my prose included) -> new 6bc39af6e5ddde93cc87659549136006300aaf61: 2 files whose own diff differs, packages/envoy/go.mod and go.sum, which leave the PR's diff because main pins the same tag v1.54.1-sami.1 since #2526. No runtime file: the merge of main is a confirmation round.",
-  "ci": "At 6bc39af6 (read 16:59 UTC): lint, listener-server-change, docs, worker-image passed; envoy-go and test in progress; the rest queued. My prose push bad45670 replaced that run; at 17:59 UTC its lanes were queued. A request for changes does not wait for them.",
-  "codeVerdict": "Approved apart from the adaptation below: the merge resolved service.go and websocket.go without changing the PR's own diff, and go.mod/go.sum are main's.",
+  "roundShape": "round-shape.py v3, old bad4567067da8a5018852ac68c56f86e83be7494 -> new e22b1dfa74632c1efaee2314f2c676fe93f6068b: 6 files whose own diff differs (AGENTS.md, format_replay_test.go, pending_authors.go, tree.go, websocket.go, websocket_test.go), runtime among them: the merge of #2604, a full round.",
+  "codeVerdict": "Approved apart from the merge below. crdt.WithFormatCleanup(false) is in newCappedDocumentCopy, through which newDocumentCopy and every fold, read-back, documentThrough and validateUpdate build; every other non-test document build or apply is a local commit or the room's own remote apply. One load hook, bootstrapLoadedState: cleanup off before the decode and back on after on every path (defer order with recover verified), never inside a transaction, the server's MaxPendingItems (maxUpdateItems, the cap main refused at before and after #2604), decodeStoredState/invalidOnce, a panic returned as the error that fails the room. #2604's tests unchanged apart from a name; nothing of #2604 lost.",
+  "ci": "At e22b1dfa every lane passed (ci-ok still queued at 23:48 UTC when the reviewer's prose push replaced the run). At 3590d0f6, read 03:11 UTC: ci-ok success, pr-title success, and every lane (lint, typecheck, test, dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, -docs, -api, -pmdoc, listener-server-change and the rest) success.",
+  "thermonuclear": "Both run once on the merge of #2604 (3c78856b..e22b1dfa): deep review APPROVE (three minors), code quality prose findings fixed by the reviewer in 3590d0f6; its finding on the new test's setup duplicating #2604's judged not a defect.",
+  "proseFixedByReviewer": "3590d0f6: go.mod names bootstrapLoadedState instead of the deleted applyLoadedState; the changelog fragment and decodeStoredState's comment no longer name v1.54.1-sami.1 (main pins sami.3); the load hook's contract stated once on bootstrapLoadedState, with LoadDoc's, onLoadDocument's and the inline comment pointing at it. PR body: the ygo line and the thermonuclear line.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/tree.go", "description": "TAIL's #2604 (approved, auto-merge armed) lands on main first. Merge main once it does and adapt: put crdt.WithFormatCleanup(false) into newCappedDocumentCopy (tree.go:310), the one place every fold, read-back, documentThrough and validateUpdate builds its document (#2604 puts it in newDocumentCopy's body, which on this branch only delegates); and keep one load hook that applies the stored state with the cleanup off, under the server's MaxPendingItems with this change's refusal (bootstrapLoadedState through decodeStoredState/invalidOnce), in place of #2604's applyLoadedState (math.MaxInt pending, raw error). Runtime conflict, so a full round."}
+    {"severity": "important", "file": "(branch)", "description": "GitHub reports the pull request CONFLICTING with main at 03:11 UTC. Main changed eleven of the PR's files since its fork point, runtime among them (cmd/dispatch/main.go, docs/livewrite.go, mutation.go, service.go, tree.go, websocket.go), so the merge of main is the implementer's and round-shape decides the next round."}
   ],
-  "proseFixedByReviewer": "bad45670: the changelog fragment drops the ygo repin text, which main's own entry (INFRA-767) ships, and keeps this change's refusal wording. PR body: the ygo bullet names the pin as main's (#2526); a Not proven / risk line on the format-cleanup regression until #2604.",
-  "reportedOutside": "To the INFRA-514 architect at 17:00 UTC: #2604 does not cover this branch's folds as written, and its load hook overlaps this change's."
+  "notDefects": [
+    "TestACompactionStoresTheRoomsFormattedStateAsTheRoomHoldsIt repeats #2604's test's formatted-history setup: two tests with different assertions sharing a fixture shape; a shared helper would couple a cleanup counter into the compaction test.",
+    "testhooks.go's crdt.New() calls: main's, test-only."
+  ]
 }
