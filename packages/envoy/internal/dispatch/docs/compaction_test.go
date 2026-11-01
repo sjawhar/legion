@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -510,6 +511,115 @@ func TestACompactionHoldsNoSharedOrRoomsConnection(t *testing.T) {
 	}
 }
 
+// A compaction that does not wait for the room's lock holds none of it while it waits for a
+// connection of the compaction pool. Both of the pool's connections are taken when its write
+// comes to acquire one, and an append to the room lands while the compaction is still waiting: a
+// write that took the room's in-process lock before its connection would leave the room's writers
+// queued behind a compaction that is itself waiting, the opposite of what not waiting asks for
+// (lockRoom).
+func TestACompactionThatDoesNotWaitHoldsNoRoomLockWhileItWaitsForAConnection(t *testing.T) {
+	database, versioned, artifactID := newHeldCompactionDocument(t)
+	pool, err := database.Pool.Compaction()
+	if err != nil {
+		t.Fatalf("open the compaction pool: %v", err)
+	}
+	// A fold holds no connection, so the compaction's read has let its own go by the time this
+	// runs: the connections taken here are every one its write can be given.
+	occupied := make(chan []*pgxpool.Conn, 1)
+	duringCompactionFold(versioned, artifactID, func() {
+		var taken []*pgxpool.Conn
+		for range pool.Config().MaxConns {
+			conn, err := pool.Acquire(context.Background())
+			if err != nil {
+				t.Errorf("hold a compaction connection: %v", err)
+				break
+			}
+			taken = append(taken, conn)
+		}
+		occupied <- taken
+	})
+
+	run := compactAside(versioned, artifactID, false)
+	var held []*pgxpool.Conn
+	select {
+	case held = <-occupied:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the compaction never reached its fold, so its write never came to a connection")
+	}
+	release := sync.OnceFunc(func() {
+		for _, conn := range held {
+			conn.Release()
+		}
+	})
+	t.Cleanup(release)
+	if got, want := len(held), int(pool.Config().MaxConns); got != want {
+		t.Fatalf("the test holds %d of the compaction pool's %d connections, want all of them", got, want)
+	}
+	// pgxpool counts an acquire that waited only once it has succeeded (Stat.EmptyAcquireCount,
+	// Stat.EmptyAcquireWaitTime), so no statistic of the pool's shows an acquire in flight. What
+	// says the compaction's write has come to its connection is the room's in-process lock:
+	// lockRoom counts itself among that lock's users as it is entered, before the connection.
+	waitForRoomLockUsers(t, versioned, artifactID, 1)
+
+	writer := newProofHistory(t, 202)
+	update := writer.write("six\n")
+	appended := make(chan error, 1)
+	go func() {
+		_, err := versioned.AppendUpdate(context.Background(), artifactID, update)
+		appended <- err
+	}()
+	select {
+	case err := <-appended:
+		if err != nil {
+			t.Fatalf("append to the room while the compaction waits for a connection: %v", err)
+		}
+	case <-time.After(roomWait(t)):
+		t.Fatal("the append never landed while the compaction waited for a compaction-pool connection: the compaction holds the room's lock across that wait")
+	}
+	if run.returned() {
+		t.Fatalf("the compaction returned (%+v, %v) before the append landed, so it never waited for a connection", run.result, run.err)
+	}
+
+	release()
+	run.await(t, "the compaction never returned once the connections it waited for were released")
+	if run.err != nil || run.result.outcome != compactCompacted {
+		t.Fatalf("the compaction = (%+v, %v), want the rows folded once it had a connection", run.result, run.err)
+	}
+}
+
+// A compaction that waits for the room's lock and whose read failed waits for that lock and lets
+// it go all the same (passRoomLock): a failed room's eviction has to queue behind a repair
+// holding the document's lock whether or not the compaction read anything. It returns once the
+// holder of that lock lets go, with the read's error.
+func TestAWaitingCompactionWhoseReadFailedStillWaitsForTheRoomsLock(t *testing.T) {
+	database, versioned, artifactID := newHeldCompactionDocument(t)
+	unlock := holdDocumentLock(t, database, artifactID)
+	renameDocUpdatesAway(t, database)
+
+	run := compactAside(versioned, artifactID, true)
+	// The compaction's is the one advisory lock of this test's database waited for: nothing else
+	// here takes one, and the lock the test holds is granted.
+	deadline := time.Now().Add(roomWait(t))
+	for waitingAdvisoryLocks(t, database) == 0 {
+		if run.returned() {
+			t.Fatalf("the compaction whose read failed returned (%+v, %v) without waiting for the document's lock", run.result, run.err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the compaction whose read failed never waited for the document's lock within roomWait")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	unlock()
+	run.await(t, "the compaction never returned once the document's lock was let go")
+	if run.err == nil || !strings.Contains(run.err.Error(), "read compaction fold point") {
+		t.Fatalf("the compaction returned %v, want the error its read failed with", run.err)
+	}
+	if run.result != (compactResult{}) {
+		t.Fatalf("the compaction returned %+v, want no outcome and no row deleted after a failed read", run.result)
+	}
+}
+
 // newHeldCompactionDocument is a document of five rows, every one but the newest older than the
 // tail, on a PgVersioned no service shares.
 func newHeldCompactionDocument(t *testing.T) (*store.Store, *PgVersioned, string) {
@@ -581,6 +691,84 @@ func compactAged(t *testing.T, versioned *PgVersioned, database *store.Store, ar
 	t.Helper()
 	ageUpdatesThrough(t, database, artifactID, everyVersion, time.Hour)
 	return compactUnderTail(t, versioned, artifactID)
+}
+
+// compacted is one compaction run on a goroutine of its own, so a test can hold what it waits for
+// - a connection of the compaction pool, the document's lock - and watch it wait. Its result and
+// its error are read once done is closed.
+type compacted struct {
+	done   chan struct{}
+	result compactResult
+	err    error
+}
+
+// compactAside compacts the document under the tail rule on a goroutine of its own, waiting for
+// the room's lock when wait is set.
+func compactAside(versioned *PgVersioned, artifactID string, wait bool) *compacted {
+	run := &compacted{done: make(chan struct{})}
+	go func() {
+		run.result, run.err = versioned.compactRoom(context.Background(), artifactID, tailRule, wait)
+		close(run.done)
+	}()
+	return run
+}
+
+// returned reports whether the compaction has returned.
+func (c *compacted) returned() bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// await waits up to roomWait for the compaction to return, and fails the test by name when it
+// never does rather than leaving the test binary's timeout to say so.
+func (c *compacted) await(t *testing.T, what string) {
+	t.Helper()
+	select {
+	case <-c.done:
+	case <-time.After(roomWait(t)):
+		t.Fatal(what)
+	}
+}
+
+// waitForRoomLockUsers waits up to roomWait for want callers to be counted among the users of the
+// room's in-process lock (acquireRoomLock), which lockRoom counts itself among as it is entered,
+// before the connection and the advisory lock it goes on to take.
+func waitForRoomLockUsers(t *testing.T, versioned *PgVersioned, room string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(roomWait(t))
+	for {
+		users := 0
+		versioned.locksMu.Lock()
+		if lock := versioned.locks[room]; lock != nil {
+			users = lock.users
+		}
+		versioned.locksMu.Unlock()
+		if users >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d callers of the room's in-process lock within roomWait, want %d", users, want)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// renameDocUpdatesAway renames doc_updates out of the way, so that a compaction's read of the
+// document's rows fails, and renames it back when the test ends.
+func renameDocUpdatesAway(t *testing.T, database *store.Store) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `alter table doc_updates rename to doc_updates_renamed`); err != nil {
+		t.Fatalf("rename doc_updates out of the way: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := database.Pool.Exec(context.Background(), `alter table doc_updates_renamed rename to doc_updates`); err != nil {
+			t.Errorf("rename doc_updates back: %v", err)
+		}
+	})
 }
 
 // updateRow is one doc_updates row as stored: its bytes and the transaction that wrote it.
