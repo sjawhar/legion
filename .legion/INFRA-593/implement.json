@@ -2,32 +2,32 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-593",
-  "completed": "2026-10-31T21:00:00Z",
+  "completed": "2026-11-01T04:45:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2444",
-  "round": 16,
+  "round": 17,
   "proof": [
     {
-      "criterion": "A compaction stores the room's own formatted state: the folded row renders the room's markdown and holds its clocks, with formatted local and browser writes",
-      "surface": "go test of internal/dispatch/docs on Postgres 16.2 (real Service, ygo room, browser updates through Server.Apply)",
-      "command": "go test ./internal/dispatch/docs -run '^TestACompactionStoresTheRoomsFormattedStateAsTheRoomHoldsIt$'; and -race -count=300 with the 6 tests below",
-      "observed": "PASS; under -race -count=300 the new test, #2604's two format tests and the refused, parked, fold-reason and history-reason tests pass 2,100/2,100, 0 DATA RACE, ok 1045.2 s, sampled peak 3.73 GiB of 19 over 761 samples (named job, stopped through proc://; leftover ps check printed no line).",
-      "headSha": "e22b1dfa74632c1efaee2314f2c676fe93f6068b",
-      "negativeControl": "With WithFormatCleanup(false) taken out of newCappedDocumentCopy the test fails: 'the folded row renders \"seed\\n\\n*xy*\\n\\n*xy*\\n\", want the room's \"seed\\n\\n*x*y\\n\\n*xy*\\n\"'. With bootstrapLoadedState's cleanup left on, #2604's TestARoomLoadsItsStoredHistoryAsItWasStored fails (221 bytes, want 238). A first race run without -timeout failed only on the 10-minute binary deadline."
+      "criterion": "The merge keeps the pull request's change as reviewed: only a migration renumber and a text conflict",
+      "surface": "jj merge and a per-file comparison of the PR's own diff (round-shape.py's method; the script was lost with the pod)",
+      "command": "jj new legion/INFRA-593 main@origin; python3 $TMPDIR/infra593/shape.py 0c3d765d a50f4960 (each head vs its fork point with main, .legion/ and docs/solutions/ out, @@/index dropped, migration numbers normalised)",
+      "observed": "One conflict, cmd/dispatch/README.md (main's 0150_dpop_proofs paragraph, then this branch's, now 0151). Shape lists one file, store/doc_compaction_owed_migration_test.go (beforeDocCompactionOwed 149 -> 150), a test. #2522 adds no crdt.New outside newCappedDocumentCopy (grep: encodeDocumentTree's local commit and test hooks only). Comment: https://github.com/sjawhar/legion/pull/2444#issuecomment-6553457205.",
+      "headSha": "a50f4960c8a2a66995fa55d81c1c9d850049f187",
+      "negativeControl": "Before the merge GitHub reported 0c3d765d CONFLICTING; at a50f4960 it reports MERGEABLE and started 2 runs."
     },
     {
-      "criterion": "The merge keeps one load path and the packages working",
-      "surface": "jj merge, local build, vet and suites on Postgres 16.2 under the memory caps",
-      "command": "go build ./... && go vet (plain, multiprocess, memory); GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -parallel 4 ./internal/dispatch/docs ./cmd/dispatch; round-shape.py 6d3e22eb e22b1dfa 2444",
-      "observed": "vet clean; ok docs 1604.7 s, cmd/dispatch 334.6 s, sampled peak 10.11 GiB of 19 over 849 samples (leftover ps check printed no line); round-shape lists tree.go, websocket.go, pending_authors.go (runtime), websocket_test.go, format_replay_test.go, AGENTS.md. Diff-check comment: https://github.com/sjawhar/legion/pull/2444#issuecomment-6548972749.",
-      "headSha": "e22b1dfa74632c1efaee2314f2c676fe93f6068b",
-      "negativeControl": "Before the merge #2604's applyLoadedState and this branch's bootstrapLoadedState both decoded the stored state (two load hooks); at e22b1dfa only bootstrapLoadedState is defined (grep)."
+      "criterion": "The format, refusal and peer tests stay deterministic under -race at the merged head",
+      "surface": "go test -race of internal/dispatch/docs on Postgres 16.2 under the memory caps",
+      "command": "GOMAXPROCS=4 GOMEMLIMIT=12GiB CGO_ENABLED=1 go test -race -p 1 -parallel 4 -timeout 45m ./internal/dispatch/docs -count=300 -run '<the 7 format, refusal and peer tests>' -v",
+      "observed": "ok 651.8 s: 300 PASS of each of 7 tests (2,100/2,100), 0 DATA RACE; sampled peak 3.95 GiB of 19 over 382 samples (named job mem-sampler-infra-593, stopped through proc://; the leftover ps check printed no line).",
+      "headSha": "a50f4960c8a2a66995fa55d81c1c9d850049f187",
+      "negativeControl": "At e22b1dfa the compaction test fails with WithFormatCleanup(false) taken out of newCappedDocumentCopy (it renders *xy*)."
     },
     {
-      "criterion": "Acceptance 1, 2 and 5 at the merged head",
-      "surface": "real envoy-dispatch built from the head on Postgres 16.2, DISPATCH_NATS_DISABLED=1, through the HTTP API",
-      "command": "bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 19)",
-      "observed": "41 rows; after the restart the sweep logged candidates=1 compacted=1 rows_deleted=37 leaving 4 rows; the 3 young rows unchanged in version, xmin and md5; text sha256 identical; a 31st upload reads back.",
-      "headSha": "e22b1dfa74632c1efaee2314f2c676fe93f6068b",
+      "criterion": "Packages and server still work; #2522's tests unmodified; acceptance 1, 2 and 5",
+      "surface": "local suites on Postgres 16.2 (en_US), and real envoy-dispatch with NATS off",
+      "command": "go vet (plain, multiprocess, memory); GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -parallel 4 ./internal/dispatch/docs ./internal/dispatch/pmdoc/... ./cmd/dispatch ./internal/dispatch/store/... ./internal/pgmigrate/...; bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 20)",
+      "observed": "vet clean; ok docs 972.4 s, cmd/dispatch 296.8 s, store 229.8 s, pgmigrate; pmdoc ok 755.3 s after bun install (its first run failed only on 'Cannot find module proof-sdk-upstream', bun deps missing in the recreated workspace); sampled peak 10.43 GiB of 19 over 1,139 samples, leftover ps check printed no line. e2e: 41 rows, the restart's sweep compacted=1 rows_deleted=37 leaving 4, the 3 young rows unchanged, text sha256 identical.",
+      "headSha": "a50f4960c8a2a66995fa55d81c1c9d850049f187",
       "negativeControl": "The restarted process's first sweep tick logs candidates=0 while the hour is recorded as served."
     }
   ],
@@ -38,9 +38,9 @@
   ],
   "deviations": [
     "Correction of round 11's handoff: it said ygo sami.4 words a cut row's refusal 'crdt: invalid update: crdt: invalid update' too. That was wrong. sami.4, sami.7 and sami.9 name 'encoding: unexpected end of input' for all 200 cuts of a real stored row, and the release candidate (845ce79c and a23bc871) drops it for 196: a candidate regression, whose fix is with the ygo release session (dispatch://INFRA-593/artifact/ygo-truncated-reason-patch). Until it ships, decodeStoredState states the refusal once, and the log no longer says a history was cut short.",
-    "ygo v1.54.1-sami.3 (main's pin since #2604) still doubles a cut row's refusal: 196 of 200 cuts of a real row. invalidOnce stays.",
-    "Main moved by one commit after the merge (#2606, a test); GitHub reports MERGEABLE at e22b1dfa, so no second merge.",
-    "Kept from #2604 in the one hook: a panic in the apply is returned as the load's error. Dropped: lifting the pending cap to math.MaxInt for the load; the load decodes under the server's cap, as validateUpdate checks it."
+    "My pod was replaced during this round; the merge had been pushed to legion/INFRA-593-wip (a50f4960) first, so nothing was lost. That branch is deleted now that its commit is on legion/INFRA-593.",
+    "round-shape.py lived on the lost pod's disk; the shape was computed with an equivalent script (method in the diff-check comment).",
+    "Main moved by 4 commits after the merge (#2549, #2609, two releases); GitHub reports MERGEABLE at a50f4960, so no second merge."
   ],
-  "answersReview": "Review round 10 at 6bc39af6 (REQUEST_CHANGES, review head 6d3e22eb): adapt to #2604 once on main. Done in the merge e22b1dfa: WithFormatCleanup(false) in newCappedDocumentCopy; one load hook (bootstrapLoadedState) with the cleanup off, the server's cap, decodeStoredState/invalidOnce and panic-as-error; the formatted compaction test added. Full round."
+  "answersReview": "Review round 11 at e22b1dfa (REQUEST_CHANGES, review head 0c3d765d): one required change, a merge of main. Done in a50f4960: main's #2522 and the rest merged without conflict; the README conflict is text (0150_dpop_proofs, so this migration is 0151). A confirmation round by the shape rule."
 }
