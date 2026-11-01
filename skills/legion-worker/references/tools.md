@@ -535,7 +535,16 @@ reach any work a pod runs, a test or a tool of your own, not a test suite alone.
   moments. Three parts, all measured: within one pod, comparable — run both arms there, as two
   containers on one node started together, and a difference between them is a difference between
   the arms; across pods, not comparable; across platforms, not until something measures the gap.
-  Label every figure taken there a gVisor figure.
+  Label every figure taken there a gVisor figure. That factor is the cost of syscalls and no
+  budget for a whole job: a lane measured two real builds of the same work faster in a pod than
+  on a virtual machine (1,014 s against 1,546 s, and 620 s against 1,117 s), with system time
+  roughly doubled and user time lower, so compute-bound work can run as fast or faster there.
+- **A `subPath` mount of the pod's own volume can come up empty.** A lane measured this on
+  2026-11-01 under gVisor: the mount raised no error and refused nothing, and the directory was
+  simply empty, so a job that reads it, finds nothing and carries on produces a clean-looking
+  wrong answer and a green exit. Mount the volume root instead and reach the subdirectory
+  through a symlink. This reaches a role that starts a workload of its own in the cluster
+  (`docs/kubernetes.md`, "Running a workload in the cluster from a role").
 - **No Docker.** The image carries no container runtime, so a test that starts one through
   testcontainers panics `rootless Docker not found`: in `packages/envoy`, the tests that use
   `internal/tests3` (`internal/dispatch/files`, which `DISPATCH_TEST_NO_CONTAINERS=1` skips) and
