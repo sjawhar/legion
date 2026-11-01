@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-594",
+  "completed": "2026-11-01T14:36:00Z",
+  "round": 11,
+  "reviewedCode": "8aeb8a853bf0 (retro's head; code byte-identical to 1050502b6ef6 outside .legion/ and docs/solutions/)",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "readyRefusal": "READY_UNREVIEWED_CHANGE: GitHub's compare from the approved 727ea565 to retro's head 8aeb8a85 hit its 300-file cap, so it decided nothing.",
+  "localDiff": "git diff --name-status 727ea565 8aeb8a85: 347 paths, 345 D all under .legion/INFRA-594/, 2 A: docs/solutions/architecture-patterns/a-stall-that-returns-from-a-record-two-paths-share-is-fixed-where-the-record-is-read-pr2446.md and docs/solutions/envoy/a-reconnect-handshake-the-server-closes-reaches-only-asyncerrorcb-pr2446.md; no other path. git diff 1050502b 8aeb8a85 -- . ':!.legion' ':!docs/solutions' is empty. Commits: b89653f7 (the two lessons), 8aeb8a85 (the removal).",
+  "lessons": "Both read; every code citation checked at 8aeb8a85 (delivery.go:859, :878, :914, :999; session_relay.go:946, :1009; connect.go:212, :310) points at the symbol it names, and each 'what stays open' line matches what rounds 9 and 10 recorded.",
+  "departure": "My role text says a READY_UNREVIEWED_CHANGE return gets REQUEST_CHANGES and a tester round before approval. The architect directed a confirmation instead (envoy 13:12Z). I followed it: the refusal is GitHub's file cap, and the refused delta is only what retro may add above an approval, read path by path, with the code identical to 1050502b, which the tester's round 18 E2E names.",
+  "ci": "At 8aeb8a85 (retro's push, run of its own): ci-ok success (14:33:52Z), pr-title success, every other check success, worker-image / attest skipped. Required set: ci-ok, pr-title.",
+  "keyFindings": []
+}
