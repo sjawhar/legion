@@ -1,3 +1,5 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import type { CreateBroadcastInput, Message } from "../web/src/api/types";
 import {
@@ -34,6 +36,11 @@ import { resetDatabase, setCreatedAt } from "./seed";
 import { sessionIds } from "./session-ids";
 import { assertPageFits, assertWhole } from "./unclipped";
 import { asUser } from "./users";
+
+/** The margin an absence - a request the page must not make, a navigation it must not take - is
+ *  read after. Each is the work of the click's own task, so a margin in Node, which the page's
+ *  own clock cannot skip, covers one deferred a task or two past it. */
+const ABSENCE_MARGIN_MS = 150;
 
 const planner: FakeSession = {
   capabilities: ["aside", "btw"],
@@ -76,6 +83,9 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): one page tour over four sessions - order, folds, pills, pin, clipboard and an
+// issue-less BTW conversation. Every second is a step the row asserts, and the seed's order is
+// what "who needs you first" is read against, so its writes keep theirs.
 test("Agents puts who needs you first, folds silent and inactive sessions, shows one whose-turn pill per side, pins a card, copies identifiers, and holds an issue-less BTW conversation @phone", async ({
   browser,
 }, testInfo) => {
@@ -338,6 +348,8 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
   }
 });
 
+// SLOW(>=2s): a seed, one page load, the folds the row reads and a full-page screenshot per
+// width; every second is a step the row asserts.
 test("Agents shows the newest exchange, folds the older ones, and lets the viewer clear the conversation @phone", async ({
   browser,
 }, testInfo) => {
@@ -441,6 +453,8 @@ test("Agents shows the newest exchange, folds the older ones, and lets the viewe
   }
 });
 
+// SLOW(>=2s): a seed, one page load and the live delivery the row observes, which the socket
+// brings with no wait of the row's own.
 test("a session's untargeted reply lands in the open conversation", async ({ browser }) => {
   await setLiveSessions([planner]);
   await createProject({ key: "CORE", name: "Core" });
@@ -480,6 +494,8 @@ test("a session's untargeted reply lands in the open conversation", async ({ bro
   }
 });
 
+// SLOW(>=2s): a seed, one page load and the live delivery the row observes; the disconnect hook
+// already stands in for every wait a reconnect would otherwise cost.
 test("a reconnect picks up a Clear made from another device", async ({ browser }) => {
   await setLiveSessions([planner]);
   await createProject({ key: "CORE", name: "Core" });
@@ -837,21 +853,22 @@ function planners(count: number, capable: number): FakeSession[] {
   });
 }
 
-/** Types lines into the message box until two consecutive heights agree: the composer at its
- *  tallest, the way it is while someone writes a long message. A box that is not there is the
- *  degenerate case, and it throws: defaulting its height to 0 would agree with the next 0 and
- *  report stability, leaving every caller to measure an unfilled composer and pass. */
+/** Fills the message box past the line count its height caps at, so the composer is measured at
+ *  its tallest, the way it is while someone writes a long message. The box's height is a CSS
+ *  maximum, so it is reached by filling the most lines any caller's box takes and shown by one
+ *  more line leaving the height where it was - two fills rather than a line-by-line climb. A box
+ *  that is not there is the degenerate case, and it throws: defaulting its height to 0 would
+ *  agree with the next 0 and report stability, leaving every caller to measure an unfilled
+ *  composer and pass. */
 async function fillUntilStable(textarea: Locator): Promise<void> {
-  let previous = -1;
-  // From three lines, past the two rows the empty box already holds.
-  for (let lines = 3; lines <= 40; lines += 1) {
+  const height = async (lines: number) => {
     await textarea.fill(Array.from({ length: lines }, (_, line) => `Line ${line + 1}`).join("\n"));
     const box = await textarea.boundingBox();
     if (box === null) throw new Error("the message box is not on screen to measure");
-    if (box.height === previous) return;
-    previous = box.height;
-  }
-  throw new Error("the message box never stopped growing");
+    return box.height;
+  };
+  const capped = await height(40);
+  if ((await height(41)) !== capped) throw new Error("the message box never stopped growing");
 }
 
 /** Whether a box sits wholly above the composer: top >= 0 and bottom <= the composer's top edge. */
@@ -868,6 +885,8 @@ async function wholeCardsAbove(agents: Locator, composer: Locator): Promise<numb
   return boxes.filter((box) => wholeAbove(box, composerTop)).length;
 }
 
+// SLOW(>=2s): 40 recipient chips rendered for real, the fold opened, and the composer measured
+// empty and filled at each compact size; the layout under measurement is what the row proves.
 test("on a phone the open composer keeps its height budget at forty recipients, empty or filled, keeps its message box steady, and keeps every chip reachable", async ({
   browser,
 }, testInfo) => {
@@ -1022,6 +1041,8 @@ test("a narrow or short screen gets the compact composer, filled within 45% of i
 // its computed style, not the composer by name: with a refused send's row present, which the rows
 // above never have, a strip inside that box would count against the 45%. A `display: contents`
 // element generates no box, so it sticks nothing.
+// SLOW(>=2s): 40 recipient chips rendered for real, a refused send, and the sticky box measured
+// filled at each compact size; the layout under measurement is what the row proves.
 test("on a narrow or short screen a refused send's row stays out of the sticky block, which holds 45% with the message filled", async ({
   browser,
 }, testInfo) => {
@@ -1148,6 +1169,8 @@ async function openNoticeFixture(page: Page, sessions: FakeSession[]) {
   };
 }
 
+// SLOW(>=2s): 40 recipient chips rendered for real at each of three compact sizes, with the
+// exclusion line read off the page; the layout under measurement is what the row proves.
 test("with half the recipients unable to take the mode, the compact composer keeps its budget and every exclusion stays reachable on one line", async ({
   browser,
 }, testInfo) => {
@@ -1197,6 +1220,8 @@ test("with half the recipients unable to take the mode, the compact composer kee
 });
 
 test.describe("the composer's notices share one slot, highest first, within budget on compact screens", () => {
+  // SLOW(>=2s): 120 recipient chips rendered for real at each of three compact sizes; the layout
+  // under measurement is what the row proves.
   test("the limit alone: 120 recipients", async ({ browser }, testInfo) => {
     test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
     const alice = await asUser(browser, "alice");
@@ -1212,6 +1237,8 @@ test.describe("the composer's notices share one slot, highest first, within budg
     }
   });
 
+  // SLOW(>=2s): 120 recipient chips rendered for real at each of three compact sizes; the layout
+  // under measurement is what the row proves.
   test("the limit over exclusions: 120 selected, 110 recipients, each excluded chip still names its reason", async ({
     browser,
   }, testInfo) => {
@@ -1230,6 +1257,8 @@ test.describe("the composer's notices share one slot, highest first, within budg
     }
   });
 
+  // SLOW(>=2s): 111 recipient chips rendered for real at each of three compact sizes, twice over
+  // the boundary; the layout under measurement is what the row proves.
   test("the boundary with exclusions: 101 recipients show the limit, exactly 100 the Excluded line", async ({
     browser,
   }, testInfo) => {
@@ -1416,7 +1445,7 @@ test("a second broadcast pressed while the first is on the wire waits its turn, 
     held[1]?.resolve();
     await expect(row("Second.").getByRole("link", { name: "Sent to 2 agents" })).toBeVisible();
     // After more than one send the page stays, and each row links its own broadcast.
-    await page.waitForTimeout(500);
+    await sleep(ABSENCE_MARGIN_MS);
     await expect(page).toHaveURL(/\/agents$/);
     await row("First.").getByRole("link", { name: "Sent to 2 agents" }).click();
     await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
@@ -1463,7 +1492,7 @@ test("a send the server refuses keeps its row after a later send succeeds, and R
     await composer.getByRole("button", { name: "Send to 2" }).click();
     await expect(row("Second.").getByRole("link", { name: "Sent to 2 agents" })).toBeVisible();
     // A later success neither hides the failure nor navigates away from it.
-    await page.waitForTimeout(500);
+    await sleep(ABSENCE_MARGIN_MS);
     await expect(page).toHaveURL(/\/agents$/);
     await expect(failed.getByRole("status")).toHaveText(/^Could not send to 2 agents: /);
     await expect(failed.getByRole("button", { name: "Restore draft" })).toBeVisible();
@@ -1534,7 +1563,7 @@ test("a human-paced double click on one Retry sends that message once, and never
     await expect(
       row("Retried once.").getByRole("link", { name: "Sent to 2 agents" })
     ).toBeVisible();
-    await page.waitForTimeout(500);
+    await sleep(ABSENCE_MARGIN_MS);
     expect(posted.map((request) => request.input.body)).toEqual([
       "Retried once.",
       "Never retried.",
@@ -1571,7 +1600,7 @@ test("a selection over the broadcast limit says so and never asks the server", a
     const send = composer.getByRole("button", { name: "Send to 101" });
     await expect(send).toBeDisabled();
     await send.click({ force: true });
-    await page.waitForTimeout(500);
+    await sleep(ABSENCE_MARGIN_MS);
     expect(posts).toEqual([]);
     expect(await getSentMessages()).toEqual([]);
     await expect(
@@ -1643,7 +1672,7 @@ test("a mode no selected agent advertises leaves Send dead, and Send says so and
     // Refused, not merely grey: pressing it anyway asks nothing of the server.
     await dead.click({ force: true });
     await dead.press("Enter");
-    await page.waitForTimeout(500);
+    await sleep(ABSENCE_MARGIN_MS);
     expect(posts).toEqual([]);
     expect(await getSentMessages()).toEqual([]);
 
@@ -1662,14 +1691,16 @@ test("with one of two selected agents gone from the registry, Send reaches the l
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the reason");
-  // The page learns of a departure on its 15 s agent poll, which this row waits out.
-  test.setTimeout(60_000);
+  // The page learns of a departure only on its 15 s agent poll, which the page clock fires: the
+  // jump also trips the live socket's own 15 s silence check, so the tab reconnects mid-row,
+  // which nothing here reads.
   const [alpha, bravo] = [builder("alpha", ["btw"]), builder("bravo", ["btw"])];
   await setLiveSessions([alpha, bravo]);
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    await page.clock.install();
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const composer = page.getByRole("region", { name: "Broadcast" });
@@ -1680,8 +1711,11 @@ test("with one of two selected agents gone from the registry, Send reaches the l
     // Bravo leaves; the page learns of it on its next agent poll, and names it by its ID since
     // the registry no longer holds its title, with its state - not running - before the name.
     await setSessionLive(bravo.session_id, false);
+    await page.clock.fastForward(15_000);
+    // TanStack's notifyManager batches its delivery on a zero-delay page timer.
+    await page.clock.runFor(1);
     const send = composer.getByRole("button", { name: "Send to 1" });
-    await expect(send).toBeEnabled({ timeout: 30_000 });
+    await expect(send).toBeEnabled();
     await expect(send).toHaveAccessibleDescription(
       "Excluded: Not running session:bravo-se… (no live session). Nothing is sent to them, and no other mode is substituted."
     );
@@ -1710,6 +1744,7 @@ test("a session that registers under the filter after select-all is not swept in
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    await page.clock.install();
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
@@ -1718,11 +1753,15 @@ test("a session that registers under the filter after select-all is not swept in
     await header.click();
     await expect(header).toHaveAccessibleDescription("2 of 2 matching selected");
 
-    // A third planner registers; the page learns of it on its next agent poll.
+    // A third planner registers; the page learns of it on its next agent poll, which the clock
+    // fires once the two already selected are selected - the select-all above must run against a
+    // registry of two, or the row proves nothing. The jump also trips the live socket's own 15 s
+    // silence check, so the tab reconnects mid-row, which nothing here reads.
     await setLiveSessions([planner("a"), planner("b"), planner("c")]);
-    await expect(header).toHaveAccessibleDescription("2 of 3 matching selected", {
-      timeout: 30_000,
-    });
+    await page.clock.fastForward(15_000);
+    // TanStack's notifyManager batches its delivery on a zero-delay page timer.
+    await page.clock.runFor(1);
+    await expect(header).toHaveAccessibleDescription("2 of 3 matching selected");
     await expect(header).toBeChecked({ indeterminate: true });
     await expect(
       composer.getByRole("heading", { name: "Broadcast to 2 of 2 selected" })

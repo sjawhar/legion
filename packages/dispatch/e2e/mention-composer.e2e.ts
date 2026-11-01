@@ -1,4 +1,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
+
+import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
+
 import {
   type FakeSession,
   getSentMessages,
@@ -388,6 +391,10 @@ test("an issue closed and reopened under a docked send leaves that send's compos
 
   try {
     const page = await alice.newPage();
+    // Both status writes below reach the header over the event feed, whose refetch the page holds
+    // to one per second (`MIN_REFETCH_INTERVAL_MS`): a page timer its own clock fires, and 1 s is
+    // nowhere near the send's 30 s deadline, which stays out through the row.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const form = page.getByRole("form", { name: "Comment composer" });
     const field = form.getByLabel("Comment");
@@ -397,8 +404,10 @@ test("an issue closed and reopened under a docked send leaves that send's compos
     await expect(field).toBeDisabled();
 
     await patchIssue(issue.key, { status: "done" }, { login: "bob" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
     await patchIssue(issue.key, { status: "backlog" }, { login: "bob" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(page.getByRole("button", { name: "Close issue" })).toBeVisible();
     await expect(field).toHaveValue("Through the close");
     await expect(field).toBeDisabled();

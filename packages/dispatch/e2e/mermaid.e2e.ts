@@ -21,6 +21,8 @@
 // closed-source check. Before the change the editor draws with upstream's view, synchronously on
 // the page's thread, its sheet and Google Fonts `@import` in the page, so the style,
 // hostile-document, worker, time-limit, focus and no-worker rows fail.
+import { setTimeout as sleep } from "node:timers/promises";
+
 import {
   type BrowserContext,
   expect,
@@ -155,10 +157,12 @@ function watchSourceAsCode(page: Page): (source: string) => Promise<void> {
   };
 }
 
-/** A request that never happens can only be shown by waiting: this long after the diagram shows
- *  is far longer than an inserted element or sheet takes to start its fetch, so a request list
- *  read after it holds every fetch the drawing caused. */
-const REQUEST_SETTLE_MS = 1_000;
+/** The margin an absence of a request is read after, taken in Node so the page's own clock
+ *  cannot skip it. Each row that reads one first forces the drawing into the DOM and walks the
+ *  shadow root the markup would fetch from, which is the style resolution that starts a
+ *  stylesheet's `@import`, an `<image>`'s load and a fetching `url(…)` paint; this margin covers
+ *  a fetch begun a task or two after that pass rather than inside it. */
+const REQUEST_MARGIN_MS = 250;
 
 /** Records every request `context` makes to Google Fonts' two hosts and answers it with an empty
  *  stylesheet, so a run needs no outbound network. */
@@ -272,16 +276,20 @@ async function expectNothingHostile(
   const diagram = diagramIn(scope);
   await expect(diagram).toBeVisible();
   await expect(diagram).toContainText("Hostile label");
-  await page.waitForTimeout(REQUEST_SETTLE_MS);
+  // The shadow-root walk is read first: it is the positive signal that the drawing is installed,
+  // and walking it forces the style pass each hostile carrier would fetch from.
+  expect(await hostileLeftovers(preview)).toEqual([]);
+  await sleep(REQUEST_MARGIN_MS);
   expect(await page.evaluate(() => window.__hostile)).toEqual([]);
   expect(requested).toEqual([]);
-  expect(await hostileLeftovers(preview)).toEqual([]);
 }
 
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): a cold load of the Conversation and one real Mermaid draw, which is 2.2 s in WebKit
+// alone; the row is the shared per-row cost plus its own single step.
 test("a comment holding a mermaid block draws a diagram, its source behind Mermaid source @phone", async ({
   browser,
 }, testInfo) => {
@@ -347,6 +355,8 @@ test("an issue message holding a mermaid block draws a diagram in the Conversati
   }
 });
 
+// SLOW(>=2s): a cold load, a thread expanded and one real Mermaid draw, which is 2.1 s in WebKit
+// alone; the row is the shared per-row cost plus its own single step.
 test("a reply to a comment holding a mermaid block draws a diagram under its comment @phone", async ({
   browser,
 }, testInfo) => {
@@ -405,7 +415,10 @@ test("a mermaid source the renderer refuses shows the reason and its source, and
 // two-node flowchart on every runner, and the row proves what the limit does, not how fast a
 // machine draws: the page hands the source to the worker chunk, the page's thread keeps answering
 // while the worker is busy, and the limit refuses it with the reason and the source shown. A page
-// drawing on its own thread never loads the chunk and fails at the hold assertion.
+// drawing on its own thread never loads the chunk and fails at the hold assertion. The limit is a
+// page timer, so the clock fires it rather than the row waiting 5 s for it; the responsiveness
+// samples run first, on the clock at real speed (`install` alone does not pause it), since an
+// advanced clock would make a sample read its deadline for free.
 test("a diagram too large to draw in time shows the reason, and the page keeps responding @phone", async ({
   browser,
 }, testInfo) => {
@@ -417,6 +430,7 @@ test("a diagram too large to draw in time shows the reason, and the page keeps r
   try {
     const page = await alice.newPage();
     const holds = await holdWorkerSource(page);
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const card = await openCommentThread(page, testInfo, comment.id, "Large:");
     await expect(card).toContainText("Large:");
@@ -426,6 +440,7 @@ test("a diagram too large to draw in time shows the reason, and the page keeps r
     await expectHeldAndResponsive(page, holds);
     // The samples ran while the worker still held the source, before the time limit refused it.
     await expect(refusal).toHaveCount(0);
+    await page.clock.fastForward(5_000);
     await expect(refusal).toHaveText(
       "Unable to render Mermaid diagram: it did not finish within 5 seconds"
     );
@@ -436,6 +451,8 @@ test("a diagram too large to draw in time shows the reason, and the page keeps r
   }
 });
 
+// SLOW(>=2s): a cold load, a thread expanded and one real Mermaid draw, which is 2.0 s in WebKit
+// alone; the row is the shared per-row cost plus its own single step.
 test("a mermaid label holding markup draws as text, never as an element @phone", async ({
   browser,
 }, testInfo) => {
@@ -550,10 +567,9 @@ test("a document's mermaid diagram draws, styles nothing outside it, and fetches
     });
     expect(pageRules).toEqual([]);
 
-    await page.waitForTimeout(REQUEST_SETTLE_MS);
-    expect(googleFonts).toEqual([]);
-
-    // The diagram's own sheet survives, inside its shadow root, without its `@import`.
+    // The diagram's own sheet survives, inside its shadow root, without its `@import`. Reading it
+    // is also the positive signal the absence below is taken after: the sheet whose `@import`
+    // would fetch the font is installed and has been resolved.
     const ownStyles = await documentEditor(page)
       .locator(".proof-mermaid-preview")
       .evaluate((preview) =>
@@ -564,6 +580,9 @@ test("a document's mermaid diagram draws, styles nothing outside it, and fetches
     expect(ownStyles, "the preview holds a shadow root").not.toBeNull();
     expect(ownStyles).toContainEqual(expect.stringContaining("--_text"));
     expect(ownStyles?.filter((style) => style?.includes("@import"))).toEqual([]);
+
+    await sleep(REQUEST_MARGIN_MS);
+    expect(googleFonts).toEqual([]);
   } finally {
     await alice.close();
   }
@@ -614,6 +633,8 @@ test("hostile diagram markup in a document runs nothing and fetches nothing @pho
   }
 });
 
+// SLOW(>=2s): two real worker draws - the open and the redraw after the edit - and the document
+// read that shows the edit was the only change the document took. There is no wait to shorten.
 test("a document's mermaid diagram redraws as it is edited, and a click on it changes nothing @phone", async ({
   browser,
 }) => {
@@ -651,6 +672,8 @@ test("a document's mermaid diagram redraws as it is edited, and a click on it ch
   }
 });
 
+// SLOW(>=2s): one real draw, the typing, and the redraw the page's own debounce runs after it;
+// in WebKit that is 2.3 s, and the row waits out no part of the debounce itself.
 test("an edited document diagram redraws once typing pauses, and its last drawing stays until then @phone", async ({
   browser,
 }) => {
@@ -703,9 +726,10 @@ test("an edited document diagram redraws once typing pauses, and its last drawin
   }
 });
 
-// The document twin of the comment row above, on the same hold (`holdWorkerSource`): the editor
-// hands the source to the worker chunk, the page keeps answering, and the shipped limit refuses it
-// with the reason above its source. An editor drawing on the page's thread fails at the hold.
+// The document twin of the comment row above, on the same hold (`holdWorkerSource`) and the same
+// clock: the editor hands the source to the worker chunk, the page keeps answering while the
+// clock runs at real speed, and the shipped limit, fired by the fast-forward, refuses it with the
+// reason above its source. An editor drawing on the page's thread fails at the hold.
 test("a document diagram too large to draw in time shows the reason and its source, and the page keeps responding @phone", async ({
   browser,
 }) => {
@@ -720,12 +744,14 @@ test("a document diagram too large to draw in time shows the reason and its sour
   try {
     const page = await alice.newPage();
     const holds = await holdWorkerSource(page);
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/spec`);
     await expect(documentEditor(page)).toContainText("Large document:");
     const status = documentEditor(page).locator(".proof-mermaid-status");
     await expectHeldAndResponsive(page, holds);
     // The samples ran while the worker still held the source, before the time limit refused it.
     await expect(status).toBeHidden();
+    await page.clock.fastForward(5_000);
     await expect(status).toHaveText(
       "Unable to render Mermaid diagram: it did not finish within 5 seconds"
     );
@@ -739,6 +765,8 @@ test("a document diagram too large to draw in time shows the reason and its sour
   }
 });
 
+// SLOW(>=2s): one real draw of the 21-node chain, which must be taller than the viewport for the
+// link's landing to be worth proving; the worker draws it for real and no timer is waited on.
 test("a block link below a diagram lands on its block once the diagram draws @phone", async ({
   browser,
 }) => {
@@ -769,6 +797,13 @@ test("a block link below a diagram lands on its block once the diagram draws @ph
   }
 });
 
+/** The margin a pull back is read after, in Node: long enough for a smooth scroll started by a
+ *  focus re-run to have moved the offset the sampler before it read. */
+const PULL_BACK_MARGIN_MS = 250;
+
+// SLOW(>=2s): one real draw of the 21-node chain, which must be taller than the viewport for the
+// pull back to be worth proving; the worker draws it for real and the two reads of the offset
+// are its own stillness sampler, not a wait.
 test("a reader who scrolls after a block link lands is not pulled back once the diagram draws @phone", async ({
   browser,
 }) => {
@@ -804,9 +839,12 @@ test("a reader who scrolls after a block link lands is not pulled back once the 
     expect(scrolled).toBeGreaterThan(0);
     await page.evaluate(() => window.__releaseMermaid?.());
     await expect(diagram).toBeVisible();
-    // A pull back that never happens can only be shown by waiting: the focus re-run follows the
-    // drawn diagram within a frame or two, and 1500 ms also covers its smooth scroll.
-    await page.waitForTimeout(1_500);
+    // A pull back that never happens is shown by the offset holding still: the focus re-run
+    // follows the drawn diagram from the draw's own effect, within a frame or two, so a pull back
+    // either moves the offset the sampler reads or starts a smooth scroll inside the Node-side
+    // margin after it.
+    await settledScrollTop(page);
+    await sleep(PULL_BACK_MARGIN_MS);
     expect(await page.evaluate(() => document.scrollingElement?.scrollTop)).toBe(scrolled);
     await expect(paragraph).not.toBeInViewport();
   } finally {
@@ -814,6 +852,8 @@ test("a reader who scrolls after a block link lands is not pulled back once the 
   }
 });
 
+// SLOW(>=2s): one real draw of the 21-node chain, which must be taller than the viewport for the
+// mark's landing to be worth proving; the worker draws it for real and no timer is waited on.
 test("a past version's highlighted mark lands on its block once a diagram above it draws @phone", async ({
   browser,
 }) => {
@@ -853,6 +893,8 @@ test("a past version's highlighted mark lands on its block once a diagram above 
   }
 });
 
+// SLOW(>=2s): one real draw of the 21-node chain, which must be taller than the viewport for the
+// link's landing to be worth proving; the worker draws it for real and no timer is waited on.
 test("a comment link below a diagram lands on its quote once the diagram draws @phone", async ({
   browser,
 }) => {
@@ -909,6 +951,8 @@ test("with no worker a document's diagram shows its source @phone", async ({ bro
 
 // A worker that drew once can fail later, as when a redeploy removes its chunk: the block then
 // shows its edited source as code, never the last drawing above a source it no longer matches.
+// SLOW(>=2s): one real Mermaid draw, then the edit that asks the failing worker for the next
+// one; in WebKit that is 2.2 s, and neither draw waits on a timer.
 test("a document diagram whose worker fails after its first drawing shows its source @phone", async ({
   browser,
 }) => {

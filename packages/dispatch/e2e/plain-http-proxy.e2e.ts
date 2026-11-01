@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
 
 import { devSignInPath, sessionCookieName } from "./api";
+import { withoutHarnessPort } from "./harness-ports";
 import {
   httpsTarget,
   plainHttpHost,
@@ -118,9 +119,10 @@ test("a page that closes leaves no live socket open upstream of the proxy", asyn
   await once(upstream, "listening");
   const upstreamPort = (upstream.address() as AddressInfo).port;
   // A second proxy in front of the stand-in: the harness's own proxy forwards to the server under
-  // test, whose subscribers this spec cannot count. With PLAIN_HTTP_PORT unset it binds a port the
-  // OS chooses, which this row reads from the proxy's listening line.
-  const { PLAIN_HTTP_PORT: _harnessProxy, ...env } = process.env;
+  // test, whose subscribers this spec cannot count. With the plain-HTTP port unset under every
+  // name this lane carries it under, the second proxy binds a port the OS chooses, which this row
+  // reads from its listening line.
+  const env = withoutHarnessPort("plainHttp");
   const proxy = spawn("bun", [proxyModule], {
     env: { ...env, PLAYWRIGHT_BASE_URL: `http://127.0.0.1:${upstreamPort}` },
     stdio: ["ignore", "pipe", "inherit"],

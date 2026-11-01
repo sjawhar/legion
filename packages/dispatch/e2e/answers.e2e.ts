@@ -15,6 +15,7 @@ import {
 } from "./api";
 import { documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 
 const session = {
@@ -49,6 +50,8 @@ async function expectFocusedAskTurn(page: Page, id: string): Promise<void> {
   await expect(turn).toBeInViewport();
 }
 
+// SLOW(>=2s): Two people need two contexts: alice's answers page and bob's empty one are the same
+// claim from both sides, and each context pays its own sign-in and first load.
 test("the answers page lists a person's answers and replies, opens each ask, and changes an answer @phone", async ({
   browser,
 }, testInfo) => {
@@ -138,14 +141,15 @@ test("the answers page lists a person's answers and replies, opens each ask, and
       [changed.id, changedIssue],
       [replied.id, repliedIssue],
     ] as const) {
-      await page.goto("/answers");
+      await navigateInApp(page, "/answers");
       await rowOf(id).getByRole("link", { exact: true, name: "Open" }).click();
       await expect(page).toHaveURL(`/issues/${issue.key}/asks/${id}`);
       await expectFocusedAskTurn(page, id);
     }
 
     // Change answer on the top row opens the form seeded with the current answer, not a
-    // second completion card.
+    // second completion card. One cold load of the list, so the change is made on a page that
+    // cached nothing.
     await page.goto("/answers");
     await expect(answerRows(page)).toHaveCount(3);
     await rowOf(changed.id).getByRole("button", { name: "Change answer" }).click();
@@ -270,8 +274,10 @@ test("changing a decision block's answer rewrites the block in the document", as
     { as: "agent" }
   );
   await expect
-    .poll(async () =>
-      (await getIssue(issue.key)).open_asks.some((ask) => ask.block_id === "ship-decision")
+    .poll(
+      async () =>
+        (await getIssue(issue.key)).open_asks.some((ask) => ask.block_id === "ship-decision"),
+      { intervals: [50, 50, 100, 200, 500] }
     )
     .toBe(true);
   const documentText = async () => (await getArtifactText(issue.primary_artifact_id)).markdown;

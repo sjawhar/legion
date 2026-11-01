@@ -1,5 +1,8 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 import { expect, type Page, test } from "@playwright/test";
 
+import { EVENT_HEAD_RETRY_CEILING_MS, QUERY_RETRY_DELAY_MS } from "../web/src/api/query-client";
 import { baseUrl, createIssue, createProject, sessionCookieName } from "./api";
 import { holdFirstRequest } from "./editor";
 import { resetDatabase } from "./seed";
@@ -59,10 +62,14 @@ test("a page asks whoami again while it answers EVENT_HEAD_UNAVAILABLE, and open
 }, testInfo) => {
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  const refuseUntil = Date.now() + 12_000;
+  // The page asks again on a timer of its own - 500 ms doubling to the ceiling
+  // (`web/src/api/query-client.ts`) - so the refusals are counted rather than timed out, and
+  // each wait between two of them is spent on the page's clock. Five of them is past the two
+  // retries any other failed read gets.
+  const refusals = 5;
   let refused = 0;
   await page.route("**/auth/whoami", (route) => {
-    if (Date.now() >= refuseUntil) {
+    if (refused >= refusals) {
       return route.continue();
     }
     refused++;
@@ -76,12 +83,17 @@ test("a page asks whoami again while it answers EVENT_HEAD_UNAVAILABLE, and open
     });
   });
 
+  await page.clock.install();
   await page.goto("/");
-  if (testInfo.project.name === "iphone") {
-    await page.getByRole("button", { name: "Open navigation" }).click({ timeout: 30_000 });
+  for (let ask = 1; ask <= refusals; ask += 1) {
+    await expect.poll(() => refused).toBeGreaterThanOrEqual(ask);
+    await page.clock.fastForward(EVENT_HEAD_RETRY_CEILING_MS);
   }
-  await expect(page.getByText("Signed in as alice")).toBeVisible({ timeout: 30_000 });
-  expect(refused).toBeGreaterThan(0);
+  if (testInfo.project.name === "iphone") {
+    await page.getByRole("button", { name: "Open navigation" }).click();
+  }
+  await expect(page.getByText("Signed in as alice")).toBeVisible();
+  expect(refused).toBe(refusals);
 
   await context.close();
 });
@@ -108,12 +120,22 @@ test("a page stops on Couldn't reach Dispatch. while whoami answers EVENT_HEAD_R
     });
   });
 
+  await page.clock.install();
   await page.goto("/");
-  await expect(page.getByText("Couldn't reach Dispatch.")).toBeVisible({ timeout: 15_000 });
+  // The two retries this code gets (`queryRetry`, `web/src/api/query-client.ts`) wait
+  // `QUERY_RETRY_DELAY_MS` each: page timers, fired here rather than waited out.
+  for (let ask = 1; ask <= 3; ask += 1) {
+    await expect.poll(() => refused).toBeGreaterThanOrEqual(ask);
+    await page.clock.fastForward(QUERY_RETRY_DELAY_MS);
+  }
+  await expect(page.getByText("Couldn't reach Dispatch.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
   const shown = refused;
   expect(shown).toBeLessThanOrEqual(3);
-  await page.waitForTimeout(3_000);
+  // A minute of the page's own time, in which a retry tier the policy does not have would fire;
+  // the margin is for such a request reaching the route above.
+  await page.clock.fastForward(60_000);
+  await sleep(100);
   expect(refused).toBe(shown);
 
   await context.close();
@@ -183,6 +205,7 @@ test("a page chunk that fails on every load reloads three times and then shows t
 // page stays the reader's. The Navigation API's `navigate` event fires for it with `downloadRequest`
 // set and `destination.sameDocument` false, and a chunk that fails after it must still reload the
 // page, as on any page nobody is leaving.
+// SLOW(>=2s): a cold Firefox load of the document route, a real download and a real reload.
 test("a chunk that fails after a Download link was followed reloads the page", async ({
   browser,
 }, testInfo) => {
@@ -365,8 +388,10 @@ test("a page whose entry chunk is missing on every load reloads three times and 
   try {
     await page.goto("/", { waitUntil: "commit" });
     await expect.poll(() => counts.entryRequests).toBe(4);
-    // Long enough for a reload the fourth miss started to have asked for the page again.
-    await page.waitForTimeout(1_000);
+    // The recovery's reload starts from the failed-asset handler of the load that just counted
+    // that request, so a fifth document request would already be out; this margin is four frames
+    // for it.
+    await sleep(250);
     expect(counts).toEqual({ documents: 4, entryRequests: 4 });
     await expect(page.locator("#root")).toBeEmpty();
   } finally {
@@ -376,6 +401,7 @@ test("a page whose entry chunk is missing on every load reloads three times and 
 
 // One budget for the whole tab: a page chunk's failures that already reloaded the page three times
 // leave none for the entry chunk, so the two recoveries cannot hand the page back and forth.
+// SLOW(>=2s): five real document loads of a page whose entry chunk 404s.
 test("a missing entry chunk after a page chunk spent the tab's reloads stays", async ({
   browser,
 }, testInfo) => {
@@ -397,8 +423,10 @@ test("a missing entry chunk after a page chunk spent the tab's reloads stays", a
     entryMissing = true;
     await page.reload({ waitUntil: "commit" });
     await expect.poll(() => counts.entryRequests).toBe(5);
-    // Long enough for a reload the miss started to have asked for the page again.
-    await page.waitForTimeout(1_000);
+    // The recovery's reload starts from the failed-asset handler of the load that just happened,
+    // so a sixth document request would already be out; this window is four frames of margin for
+    // it, and the wall clock is the measurement because there is no reload to await.
+    await page.waitForTimeout(250);
     expect(counts).toEqual({ documents: 5, entryRequests: 5 });
     await expect(page.locator("#root")).toBeEmpty();
   } finally {
@@ -425,8 +453,9 @@ test("an entry chunk's reloads and a page chunk's share the tab's three", async 
     await expect(page.getByTestId("error-boundary")).toContainText(
       "Failed to fetch dynamically imported module"
     );
-    // Long enough for a reload the last failure started to have asked for the page again.
-    await page.waitForTimeout(1_000);
+    // The recovery's reload starts from the failed-asset handler of the load whose boundary is
+    // drawn above, so a fifth document request would already be out; four frames of margin.
+    await sleep(250);
     expect(counts).toEqual({ documents: 4, entryRequests: 4 });
   } finally {
     await context.close();
@@ -548,9 +577,14 @@ test("a tab that reloaded three times in the last five minutes does not reload f
     await expect(page.getByText("Signed in as alice")).toBeVisible();
     const spent = await recordTabReloads(page, [3, 2, 1]);
 
+    const failed = page.waitForResponse((response) =>
+      response.url().endsWith("/assets/index-missing.js")
+    );
     await failBuildScript(page);
-    // Long enough for a reload the failure started to have asked for the page again.
-    await page.waitForTimeout(1_000);
+    // The handler runs on the failure itself, so a reload it decided to make would already have
+    // asked for the page; four frames of margin for the request to reach the counter.
+    await failed;
+    await sleep(250);
     expect(counts).toEqual({ documents: 1, entryRequests: 1 });
     expect(await tabReloads(page)).toEqual(spent);
   } finally {
@@ -574,8 +608,9 @@ test("a page whose entry chunk fails while the browser is offline does not reloa
   try {
     await page.goto("/", { waitUntil: "commit" });
     await expect.poll(() => counts.entryRequests).toBeGreaterThan(0);
-    // Long enough for a reload the miss started to have asked for the page again.
-    await page.waitForTimeout(1_000);
+    // The miss is counted as the request is routed and answered 404 at once, so a reload it
+    // started would already be out; four frames of margin for it.
+    await sleep(250);
     expect(counts).toEqual({ documents: 1, entryRequests: 1 });
   } finally {
     await context.close();
@@ -608,9 +643,13 @@ for (const leaving of ["beforeunload", "pagehide"]) {
       await page.goto("/", { waitUntil: "commit" });
       await requested.promise;
       await page.evaluate((type) => window.dispatchEvent(new Event(type)), leaving);
+      // The 404 the release lets through is what the page's handler sees; waiting for it puts
+      // the margin after the failure rather than around it.
+      const missed = page.waitForResponse((response) => response.status() === 404);
       released.resolve();
-      // Long enough for a reload the miss started to have asked for the page again.
-      await page.waitForTimeout(1_000);
+      await missed;
+      // Four frames of margin for a reload the miss could have started.
+      await sleep(250);
       expect(counts).toEqual({ documents: 1, entryRequests: 1 });
 
       // Shown again (a back/forward-cache restore fires `pageshow`), the page's next failed build
@@ -655,8 +694,9 @@ test("a script from another origin that fails under an /assets/ path leaves the 
           })
       )
       .catch(() => undefined);
-    // Long enough for a reload the failure started to have asked for the page again.
-    await page.waitForTimeout(1_000);
+    // The script's own error event is awaited above, so a reload the failure started would
+    // already be out; four frames of margin for it.
+    await sleep(250);
     expect(counts).toEqual({ documents: 1, entryRequests: 1 });
     expect(await tabReloads(page)).toBeNull();
   } finally {

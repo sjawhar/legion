@@ -407,6 +407,9 @@ test("a long-named picture in a comment draws, its link to a long-named document
       body: `![shot](dispatch://${issue.key}/artifact/${pictureSlug}@v1)\n\nSee [design](${designTarget}).\n\nBare: ${bareUrl}\n\nAngle: <${designTarget}>\n\nSelf: [${designTarget}](${designTarget})\n\nBlock: <${blockTarget}>`,
     });
 
+    // The hover card's open delay below is a page timer (`REF_PREVIEW_OPEN_DELAY_MS`), so the
+    // page's own clock is what spends it.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const turn = page.locator(`[data-turn="comment:${comment.id}"]`);
     await turn.getByRole("button", { name: "Expand thread" }).click();
@@ -444,7 +447,7 @@ test("a long-named picture in a comment draws, its link to a long-named document
       await expect(paragraph.locator("[data-dispatch-href],[data-dispatch-ref]")).toHaveCount(0);
       if (testInfo.project.name !== "iphone") {
         await paragraph.hover();
-        await page.waitForTimeout(2 * REF_PREVIEW_OPEN_DELAY_MS);
+        await page.clock.runFor(2 * REF_PREVIEW_OPEN_DELAY_MS);
         await expect(page.getByRole("tooltip")).toHaveCount(0);
       }
     }
