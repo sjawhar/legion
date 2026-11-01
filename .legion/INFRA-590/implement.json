@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-11-01T01:43:39Z",
+  "completed": "2026-11-01T06:20:20Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
   "head": "d99681cece964276e4a5427500fd94c7e9b39f2a",
-  "round": "28 (head conflicting with main after the retro at cd17a5a4): main's #2541 (f93dd6895) took migration 0150_dpop_proofs. Forward merge of main f93dd6895; the one text conflict in cmd/dispatch/README.md puts main's 0150 paragraph first. This PR's migrations renumbered to the next free numbers on main, 0150_duty_holds -> 0151_duty_holds and 0151_outbox_claim -> 0152_outbox_claim (forward and census), since TestMigrationSetIsNumberedOneToN refuses any gap (the architect's 0158/0159 block was dropped for that reason), with every reference: README, packages/envoy/AGENTS.md, the changelog fragment, .dispatch/architecture/dispatch-outbox.md, outbox/batch.go comment, 0152_outbox_claim.up.sql's comment, the migration lesson, and the PR body. SQL unchanged but one comment. Per-file own-diff check: 14 of 120 files differ, all the renumbering. #2541 adds no pool (store.NewDPoPProofs on database.Pool), so 91 connections. Fingerprint 0e1f9bcd -> b6c793a1. Diff-check comment 6551902095. Restored from 11963c64 since retro removed .legion/INFRA-590/. Sampled memory peak 2.93 GiB of 19, 947 samples every 2 s; the leftover check after the stop listed nothing. Store tests run on a superuser Postgres 17 on the issue volume: the pod's test Postgres (LEGION_TEST_PG_DSN) fails ten store tests for missing privileges (pg_read_all_stats, max_wal_senders, event triggers, create on schema public).",
+  "round": "29 (CI red at d99681ce, ci-ok: docs / build job 124723299602 failed in 'Take the screenshots' on the legion/handover shot, getByRole('heading', {level: 1}) resolving to two h1 elements; this PR changes no screenshot code, only docs/site/src/content/docs/dispatch/running-dispatch.md). As the architect directed, one re-run of the failed jobs, nothing changed: run 41262122784 attempt 2, docs / build success (job 124756368095, 05:34:58Z) and ci-ok success (06:09:21Z). No code push this round: the code head stays d99681ce. GitHub reports MERGEABLE (state BLOCKED on review), git merge-tree with main shows no conflict, #2391 still open and main's last migration still 0150, so 0151/0152 stand.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -270,6 +270,14 @@
       "observed": "store ok 255.3 s (TestMigrationSetIsNumberedOneToN included), duty ok 19.4 s, outbox ok 253.7 s, cmd/dispatch multiprocess ok 1043.8 s; zero '--- FAIL' lines; GitHub MERGEABLE at d99681ce.",
       "headSha": "d99681cece964276e4a5427500fd94c7e9b39f2a",
       "negativeControl": "Before the merge, git merge-tree of cd17a5a4 with main reported 'CONFLICT (content): Merge conflict in packages/envoy/cmd/dispatch/README.md', and main's migration directory held 0150_dpop_proofs beside this PR's 0150_duty_holds."
+    },
+    {
+      "criterion": "The red at d99681ce was the docs screenshot job failing on its own, not this PR: the same head passes it unchanged.",
+      "surface": "GitHub Actions CI run 41262122784 at d99681ce, attempt 2 (re-run of the failed jobs)",
+      "command": "gh run rerun 41262122784 --failed -R sjawhar/legion; then gh api repos/sjawhar/legion/actions/runs/41262122784/jobs --jq '.jobs[] | select(.name==\"docs / build\" or .name==\"ci-ok\")'",
+      "observed": "docs / build completed success (job 124756368095) and ci-ok completed success at 2026-11-01T06:09:21Z; gh pr view: MERGEABLE.",
+      "headSha": "d99681cece964276e4a5427500fd94c7e9b39f2a",
+      "negativeControl": "Attempt 1 of the same run on the same head: docs / build job 124723299602 failed with 'strict mode violation: getByRole('heading', { level: 1 }) resolved to 2 elements' on the legion/handover shot."
     }
   ],
   "filesChanged": [
@@ -321,5 +329,5 @@
   "discoveredComplexity": [
     "Ordering per (owner, destination) costs one NATS round trip per event per destination of one owner: with NATS behind 150 ms, a burst of 100 events on one issue drains in 16 s (THROUGHPUT.md)."
   ],
-  "previousHandoff": "cd17a5a42e70decccf0a46d4fc6627051a293bb3"
+  "previousHandoff": "2f41b8d6344faefa945812f9ea86cecc4c791cef"
 }
