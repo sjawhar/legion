@@ -24,7 +24,9 @@
 # or under the image's home (/home/legion), which that container mounts at the same path under
 # /var/run/legion/home and each role's namespaces bind back under the home
 # (internal/runtime/sandbox/names.go containerHomePath). Any other container but the init
-# containers carries every mount at the block's path. A projected token with no expiration_seconds
+# containers carries every mount at the block's path. A block naming no service_account runs its
+# pods as the namespace's `default` account, which is also what a pod naming none runs as, so the
+# two are compared under that name on both sides. A projected token with no expiration_seconds
 # expires in 3600 s (the API server's default),
 # and a mount with no read_only is read-only (Legion's loader). A Secret or ConfigMap volume is
 # compared by its kind, its object name and, when the block sets one, its default_mode (octal text,
@@ -79,8 +81,8 @@
         (if $got.configMap.name != $want.config_map.name then [{wrong: "\($where) is ConfigMap \($got.configMap.name), not \($want.config_map.name)"}] else [] end)
       end;
   [
-    (if $b.service_account != null and $pod.spec.serviceAccountName != $b.service_account then
-       {wrong: "the pod runs as ServiceAccount \($pod.spec.serviceAccountName // "default"), not \($b.service_account)"} else empty end),
+    (if ($b.service_account // "default") != ($pod.spec.serviceAccountName // "default") then
+       {wrong: "the pod runs as ServiceAccount \($pod.spec.serviceAccountName // "default"), not \($b.service_account // "default")"} else empty end),
     (($b.volumes // [])[] as $v
      | ($volumes[$v.name]) as $pv
      | ($v | volume_kind) as $k

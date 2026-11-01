@@ -59,6 +59,9 @@
 # - LEGION_E2E_MODEL_GATEWAY_AUDIENCE (required) is the audience the operator's model gateway accepts
 #   on a worker's projected ServiceAccount token, substituted into the run's copy of the operator
 #   route's pod.yml and asserted on every pod.
+# - LEGION_E2E_POD_SERVICE_ACCOUNT (required) is the ServiceAccount the deployment's pods run as,
+#   substituted for the ${POD_SERVICE_ACCOUNT} placeholder in the run's copy of the operator
+#   route's pod.yml and asserted on every pod (lib/pod-service-account.sh).
 # - LEGION_E2E_DISPATCH_URL, LEGION_E2E_ENVOY_URL and LEGION_E2E_NATS_URL (required) are production
 #   Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified
 #   names for them: an https:// URL, an http(s):// URL and a nats://host:port, none with a path. The
@@ -1423,13 +1426,17 @@ resources_block() {
   [ -z "$controller_cpu" ] || echo "      controller: { cpu: \"$controller_cpu\", memory: 1Gi }"
 }
 # render_operator_pod writes the run's copy of the operator route's pod.yml, the gateway's audience
-# in place of its placeholder.
+# and LEGION_E2E_POD_SERVICE_ACCOUNT's ServiceAccount each in place of its placeholder.
 render_operator_pod() {
   # shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
   local placeholder='${MODEL_TOKEN_AUDIENCE}' pod
+  # shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
+  local account_placeholder='${POD_SERVICE_ACCOUNT}'
   pod=$(<"$operator_route/pod.yml")
-  printf '%s\n' "${pod//"$placeholder"/"$gateway_audience"}" >"$work/pod.yml"
+  pod=${pod//"$placeholder"/"$gateway_audience"}
+  printf '%s\n' "${pod//"$account_placeholder"/"$pod_service_account"}" >"$work/pod.yml"
   grep -qF "audience: \"$gateway_audience\"" "$work/pod.yml" || fail "the operator route's pod.yml has no token audience $placeholder to fill with the gateway's"
+  grep -qF "service_account: $pod_service_account" "$work/pod.yml" || fail "the operator route's pod.yml has no ServiceAccount $account_placeholder to fill with the run's"
 }
 # create_route_configmap is the operator's step before any pod runs: the operator route's models.yml and
 # overlay.yml in the ConfigMap the run's pods mount.
@@ -2008,14 +2015,14 @@ hog_oomkilled() {
 # forked before a restart that moves the stream, holds each pod to the stream of its own creation as
 # the main shell does.
 shape_problems() {
-  jq -r -L "$root/scripts/e2e/lib" --arg route "$route_configmap" --arg audience "$gateway_audience" --slurpfile streams "$evidence/worker-streams.jsonl" --argjson expected "$run_resources" '
+  jq -r -L "$root/scripts/e2e/lib" --arg route "$route_configmap" --arg audience "$gateway_audience" --arg account "$pod_account" --slurpfile streams "$evidence/worker-streams.jsonl" --argjson expected "$run_resources" '
     include "stage4b-pods";
     ["architect", "planner", "implementer", "tester", "reviewer", "merger"] as $roles
     | "/var/run/legion/roles" as $dir
     | .spec as $s
     | ([$s.containers[] | select(.name == "roles")] | first) as $c
     | (if $s.runtimeClassName != "gvisor" then "runtimeClassName \($s.runtimeClassName)" else empty end),
-      (if $s.serviceAccountName != "legion-worker" then "serviceAccountName \($s.serviceAccountName)" else empty end),
+      (if $s.serviceAccountName != $account then "serviceAccountName \($s.serviceAccountName)" else empty end),
       (if $s.automountServiceAccountToken != false then "automountServiceAccountToken \($s.automountServiceAccountToken)" else empty end),
       (if ([$s.volumes[] | select(.projected) | .projected.sources[] | select(.serviceAccountToken)] | length) != 1
         or ([$s.volumes[] | select(.projected) | .projected.sources[] | select(.serviceAccountToken) | .serviceAccountToken.audience] != [$audience])
@@ -3128,6 +3135,14 @@ gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the operator route's models.yml can name (the reason is above)"
 gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is not a token audience the operator route's pod.yml can carry (the reason is above)"
+pod_service_account=$(bash "$root/scripts/e2e/lib/pod-service-account.sh") ||
+  fail "LEGION_E2E_POD_SERVICE_ACCOUNT is not a ServiceAccount name the operator route's pod.yml can carry (the reason is above)"
+# pod_account is the ServiceAccount every pod of the run must run as, which pod-shape holds each
+# to: the run's own under the operator route, and the block's own under LEGION_E2E_POD_FILE, whose
+# pods carry the deployment's block instead. It is settled here, once, so the shape watcher forked
+# later judges against the same account the main shell does.
+pod_account=$pod_service_account
+[ -z "$pod_file" ] || pod_account=$(jq -r '.service_account // "default"' "$pod_block")
 # The branch-built daemon links no release plugin pair (only a release workflow build does), so a
 # daemon started from this checkout boots in the degraded mode (a Warn and `plugins: none` from
 # `--check-config`) unless the run's legion.yaml names runtime.kubernetes.plugins itself. Stage 4b

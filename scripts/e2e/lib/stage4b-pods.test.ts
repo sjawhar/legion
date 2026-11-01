@@ -121,6 +121,10 @@ interface Run {
   // the plain goldens carry no route or audience of, so each rule's tests keep only their own lines.
   route?: string;
   audience?: string;
+  // account is pod_account, the ServiceAccount every pod of the run must run as: the run's own
+  // under the operator route, or the block's own under LEGION_E2E_POD_FILE. The default is the
+  // account the operator route's golden carries.
+  account?: string;
 }
 // shapeProblemLines runs shape_problems on the pod under RUN's worker streams and returns every
 // line it prints. The golden pod departs from the run's route and audience rules (its route
@@ -142,7 +146,7 @@ function shapeProblemLines(object: object, run: Run = {}): string[] {
       "bash",
       "-c",
       `set -Eeuo pipefail
-root=${JSON.stringify(root)} evidence=${JSON.stringify(evidence)} route_configmap=${run.route ?? "route"} gateway_audience=${run.audience ?? "audience"} host=${host} port_worker_stream=${port}
+root=${JSON.stringify(root)} evidence=${JSON.stringify(evidence)} route_configmap=${run.route ?? "route"} gateway_audience=${run.audience ?? "audience"} pod_account=${run.account ?? "operator-account"} host=${host} port_worker_stream=${port}
 run_resources=${JSON.stringify(JSON.stringify(run.resources ?? defaults))}
 ${shapeProblems}
 shape_problems`,
@@ -212,6 +216,16 @@ describe("the pod shape, whole, on the pod the runtime builds under the operator
     }
     expect(shapeProblemLines(object, operatorRun).filter((line) => line !== "")).toEqual([
       "the roles container does not mount models.yml of legion-operator-route where every role profile reads it",
+    ]);
+  });
+
+  // The run's account is LEGION_E2E_POD_SERVICE_ACCOUNT's, which the golden carries, so a pod on
+  // any other account departs and the line names the one it runs as.
+  test("a pod on another ServiceAccount departs", () => {
+    const object = operatorPod();
+    object.spec.serviceAccountName = "another-account";
+    expect(shapeProblemLines(object, operatorRun).filter((line) => line !== "")).toEqual([
+      "serviceAccountName another-account",
     ]);
   });
 });
@@ -835,7 +849,7 @@ describe("the pod-shape checkpoint's wrong-runtime control", () => {
     );
     writeFileSync(join(evidence, "pod-watch.json"), watch.map((line) => `${line}\n`).join(""));
     const out =
-      runScript(`root=${JSON.stringify(root)} evidence=${JSON.stringify(evidence)} work=${JSON.stringify(evidence)} route_configmap=route gateway_audience=audience
+      runScript(`root=${JSON.stringify(root)} evidence=${JSON.stringify(evidence)} work=${JSON.stringify(evidence)} route_configmap=route gateway_audience=audience pod_account=operator-account
 run_resources=${JSON.stringify(JSON.stringify(defaults))}
 ${shapeProblems}
 ${fn("pod_shape_verdict")}
