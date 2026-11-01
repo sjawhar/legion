@@ -57,7 +57,6 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-// SLOW(>=2s): two pages, each paying its own first load, and two full-page phone screenshots.
 test("live: bob's ask updates alice's Inbox and project badges without reload @phone", async ({
   browser,
 }, testInfo) => {

@@ -22,8 +22,6 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-// SLOW(>=2s): two fills of DISPATCH_BODY_MAX (32,000) characters through the page's own editing
-// pipeline and their readback; the cap is the property, and a shorter body would not test it.
 test("the comment composer takes a whole body of the limit, and holds a longer one to it", async ({
   browser,
 }) => {

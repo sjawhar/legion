@@ -91,9 +91,6 @@ test("sidebar shows Inbox, Pinned, one row per project with its open-ask badge, 
   }
 });
 
-// SLOW(>=2s): five document loads, each the thing it proves - the issue route and its title, a
-// reload that shows the URL picks the tab, and three direct routes that must answer Not found
-// from a cold load. This spec is the suite's only direct-load coverage of them.
 test("issue tabs are URL-driven and keyboard-navigable, and titles follow direct issue routes", async ({
   browser,
 }) => {

@@ -382,8 +382,6 @@ test("a docked send the server answers at 35 s is one keyed write and shows once
 
 // Closing and reopening the issue while a send is out leaves the send's own composer where it
 // was: the draft held through it, the refusal shown beside it, and the field taking typing after.
-// SLOW(>=2s): one page load and two issue status writes observed through the live event feed,
-// under a held send; the seconds are server round trips the property names.
 test("an issue closed and reopened under a docked send leaves that send's composer in place", async ({
   browser,
 }) => {

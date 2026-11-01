@@ -309,8 +309,6 @@ test("a comment holding a mermaid block draws a diagram, its source behind Merma
   }
 });
 
-// SLOW(>=2s): a cold load of the Inbox and one real Mermaid draw, which is 2.2 s in WebKit alone;
-// the row is the shared per-row cost plus its own single step.
 test("an ask's question holding a mermaid block draws a diagram on the Inbox card @phone", async ({
   browser,
 }) => {
