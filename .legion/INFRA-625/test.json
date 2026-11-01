@@ -2,47 +2,54 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-625",
-  "completed": "2026-11-01T17:40:00Z",
-  "round": 9,
+  "completed": "2026-11-01T19:58:00Z",
+  "round": 10,
   "implementerProof": {
     "verdict": "verified",
-    "how": "The merge alone, as the architect scoped it. Main's roomcursor.go is kept whole - the merge changes nothing of its code, only two comments - no declaration is duplicated between it and pending_authors.go, and LoadDoc's recovery still fails the room through failRoomLoad with the load's own record, on the load's goroutine, before ygo's own recovery wakes any waiter. The behaviour behind that reading is green here: the whole docs package passes against my own Postgres in 1,523 s, the five named load rows pass, and MarkdownBody.test.tsx is 51 pass, 0 fail. CI at the merge head has lint, typecheck, test and dispatch-memory green; its one red is main's migration-numbering test, and the dispatch lane is still running."
+    "how": "The merge alone, as scoped. Three of the architect's four checks hold outright: the frozen-lockfile install succeeds at the head, MarkdownBody.test.tsx and the whole dispatch package pass, and the store package's timestamptz red fails identically on main's own tree against this pod's Postgres, so it is the harness cluster and not this change. The fourth, the bun.lock comparison, needs the architect's ruling rather than my verdict: the two version lines do differ from main@origin's bun.lock, which is the stated failure condition, but the reason is that main's lockfile is stale against main's own package.json, and the branch never touched either package."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "The merge's one conflict, pending_authors.go, is resolved so that main's #2496 block is kept whole, nothing is declared twice, and the branch's own load-failure behaviour survives.",
-      "surface": "The merged tree against both parents, read file by file, and the Go package that compiles them.",
-      "command": "git diff 67901f79a (main's side) 2898fcf0 -- packages/envoy/internal/dispatch/docs/roomcursor.go; grep of the top-level declarations of roomcursor.go and pending_authors.go; and the read of websocket.go's LoadDoc.",
-      "observed": "roomcursor.go differs from main's by 5 added and 4 removed lines, all of them inside two doc comments (beginRoomLoad's and keepInstance's), which now say a record also goes where the failure that ended its load was met; no statement of main's cursor-gate rewrite is touched. The two files share no declaration: roomcursor.go holds roomInstance, roomLoad and its methods, beginRoomLoad, tookResidentVersion, keepInstance, instanceOf, cursorOf, roomCursor and the cursor helpers, while pending_authors.go holds inflightCredit, UpdateCredit, roomHold, heldUpdates, authorCapture, uploadHold and the author helpers - so the block the branch had moved beside LoadDoc is gone from it rather than living in both. LoadDoc (websocket.go:88) begins the load's record, and its own defer recovers the panic, turns it into an error and calls failRoomLoad(room, load, err) with that record - on the load's goroutine, before ygo's recovery hands waiters the error with the room still healthy, which is the shadow the comment names.",
-      "headSha": "9412cdb5580236eac31a6c4abba55c0fa6575010",
-      "negativeControl": "A duplicate declaration would not compile, and the package does: the whole docs suite builds and runs below. For the parts a compiler cannot catch, the control is main's own side of the diff - had the resolution taken the branch's copy of the block, roomcursor.go would differ from main's by its statements and not by two comments."
+      "criterion": "The architect's check 1: the four changed bun.lock lines (pi-envoy 14.2.0, pi-legion 16.3.0) against main@origin's bun.lock, so #2519's lockfile diff over main stays its patchedDependencies.",
+      "surface": "The lockfile and the package manifests, at the merge head and at both of its parents.",
+      "command": "git diff origin/main 9125d44d -- bun.lock; git show <ref>:bun.lock and <ref>:packages/pi-envoy/package.json for origin/main, 9125d44d and both parents; git diff --name-only origin/main af88a6b3 -- packages/pi-envoy/package.json packages/pi-legion/package.json",
+      "observed": "They differ, and not as churn this branch authored. main@origin's bun.lock says pi-envoy 13.11.1 and pi-legion 15.7.1; both parents of the merge say the same; the merge commit says 14.2.0 and 16.3.0. But main@origin's own packages/pi-envoy/package.json says 14.2.0 and packages/pi-legion/package.json says 16.3.0, and this branch changes neither file (the diff over main is empty for both). So main's lockfile is the stale one - its two workspace version strings lag the manifests main itself carries - and what the merge's `bun install` did was bring those two strings up to what main declares. The rest of the lockfile diff over main is this change's own: the five patchedDependencies entries and the micromark-core-commonmark dependency of packages/proof-editor.",
+      "headSha": "af88a6b3ba6429047c06a552889919ae5d505064",
+      "negativeControl": "Both trees install under the frozen lockfile, so neither state is refused by the tool that reads it: at the head `bun install --frozen-lockfile` is 'Checked 939 installs across 1120 packages (no changes)', and on a `git archive` of origin/main in $TMPDIR it is '924 packages installed' with exit 0. Reverting the two lines would restore main's disagreement between its lockfile and its manifests rather than remove a difference this change introduced."
     },
     {
-      "criterion": "The load rows the architect named pass at the merge head, against a real Postgres, and so does the rest of the document service.",
-      "surface": "The Go document service package against the harness Postgres lane of this role.",
-      "command": "export LEGION_ROLE=tester && source /legion/harness/env.sh && export DISPATCH_TEST_DATABASE_URL=\"$DATABASE_URL\" && cd packages/envoy && go test ./internal/dispatch/docs -count=1 -timeout 45m; then the same with -run over the named rows and -v.",
-      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/docs 1522.997s. The named rows, each PASS: TestALoadThatPanicsFailsItsRoomWhereThePanicIsMet (0.75s), TestPanickingColdLoadFailsTheRoomAndRecovers (2.03s), TestLoadFailureMakesDocumentServiceUnavailable (0.48s), TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable (0.49s), TestTheStoreJudgesAnUpdateByItsHeader (1.59s). TestALoadFailureAnswersForItsOwnLoadAndNotTheLoadAfterIt is not at this head: the round that rewrote the load-identity work around ygo's recovered LoadDoc panic replaced it with the panics row, and nothing of that name remains in the package. A wider sweep (-run 'Load|Room') is green too, 25 rows including the room-load, stored-history and cursor rows main's #2496 rewrote.",
-      "headSha": "9412cdb5580236eac31a6c4abba55c0fa6575010",
-      "negativeControl": "These same rows are the ones that caught the earlier merge: when main's #2496 first came in, TestTheStoreJudgesAnUpdateByItsHeader went red with 'the refused load left the room healthy, so nothing reloads the document', which is the failure this resolution has to keep fixed - and it is the row I ran first."
+      "criterion": "The architect's check 2: `bun install --frozen-lockfile` succeeds at the head.",
+      "surface": "The workspace at the merge head.",
+      "command": "cd \"$LEGION_WORKSPACE\" && bun install --frozen-lockfile",
+      "observed": "Exit 0: 'Resolved, downloaded and extracted [8]', 'Checked 939 installs across 1120 packages (no changes) [753.00ms]'.",
+      "headSha": "af88a6b3ba6429047c06a552889919ae5d505064",
+      "negativeControl": "The same command on main's own tree also exits 0, which is what makes the lockfile difference above inert rather than load-bearing."
     },
     {
-      "criterion": "The render path's unit rows are unaffected by the merge.",
-      "surface": "The markdown render path's unit surface in this workspace.",
-      "command": "cd packages/dispatch && bun test web/src/features/refs/MarkdownBody.test.tsx",
-      "observed": "51 pass, 0 fail, 433 expect() calls in 7.9 s - the same shape as the twenty runs of round 8, with the waits that round added still holding after the merge.",
-      "headSha": "9412cdb5580236eac31a6c4abba55c0fa6575010",
-      "negativeControl": "Round 8's forced-lag seam is the standing control for this file: the reviewed file reds 16 of 51 under one task of lag where this one is 51 of 51."
+      "criterion": "The architect's check 3: MarkdownBody.test.tsx and the dispatch package pass at the merge head.",
+      "surface": "The markdown render path's unit surface and the whole dispatch package.",
+      "command": "cd packages/dispatch && bun test web/src/features/refs/MarkdownBody.test.tsx && bun run test",
+      "observed": "51 pass, 0 fail, 445 expect() calls in 9.2 s; and the package 3,138 pass, 0 fail, 14,356 expect() calls across 214 files in 160 s - nine rows more than the 3,129 of round 8, which is main's own growth through this merge.",
+      "headSha": "af88a6b3ba6429047c06a552889919ae5d505064",
+      "negativeControl": "Round 8's forced-lag seam remains the control for this file: the pre-fix copy reds 16 of 51 under one task of lag where this one is 51 of 51."
+    },
+    {
+      "criterion": "The architect's check 4: the store package's timestamptz red is the pod's Postgres and not this change - it must fail on main's tree too.",
+      "surface": "The Go store package against this role's harness Postgres lane, at the merge head and on a checkout of origin/main.",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$DATABASE_URL go test ./internal/dispatch/store -count=1; then the same -run TestScannedTimestampsCarryUTCWhateverTheHostZone -v in $TMPDIR/main-tree, a git archive of origin/main.",
+      "observed": "Identical failure on both trees: 'store_test.go:170: read a timestamptz: simple protocol queries must be run with client_encoding=UTF8', in the row's text subcase, TestScannedTimestampsCarryUTCWhateverTheHostZone. At the head the package is FAIL in 332 s with that one row; on main's tree the same row FAILs in 0.03 s. The cause is this pod's harness cluster, which was created SQL_ASCII: `show server_encoding` and `show client_encoding` both answer SQL_ASCII, and pgx refuses a simple-protocol query unless the client encoding is UTF8. Nothing of this change touches the store package.",
+      "headSha": "af88a6b3ba6429047c06a552889919ae5d505064",
+      "negativeControl": "main's tree is the control and it fails the same row with the same message, which is what distinguishes a harness fault from a regression; CI's own store rows are green on main, where the cluster is UTF8."
     }
   ],
   "ciRead": [
-    "Run 41328402117 at the merge head 2898fcf0, read at 17:36Z: lint, typecheck and test green - three of the four required checks - along with dispatch-memory, dispatch-browser-multiprocess, dispatch-multiprocess, envoy-e2e-local, envoy-smoke, envoy-session-stall, envoy-client, envoy-infra-go, listener-server-change, contracts, claude-envoy, pi-envoy, pi-legion, pi-shared, docs, ci-filters, ci-images, conflicts-script, broker-multiprocess and worker-image / build. The dispatch lane and envoy-go, envoy-go-race-docs are still running, so the dispatch lane is unjudged, at that run id. pr-title reports on the pull request's head rather than this commit and is not in this run.",
-    "The run's one red is envoy-go-race, and it is main's, not this change's: job 124914080116, store_test.go:391, 'migration 0158_message_delivery_urgency.up.sql takes version 158: the numbered migrations ended at 157…'. That is TestMigrationSetTakesNumbersThenTimestamps, which the controller reported red on main since 15:45Z from #2387's numbered migrations 0158-0161, with a one-line fix in the merge lane. Per the architect's instruction I spent no fix round on it and record it with the run id; this branch adds no migration of its own.",
-    "dispatch-memory is green again at a code head, and its shapes read: ')_' 245 MiB, two-column table 172, four-column table 215, headings 159, 'a_b*' 106 - all under the 256 MiB bound, with the four-column table in the same band as the 220 MiB of the last settled run and far from the 260 that was red in round 3."
+    "Run 41342449562 at the code head 9125d44d, read at 19:55Z: changes, ci-images, conflicts-script and typecheck green; lint, test, dispatch, dispatch-memory, the envoy-go lanes and the rest queued or running. So the dispatch lane, ci-ok and two of the four required checks are unjudged, at that run id.",
+    "The previous merge head's run, 41328402117 at 2898fcf0, settled with its one red being main's migration-numbering test (envoy-go-race, store_test.go:391, migration 0158 after numbering closed at 157). That is what 0642a37a fixed on main and what this merge brings in, so the lane should come back green here; this round is the first chance CI has had to show it."
   ],
   "observations": [
-    "This round touched no browser surface and no Go behaviour of this change, so rounds 7 and 8's measurements stand where they were taken; what is new here is only that main's cursor-gate rewrite and this branch's load-failure work hold together.",
-    "The merge is a large one - 58 files and about 5,800 added lines in internal/dispatch alone against the branch's side - and the docs package takes 1,523 s on this pod, which is worth knowing before anyone re-runs it under a shorter deadline: go test's default 10 minutes is not enough and -timeout 45m is what I used."
+    "Check 1 is the one thing I will not rule on alone, because the architect's rule and the evidence point different ways. The rule says a difference from main's bun.lock is a defect of this round; the evidence says the difference is two workspace version strings that main's own package.json already declares, that this branch never touched either manifest, and that both trees install under the frozen lockfile. Reverting them would make this pull request's lockfile disagree with the manifests it ships beside, which is the state main is in today. I am recording it rather than failing the round on it, and have asked the architect to rule - the issue is past its round cap, so a round spent on two inert lines is worth a decision rather than a reflex.",
+    "The store package needs an encoding the harness does not give it. A pod cluster created with `initdb` and no locale lands on SQL_ASCII, and that is enough to red one store row at any head; if a later round needs the store package green on a pod, the lane's cluster has to be created with UTF8 rather than the row changed."
   ]
 }
