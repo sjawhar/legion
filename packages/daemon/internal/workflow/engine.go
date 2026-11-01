@@ -1096,9 +1096,8 @@ func noticeFor(trigger TriggerKind, from phase.Phase, handoff record.PhaseRow, r
 // Envoy topic. Only that move sends one: every other move out of a phase is the working role's own
 // completion or backward move, which that role made and so already knows of, and the approval and
 // the merge the daemon raises of its own leave a role that has just finished the work they report,
-// with no reason of the kind this message carries. Before this change the trigger was the CI red
-// that moved an issue, which moves none now (dispatch://INFRA-714 R1); a head that starts
-// conflicting with its base is what takes its place.
+// with no reason of the kind this message carries. A CI result moves no issue
+// (dispatch://INFRA-714 R1), so the trigger is a head that starts conflicting with its base.
 // The recipient is RoleFor(from) whenever that is a role other than the architect, read from the
 // transition alone rather than from what the role had done: the tester in testing, the reviewer in
 // reviewing whether or not it completed its round, the merger in merging, and the implementer in

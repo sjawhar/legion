@@ -59,11 +59,10 @@ type CiOutcome struct {
 // settlement reports the title check at the run it had there while the handoff head above it has
 // run that check again, and the handoff head's settlement reports no run at all of the checks
 // that ran only on the code head. Each name is then decided on its own by the newest run of it
-// (mergeAttemptSets, and the conclusion that run came to), so neither head's facts are lost; the
-// rule this replaced called such a set a conflict and dropped the whole settlement, which lost
-// the code head's red for as long as the handoff heads stood above it. Every other
-// classification is as it was: a set older for every name it reports is stale, and a settlement
-// of the same generation and snapshot is the same observation delivered again.
+// (mergeAttemptSets, and the conclusion that run came to), so neither head's facts are lost and
+// the code head's red stands however many handoff heads sit above it. A set older for every name
+// it reports is stale, and a settlement of the same generation and snapshot is the same
+// observation delivered again.
 func ClassifySettlement(pr record.PullRequest, in SettlementCandidate) SettlementClassification {
 	if pr.CheckRuns == nil {
 		return SettlementNewer
@@ -92,8 +91,8 @@ func ClassifySettlement(pr record.PullRequest, in SettlementCandidate) Settlemen
 // omits: a check the stored settlement names failing or cancelled that the new one does not report
 // at all stays as it was.
 //
-// It is kept exported and unchanged now that each name the fence holds a run for is decided by
-// that run's own conclusion (concludedBy, which ApplySettlement layers over this). The two
+// Each name the fence holds a run for is decided by that run's own conclusion (concludedBy, which
+// ApplySettlement layers over this), and this stays apart from it. The two
 // answer different questions and only one of them could be folded into the other: a settlement
 // may name a check failing and report no run of it - an aggregate job whose needs: never ran, so
 // GitHub started nothing - and no run means no conclusion to read, so what the lists say is all

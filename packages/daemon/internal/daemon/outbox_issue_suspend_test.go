@@ -670,7 +670,7 @@ func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 	// worker that did the work back (dispatch://INFRA-714 R8, A10). This deployment's sessions
 	// are rows in a session database (Options.SessionStore above), not files on the volume the
 	// close deletes, so the path still names a session its store holds and the close leaves it
-	// alone (supervise.Deps.SessionOnIssueVolume).
+	// alone.
 	if got := storedClaim(planner.Token); got.State != supervise.StateRetired || got.Session != planner.Session || got.SessionFile != planner.SessionFile || got.Locator != nil {
 		t.Fatalf("done child's planner after the close = %+v, want retired with its session, its resume path and no locator", got)
 	}
@@ -730,9 +730,9 @@ func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 	// started again on the session it recorded, where a fresh agent would have read none of its
 	// own earlier work (dispatch://INFRA-714 R8, A10). Both halves of that record survive the
 	// close here — the id, which the session database holds and the volume reaping reads as its
-	// evidence, and the resume path, which is the only handle a runtime resumes by. The path
-	// would go only under a deployment that wrote the session to the deleted disk
-	// (supervise.Deps.SessionOnIssueVolume), which is not this one.
+	// evidence, and the resume path, which is the only handle a runtime resumes by. No session
+	// store the configuration accepts keeps a session on the deleted disk (config's
+	// readSessionStore refuses pvc), so the close never clears the path.
 	if got := storedClaim(planner.Token); got.Session != "saved-planner" || got.SessionFile != planner.SessionFile {
 		t.Fatalf("re-entered child's planner = %+v, want the session and resume path it recorded kept", got)
 	}

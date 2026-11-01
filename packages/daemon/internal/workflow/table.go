@@ -97,9 +97,9 @@ var Table = append([]Row{
 	{From: phase.Reviewing, Trigger: TriggerReviewRejected, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
 	{From: phase.Retro, Trigger: TriggerRetroCompleted, Guard: allow, To: phase.Merging, Effects: []EffectKind{EffectStart, EffectNotice}},
 	// A head that conflicts with its base goes back to implementing from every phase after the
-	// implementer's own (transition). It is one trigger for all of them so that the quiesce
-	// (takenOver) and the architect's notice (noticeFor) have a single name to key on, and so that
-	// the architect's own backward move stays the separate thing it is.
+	// implementer's own (transition). It is one trigger for all of them so that the role's
+	// phase-ended message (phaseEnded) and the architect's notice (noticeFor) have a single name to
+	// key on, and so that the architect's own backward move stays the separate thing it is.
 	{From: phase.Testing, Trigger: TriggerConflict, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
 	{From: phase.Reviewing, Trigger: TriggerConflict, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
 	{From: phase.Accepting, Trigger: TriggerConflict, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},

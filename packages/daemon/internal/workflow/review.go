@@ -572,9 +572,9 @@ func stuckMergeStateReason(pr record.PullRequest) string {
 // a check run on that head itself and every one of them has concluded. A settlement carried
 // back from the code head through handoff-only pushes never satisfies it, and must not: the
 // handoff push that left this head carries no skip-checks trailer unless its author wrote one,
-// so GitHub runs CI here too and answers `blocked` while it does - the rule this replaced took
-// the carried settlement for an account of this head and reported the round stuck at once,
-// marking the head told before the checks that would clear it had finished.
+// so GitHub runs CI here too and answers `blocked` while it does. Read off the carried settlement,
+// the round would be reported stuck at once and the head marked told before the checks that
+// would clear it had finished.
 // An approval GitHub answers with a state it would not merge from, on a head whose own checks
 // have all concluded, is stuck (stuckMergeState): the architect and the reviewer are told, once
 // for each head and state (record.ReviewDecision.ToldStuckHead), since the checks that would
