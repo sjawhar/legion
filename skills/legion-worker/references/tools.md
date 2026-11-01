@@ -498,6 +498,14 @@ something to count.
   matters to durable storage as it is produced, not at the end: a node can vanish within a minute
   of a pod ending, so an unpersisted log is gone even when nothing killed anything, and a
   terminating pod's grace period can be as short as 25 seconds, which is no time to flush.
+
+  **The phase lies in the other direction too, and that one is worse.** A lane measured a Job
+  reporting `Running` for 23 minutes while its pod count was **zero**: the quota was full, every
+  pod create was refused (`exceeded quota … requested: requests.cpu=16, used: 198, limited:
+  200`), and the controller kept retrying. A watcher reading the phase would have called that
+  build running all night. **The phase is a request; the pod list is the result.** If you watch
+  a Job, watch `kubectl get pods -l batch.kubernetes.io/job-name=<job>`, or watch the marker
+  your own work writes — never the phase alone.
 - **gVisor.** Every pod runs under gVisor, which does not give a test every interface the Linux
   kernel does. In `packages/envoy` the tests of `cmd/agent-secrets`, `cmd/agent-secrets-helper`
   and `internal/broker/helper` fail: the helper identifies its peer with `SO_PEERPIDFD`, which
