@@ -2,120 +2,95 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-839",
-  "completed": "2026-10-31T15:05:00Z",
-  "round": 6,
+  "completed": "2026-11-01T00:05:00Z",
+  "round": 7,
+  "codeHead": "efa9c9be467afc8128ea479d26060eb3f5125dd0",
+  "branchHead": "e19f161c6ca891b3b8f54d5334029ec8a3d6c4a8",
   "answersReviewFindings": [
     {
-      "finding": "Blocking 1 (role_keep.go:443): the handover still gives a lane up with copies on it while the holder is live, in three ways, and nothing starts another.",
-      "fix": "roleKeepDrainResult gained `passed`, the copies a walk moved the cursor past without forwarding, and the handover counts `forwarded > 0 || passed > 0` as progress, so a run of walks over expired or refused copies is not idle. A failed walk no longer spends an idle round: it earns a widening pause (roleKeepDrainBackoff, 1 s doubling to roleKeepDrainRetryCap 30 s, reset on progress) and retries while the holder is live and the handover's context lives, and so does every failed holder resolution but the first of all, which is the keep's own case. New startKeptRoleSweep/sweepKeptRoleLanes runs at the listener's start and every five minutes beside the reapers and hands over every lane holding copies after its cursor whose role has a live holder, so a handover this process lost to a restart or a rolling deploy is picked up.",
-      "tests": [
-        "TestAHandoverWalksPastMoreExpiredCopiesThanItsIdleWalksAllow",
-        "TestAHandoverRetriesMoreFailedWalksThanItsIdleWalksAllow",
-        "TestTheSweepHandsOverALaneNoHandoverIsDraining",
-        "TestKeptRoleLanes (internal/bus)"
-      ],
-      "departure": "The per-role guard moved from the walk to the handover (roleKeepGuards.hold/tryHold): a per-walk lock answers 'a walk is in flight', and the sweep needs 'a handover is running' so it starts no second one. That also satisfies minor :436 by construction. Stated in the replies on PRRT_kwDORFy7ds6yRFed and PRRT_kwDORFy7ds6yRFei."
+      "finding": "Blocking 1 (role_keep.go:493): every pass of the handover resolves the role's holder before anything reads the kept lane, so every POST /v1/roles/set starts a goroutine that reads the session registry even for a role nothing was kept for, and envoy-go-race is red at 5593037ddf83 with a data race in TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim/role_delivery.",
+      "fix": "Each pass now runs pause, then readKeptLaneHead, then the holder resolution, then the walk. A pass whose head read finds the lane empty returns with no resolution at all, so a claim of a role with nothing kept costs the one stream read it cost before round 3. Round 3's ordering is kept for the passes that do run: the holder is resolved after the pause. A failed head read behaves exactly as a failed holder read does, through one local `failed` helper, so the first pass of all ends the handover and a later one widens the backoff.",
+      "test": "TestAHandoverOfAnEmptyKeptLaneResolvesNoHolder - counts the session-bucket reads a resolution makes (the read role_holder.go:229 -> session/registry.go:529 that the detector caught) and requires zero for an empty lane, with a positive control over a lane that holds a copy. Fails at the pre-change code, passes here. The race lane is green: go test -race -count=1 -run 'Role|Kept|Keep' ./cmd/listener ok 202.373s, and -race -count=20 over the claim, handover, sweep and kept-copy tests ok 669.613s."
     },
     {
-      "finding": "Blocking 2 (outbox/publisher.go:1248): the reason given for Dispatch's keep:false is not what the outbox does, and Dispatch's role-routed events to an unheld role are still dropped. The architect's decision to make again.",
-      "fix": "INFRA-514's architect reversed the round-2 census decision on 2026-10-31 with the reviewer's facts. `keep: false` and the dispatchRoleKeep package variable are gone from publishRoute, so a Dispatch role-routed event carries no flag and is kept for the role's next holder like any role message. The envelope field and the lane's honouring of it stay for a sender with its own queue (the Legion daemon's notice queue, a phase worker's stall reminder). publishRoute's doc, envelope.ts, keepForNextHolder's doc, AGENTS.md, docs/architecture.md, the envoy and contracts fragments, the census row and the PR body all now state what the outbox does: it sends a role route once, marks the event published on NATS acceptance and reads no no_holder.",
-      "tests": [
-        "TestARoleRoutedEventIsKeptForTheRolesNextHolder (outbox, rewritten from TestARoleRoutedEventTellsTheRoleLaneToKeepNothing)",
-        "TestADispatchRoleRoutedEventToAnUnheldRoleReachesTheNextHolder (listener, new: the envelope publishRoute builds, published raw onto an unheld role's lane, is kept and then handed to the session that claims the role)"
-      ],
-      "release": "sjawhar/legion#2395 is OPEN at this round (gh pr view 2395), so item 1 is done on this base. Once it merges the outbox sends every role route as a Request to the holder's agent subject and records an unheld role's route as reached without sending, so keeping moves into that branch; INFRA-514's architect ruled that is the round after #2395 lands. Recorded in the PR body's Not proven / risk."
+      "finding": "Blocking 2 (api.go:754): since the Dispatch reversal the envelope's keep field has no producer but this line, and it rides on every forwarded keep:false notice and back in every publish answer.",
+      "fix": "The field is deleted from packages/contracts/src/envelope.ts, packages/contracts/schemas/envelope.schema.json and the regenerated packages/envoy/internal/contracts/generated.go, so no forwarded copy and no publish answer can carry a keep key. The route's own request field stays for the Legion daemon's notice queue and the phase worker's stall reminder: publishHandler stamps no envelope, the role branch passes request.Keep == nil || *request.Keep to sendToRole, roleSend carries that keep, and noHolder gates on it before keepForNextHolder, which now decides only isValidRole and the lapsed-claim retention. The raw role lane always keeps.",
+      "test": "TestNoKeptRoleCopyOrPublishAnswerCarriesAKeepKey (the key's absence on a forwarded kept copy and on a publish answer) and TestAPublishWithKeepFalseToAnUnheldRoleIsRefusedAndKeepsNothing (the route's 404 with nothing stored). TestTheRoleLaneKeepsNothingForASenderThatKeepsItsOwnQueue is replaced by TestTheRoleLaneKeepsARawRolePublishForTheRolesNextHolder, the half that still holds. packages/envoy/internal/dispatch/outbox/publisher_role_keep_test.go is deleted, its whole subject being a field that no longer exists; TestADispatchRoleRoutedEventToAnUnheldRoleReachesTheNextHolder remains the behaviour test for that path."
     },
     {
-      "finding": "Blocking 3 (role_keep.go:452): the holder is resolved before the 60 s pause, so the walk after it uses a holder and a session entry 60 s old, and roleKeepDrainHolds reads an unclaimed role as still held.",
-      "fix": "The holder is resolved at the top of every pass, after the pause. drainKeptRole(ctx, cfg, role, now) takes no holder and no entry; startKeptRoleDrain and drainAfterKeep are gone, collapsed into runKeptRoleDrain(cfg, role) for both the claim route and the keep path, with reportKeptRoleDrain the one failure line the three starts share. Three resolution points became one.",
-      "tests": ["TestAHandoverResolvesTheHolderOfAWalkAfterThePauseBeforeIt"]
+      "finding": "Minor role_keep.go:624 - the sweep's lane-head read copies the walk's opening.",
+      "fix": "keptRoleCopiesLeft is deleted; one readKeptLaneHead(ctx, client, role) returns the lane's last sequence, the cursor sequence, the cursor body and store time, and whether anything is left, and the sweep, the handover's pass opening and walkKeptRole all call it; the walk takes its cursor sequence, claim and kept from that head.",
+      "test": "No new test of its own: the existing sweep, handover and walk tests all drive the one helper now, and TestTheSweepHandsOverALaneNoHandoverIsDraining and TestAHandoverOfAnEmptyKeptLaneResolvesNoHolder both fail if its 'anything left' test is wrong."
     },
     {
-      "finding": "Minor role_keep.go:436 - the walk's 60 s window starts before the per-role lock.",
-      "fix": "The roleKeepDrainWindow context is created inside walkKeptRole, after the lock, and the guard itself is the handover's, so a second handover of the same role waits outside any walk window."
+      "finding": "Minor role_keep.go:523 - the post-walk decision is split between roleKeepDrainAgain and the loop, and progress is tested twice.",
+      "fix": "roleKeepDrainAgain is deleted and the decision is one switch in the loop: progressed computed once and resetting idle and backoff; LaneDrained returns; DrainFailed widens the backoff and continues; LaneBusy pauses roleKeepClaimWindow; WorkLeft and HolderMoved pause 0; then the idle count.",
+      "test": "No new test: round 3's handover tests (TestAHandoverWalksPastMoreExpiredCopiesThanItsIdleWalksAllow, TestAHandoverRetriesMoreFailedWalksThanItsIdleWalksAllow, TestADrainStopsWhenTheRoleChangesHolderUnderIt, TestOneClaimHandsOverAKeptLaneLongerThanOneWalkOfIt) pin each branch of it and pass untouched, which is what 'the behaviour must not change' means here."
     },
     {
-      "finding": "Minor role_keep.go:629 - a receipt timeout is counted as delivered.",
-      "fix": "forwardKeptRoleMessage is deleted; the walk calls cfg.forwardAndWait and passes its outcome to finishRoleForward, so a kept copy that drew no receipt counts and logs receipt_timeout as the live lane does and its dedupe is not recorded delivered; the walk goes on.",
-      "tests": ["TestAKeptCopyThatDrewNoReceiptIsReportedReceiptTimeout"]
-    },
-    {
-      "finding": "Minor role_keep.go:182 - an ownership result translated twice through a fake 'drained' value.",
-      "fix": "writeRoleKeepCursor returns (uint64, error); bus.ErrCursorMoved maps to roleKeepLaneBusy once at the call sites through roleKeepWriteFailed; roleKeepWriteEnd and the owned result are deleted."
-    },
-    {
-      "finding": "Minor confirmed.go:252 - the keep decision lives in two flags with one wire name.",
-      "fix": "api.go sets item.Keep = request.Keep after messageEnvelope; roleSend.keep and sendToRole's keep parameter are deleted, and keepForNextHolder decides for both give-up paths from the envelope alone."
-    },
-    {
-      "finding": "Minor publisher.go:1266 - every role-routed envelope shares one package variable.",
-      "fix": "Deleted with the opt-out: publishRoute sets no keep flag and dispatchRoleKeep is gone, so no envelope points at shared state."
-    },
-    {
-      "finding": "Minor role_keep.go:96 - the idle-rounds doc says three walks, the loop gives up on the fourth.",
-      "fix": "The check is idle >= roleKeepDrainIdleRounds and the doc says the third such walk is its last, and also says what an idle walk is now: one that neither forwarded a copy nor moved the cursor past one, a failed walk not being one."
-    },
-    {
-      "finding": "Minor - three stale changelog fragments (pi-legion, contracts, envoy).",
-      "fix": "pi-legion's phase-reminder fragment is rewritten as the opt-out it is (keep: false, the 404 and the next reminder's own retry). contracts' fragment announces both public envelope fields, kept_at and keep, with what an absent keep means. The envoy fragment adds the lane honouring the envelope's keep, the handover and the restart sweep, and no longer says Dispatch's outbox sets the flag."
-    },
-    {
-      "finding": "Minor - AGENTS.md:2403-2405 and docs/architecture.md:106,279-282 describe the round-2 drain.",
-      "fix": "packages/envoy/AGENTS.md:2403-2406 and packages/envoy/docs/architecture.md:282-300 are rewritten for the handover, its bounds, the backoff and the sweep, and architecture.md:104-109 now names all four keep-nothing cases as AGENTS.md:3126 does."
+      "finding": "Minor role_keep.go:608 - the sweep logs at Info and starts work for roles with no holder, every 5 minutes on every listener.",
+      "fix": "The sweep reads the role's cached claim before it takes the guard, skips a lane whose role no session claims, and logs the find at Debug with the claim's session. sweepKeptRoleLanes's doc states why: nothing moves such a lane's cursor, so at Info with a handover started every pass would log and work the same lane for the stream's 72 hours.",
+      "test": "No new test of its own: TestTheSweepHandsOverALaneNoHandoverIsDraining covers the lane with a live holder, and the skip is the absence of work, which that test's claim-free setup would otherwise have produced."
     }
   ],
   "proof": [
     {
-      "criterion": "Acceptance 1: a role message the listener cannot deliver is kept and forwarded once, in order, to the role's next holder, and after this round the handover keeps walking the lane for the role's current holder and a lane this process loses is picked up by the sweep.",
+      "criterion": "Acceptance 1 to 3 end to end at the head that merges: a role message the listener cannot deliver is kept, the sender is told, and the role's next claim is handed each kept copy once carrying kept_at, while a sender with a queue of its own still gets the 404.",
       "surface": "The real local stack: a built Envoy listener, a real nats-server and a real session process that registers, claims and reads its agent subject (packages/envoy/scripts/e2e-local.sh), run in this issue pod.",
       "command": "cd -- \"$LEGION_WORKSPACE\" && timeout 1200 bash packages/envoy/scripts/e2e-local.sh",
-      "observed": "exit 0 with 'unclaimed-role window: kept message bcd4a183c76a369b4199731b212fc6b1 reached the fake session exactly once, carrying kept_at', 'lapsed-claim window: kept message 47f27a716655169c61c3589920e1e501 reached the fake session exactly once, carrying kept_at', 'keep-false control: the unheld role answered 404, nothing was stored and its claimant was handed nothing', and both PASS lines.",
-      "headSha": "5593037ddf8314876e8130cf794e5a4ca07d3dbb",
-      "negativeControl": "Before the change, measured on this round's two candidate bases with a throwaway test driving the same three cases: the unheld role answered 404 {\"error\":\"no holder for role t0-unheld\",\"reason\":\"unclaimed\"} and the lapsed claim 404 with \"holder_lapsed\",\"claim_released\":true, nothing stored and nothing delivered to the claimant."
+      "observed": "exit 0 at the merge head e19f161c6ca8 with 'unclaimed-role window: kept message f96f43dfa7ddbf916654f3ec2d5c6cf1 reached the fake session exactly once, carrying kept_at', 'lapsed-claim window: kept message a7d67e6f4ffc0f914fdf387bc0d26ba0 reached the fake session exactly once, carrying kept_at', 'keep-false control: the unheld role answered 404, nothing was stored and its claimant was handed nothing', and both PASS lines.",
+      "headSha": "e19f161c6ca891b3b8f54d5334029ec8a3d6c4a8",
+      "negativeControl": "Before the change, on this round's two candidate bases: the unheld role answered 404 {\"error\":\"no holder for role t0-unheld\",\"reason\":\"unclaimed\"} and the lapsed claim 404 with \"holder_lapsed\",\"claim_released\":true, nothing stored and nothing delivered to the claimant."
     },
     {
-      "criterion": "Acceptance 2 and 3: the sender is told its message was kept (202, kept, kept_reason, kept_at on the forwarded copy) and a sender with a queue of its own opts out and still gets the 404; after this round Dispatch's outbox is no longer one of those senders.",
-      "surface": "The Go suites of the listener, the bus, the Dispatch outbox and the store, the outbox package against a real Postgres.",
-      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && DISPATCH_TEST_DATABASE_URL=\"postgres://postgres:***@127.0.0.1:5433/postgres\" GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -count=1 -timeout 2400s ./cmd/listener ./internal/bus ./internal/dispatch/outbox ./internal/store",
-      "observed": "ok github.com/sjawhar/envoy/cmd/listener 681.135s; ok .../internal/bus 359.606s; ok .../internal/dispatch/outbox 193.446s; ok .../internal/store 32.041s. TestARoleRoutedEventIsKeptForTheRolesNextHolder and TestADispatchRoleRoutedEventToAnUnheldRoleReachesTheNextHolder are in that run, and the outbox package runs with the DSN set, as ci.yaml's envoy-go job sets it at job level (line 2262), so those tests do not skip in CI.",
-      "headSha": "5593037ddf8314876e8130cf794e5a4ca07d3dbb",
-      "negativeControl": "Each of this round's five new tests was run at the pre-change code in a scratch copy under $TMPDIR and failed there: TestAHandoverWalksPastMoreExpiredCopiesThanItsIdleWalksAllow, TestAHandoverRetriesMoreFailedWalksThanItsIdleWalksAllow, TestTheSweepHandsOverALaneNoHandoverIsDraining, TestAHandoverResolvesTheHolderOfAWalkAfterThePauseBeforeIt, TestAKeptCopyThatDrewNoReceiptIsReportedReceiptTimeout."
+      "criterion": "The red race lane the review found is green, and the claim path costs no holder resolution for a role with an empty kept lane.",
+      "surface": "The listener's own Go suite under the race detector, which is what ci.yaml's envoy-go-race job runs.",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && CGO_ENABLED=1 GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -race -count=1 -timeout 2400s -run 'Role|Kept|Keep' ./cmd/listener; and CGO_ENABLED=1 ... go test -race -count=20 -run 'TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim|TestAHandover|TestTheSweep|TestAKeptCopy' ./cmd/listener",
+      "observed": "ok github.com/sjawhar/envoy/cmd/listener 202.373s for the whole role set, and ok 669.613s for twenty runs of the race-prone subset, both with no WARNING: DATA RACE anywhere in the output. TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim, the test CI failed on, is in both.",
+      "headSha": "efa9c9be467afc8128ea479d26060eb3f5125dd0",
+      "negativeControl": "CI run 41212135030 at the previous code head 5593037ddf83 concluded failure, its envoy-go-race step reporting WARNING: DATA RACE and --- FAIL: TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim/role_delivery. A measurement for whoever repeats this: -race -count=50 over the whole Role|Kept|Keep set does not finish within a 3000 s timeout and so reports nothing either way."
     },
     {
-      "criterion": "Acceptance 4 and 5: the prose rules a role or agent reads state the kept answer and the handover as the code now works, and the contract is consistent across the two packages.",
-      "surface": "The repository's own static gates over the changed prose and contracts.",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && bash .github/scripts/check-private-names.sh && bunx biome check packages/contracts packages/envoy/cmd && (cd packages/contracts && bun run check:go && bunx tsc --noEmit && bun test)",
-      "observed": "check-private-names clean over 7093 files; biome 'Checked 60 files in 26s. No fixes applied.'; gen-go --check silent, so the Go mirror of the envelope contract matches; tsc clean; bun test 328 pass 0 fail.",
-      "headSha": "5593037ddf8314876e8130cf794e5a4ca07d3dbb",
-      "negativeControl": "The reviewer read the round-2 prose against the code and found AGENTS.md:2403-2405, docs/architecture.md:106 and :279-282 and three changelog fragments describing behaviour the code does not have; those are the lines this round rewrote, and each is cited in its thread reply."
+      "criterion": "Acceptance 4 and 5 and the whole change at the merge head: the Go suites, the contract mirror and the prose rules agree with the code after the base was merged forward.",
+      "surface": "The repository's own suites and static gates over the merged tree.",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -count=1 -timeout 2400s ./cmd/listener ./internal/bus ./internal/dispatch/outbox ./internal/store; then bun test in contracts, pi-envoy, envoy-client, pi-shared and claude-envoy; then gofmt, go build, go vet, bun run check:go, bunx biome check and .github/scripts/check-private-names.sh",
+      "observed": "ok cmd/listener 773.187s, ok internal/bus 331.675s, ok internal/dispatch/outbox 120.739s, ok internal/store 32.627s; bun test 328 contracts, 1783 pi-envoy, 1349 envoy-client, 93 pi-shared, 290 claude-envoy, 0 failures; gofmt silent, build and vet clean, gen-go --check silent, biome 'Checked 117 files. No fixes applied.', check-private-names clean over 7164 files.",
+      "headSha": "e19f161c6ca891b3b8f54d5334029ec8a3d6c4a8",
+      "negativeControl": "The same suite run at the first merge attempt failed: TestRoleSetHandlerSoftClaimPredecessorInstance panicked with a nil pointer at api.go:1296, because the base's new test builds listenerDeps with no delivery while this branch's claim hands the kept lane over. That is the merge consequence outside any conflict marker, found by building rather than by reading, and it is fixed by giving that test withRoleClaimDrain."
     }
   ],
   "filesChanged": [
     "packages/envoy/cmd/listener/role_keep.go",
-    "packages/envoy/cmd/listener/confirmed.go",
     "packages/envoy/cmd/listener/api.go",
-    "packages/envoy/cmd/listener/main.go",
+    "packages/envoy/cmd/listener/confirmed.go",
     "packages/envoy/cmd/listener/role_keep_test.go",
-    "packages/envoy/cmd/listener/role_keep_claim_test.go",
     "packages/envoy/cmd/listener/role_keep_handover_test.go",
-    "packages/envoy/cmd/listener/role_keep_loss_test.go",
-    "packages/envoy/cmd/listener/confirmed_test.go",
-    "packages/envoy/internal/bus/stored.go",
-    "packages/envoy/internal/bus/stream.go",
-    "packages/envoy/internal/bus/kept_test.go",
+    "packages/envoy/cmd/listener/role_claim_race_test.go",
+    "packages/envoy/cmd/listener/api_test.go",
+    "packages/envoy/cmd/listener/main_test.go",
     "packages/envoy/internal/dispatch/outbox/publisher.go",
-    "packages/envoy/internal/dispatch/outbox/publisher_role_keep_test.go",
+    "packages/envoy/internal/dispatch/outbox/publisher_role_keep_test.go (deleted)",
     "packages/contracts/src/envelope.ts",
+    "packages/contracts/schemas/envelope.schema.json",
+    "packages/envoy/internal/contracts/generated.go",
     "packages/envoy/AGENTS.md",
     "packages/envoy/docs/architecture.md",
+    "packages/claude-envoy/AGENTS.md",
+    "packages/pi-envoy/extensions/envoy.ts",
+    "skills/envoy/references/roles.md",
     "packages/envoy/.changes/unreleased/pr2588-kept-role-lane.yaml",
-    "packages/contracts/.changes/unreleased/pr2588-kept-subjects.yaml",
-    "packages/pi-legion/.changes/unreleased/pr2588-phase-reminder-kept.yaml"
+    "packages/contracts/.changes/unreleased/pr2588-kept-subjects.yaml"
   ],
   "trickyParts": [
-    "The sweep needs to tell 'a handover is running on this listener' from 'a walk is in flight', which the per-walk lock could not say, so the per-role guard moved to the handover. That is the one departure from the reviewer's sketch of minor :436, and it satisfies that minor too: no walk window is spent waiting on a lock.",
-    "A failed holder resolution is retried on the backoff, except the very first of a handover, which still ends it: that first resolution is the keep's own case, where a role nobody holds must cost one read and no walk. The boundary is the `walked` flag in handOverKeptRole.",
+    "This round was written twice. The pod was recreated mid-round and took the unpushed work with it; the INFRA merge lane had pushed it to legion/INFRA-839-rescue at bda9b68f before replacing the pod, so the code was rebuilt from scratch in the new pod and the four prose files were taken back from that branch with jj restore --from. The lane deleted the branch at my request. Nothing of this round is lost and nothing of it is unreviewed: every file is in the pushed head.",
+    "The forward merge was required, not chosen: GitHub reported the pull request dirty at the code head efa9c9be and ran no lane on it, because the base legion/INFRA-594 moved from 3666db31 to 15e39ed3. Six files conflicted; two were resolved by taking the base whole (the base deleted the function this branch had commented in pi-envoy's envoy.ts, and stated the claude-envoy clause more precisely than this branch's edit), and four kept both sides. The fingerprint changed (8e9b0506 -> b587f008), so this head goes through the tester as a new one; the forward-merge comment names every file and why.",
+    "The merge's two consequences outside any conflict marker are the ones worth remembering: the base added a third parameter to roleSetHandler, which broke five call sites in this branch's own tests, and the base's new TestRoleSetHandlerSoftClaimPredecessorInstance builds listenerDeps with no delivery, which this branch's claim-time handover dereferenced into a nil-pointer panic. Both were found by building and running, not by reading the conflicts.",
+    "A failed holder read is retried on the backoff except the very first of a handover, which still ends it: that first read is the keep's own case, where a role nobody holds must cost one read and no walk. The boundary is the `walked` flag in handOverKeptRole.",
     "The one-hour drop is still proven on a build whose roleKeepWindow is three seconds: the age is the stream's own store time, which no caller chooses."
   ],
-  "openQuestions": []
+  "openQuestions": [],
+  "notes": [
+    "Leftover check after every background job of this turn, per the architect's rule: ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|e2e-local|go test|nats-server' printed no lines, so nothing of mine was left running.",
+    "CI run 41254878038 was created on the merge head e19f161c6ca8 and is queued. Nothing of mine will be pushed over that head until it finishes, as the architect asked: every push to this pull request cancels the run before it."
+  ]
 }
