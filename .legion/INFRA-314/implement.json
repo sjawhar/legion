@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-314",
-  "completed": "2026-11-01T04:55:00Z",
+  "completed": "2026-11-01T11:10:00Z",
   "proof": [
     {
       "criterion": "A1, A2, A3, A4, A9, A10, A11: the broker serves its own approval page with a sign-in on its own origin; only the signed-in approver decides, and the decision is bound to what the page showed; nothing Dispatch holds decides; the four sign-in settings are required; a sign-in crosses processes and restarts",
@@ -115,6 +115,14 @@
       "observed": "The head is 6b100c1abd24 and GitHub reports it MERGEABLE where a648cb09 was CONFLICTING. Build, vet and gofmt clean; every named Go package ok; the dev stack reached 'dev-broker: ready.' with main's five token files, the pod-session registration and the branch's sign-in client in one run, whose real output replaces both sides' stale transcript in run-locally.md; the browser suite is 53 passed with 1 pre-existing skip; the docs site builds 43 pages with every internal link valid; the filter gate passes 28 gates with 0 uncovered once the dispatch filter follows main's move of internal/broker/ratelimit to internal/ratelimit. Migrations are renumbered to 0022_browser_sessions and 0023_signin_status above main's 0021_oauth_pod_sessions, and TestMigrationSetIsNumberedOneToN passes.",
       "headSha": "6b100c1abd2430700888bc70f490269879596c65",
       "negativeControl": "The fingerprint is the control, and it changed: 5846cf7e... at a648cb09 to ba3dad8b... at this head. Every changed file is named with its reason in https://github.com/sjawhar/legion/pull/2198#issuecomment-6553503533 - main's caller-powers model, its move of the ratelimit package, its migration 0021, and a dev-stack transcript neither side's run could describe. internal/broker/store's two IAM tests fail here as they do on main, needing a Postgres role with a password where this pod authenticates by trust."
+    },
+    {
+      "criterion": "The second conflict return: GitHub reported the approved head 6fea9a1b CONFLICTING/DIRTY against main d86f8de8, so main is brought in by a forward merge, the conflicts resolved, the migrations checked against main's, and the branch's own behaviour unchanged",
+      "surface": "the merged tree: the compiled broker and its packages on this pod's Postgres, Dispatch's browser suite in real Chromium against the real Dispatch server and the real broker binary, the docs site's build, and the repository's CI filter gate",
+      "command": "cd packages/envoy && go build ./... && go vet ./... && gofmt -l cmd internal ; go test -count=1 ./internal/broker/api/ ./internal/broker/approval/ ./internal/broker/config/ ./cmd/broker-refgen/ ./cmd/broker/ ./internal/broker/requests/ ./internal/broker/machine/ ; cd packages/dispatch && bun run e2e -- broker-approval.e2e.ts machine-login.e2e.ts inbox.e2e.ts --project chromium ; cd docs/site && bun run build ; bunx tsc --noEmit ; bunx biome check packages/dispatch packages/envoy .github ; bash .github/scripts/check-ci-filters.sh",
+      "observed": "The head is 8fb1cff15350 and GitHub reports it MERGEABLE where 6fea9a1b was CONFLICTING. Three files conflicted - cmd/agent-secrets/main.go's help, packages/envoy/AGENTS.md and docs/site/.../operate.md - and each keeps both sides whole; main took no migration 0022 or 0023, so ours stay as they are. Build, vet and gofmt clean; every named Go package ok, main's own VM suites included; the browser suite 53 passed with 1 pre-existing skip; the docs site 43 pages with every internal link valid; tsc 0; biome 793 files no fixes; the filter gate 27 gates with 0 uncovered.",
+      "headSha": "8fb1cff1535024319b0c7d03e5192caa67e1bba2",
+      "negativeControl": "The fingerprint is the control and it changed, 6b6c88e1 to f656e2e3, in exactly two files, both tests main's 4b0b98ec2 added whose expectations this branch contradicts: vm_login_test.go approved a secret request through the account route, which this branch refuses 403 DECIDE_ON_BROKER_PAGE for every caller, so the request stayed pending and both narrowings failed - the person now decides it on the broker's page through the rig's own ts.decide, and the test's assertions are untouched; and cmd/broker/vm_identity_test.go's vmConfig built a configuration with no BROKER_SIGNIN_*, which this branch's broker refuses to start without, so all four of its tests failed at config.Load. Both are green now, and the one other diff line that moved is cmd/broker/main.go no longer adding the strings import, which main now adds itself. The census is in https://github.com/sjawhar/legion/pull/2198#issuecomment-6557068356."
     }
   ],
   "filesChanged": [
@@ -150,5 +158,5 @@
     "Two packages cannot run in a Legion pod and are CI's at this head: internal/broker/helper (needs SO_PEERPIDFD, which gVisor refuses) and internal/broker/store's TestOpenSignsEveryNewConnectionInWithAFreshlyMintedToken (needs a Postgres with IAM authentication).",
     "Two forward merges were needed, not one: the first for the conflict GitHub reported, the second for the migration number main took. The second's only conflict was docs/kubernetes.md, where main's one-sentence-per-line reflow met this branch's paragraph; main's text was taken and the sentence re-authored on it."
   ],
-  "previousHandoff": "e9aad7922ae17a2caae3e3c2c8222fc9f395b524"
+  "previousHandoff": "b6f63853f4d4ca19993bcd4b7e8e703002ff1bc3"
 }
