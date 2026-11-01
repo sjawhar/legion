@@ -1197,7 +1197,7 @@ Versions are Postgres `integer`, so `refs.BlockTextAt` answers a pin above 21474
 `404 NOT_FOUND` `no version <N> of <document ref>`.
 `GET /api/v1/block-links?from=<document>&to=<document>` (`refs.BlockLinks`) lists the links from blocks of one document to blocks of another, or of the same one, while both blocks are current.
 
-An issue's decision records are its document `decisions.md` read over that block graph (`internal/dispatch/api/decisions.go`, migration `0158`).
+An issue's decision records are its document `decisions.md` read over that block graph (`internal/dispatch/api/decisions.go`, migration `20261101162254`).
 Each decision is one `##` section of it: its heading block and every block after it up to the next heading of its level or higher, the heading naming the choice, the blocks giving the reason and the options weighed, and each spec block it shaped linked `dispatch://KEY/spec#b-<id>`, which the block index records as a link from the decision's own block to that spec block.
 The section headed exactly `## Replaced` holds replaced decisions as `###` sections, a paragraph that starts `Unsure:` marks a decision unsure, and a person's decision links its answered ask, which is what makes it theirs rather than the agent's.
 A decision's changed version and time are the greatest of its blocks' (`refs.BlockChanges`), and a spec block X linked from decision D by link L is out of date exactly when D changed after it first linked X (D's changed version is above L's `created_version`) and X has not changed since D did:
