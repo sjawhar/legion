@@ -43,9 +43,15 @@ function databaseUrl(): string {
 /** What psql prints when a statement is done: `\echo` on stdout and `\warn` (psql 13 and later)
  *  on stderr. The two pipes are read independently, so each needs its own end mark — everything
  *  stderr carried before it belongs to that statement, and nothing after it does. The UUID keeps
- *  a statement's own output from ever reading as a mark. */
+ *  a statement's own output from ever reading as a mark. psql's verdict on the statement follows
+ *  the first mark on stdout, under a mark of its own (`${mark}-verdict`), so the statement's own
+ *  output is what ends at the first one. */
 const sentinel = `--psql-sentinel-${randomUUID()}`;
 let sentinelCount = 0;
+
+/** The psql variable a statement's own `:ERROR` is captured in before the terminator `send`
+ *  appends can overwrite it. */
+const verdictVariable = "e2e_verdict";
 
 /** One of the child's pipes, read in the pieces the sentinels cut it into. One statement runs at
  *  a time, so at most one read waits. */
@@ -92,6 +98,12 @@ function markedStream(stream: Readable): MarkedStream {
   return {
     readTo: (mark) =>
       new Promise<string>((settled, failed) => {
+        // One statement runs at a time, so a second read means the caller broke that: the first
+        // promise would be neither settled nor failed, and its call would wait for a mark
+        // nothing reads any more.
+        if (waiting !== null) {
+          throw new Error(`a read of ${waiting.mark} is already waiting, so ${mark} cannot be`);
+        }
         waiting = { mark, settled, failed };
         deliver();
       }),
@@ -111,8 +123,8 @@ let session: Session | null = null;
 
 function startSession(): Session {
   // No ON_ERROR_STOP: it makes psql exit on the first error, which would take the connection with
-  // it. A failing statement is recognised by what psql wrote to stderr before that statement's
-  // mark instead, and the session stays open for the next caller.
+  // it. A failing statement is recognised by psql's own verdict on it (`send`) instead, and the
+  // session stays open for the next caller.
   const child = spawn("psql", [databaseUrl(), "-X", "-v", "VERBOSITY=verbose", "-tA"], {
     env: psqlEnvironment,
   });
@@ -132,6 +144,11 @@ function startSession(): Session {
   );
   // EPIPE on a child that has already gone is an exit this has handled, not an unhandled error.
   child.stdin.on("error", () => {});
+  // The pipes are net sockets, and an `error` on one with no listener is an uncaught exception
+  // that would take the Playwright worker with it; here it is the same loss of the session the
+  // child's own `error` is.
+  child.stdout.on("error", lose);
+  child.stderr.on("error", lose);
   // A Playwright worker ends when its event loop empties, and a piped child holds the loop open
   // through its own handle and its three pipes. Unref'ed, none of them keeps a finished worker
   // alive; psql then reads EOF on the stdin this process leaves behind and exits by itself, and
@@ -145,15 +162,28 @@ function startSession(): Session {
   return started;
 }
 
-/** Runs one statement and returns what each stream carried for it. The trailing `;` on its own
- *  line terminates a statement the caller left unterminated without swallowing a last-line
- *  comment; a statement that already ends in one leaves an empty query, which psql ignores. */
-async function send(open: Session, statement: string): Promise<{ out: string; errors: string }> {
+/** Runs one statement and returns what each stream carried for it, and psql's verdict on it. The
+ *  trailing `;` on its own line terminates a statement the caller left unterminated without
+ *  swallowing a last-line comment; a statement that already ends in one leaves an empty query,
+ *  which runs as a query of no statements and whose success sets `:ERROR` false. So the verdict
+ *  is taken twice: `ERROR` is cleared before the statement, captured right after the text the
+ *  caller sent — which is that text's own verdict when it terminated itself, and the cleared
+ *  false when it left its last query for the terminator — and read again after the terminator,
+ *  which is that pending query's verdict. The statement failed when either says so. psql keeps
+ *  one verdict, so a caller that sends several queries in one string is judged by the last. */
+async function send(
+  open: Session,
+  statement: string
+): Promise<{ out: string; errors: string; failed: boolean }> {
   sentinelCount += 1;
   const mark = `${sentinel}-${sentinelCount}`;
-  open.child.stdin.write(`${statement}\n;\n\\echo ${mark}\n\\warn ${mark}\n`);
+  open.child.stdin.write(
+    `\\set ERROR false\n${statement}\n\\set ${verdictVariable} :ERROR\n;\n` +
+      `\\echo ${mark}\n\\echo :${verdictVariable} :ERROR\n\\echo ${mark}-verdict\n\\warn ${mark}\n`
+  );
   const [out, errors] = await Promise.all([open.out.readTo(mark), open.errors.readTo(mark)]);
-  return { out, errors };
+  const verdict = await open.out.readTo(`${mark}-verdict`);
+  return { errors, failed: verdict.trim().split(/\s+/).includes("true"), out };
 }
 
 async function runStatements(statements: readonly string[]): Promise<string> {
@@ -161,12 +191,11 @@ async function runStatements(statements: readonly string[]): Promise<string> {
   const open = session;
   const output: string[] = [];
   for (const statement of statements) {
-    const { out, errors } = await send(open, statement);
-    if (errors.trim() !== "") {
+    const { out, errors, failed } = await send(open, statement);
+    if (failed) {
       // What ON_ERROR_STOP used to do: nothing after the failing statement runs. The transaction
       // the failure aborted is rolled back here, so the next caller starts on a usable session;
-      // its own warning ("there is no transaction in progress" when none was open) lands before
-      // this ROLLBACK's mark and is read as nothing else's failure.
+      // whatever that ROLLBACK itself says is this call's business no longer.
       await send(open, "ROLLBACK").catch(() => undefined);
       throw new Error(errors.trim());
     }
@@ -181,12 +210,16 @@ let busy = false;
 /** Runs each statement, in order on one connection, against this run's database and returns the
  *  trimmed output. It stops at the first statement psql reports an error for and rejects with that
  *  error's own text, SQLSTATE and location included (`VERBOSITY=verbose`), so the reset's
- *  `RAISE EXCEPTION` naming a lock's holders reaches whoever reads the failure.
+ *  `RAISE EXCEPTION` naming a lock's holders reaches whoever reads the failure. A statement psql
+ *  answers with a NOTICE or a WARNING is not one that failed, though it writes to the same pipe:
+ *  the verdict is psql's own `:ERROR` (`send`), which neither sets.
  *
  *  A call that arrives while another holds the session runs as a psql of its own, which is what
  *  every call was before. One caller's statements can then never interleave with another's, and
  *  two calls still reach the database at once: e2e/keyed-writes.e2e.ts holds a row locked in one
- *  call and watches pg_stat_activity for it in another, which one connection cannot do. */
+ *  call and watches pg_stat_activity for it in another, which one connection cannot do. A failure
+ *  on that path is `execFile`'s own `Command failed: psql …` with psql's text under it, rather
+ *  than psql's text alone: the two paths spell a failure differently. */
 export async function sql(...statements: string[]): Promise<string> {
   if (busy) return sqlAt(databaseUrl(), statements);
   busy = true;

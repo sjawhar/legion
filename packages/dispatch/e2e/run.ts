@@ -27,7 +27,7 @@
  *  A Ctrl-C reaches the command itself, which shares this process group, and the harness stops
  *  once the command has; a SIGTERM sent to this process alone is passed on to the command. A
  *  signal while the harness starts stops what has started. */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Subprocess } from "bun";
@@ -100,9 +100,10 @@ function clearRunDir(status: number): void {
   if (runDir === "") return;
   const root = runDir;
   const keepLogs = status !== 0 && lanes.some((lane) => lane.logDir !== undefined);
-  const removed = keepLogs
-    ? [join(root, "template"), ...lanes.map((lane) => join(root, `lane-${lane.index}`, "pgdata"))]
-    : [root];
+  // Every data directory under the run's own, named from that directory rather than from the
+  // lanes that started: a lane that failed to start left a copy of the template there and no
+  // entry among them, and those copies are the bulk this branch is here to lose.
+  const removed = keepLogs ? readdirSync(root).map((entry) => join(root, entry, "pgdata")) : [root];
   for (const path of removed) {
     try {
       rmSync(path, { force: true, recursive: true });
@@ -195,20 +196,22 @@ try {
   }
   const startLane = async (index: number): Promise<void> => {
     const logDir = count === 1 ? undefined : join(runDir, `lane-${index}`, "log");
-    const database = postgres === undefined ? undefined : await postgres.start(index);
-    const own: Record<string, string> = {};
-    const url = database?.url ?? given;
-    if (url !== "") own.DATABASE_URL = url;
-    const bucket = await laneBucket(index, count);
-    if (bucket !== undefined) own.DISPATCH_E2E_FILE_STORE_BUCKET = bucket;
-    let harness: Harness;
+    const database =
+      postgres === undefined ? undefined : await postgres.start(index, stopping.signal);
+    // Everything from here on runs with a server of this lane's own up, so each of them — the
+    // bucket the file store makes as much as the harness — stops it rather than leave it behind.
     try {
-      harness = await startHarness({ env: own, logDir, signal: stopping.signal });
+      const own: Record<string, string> = {};
+      const url = database?.url ?? given;
+      if (url !== "") own.DATABASE_URL = url;
+      const bucket = await laneBucket(index, count);
+      if (bucket !== undefined) own.DISPATCH_E2E_FILE_STORE_BUCKET = bucket;
+      const harness = await startHarness({ env: own, logDir, signal: stopping.signal });
+      lanes.push({ database, env: { ...own, ...harness.env }, harness, index, logDir });
     } catch (error) {
       await database?.stop();
       throw error;
     }
-    lanes.push({ database, env: { ...own, ...harness.env }, harness, index, logDir });
   };
   // Every lane at once: each is an initdb or a `docker run` and a server build away, and they
   // share nothing. A lane that fails leaves the others to stop in the catch below.

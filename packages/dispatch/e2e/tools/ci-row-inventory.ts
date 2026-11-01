@@ -21,6 +21,7 @@
  *      | sed 's/\x1b\[[0-9;]*m//g' > base.log
  *    bun e2e/tools/ci-row-inventory.ts base.log > rows.tsv
  */
+import { parseArgs } from "node:util";
 
 const usage =
   "usage: bun e2e/tools/ci-row-inventory.ts <job.log> [--slow-ms <n>]\n" +
@@ -123,23 +124,28 @@ export function inventory(log: string): { rows: Row[]; summary: Summary } {
   return { rows, summary: parseSummary(lines) };
 }
 
-if (import.meta.main) {
-  const argv = process.argv.slice(2);
-  let slowMs = 2000;
-  const files: string[] = [];
-  for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === "--slow-ms") {
-      slowMs = Number(argv[i + 1]);
-      i += 1;
-      continue;
-    }
-    files.push(argv[i]);
-  }
-  if (files.length !== 1 || !Number.isFinite(slowMs)) {
+/** The command line, or the usage and exit 2. `parseArgs` refuses an unknown flag and a flag
+ *  whose value is missing, which is the same bad command line as a value the checks here refuse,
+ *  so both leave the same way. */
+function readArguments(): { log: string; slowMs: number } {
+  try {
+    const { positionals, values } = parseArgs({
+      allowPositionals: true,
+      options: { "slow-ms": { type: "string" } },
+      strict: true,
+    });
+    const slowMs = Number(values["slow-ms"] ?? 2000);
+    if (positionals.length !== 1 || !Number.isFinite(slowMs)) throw new Error(usage);
+    return { log: positionals[0], slowMs };
+  } catch {
     console.error(usage);
     process.exit(2);
   }
-  const { rows, summary } = inventory(await Bun.file(files[0]).text());
+}
+
+if (import.meta.main) {
+  const { log, slowMs } = readArguments();
+  const { rows, summary } = inventory(await Bun.file(log).text());
   const out: string[] = ["index\tproject\tfile\tline\tcol\tms\tstatus\ttitle"];
   for (const row of rows) {
     out.push(

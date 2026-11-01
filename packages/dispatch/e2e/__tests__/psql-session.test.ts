@@ -86,3 +86,26 @@ test.skipIf(!live)("runs a call that overlaps another on a second connection", a
   await holding;
   expect(sleeping).toBe("1");
 });
+
+// A NOTICE and a WARNING go to the same pipe an error does, so what a statement wrote there is
+// not what it is judged by: e2e/failed-room.e2e.ts drops a trigger that is not there between its
+// rows, and Postgres answers that with a NOTICE.
+test.skipIf(!live)("keeps a statement psql only wrote a notice or a warning for", async () => {
+  await sql("CREATE TEMP TABLE notice_log (ran int)");
+  // psql prints a command's own tag before the next statement's rows, `-tA` and all.
+  expect(await sql("DROP TRIGGER IF EXISTS never_made ON notice_log; SELECT 'dropped'")).toBe(
+    "DROP TRIGGER\ndropped"
+  );
+  expect(
+    await sql("DO $$ BEGIN RAISE WARNING 'a warning is not a failure'; END $$", "SELECT 'warned'")
+  ).toBe("DO\nwarned");
+});
+
+// Both spellings a caller sends: a statement it terminated itself leaves psql an empty query
+// after it, whose own verdict is success, and one it left open is run by the terminator the
+// session appends.
+test.skipIf(!live)("rejects a statement that really failed with psql's own text", async () => {
+  await expect(sql("SELECT nosuchcolumn")).rejects.toThrow(/nosuchcolumn/);
+  await expect(sql("SELECT nosuchcolumn;")).rejects.toThrow(/nosuchcolumn/);
+  expect(await sql("SELECT 'alive'")).toBe("alive");
+});

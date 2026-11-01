@@ -28,6 +28,7 @@
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { parseArgs } from "node:util";
 
 const usage =
   "usage: bun e2e/tools/check-slow-rows.ts <report.json> [--slow-ms <n>] [--dir <e2e>]\n" +
@@ -194,29 +195,31 @@ export function judge(rows: readonly Row[], markers: readonly Marker[], slowMs: 
   };
 }
 
-if (import.meta.main) {
-  const argv = process.argv.slice(2);
-  let slowMs = 2000;
-  let dir = "e2e";
-  const files: string[] = [];
-  for (let index = 0; index < argv.length; index += 1) {
-    if (argv[index] === "--slow-ms") {
-      slowMs = Number(argv[index + 1]);
-      index += 1;
-      continue;
+/** The command line, or the usage and exit 2. `parseArgs` refuses an unknown flag and a flag
+ *  whose value is missing, which is the same bad command line as a value the checks here refuse,
+ *  so both leave the same way. */
+function readArguments(): { report: string; slowMs: number; dir: string } {
+  try {
+    const { positionals, values } = parseArgs({
+      allowPositionals: true,
+      options: { dir: { type: "string" }, "slow-ms": { type: "string" } },
+      strict: true,
+    });
+    const slowMs = Number(values["slow-ms"] ?? 2000);
+    const dir = values.dir ?? "e2e";
+    if (positionals.length !== 1 || !Number.isFinite(slowMs) || slowMs <= 0 || dir === "") {
+      throw new Error(usage);
     }
-    if (argv[index] === "--dir") {
-      dir = argv[index + 1] ?? "";
-      index += 1;
-      continue;
-    }
-    files.push(argv[index]);
-  }
-  if (files.length !== 1 || !Number.isFinite(slowMs) || slowMs <= 0 || dir === "") {
+    return { dir, report: positionals[0], slowMs };
+  } catch {
     console.error(usage);
     process.exit(2);
   }
-  const rows = reportRows(JSON.parse(readFileSync(files[0], "utf8")));
+}
+
+if (import.meta.main) {
+  const { dir, report, slowMs } = readArguments();
+  const rows = reportRows(JSON.parse(readFileSync(report, "utf8")));
   const markers = readdirSync(dir)
     .filter((name) => name.endsWith(".e2e.ts"))
     .sort()

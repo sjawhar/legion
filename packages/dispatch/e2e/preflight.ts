@@ -1,4 +1,5 @@
-import { baseUrl, devSignInPath, e2eAgentToken, sessionCookieFrom } from "./api";
+import { resetFakeEnvoy, setLiveSessions } from "./agents";
+import { baseUrl, baseUrlOf, devSignInPath, e2eAgentToken, sessionCookieFrom } from "./api";
 import { asLane, harnessPorts, laneCount } from "./harness-ports";
 import {
   type DispatchProcess,
@@ -18,8 +19,9 @@ import { harnessSignIn } from "./harness-signin";
  *  Every lane is checked, not just the one this process resolves: a run has one lane per worker
  *  (e2e/run.ts), each with servers of its own, and a row that lands in lane 2 is no better off
  *  for lane 0 having answered. This process resolves each lane's ports and URL the way a worker
- *  of that lane does (`asLane`), and addresses them itself, since the helpers in e2e/api.ts and
- *  e2e/agents.ts read their own lane's ports once, when they are imported.
+ *  of that lane does (`asLane`) and hands them to the helpers it shares with the rows, since
+ *  those read their own lane otherwise: e2e/api.ts's `baseUrl` is the lane of the process that
+ *  imported it, and e2e/agents.ts's fixture helpers address their own lane's fake Envoy port.
  *
  *  In two-process mode (e2e/harness-processes.ts) both processes must answer, each asked pinned
  *  rather than whichever the round-robin proxy picks, and a person signed in on A must be signed
@@ -33,18 +35,6 @@ export default async function preflight(): Promise<void> {
   const lanes = laneCount();
   for (let lane = 0; lane < lanes; lane++) await checkLane(lane, lanes);
   if (harnessProcessCount === 2 && harnessSignIn === "dev") await requireOneCookieKey();
-}
-
-/** A request to one lane's fake Envoy, the shape e2e/agents.ts makes for its own lane. */
-async function fixtureRequest(port: number, path: string, body?: object): Promise<void> {
-  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
-    body: body === undefined ? undefined : JSON.stringify(body),
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-    method: "PUT",
-  });
-  if (!response.ok) {
-    throw new Error(`PUT ${path} failed: ${response.status} ${await response.text()}`);
-  }
 }
 
 /** The lane's Agents rows, as `listAgents` reads its own lane's (e2e/api.ts). */
@@ -67,13 +57,13 @@ async function agentsOf(url: string, target: DispatchProcess | undefined): Promi
  *  again, whatever the answer was. */
 async function checkLane(lane: number, lanes: number): Promise<void> {
   const ports = harnessPorts(asLane(lane));
-  const url = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${ports.dispatch.port}`;
+  const url = baseUrlOf(asLane(lane));
   const named = lanes === 1 ? "" : ` (lane ${lane})`;
   const sentinel = { session_id: `e2e-preflight-${process.pid}-${lane}`, title: "e2e preflight" };
   const fake = `the fake Envoy this run started on 127.0.0.1:${ports.fakeEnvoy.port} (${ports.fakeEnvoy.variable}${named})`;
   const targets: readonly (DispatchProcess | undefined)[] =
     harnessProcessCount === 2 ? dispatchProcesses : [undefined];
-  await fixtureRequest(ports.fakeEnvoy.port, "/__fixture/sessions", [sentinel]);
+  await setLiveSessions([sentinel], ports.fakeEnvoy.port);
   try {
     for (const target of targets) {
       const pinned = target === undefined ? "" : ` pinned to Dispatch ${target.toUpperCase()}`;
@@ -94,7 +84,7 @@ async function checkLane(lane: number, lanes: number): Promise<void> {
       }
     }
   } finally {
-    await fixtureRequest(ports.fakeEnvoy.port, "/__fixture/reset");
+    await resetFakeEnvoy(ports.fakeEnvoy.port);
   }
 }
 

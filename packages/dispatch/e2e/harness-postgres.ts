@@ -30,6 +30,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 
+import { Interrupted } from "./local-instance-support";
 import { sqlAt } from "./psql";
 
 const execFileAsync = promisify(execFile);
@@ -73,8 +74,10 @@ export interface LanePostgres {
   /** What a log line and a refusal call it. */
   readonly name: string;
   /** One lane's server. Everything it leaves behind is under the run's own directory, which
-   *  `e2e/run.ts` removes, or a container the returned `stop` removes. */
-  start(lane: number): Promise<LaneDatabase>;
+   *  `e2e/run.ts` removes, or a container the returned `stop` removes. `signal` is the run's own
+   *  stop (`e2e/run.ts`): a Ctrl-C while this waits for the server to answer ends the wait as
+   *  `Interrupted`, which is the exit status of the signal rather than a failed run. */
+  start(lane: number, signal?: AbortSignal): Promise<LaneDatabase>;
 }
 
 /** A port the OS chose and nothing holds. Another listener can take it between here and the
@@ -102,15 +105,33 @@ async function freePort(): Promise<number> {
   }
 }
 
+/** One lane's server, with a stop under way reported as the interruption it is: psql rejects a
+ *  statement the signal killed with an abort of its own, and `e2e/run.ts` exits a run a signal
+ *  stopped with that signal's status rather than a failed run's. */
+async function laneOf(
+  signal: AbortSignal | undefined,
+  started: () => Promise<LaneDatabase>
+): Promise<LaneDatabase> {
+  try {
+    return await started();
+  } catch (error) {
+    if (signal?.aborted === true) throw new Interrupted();
+    throw error;
+  }
+}
+
 /** Waits until `url` answers `select 1`: a server that is up has read its data directory, run
  *  its own recovery and opened its port. */
-async function ready(url: string, what: string): Promise<void> {
+async function ready(url: string, what: string, signal?: AbortSignal): Promise<void> {
   const deadline = Date.now() + readyMs;
   for (;;) {
     try {
-      await sqlAt(url, ["select 1"]);
+      await sqlAt(url, ["select 1"], signal);
       return;
     } catch (error) {
+      // The psql above was killed by the signal, or the one before it was: a stopping run waits
+      // out none of the deadline that is left.
+      if (signal?.aborted === true) throw new Interrupted();
       if (Date.now() > deadline) {
         throw new Error(
           `The Dispatch e2e harness cannot start: ${what} did not answer within ` +
@@ -163,7 +184,7 @@ function binariesProvider(dir: string, bin: string): LanePostgres {
   /** The one `initdb` of the run, with the lane database and its pgvector extension, copied per
    *  lane. Started once however many lanes ask for it. */
   let template: Promise<string> | undefined;
-  const makeTemplate = async (): Promise<string> => {
+  const makeTemplate = async (signal?: AbortSignal): Promise<string> => {
     const templateDir = join(dir, "template");
     const data = join(templateDir, "pgdata");
     mkdirSync(templateDir, { recursive: true });
@@ -178,36 +199,45 @@ function binariesProvider(dir: string, bin: string): LanePostgres {
       "UTF8",
     ]);
     const port = await startCluster(bin, data, templateDir, "the lanes' Postgres template");
-    const admin = `postgres://postgres@127.0.0.1:${port}/postgres?sslmode=disable`;
-    await ready(admin, "the lanes' Postgres template");
-    await sqlAt(admin, [`create database ${databaseName}`]);
-    await sqlAt(`postgres://postgres@127.0.0.1:${port}/${databaseName}?sslmode=disable`, [
-      "create extension vector",
-    ]);
-    await execFileAsync(join(bin, "pg_ctl"), ["-D", data, "-m", "fast", "-w", "stop"]);
+    try {
+      const admin = `postgres://postgres@127.0.0.1:${port}/postgres?sslmode=disable`;
+      await ready(admin, "the lanes' Postgres template", signal);
+      await sqlAt(admin, [`create database ${databaseName}`], signal);
+      await sqlAt(
+        `postgres://postgres@127.0.0.1:${port}/${databaseName}?sslmode=disable`,
+        ["create extension vector"],
+        signal
+      );
+    } finally {
+      // Whatever happened above: the postmaster is up from `startCluster` on, and a throw that
+      // left it running would leave it serving a loopback port while `e2e/run.ts` removes the
+      // data directory under it.
+      await execFileAsync(join(bin, "pg_ctl"), ["-D", data, "-m", "fast", "-w", "stop"]);
+    }
     return data;
   };
   return {
     name: `the Postgres binaries in ${bin}`,
-    async start(lane: number): Promise<LaneDatabase> {
-      template ??= makeTemplate();
-      const laneDir = join(dir, `lane-${lane}`);
-      const data = join(laneDir, "pgdata");
-      mkdirSync(laneDir, { recursive: true });
-      // `cp -a` keeps the 0700 a data directory's server refuses to start without.
-      await execFileAsync("cp", ["-a", await template, data]);
-      const what = `lane ${lane}'s Postgres`;
-      const port = await startCluster(bin, data, laneDir, what);
-      const url = `postgres://postgres@127.0.0.1:${port}/${databaseName}?sslmode=disable`;
-      await ready(url, what);
-      return {
-        port,
-        url,
-        stop: async () => {
-          await execFileAsync(join(bin, "pg_ctl"), ["-D", data, "-m", "immediate", "-w", "stop"]);
-        },
-      };
-    },
+    start: (lane, signal) =>
+      laneOf(signal, async (): Promise<LaneDatabase> => {
+        template ??= makeTemplate(signal);
+        const laneDir = join(dir, `lane-${lane}`);
+        const data = join(laneDir, "pgdata");
+        mkdirSync(laneDir, { recursive: true });
+        // `cp -a` keeps the 0700 a data directory's server refuses to start without.
+        await execFileAsync("cp", ["-a", await template, data]);
+        const what = `lane ${lane}'s Postgres`;
+        const port = await startCluster(bin, data, laneDir, what);
+        const url = `postgres://postgres@127.0.0.1:${port}/${databaseName}?sslmode=disable`;
+        await ready(url, what, signal);
+        return {
+          port,
+          url,
+          stop: async () => {
+            await execFileAsync(join(bin, "pg_ctl"), ["-D", data, "-m", "immediate", "-w", "stop"]);
+          },
+        };
+      }),
   };
 }
 
@@ -226,42 +256,68 @@ async function containerLog(container: string): Promise<string> {
 function imageProvider(image: string, run: string): LanePostgres {
   return {
     name: `the Postgres image ${image}`,
-    async start(lane: number): Promise<LaneDatabase> {
-      const what = `lane ${lane}'s Postgres`;
-      let last = "";
-      for (let attempt = 1; attempt <= bindAttempts; attempt++) {
-        // The name carries the attempt: a container whose port was taken keeps its name until it
-        // is removed, and the run removes it with the lane.
-        const container = `dispatch-e2e-pg-${run}-${lane}-${attempt}`;
-        const port = await freePort();
-        try {
-          await execFileAsync("docker", [
-            "run",
-            "--detach",
-            "--name",
-            container,
-            "--publish",
-            `127.0.0.1:${port}:5432`,
-            "--env",
-            "POSTGRES_PASSWORD=dispatch",
-            "--env",
-            `POSTGRES_DB=${databaseName}`,
-            "--env",
-            "POSTGRES_INITDB_ARGS=--no-sync",
-            // The data stays in the container's own writable layer and goes with it. A bind
-            // mount of a directory this process made is what the image cannot use: its server
-            // runs as the image's own user, which may neither write nor chown a directory the
-            // runner's user owns, and the container then exits before it listens.
-            "--tmpfs",
-            "/var/lib/postgresql/data:rw,exec",
-            image,
-            ...settings.flatMap((setting) => ["-c", setting]),
-          ]);
+    start: (lane, signal) =>
+      laneOf(signal, async (): Promise<LaneDatabase> => {
+        const what = `lane ${lane}'s Postgres`;
+        let refused = "";
+        for (let attempt = 1; attempt <= bindAttempts; attempt++) {
+          // The name carries the attempt: a container whose port was taken keeps its name until it
+          // is removed, and the run removes it with the lane.
+          const container = `dispatch-e2e-pg-${run}-${lane}-${attempt}`;
+          const port = await freePort();
+          const remove = async (): Promise<void> => {
+            await execFileAsync("docker", ["rm", "--force", "--volumes", container]).catch(
+              () => {}
+            );
+          };
+          try {
+            await execFileAsync("docker", [
+              "run",
+              "--detach",
+              "--name",
+              container,
+              "--publish",
+              `127.0.0.1:${port}:5432`,
+              "--env",
+              "POSTGRES_PASSWORD=dispatch",
+              "--env",
+              `POSTGRES_DB=${databaseName}`,
+              "--env",
+              "POSTGRES_INITDB_ARGS=--no-sync",
+              // The data stays in the container's own writable layer and goes with it. A bind
+              // mount of a directory this process made is what the image cannot use: its server
+              // runs as the image's own user, which may neither write nor chown a directory the
+              // runner's user owns, and the container then exits before it listens.
+              "--tmpfs",
+              "/var/lib/postgresql/data:rw,exec",
+              image,
+              ...settings.flatMap((setting) => ["-c", setting]),
+            ]);
+          } catch (error) {
+            // `docker run` publishes the port itself, so this is the port another listener took
+            // between `freePort` and here, which is what another port answers.
+            refused = `${error instanceof Error ? error.message : String(error)}; the container said: ${await containerLog(container)}`;
+            await remove();
+            continue;
+          }
           const url = `postgres://postgres:dispatch@127.0.0.1:${port}/${databaseName}?sslmode=disable`;
-          await ready(url, what);
-          // The image carries the extension; the database the image made still has to install it,
-          // as migration 0072 needs it.
-          await sqlAt(url, ["create extension if not exists vector"]);
+          try {
+            await ready(url, what, signal);
+            // The image carries the extension; the database the image made still has to install it,
+            // as migration 0072 needs it.
+            await sqlAt(url, ["create extension if not exists vector"], signal);
+          } catch (error) {
+            // The container holds the port, so no other port is a different question: it is the
+            // server inside that never answered, and the refusal says that rather than counting
+            // ports. Its own last lines are read before it is removed.
+            const said = await containerLog(container);
+            await remove();
+            throw new Error(
+              `The Dispatch e2e harness cannot start: ${what} came up from ${image} on port ` +
+                `${port} and then ${error instanceof Error ? error.message : String(error)}; ` +
+                `the container said: ${said}`
+            );
+          }
           return {
             port,
             url,
@@ -269,16 +325,12 @@ function imageProvider(image: string, run: string): LanePostgres {
               await execFileAsync("docker", ["rm", "--force", "--volumes", container]);
             },
           };
-        } catch (error) {
-          last = `${error instanceof Error ? error.message : String(error)}; the container said: ${await containerLog(container)}`;
-          await execFileAsync("docker", ["rm", "--force", "--volumes", container]).catch(() => {});
         }
-      }
-      throw new Error(
-        `The Dispatch e2e harness cannot start: ${what} did not come up on any of ` +
-          `${bindAttempts} ports from ${image}: ${last}`
-      );
-    },
+        throw new Error(
+          `The Dispatch e2e harness cannot start: ${what} got none of ${bindAttempts} ports from ` +
+            `${image}: ${refused}`
+        );
+      }),
   };
 }
 

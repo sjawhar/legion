@@ -55,10 +55,15 @@ import type {
 import { harnessPorts } from "./harness-ports";
 import { type DispatchProcess, pinnedTo } from "./harness-processes";
 
-// The harness server's port, which e2e/run.ts exports from the server's report before anything
-// imports this module (e2e/harness-ports.ts).
-export const baseUrl =
-  process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${harnessPorts().dispatch.port}`;
+/** The Dispatch server a process of `env`'s lane addresses: the deployed server `env` names, else
+ *  the harness server of that lane, whose port e2e/run.ts exports from the server's report before
+ *  anything imports this module (e2e/harness-ports.ts). `e2e/preflight.ts` resolves another
+ *  lane's the same way this one resolves its own. */
+export function baseUrlOf(env: NodeJS.ProcessEnv = process.env): string {
+  return env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${harnessPorts(env).dispatch.port}`;
+}
+
+export const baseUrl = baseUrlOf();
 /** The origin the server compares every cookie-authenticated write against (enforceCookieOrigin). */
 export const dashboardOrigin = new URL(baseUrl).origin;
 // A deployed server has its own agent token; the local harness pins `e2e-token` in
@@ -92,12 +97,17 @@ export function devSignInPath(login: string): string {
   return `/auth/_dev/signin?login=${encodeURIComponent(login)}`;
 }
 
-/** The `name=value` of the session cookie `response` sets, or undefined when it sets none. */
-export function sessionCookieFrom(response: Response): string | undefined {
+/** The whole `Set-Cookie` the server set the session cookie with, or undefined when it set
+ *  none. */
+function sessionSetCookie(response: Response): string | undefined {
   return response.headers
     .getSetCookie()
-    .find((header) => header.startsWith(`${sessionCookieName}=`))
-    ?.split(";")[0];
+    .find((header) => header.startsWith(`${sessionCookieName}=`));
+}
+
+/** The `name=value` of the session cookie `response` sets, or undefined when it sets none. */
+export function sessionCookieFrom(response: Response): string | undefined {
+  return sessionSetCookie(response)?.split(";")[0];
 }
 
 /** The SameSite values a `Set-Cookie` carries, by their lowercased spelling, as Playwright spells
@@ -116,9 +126,7 @@ const sameSiteValues: Record<string, Cookie["sameSite"]> = {
  *  domain. Playwright dates a cookie in whole seconds, and -1 is one that lasts the context's
  *  life, which a header with no `Max-Age` gets. */
 function sessionCookieOf(response: Response, from: URL): Cookie | undefined {
-  const setCookie = response.headers
-    .getSetCookie()
-    .find((header) => header.startsWith(`${sessionCookieName}=`));
+  const setCookie = sessionSetCookie(response);
   if (setCookie === undefined) {
     return undefined;
   }

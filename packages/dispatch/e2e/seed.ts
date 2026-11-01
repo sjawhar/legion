@@ -99,14 +99,16 @@ export async function clearIssueCreator(issueKey: string): Promise<void> {
 // too. It never waits while it holds one of those locks. Each try takes them all with NOWAIT; when
 // one is held, the try lets go of every lock it took, and the next try first waits for that one
 // table while it holds none, so the wait cannot close a cycle. Once it holds them all, nothing
-// else touches those tables until COMMIT; the reset's other locks are on the tables' own
-// sequences, which only an insert into one of those tables advances. Each wait is capped at the
-// time left of 5 s, so a table still held 5 s after the step began fails the reset then, naming
-// that table's holders.
+// else touches those tables until the block commits; the reset's other locks are on the tables'
+// own sequences, which only an insert into one of those tables advances. Each wait is capped at
+// the time left of 5 s, so a table still held 5 s after the step began fails the reset then,
+// naming that table's holders.
 
+// One statement: a DO block is a transaction of its own, so the inserts that end it are the ones
+// the delete's own transaction makes, and the reset pays psql one round trip rather than the five
+// a BEGIN, the block, each insert and a COMMIT paid.
 async function resetDatabaseOnce(): Promise<void> {
   await sql(
-    "BEGIN",
     `DO $$
       DECLARE
         targets regclass[];
@@ -213,21 +215,20 @@ async function resetDatabaseOnce(): Promise<void> {
         LOOP
           EXECUTE format('ALTER SEQUENCE %s RESTART', sequence_name);
         END LOOP;
+        -- The people the scenarios act as, as if each had signed in: the only assignable names.
+        INSERT INTO people (email) VALUES ${resetLogins.map((login) => `(${sqlLiteral(login)})`).join(", ")};
+        -- And the session a sign-in of each would have created (PgSessionStore.EnsureSession
+        -- inserts the row, whose generation column defaults to 0, and only RevokeSessions
+        -- advances it), at that same generation 0. The delete above took every \`user_sessions\`
+        -- row with it, and the server admits a cookie only at its login's current generation
+        -- (identity.CookieIdentity.Login), so without this row a cookie minted before the reset
+        -- would meet none and be refused; with it, the cookie e2e/api.ts kept for alice or bob
+        -- authenticates again and this scenario pays no sign-in for them (forgetSessions).
+        INSERT INTO user_sessions (login, generation) VALUES ${resetLogins
+          .map((login) => `(${sqlLiteral(login)}, 0)`)
+          .join(", ")};
       END
-    $$`,
-    // The people the scenarios act as, as if each had signed in: the only assignable names.
-    `INSERT INTO people (email) VALUES ${resetLogins.map((login) => `(${sqlLiteral(login)})`).join(", ")}`,
-    // And the session a sign-in of each would have created (PgSessionStore.EnsureSession inserts
-    // the row, whose generation column defaults to 0, and only RevokeSessions advances it), at
-    // that same generation 0. The delete above took every `user_sessions` row with it, and the
-    // server admits a cookie only at its login's current generation
-    // (identity.CookieIdentity.Login), so without this row a cookie minted before the reset would
-    // meet none and be refused; with it, the cookie e2e/api.ts kept for alice or bob
-    // authenticates again and this scenario pays no sign-in for them (forgetSessions).
-    `INSERT INTO user_sessions (login, generation) VALUES ${resetLogins
-      .map((login) => `(${sqlLiteral(login)}, 0)`)
-      .join(", ")}`,
-    "COMMIT"
+    $$`
   );
 }
 

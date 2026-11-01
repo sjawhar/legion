@@ -228,16 +228,18 @@ export function laneConflicts(env: NodeJS.ProcessEnv): readonly string[] {
 }
 
 /** Refuses a run of `lanes` lanes whose caller set a variable one lane owns, before anything
- *  starts. `e2e/run.ts` calls it before it adds its own values of those variables. */
+ *  starts, naming the first of them: `laneConflicts` is the list of all of them, and a caller
+ *  that unsets this one is refused the next. `e2e/run.ts` calls it before it adds its own values
+ *  of those variables. */
 export function refuseLaneConflicts(lanes: number, env: NodeJS.ProcessEnv = process.env): void {
-  for (const variable of laneConflicts(env)) {
-    const reason =
-      laneConflictReasons[variable] ??
-      "a port is one listener's, and each lane needs listeners of its own";
-    throw new Error(
-      `${workerCountVariable}=${lanes} runs ${lanes} lanes, each a harness of its own, so ` +
-        `${variable} must not be set: ${reason}. Unset ${variable}, or leave ` +
-        `${workerCountVariable} unset to run one lane as before.`
-    );
-  }
+  const [variable] = laneConflicts(env);
+  if (variable === undefined) return;
+  const reason =
+    laneConflictReasons[variable] ??
+    "a port is one listener's, and each lane needs listeners of its own";
+  throw new Error(
+    `${workerCountVariable}=${lanes} runs ${lanes} lanes, each a harness of its own, so ` +
+      `${variable} must not be set: ${reason}. Unset ${variable}, or leave ` +
+      `${workerCountVariable} unset to run one lane as before.`
+  );
 }
