@@ -50,7 +50,7 @@ var closings = []struct {
 	closedAt int
 }{
 	{series: "the Legion daemon (packages/daemon/internal/store/migrations)", file: "0067_phase_assignment.up.sql", closedAt: 67},
-	{series: "Dispatch (packages/envoy/internal/dispatch/store/migrations)", file: "0157_document_edit_notices_notify.up.sql", closedAt: 157},
+	{series: "Dispatch (packages/envoy/internal/dispatch/store/migrations)", file: "0161_delivery_run_warnings.up.sql", closedAt: 161},
 }
 
 // ClosedAt is the number the numbered series of this set closed at, the series found by the
