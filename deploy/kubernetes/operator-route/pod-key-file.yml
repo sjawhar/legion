@@ -9,7 +9,9 @@
 env:
   PI_CONFIG_FILES: /etc/legion-operator/overlay.yml
   CLAUDE_CODE_USE_FOUNDRY: "0"
-service_account: legion-worker
+# The ServiceAccount the pods run as is the operator's own, and each live harness run's own, so the
+# repository holds none.
+service_account: ${POD_SERVICE_ACCOUNT}
 volumes:
   - name: operator-route
     config_map:
