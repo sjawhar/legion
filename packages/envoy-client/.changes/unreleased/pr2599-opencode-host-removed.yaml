@@ -1,0 +1,9 @@
+kind: Removed
+body: |-
+  OpenCode is no longer a host or a harness. `DISPATCH_HOST=opencode` is refused with
+  `dispatch: DISPATCH_HOST is "opencode", not omp or claude.`, and `OPENCODE_CONFIG_DIR` is no
+  longer read: a plugin reads a named Oh My Pi profile's `PI_CODING_AGENT_DIR` or Claude Code's
+  `CLAUDE_CONFIG_DIR` and no other harness's, and a script reads `ENVOY_CONFIG_FILE`, then those
+  two in that order, then the neutral file. The guards against the OpenCode-era files stay: a
+  missing config still names `~/.config/opencode/envoy.json` and its move, and a checkout's
+  `.opencode/envoy.json` still warns.

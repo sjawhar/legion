@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { appendFile, symlink, writeFile } from "node:fs/promises";
+import { appendFile, link, rm, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import type { SessionAnswer } from "@legion/contracts";
 import { DISPATCH_FIRST_MARKER } from "@legion/envoy-client/dispatch-first";
@@ -226,10 +226,11 @@ function answersBefore(seen: readonly Seen[], request: Seen): Seen {
  * `reply` may change the answers route as the stand-in answers a turn. `methodOrder` is the
  * compaction's (`[soft]` by default) and `model` lines go on the stand-in model's entry in
  * models.yml. With `twoCopies`, omp loads the extension twice: from this checkout and through a
- * symlink to it, which it takes for another extension. With `warm`, the profile's model catalog is
- * built before the session starts. Once the steps have settled, `until` is awaited before omp's
- * stdin closes. Returns every request the stand-in served, in order of arrival, the main loop's
- * turns among them, and when each step was sent (`performance.now()`, route changes left out).
+ * hard link to it beside it, which both omp and Bun take for another file (omp loads a symlink and
+ * its target once). With `warm`, the profile's model catalog is built before the session starts.
+ * Once the steps have settled, `until` is awaited before omp's stdin closes. Returns every request
+ * the stand-in served, in order of arrival, the main loop's turns among them, and when each step
+ * was sent (`performance.now()`, route changes left out).
  */
 async function runSession(
   binary: string,
@@ -357,8 +358,10 @@ async function runSession(
   const extension = path.join(import.meta.dir, "envoy.ts");
   const extensions = [extension];
   if (options.twoCopies === true) {
-    const copy = path.join(root, "envoy-copy.ts");
-    await symlink(extension, copy);
+    // Beside the original, so its relative imports resolve to the same modules a symlink's did.
+    const copy = path.join(import.meta.dir, `.envoy-copy-${process.pid}-${Date.now()}.ts`);
+    await link(extension, copy);
+    cleanup.push(() => rm(copy, { force: true }));
     extensions.push(copy);
   }
   if (steps.some((step) => "deliver" in step)) {
