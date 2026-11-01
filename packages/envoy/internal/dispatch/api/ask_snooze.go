@@ -65,15 +65,14 @@ func (s *server) putAskSnooze(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "SNOOZE_INPUT", http.StatusBadRequest, "snoozed_until must be an RFC3339 timestamp")
 		return
 	}
-	// A snooze that has already passed would fold nothing away. The bound allows no skew: the
-	// Inbox's presets are its own to keep clear of it, and the one that can land near midnight
-	// keeps a few seconds of today in hand rather than naming a moment this could refuse.
-	if !snoozedUntil.After(time.Now()) {
-		writeError(w, "SNOOZE_INPUT", http.StatusBadRequest, "snoozed_until must be in the future")
-		return
-	}
-	// Selecting the ask rather than inserting its id makes an unknown ask pgx.ErrNoRows - a
-	// 404 - instead of the foreign key's 500. previous is read from the statement's own snapshot,
+	// A snooze that has already passed would fold nothing away, so it is refused. "Passed" is
+	// judged against the database's now(), in the statement that stores the snooze: each
+	// process's host keeps its own clock, and the Inbox compares a snooze with now when it reads
+	// it. The bound allows no skew: the Inbox's presets are its own to keep clear of it, and the
+	// one that can land near midnight keeps a few seconds of today in hand rather than naming a
+	// moment this could refuse. The ask is selected rather than its id inserted, so an unknown ask
+	// stores nothing and reads as absent - a 404 - instead of the foreign key's 500; a past moment
+	// is refused first, whatever ask it names. previous is read from the statement's own snapshot,
 	// before the write, so a snooze to the moment the row already holds is known to move nothing.
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -81,21 +80,31 @@ func (s *server) putAskSnooze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var stored time.Time
-	var previous *time.Time
+	var future bool
+	var stored, previous *time.Time
 	if err := tx.QueryRow(r.Context(), `
 		with previous as (
 			select snoozed_until from user_ask_snooze where login = $1 and ask_id = $2
+		), snoozed as (
+			insert into user_ask_snooze (login, ask_id, snoozed_until)
+			select $1, id, $3::timestamptz from asks where id = $2 and $3::timestamptz > now()
+			on conflict (login, ask_id) do update set snoozed_until = excluded.snoozed_until
+			returning snoozed_until
 		)
-		insert into user_ask_snooze (login, ask_id, snoozed_until)
-		select $1, id, $3 from asks where id = $2
-		on conflict (login, ask_id) do update set snoozed_until = excluded.snoozed_until
-		returning snoozed_until, (select snoozed_until from previous)
-	`, model.CanonicalLogin(actor.ID), askID, snoozedUntil).Scan(&stored, &previous); err != nil {
+		select $3::timestamptz > now(), (select snoozed_until from snoozed), (select snoozed_until from previous)
+	`, model.CanonicalLogin(actor.ID), askID, snoozedUntil).Scan(&future, &stored, &previous); err != nil {
 		s.writeHandlerError(w, r, err)
 		return
 	}
-	if previous == nil || !previous.Equal(stored) {
+	if !future {
+		writeError(w, "SNOOZE_INPUT", http.StatusBadRequest, "snoozed_until must be in the future")
+		return
+	}
+	if stored == nil {
+		writeError(w, "NOT_FOUND", http.StatusNotFound, "no ask "+askID)
+		return
+	}
+	if previous == nil || !previous.Equal(*stored) {
 		if !s.announceAskSnooze(w, r, tx, actor, askID) {
 			return
 		}
@@ -103,7 +112,7 @@ func (s *server) putAskSnooze(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, r, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, userAskSnooze{SnoozedUntil: timestampValue(stored)})
+	WriteJSON(w, http.StatusOK, userAskSnooze{SnoozedUntil: timestampValue(*stored)})
 }
 
 // DELETE /api/v1/me/asks/{id}/snooze

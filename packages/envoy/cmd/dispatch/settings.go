@@ -40,7 +40,7 @@ type setting struct {
 // local and test runs.
 var settings = []setting{
 	{Name: "DATABASE_URL", Required: "yes",
-		Description: "Postgres connection string. The server migrates the database before serving; `census`, `backfill-block-ids`, `backfill-anchor-blocks`, `backfill-files` and `rebuild-refs` read it too. A `pool_max_conns` parameter is refused."},
+		Description: "Postgres connection string. The server migrates the database before serving; `census`, `backfill-block-ids`, `backfill-anchor-blocks`, `backfill-files`, `rebuild-refs` and `stored-order` read it too. A `pool_max_conns` parameter is refused."},
 	{Name: "DISPATCH_FILE_STORE_BUCKET", Required: "no",
 		Description: "S3 bucket uploaded files (images, attachments) are stored in, keyed by their SHA-256; the AWS SDK finds its region and credentials itself (`AWS_*`, the shared config files, the task role). `backfill-files` reads it too. Unset, every upload's bytes stay in Postgres, as before the bucket existed."},
 	{Name: "DISPATCH_AGENT_TOKEN", Required: "yes",
@@ -145,10 +145,14 @@ var settings = []setting{
 		Description: "Set to `1` to mount the end-to-end tests' hook routes; never in a real deployment."},
 	{Name: "DISPATCH_TEST_SETTLE_DELAY", Default: "`2s`", Required: "no",
 		Description: "Document settlement delay for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_ROUTE_ROSTER_TTL", Default: "`5s`", Required: "no",
+		Description: "How long a test process's stored listener answer serves issue reads' `route_status` and `GET /api/v1/agents`; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 	{Name: "DISPATCH_TEST_EDIT_NOTICE_QUIET", Default: "`30s`", Required: "no",
 		Description: "How long a document stays quiet after a person's last settled version before its `artifact.human_edited` notice goes, for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 	{Name: "DISPATCH_TEST_ROSTER_UNCACHED", Required: "no",
 		Description: "Set to `1` so every read of the listener's session list (an issue's `route_status`, `GET /api/v1/agents`) asks the listener rather than Dispatch's five-second copy, for an end-to-end test process whose fake listener changes between reads. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_RECONCILE_AT_START", Required: "no",
+		Description: "Set to `1` so a test process runs the delivery reconcile's first pass as it starts, rather than at a random moment within its first 5 minutes, for an end-to-end test that must see a pass inside its window. Set only with `DISPATCH_TEST_HOOKS=1`."},
 }
 
 // removedSettings are the variables a release stopped reading, each with what replaced it. None is

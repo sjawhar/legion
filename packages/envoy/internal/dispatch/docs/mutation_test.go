@@ -583,10 +583,12 @@ func TestNamedVersionCreditsNoAuthorOfAnEditMadeAfterItsForkRead(t *testing.T) {
 	}
 }
 
-// A room-backed snapshot takes its authors before it copies the document. A browser edit between
-// those steps is in that snapshot but credited afterwards, so it stays pending for the next version
-// that holds it (LEGION-503).
-func TestSnapshotCreditsAnEditMadeBetweenItsAuthorsAndCopyOnTheNextVersion(t *testing.T) {
+// A room-backed snapshot bounds the in-flight credits it lists before it reads the room. A browser
+// edit between those steps is in that snapshot, and the snapshot stores its update, with its
+// credit, before it versions (Ledger.flushThrough), so the edit's append writes its author to the
+// pending authors the snapshot then lists: the snapshot credits the author although the credit
+// followed the bound, and no later version credits them again.
+func TestSnapshotCreditsAnEditMadeBetweenItsCreditBoundAndReadOnce(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -617,10 +619,10 @@ func TestSnapshotCreditsAnEditMadeBetweenItsAuthorsAndCopyOnTheNextVersion(t *te
 		t.Fatalf("snapshot document: %v", err)
 	}
 	if !snapshot.Wrote || release == nil {
-		t.Fatalf("snapshot = %#v, release=%t, want a version and the author-to-copy window", snapshot, release != nil)
+		t.Fatalf("snapshot = %#v, release=%t, want a version and the bound-to-read window", snapshot, release != nil)
 	}
-	if !reflect.DeepEqual(snapshot.Version.Authors, []model.Actor{alice}) {
-		t.Fatalf("snapshot authors = %#v, want alice alone: Bob's credit follows the take", snapshot.Version.Authors)
+	if !reflect.DeepEqual(snapshot.Version.Authors, []model.Actor{alice, bob}) {
+		t.Fatalf("snapshot authors = %#v, want alice and bob: the snapshot stored Bob's edit with his credit", snapshot.Version.Authors)
 	}
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit snapshot: %v", err)
@@ -638,8 +640,8 @@ func TestSnapshotCreditsAnEditMadeBetweenItsAuthorsAndCopyOnTheNextVersion(t *te
 		t.Fatalf("carol's edit: %v", err)
 	}
 	settleCurrentGeneration(t, service, artifactID)
-	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{bob, carol}) {
-		t.Fatalf("version %d authors = %#v, want Bob and Carol", latestVersionNumber(t, service, artifactID), authors)
+	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{carol}) {
+		t.Fatalf("version %d authors = %#v, want Carol alone: the snapshot listed Bob", latestVersionNumber(t, service, artifactID), authors)
 	}
 }
 

@@ -421,7 +421,7 @@ func (s *Service) indexOwedDocument(ctx context.Context, pool *store.Pool, docum
 		}
 		markdown, blocks = held, heldBlocks
 	}
-	if _, err := s.indexRenderedVersion(ctx, tx, document.id, version, versionAt, markdown, blocks); err != nil {
+	if _, err := s.indexRenderedVersion(ctx, tx, document.id, version, versionAt, markdown, blocks, nil); err != nil {
 		return false, false, err
 	}
 	if err := stampVersionEvent(ctx, tx, owner, document.id, version, versionAt); err != nil {

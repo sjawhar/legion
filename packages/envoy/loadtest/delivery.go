@@ -55,6 +55,9 @@ type receipt struct {
 	EventID int64
 	Recv    int64 // Unix ns
 	Agent   bool  // on a session's agent topic (a route copy), not an issue topic
+	// Published is when the stream stored the message (a relay frame's Envoy-Stored-At), Unix ns;
+	// 0 for a core receipt, which carries no such time.
+	Published int64
 }
 
 type eventsSummary struct {
@@ -64,10 +67,13 @@ type eventsSummary struct {
 	CommittedPerS float64                `json:"committed_per_s"`
 	ByKind        map[string]kindSummary `json:"by_kind"`
 	// DeliveryMsFromSent, DeliveryMsFromArrival and DeliveryMsFromCommit hold one value per
-	// (primary event, subscribed session) issue-topic receipt.
+	// (primary event, subscribed session) issue-topic receipt. DeliveryMsFromPublish holds one
+	// per such receipt that carries the stream's store time (a relay frame under consumer
+	// delivery): the receipt time minus the time the event's NATS publish was stored.
 	DeliveryMsFromSent         stat `json:"delivery_ms_from_sent"`
 	DeliveryMsFromArrival      stat `json:"delivery_ms_from_arrival"`
 	DeliveryMsFromCommit       stat `json:"delivery_ms_from_commit"`
+	DeliveryMsFromPublish      stat `json:"delivery_ms_from_publish"`
 	IssueTopicReceipts         int  `json:"issue_topic_receipts"`
 	ExpectedIssueTopicReceipts int  `json:"expected_issue_topic_receipts"`
 	Missing                    int  `json:"missing"`
@@ -175,7 +181,7 @@ func joinDelivery(writes []writeRec, commits []commitRow, receipts []receipt, wa
 	}
 	out.OtherEvents = len(other)
 
-	var fromSent, fromArrival, fromCommit []float64
+	var fromSent, fromArrival, fromCommit, fromPublish []float64
 	kindArrival := map[string][]float64{}
 	kindCommit := map[string][]float64{}
 	for _, r := range receipts {
@@ -192,6 +198,9 @@ func joinDelivery(writes []writeRec, commits []commitRow, receipts []receipt, wa
 		}
 		out.IssueTopicReceipts++
 		fromSent = append(fromSent, float64(r.Recv-t.w.Sent)/1e6)
+		if r.Published != 0 {
+			fromPublish = append(fromPublish, float64(r.Recv-r.Published)/1e6)
+		}
 		arrival := t.w.Arrival
 		ms := float64(r.Recv-arrival) / 1e6
 		fromArrival = append(fromArrival, ms)
@@ -209,6 +218,7 @@ func joinDelivery(writes []writeRec, commits []commitRow, receipts []receipt, wa
 	out.DeliveryMsFromSent = mkStat(fromSent)
 	out.DeliveryMsFromArrival = mkStat(fromArrival)
 	out.DeliveryMsFromCommit = mkStat(fromCommit)
+	out.DeliveryMsFromPublish = mkStat(fromPublish)
 	out.ConnWaitMs = mkStat(connWait)
 	out.Refusals = refusals.summary()
 	for kind, k := range out.ByKind {

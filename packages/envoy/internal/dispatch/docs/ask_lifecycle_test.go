@@ -292,7 +292,13 @@ func TestReopeningAnIssueRestoresTheLatestEditSourceOfARoomLoadedWhileClosed(t *
 				state.mu.Lock()
 				state.durableAppends.Add(1)
 				state.mu.Unlock()
-				defer service.finishDurableAppend(artifactID, state)
+				// The count is taken by hand, so it is released by hand: the room's worker ends
+				// an append with the class it took (finishUpdateClass), and this holds none.
+				defer func() {
+					state.mu.Lock()
+					state.durableAppends.Add(-1)
+					service.unlockState(artifactID, state)
+				}()
 			}
 
 			reopenTestIssue(t, service)

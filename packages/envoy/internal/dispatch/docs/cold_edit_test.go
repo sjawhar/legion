@@ -160,7 +160,7 @@ func TestABrowserOpeningADocumentMidColdWriteKeepsBothEdits(t *testing.T) {
 					return nil
 				}
 				write := joinedLiveWrite(ctx, artifactID)
-				if during && (write.cold || write.forkedFrom.Value() != room) {
+				if during && (write.cold || write.point.cursor != service.cursorOf(room)) {
 					t.Error("the write kept a copy of the document read from the store beside the browser's room")
 				}
 				return nil

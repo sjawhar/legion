@@ -275,11 +275,11 @@ const (
 	RouteUnknown = "unknown"
 )
 
-// IssueRouteReach is whether an issue's route reaches anyone: resolved on read from the server's
-// copy of the listener's session list, at most 5 s old, stored in no table, and never part of an
-// event payload, which is why it sits beside Issue in a read response rather than in it. Both
-// fields are null for an issue with no route; RouteHolder names the session only when
-// RouteStatus is RouteLive.
+// IssueRouteReach is whether an issue's route reaches anyone: resolved on read from the one stored
+// copy of the listener's session list every server process judges by, at most 5 s old, never
+// stored on the issue and never part of an event payload, which is why it sits beside Issue in a
+// read response rather than in it. Both fields are null for an issue with no route; RouteHolder
+// names the session only when RouteStatus is RouteLive.
 type IssueRouteReach struct {
 	RouteStatus *string `json:"route_status"`
 	RouteHolder *string `json:"route_holder"`
@@ -1523,6 +1523,15 @@ type CommentEventPayload struct {
 	SuppressRoute            bool    `json:"suppress_route"`
 	SuppressedRoute          string  `json:"suppressed_route,omitempty"`
 	SuppressedRouteSessionID *string `json:"suppressed_route_session_id,omitempty"`
+	// MentionsDecideRoutes records that the comment reaches sessions beyond its mentions - the
+	// issue had a route or a session claimant, the comment replies to a thread or joins an ask's
+	// thread that has followers, it is on a document, or it is on an issue whose primary document
+	// credits a session - so its mentions were resolved, through a listener take-over, before it
+	// committed, and the route above and the outbox's session routes were decided on those
+	// resolutions. Each mention's first attempt keeps its resolution for whichever sender finishes
+	// it: a mention resolved again after the commit could reach a session one of those routes
+	// reaches too. Omitted when false.
+	MentionsDecideRoutes bool `json:"mentions_decide_routes,omitempty"`
 	// ReferenceChangesPayload names the nodes whose inbound reference edges this write moved,
 	// so a reader carrying their batched backlink counts refreshes exactly those rows.
 	ReferenceChangesPayload
@@ -1752,6 +1761,11 @@ type GraphExcerpt struct {
 	BlockID string `json:"block_id,omitempty"`
 	Text    string `json:"text"`
 }
+
+// GraphEdgeKinds is every structural edge kind graph_edges emits. A typed block's `block[]`
+// attribute makes edges of a kind named by the attribute (pmdoc.LinkKinds), which is never one of
+// these: a schema name equal to one would merge silently with it in every reader.
+var GraphEdgeKinds = []string{"mentions", "child_of", "blocked_by", "attached_to", "anchored_to", "owned_by", "replies_to", "followed_by", "part_of", "depends_on", "affects"}
 
 // GraphEdge is one typed, timestamped edge of graph_edges seen from the queried node: Node is
 // the other end, Direction is "in" for edges pointing at the queried node and "out" for edges

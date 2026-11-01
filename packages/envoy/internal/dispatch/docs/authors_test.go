@@ -63,11 +63,12 @@ func TestSettlementCreditsNoAuthorOfAnEditMadeAfterItsRead(t *testing.T) {
 	}
 }
 
-// An edit made after settlement takes its authors and before it copies the tree is in the version
-// it copies but is credited after that take, so the version does not credit its author. The edit's
-// own settlement sees that version and writes none, leaving the author pending for the next version
-// that holds the edit (LEGION-503).
-func TestSettlementCreditsAnEditMadeBetweenItsAuthorsAndCopyOnTheNextVersion(t *testing.T) {
+// An edit made after a settlement bounds the in-flight credits it lists and before it reads the
+// tree is in the version it reads. The settlement stores that edit's update itself before it
+// versions (Ledger.flushThrough), with the edit's credit, whose append writes its author to the
+// pending authors the version then lists: the version credits its author although the credit
+// followed the bound, and no later version credits them again.
+func TestSettlementCreditsAnEditMadeBetweenItsCreditBoundAndReadOnce(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -87,13 +88,13 @@ func TestSettlementCreditsAnEditMadeBetweenItsAuthorsAndCopyOnTheNextVersion(t *
 	}
 	settleCurrentGeneration(t, service, artifactID)
 	if release == nil {
-		t.Fatal("settlement never reached the window between its authors and its copy")
+		t.Fatal("settlement never reached the window between its credit bound and its read")
 	}
 	const both = "First, alice.\n\nSecond, bob.\n"
 	requireLatestVersionMarkdown(t, service, artifactID, both)
 	versioned := latestVersionNumber(t, service, artifactID)
-	if authors := latestVersionAuthors(t, service, artifactID); !slices.Equal(authors, []model.Actor{alice}) {
-		t.Fatalf("version %d authors = %#v, want alice alone: bob was credited after the take", versioned, authors)
+	if authors := latestVersionAuthors(t, service, artifactID); !slices.Equal(authors, []model.Actor{alice, bob}) {
+		t.Fatalf("version %d authors = %#v, want alice and bob: the settlement stored bob's edit with his credit", versioned, authors)
 	}
 
 	service.afterSettleAuthorsTake = nil
@@ -107,8 +108,8 @@ func TestSettlementCreditsAnEditMadeBetweenItsAuthorsAndCopyOnTheNextVersion(t *
 		t.Fatalf("carol's edit: %v", err)
 	}
 	settleCurrentGeneration(t, service, artifactID)
-	if authors := latestVersionAuthors(t, service, artifactID); !slices.Contains(authors, bob) {
-		t.Fatalf("version %d authors = %#v, want bob, whose edit it holds", latestVersionNumber(t, service, artifactID), authors)
+	if authors := latestVersionAuthors(t, service, artifactID); slices.Contains(authors, bob) {
+		t.Fatalf("version %d authors = %#v, want no bob, whom version %d listed", latestVersionNumber(t, service, artifactID), authors, versioned)
 	}
 }
 
@@ -158,11 +159,12 @@ func TestSettlementKeepsTheCreditOfAnEditItsAuthorMakesBeforeItCommits(t *testin
 }
 
 // ygo runs a room's update observer, which credits an edit to its authors, only once the edit's
-// transaction has released the document, so a settlement can version an edit the room holds before
-// its observer has credited it. That version credits the edit to no one, and the edit's own
-// settlement finds the document already versioned and writes none. The author stays pending and is
-// credited on the next version, which holds the edit too (LEGION-503).
-func TestAnEditVersionedBeforeItsObserverCreditsItIsCreditedOnTheNextVersion(t *testing.T) {
+// transaction has released the document, so a settlement can read the room before the observer of
+// an edit it holds has run. Its read point classifies and credits that edit itself, and the
+// settlement stores it, with that credit, before it versions (Ledger.flushThrough): the version
+// credits the edit's author, the edit's own settlement finds the document already versioned and
+// writes none, and no later version credits the author again.
+func TestAnEditReadBeforeItsObserverRunsIsCreditedOnTheVersionThatStoresIt(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -175,14 +177,14 @@ func TestAnEditVersionedBeforeItsObserverCreditsItIsCreditedOnTheNextVersion(t *
 	service.addConnection(artifactID, 1, bob)
 	release := holdPeerEdit(t, service, artifactID, &service.beforeObserveUpdate, replaceRun("Second.", "Second, bob."))
 
-	// The room holds bob's edit, and its observer has not credited him: the settlement versions
-	// the edit and credits alice alone.
+	// The room holds bob's edit, and its observer has not credited him: the settlement's read
+	// credits him, stores the edit and versions it.
 	settleCurrentGeneration(t, service, artifactID)
 	const both = "First, alice.\n\nSecond, bob.\n"
 	requireLatestVersionMarkdown(t, service, artifactID, both)
 	versioned := latestVersionNumber(t, service, artifactID)
-	if authors := latestVersionAuthors(t, service, artifactID); !slices.Equal(authors, []model.Actor{alice}) {
-		t.Fatalf("version %d authors = %#v, want alice alone: bob's observer had not credited him", versioned, authors)
+	if authors := latestVersionAuthors(t, service, artifactID); !slices.Equal(authors, []model.Actor{alice, bob}) {
+		t.Fatalf("version %d authors = %#v, want alice and bob: the settlement stored bob's edit with his credit", versioned, authors)
 	}
 
 	release()
@@ -198,9 +200,9 @@ func TestAnEditVersionedBeforeItsObserverCreditsItIsCreditedOnTheNextVersion(t *
 	}
 	settleCurrentGeneration(t, service, artifactID)
 	requireLatestVersionMarkdown(t, service, artifactID, both+"\nThird, carol.\n")
-	if authors := latestVersionAuthors(t, service, artifactID); !slices.Contains(authors, bob) {
-		t.Fatalf("version %d authors = %#v, want bob, whose edit it holds and no version had credited",
-			latestVersionNumber(t, service, artifactID), authors)
+	if authors := latestVersionAuthors(t, service, artifactID); slices.Contains(authors, bob) {
+		t.Fatalf("version %d authors = %#v, want no bob, whom version %d listed",
+			latestVersionNumber(t, service, artifactID), authors, versioned)
 	}
 }
 

@@ -432,9 +432,9 @@ func TestASettlementRendersWithoutHoldingItsDocumentsOwnerRow(t *testing.T) {
 }
 
 // A settlement that stamps block ids and repairs an ask block renders nothing under its document's
-// owner row either: while each of its renders - the live tree each pass read, the stamped copy, the
-// planned repairs - is held for a moment, another connection takes that row at once. The document
-// still gets its stamp, its repair and its version.
+// owner row either: while each of its renders - the live tree each pass read, the planned repairs -
+// is held for a moment, another connection takes that row at once. The document still gets its
+// stamp, its repair and its version.
 func TestARepairingSettlementRendersNothingUnderItsDocumentsOwnerRow(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -465,9 +465,10 @@ func TestARepairingSettlementRendersNothingUnderItsDocumentsOwnerRow(t *testing.
 	}
 	settleCurrentGeneration(t, service, artifactID)
 	service.beforeSettleRender = nil
-	// The live tree, its stamped copy, the stamped tree, the planned repairs, the tree they are
-	// committed from and the repaired tree versioned.
-	if got := renders.Load(); got < 6 {
+	// The live tree, the stamped tree, the planned repairs, the tree they are committed from and
+	// the repaired tree versioned. The stamp itself renders nothing: the room measures the class
+	// its update is stored with (repairClass, storeRepair).
+	if got := renders.Load(); got < 5 {
 		t.Fatalf("the settlement rendered %d times, want a render for each of its stamp, plan, repairs and version", got)
 	}
 	want := ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"" +

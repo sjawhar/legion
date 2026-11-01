@@ -42,9 +42,10 @@ const reconcileOverlap = time.Hour
 // broker the issue.deployed events go through (RecordDeployedEvents). A nil GitHub client (no App
 // credentials) leaves it idle, exactly like architecture.Importer and Intake.
 type Reconcile struct {
-	pool   *store.Pool
-	github *githubapp.Client
-	events *events.Broker
+	pool    *store.Pool
+	github  *githubapp.Client
+	events  *events.Broker
+	atStart bool
 }
 
 // NewReconcile builds a Reconcile reading and writing through pool: cmd/dispatch hands it the
@@ -52,6 +53,16 @@ type Reconcile struct {
 // nor takes one.
 func NewReconcile(pool *store.Pool, github *githubapp.Client, broker *events.Broker) *Reconcile {
 	return &Reconcile{pool: pool, github: github, events: broker}
+}
+
+// FirstPassAtStart makes Run run one pass as it starts, before its jittered ticks, for an
+// end-to-end test that must see a pass inside its window (DISPATCH_TEST_RECONCILE_AT_START, under
+// the test hooks). The pass takes the lease for the current ReconcileInterval as any tick's does,
+// so a jittered tick inside that interval finds it served. A deployment never sets it: the
+// jitter is what keeps a restart from stampeding GitHub.
+func (r *Reconcile) FirstPassAtStart() *Reconcile {
+	r.atStart = true
+	return r
 }
 
 // HasApp reports whether the GitHub App credentials needed to do any work are configured.
@@ -71,6 +82,9 @@ func (r *Reconcile) HasApp() bool {
 // the interval reconciled. leases is required, as it is of every leased loop: it is the pool
 // cmd/dispatch has already opened (and exits at boot without).
 func (r *Reconcile) Run(ctx context.Context, leases duty.Leases) {
+	if r.atStart && r.HasApp() {
+		r.leasedPass(ctx, leases, time.Now())
+	}
 	duty.RunJittered(ctx, ReconcileInterval, func() bool {
 		if r.HasApp() {
 			return false
