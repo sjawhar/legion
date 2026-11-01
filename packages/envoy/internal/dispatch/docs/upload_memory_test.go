@@ -144,14 +144,15 @@ type loadThread struct {
 	replies      []MarkReply
 }
 
-// skipUnderRace skips a room-memory test in a -race build: the race detector distorts the heap
-// growth these tests measure (its shadow memory and instrumented allocations are not the room's),
-// and they exercise no concurrency for it to catch, so under -race they cost minutes of the
-// package's time budget and prove nothing. The normal build runs them.
+// skipUnderRace skips a measurement of the heap, or of the allocations a path makes, in a -race
+// build: the race detector distorts both figures (its shadow memory, its instrumented allocations
+// and the escapes its instrumentation forces are not the measured path's), and these tests
+// exercise no concurrency for it to catch, so under -race they cost minutes of the package's time
+// budget and prove nothing. The normal build runs them.
 func skipUnderRace(t *testing.T) {
 	t.Helper()
 	if raceEnabled {
-		t.Skip("the race detector distorts the heap growth this test measures, and the test checks no concurrency")
+		t.Skip("the race detector distorts the heap and the allocations this test measures, and the test checks no concurrency")
 	}
 }
 

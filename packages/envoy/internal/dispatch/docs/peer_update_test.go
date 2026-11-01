@@ -1627,6 +1627,7 @@ func applyAllocation(t *testing.T, into func() *crdt.Doc, update []byte, scanRef
 // memory reached about 11.8 GB, where alone on this pod's two processors it took 20 s, and no
 // row's process passed 300 MiB resident (each logs its peak).
 func TestEveryApplysTransientHeapIsWithinItsEstimate(t *testing.T) {
+	skipUnderRace(t)
 	// The rows of many structs carry structs of them, of many Any values values, and of large maps,
 	// objects and arrays entries an element; the long string and binary are blob bytes. Each makes
 	// the estimate's fixed part (applyHeapPerApply) under a hundredth of the row's measurement, so

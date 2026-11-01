@@ -1750,6 +1750,13 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 	// each carries the deletes of the cuts before it too, which a document that has taken them
 	// holds.
 	const shrunk, cutsEach, cutBytes = 25, 4, 50
+	// markAuthor is the reader whose abandoned composer left both unrecorded marks behind, and is
+	// nobody this drive connects as: the sweep keeps an unrecorded mark whose author still has a
+	// browser on its room, the composer still open in front of them (sweepUnrecordedMarks,
+	// internal/dispatch/docs/marks.go:832-918), and every browser here connects as alice
+	// (memoryServer.openBrowser, memory_harness_test.go:656), one of them holding the room of the
+	// first mark until the drive ends, so a mark of alice's would never age.
+	const markAuthor = "user:bob"
 	memory := newMemoryHarness(t)
 	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
 	fleet := memory.mebibyteFleet(t, func(reserved int64) int { return int(roomBudgetBytesForTest/reserved) + 4 })
@@ -1763,7 +1770,7 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 	// unheld is a document whose stored history holds an unrecorded comment mark and that no room of
 	// the drive's server holds: a server of its own takes the mark from a browser and stores it, then
 	// stops, well inside the minute after which the sweep removes an unrecorded mark
-	// (sweepUnrecordedMarks, internal/dispatch/docs/marks.go:783-838), which the drive's server counts
+	// (sweepUnrecordedMarks, internal/dispatch/docs/marks.go:832-918), which the drive's server counts
 	// from when its own settlement first finds the mark.
 	unheld := fleet.copies[len(fleet.copies)-1]
 	unheldMark := pmdoc.MarkRef{Type: commentMark, ID: unheldMarkID}
@@ -1771,7 +1778,7 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 	setting := marking.openBrowser(t, unheld)
 	requireApplied(t, setting, browserEdit(t, fleet.state, func(tree *pmdoc.Node) {
 		text := paddingTexts(t, tree)[0]
-		text.Marks = append(text.Marks, pmdoc.Mark{Type: commentMark, Attrs: pmdoc.Attrs{"id": unheldMarkID, "by": "user:alice"}})
+		text.Marks = append(text.Marks, pmdoc.Mark{Type: commentMark, Attrs: pmdoc.Attrs{"id": unheldMarkID, "by": markAuthor}})
 	}), "an unrecorded comment mark")
 	setting.leave()
 	memory.waitForSettled(t, unheld)
@@ -1806,7 +1813,7 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 	}
 	mark := browserEdit(t, fleet.state, func(tree *pmdoc.Node) {
 		text := paddingTexts(t, tree)[0]
-		text.Marks = append(text.Marks, pmdoc.Mark{Type: commentMark, Attrs: pmdoc.Attrs{"id": markID, "by": "user:alice"}})
+		text.Marks = append(text.Marks, pmdoc.Mark{Type: commentMark, Attrs: pmdoc.Attrs{"id": markID, "by": markAuthor}})
 	})
 	grow := browserEdit(t, fleet.state, func(tree *pmdoc.Node) { paddingTexts(t, tree)[0].Text += " This sentence grows the document." })
 	denser := browserEdit(t, fleet.state, func(tree *pmdoc.Node) {
@@ -1861,9 +1868,9 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 			t.Fatalf("%d documents of a mebibyte are open, want at least %d", len(held), shrunk+4)
 		}
 		// The refused browser left the budget within its limit, so nothing is full: the mark,
-		// which inserts, applies. It has no comment recorded for it, so the sweep removes it once it
-		// is a minute old (sweepUnrecordedMarks, internal/dispatch/docs/marks.go:782-838), which is
-		// after the budget is full.
+		// which inserts, applies. It has no comment recorded for it, and no browser of its author
+		// is on the room, so the sweep removes it once it is a minute old (sweepUnrecordedMarks,
+		// internal/dispatch/docs/marks.go:832-918), which is after the budget is full.
 		marking := server.openBrowser(t, held[0].room)
 		requireApplied(t, marking, mark, "an unrecorded comment mark on a budget that refused a browser and is within its limit")
 		marking.leave()

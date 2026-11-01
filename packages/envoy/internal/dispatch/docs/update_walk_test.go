@@ -440,6 +440,7 @@ func TestTheUpdateWalkReadsJSONWhereYgoDoes(t *testing.T) {
 // cheapest flood a client that is not the editor can send, and the whole state of a 1 MiB document
 // are each walked in the same few allocations, whatever their struct counts.
 func TestTheUpdateWalkAllocatesNothingPerStruct(t *testing.T) {
+	skipUnderRace(t)
 	for _, row := range []struct {
 		name   string
 		update []byte

@@ -365,6 +365,7 @@ func storedCountGrant(t *testing.T, database *store.Store, room string, number i
 // history is one row of over a mebibyte against a rendering of a few hundred bytes: the shape the
 // walk, not the parse, is weighed for.
 func TestAStoredVersionsCountHoldsNoMoreThanItsGrant(t *testing.T) {
+	skipUnderRace(t)
 	database := storetest.Open(t)
 	service := newRoomBudgetService(t, database, NewPgVersioned(database))
 	shapes := []struct {
