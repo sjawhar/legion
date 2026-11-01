@@ -136,7 +136,8 @@ Each item below names a task and where its code is, then notes on it.
   Dispatch's and the secrets broker's listeners:
   one LISTEN connection that dials, reports each notification, pings itself when idle, wakes a caller on its own goroutine, and redials on every failure (`Listener`, `Run`, `RedialBackoff`), because a connection waiting for a notification must outlive every failure between it and the server (INFRA-66).
   Shared the way `internal/pgmigrate` is, since the broker's cross-pod secret-reread fan-out (`internal/broker/reread`) listens on the same kind of connection as Dispatch's delivery hub and event stream relay (`internal/dispatch/api`) and its stale-room evictor (`internal/dispatch/docs`);
-  each caller sets `Listener.Owner`, the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch`
+  each caller sets `Listener.Owner`, the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch`.
+  `Hub` shares one `Listener` among many subscribers and channels: `cmd/dispatch` runs one per process (`dispatch background wakes`) for its woken background loops, and every `Wake` is signalled after each successful LISTEN as well as on each notification, so a subscriber catches up then on what it missed while the listener had no connection (`cmd/dispatch/README.md`, "Background loops")
 
 - **GitHub webhook redelivery**: `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go`
 
@@ -145,8 +146,8 @@ Each item below names a task and where its code is, then notes on it.
 - **Meaning search's embedder and coverage**: `internal/dispatch/embed/`, `internal/dispatch/embedqueue/`, `cmd/dispatch/embedder.go`
 
   Cohere Embed v4 on AWS Bedrock (`bedrock.go`, the default) or Azure AI Foundry (`azure.go`, `azuretoken.go` for the keyless Entra exchange), chosen by `DISPATCH_EMBEDDER`;
-  each client's `Identity` is what `embeddings.model` records and search compares, and its `Limits` pace the queue.
-  `embedqueue/coverage.go` is the coverage pass the server runs at start and every 10 minutes (no backfill subcommand) and the report `GET /api/v1/search/coverage` serves (`cmd/dispatch/README.md`, "Search")
+  each client's `Identity` is what `embeddings.model` records and search compares, and its `Limits` pace the queue, which scans when `embeddings_enqueue` notifies `dispatch_embeddings` (migration 0151) or a pending row falls due.
+  `embedqueue/coverage.go` is the coverage pass the server runs once at start (no backfill subcommand), whose identity steps alone run again while another identity's rows remain, and the report `GET /api/v1/search/coverage` serves (`cmd/dispatch/README.md`, "Search")
 
 - **Document tree (Proof schema)**: `internal/dispatch/pmdoc/`
 
@@ -321,10 +322,10 @@ goldmark's tree before the Proof schema's refusals, so a spec holding a table ro
 Both skip an item emptied of its text, since the renderer writes one as a plain `- `, and both read front matter as Parse does, so they agree on every document both can read.
 Every version write records the count in its own transaction (`docs.RecordTaskProgress` from `writeVersionTx`;
 issue creation and an upload call `docs.RecordTaskProgressMarkdown` after they insert their version row, so the count names it).
-The row the API reads (`model.IssueProgress`, on `IssueSummary` and the issue read, never on an event payload) can lag its document - every row the migration found, any the task a deploy replaces versions while both run (its code records no count), a row another writer held - so `cmd/dispatch` runs `docs.Service.RunTaskProgressReconciliation`, which at start and every five minutes (`TaskProgressReconcileInterval`) counts again every issue whose `tasks_version` is not its document's greatest `artifact_versions.number` (`taskProgressDrift`), in batches of 50 under `for no key update … skip locked`:
-a full batch with drift left goes straight to the next, and a short or failed one is retried a bounded number of times in the pass;
-so a stale or missing count lasts at most that interval, and `tasks: null` on the API means a spec with no task list (total
-0) or one still inside that window.
+The row the API reads (`model.IssueProgress`, on `IssueSummary` and the issue read, never on an event payload) can lag its document - every row the migration found, a version a build predating LEGION-542 wrote (its code records no count), a row another writer held - so `cmd/dispatch` runs `docs.Service.RunTaskProgressReconciliation`, which once at start counts again every issue whose `tasks_version` is not its document's greatest `artifact_versions.number` (`taskProgressDrift`), in batches of 50 under `for no key update … skip locked`:
+a full batch with drift left goes straight to the next, and a short or failed one is retried a bounded number of times in the pass.
+No timer follows it: every build a deploy runs beside this one records the count in each version write, so the only drift left is rows another writer held during the pass, which it retries up to six more passes (`taskProgressBootRetries`, one second after it and doubling, at most a minute apart) and, if any remain, logs at WARN and leaves to the next start.
+`tasks: null` on the API means a spec with no task list (total 0) or a count that reconciliation has not reached yet.
 
 A write never puts one block id on two blocks.
 `EnsureBlockIDs` keeps a repeated id for the first holder in document order, and ask rows and anchors are keyed on block ids, so a block written ahead of an answered ask under its id would take the ask's row and answer, and the question would come back as a fresh open ask.
@@ -1085,12 +1086,17 @@ An edit, a named version, a seed, a rebuild and a settlement render the tree onc
 an upload that changes the document renders it twice, as it did before excerpts - `ReplaceText`'s render of the replacement, which is the stored markdown, and `applyLive`'s render of the fork - and its excerpts are cut from `applyLive`'s render only when the two agree.
 A null `excerpt_version` marks a mention owed an excerpt:
 every row 0092 found, each one `rebuild-refs` inserts, and every mention of an upload whose replacement left the document as it was, the one version write that records no rendering (`refs.ClearExcerpts`, which keeps the payload the row holds for the reconciliation but sets its version null).
-`cmd/dispatch` runs `docs.Service.RunReferenceExcerptReconciliation`, which reads owed rows through the partial index `refs_excerpt_drift` (an empty index once it has caught up), stores one batch of 20 documents per tick, every 2 s while a batch is full and every five minutes after, and for the hour after its start first marks owed the excerpts a version written by the binary a deploy replaces left behind (`refs.MarkStaleExcerpts`).
-A document the reconciliation cannot read for any reason but an unloadable history or a tree outside the schema (which it records as having no block), or whose excerpts it cannot store, is logged at ERROR and skipped for that tick, its mentions left owed, so one document never holds back the rest of its batch.
+`cmd/dispatch` runs `docs.Service.RunReferenceExcerptReconciliation`, a woken loop (`duty.RunWoken`, lease `reference-excerpts`):
+a row trigger on `refs` (migration 0153) notifies `dispatch_excerpts_owed` whenever a mention is left owed, whoever wrote it, and the loop, woken through the server's shared listener (`pglisten.Hub`), reads owed rows through the partial index `refs_excerpt_drift` (an empty index once it has caught up) and stores one batch of 20 documents per pass, passes at least 2 s apart, the next at once while a full batch leaves documents it can still record.
+Each process's first pass also marks owed, once, the excerpts a version written by a binary predating 0092 left behind (`refs.MarkStaleExcerpts`);
+every build since records them in each version write.
+A document the reconciliation cannot read for any reason but an unloadable history or a tree outside the schema (which it records as having no block), or whose excerpts it cannot store, is logged at ERROR and deferred in `reference_excerpt_backoff` (migration 0152, `refs.DeferExcerpts`):
+one minute after its first failure at that version, doubling to at most six hours, plus up to a fifth again of jitter;
+its mentions stay owed, and `refs.DriftedExcerpts` leaves it out of the batches until it falls due, so one document never holds back the rest of its batch, the batches after it or the loop's pace.
+A success deletes its row.
+The earliest due row (`refs.NextExcerptRetry`) is the loop's only timer; with nothing owed and nothing deferred it holds none and sends no statement.
 `refs.StoredExcerpts` serves only a row whose `excerpt_version` is non-null;
 a row owed an excerpt is answered with the document's name, not the payload it still holds.
-One window is left: during the one rolling deploy that ships 0092, a version the binary it replaces writes leaves the previous version's excerpt with its `excerpt_version` still set, and the route serves that excerpt until `refs.MarkStaleExcerpts` marks it owed at the reconciliation's next tick, which starts within five minutes (`docs.ReferenceExcerptReconcileInterval`) of the last one ending.
-The deploy's overlap lies inside the hour after the new task starts, the only hour `MarkStaleExcerpts` runs.
 A `?to=` read lists a mention that one of the citing document's blocks holds from that block, with the block's own excerpt (below), so the excerpt on the `refs` row is what a document mention no block holds is shown with:
 one in a document the block index has not reached.
 
@@ -2171,7 +2177,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A healthy source whose head is the recorded commit only refreshes `last_sync_at` (no fetch, no event);
   a moved head whose subtree sha equals `last_tree_sha` records the commit without re-fetching or re-projecting
   — so a caller looping a sync route is bounded to the head lookups.
-  Triggers: a five-minute jittered ticker in `cmd/dispatch/main.go` (idle without App credentials) that syncs every enabled source by project and then id, going on past a failure;
+  Triggers: a five-minute ticker in `cmd/dispatch/main.go` (`duty.RunJittered`:
+  each wait the interval plus up to a tenth again, drawn afresh every period;
+  idle without App credentials) that syncs every enabled source by project and then id, going on past a failure;
   `POST /api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync` (one source;
   authAny; 200 with `last_error` on a recorded failure, 409 `SOURCE_ACCESS` for credential/branch problems, 404 `SOURCE_NOT_FOUND` when the repository is not a source of the project);
   `POST /api/v1/projects/{key}/architecture-sources/sync` (every source of the project in id order, each attempted whatever another's import did;
@@ -3423,7 +3431,7 @@ The row holds a SHA-256 of the method, the route pattern, its path values, the q
 The delivery sweep (`internal/dispatch/api/delivery_sweep.go`) finishes the deliveries a dead process left.
 Every write that delivers to sessions - a send to one session, the live view's model and thinking switch, a broadcast's recipients, an issue message to a session, a comment's and a document comment's mentions, and a retry from an agent card - claims each attempt before its send and settles it after, on a context its client's cancellation does not reach.
 A process that dies between the two leaves the attempt pending under a claim nobody holds.
-Every pass of the maintenance loop (`RunSuggestionOutcomeSweep`, once a minute, the `ResumeDeliveries` that `api.Register` and `routes.New` return in `api.Background` beside `Wait`) calls `resumeOwedDeliveries`.
+Every pass of the maintenance loop (`RunMaintenanceSweep`, once a minute across the processes under the `suggestion-outcomes` lease, the `ResumeDeliveries` that `api.Register` and `routes.New` return in `api.Background` beside `Wait`) calls `resumeOwedDeliveries`.
 It first settles `failed`, with the receipt the row owes, every owed attempt nothing can send, 100 of each kind a read until a read comes back short or a round settles nothing:
 a message attempt on a closed issue and a keyed send with no attempt on a closed issue (given a failed attempt 1), `not sent: the issue closed before this attempt was delivered`;
 a mention attempt whose document is no longer a project's, `not sent: the document is gone`, or whose issue closed, as above;
@@ -3448,7 +3456,7 @@ a context that ends during the wait answers `503 SLOW_WRITE_CUT_OFF` and the han
 The browser suite drives a write Dispatch is slow to finish with it.
 
 A key is kept 24 hours (`IDEMPOTENCY_KEY_TTL_MS`):
-the suggestion-outcome sweep's pass deletes every older row (`sweepRequestKeys`), a row a dead process left in flight with it, and a repeat that finds an older row not yet swept treats the key as unused.
+the maintenance sweep's pass deletes every older row (`sweepRequestKeys`), a row a dead process left in flight with it, and a repeat that finds an older row not yet swept treats the key as unused.
 The hand-written key path before it is gone, and so is its table:
 `broadcast_idempotency_keys` (migration `0055`), dropped by `0141_drop_broadcast_idempotency_keys`, in a release later than `0137`'s, which stopped reading and writing it.
 Neither send route takes a body `idempotency_key` any more; the header carries the key.
@@ -3742,7 +3750,7 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   a document has no delivery route, so the same author routes above are the only way an involved session learns about a human reply, resolution, reopening, or edit on its ask or comment thread, or a human's new comment on a document it wrote.
 
 - `artifact.human_edited` goes to the issue's route and to each session the document credits, never to a person.
-  Dispatch appends it once a document has been quiet for 30 seconds after a person's last settled browser version (`document_edit_notices`, migration 0129, swept every 5 s under the `edit-notices` lease by `docs.RunEditNotices`);
+  Dispatch appends it once a document has been quiet for 30 seconds after a person's last settled browser version (`document_edit_notices`, migration 0129, sent by `docs.RunEditNotices` under the `edit-notices` lease, a woken loop that the row trigger of migration 0157 wakes and that waits for the earliest due time, sweeps at least 5 s apart);
   its actor is the last person the window knows edited, and its payload names the document, the two versions the quiet window spans, each person who edited, and the unified diff of the two versions, cut at its last line end within 4,096 bytes (`ArtifactHumanEditedEventPayload` in `packages/contracts/src/dispatch-api.ts`).
   The document is the payload's `artifact_id`, and its sessions are read as a comment's are (`loadDocumentSessionAuthors`).
   That person is the sender of a version's latest edit (`docs.latestEditSource`):
