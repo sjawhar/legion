@@ -1207,6 +1207,14 @@ func (w *workflowRuntime) recordOf(ctx context.Context, key string) (*record.Iss
 // record, or a fresh event of a recorded issue whose Dispatch parent is not its record's, reads
 // again the chain of every queued root whose recorded chain holds the issue: that issue may be the
 // ancestor a person just moved.
+//
+// An unrecorded root in triage that carries the label also has its Dispatch event log read, from
+// its start, for who set the label (labelSetter, intake.DispatchIssue.LabelSetter): a person's
+// label queues the root through the outbox, a session's wakes the controller as today, and the
+// event that reaches the daemon says the label is there, not who put it there. It is one paged
+// read per such event, outside the fact lock as the rest of the preparation reads, and a failed
+// read leaves the event to be retried. A recorded root a person moved back to triage is never
+// queued again, so its log is not read.
 func (w *workflowRuntime) prepareRepository(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error) {
 	return w.prepareIssue(ctx, issue, true)
 }
@@ -1230,6 +1238,11 @@ func (w *workflowRuntime) prepareIssue(ctx context.Context, issue intake.Dispatc
 		return w.withAncestry(ctx, w.prepareRecorded(issue, recorded), recorded, observe)
 	}
 	if !admissionBound(issue) {
+		if labelledTriageRoot(issue) {
+			if issue.LabelSetter, err = w.labelSetter(ctx, issue.Key); err != nil {
+				return issue, err
+			}
+		}
 		prepared, err := w.prepareUnrecorded(ctx, issue, false, 0)
 		if err != nil {
 			return prepared, err
@@ -1255,6 +1268,53 @@ func (w *workflowRuntime) prepareIssue(ctx context.Context, issue intake.Dispatc
 	}
 	w.forgetHolds(issue.Key, prepared.Seq)
 	return prepared, nil
+}
+
+// labelledTriageRoot says whether issue is a root (no Dispatch parent) in triage that carries the
+// label: the issue whose label's setter admission reads to queue a person's handover
+// (intake.DispatchIssue.LabelSetter), while the workflow does not record it.
+func labelledTriageRoot(issue intake.DispatchIssue) bool {
+	return issue.Status == "triage" && issue.Parent == "" && issue.HandedOver
+}
+
+// labelSetter is the kind of the Dispatch actor that added the label to key, read from the issue's
+// whole Dispatch event log, from sequence 0, by intake.LabelSetter's rule: one paged read per call,
+// outside the fact lock as the rest of a preparation reads, for an event's preparation
+// (prepareIssue) and the boot listing's (reconcileListing) alike. A read that fails, or a log the
+// daemon cannot decode, is an error naming the key, for the caller to fail the preparation on, so
+// the event or the listing is read again rather than applied with a setter nobody read: a setter
+// of "" would keep today's triage wake for a label a person set.
+func (w *workflowRuntime) labelSetter(ctx context.Context, key string) (string, error) {
+	events, err := w.dispatch.EventsAfter(ctx, key, 0)
+	if err != nil {
+		return "", fmt.Errorf("read the event log of %s from Dispatch for who set its label: %w", key, err)
+	}
+	setter, err := intake.LabelSetter(events)
+	if err != nil {
+		return "", fmt.Errorf("read who set the label of %s from its event log: %w", key, err)
+	}
+	return setter, nil
+}
+
+// prepareArtifact readies a Dispatch review event before it is applied (intake's
+// ConsumerSpec.PrepareArtifact), and is the event to apply. The workflow performs no I/O, and
+// decides from Dispatch's view of the issue the review is on whether a person's approval of a
+// parked labelled root's primary document queues that root (intake.DispatchArtifact.Issue), so for
+// an approval a person made that is not Dispatch's carry of an earlier one (CarriedApproval) the
+// issue is read from Dispatch's detail, one read per such event, a read that fails leaving the
+// event to be retried. Every other review or version event — a session's or Dispatch's own review,
+// a changes request, a carried approval, a version — asks Dispatch nothing and is applied as
+// decoded, with no view, which queues nothing.
+func (w *workflowRuntime) prepareArtifact(ctx context.Context, fact intake.DispatchArtifact) (intake.DispatchArtifact, error) {
+	if fact.Kind != intake.DispatchArtifactApproved || !fact.Actor.Person() || fact.CarriedApproval() {
+		return fact, nil
+	}
+	issue, err := w.dispatch.GetIssue(ctx, fact.Key)
+	if err != nil {
+		return fact, fmt.Errorf("read %s from Dispatch before applying a person's approval of its document %s: %w", fact.Key, fact.ArtifactID, err)
+	}
+	fact.Issue = &issue
+	return fact, nil
 }
 
 // prepareListed readies a todo issue of reconcile's boot listing as prepareRepository readies an
