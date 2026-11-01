@@ -125,6 +125,14 @@ type StatusWrite struct {
 	// a marked row at delivery when the re-read issue no longer carries the label: a person who took
 	// it off withdrew the handover. A hand-over row (HandOver), also a todo, is not one.
 	PersonHandover bool `json:"personHandover,omitempty"`
+	// Reassert marks the row the daemon queues to set its own status back over one a session
+	// wrote (workflow's sessionStatusWrite): the session's close or park stands in Dispatch and
+	// the record kept the daemon's status, so this row is queued observing a status the issue is
+	// not meant to be at — done, backlog or icebox — exactly as a person's handover is. The
+	// outbox's retry reads the mark to know which rule judges the row (its statusRowKind): asking
+	// the ordinary one, whether the issue is still in the workflow, would drop the row for being
+	// at the status it exists to undo.
+	Reassert bool `json:"reassert,omitempty"`
 }
 
 func (StatusWrite) OutboxKind() OutboxKind { return OutboxKindDispatchStatus }

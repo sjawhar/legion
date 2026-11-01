@@ -497,8 +497,8 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 	// The post is an event of the issue and moves its sequence, so the issue read above is stale
 	// the moment it lands and the write is fenced on a read made after it (writeStatus). Fenced on
 	// the older read, the first write of every row carrying a reason would be refused
-	// (ISSUE_CHANGED) and pay another issue read, a fact transaction on the apply-fact lock
-	// (applyRead) and a record read before making the write that was always going to land.
+	// (ISSUE_CHANGED) and pay another issue read, and for an ordinary row a record read, before
+	// making the write that was always going to land.
 	if payload.Reason != "" {
 		if err := r.message(ctx, row, record.MessagePost{Body: payload.Reason}); err != nil {
 			return err
@@ -524,24 +524,18 @@ const statusWriteReads = 3
 // that older number would be refused almost every time.
 //
 // ISSUE_CHANGED is no failure of the write and no permanent refusal (dispatch.PermanentRefusal),
-// so nothing is dropped over it. The row reads the issue again, applies what Dispatch then shows
-// to the record as the event that made it would (applyRead) — which is how a close the daemon
-// learns of only here takes its issue out of the workflow — and writes again only while that
-// fresh read passes what the first attempt required of its own read (status): the issue still
-// shows the status the row observed, and is still in the workflow and not closed
-// (statusStillWanted). A read already at the status the row carries is this write's work, done by
-// someone else; a read at any other status is a change made after the row's read, which the row
-// never writes over, whether it took the issue out of the workflow or moved it along within one.
+// so nothing is dropped over it. The row reads the issue again and writes again only while that
+// fresh read passes the rule its own kind is judged by (stillWanted). A read already at the status
+// the row carries is this write's work, done by someone else; a read at any other status is a
+// change made after the row's read, which the row never writes over, whether it took the issue
+// out of the workflow or moved it along within one.
 //
-// A person's handover is the one row those two steps are wrong for, and wrong in opposite
-// directions, because it is the row that brings an issue *into* the workflow rather than moving
-// one along inside it: it is queued at `triage`, `backlog` or `icebox` (admit's person's label,
-// gate's approval of a parked root), and every one of those reads as out of the workflow, so
-// statusStillWanted would finish it without writing and log that its issue had left a workflow it
-// never entered. And the read this loop makes is unprepared — intake.ReadIssue carries no
-// LabelSetter — so applying it would tell admission the label is absent and queue a `triage` wake
-// for a root the controller is told to leave alone. Such a row is judged by personHandoverStands
-// instead, the same rule the first attempt applied, and nothing of its read is applied.
+// What this read never does is reach the engine. It carries no actor (intake.ReadIssue), so the
+// engine would have to read every change it shows as a person's, and two of the daemon's own rows
+// exist precisely because a change was not a person's: a session's own close or park, which the
+// re-assert undoes, would be taken for a person ending the tree, lingering it and freeing its
+// slot. A change Dispatch recorded reaches the engine through its own event, with its actor
+// (dispatch://INFRA-714/spec R4); this read decides one thing, whether to write.
 func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) error {
 	for range statusWriteReads {
 		_, err := r.dispatch.SetStatusAt(ctx, read, payload.Status)
@@ -555,11 +549,6 @@ func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload 
 		if read, err = r.dispatch.GetIssue(ctx, row.Issue); err != nil {
 			return fmt.Errorf("read Dispatch issue %s again after it changed under the status write: %w", row.Issue, err)
 		}
-		if !payload.PersonHandover {
-			if err := r.applyRead(ctx, read); err != nil {
-				return err
-			}
-		}
 		if read.Status == payload.Status {
 			r.log.Info("outbox status write found Dispatch already at its status after the issue changed under it",
 				"row", row.ID, "issue", row.Issue, "status", payload.Status)
@@ -570,13 +559,7 @@ func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload 
 				"row", row.ID, "issue", row.Issue, "status", payload.Status, "observed", payload.ObservedStatus, "dispatch", read.Status)
 			return nil
 		}
-		if payload.PersonHandover {
-			if !r.personHandoverStands(row, read) {
-				return nil
-			}
-			continue
-		}
-		wanted, err := r.statusStillWanted(ctx, row, payload, read)
+		wanted, err := r.stillWanted(ctx, row, payload, read)
 		if err != nil || !wanted {
 			return err
 		}
@@ -585,21 +568,66 @@ func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload 
 		row.Issue, payload.Status, statusWriteReads)
 }
 
-// personHandoverStands says whether a person's handover row may still be written, and is the one
-// rule both the first attempt and every ISSUE_CHANGED retry ask, so neither can drift from the
-// other: the row was queued for a person's legion label on an unrecorded triage root, or for a
-// person's approval of a parked labelled root's spec, and what it needs is that the label is
-// still there. A person who took it off between the queue and this delivery withdrew the
-// handover, and a todo on an unlabelled issue would be nobody's: admission records nothing of a
-// todo without the label (its "not handed to Legion" exit), so the write would only wake the
-// controller for an issue it must not take. The row is dropped and logged once instead.
+// statusRowKind is what a status row is for, which is what decides the rule its retry is judged
+// by. Every row is exactly one of these, read from the payload's own marks (statusKindOf), and
+// stillWanted has a case for each: a kind added without one reaches the default and the row fails
+// rather than being judged by somebody else's rule, which TestEveryStatusRowKindHasAStillWantedRule
+// holds to the list.
+type statusRowKind int
+
+const (
+	// ordinaryStatusRow is the workflow moving an issue along inside the workflow: the phase
+	// statuses, and the done a merge writes.
+	ordinaryStatusRow statusRowKind = iota
+	// personHandoverRow is a person's handover, queued at triage, backlog or icebox to bring an
+	// issue into the workflow (StatusWrite.PersonHandover).
+	personHandoverRow
+	// reassertRow is the daemon setting its own status back over one a session wrote
+	// (workflow's sessionStatusWrite), so it too is queued at a status the issue is not meant to
+	// be at, done, backlog or icebox among them.
+	reassertRow
+)
+
+func statusKindOf(payload record.StatusWrite) statusRowKind {
+	switch {
+	case payload.PersonHandover:
+		return personHandoverRow
+	case payload.Reassert:
+		return reassertRow
+	default:
+		return ordinaryStatusRow
+	}
+}
+
+// stillWanted says whether a row whose write Dispatch refused may write again, asking the rule its
+// own kind carries. The caller has already taken the two answers every kind shares — the status is
+// the row's own, so someone else did this work, or it is neither the row's nor the one it observed,
+// so somebody moved the issue since — and what is left is the question each kind answers
+// differently.
 //
-// The status is not asked here, because both callers have already asked it of the same read: the
-// first attempt requires the observed status or the row's own, and the retry requires the
-// observed status after taking the two other answers (already written, moved elsewhere) itself.
-// What the retry must not ask is statusStillWanted, whose record.OutOfWorkflow is true for every
-// status a handover is queued from — this row brings an issue into the workflow rather than
-// moving one along inside it, so that question reads backwards here.
+// Two of the three are queued at a status that reads as out of the workflow, and for them the
+// ordinary rule reads backwards: a handover brings an issue into the workflow, and a re-assert
+// undoes a session's own move out of it. Asking record.OutOfWorkflow of either would finish it
+// without writing and log that its issue had left a workflow it never entered, or had left one
+// this very row exists to put it back in.
+func (r *outbox) stillWanted(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) (bool, error) {
+	switch kind := statusKindOf(payload); kind {
+	case ordinaryStatusRow:
+		return r.statusStillWanted(ctx, row, payload, read)
+	case personHandoverRow:
+		return r.personHandoverStands(row, read), nil
+	case reassertRow:
+		// The read shows the status the session wrote, which the caller has just required, so the
+		// session's move still stands and the daemon's own status is still owed. Nothing else is
+		// asked: the record cannot be consulted for it, since the status this row restores is the
+		// one the record kept (workflow's keepStatus), and the issue's being out of the workflow
+		// in Dispatch's eyes is the very thing being undone.
+		return true, nil
+	default:
+		return false, fmt.Errorf("outbox row %d: status row kind %d has no still-wanted rule", row.ID, kind)
+	}
+}
+
 func (r *outbox) personHandoverStands(row record.OutboxRow, issue dispatch.Issue) bool {
 	if issue.HandedOver {
 		return true
@@ -608,26 +636,11 @@ func (r *outbox) personHandoverStands(row record.OutboxRow, issue dispatch.Issue
 	return false
 }
 
-// applyRead applies what Dispatch shows of an issue to the record, through the fact path every
-// event takes (intake.ReadIssue), under the read's own sequence as its fact id: the change that
-// refused this row's write reaches the workflow now rather than whenever the consumer delivers
-// its event, so a close learned of here takes the issue out of the workflow and a park stops it.
-// A read Dispatch answered with no sequence carries no fence and applies nothing.
-func (r *outbox) applyRead(ctx context.Context, read dispatch.Issue) error {
-	if read.LastSeq <= 0 || r.pool == nil {
-		return nil
-	}
-	if _, err := intake.ApplyFact(ctx, r.pool, "dispatch-read", fmt.Sprintf("status:%s:%d", read.Key, read.LastSeq),
-		intake.ReadIssue(read), r.handlers...); err != nil {
-		return fmt.Errorf("apply what Dispatch shows of %s at sequence %d: %w", read.Key, read.LastSeq, err)
-	}
-	return nil
-}
-
 // statusStillWanted says whether a row may write its status after its issue changed under it: the
 // fresh read shows a status still in the workflow — neither done nor parked
-// (record.OutOfWorkflow) — and the record, which has just taken that read (applyRead), still has
-// the issue in the workflow too. A close or a park is the issue's state now, and the status this
+// (record.OutOfWorkflow) — and the record, read as it stands, still has the issue in the
+// workflow too. The read is not applied to the record: it carries no actor, and a change Dispatch
+// recorded reaches the engine through its own event (writeStatus). A close or a park is the issue's state now, and the status this
 // row carries is of a workflow the issue has left, so the row finishes having written nothing. An
 // issue the daemon keeps no record of is judged by the read alone.
 func (r *outbox) statusStillWanted(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) (bool, error) {

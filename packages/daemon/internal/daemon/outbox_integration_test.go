@@ -598,6 +598,89 @@ func TestAPersonsHandoverIsWrittenAfterDispatchRefusesItsFirstWrite(t *testing.T
 	}
 }
 
+// The daemon's re-assert of its own status over one a session wrote is the other row queued at a
+// status the issue is not meant to be at (workflow's sessionStatusWrite): the session set the
+// issue done, backlog or icebox, the record kept the daemon's status, and this row sets Dispatch
+// back. One interleaved change — the agent's next comment is enough — refuses its first write, and
+// the retry must write again. Before, it asked the ordinary rule, whose record.OutOfWorkflow is
+// true for exactly those three statuses, so the re-assert was dropped and the session's own close
+// stood; and the retry applied its read, which carries no actor, so the engine took the session's
+// close for a person's, lingered the tree and freed its slot. Neither happens now: the read
+// decides whether to write and nothing else.
+func TestTheDaemonsReassertIsWrittenAfterDispatchRefusesItsFirstWrite(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
+	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
+	for _, tc := range []struct {
+		name string
+		key  string
+		// wrote is the status the session set, which the row observes and the re-read still shows.
+		wrote string
+	}{
+		{name: "a session closed its own issue", key: "LEGION-761", wrote: "done"},
+		{name: "a session parked its own issue to backlog", key: "LEGION-762", wrote: "backlog"},
+		{name: "a session parked its own issue to icebox", key: "LEGION-763", wrote: "icebox"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shown := dispatch.Issue{Key: tc.key, Status: tc.wrote, Title: tc.key, Rank: "A", Labels: []string{dispatch.LegionLabel},
+				HandedOver: true, ResolvedRepo: "acme/widgets", LastSeq: 4}
+			reread := shown
+			reread.LastSeq = shown.LastSeq + 1
+			client := &refusedOnceDispatch{outboxDispatch: outboxDispatch{issue: shown}, reread: reread}
+			runner := &outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{engine, admission},
+				log: quietLogger()}
+			row := mustOutboxRow(t, tc.key, record.StatusWrite{Status: "in_progress", ObservedStatus: tc.wrote, Reassert: true}, time.Now())
+
+			if err := runner.execute(context.Background(), row); err != nil {
+				t.Fatalf("execute the re-assert: %v", err)
+			}
+
+			if client.refusals != 1 {
+				t.Fatalf("Dispatch refused %d writes, want the one interleaved change this test is about", client.refusals)
+			}
+			if !slices.Equal(client.statuses, []string{"in_progress"}) {
+				t.Fatalf("status writes = %v, want the daemon's own status written after the refusal", client.statuses)
+			}
+			if client.at != reread.LastSeq {
+				t.Fatalf("the retry wrote at sequence %d, want the re-read's %d", client.at, reread.LastSeq)
+			}
+			// Nothing of the read reached the engine, so the session's close ended no tree: an
+			// issue the engine had taken out of the workflow would be recorded, and a linger
+			// would have queued its rows.
+			if rows := outboxRowsOf(t, pool, tc.key); rows != 0 {
+				t.Fatalf("%d rows left for %s, want none: a linger would have queued its own", rows, tc.key)
+			}
+		})
+	}
+}
+
+// Every kind of status row has a rule its retry is judged by, and stillWanted has a case for
+// each. A kind added without one reaches the default and fails its row rather than being judged
+// by another kind's rule, which is the mistake this case exists to make loud: each kind is asked
+// for real, against a record and a read that stand, and none may answer with that refusal.
+func TestEveryStatusRowKindHasAStillWantedRule(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	runner := &outbox{pool: pool, records: records, log: quietLogger()}
+	for _, tc := range []struct {
+		kind    statusRowKind
+		payload record.StatusWrite
+	}{
+		{ordinaryStatusRow, record.StatusWrite{Status: "testing", ObservedStatus: "in_progress"}},
+		{personHandoverRow, record.StatusWrite{Status: "todo", ObservedStatus: "triage", PersonHandover: true}},
+		{reassertRow, record.StatusWrite{Status: "in_progress", ObservedStatus: "done", Reassert: true}},
+	} {
+		if got := statusKindOf(tc.payload); got != tc.kind {
+			t.Fatalf("statusKindOf(%+v) = %d, want %d", tc.payload, got, tc.kind)
+		}
+		read := dispatch.Issue{Key: "LEGION-208", Status: tc.payload.ObservedStatus, HandedOver: true}
+		if _, err := runner.stillWanted(context.Background(), record.OutboxRow{Issue: "LEGION-208"}, tc.payload, read); err != nil {
+			t.Fatalf("the rule of status row kind %d answered %v, want it to answer at all", tc.kind, err)
+		}
+	}
+}
+
 // refusedOnceDispatch refuses the first fenced status write with ISSUE_CHANGED, as Dispatch
 // refuses a write whose read an event overtook, and shows reread — the issue as it stands at the
 // sequence that event moved it to — to every read after that. refusals counts the refusals it

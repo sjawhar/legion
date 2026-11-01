@@ -680,9 +680,13 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 	if err != nil {
 		t.Fatalf("read the embedded migrations: %v", err)
 	}
-	kinds := []record.OutboxKind{record.OutboxKindDispatchStatus, record.OutboxKindDispatchMessage, record.OutboxKindNotice, record.OutboxKindControllerNotice,
-		record.OutboxKindSupervise, record.OutboxKindGateSeed, record.OutboxKindLingerClose, record.OutboxKindWorkspaceRemove,
-		record.OutboxKindIssueSuspend, record.OutboxKindIssueBranch}
+	// Every kind the daemon runs, read from the lanes rather than listed here: a kind added to a
+	// lane and forgotten in a hand-kept list is exactly the omission this case exists to catch,
+	// and it is how phase_ended came to be missing from two of this release's rewrites.
+	var kinds []record.OutboxKind
+	for _, lane := range []record.OutboxLane{record.LaneLifecycle, record.LaneBoard, record.LaneRoleMessage} {
+		kinds = append(kinds, record.LaneKinds(lane)...)
+	}
 	insert := "insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ($1, 'LEGION-208', '{}', 0, now(), '')"
 	for _, tc := range []struct {
 		name  string
@@ -691,6 +695,12 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 		{"a fresh database", func(migrations.Migration) bool { return false }},
 		{"a database that ran 0020 before 0016", func(m migrations.Migration) bool { return m.Version <= 20 && m.Version != 16 }},
 		{"a database that ran 0031 through 0038 before 0029 and 0030", func(m migrations.Migration) bool { return m.Version <= 28 || (m.Version >= 31 && m.Version <= 38) }},
+		// A database main deployed, at its newest migration, with the kinds of that release
+		// already queued. A rewrite of a CHECK validates the rows the table holds, so a release
+		// whose new list forgets a kind another release queues cannot be applied at all: the
+		// daemon fails its boot on every restart until someone deletes the row. That is what this
+		// case holds, and the seeds below are what make it bite.
+		{"a database at main's newest migration", func(m migrations.Migration) bool { return m.Version <= 67 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -710,7 +720,7 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 			for _, queued := range []struct {
 				since int
 				kind  record.OutboxKind
-			}{{20, record.OutboxKindControllerNotice}, {34, record.OutboxKindIssueSuspend}} {
+			}{{20, record.OutboxKindControllerNotice}, {34, record.OutboxKindIssueSuspend}, {66, record.OutboxKindPhaseEnded}} {
 				if version < queued.since {
 					continue
 				}

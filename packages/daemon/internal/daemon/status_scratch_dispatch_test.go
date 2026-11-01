@@ -76,9 +76,15 @@ func TestTheBootsStatusWriteLandsOnScratchDispatchAfterAnEventOvertakesItsRead(t
 
 // The same write must never land over a change Dispatch recorded after the row's read. A person
 // who closes the issue in that moment has ended the work, and the status the row carries is of a
-// workflow the issue has left: Dispatch keeps the close, and the daemon applies it to its own
-// record, which takes the issue out of the workflow rather than waiting for an event its consumer
-// may deliver days later (dispatch://INFRA-714/spec R4).
+// workflow the issue has left: Dispatch keeps the close and the row finishes having written
+// nothing (dispatch://INFRA-714/spec R4).
+//
+// What the row does not do is tell the engine what it read. That read carries no actor, so the
+// engine could only take every change it shows for a person's, and two of the daemon's own rows
+// are queued precisely because a change was not a person's — a session's own close or park, which
+// the re-assert undoes, would end the tree as if a person had. The close reaches the record
+// through its own event, with its actor; until that event arrives the record stands where the
+// workflow left it, which is what this case reads.
 func TestABootStatusWriteDoesNotLandOverACloseScratchDispatchTookAfterItsRead(t *testing.T) {
 	baseURL, token := startScratchDispatch(t)
 	issue := createScratchDispatchIssue(t, baseURL)
@@ -102,8 +108,8 @@ func TestABootStatusWriteDoesNotLandOverACloseScratchDispatchTookAfterItsRead(t 
 		t.Fatalf("Dispatch shows %s at %q, want the person's done: the daemon wrote nothing over it", issue, got)
 	}
 	recorded := recordOf(t, pool, records, issue)
-	if workflow.InWorkflow(recorded) {
-		t.Fatalf("the record of %s = %+v, want it out of the workflow: the row's second read brought the close", issue, recorded)
+	if !workflow.InWorkflow(recorded) {
+		t.Fatalf("the record of %s = %+v, want it where the workflow left it: the row's read decides its own write and tells the engine nothing", issue, recorded)
 	}
 	if rows := statusRowsOf(t, pool, issue); rows != 0 {
 		t.Fatalf("status rows after the close = %d, want the boot's finished having written nothing", rows)

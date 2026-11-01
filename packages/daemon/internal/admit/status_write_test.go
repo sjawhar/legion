@@ -90,7 +90,7 @@ func TestWhoseStatusWriteTakesARunningRootOutOfTheWorkflow(t *testing.T) {
 			var reasserted int
 			var told []record.Notice
 			for _, effect := range effects(t, pool) {
-				if write, ok := effect.payload.(record.StatusWrite); ok && effect.issue == "LEGION-1" && write == (record.StatusWrite{Status: "retro", ObservedStatus: tc.status}) {
+				if write, ok := effect.payload.(record.StatusWrite); ok && effect.issue == "LEGION-1" && write == (record.StatusWrite{Status: "retro", ObservedStatus: tc.status, Reassert: true}) {
 					reasserted++
 				}
 				if notice, ok := effect.payload.(record.Notice); ok && notice.Kind == "status-reasserted" {
@@ -235,13 +235,13 @@ func TestOnlyAChangeFromTheStatusDispatchLastShowedIsAStatusWrite(t *testing.T) 
 			steps: []step{{"ses-outsider", "in_progress", "renamed"}}},
 		{name: "an outside session's rename before its backlog is set back",
 			steps: []step{{"ses-outsider", "backlog", "LEGION-1"}, {"ses-outsider", "backlog", "renamed"}},
-			rows:  []record.StatusWrite{{Status: "in_progress", ObservedStatus: "backlog"}}, notices: 1},
+			rows:  []record.StatusWrite{{Status: "in_progress", ObservedStatus: "backlog", Reassert: true}}, notices: 1},
 		{name: "a person's rename before an outside backlog is set back",
 			steps: []step{{"ses-outsider", "backlog", "LEGION-1"}, {"", "backlog", "renamed"}},
-			rows:  []record.StatusWrite{{Status: "in_progress", ObservedStatus: "backlog"}}, notices: 1},
+			rows:  []record.StatusWrite{{Status: "in_progress", ObservedStatus: "backlog", Reassert: true}}, notices: 1},
 		{name: "an outside session's backlog while the daemon's testing is on its way", queued: inFlight,
 			steps: []step{{"ses-outsider", "backlog", "renamed"}},
-			rows:  []record.StatusWrite{*inFlight, {Status: "testing", ObservedStatus: "backlog"}}, notices: 1},
+			rows:  []record.StatusWrite{*inFlight, {Status: "testing", ObservedStatus: "backlog", Reassert: true}}, notices: 1},
 		{name: "a person parks the tree after two outside writes were set back",
 			steps: []step{{"ses-outsider", "backlog", "LEGION-1"}, {"ses-outsider", "icebox", "LEGION-1"}, {"", "backlog", "renamed"}},
 			ends:  true, notices: 2},
