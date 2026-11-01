@@ -208,6 +208,16 @@ describe("message metadata", () => {
     ]);
   });
 
+  // Nothing in Envoy orders, holds or delivers a message by its urgency: the renderers only show
+  // it. A sender told nothing more takes a "high" for a faster lane that does not exist.
+  test("tells a sender that urgency is for the reader and does not deliver a message sooner", () => {
+    // The JSON schema is what a model is shown for the tool's arguments.
+    const shown = JSON.stringify(z.toJSONSchema(MessageMetadataSchema));
+
+    expect(shown).toContain("how soon the recipient should act");
+    expect(shown).toContain("does not deliver the message sooner or ahead of others");
+  });
+
   test("refuses an Envoy tool call once with every problem named", () => {
     const failure = (() => {
       try {

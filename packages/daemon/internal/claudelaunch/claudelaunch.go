@@ -82,9 +82,10 @@ func MCPConfig(bun, pluginDir, configDir string) ([]byte, error) {
 
 // Environment is what a Claude Code worker carries beside its runtime's own pairs, each a
 // `NAME=VALUE`: its Claude Code configuration directory (runtime.ClaudeConfigDirVariable), and
-// Claude Code's background tasks and scheduled prompts off (runtime.ClaudeDisabledFeatures, each
-// set to 1), since the bridge reports a turn's end when its last user message's result arrives and
-// nothing may run after it unseen.
+// Claude Code's scheduled prompts off (runtime.ClaudeDisabledFeatures, each set to 1), since a
+// prompt of the clock's is a turn no task of the daemon's asked for. Background tasks are not
+// turned off: a background result wakes Claude Code into a turn of its own, which the bridge
+// reports to the daemon as a turn (internal/claudebridge).
 func Environment(configDir string) []string {
 	env := make([]string, 0, 1+len(runtime.ClaudeDisabledFeatures))
 	env = append(env, runtime.ClaudeConfigDirVariable+"="+configDir)

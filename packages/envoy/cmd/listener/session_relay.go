@@ -928,30 +928,47 @@ const (
 	relayStopped
 )
 
-// followedTopicVerdict applies the durable path's judgement (judgeFollowedTopic) to item, a
-// message on a topic the session follows, and says what the relay does with it: a copy the
-// session already took, an echo of its own message, and a delivery mode it does not advertise or
-// that cannot be read are acked unpushed, the last reported as a delivery_failed exception as the
-// fan-out reports it; a copy another path is already pushing is held. A message on the session's
-// agent subject, a role forward included, is addressed to this session alone and is never refused
-// here.
+// followedTopicVerdict applies the durable path's judgement to item, a message on a topic the
+// session follows, as if no attempt record of it stood (judgeFollowedTopicWithoutAttempt), and
+// says what the relay does with it: a copy the session already took, an echo of its own message,
+// and a delivery mode it does not advertise or that cannot be read are acked unpushed.
+//
+// A mode refusal is reported as a delivery_failed exception, as the fan-out reports it, unless an
+// attempt record of the message stands: the fan-out records a refusal only together with the
+// exception that reports it (fanoutRefusalOutcome), so that refusal has been reported already and
+// the message is acked without a second report of it. A record therefore holds the relay only
+// where the relay would otherwise push the message, which is the push in flight a hold is for
+// (holdWhilePushedElsewhere), and no refusal record can hold it, whatever the session's entry
+// said when the fan-out wrote it.
+//
+// A message on the session's agent subject, a role forward included, is addressed to this session
+// alone and is never refused here.
 func (m *sessionRelays) followedTopicVerdict(sessionID string, item contracts.Envelope) relayVerdict {
 	if isControlTopic(item.Topic) {
 		return relayPushesIt
 	}
 	mode, modeErr := envelopeDeliveryMode(item)
-	verdict, _, err := judgeFollowedTopic(m.rules, sessionID, item, mode, modeErr)
+	verdict, _, err := judgeFollowedTopicWithoutAttempt(m.rules, sessionID, item, mode, modeErr)
 	switch verdict {
-	case takeFollowedTopic:
-		return relayPushesIt
 	case followedTopicEcho:
 		m.logger.DeliveryLog(slog.LevelInfo, "session relay skipped an echo", sessionID, item.Topic, item.EventID, "skipped")
 		return relayAcksIt
 	case followedTopicDeduped:
 		m.logger.DeliveryLog(slog.LevelInfo, "session relay skipped a copy the session already has", sessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
 		return relayAcksIt
-	case followedTopicAttempted:
-		return relayHoldsIt
+	}
+	// What is left -- the message the relay pushes, and a refusal the session's own state earns --
+	// is what an attempt record speaks to.
+	attempted := m.rules.attemptCache.Seen(item.DedupeKey, sessionID)
+	if verdict == takeFollowedTopic {
+		if attempted {
+			return relayHoldsIt
+		}
+		return relayPushesIt
+	}
+	if attempted {
+		m.logger.DeliveryLog(slog.LevelInfo, "session relay skipped a refusal the fan-out reported", sessionID, item.Topic, item.EventID, "skipped", slog.String("error", err.Error()))
+		return relayAcksIt
 	}
 	m.logger.DeliveryLog(slog.LevelWarn, "session relay refused a message the session cannot take", sessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
 	if publishErr := publishDeliveryException(m.client, item, "delivery_failed", sessionID, true, ""); publishErr != nil {
@@ -964,11 +981,16 @@ func (m *sessionRelays) followedTopicVerdict(sessionID string, item contracts.En
 // is in flight, judging it again every relayHeldRecheck and keeping it in progress meanwhile. It
 // returns the verdict the hold ended on, relayStopped when the relay was stopped first.
 //
-// An attempt record is a push in flight, not a delivery: the path that wrote it is a serving-port
-// worker handed the push before the session's entry moved to consumer delivery under it
-// (serve_port_workers.go). Acking the message on that record would rest the session's only copy on
-// a process-local cache that expires and on a worker that may yet drop or hand back its push, so
-// the message is held unacked instead, and judged again:
+// Only a message the relay would otherwise push is held: followedTopicVerdict judges as if no
+// record stood, and acks a refusal the fan-out recorded as it reported it, so no refusal record
+// reaches this hold.
+//
+// An attempt record is a push in flight, not a delivery: the path that wrote it pushed the
+// message to the session's port itself, or is a serving-port worker handed that push before the
+// session's entry moved to consumer delivery under it (serve_port_workers.go). Acking the message
+// on that record would rest the session's only copy on a process-local cache that expires and on
+// a worker that may yet drop or hand back its push, so the message is held unacked instead, and
+// judged again:
 //   - the worker's 204 records the dedupe key: the session has the message, so it is acked;
 //   - the worker drops its push (its session is relayed now) or hands it back, either of which
 //     clears the attempt: the relay pushes the message itself;

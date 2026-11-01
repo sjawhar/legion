@@ -15,9 +15,9 @@ import (
 // A PORTLESS session on consumer delivery, whose own consumer holds
 // the stored message, is reported exactly one delivery_failed for a mode that cannot be read.
 //
-// This is the case review round 6's fix changes: `relayed && (verdict == takeFollowedTopic ||
-// target.Port > 0)`. The relay of a portless session publishes frames and judges nothing, so a
-// refusal left to it is reported by nobody.
+// This is the case review round 6's fix changes, now the `!relayJudges` of the fan-out's refusal
+// branch (`relayJudges := relayed && target.Port > 0`). The relay of a portless session publishes
+// frames and judges nothing, so a refusal left to it is reported by nobody.
 func TestAPortlessConsumerSessionIsReportedAnUnreadableDeliveryMode(t *testing.T) {
 	rig := newRelayRigUnowned(t, relayPauseFirst, relayPauseMax)
 	portless := "ses_portless_" + id.New()

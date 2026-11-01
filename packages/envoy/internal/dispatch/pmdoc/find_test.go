@@ -486,7 +486,7 @@ func TestSpliceInlineKeepsNeighbourMarks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := Splice(doc, rangeChange, with)
+	out, err := splice(doc, rangeChange, with)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -516,7 +516,7 @@ func TestSpliceAcrossBlocksReplacesBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := Splice(doc, Range{From: from.From, To: to.To}, with)
+	out, err := splice(doc, Range{From: from.From, To: to.To}, with)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +575,7 @@ func TestSpliceNestedTextblocks(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := Splice(doc, r, with)
+			got, err := splice(doc, r, with)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -607,7 +607,7 @@ func TestSpliceCrossListItemsReplacesOnlySelectedItems(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Splice(doc, Range{From: from.From, To: to.To}, with)
+	got, err := splice(doc, Range{From: from.From, To: to.To}, with)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -637,7 +637,7 @@ func TestSpliceAcrossTextblocksKeepsPartialBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Splice(doc, Range{From: from.From, To: to.To}, with)
+	got, err := splice(doc, Range{From: from.From, To: to.To}, with)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -719,7 +719,7 @@ func TestSpliceMatchesEngineReplaceRange(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := Splice(doc, r, with)
+			got, err := splice(doc, r, with)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -748,7 +748,7 @@ func TestSpliceBlockReplacementDoesNotFlattenIntoParagraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Splice(doc, r, with)
+	got, err := splice(doc, r, with)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -801,7 +801,7 @@ func TestSpliceDoesNotJoinTextblocksWithDifferentAttrs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := Splice(doc, Range{From: from.From, To: to.To}, with)
+			got, err := splice(doc, Range{From: from.From, To: to.To}, with)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -826,7 +826,7 @@ func TestSpliceAtBlockBoundariesAndDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Splice(doc, Range{From: 0, To: 6}, with)
+	got, err := splice(doc, Range{From: 0, To: 6}, with)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -842,7 +842,7 @@ func TestSpliceAtBlockBoundariesAndDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err = Splice(doc, Range{From: 0, To: 6}, empty)
+	got, err = splice(doc, Range{From: 0, To: 6}, empty)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -858,7 +858,7 @@ func TestSpliceAtBlockBoundariesAndDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err = Splice(only, Range{From: 0, To: 6}, empty)
+	got, err = splice(only, Range{From: 0, To: 6}, empty)
 	if err != nil {
 		t.Fatal(err)
 	}

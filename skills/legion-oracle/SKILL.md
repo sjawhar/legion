@@ -28,7 +28,9 @@ Run steps 1 and 2, in parallel if you choose, since neither needs the other's re
 when the question names a library, and step 4 when it asks for general practice, each only when
 steps 1 and 2 give no `file:line` source for some part of the question. Use only `read`, `grep`,
 `web_search`, the `envoy_publish` above, and `task` with `scout` or `oracle`: the daemon's boot
-gate checks that the agents Legion's prompts name exist, and no other.
+gate checks that the agents Legion's prompts name exist, and no other. A `task` runs as a job of
+its own, so `wait` for its result — two dispatched together are two results to wait for — and
+answer from what came back, never from the dispatch.
 
 | Step | Tool | Query |
 |------|------|-------|

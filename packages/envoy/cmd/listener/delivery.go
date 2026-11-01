@@ -884,14 +884,15 @@ const (
 	followedTopicModeNotAdvertised
 )
 
-// judgeFollowedTopic is the one judgement of a message on a topic sessionID follows: the durable
-// path's fan-out (fanoutDelivery) and the relay of a serving-port session's consumer
-// (sessionRelays.pushUntilAccepted), which push the same messages by different routes, both apply
-// it, so each refusal holds whichever route a session's message takes. A copy the session already
-// took, or one already on its way to it, is refused by the dedupe and attempt caches, which are
-// keyed on the envelope's dedupe key: one upstream event published on several of a session's
-// topics (contracts/normalize.go) reaches it once. An echo of the session's own message, and a
-// delivery mode its entry does not advertise, are refused too.
+// judgeFollowedTopic is the durable path fan-out's (fanoutDelivery) judgement of a message on a
+// topic sessionID follows: judgeFollowedTopicWithoutAttempt, the judgement the relay of a
+// serving-port session's consumer applies too (sessionRelays.followedTopicVerdict), so each refusal
+// holds whichever route a session's message takes, and then the attempt cache, which the fan-out
+// alone reads as a refusal. A copy the session already took is refused by the dedupe cache, and,
+// on the fan-out's route, one already on its way to it by the attempt cache; both are keyed on the
+// envelope's dedupe key, so one upstream event published on several of a session's topics
+// (contracts/normalize.go) reaches it once. An echo of the session's own message, and a delivery
+// mode its entry does not advertise, are refused too.
 //
 // mode is the delivery mode the envelope targets, "" when it targets none, and modeErr the failure
 // of reading it (envelopeDeliveryMode): both are read once per message rather than once per
@@ -902,16 +903,37 @@ const (
 // the fan-out decides from it whether the session's own consumer relays this message, which it
 // must know for a refusal as much as for a delivery (fanoutDelivery). It returns the error behind
 // a mode refusal too, for the caller to report.
+//
+// An attempt record outranks every verdict but the dedupe one, so a copy read while a push of the
+// same event, or an exception for it, is in flight is one attempt-dedupe skip rather than a
+// second push or a second exception. The relay judges without that record and reads it on its own
+// (judgeFollowedTopicWithoutAttempt, sessionRelays.followedTopicVerdict).
 func judgeFollowedTopic(rules followedTopicRules, sessionID string, item contracts.Envelope, mode string, modeErr error) (followedTopicVerdict, *session.SessionEntry, error) {
+	verdict, target, err := judgeFollowedTopicWithoutAttempt(rules, sessionID, item, mode, modeErr)
+	if verdict != followedTopicDeduped && rules.attemptCache.Seen(item.DedupeKey, sessionID) {
+		return followedTopicAttempted, target, nil
+	}
+	return verdict, target, err
+}
+
+// judgeFollowedTopicWithoutAttempt is judgeFollowedTopic as if no attempt record of the message
+// existed: the verdict the message earns from the session itself -- a copy it already took, an
+// echo of its own message, a delivery mode it does not advertise or one that cannot be read, or
+// the message it is given.
+//
+// The relay of a serving-port session's consumer judges by this one
+// (sessionRelays.followedTopicVerdict) and reads the record separately, which is how it tells the
+// one thing a record can mean for it -- a push of a message it would otherwise push itself is in
+// flight, and it holds its copy while that lasts (holdWhilePushedElsewhere) -- from a refusal the
+// fan-out recorded as it reported it, which it acks unreported. So no refusal record holds the
+// relay, whatever the session's entry said when the fan-out wrote it.
+func judgeFollowedTopicWithoutAttempt(rules followedTopicRules, sessionID string, item contracts.Envelope, mode string, modeErr error) (followedTopicVerdict, *session.SessionEntry, error) {
 	var target *session.SessionEntry
 	if entry, err := rules.sessions.Get(sessionID); err == nil {
 		target = &entry
 	}
 	if rules.dedupeCache.Seen(item.DedupeKey, sessionID) {
 		return followedTopicDeduped, target, nil
-	}
-	if rules.attemptCache.Seen(item.DedupeKey, sessionID) {
-		return followedTopicAttempted, target, nil
 	}
 	if item.SourceSession != "" && item.SourceSession == sessionID {
 		return followedTopicEcho, target, nil
@@ -936,11 +958,11 @@ func judgeFollowedTopic(rules followedTopicRules, sessionID string, item contrac
 // delivers to itself records the attempt, so an identical redelivery inside the attempt window is
 // the attempt-dedupe skip above rather than a second exception. A refusal whose resolution failed,
 // and one of a session whose own consumer relays the message, records nothing and gives that
-// dedupe up. judgeFollowedTopic is what reads the record back, on the next copy, and the relay of
-// a serving-port session's consumer applies it too (sessionRelays.followedTopicVerdict): a record
-// would make that relay hold its copy of the message, and the session's later messages behind it,
-// until the record expired, for a session on a serving port now or one that registers on one
-// before then (fanoutDelivery). A refusal the caches themselves made records nothing either way.
+// dedupe up. A record of a refusal is written only together with the exception that reports it,
+// which is what lets the relay of a serving-port session's consumer tell the two meanings of a
+// record apart: it acks such a message unreported rather than reporting it again
+// (sessionRelays.followedTopicVerdict). A refusal the caches themselves made records nothing
+// either way.
 func fanoutRefusalOutcome(sessionID string, item contracts.Envelope, verdict followedTopicVerdict, mode string, recorded bool) deliveryOutcome {
 	switch verdict {
 	case followedTopicDeduped:
@@ -1021,39 +1043,24 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		// them, and makes no call of its own.
 		delivery, err := cfg.deliverer.Resolve(item, interest, target, item.Topic, message.storedSeq())
 		relayed := err == nil && delivery.Relayed
+		// relayJudges names the session whose own relay applies these same rules to what it
+		// pushes (sessionRelays.followedTopicVerdict) and reports a refusal of it itself, which
+		// is a serving-port session's. A portless session's relay publishes every frame unjudged
+		// (sessionRelays.relayNATS), and the plugin drops a frame whose delivery mode it cannot
+		// read without a word, so that session's refusals are reported here instead.
+		relayJudges := relayed && target.Port > 0
 		// Refusals are decided before the take case, since the session whose own consumer relays
 		// the message is one this path still reports a refusal of unless that relay judges it.
-		//
-		// Such a session's message is pushed by the relay of its consumer
-		// (sessionRelays.pushUntilAccepted), which records the dedupe key on the port's 204: this
-		// path pushes nothing and records nothing for it. A dedupe record it wrote for a session
-		// it does not push to is one the relay would ack a copy the session never received by,
-		// and an attempt record one it would hold that copy under, the session's later messages
-		// behind it, until the record expired (session.SessionEntry.ConsumerRelaysStored).
-		if verdict != takeFollowedTopic {
-			if relayed && target.Port > 0 {
-				// A refusal is left to that relay only where the relay judges it, which is a
-				// serving-port session's: it applies these same rules to what it pushes
-				// (sessionRelays.followedTopicVerdict) and reports the refusal itself. A portless
-				// session's relay publishes every frame unjudged (sessionRelays.relayNATS), and
-				// the plugin drops a frame whose delivery mode it cannot read without a word, so
-				// that session's refusals are reported below instead.
-				applyDeliveryOutcome(cfg, item, deliveryOutcome{
-					sessionID:    interest.SessionID,
-					metricStatus: "skipped",
-					duration:     &deliveryTimer,
-				})
-				continue
-			}
-			// The attempt is recorded only where the resolution read the session and did not
-			// relay the message. One left for a session whose entry is gone
-			// (session.ErrNoSessionRecord) or for a portless session on consumer delivery is one
-			// the relay of that session would hold this message under, its later messages behind
-			// it, once the session registers again on a serving port.
+		if verdict != takeFollowedTopic && !relayJudges {
 			applyDeliveryOutcome(cfg, item, fanoutRefusalOutcome(interest.SessionID, item, verdict, mode, err == nil && !delivery.Relayed))
 			continue
 		}
 		if relayed {
+			// The session's own consumer holds the message, and the relay of that consumer pushes
+			// it and records the dedupe key on the port's 204: this path pushes nothing and
+			// records nothing for it, a refusal that relay judges included. A dedupe record
+			// written here would have the relay ack a copy the session never received
+			// (session.SessionEntry.ConsumerRelaysStored).
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				sessionID:    interest.SessionID,
 				metricStatus: "skipped",
@@ -1064,11 +1071,11 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		if err == nil {
 			// The attempt is recorded before the push is made or handed over, so another copy of
 			// the same event read while it is in flight is a dedupe skip rather than a second
-			// push. A resolution that failed records none: it names a push that was never made,
-			// and a record left for a session whose entry is gone (session.ErrNoSessionRecord)
-			// is one the relay of a session that registers again -- its consumer starting at or
-			// below this message -- would hold that message under until it expired
-			// (session_relay.go's holdWhilePushedElsewhere).
+			// push. A resolution that failed records none: it names a push that was never made.
+			// This is the record that can hold the relay of a session on a serving port by the
+			// time it reads the message: the relay holds its copy while the push this record
+			// names is in flight, and pushes it itself once the record is gone (session_relay.go's
+			// holdWhilePushedElsewhere).
 			cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
 			if delivery.Push {
 				if message.mode == durableDelivery {

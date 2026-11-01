@@ -202,13 +202,19 @@ type requestKeyClaim struct {
 // bindRequestKeyRecovery.
 type requestKeyClaimKey struct{}
 
-// resolvedCallerKey carries the caller keyedWrites resolved to its handler, so optionalActor does
-// not verify one bearer twice in a request.
+// resolvedCallerKey carries a caller already decided to the layers behind it, so optionalActor
+// neither verifies one bearer twice in a request nor presents one DPoP proof twice: keyedWrites
+// resolves before its handler, and decideBrokerToken decides a DPoP presentation before any of
+// them (broker_token.go).
 type resolvedCallerKey struct{}
 
+// resolvedCaller is that decision. err is the refusal where the credential did not resolve,
+// which only a decision made before the request's own layers carries: a caller refused once is
+// told why rather than told its spent proof did not verify.
 type resolvedCaller struct {
 	actor model.Actor
 	human bool
+	err   error
 }
 
 // keyedWrites wraps the handler of a POST or PATCH route, method and pattern, in the keyed path
