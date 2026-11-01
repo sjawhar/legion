@@ -128,7 +128,9 @@ func TestTaskProgressLockedThroughTheBootPassIsCountedByARetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = writer.Rollback(context.Background()) }()
-	if _, err := writer.Exec(ctx, `select 1 from issues where key = $1 for update`, held); err != nil {
+	// The pass tries each issue's owner lock rather than its row (store.TryLockOwners), so a
+	// writer holds an issue out of a pass by holding that lock, as every writer of the issue does.
+	if err := store.LockOwner(ctx, writer, store.IssueOwner(held)); err != nil {
 		t.Fatalf("hold %s: %v", held, err)
 	}
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})

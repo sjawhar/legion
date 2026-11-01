@@ -84,6 +84,9 @@ type Ledger struct {
 	queue  []WriteStep
 	sealed bool
 	batch  *store.WriteBatch
+	// artifacts is the reference key of each artifacts row this transaction creates and has not
+	// written yet, by artifact id (RegisterPendingArtifact).
+	artifacts map[string]string
 	// rooms holds, per document whose stored history this transaction has queued a write to, the
 	// state its queued writes leave it in (pendingRoom).
 	rooms map[string]*pendingRoom
@@ -111,6 +114,12 @@ type Ledger struct {
 	// askBlocks holds, per document, the block asks whose rows this transaction has queued writes
 	// of, by block id, as they will stand (recordAskBlock, loadAskBlocks).
 	askBlocks map[string]map[string]model.Ask
+	// owedAuthors holds, per document, the pending authors this transaction has queued writes of
+	// (upsertPendingAuthors), by actorKey: the appends it makes for a room credit the browser
+	// edits they store, and doc_pending_authors holds none of those rows until the write phase
+	// has run, so the versions this transaction writes read them from here as well as from the
+	// table (transactionPendingAuthors).
+	owedAuthors map[string]map[string]model.Actor
 }
 
 // WriteStep is one step of a transaction's write phase: it puts the statements of one write on the
@@ -347,6 +356,26 @@ func (l *Ledger) queuedVersion(artifactID string, pending pendingVersion) {
 	l.latest[artifactID] = pending
 }
 
+// queuedAuthors records authors as pending authors of artifactID this transaction has queued the
+// write of (upsertPendingAuthors): until its write phase has run, doc_pending_authors holds no
+// row of theirs, and the versions this transaction writes read them from here instead
+// (transactionPendingAuthors). A queued delete of them (deleteCapturedPendingAuthors) is queued
+// after the insert, so it takes the rows back out in the write phase; nothing of this transaction
+// reads R between the two.
+func (l *Ledger) queuedAuthors(artifactID string, authors []pendingAuthor) {
+	if l.owedAuthors == nil {
+		l.owedAuthors = make(map[string]map[string]model.Actor, 1)
+	}
+	owed := l.owedAuthors[artifactID]
+	if owed == nil {
+		owed = make(map[string]model.Actor, len(authors))
+		l.owedAuthors[artifactID] = owed
+	}
+	for _, author := range authors {
+		owed[actorKey(author.actor)] = author.actor
+	}
+}
+
 // QueueVersion queues the insert of a document version the caller writes itself, outside the
 // document service - an upload's, which lists its uploader alone, and a new issue's first version
 // of its seeded spec - and returns the row as the insert will leave it. It is named when it has a
@@ -440,6 +469,30 @@ func pendingAnchorsOf(ctx context.Context, artifactID string) []*PendingAnchor {
 		return nil
 	}
 	return ledger.anchors[artifactID]
+}
+
+// RegisterPendingArtifact records refKey as the reference key of artifactID, an artifacts row this
+// transaction creates and has not written yet: its insert is queued with the transaction's other
+// writes, or runs later in its write phase, while the document's own work names the artifact's id
+// from the start, so a read of the document's reference here takes it from the ledger rather than
+// from the row no read of this transaction can see (documentRefKey). The key is the one the row
+// is written with, so it answers the same before and after the write phase has run.
+func (l *Ledger) RegisterPendingArtifact(artifactID, refKey string) {
+	if l.artifacts == nil {
+		l.artifacts = make(map[string]string)
+	}
+	l.artifacts[artifactID] = refKey
+}
+
+// pendingRefKey is the reference key registered for artifactID on ctx's ledger
+// (RegisterPendingArtifact), false when none is and the artifacts row is the only place to read it.
+func pendingRefKey(ctx context.Context, artifactID string) (string, bool) {
+	ledger := ledgerFrom(ctx)
+	if ledger == nil {
+		return "", false
+	}
+	refKey, pending := ledger.artifacts[artifactID]
+	return refKey, pending
 }
 
 // pendingApproval is a document's open approval request as the writes this transaction has queued

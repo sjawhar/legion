@@ -119,6 +119,27 @@ func TestAWriteRefusesABlockPointerToADisallowedType(t *testing.T) {
 	}
 }
 
+// The document an upload creates has no artifacts row to read until the upload commits, and a
+// pointer at a block of that same document is still resolved from the blocks the upload writes:
+// a claim pointing at a callout the new document adds is refused and nothing is written, while
+// one pointing at a requirement it adds is created.
+func TestANewDocumentIsRefusedAPointerToItsOwnDisallowedBlock(t *testing.T) {
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
+	handler, database := blockIndexHandler(t)
+	issue, _ := pointerSpec(t, handler)
+	checks := "dispatch://" + issue.Key + "/artifact/checks-md"
+
+	expectRefusal(t, "a new document pointing at a callout of its own",
+		uploadChecks(t, handler, issue.Key, ":::callout{#k2 kind=\"note\" title=\"\"}\nOurs.\n:::\n\n"+claimMarkdown("c1", checks+"#b-k2")),
+		http.StatusBadRequest, "INVALID_MARKDOWN", `"serves"`, checks+"#b-k2", `"callout"`, "requirement")
+	if state := readChecks(t, database, issue.Key); state.ID != "" {
+		t.Fatalf("the refused upload left checks.md %+v, want no document", state)
+	}
+	if response := uploadChecks(t, handler, issue.Key, ":::requirement{#r2}\nOurs.\n:::\n\n"+claimMarkdown("c1", checks+"#b-r2")); response.Code != http.StatusCreated {
+		t.Fatalf("a pointer to a requirement the same new document adds: status=%d body=%s, want 201", response.Code, response.Body.String())
+	}
+}
+
 // A pointer a write leaves as it was is never refused, so retyping its target elsewhere to a type
 // the attribute does not allow blocks neither the retype nor an unrelated edit of the citing
 // document, while a new pointer to the retyped target is refused.

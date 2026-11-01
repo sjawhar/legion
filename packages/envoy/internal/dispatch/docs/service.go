@@ -150,9 +150,11 @@ type Service struct {
 	// since the write read it (refuseLostWrite), and before it renders the write's fork. Nil
 	// outside tests; tests use it to edit the room in that window.
 	afterCaptureFork func(room string)
-	// afterForkRead runs once a transaction's one read of a document has built its write's fork
-	// (forkLive), under the document's advisory lock, before the write's operation runs on it. Nil
-	// outside tests; tests use it to edit the room after the fork read it.
+	// afterForkRead runs once an operation of a transaction holds its write's fork (forkLive),
+	// under the document's advisory lock, before the operation runs on it: at the transaction's
+	// one read of the document, and again at each later operation, which takes the fork that read
+	// left. Nil outside tests; tests use it to edit the room after the fork read it, and take the
+	// first call where they want that window alone.
 	afterForkRead func(room string)
 	// afterAnchorRefresh runs as soon as an anchor refresh has decided which rows it refreshes
 	// (refreshAnchors), with the document it ran on and the number of rows whose anchor it writes.
@@ -1252,10 +1254,11 @@ func (s *Service) readSettlementTree(state *roomState, doc *crdt.Doc, room strin
 // tx under the document's advisory lock, and the room's in-flight credits no committed version has
 // listed that were observed before the read. Taken once the settlement has stored the room's
 // updates through the read (Ledger.flushThrough), the pending authors hold the authors those appends
-// wrote, so a credit observed after the bound whose update the settlement stored is listed too;
-// one whose update the read lacks stays pending for the next version.
+// wrote - the ones its queue has yet to write among them (transactionPendingAuthors) - so a credit
+// observed after the bound whose update the settlement stored is listed too; one whose update the
+// read lacks stays pending for the next version.
 func settlementCredit(ctx context.Context, tx pgx.Tx, state *roomState, room string, read settlementRead) (settlementVersionCredit, error) {
-	owed, err := readPendingAuthors(ctx, tx, room)
+	owed, err := transactionPendingAuthors(ctx, tx, room)
 	if err != nil {
 		return settlementVersionCredit{}, err
 	}

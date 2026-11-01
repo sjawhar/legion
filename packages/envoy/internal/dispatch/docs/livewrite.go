@@ -351,6 +351,11 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 // A fork an operation abandoned (applyLive) is built again for the transaction's next operation:
 // read afresh while the transaction has appended nothing of its own, since nothing it stores then
 // was made on the abandoned read; otherwise rebuilt on that read exactly (rebuildFork).
+//
+// afterForkRead runs here, once for each operation that takes the fork, however the fork was come
+// by: the transaction's one read of the room or the store, a rebuild on that read, or the fork
+// the transaction's earlier operations left. A caller that wants the window after the read alone
+// takes the first call (onFirst in the tests).
 func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
 	var fork *crdt.Doc
 	var err error
@@ -366,6 +371,9 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	}
 	if err != nil {
 		return nil, err
+	}
+	if s.afterForkRead != nil {
+		s.afterForkRead(write.artifactID)
 	}
 	if s.checkRendering != nil {
 		s.checkRendering("fork", write)
@@ -517,9 +525,6 @@ func (s *Service) warmFork(write *liveWrite, live *crdt.Doc) (*crdt.Doc, error) 
 	}
 	write.fork, write.point, write.forkSeq, write.forkHold, write.cold = fork, point, seq, hold, false
 	write.forkedFrom, write.forkRead, write.forkMarkdown = weak.Make(live), read.mark, read.markdown
-	if s.afterForkRead != nil {
-		s.afterForkRead(write.artifactID)
-	}
 	return fork, nil
 }
 
@@ -568,9 +573,6 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite, head int64) (*
 	// (applyMargin) and its operations' renderings are never published (publishedRendering).
 	write.forkedFrom, write.forkRead, write.forkMarkdown = weak.Pointer[crdt.Doc]{}, forkReadMark{}, nil
 	write.forkHold = &roomHold{loaded: int64(loaded.Version)}
-	if s.afterForkRead != nil {
-		s.afterForkRead(write.artifactID)
-	}
 	return fork, nil
 }
 

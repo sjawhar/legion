@@ -210,12 +210,13 @@ type uploadHold struct {
 	hold *roomHold
 }
 
-// capturePendingAuthors reads R in tx, which holds the document's advisory lock, with the
+// capturePendingAuthors reads R in tx, which holds the document's advisory lock, as tx sees it -
+// the rows the table holds and the rows tx has queued (transactionPendingAuthors) - with the
 // document's latest person sender (readLastPerson), and takes whom a version lists
 // (captureAuthors), with the in-flight credits observed through `through`, under room's state
 // lock.
 func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room string, write *liveWrite, actor *model.Actor, through uint64) (authorCapture, error) {
-	owed, err := readPendingAuthors(ctx, tx, room)
+	owed, err := transactionPendingAuthors(ctx, tx, room)
 	if err != nil {
 		return authorCapture{}, err
 	}
@@ -485,12 +486,37 @@ func upsertPendingAuthors(ctx context.Context, tx pgx.Tx, room string, authors [
 		encoded = append(encoded, string(raw))
 		versions = append(versions, int64(author.writtenThrough))
 	}
-	return writeExec(ctx, tx, "record the document's pending authors", `
+	if err := writeExec(ctx, tx, "record the document's pending authors", `
 		insert into doc_pending_authors (artifact_id, actor_kind, actor_id, actor, written_through)
 		select $1::uuid, kind, id, actor, version
 		from unnest($2::text[], $3::text[], $4::jsonb[], $5::bigint[]) as author(kind, id, actor, version)
 		on conflict (artifact_id, actor_kind, actor_id, written_through) do update set actor = excluded.actor
-	`, room, kinds, ids, encoded, versions)
+	`, room, kinds, ids, encoded, versions); err != nil {
+		return err
+	}
+	// A queued statement writes nothing until the write phase runs, so the rows it will add are
+	// recorded for the reads of this transaction that follow it (transactionPendingAuthors).
+	if ledger := queueFor(ctx, tx); ledger != nil {
+		ledger.queuedAuthors(room, authors)
+	}
+	return nil
+}
+
+// transactionPendingAuthors is R for room as tx sees it: the rows the table holds, and the rows
+// the writes tx has queued will add (Ledger.queuedAuthors). A version's transaction stores the
+// room's updates before it reads R (Ledger.flushThrough), and each of those appends writes the
+// authors of the edit it stores; where its writes are queued the table holds none of them yet, so
+// a version reading the table alone would neither list those authors nor delete their rows when
+// it commits, and the next version would be owed them again.
+func transactionPendingAuthors(ctx context.Context, tx pgx.Tx, room string) (map[string]model.Actor, error) {
+	owed, err := readPendingAuthors(ctx, tx, room)
+	if err != nil {
+		return nil, err
+	}
+	if ledger := queueFor(ctx, tx); ledger != nil {
+		maps.Copy(owed, ledger.owedAuthors[room])
+	}
+	return owed, nil
 }
 
 // readPendingAuthors is R for room, keyed by actorKey. It says nothing about who edited last: the

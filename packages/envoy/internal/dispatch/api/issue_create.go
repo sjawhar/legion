@@ -304,6 +304,11 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
 	defer ledger.Discard()
+	// The spec's artifacts row is written in the write phase below, after the document work, so
+	// the key that row is given - the issue's key and the 'spec' slug its insert names - is
+	// recorded for the reads of this transaction that need it: a block pointer of the seeded spec
+	// names a target in the spec by this key (docs.documentRefKey).
+	ledger.RegisterPendingArtifact(artifactID, key+"/spec")
 	markdown, err = s.deps.Docs.SeedText(documentCtx, artifactID, markdown, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)

@@ -519,8 +519,30 @@ func joinedSchemaError(err error, start func() error) error {
 // already stored, so it is never refused.
 func refuseBlockPointers(ctx context.Context, tx pgx.Tx, artifactID string, tree, prior *pmdoc.Node, offsets []pmdoc.BlockOffset) error {
 	return pmdoc.CheckBlockPointers(tree, prior, func(targets []text.Ref) (map[string][]string, error) {
-		return refs.BlockTypes(ctx, tx, artifactID, offsetBlocks(offsets), targets)
+		// The reference key is resolved here, inside the check's one call, so a write that
+		// introduces no pointer reads nothing for it.
+		refKey, err := documentRefKey(ctx, tx, artifactID)
+		if err != nil {
+			return nil, err
+		}
+		return refs.BlockTypes(ctx, tx, artifactID, refKey, offsetBlocks(offsets), targets)
 	})
+}
+
+// documentRefKey is the reference key of document artifactID, the address its blocks' node ids are
+// built from: the key this transaction recorded for an artifacts row it is creating
+// (Ledger.RegisterPendingArtifact), else the stored row's. A transaction creating the document
+// writes that row with the rest of its writes, after the document work, so no read of its own can
+// see it; one that is not creating it reads the row it already holds.
+func documentRefKey(ctx context.Context, tx pgx.Tx, artifactID string) (string, error) {
+	if refKey, pending := pendingRefKey(ctx, artifactID); pending {
+		return refKey, nil
+	}
+	var refKey string
+	if err := tx.QueryRow(ctx, `select coalesce(ref_key, '') from artifacts where id = $1`, artifactID).Scan(&refKey); err != nil {
+		return "", fmt.Errorf("read the reference of document %s: %w", artifactID, err)
+	}
+	return refKey, nil
 }
 
 func mergeUpdates(updates [][]byte) ([]byte, error) {

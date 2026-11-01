@@ -513,16 +513,17 @@ func BlockLinks(ctx context.Context, q Queryer, fromArtifact, toArtifact string)
 }
 
 // BlockTypes is the type of each block targets name, by node id (text.TargetID), as the block
-// index would hold it once a write to document artifactID leaving the blocks written (rendered, in
-// document order, each parent before its children) is indexed, read through q: a block of that
-// document as written's node for its id (uniqueBlocks: the first holder of a repeated id, and no
-// id the index cannot key), any other as its document's current blocks (document_blocks) hold it,
-// with one query for every such target. A target no block has is absent.
-func BlockTypes(ctx context.Context, q Queryer, artifactID string, written []model.ArtifactBlock, targets []text.Ref) (map[string][]string, error) {
-	var refKey string
-	if err := q.QueryRow(ctx, `select coalesce(ref_key, '') from artifacts where id = $1`, artifactID).Scan(&refKey); err != nil {
-		return nil, fmt.Errorf("read the reference of document %s: %w", artifactID, err)
-	}
+// index would hold it once a write to document artifactID, whose reference key is refKey, leaving
+// the blocks written (rendered, in document order, each parent before its children) is indexed,
+// read through q: a block of that document as written's node for its id (uniqueBlocks: the first
+// holder of a repeated id, and no id the index cannot key), any other as its document's current
+// blocks (document_blocks) hold it, with one query for every such target. A target no block has is
+// absent.
+//
+// The caller hands the reference key over rather than this read taking it from the artifacts row,
+// because a transaction creating the document has only queued that row: its own reads cannot see
+// it, while the caller knows the key the queued insert will write (docs.documentRefKey).
+func BlockTypes(ctx context.Context, q Queryer, artifactID, refKey string, written []model.ArtifactBlock, targets []text.Ref) (map[string][]string, error) {
 	nodes, _, _ := uniqueBlocks(written)
 	own := make(map[string]string, len(nodes))
 	for _, node := range nodes {
