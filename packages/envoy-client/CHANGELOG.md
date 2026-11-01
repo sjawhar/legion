@@ -1,5 +1,15 @@
 # Changelog
 
+## [main@6b1524cdb8aa] - 2026-11-01
+
+### Fixed
+
+- `dispatch request-approval` finds an ask block whose id the renderer writes `id="…"` (an id
+  holding a space, `&` or another character the `#` shortcut cannot hold, such as `a b` or
+  `R&D`, written `id="a b"` and `id="R&amp;D"`). It looked only for `ask{#<id>`, so it named such
+  a block as one the latest version does not hold yet and refused every request over the
+  document; it now looks for the opener as `@legion/contracts`' `typedBlockIdAttribute` writes it.
+
 ## [main@2605f55135db] - 2026-11-01
 
 ### Added
