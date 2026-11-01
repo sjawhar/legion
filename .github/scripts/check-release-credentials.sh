@@ -5,7 +5,7 @@
 # credentials and runs no dependency code: only release-push.sh, git, gh, jq, sha256sum, npm view
 # and npm publish and a handful of pinned actions, with no cache restored and the deploy key only
 # in the env of the steps that push. (release.yaml's one publish job publishes the packages of its
-# four build jobs, one after another.) changelog-fold.yaml splits each fold of the changelog
+# three build jobs, one after another.) changelog-fold.yaml splits each fold of the changelog
 # fragments the same way: fold_build renders them with changie, fold_publish lands them with
 # release-push.sh push-fold. claude-envoy-rebuild.yaml, which is no release but pushes to main with
 # the same deploy key, takes the same split: a build job that builds the plugin, and a push job.

@@ -2713,7 +2713,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   the failure starts one, and when one is already ending the failure finds it running and starts none, so a recovery looks again once it has cleared its flag.
   A run that fails with the client still running is reported by how long the hooks have been uncovered and not by the one failure (`bus.Client.reportHookFailure`):
   under `bus.RepairGrace` (a minute) it is a WARN, `envoy nats reconnect hook failed; it is retried`, and at or past it an ERROR, `envoy nats reconnect hooks have not succeeded`, each with `name`, `error` and `stall_ms`;
-  a run that fails once the client has stopped stays the INFO `envoy nats reconnect hooks cancelled`.
+  a run that fails once the client has stopped is the stop and not a failure, and the path the run was on reports it: the `stopped` guard in `bus.Client.onReconnect` logs the INFO `envoy nats reconnect hooks cancelled` with the hook's error, and the guard after each attempt in `bus.Client.recoverUntilHealthy` logs the INFO `envoy nats recovery cancelled` with that attempt's joined error (`errors.Join` of the connect-or-restore error and the hook error).
   A recovery reports its own failed run the same way rather than folding it into `envoy nats recovery resubscribe failed`.
   Re-subscribing holds no lock across a bind's request, so a reconnect that lands while a bind is in flight, such as the listener's bind attempt, whose lookup the reconnect can lose for JetStream to wait out for 10 s, restores and runs the hooks without waiting for it:
   a registration has one bind at a time, so the restore leaves that registration to its bind, and the recovery the reconnect starts binds it should that bind fail.
