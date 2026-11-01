@@ -9,10 +9,13 @@ you act, because a wake can be stale.
 
 ## `triage on <KEY>` (`{kind: "triage"}`)
 
-An unrecorded root in `triage` that carries the `legion` label. The daemon sends it when the issue
-is created with the label, and on each later change while it stays in `triage`, the change that
-adds the label included: the dashboard creates an issue without labels, so a person adds it from
-the issue header. Triage it as `skill://legion-controller/references/triage.md` says.
+An unrecorded root in `triage` that carries the `legion` label, when no person set that label (a
+session's label, yours included). The daemon sends it when a session creates the issue with the
+label, and on each later change while it stays in `triage`, the change that adds the label
+included. Triage the root as `skill://legion-controller/references/triage.md` says. A person's
+label on a `triage` root wakes nobody: the root is queued by the daemon (its own `todo` write). A
+person's approval of a parked (`backlog` or `icebox`) labelled root's spec is queued by the daemon
+the same way and wakes nobody.
 
 ## `slot-free on <KEY>` (`{kind: "slot-free"}`)
 

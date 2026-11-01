@@ -1,11 +1,13 @@
 // Package pgmigratetest holds the rules Envoy's migration sets are held to in tests: what a store
-// embeds is its whole migrations directory, the set is numbered 1 to N, every migration from a
-// store's chosen number declares a census, a census names the new migrations whose objects it
-// reads (CheckCensusNamesTheMigrationsItReads), and the census's reading of which tables a
-// migration touches is held to the set, both by name (CheckTouchedTablesAreKnown) and against the
-// locks each migration really takes (CheckTouchedTablesAgainstLocks). It is an ordinary package
-// rather than a _test.go file so Dispatch's and the broker's store tests can both call it; Go
-// shares no test-only code across packages.
+// embeds is its whole migrations directory, the identifiers the broker's set hands out are
+// numbered throughout (CheckNumberedOneToN; a set whose identifiers are numbers and then UTC
+// timestamps, as Dispatch's is, is held to migrationid.Check), every migration from a store's
+// chosen number declares a census, a census names the new migrations whose objects it reads
+// (CheckCensusNamesTheMigrationsItReads), and the census's reading of which tables a migration
+// touches is held to the set, both by name (CheckTouchedTablesAreKnown) and against the locks
+// each migration really takes (CheckTouchedTablesAgainstLocks). It is an ordinary package rather
+// than a _test.go file so Dispatch's and the broker's store tests can both call it; Go shares no
+// test-only code across packages.
 package pgmigratetest
 
 import (

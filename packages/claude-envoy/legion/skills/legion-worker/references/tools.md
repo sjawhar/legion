@@ -475,8 +475,37 @@ figure came from
 Some tests fail in a Kubernetes issue pod whatever your change, because of the pod, not the branch.
 A tmux pane runs on its host, and none of this holds there. Their proof is CI's run at the head:
 cite that run, and name in your handoff each package the pod could not run. The cases below are
-the known ones, not every one: a failure they do not name is yours to explain.
+the known ones, not every one: a failure they do not name is yours to explain. Several of them
+reach any work a pod runs, a test or a tool of your own, not a test suite alone. One habit holds
+them together: check the result, never the request. A call's exit code, a reported limit and a
+job's phase each answer a different question than the one you asked, so where you set something,
+read it back and refuse on a mismatch, and where you read something, confirm the tool ran. An
+empty result is evidence only then: a missing binary, a refused permission, or a truncated
+search gives you silence that reads as a clean answer, so check that the thing you counted had
+something to count.
 
+- **Read the summary your work wrote, never the Job's phase.** A Kubernetes Job that reports
+  `Succeeded` says its container exited 0, and nothing more: read the artefact your work was to
+  produce, or the log line that proves it ran, before you believe any result. A lane measured
+  this on 2026-11-01: two pods running a native toolchain died with `Error: Stack overflow.` after 23
+  seconds, and their Job still reported `Succeeded`, because the process they ran (`rocq repl`)
+  exits 0 when a command inside it fails. The toolchain is incidental; any interpreter, driver or
+  wrapper that swallows an inner failure gives the same clean phase over a silent no-result, and
+  a lane that trusts the phase records it as a run that worked.
+
+  Two habits make that phase true. Detect the failure in the text your tool prints and exit
+  non-zero yourself, rather than passing the wrapper's exit code on. And write a verdict that
+  matters to durable storage as it is produced, not at the end: a node can vanish within a minute
+  of a pod ending, so an unpersisted log is gone even when nothing killed anything, and a
+  terminating pod's grace period can be as short as 25 seconds, which is no time to flush.
+
+  **The phase lies in the other direction too, and that one is worse.** A lane measured a Job
+  reporting `Running` for 23 minutes while its pod count was **zero**: the quota was full, every
+  pod create was refused (`exceeded quota … requested: requests.cpu=16, used: 198, limited:
+  200`), and the controller kept retrying. A watcher reading the phase would have called that
+  build running all night. **The phase is a request; the pod list is the result.** If you watch
+  a Job, watch `kubectl get pods -l batch.kubernetes.io/job-name=<job>`, or watch the marker
+  your own work writes — never the phase alone.
 - **gVisor.** Every pod runs under gVisor, which does not give a test every interface the Linux
   kernel does. In `packages/envoy` the tests of `cmd/agent-secrets`, `cmd/agent-secrets-helper`
   and `internal/broker/helper` fail: the helper identifies its peer with `SO_PEERPIDFD`, which
@@ -487,6 +516,95 @@ the known ones, not every one: a failure they do not name is yours to explain.
   later release may have it. A timing test can fail too: `internal/dispatch/pmdoc`'s linearity
   tests time a call by the process's CPU time, which gVisor counts in 10 ms ticks, so a call under
   10 ms can measure 0 s and the test reports `+Inf times`.
+- **`O_NOFOLLOW` guards a leaf and not a component under gVisor.** A lane measured this on
+  2026-11-01, in a pod under gVisor (`uname` 4.19.0-gvisor) against the same probe on an ordinary
+  kernel, on two filesystems. Almost everything matches: `O_RDONLY|O_NOFOLLOW` on a symlink to a
+  file refuses `ELOOP`, `O_CREAT|O_EXCL|O_NOFOLLOW` on one refuses `EEXIST`, `O_PATH|O_NOFOLLOW`
+  opens the link itself, and the controls (a regular file, a real directory, a free name) succeed
+  on both. One call differs: `openat(dirfd, <a link to a directory>,
+  O_DIRECTORY|O_NOFOLLOW|O_RDONLY|O_CLOEXEC)`, which the ordinary kernel refuses `ENOTDIR` and
+  gVisor follows with no error. So code that walks a path one component at a time and opens each
+  with `O_NOFOLLOW` is defeated there while every leaf check still passes, and its tests stay
+  green on a developer's kernel. A whole block of such tests failing in a pod is that one
+  property of the environment, not one defect per test. The fix shape holds on both kernels: the
+  walk cannot trust the flag, so `lstat` the component, `fstat` the descriptor it opened, compare
+  `st_dev` and `st_ino`, and refuse when they differ or when the `lstat` says `S_IFLNK`.
+  `openat2` is not the alternative there: a lane measured it returning `ENOSYS` under gVisor for
+  every flag combination it tried, so the `lstat` and `fstat` comparison above is the portable
+  check rather than a fallback. The question is not which tool to use but whether anything you
+  run calls `openat2`, which you can read off the binary (two builds of one tool reporting an
+  identical `--version` differed here, and only the package version and the checksum told them
+  apart):
+
+  ```sh
+  b=$(readlink -f "$(command -v <tool>)")
+  n=$(nm -D --undefined-only "$b" | wc -l)
+  bad=$(nm -D --undefined-only "$b" | grep -c openat2 || true)   # grep -c exits 1 on no match
+  [ "$n" -gt 0 ] || { echo "no dynamic symbols: static binary or nm failed, use a tracer"; exit 2; }
+  [ "$bad" -eq 0 ] || { echo "this binary calls openat2 and fails under gVisor"; exit 2; }
+  ```
+
+  The total count is the control: a total of zero is a static binary or a failed `nm`, not a
+  clean result. **An undefined `openat2` symbol proves the binary calls it. Its absence proves
+  nothing**, so the check is a positive test only: a caller can reach the syscall through
+  `syscall(SYS_openat2, …)`, which leaves `syscall` in the table and never `openat2`, and a libc
+  that exports no `openat2` wrapper produces the symbol for no binary at all — measured on a
+  glibc 2.39 host, where no binary in `/usr/bin` carries it and `tar` shows 227 undefined
+  symbols, `openat2` zero and `syscall` one. To establish that a binary is safe rather than
+  suspect, trace it.
+- **Set the stack with `ulimit -s`, then read both limits back.** The check, not the number,
+  is the durable part. 131072 is the number for an ordinary job; name a larger one when a tool
+  you run polices its own limit and demands it:
+
+  ```sh
+  want=131072   # a tool with its own stack guard may demand more; use its minimum
+  ulimit -S -s "$want" 2>/dev/null || { ulimit -H -s "$want" 2>/dev/null || true; ulimit -S -s "$want"; }
+  { [ "$(ulimit -Hs)" = unlimited ] && ulimit -H -s "$want" 2>/dev/null; } || true
+  soft=$(ulimit -Ss); hard=$(ulimit -Hs)
+  [ "$soft" = "$want" ] || { echo "stack soft is $soft, want $want; refusing"; exit 2; }
+  [ "$hard" != unlimited ] && [ "$hard" -ge "$want" ] || { echo "stack hard is $hard; refusing"; exit 2; }
+  ```
+
+  The soft limit must equal what you asked for, and the hard limit must be finite and no lower.
+  `unlimited` is refused by name, because it reports `unlimited` and gives 8 MiB.
+  Three things in that setter each answer a measured failure, and a simpler form breaks one of
+  them. **The soft limit is set first**, because lowering the hard limit below a soft
+  `unlimited` is `EINVAL` — `ulimit -H -s 131072` from that state fails with `cannot modify
+  limit: Invalid argument`, and chained with `&&` the soft set never runs, so the process keeps
+  `unlimited` and gets 8 MiB, the failure the rule exists to stop. **The hard limit is set only
+  when it reads `unlimited`**, because setting it unconditionally lowers a higher finite hard
+  limit the pod gave you, which is the headroom a tool with its own guard may need. The
+  **`|| true` around it** is not decoration: on the ordinary path, where the hard limit is
+  already finite, that test is false, and a bare `&&` list whose test fails is a non-zero exit
+  status. `set -e` does not abort there, so the script runs to the end and does all of its work
+  — and if that line is the last one in the file, the script exits 1 with everything correct.
+  Measured: as a last line, `exit=1`; with `|| true`, `exit=0`; and with any command after it,
+  `exit=0` either way, which is why it is easy to test and find nothing. And the
+  **fallback** covers a want above the current hard limit, where the soft set fails first.
+  Measured from three starting states: `unlimited/unlimited` and `8192/unlimited` both end at
+  `131072/131072`, and `131072/1048576` ends at `131072/1048576` with the higher hard limit
+  kept. Do not reduce it to a single `ulimit -s <n>`: that set both limits in a fresh shell
+  here and left the hard limit `unlimited` in a long-lived one, same binary and same starting
+  pair, cause unknown — which is why the read-back is the rule and the setter is not.
+  The ceiling is 128 MiB whichever finite value you choose —
+  gVisor maps the whole stack at exec and caps it at `maxStackSize = 128 << 20` in `MapStack`
+  (`pkg/sentry/mm/syscalls.go`), with `RLIM_INFINITY` falling back to the 8 MiB default — and a
+  larger soft limit costs rather than buys, since glibc sizes a default thread stack from it and
+  a tool that creates a thread pool can fail to allocate one. A lane measured both on 2026-11-01
+  in pods under gVisor (4.19.0-gvisor), with a C probe and a second probe in another language:
+  under `unlimited` the fault came at 7 MiB and 524,150 frames; at 131072 (KiB) both probes
+  faulted at 127 MiB and 8,388,470 frames. The same probes on an ordinary kernel track the
+  setting as expected, so this is the sandbox and not the probes.
+- **Compare durations within one pod, never across pods.** A gVisor sandbox runs syscall-heavy
+  work 2.2 to 3.8 times slower than the same work outside it, and a pod lands on whatever node
+  the autoscaler provisions, so two pods are two machines, two sets of neighbours and two
+  moments. Three parts, all measured: within one pod, comparable — run both arms there, as two
+  containers on one node started together, and a difference between them is a difference between
+  the arms; across pods, not comparable; across platforms, not until something measures the gap.
+  Label every figure taken there a gVisor figure. That factor is the cost of syscalls and no
+  budget for a whole job: a lane measured two real builds of the same work faster in a pod than
+  on a virtual machine (1,014 s against 1,546 s, and 620 s against 1,117 s), with system time
+  roughly doubled and user time lower, so compute-bound work can run as fast or faster there.
 - **No Docker.** The image carries no container runtime, so a test that starts one through
   testcontainers panics `rootless Docker not found`: in `packages/envoy`, the tests that use
   `internal/tests3` (`internal/dispatch/files`, which `DISPATCH_TEST_NO_CONTAINERS=1` skips) and

@@ -1270,6 +1270,21 @@ A deployment of an earlier layout clears all of it before it upgrades ([Upgradin
 The daemon runs on a host its pods can reach and serves the worker stream they dial.
 The controller is `legion controller start` on the operator's machine, or, under `controller: daemon`, a pod of its own with one launcher that the daemon launches ([The controller](#the-controller)).
 
+### Daemon migration identifiers and release order
+
+A migration's version is the leading digits of its file name (`internal/store/migrations`).
+The numbered migrations are the sequence the daemon grew up with, 1 to the number its series closed at (`0067_phase_assignment.up.sql`, recorded once in `migrationid`), each taken once;
+every migration added since takes the UTC moment its author created it, 14 digits `YYYYMMDDHHMMSS`, so two branches open at the same time cannot both claim one version.
+A timestamp sorts after every number, so a fresh database applies the numbered migrations in their old order and the timestamped ones in the order they were written.
+
+`schemaVersion` is the highest version applied, not proof that every version below it is applied:
+`Migrate` applies every version `schema_version` lacks, in version order, so a migration that merges below one a database already has still runs there, once.
+A deployed database applies each migration as the release carrying it deploys, so it can apply two migrations written on branches open at the same time in the other order than a fresh database does;
+a migration must not depend on that order, and one that needs another's effect is written after that one has merged.
+
+The release that reads the version cast to `bigint` goes out before any release that carries a timestamped migration:
+the release before it reads `max(version)` uncast, so a deployment that skips it costs the daemon it replaces one failed state read on each connection that prepared the uncast read, which pgx then drops.
+
 ### Upgrading a deployment with running trees
 
 This section is for a deployment that runs the release before issue pods (`legion-v10.0.0`), whose every role runs in a Sandbox of its own.
@@ -1749,8 +1764,10 @@ In this order:
    The earlier release's `Migrate` checks each migration it has by its own number and reads no highest row;
    only its `legion state` reports one, the `schemaVersion` it reads as `max(version)` (`schemaVersion` in `internal/store/store.go`, the state read in `internal/daemon/daemon.go`), which reads 53 once the row is gone, the earlier release's own last migration (`0053_issue_taken_back.up.sql`, which this rollback leaves applied with `0052_dispatch_issues.up.sql`).
    The SQL changes only these locators and that row, so Oh My Pi's session tables, wherever they are, keep every turn taken under this release.
-   The `54` in the `delete` is the number of the migration that renames the container, `0054_issue_pod_roles_container.up.sql`;
-   where that file carries another number in the release you roll back from, use that number.
+   The `54` in the `delete` is the version of the migration that renames the container, `0054_issue_pod_roles_container.up.sql`;
+   where that file carries another version in the release you roll back from, use that version.
+   A migration written after the numbered series takes the UTC moment it was created as its version, the 14 digits its file name begins with (`20261030120000_<slug>.up.sql` records `version = 20261030120000`), so reversing one deletes that 14-digit value and not a small number.
+   What the recorded versions do and do not prove, and which release goes out first, are [Daemon migration identifiers and release order](#daemon-migration-identifiers-and-release-order).
 
 4. **Return every one-container issue Sandbox to the earlier layout's template.**
    With `<namespace>` and `<project>` as in [Upgrading a deployment with running trees](#upgrading-a-deployment-with-running-trees) step 4, each patch suspends the Sandbox, which ends its pod and with it the pod's disk, and replaces its containers with the six role names alone;
@@ -4550,6 +4567,8 @@ each issue's pod (every role of it alike) and the image probe's.
   — naming the pod UID it recorded at spawn (the enrollment carries no issue or approver at all;
   each secret's owner and tier tags pick the approver for the pod's later credential requests at request time)
   — hands the enrollment id back to the shim, and revokes it wherever it lets the pod go (a death, the registration deadline, a suspension, a stop, the tree's close).
+  That person decides each of those requests on the secrets broker's own page, `<broker>/approve/<record>`, signed in to the broker itself: the agent's output names that page, their Dispatch Inbox links it, and Dispatch decides no secret request at all.
+  A broker that is not given its four `BROKER_SIGNIN_*` settings does not start, so a pin move that drops them stops at its first new pod while the old pods go on serving.
   The shim's renewer, `agent-secrets renew --pod-token-file <the projected token>`, sends the pod's current token with every renewal, and the broker refuses a renewal whose token names another pod UID or service account than the enrollment's (`POD_IDENTITY_MISMATCH`, which the renewer retries until the lease ends, since the broker also answers it while its token issuer is unreachable).
   The token is not yet required: once any enrollment naming a pod UID has renewed with that pod's token, the broker refuses a renewal without one (`POD_TOKEN_REQUIRED`, on which the renewer stops) from every enrollment naming that pod, whichever machine login made it, so the copied-token gap closes for every pod UID a current-image pod has renewed under.
   A pod on an older worker image never sends one and renews as before, each renewal logged at WARN, so the gap stays open for old-image UIDs until the release that requires the token (the broker's operate page, "The renew token check").
