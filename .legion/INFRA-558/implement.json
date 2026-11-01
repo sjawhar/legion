@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-558",
-  "completed": "2026-10-31T22:40:00Z",
+  "completed": "2026-11-01T00:30:00Z",
   "proof": [
+    {
+      "criterion": "Review round 7: the pull request merges with main, so its required checks can run; this PR's changelog wording lives in its own fragment.",
+      "surface": "GitHub's mergeability of #2461 and the Go suites on real Postgres at the merged head",
+      "command": "gh pr view 2461 -R sjawhar/legion --json mergeable; cd packages/envoy && go vet ./... (and -tags twobuild, multiprocess) && go test -count=1 ./internal/dispatch/docs/ ./internal/dispatch/api/ ./cmd/dispatch/",
+      "observed": "MERGEABLE; CI run 41257504555 started at b7709821; docs ok (2055 s), api ok (1931 s), cmd/dispatch ok (337 s); INFRA-767's two fragments deleted as main's fold left them, and pr2461-Added names OnTokenAuthContext on sjawhar/ygo v1.54.1-sami.3",
+      "headSha": "b770982192e5",
+      "negativeControl": "At 7a037ba4 GitHub reported CONFLICTING with main daf71f53 and ran no pull_request workflow."
+    },
     {
       "criterion": "Review round 6 item 1: the slow-page revoke test fails when the revoke's cancel is removed.",
       "surface": "Real sockets through docs.Service on real Postgres; the page reads 2 s after the revoke",
@@ -70,6 +78,7 @@
     }
   ],
   "filesChanged": [
+    "b7709821: merge of main daf71f53 (INFRA-767-ygo-awareness-echo.yaml and INFRA-767-ygo-v1-54-1-sami-1.yaml deleted as main's fold left them; pr2461-Added-20261028-123937.yaml names OnTokenAuthContext)",
     "338cfeaf: schema_admission_test.go (bounded slow-page test), schema_admission.go (no nil guard), websocket_test.go (fixtures with a real cancel), contracts dispatch-api.ts (points to the README's 1 s rule)",
     "7a037ba4: merge of main efed4e4d (ygo pin is main's v1.54.1-sami.3, which carries OnTokenAuthContext; ProofDocument.tsx and pending-sync.test.ts keep both sides)",
     "4a1c0f57: schema_admission_test.go (the tester's c0b46985 slow-page test replaced by TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole)",
