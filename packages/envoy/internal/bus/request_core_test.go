@@ -238,3 +238,112 @@ func TestRequestCoreToFlushTimeoutIsNotErrReceiptTimeout(t *testing.T) {
 		t.Fatalf("RequestCoreTo returned after %s; the flush must be bounded by the %s window, not the client's 10s default", elapsed, window)
 	}
 }
+
+// A forward its holder received but no stream stored is not delivered: the receipt arrives, the
+// stream's acknowledgement never does, and RequestCoreTo returns ErrForwardNotStored once the window
+// runs out, never nil and never ErrReceiptTimeout, so the listener reports it delivery_failed. The
+// same responder on a subject the stream captures is a nil error.
+func TestRequestCoreToReportsAReceiptWithoutTheStreamsAcknowledgementAsNotStored(t *testing.T) {
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+
+	const uncaptured = "test.uncaptured.holder"
+	if bus.StreamCaptures(uncaptured) {
+		t.Fatalf("the stream captures %s; the test needs a subject it does not store", uncaptured)
+	}
+	captured := contracts.AgentSubject("ses_captured_holder")
+	for _, subject := range []string{uncaptured, captured} {
+		responder, err := client.Conn.Subscribe(subject, func(message *natsgo.Msg) {
+			if message.Reply != "" {
+				_ = message.Respond(nil)
+			}
+		})
+		if err != nil {
+			t.Fatalf("subscribe responder on %s: %v", subject, err)
+		}
+		t.Cleanup(func() { _ = responder.Unsubscribe() })
+	}
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	item := contracts.Envelope{
+		EventID:        "evt_not_stored",
+		Source:         "agent",
+		SourceEventID:  "src_not_stored",
+		Topic:          "notifications.role.not-stored",
+		DedupeKey:      "publish.not-stored",
+		IssuedAt:       contracts.NowMillis(),
+		PayloadSummary: "a forward no stream stores",
+		TraceID:        "trace_not_stored",
+	}
+
+	const window = 500 * time.Millisecond
+	if err := client.RequestCoreTo(captured, item, 2*time.Second); err != nil {
+		t.Fatalf("RequestCoreTo to a stored subject with a live responder = %v, want nil", err)
+	}
+	started := time.Now()
+	err = client.RequestCoreTo(uncaptured, item, window)
+	elapsed := time.Since(started)
+	if !errors.Is(err, bus.ErrForwardNotStored) || errors.Is(err, bus.ErrReceiptTimeout) {
+		t.Fatalf("RequestCoreTo with a receipt and no stream acknowledgement = %v, want ErrForwardNotStored", err)
+	}
+	if elapsed < window || elapsed > 2*time.Second {
+		t.Fatalf("RequestCoreTo returned after %s; want the full %s window, waiting for the acknowledgement", elapsed, window)
+	}
+}
+
+// A forward to a holder that answers no receipt counts once the stream stores it: with no subscriber
+// on the agent subject, StartRequestStoredTo's wait returns nil on the stream's acknowledgement,
+// well inside the window, and stores the forward once however often it is sent (its Nats-Msg-Id).
+// On a subject no stream captures and nobody subscribes it returns ErrForwardNotStored.
+func TestStartRequestStoredToCountsTheStreamsAcknowledgementAlone(t *testing.T) {
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	item := contracts.Envelope{
+		EventID:        "evt_stored_only",
+		Source:         "agent",
+		SourceEventID:  "src_stored_only",
+		Topic:          "notifications.role.stored-only",
+		DedupeKey:      "publish.stored-only",
+		IssuedAt:       contracts.NowMillis(),
+		PayloadSummary: "a forward to a serving port",
+		TraceID:        "trace_stored_only",
+	}
+	const window = 2 * time.Second
+	subject := contracts.AgentSubject("ses_serving_port")
+	for range 2 {
+		started := time.Now()
+		forward, err := client.StartRequestStoredTo(subject, item, window)
+		if err != nil {
+			t.Fatalf("StartRequestStoredTo: %v", err)
+		}
+		if err := forward.Wait(); err != nil {
+			t.Fatalf("the stored forward's wait = %v, want nil on the stream's acknowledgement", err)
+		}
+		if elapsed := time.Since(started); elapsed >= window {
+			t.Fatalf("the stored forward's wait took %s, the whole window; want it to end on the acknowledgement", elapsed)
+		}
+	}
+	info, err := client.JS().StreamInfo(bus.Stream, &natsgo.StreamInfoRequest{SubjectsFilter: subject})
+	if err != nil {
+		t.Fatalf("read the stream: %v", err)
+	}
+	if stored := info.State.Subjects[subject]; stored != 1 {
+		t.Fatalf("the stream stores %d copies of the forward sent twice, want 1", stored)
+	}
+
+	const uncaptured = "test.uncaptured.serving-port"
+	forward, err := client.StartRequestStoredTo(uncaptured, item, 300*time.Millisecond)
+	if err != nil {
+		t.Fatalf("StartRequestStoredTo on %s: %v", uncaptured, err)
+	}
+	if err := forward.Wait(); !errors.Is(err, bus.ErrForwardNotStored) {
+		t.Fatalf("the wait of a forward no stream stores = %v, want ErrForwardNotStored", err)
+	}
+}
