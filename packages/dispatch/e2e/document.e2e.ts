@@ -16,6 +16,7 @@ import {
   selectEditorText,
   typeAtEnd,
 } from "./editor";
+import { askCard as inboxAskCard, inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { assertPageFits, assertWhole } from "./unclipped";
 import { asUser } from "./users";
@@ -205,11 +206,12 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     }
     await expect(markSpan(bobPage, ask.ask.anchor.mark_id)).toContainText(ask.ask.anchor.quote);
     // A document has no assignee, so its question is in nobody's own list: the Inbox reaches it
-    // under the Unassigned filter.
+    // under the Unassigned filter. The short row names the document the question belongs to,
+    // and the card - which from 1280 px the reading pane draws (INFRA-575) - answers it.
     await bobPage.goto("/?assignee=unassigned");
-    const inboxDocument = bobPage.getByRole("link", { name: /CORE.*Design notes/ });
-    await expect(inboxDocument).toBeVisible();
-    const inboxAsk = bobPage.getByTestId(`ask-${askId}`);
+    const inboxDocumentRow = inboxRow(bobPage, askId);
+    await expect(inboxDocumentRow.getByRole("link", { name: /CORE.*Design notes/ })).toBeVisible();
+    const inboxAsk = await inboxAskCard(bobPage, askId);
     await inboxAsk.getByLabel("Your answer").fill("Yes, publish it.");
     await inboxAsk.getByRole("button", { name: "Answer" }).click();
     await expect
@@ -217,7 +219,7 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
       .toMatchObject({
         ask: { answer: { text: "Yes, publish it.", user: "bob" }, state: "answered" },
       });
-    await expect(inboxAsk).toHaveCount(0);
+    await expect(inboxDocumentRow).toHaveCount(0);
     await bobPage.goto(path);
     await setDocumentSheet(bobPage, testInfo.project.name, true);
     await expect(bobPage.getByText("Yes, publish it.")).toBeVisible();

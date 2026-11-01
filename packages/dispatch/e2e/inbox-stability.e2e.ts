@@ -9,6 +9,14 @@ import {
   getAsk,
   patchIssue,
 } from "./api";
+import {
+  askCard,
+  centreRow,
+  hasReadingPane,
+  inboxRow,
+  listScrollTop,
+  selectedRow,
+} from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -25,7 +33,10 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-// Issue titles sharing no terms, so the server's duplicate check never refuses a seed.
+// Issue titles sharing no terms, so the server's duplicate check never refuses a seed. There
+// are enough of them to fill a list past the bottom of the viewport at 1280 px, where the rows
+// are short and scroll inside the list column: a row can only be held still where the list has
+// somewhere to scroll.
 const TITLES = [
   "Anchor",
   "Bridge",
@@ -39,6 +50,14 @@ const TITLES = [
   "Jetty",
   "Kelp",
   "Lantern",
+  "Marsh",
+  "Nectar",
+  "Obsidian",
+  "Prairie",
+  "Quartz",
+  "Ridge",
+  "Summit",
+  "Thicket",
 ];
 
 /** `count` open asks, each on its own issue, oldest first; `from` picks the first title. */
@@ -83,37 +102,64 @@ async function nextFrame(page: Page): Promise<void> {
   });
 }
 
-const scrollY = (page: Page) => page.evaluate(() => window.scrollY);
-
-/** Scrolls so the row's centre sits at the viewport's centre. */
-async function centre(row: Locator): Promise<void> {
-  await row.evaluate((node) => {
-    const rect = node.getBoundingClientRect();
-    window.scrollBy(0, rect.top + rect.height / 2 - window.innerHeight / 2);
+/**
+ * The row the viewport anchor's centre fallback lands on, read the way the anchor reads it
+ * (`rowAtCenter`): the probe is the centre of what the list shows, which is the list column's
+ * own box where the rows scroll inside one and the window's where they do not.
+ */
+async function rowAtCentre(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    const list = document.querySelector<HTMLElement>('[data-testid="inbox-list"]');
+    const root = list?.firstElementChild;
+    if (list === null || !(root instanceof HTMLElement)) return null;
+    const rect = root.getBoundingClientRect();
+    const box = list.scrollHeight > list.clientHeight ? list.getBoundingClientRect() : null;
+    const top = Math.max(rect.top, box === null ? 0 : box.top);
+    const bottom = Math.min(rect.bottom, box === null ? window.innerHeight : box.bottom);
+    return (
+      document
+        .elementFromPoint(rect.left + rect.width / 2, (top + bottom) / 2)
+        ?.closest("[data-inbox-row]")
+        ?.getAttribute("data-inbox-row") ?? null
+    );
   });
 }
 
-/** Six asks waiting on the reader, then four handed to agents, so Waiting on agents has rows
- *  below the one that will join it; the third of the reader's is the one under test. */
+/** Twelve asks waiting on the reader, then four handed to agents, so Waiting on agents has rows
+ *  below the one that will join it and the list scrolls at every width; the third of the
+ *  reader's is the one under test. */
+const BOTH_SECTIONS_ROWS = 16;
 async function seedBothSections() {
   await createProject({ key: "CORE", name: "Core" });
-  const waiting = await seedAsks("Yours", 6);
+  const waiting = await seedAsks("Yours", 12);
   const target = waiting[2];
   if (target === undefined) throw new Error("target ask missing");
   // The four clarifications are independent of one another and all land before the browser opens:
   // they are what puts their asks under Waiting on agents.
   await Promise.all(
-    (await seedAsks("Theirs", 4, 6)).map(({ ask, issue }) =>
+    (await seedAsks("Theirs", 4, 12)).map(({ ask, issue }) =>
       createComment(issue.key, { ask_id: ask.id, body: "Clarify first." })
     )
   );
   return target;
 }
 
-/** Takes the reader's hand off the row: the pointer to the page corner, and focus to nothing (a
- *  click on empty page) - not onto another row, which would make that row the anchor, and not by
- *  Escape, whose step back to the row would scroll a tall row into view on its own. */
+/**
+ * Takes the reader's hand off the row, so the list stops holding it where they last saw it.
+ *
+ * With the reading column on, the hand is the selection: Escape brings the focus back from the
+ * column to the row it is showing, and `j` hands the selection to the next row, leaving the
+ * list to place the one let go. Without the column the hand is focus and the pointer, so the
+ * pointer goes to the page corner and the focus to nothing - not onto another row, which would
+ * make that row the anchor, and not by Escape, whose step back to the row would scroll a tall
+ * row into view on its own.
+ */
 async function leaveRow(page: Page): Promise<void> {
+  if (hasReadingPane(page)) {
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("j");
+    return;
+  }
   await page.mouse.move(0, 0);
   await page.evaluate(() => {
     const active = document.activeElement;
@@ -124,8 +170,9 @@ async function leaveRow(page: Page): Promise<void> {
     .toBe(true);
 }
 
-// SLOW(>=2s): eleven seeded writes, a ten-card Inbox and the progress note's round trip.
-test("a row being typed into stays put, draft and all, when an agent's progress note flips its turn, and moves only once the reader leaves it @phone", async ({
+// SLOW(>=2s): sixteen seeded issues and their asks, a sixteen-row Inbox and the progress note's
+// round trip.
+test("a row being typed into keeps its draft when an agent's progress note flips its turn, and holds its place only while the reader's hand is on it @phone", async ({
   browser,
 }) => {
   const target = await seedBothSections();
@@ -133,15 +180,17 @@ test("a row being typed into stays put, draft and all, when an agent's progress 
   try {
     const page = await alice.newPage();
     await page.goto("/");
-    await expect(page.locator("[data-testid^=ask-]")).toHaveCount(10);
-    const row = page.locator(`[data-inbox-row="${target.ask.id}"]`);
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(BOTH_SECTIONS_ROWS);
+    const row = inboxRow(page, target.ask.id);
     await expect(row).toHaveAttribute("data-inbox-section", "human");
-    await centre(row);
-    const field = row.getByLabel("Your answer");
+    await centreRow(row);
+    // The question's own card, where this width draws it: in the row, or in the reading column
+    // once the row is selected - which is also what holds the row there.
+    const field = (await askCard(page, target.ask.id)).getByLabel("Your answer");
     await field.click();
     await field.fill("Ship it once the audit lands");
     const before = await topOf(row);
-    const scrolled = await scrollY(page);
+    const scrolled = await listScrollTop(page);
 
     await createComment(
       target.issue.key,
@@ -149,27 +198,40 @@ test("a row being typed into stays put, draft and all, when an agent's progress 
       session
     );
 
-    // The card says whose turn it is now; the row itself stays where the reader is typing.
+    // The card says whose turn it is now, and what the reader is typing is untouched by it.
     await expect(page.getByTestId(`turn-${target.ask.id}`)).toHaveText(
       "Waiting on e2e-session-title"
     );
-    await expect(row).toHaveAttribute("data-inbox-section", "human");
     await expect(field).toHaveValue("Ship it once the audit lands");
     await expect(field).toBeFocused();
+    if (hasReadingPane(page)) {
+      // The question is in the column, so the reader's hand is on no row at all: the row joins
+      // Waiting on agents at once, telling the truth about whose turn it is, and the column
+      // keeps the question and the half-written answer where they are (INFRA-575). The view
+      // does not follow the row down.
+      await expect(row).toHaveAttribute("data-inbox-section", "agent");
+      expect(Math.abs((await listScrollTop(page)) - scrolled)).toBeLessThanOrEqual(2);
+      return;
+    }
+    // Without the column the card is in the row, under the reader's hand: the row stays where
+    // they are typing.
+    await expect(row).toHaveAttribute("data-inbox-section", "human");
     expect(Math.abs((await topOf(row)) - before)).toBeLessThanOrEqual(2);
-    expect(Math.abs((await scrollY(page)) - scrolled)).toBeLessThanOrEqual(2);
+    expect(Math.abs((await listScrollTop(page)) - scrolled)).toBeLessThanOrEqual(2);
 
     await leaveRow(page);
     await expect(row).toHaveAttribute("data-inbox-section", "agent");
+    expect(Math.abs((await listScrollTop(page)) - scrolled)).toBeLessThanOrEqual(2);
+    // The card never left the row it moved with, so what was typed into it is still there.
     await expect(field).toHaveValue("Ship it once the audit lands");
-    expect(Math.abs((await scrollY(page)) - scrolled)).toBeLessThanOrEqual(2);
   } finally {
     await alice.close();
   }
 });
 
-// SLOW(>=2s): eleven seeded writes, a ten-card Inbox and the Ask back's round trip.
-test("the reader's own Ask back keeps the row where it is and the view still, until they leave it @phone", async ({
+// SLOW(>=2s): sixteen seeded issues and their asks, a sixteen-row Inbox and the Ask back's
+// round trip.
+test("the reader's own Ask back leaves the view still and holds the row only where their hand is @phone", async ({
   browser,
 }) => {
   const target = await seedBothSections();
@@ -177,42 +239,53 @@ test("the reader's own Ask back keeps the row where it is and the view still, un
   try {
     const page = await alice.newPage();
     await page.goto("/");
-    await expect(page.locator("[data-testid^=ask-]")).toHaveCount(10);
-    const row = page.locator(`[data-inbox-row="${target.ask.id}"]`);
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(BOTH_SECTIONS_ROWS);
+    const row = inboxRow(page, target.ask.id);
     await expect(row).toHaveAttribute("data-inbox-section", "human");
     // Scrolled, so the centre fallback is live too: on release nothing may follow the row down.
-    await centre(row);
-    const field = row.getByLabel("Your answer");
+    await centreRow(row);
+    const card = await askCard(page, target.ask.id);
+    const field = card.getByLabel("Your answer");
     await field.click();
     await field.fill("Ship what, exactly?");
-    const askBack = row.getByRole("button", { name: "Ask back" });
+    const askBack = card.getByRole("button", { name: "Ask back" });
     // Measured with the button already in view, so the click itself scrolls nothing.
     await askBack.hover();
     const before = await topOf(row);
-    const scrolled = await scrollY(page);
+    const scrolled = await listScrollTop(page);
     expect(scrolled).toBeGreaterThan(0);
 
     await askBack.click();
     await expect(
-      row.getByTestId(`thread-${target.ask.id}`).getByText("Ship what, exactly?")
+      card.getByTestId(`thread-${target.ask.id}`).getByText("Ship what, exactly?")
     ).toBeVisible();
     await expect.poll(() => getAsk(target.ask.id)).toMatchObject({ ask: { waiting_on: "agent" } });
     await expect(page.getByTestId(`turn-${target.ask.id}`)).toHaveText(
       "Waiting on e2e-session-title"
     );
 
-    // The row is still under Waiting on you, where the reader's hand is - Ask back, disabled once
-    // its text is sent, handed focus to the row - and the view has not moved after it.
+    if (hasReadingPane(page)) {
+      // The question is in the column, which stays on it: the selection is the reader's and
+      // only they move it. The row beside it joins Waiting on agents at once - their hand is in
+      // the column, on no row (INFRA-575) - and the view does not follow it.
+      await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", target.ask.id);
+      await expect(row).toHaveAttribute("data-inbox-section", "agent");
+      expect(Math.abs((await listScrollTop(page)) - scrolled)).toBeLessThanOrEqual(2);
+      return;
+    }
+    // Without the column the row is still under Waiting on you, where the reader's hand is -
+    // the focus Ask back handed back to the row as it disabled itself - and the view has not
+    // moved after it.
     await expect(row).toBeFocused();
     await expect(row).toHaveAttribute("data-inbox-section", "human");
     expect(Math.abs((await topOf(row)) - before)).toBeLessThanOrEqual(2);
-    const afterAskBack = await scrollY(page);
+    const afterAskBack = await listScrollTop(page);
     expect(Math.abs(afterAskBack - scrolled)).toBeLessThanOrEqual(2);
 
     // Letting go of it: it joins Waiting on agents below; the view stays where the reader was.
     await leaveRow(page);
     await expect(row).toHaveAttribute("data-inbox-section", "agent");
-    expect(Math.abs((await scrollY(page)) - scrolled)).toBeLessThanOrEqual(2);
+    expect(Math.abs((await listScrollTop(page)) - scrolled)).toBeLessThanOrEqual(2);
   } finally {
     await alice.close();
   }
@@ -222,7 +295,7 @@ test("the row at the viewport centre stays put when a P0 ask arrives above it @p
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
-  const asks = await seedAsks("Queue", 8);
+  const asks = await seedAsks("Queue", 16);
   const sixth = asks[5];
   if (sixth === undefined) throw new Error("sixth ask missing");
 
@@ -230,9 +303,9 @@ test("the row at the viewport centre stays put when a P0 ask arrives above it @p
   try {
     const page = await alice.newPage();
     await page.goto("/");
-    await expect(page.locator("[data-testid^=ask-]")).toHaveCount(8);
-    const row = page.locator(`[data-inbox-row="${sixth.ask.id}"]`);
-    await centre(row);
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(16);
+    const row = inboxRow(page, sixth.ask.id);
+    await centreRow(row);
     const before = await topOf(row);
     expect(before).toBeGreaterThan(0);
 
@@ -240,9 +313,9 @@ test("the row at the viewport centre stays put when a P0 ask arrives above it @p
     await patchIssue(urgent.key, { priority: 0 });
     const p0 = await createAsk(urgent.key, { question: "Urgent ask" }, session);
 
-    const arrived = page.locator(`[data-inbox-row="${p0.id}"]`);
+    const arrived = inboxRow(page, p0.id);
     await expect(arrived).toBeAttached();
-    await expect(page.locator("[data-testid^=ask-]")).toHaveCount(9);
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(17);
     expect(await topOf(arrived)).toBeLessThan(before);
     expect(Math.abs((await topOf(row)) - before)).toBeLessThanOrEqual(2);
   } finally {
@@ -250,58 +323,64 @@ test("the row at the viewport centre stays put when a P0 ask arrives above it @p
   }
 });
 
-// SLOW(>=2s): eleven seeded writes, two answers and two scroll-and-measure cycles.
+// SLOW(>=2s): a twenty-row Inbox seeded ask by ask, two answers and two scroll-and-measure
+// cycles.
 test("the row under the pointer stays put when a row above it is answered elsewhere, and is let go once the pointer leaves the list @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
-  // Newest first in the Inbox: the ninth ask is the top row, the fifth sits four rows below it.
-  const asks = await seedAsks("Queue", 9);
-  const fifth = asks[4];
-  const sixth = asks[5];
-  const seventh = asks[6];
-  const ninth = asks[8];
-  if (fifth === undefined || sixth === undefined || seventh === undefined || ninth === undefined) {
-    throw new Error("asks missing");
-  }
+  // Long enough to scroll in whichever box holds it, with rows above and below each of the four
+  // below, so every one of them can be brought to the centre of what is visible.
+  const asks = await seedAsks("Queue", 20);
+  /** Newest first in the Inbox, so a row's place is counted back from the last ask seeded. */
+  const atRow = (fromTop: number) => {
+    const ask = asks[asks.length - 1 - fromTop];
+    if (ask === undefined) throw new Error("ask missing");
+    return ask;
+  };
+  const above = atRow(4);
+  const centreAsk = atRow(9);
+  const between = atRow(10);
+  const held = atRow(11);
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
     await page.goto("/");
-    await expect(page.locator("[data-testid^=ask-]")).toHaveCount(9);
-    const row = page.locator(`[data-inbox-row="${fifth.ask.id}"]`);
-    await centre(row);
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(20);
+    const row = inboxRow(page, held.ask.id);
+    await centreRow(row);
     const box = await row.boundingBox();
     if (box === null) throw new Error("row has no box");
     await page.mouse.move(box.x + box.width / 2, box.y + 8);
     const before = box.y;
 
     await answerAsk(
-      ninth.ask.id,
+      above.ask.id,
       { expected_edited_at: null, selected: ["Ship"], text: "" },
       { login: "bob" }
     );
 
-    await expect(page.locator(`[data-inbox-row="${ninth.ask.id}"]`)).toHaveCount(0);
+    await expect(inboxRow(page, above.ask.id)).toHaveCount(0);
     expect(Math.abs((await topOf(row)) - before)).toBeLessThanOrEqual(2);
 
-    // With the pointer off the list, the anchor falls back to the row nearest the centre. The
-    // seventh ask sits above the fifth with the sixth between them: answering the sixth leaves
-    // the centre row still and the row the pointer left rising into the gap - were the pointer
-    // still counted, the fifth would hold and the centre row drop.
+    // With the pointer off the list, the anchor falls back to the row nearest the centre. That
+    // row sits above the one the pointer left with one row between them: answering the row
+    // between leaves the centre row still and the row the pointer left rising into the gap -
+    // were the pointer still counted, it would hold and the centre row drop.
     await page.mouse.move(0, 0);
-    const centreRow = page.locator(`[data-inbox-row="${seventh.ask.id}"]`);
-    await centre(centreRow);
+    const centred = inboxRow(page, centreAsk.ask.id);
+    await centreRow(centred);
+    await expect.poll(() => rowAtCentre(page)).toBe(centreAsk.ask.id);
     const leftTop = await topOf(row);
-    const centreTop = await topOf(centreRow);
+    const centreTop = await topOf(centred);
     await answerAsk(
-      sixth.ask.id,
+      between.ask.id,
       { expected_edited_at: null, selected: ["Ship"], text: "" },
       { login: "bob" }
     );
-    await expect(page.locator(`[data-inbox-row="${sixth.ask.id}"]`)).toHaveCount(0);
-    expect(Math.abs((await topOf(centreRow)) - centreTop)).toBeLessThanOrEqual(2);
+    await expect(inboxRow(page, between.ask.id)).toHaveCount(0);
+    expect(Math.abs((await topOf(centred)) - centreTop)).toBeLessThanOrEqual(2);
     expect(leftTop - (await topOf(row))).toBeGreaterThan(2);
   } finally {
     await alice.close();
@@ -312,6 +391,9 @@ test("a grouped header stays with its pointer-held row while a P0 ask arrives", 
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
+  // Older rows under the pair, so the list runs past the bottom of the viewport and has
+  // somewhere to scroll when the arrival pushes the pair down.
+  await seedAsks("Below", 14);
   const grouped = await createIssue({ project: "CORE", title: "Grouped stability" });
   await createAsk(grouped.key, { question: "Grouped first" }, session);
   const held = await createAsk(grouped.key, { question: "Grouped held" }, session);
@@ -320,7 +402,7 @@ test("a grouped header stays with its pointer-held row while a P0 ask arrives", 
   try {
     const page = await alice.newPage();
     await page.goto("/");
-    const row = page.locator(`[data-inbox-row="${held.id}"]`);
+    const row = inboxRow(page, held.id);
     const header = page.locator(`[data-inbox-group-header="issue:${grouped.key}"]`);
     await expect(row).toBeVisible();
     await expect(header).toBeVisible();
@@ -334,7 +416,7 @@ test("a grouped header stays with its pointer-held row while a P0 ask arrives", 
     await patchIssue(urgent.key, { priority: 0 });
     const p0 = await createAsk(urgent.key, { question: "Urgent arrival" }, session);
 
-    await expect(page.locator(`[data-inbox-row="${p0.id}"]`)).toBeAttached();
+    await expect(inboxRow(page, p0.id)).toBeAttached();
     expect(Math.abs((await topOf(row)) - rowBefore)).toBeLessThanOrEqual(2);
     expect(Math.abs((await topOf(header)) - headerBefore)).toBeLessThanOrEqual(2);
 
@@ -356,7 +438,7 @@ async function seedTravellingPointerGroup() {
 async function travelPointerAcrossIncomingRow(page: Page): Promise<void> {
   const rows = page.locator("[data-inbox-row]");
   await expect(rows).toHaveCount(8);
-  expect(await scrollY(page)).toBe(0);
+  expect(await listScrollTop(page)).toBe(0);
   const sixth = rows.nth(5);
   const initialSixthBox = await sixth.boundingBox();
   const viewport = page.viewportSize();

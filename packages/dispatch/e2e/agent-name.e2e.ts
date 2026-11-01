@@ -12,6 +12,7 @@ import {
   patchIssue,
 } from "./api";
 import { marginCard, openedThreadCard, setSheet } from "./editor";
+import { askCard } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -225,13 +226,14 @@ test("Claimed by, a Conversation turn, an Inbox ask card and a margin comment sh
     });
 
     // Inbox ask cards: the asker's copy-handles button stays, and the live link sits beside it,
-    // never inside it.
+    // never inside it. From 1280 px the card is the reading pane's (INFRA-575), so each
+    // question is read on the card that width draws for it.
     await page.goto("/");
     for (const [askId, id, name, running] of [
       [seeded.runAsk, runId, runCurrent, true],
       [seeded.stopAsk, stopId, stopStamped, false],
     ] as const) {
-      const card = page.getByTestId(`ask-${askId}`);
+      const card = await askCard(page, askId);
       await expectAgent(card, id, { name, running });
       const live = card.getByRole("link", {
         exact: true,

@@ -572,7 +572,7 @@ func TestPublishHandler_RoleMessageReachesTheCurrentHolderWithoutTheRoleLane(t *
 
 	claimRecorder := httptest.NewRecorder()
 	claimRequest := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_role_b","role":"legion-delivery"}`))
-	roleSetHandler(claimDeps, "test-machine").ServeHTTP(claimRecorder, claimRequest)
+	roleSetHandler(claimDeps, "test-machine", logging.New("test")).ServeHTTP(claimRecorder, claimRequest)
 	if claimRecorder.Code != http.StatusOK {
 		t.Fatalf("claim registered role B: status = %d, body = %s", claimRecorder.Code, claimRecorder.Body.String())
 	}
@@ -711,7 +711,7 @@ func TestPublishHandler_RoleFreshDeafHolderAnswersReceiptTimeout(t *testing.T) {
 
 	claimRecorder := httptest.NewRecorder()
 	claimRequest := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_deaf","role":"`+role+`"}`))
-	roleSetHandler(claimState, "test-machine").ServeHTTP(claimRecorder, claimRequest)
+	roleSetHandler(claimState, "test-machine", logging.New("test")).ServeHTTP(claimRecorder, claimRequest)
 	if claimRecorder.Code != http.StatusOK {
 		t.Fatalf("claim deaf holder: status = %d, body = %s", claimRecorder.Code, claimRecorder.Body.String())
 	}
@@ -1010,6 +1010,8 @@ func TestSendHandler_AcceptsHumanSource(t *testing.T) {
 	}
 }
 
+// A deregistration that names no client instance deletes the registration whoever wrote it, and
+// answers 200 with no body at all, as this route always has.
 func TestDeleteSessionHandler_IsIdempotent(t *testing.T) {
 	_, sessions := setupSessionsTest(t, nil, map[string]int{"ses_closed": 1234})
 	handler := deleteSessionHandler(sessions)
@@ -1022,9 +1024,89 @@ func TestDeleteSessionHandler_IsIdempotent(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("delete %d: expected 200, got %d (body: %s)", i+1, rr.Code, rr.Body.String())
 		}
+		if rr.Body.Len() != 0 {
+			t.Fatalf("delete %d: answered with a body: %s", i+1, rr.Body.String())
+		}
 	}
 	if isSessionLive(sessions, "ses_closed") {
 		t.Fatal("deleted session remains live")
+	}
+}
+
+// A client that mints an instance id deregisters its own session, and the route says so in a body
+// a client that sends no id never sees.
+func TestDeleteSessionHandler_DeletesTheSameClientInstancesRegistration(t *testing.T) {
+	const (
+		sessionID  = "ses_instance_same"
+		instanceID = "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a"
+	)
+	_, sessions := setupSessionsTest(t, nil, nil)
+	putSessionForInstance(t, sessions, sessionID, instanceID)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/sessions/"+sessionID+"?client_instance_id="+instanceID, nil)
+	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != `{"deleted":true}` {
+		t.Fatalf("body = %s, want {\"deleted\":true}", got)
+	}
+	if isSessionLive(sessions, sessionID) {
+		t.Fatal("deleted session remains live")
+	}
+}
+
+// The /clear handoff this guards: another process resumed the session id under its own instance,
+// so the earlier instance's deregistration leaves that live registration alone and still answers
+// 200, with a body saying the entry stayed.
+func TestDeleteSessionHandler_KeepsAnotherClientInstancesRegistration(t *testing.T) {
+	const sessionID = "ses_instance_other"
+	_, sessions := setupSessionsTest(t, nil, nil)
+	putSessionForInstance(t, sessions, sessionID, "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2")
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodDelete,
+		"/v1/sessions/"+sessionID+"?client_instance_id=4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a",
+		nil,
+	)
+	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	var answer struct {
+		Deleted bool   `json:"deleted"`
+		Reason  string `json:"reason"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&answer); err != nil {
+		t.Fatalf("decode the answer: %v", err)
+	}
+	if answer.Deleted || answer.Reason != "the registration belongs to another client instance" {
+		t.Fatalf("answer = %+v, want the registration kept with its reason", answer)
+	}
+	entry, err := sessions.Get(sessionID)
+	if err != nil {
+		t.Fatalf("the other client instance's registration is gone: %v", err)
+	}
+	if entry.ClientInstanceID != "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2" {
+		t.Fatalf("entry = %+v, want the other client instance's registration kept as it was", entry)
+	}
+}
+
+// putSessionForInstance registers sessionID as the client instance instanceID, which
+// setupSessionsTest's own seeding cannot name.
+func putSessionForInstance(t *testing.T, sessions *session.SessionRegistry, sessionID, instanceID string) {
+	t.Helper()
+	if err := sessions.Put(sessionID, session.SessionEntry{
+		Port:             1234,
+		MachineID:        "test-machine",
+		Dir:              "/test/" + sessionID,
+		ClientInstanceID: instanceID,
+	}); err != nil {
+		t.Fatalf("put session entry for %s: %v", sessionID, err)
 	}
 }
 
@@ -1041,7 +1123,7 @@ func TestDeleteSessionHandler_RejectsOtherMethods(t *testing.T) {
 }
 
 func TestIsValidRole(t *testing.T) {
-	valid := []string{"legion-controller", "opencode_dev", "r2d2", "a"}
+	valid := []string{"legion-controller", "pi_dev", "r2d2", "a"}
 	for _, role := range valid {
 		if !isValidRole(role) {
 			t.Fatalf("expected role %q to be valid", role)
@@ -1086,7 +1168,7 @@ func TestSessionHealthFields_PopulatedAfterReady(t *testing.T) {
 func TestRoleSetHandler_Validation(t *testing.T) {
 	registry := setupAdminTestRegistry(t, nil)
 	state := &listenerDeps{registry: registry}
-	handler := roleSetHandler(state, "test-machine")
+	handler := roleSetHandler(state, "test-machine", logging.New("test"))
 
 	cases := []struct {
 		name       string
@@ -1134,7 +1216,7 @@ func TestRoleSetHandler_Validation(t *testing.T) {
 func TestRoleSetHandler_SetsRole(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	state := &listenerDeps{registry: registry, sessions: sessions}
-	handler := roleSetHandler(state, "test-machine")
+	handler := roleSetHandler(state, "test-machine", logging.New("test"))
 	if err := sessions.Put("ses_role", session.SessionEntry{MachineID: "test-machine"}); err != nil {
 		t.Fatalf("register role session: %v", err)
 	}

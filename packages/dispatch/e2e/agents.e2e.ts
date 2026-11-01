@@ -30,6 +30,7 @@ import {
 } from "./api";
 import { recordClipboard } from "./clipboard";
 import { holdFirstRequest } from "./editor";
+import { inboxList } from "./inbox-pane";
 import { type KeyedWrite, keyedWrite } from "./keyed-writes";
 import { resetDatabase, setCreatedAt } from "./seed";
 import { sessionIds } from "./session-ids";
@@ -306,13 +307,18 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     });
 
     // Each pill's number is the number of rows the list its link opens holds. Needs you opens
-    // the reader's own questions waiting on them, from this session: its one row.
+    // the reader's own questions waiting on them, from this session: its one row. The Inbox's
+    // reading column writes the row it selects into that address as `?item=` (INFRA-575), so
+    // each list here carries the selection beside the filter its link named, and a question's
+    // text is read in the list column, which the column beside it repeats for the selected row.
+    const selected = "(?:item=[^&]+&)?";
+    const list = inboxList(page);
     await needsYou.click();
     await expect(page).toHaveURL(
-      new RegExp(`\\?agent=${planner.session_id}&section=needs-you$`, "u")
+      new RegExp(`\\?agent=${planner.session_id}&${selected}section=needs-you$`, "u")
     );
     await expect(page.locator("[data-inbox-row]")).toHaveCount(1);
-    await expect(page.getByText("First", { exact: true })).toBeVisible();
+    await expect(list.getByText("First", { exact: true })).toBeVisible();
     await page.goBack();
     await expect(plannerCard.getByRole("link", { name: "Needs you 1" })).toBeVisible();
 
@@ -320,22 +326,22 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     // counted are both listed - Bob's included - under the band it named.
     await waitingOnAgent.click();
     await expect(page).toHaveURL(
-      new RegExp(`\\?agent=${planner.session_id}&assignee=everyone$`, "u")
+      new RegExp(`\\?agent=${planner.session_id}&${selected}assignee=everyone$`, "u")
     );
     const inbox = page.locator("main");
     const chip = inbox.getByRole("link", { name: "Clear agent filter" });
     await expect(chip).toHaveText("Asks from Planner · clear");
     await expect(inbox.locator('[data-inbox-section="agent"]')).toHaveCount(2);
-    await expect(inbox.getByText("Second", { exact: true })).toBeVisible();
-    await expect(inbox.getByText("Fourth", { exact: true })).toBeVisible();
-    await expect(inbox.getByText("First", { exact: true })).toBeVisible();
+    await expect(list.getByText("Second", { exact: true })).toBeVisible();
+    await expect(list.getByText("Fourth", { exact: true })).toBeVisible();
+    await expect(list.getByText("First", { exact: true })).toBeVisible();
     await page.screenshot({
       fullPage: true,
       path: testInfo.outputPath(`inbox-agent-filter-${width}.png`),
     });
-    // Clearing the agent keeps the filter the pill arrived with.
+    // Clearing the agent keeps the filter the pill arrived with, and the row it was reading.
     await chip.click();
-    await expect(page).toHaveURL(/\/\?assignee=everyone$/);
+    await expect(page).toHaveURL(new RegExp(`/\\?${selected}assignee=everyone$`, "u"));
     await expect(inbox.getByRole("link", { name: "Clear agent filter" })).toHaveCount(0);
   } finally {
     await alice.close();

@@ -2,16 +2,33 @@
 // workspace. The set writes `docs/site/public/media/dispatch/<id>.png`, which a page embeds as
 // `![<alt>](/legion/media/dispatch/<id>.png)`. A section's own set lives in
 // `<section>/shots.config.ts` (the Legion section's: `legion/shots.config.ts`).
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 import { type DispatchWorkspace, expect, seedDispatchWorkspace } from "./harness";
 import type { ShotSet } from "./shot-runner";
 
-/** The Inbox has rendered its rows: the blocking ask leads, the snoozed one is folded. */
-async function inboxReady(page: Page): Promise<void> {
+/** The Inbox page from 1280 px: the two columns, the questions as short rows in the list, one
+ *  row selected, and the snoozed one folded under Later. */
+async function inboxPaneReady(page: Page): Promise<void> {
   await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
+  await expect(page.getByTestId("inbox-list")).toBeVisible();
+  await expect(page.getByTestId("inbox-pane")).toBeVisible();
+  await expect(page.locator('[data-inbox-selected="true"]')).toHaveCount(1);
+  await expect(page.getByRole("button", { name: /^Later \(1\)/ })).toBeVisible();
+}
+
+/** The Inbox below 1280 px: no reading column, so each question holds its own card in its row,
+ *  the blocking one first, with the snoozed one folded under Later. */
+async function inboxCardsReady(page: Page): Promise<void> {
+  await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
+  await expect(page.getByTestId("inbox-pane")).toHaveCount(0);
   await expect(page.getByRole("article", { name: "Urgency: Blocking" })).toBeVisible();
   await expect(page.getByRole("button", { name: /^Later \(1\)/ })).toBeVisible();
+}
+
+/** The row of the spec's decision block, which both Inbox shots are of. */
+function signInRow(page: Page): Locator {
+  return page.locator("[data-inbox-row]").filter({ hasText: "Which sign-in path?" });
 }
 
 /** The spec is live in the editor with its decision block hosted and the margin filled. */
@@ -35,21 +52,37 @@ const dispatch: ShotSet<DispatchWorkspace> = {
   shots: [
     {
       id: "inbox",
-      alt: "The Dispatch Inbox: asks waiting on you, the blocking one first, with a snoozed ask folded under Later.",
+      alt: "The Dispatch Inbox in two columns: the open questions as short rows on the left, and the selected question, a decision block, open in its own document on the right.",
       route: "/",
       viewport: "desktop",
       theme: "light",
-      ready: inboxReady,
+      ready: inboxPaneReady,
+      steps: async (page) => {
+        // The age is the one part of a short row that is neither the owner link nor a control,
+        // so the click reaches the row itself (`e2e/inbox-pane.ts`'s `selectRow`).
+        await signInRow(page).locator("time").first().click();
+        await expect(signInRow(page)).toHaveAttribute("data-inbox-selected", "true");
+        const pane = page.getByTestId("inbox-pane");
+        await expect(pane).toContainText("Local testing workflow");
+        await expect(
+          pane.locator("[data-dispatch-ask-block] article[data-testid^=ask-]")
+        ).toBeVisible();
+      },
     },
     {
       id: "ask-card",
       alt: "An ask card in the Inbox: the question, its two options and Other, a note field, and Answer.",
       route: "/",
       viewport: "desktop",
+      // Below 1280 px the Inbox has no reading column, so each question keeps its card in its
+      // own row. This shot is of that card.
+      size: { height: 900, width: 1024 },
       theme: "light",
-      ready: inboxReady,
-      element: (page) =>
-        page.locator("[data-inbox-row]").filter({ hasText: "Which sign-in path?" }),
+      ready: async (page) => {
+        await inboxCardsReady(page);
+        await expect(signInRow(page).locator("[data-ask-answer]")).toBeVisible();
+      },
+      element: signInRow,
     },
     {
       id: "issue-spec",
@@ -173,11 +206,11 @@ const dispatch: ShotSet<DispatchWorkspace> = {
     },
     {
       id: "shortcuts",
-      alt: "The keyboard shortcuts overlay, opened with ?, listing the keys for the page you are on.",
+      alt: "The keyboard shortcuts overlay, opened with ?, over the Inbox's two columns, listing the keys for the page you are on.",
       route: "/",
       viewport: "desktop",
       theme: "light",
-      ready: inboxReady,
+      ready: inboxPaneReady,
       steps: async (page) => {
         await page.locator("body").focus();
         await page.keyboard.press("?");

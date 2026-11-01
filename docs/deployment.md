@@ -51,9 +51,9 @@ session's token, or a process whose standard input is a terminal. The daemon mus
 path — the first would make an agent session the grantee — so:
 
 - Start the daemon in a terminal pane the operator opens by hand (a tmux window or pane in the
-  operator's own session), in which no OMP or OpenCode agent session has run since secretsd last
-  started. secretsd remembers a terminal an agent session has used and refuses tokenless requests
-  from it with `a tokenless request came from a known agent terminal`.
+  operator's own session), in which no agent session has run since secretsd last started.
+  secretsd remembers a terminal an agent session has used and refuses tokenless requests from it
+  with `a tokenless request came from a known agent terminal`.
 - The daemon and its supervisor loop (for example `while :; do legion start <team> --config
   legion.yaml; sleep 5; done`) run inside that pane's process tree with **stdin left on the pane's
   terminal**: no `< /dev/null`, no `nohup`, no `setsid` with stdin redirected. secretsd identifies
@@ -371,7 +371,7 @@ provider_keys:
 - **`pane_env`** refuses `PATH` (the runtime composes it), every name the runtime sets on a pane
   (its own `LEGION_*` names, the XDG directories, the gh variables, `PI_CONFIG_FILES`,
   `LEGION_CONTROLLER`, `LEGION_SLACK_CHANNELS`), the variables it sets on every Claude Code pane
-  (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, `CLAUDE_CODE_DISABLE_CRON`), the git
+  (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_DISABLE_CRON`), the git
   identity a launch sets (`JJ_USER`, `GIT_AUTHOR_NAME`, …), the pointers to the secrets every launch
   gets as a file of its own (`ENVOY_TOKEN_FILE`, `NATS_NKEY_SEED_FILE`), the variables that place
   the session a resume reads (`OMP_SESSION_STORAGE`, `OMP_SESSION_SQL_DSN`,
@@ -383,12 +383,13 @@ provider_keys:
   and the runtime again at boot, naming the variable and never its value. A launch whose own
   variable or secret pointer collides with a `pane_env` name is refused.
 - **`pi_config_files`** paths resolve against `legion.yaml`'s directory and may not hold `:`.
-  The runtime's turn-scope overlay stays last, so its two keys outrank the operator's overlays. The
+  Legion adds no overlay of its own to the list: it writes none, so the operator's are the whole of
+  it, with a role's own (`role_config_files`) after them. The
   boot plugin gate probes Oh My Pi under the same overlays and variables.
 - **`role_config_files`**, a top-level key beside the block, gives one role's panes overlays no
   other role's get (`role_config_files: {implementer: [/etc/legion-operator/fallback.yml]}`, the
   controller's pane under `controller: daemon` too): such a pane's `PI_CONFIG_FILES` is
-  `pi_config_files`, then the role's own in order, then the turn-scope overlay, still last. Each
+  `pi_config_files`, then the role's own in order, and nothing after them. Each
   path must be absolute; boot and `legion start --check-config` refuse one the host does not hold
   as a file the daemon's user can read, naming the role and the path, and a pane of a role the key
   leaves out is told what it was told without it. After the plugin gate passes, the boot gate runs

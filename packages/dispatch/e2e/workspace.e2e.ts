@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { shownAgentRows } from "./agents";
 import { getInbox } from "./api";
+import { askCard, inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { navigateInApp } from "./sends";
 import { asUser } from "./users";
@@ -21,25 +22,30 @@ test("the seeded workspace fills every human-only surface", async ({ browser }, 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const inboxRow = (askID: string) =>
-      page.getByRole("listitem").filter({ has: page.getByTestId(`ask-${askID}`) });
-
     // The Inbox opens on the reader's own work: alice's issues' asks, with the snoozed one
-    // folded under Later. A session's ask names it by the title its write stamped, as a real
+    // folded under Later. From 1280 px the questions are short rows and only the selected one
+    // is a card (INFRA-575), so a question's urgency and its author chip are read on the card
+    // the pane draws for it: a session's ask names it by the title its write stamped, as a real
     // agent's does, rather than by its raw id.
     await page.goto("/");
-    await expect(page.getByRole("article", { name: "Urgency: Blocking" })).toBeVisible();
+    await expect(await askCard(page, seeded.asks.blocking)).toHaveAttribute(
+      "aria-label",
+      "Urgency: Blocking"
+    );
     await expect(page.getByRole("button", { name: /^Later \(1\)/ })).toBeVisible();
-    await expect(inboxRow(seeded.asks.snoozed)).toBeHidden();
+    await expect(inboxRow(page, seeded.asks.snoozed)).toBeHidden();
     await expect(
-      inboxRow(seeded.asks.rotate).getByRole("button", { expanded: false, name: /Reviewer/ })
+      (await askCard(page, seeded.asks.rotate)).getByRole("button", {
+        expanded: false,
+        name: /Reviewer/,
+      })
     ).toBeVisible();
     // The runbook's question is on a document, which nobody holds, so it is the one row of this
     // seed her own list leaves out; the Unassigned filter is where it is listed.
-    await expect(inboxRow(seeded.asks.document)).toHaveCount(0);
+    await expect(inboxRow(page, seeded.asks.document)).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("workspace-inbox.png"), fullPage: true });
     await navigateInApp(page, "/?assignee=unassigned");
-    await expect(inboxRow(seeded.asks.document)).toContainText("Runbook");
+    await expect(inboxRow(page, seeded.asks.document)).toContainText("Runbook");
 
     // Every session with Dispatch activity is an open row; the one Dispatch never heard from and
     // the one unseen for twenty minutes each sit under their own fold. A fold's rows follow the

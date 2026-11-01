@@ -452,15 +452,14 @@ write identity errors with `identity.WriteError`.
   the token can rotate with an overlap, and `resolveBootConfig` parses it once
   (`auth.ParseSharedAgentTokens`, which refuses an empty or repeated entry by
   position) into the one `*auth.SharedAgentTokens` that `appContextOptions`
-  hands the router and `newDocumentService` hands the document service, so the
-  settings tests drive both from the variable. The API and the document
-  websocket (`/ws/doc/{room}`) read the bearer with one helper,
-  `auth.BearerToken`, and compare it with one helper,
+  hands the router, so the settings tests drive the API from the variable. The
+  API reads the bearer with `auth.BearerToken` and compares it with
   `auth.MatchesSharedAgentToken`, which compares it with every value in
   constant time and logs a match on a value after the first once per
   `X-Forwarded-For` address and User-Agent every 10 minutes
   (`cmd/dispatch/README.md` names the line's fields). Bearer callers cannot act
-  as users.
+  as users. The document websocket (`/ws/doc/{room}`) takes no bearer at all: it
+  is a person's cookie connection only (INFRA-264).
 - `DISPATCH_OIDC_ISSUER` + `DISPATCH_OIDC_AUDIENCE` (both or neither; half the
   pair refuses to boot naming the missing one) make a Kubernetes pod's projected
   service-account token a third bearer credential. `resolveBootConfig` only
@@ -482,6 +481,45 @@ write identity errors with `identity.WriteError`.
   the token alone: `bearerSessionActor` copies it from the authenticated actor
   exactly as it copies `owner`, and a request body naming one is ignored.
   Unset, the branch does not exist and bearer handling is unchanged.
+- An access token the secrets broker issued is the fifth credential and the one
+  that is not a bearer: it is presented under RFC 9449's DPoP scheme
+  (`Authorization: DPoP <token>` with a `DPoP:` proof header), because that RFC
+  refuses a DPoP-bound token presented under any other scheme.
+  `api.optionalActor` therefore branches on the scheme before it reads any
+  token, so a `DPoP` presentation is decided by `api.brokerTokenActor` alone and
+  never falls through to a bearer branch, and the bearer branches above are
+  untouched. `internal/brokertoken` does the deciding: the broker is asked what
+  the token is (RFC 7662 introspection) and the caller is held to the `jkt` that
+  answer carries. `brokerTokenVerifier` builds it from settings Dispatch already
+  has and adds none: `DISPATCH_AGENT_SECRETS_URL` (the broker the approval
+  relays already call), `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` (the
+  projected ServiceAccount token every broker call presents, read at call time)
+  and `DISPATCH_SERVER_URL` (the origin a proof's `htu` is checked against,
+  never a forwarded header). Spent proofs go in Dispatch's own `dpop_proofs`
+  (migration `0150`), swept beside the idempotency keys. A verified caller is
+  `{kind: "session", id: <the token's session>}` carrying `owner`, the person it
+  acts for, and `project`, the one project a named-scope token may write, both
+  set from the token and never from a body as `service` is; a person-scoped
+  token names no single project and carries none. Since the credential proves
+  the session, `bearerSessionActor` takes a body with no `actor` at all, takes
+  one naming that same session for its `origin`, and refuses one naming any
+  other writer `403 ACTOR_SESSION_MISMATCH` naming the session the token
+  carries. Its refusals are `401 BROKER_TOKEN_NOT_ACTIVE`,
+  `401 BROKER_TOKEN_PROOF_INVALID`, `401 BROKER_TOKEN_KEY_MISMATCH`,
+  `401 BROKER_TOKEN_NOT_A_SESSION` for a live token that is no session's
+  credential — one naming no session or no person, or issued to a client other
+  than the exchange, which a machine login's own access token is, so a body
+  cannot name a session for a credential that proves none —
+  `429 BROKER_TOKEN_RATE_LIMITED` and `503 BROKER_UNAVAILABLE`, which is a 503
+  for the reason `OIDC_ISSUER_UNAVAILABLE` is: the broker answered nothing, so
+  the token was never judged. A proof is single use by its `jti` and `htu`, so
+  `api.decideBrokerToken` decides each request once for every layer that
+  resolves its caller, and a websocket's heartbeat re-resolution asks the
+  broker's answer alone (`brokertoken.Verifier.Live`) rather than presenting the
+  upgrade's proof again. Without `DISPATCH_AGENT_SECRETS_URL` the branch has no
+  verifier, and a `DPoP` presentation is the `401 UNAUTHORIZED`
+  `invalid bearer token` that any Authorization header that is not a bearer has
+  always been.
 
 The GitHub proxy (`/api/github/rest/...`, `internal/dispatch/githubapi`) reads as the GitHub App
 installation that covers the repository, for a signed-in person, GET only and only four paths: a
@@ -618,7 +656,7 @@ caller that resolves to nobody keeps the route's own `401` (`refuseChangedLogin`
 | `/api/v1/me/agent-tokens` | GET, POST | human only | List personal token metadata or mint a personal agent token. |
 | `/api/v1/me/agent-tokens/{id}` | DELETE | human only | Revoke a personal agent token. |
 | `/api/v1/users` | GET | human only | Everyone who has signed in (`people`), as `{users: [{login}]}` sorted by email: the assignee picker's options. |
-| `/api/v1/whoami` | GET | user or bearer | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is the personal token's owner by lowercase email, null under the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
+| `/api/v1/whoami` | GET | user, bearer, or a broker-issued DPoP token | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service, session, project}` for every other credential (`owner` is the personal token's owner or a broker-issued token's person by lowercase email, null under the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other credential; `session` is the session the credential itself proved, which only a broker-issued token does, null otherwise; `project` is the one project key that credential may write, null where it names none). |
 | `/api/v1/dashboard/builds` | GET | user or bearer | Which dashboard builds are served (`api/dashboard_builds.go`): `{serving, live}`, `serving` the entry chunk (`/assets/index-*.js`) of the build this process serves (`""` when it serves none), `live` the distinct entry chunks of the builds the live server processes serve (`processes.Live` joined to `dashboard_builds` on the build id), sorted. The dashboard's "A new version is available" notice offers itself only when `live` holds exactly one entry and it is not the tab's own, so no tab is told to reload while a rolling update or a rollback still runs two builds. |
 | `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. The listing is every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match; a repeated, blank, non-integer or out-of-range value, or `cursor`, is `400 INVALID_QUERY` naming the parameter. Each listing row carries `blocked_by`, the sorted keys the issue waits on, `primary_artifact_id`, and `repo` and `resolved_repo` as the issue read below describes them. Creation without a `spec`, or with a blank one, gives an empty primary document at version 1. Creation takes the issue's own `repo` (`owner/name`, canonicalised as a mapping's is): one that is not `owner/name` is `400 INVALID_ISSUE`, and one not mapped to the issue's project `400 REPO_NOT_MAPPED`. A `parent` that would put the new issue more than 32 links (`parentDepthCap`) below its root is `409 PARENT_INPUT`. A title over `contracts.IssueTitleMax` (1,000) UTF-16 units, counted after trimming, is `400 CAP_EXCEEDED` before the duplicate check reads the project's titles. Creation refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`. A spec whose markdown makes more than 65,536 elements, or whose markdown as stored (what `.../text` answers) would be longer than 1 MiB or make more than 65,536 elements, is `413 CAP_EXCEEDED`. `blocked_by` names at most `contracts.MaxIssueBlockers` same-project issue keys before deduplication: an over-limit list or unknown key is `400 BLOCKED_BY_INPUT`, another project's issue `400 BLOCKED_BY_OUTSIDE_PROJECT`, and a wait cycle through `blocked_by` and parent links `409 DEPENDENCY_CYCLE`. Non-empty blocker lists and a `parent` take a per-project dependency advisory lock before allocating the number or rank; creation with neither takes no dependency lock, and no creation takes an explicit parent-row lock. |
 | `/api/v1/search?q=&project=&limit=&offset=` | GET | user or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind is ranked on its own list and the lists are merged by reciprocal rank fusion (`README.md`, "Search"), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` is 1–50 (default 20) and `offset` 0 or more (default 0); `total` counts every match and `reachable` the hits the pages can return, each kind's best `contracts.SearchKindDepth` (100). An under-two-character query returns `400 INVALID_QUERY`, while a stop-word-only query returns `200` with no results; a query over `contracts.SearchQueryMax` (1,000) UTF-16 units, counted after trimming, returns `400 CAP_EXCEEDED` before anything runs, a project that is not a project key returns `400 INVALID_PROJECT` (an empty one searches every project), a repeated, blank, non-integer, or out-of-range limit returns `400 INVALID_LIMIT`, and the same for offset returns `400 INVALID_OFFSET`. They ride in the URL; `packages/contracts/AGENTS.md` "Search limits" owns what keeps it under the load balancer's limit. Keyword search finds a text whose search vector would pass Postgres's limit on one vector by the words in its opening part only (`README.md` "Search"). |
@@ -684,7 +722,7 @@ caller that resolves to nobody keeps the route's own `401` (`refuseChangedLogin`
 | `/api/v1/projects/{key}/artifacts/{slug}/versions/{n}` | GET | user or bearer | Read an unlinked project document version or download its blob, as `/api/v1/artifacts/{id}/versions/{n}` does. |
 | `/api/v1/projects/{key}/artifacts/{slug}/versions` | POST | user or bearer | Create a named project-document version. |
 | `/api/v1/projects/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply project-document edit operations. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
-| `/api/v1/agents/{session_id}/artifacts` | POST | user or bearer | Upload a file or image to an agent's conversation (multipart, an issue upload's caps, errors, kind read from the bytes and file-store write; no event). There is no list route: the conversation's pictures are read by the references the messages carry. A markdown document is `400 ARTIFACT_INPUT`: an agent's conversation holds files and images, and a document belongs to an issue or a project. Such a file's comments, asks, events and subscribers under `/api/v1/artifacts/{id}/...` are `400 ARTIFACT_AGENT_OWNED`. A `session_id` `text.IsSessionID` refuses is `400 INVALID_SESSION_ID` on every agent artifact route. |
+| `/api/v1/agents/{session_id}/artifacts` | POST | user or bearer | Upload a file or image to an agent's conversation (multipart, an issue upload's caps, errors, kind read from the bytes and file-store write; no event). There is no list route: the conversation's pictures are read by the references the messages carry. A caller whose credential proves a session of its own uploads only into that session: any other `session_id` is `403 SESSION_SCOPE` (`api.withinSessionScope`). A markdown document is `400 ARTIFACT_INPUT`: an agent's conversation holds files and images, and a document belongs to an issue or a project. Such a file's comments, asks, events and subscribers under `/api/v1/artifacts/{id}/...` are `400 ARTIFACT_AGENT_OWNED`. A `session_id` `text.IsSessionID` refuses is `400 INVALID_SESSION_ID` on every agent artifact route. |
 | `/api/v1/agents/{session_id}/artifacts/{slug}` | GET | user or bearer | Read an agent's conversation's file or image and its versions by slug. |
 | `/api/v1/agents/{session_id}/artifacts/{slug}/versions/{n}` | GET | user or bearer | Download one version of it, as `/api/v1/artifacts/{id}/versions/{n}` does. |
 | `/api/v1/me/state` | GET | identity | Read the user's issue UI state. |
@@ -696,7 +734,7 @@ caller that resolves to nobody keeps the route's own `401` (`refuseChangedLogin`
 | `/api/v1/live/_test/rotate` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/live` socket with 4001 (`max age`); not mounted otherwise. |
 | `/api/v1/agents/{session_id}/stream/_test/publish` | POST | human only, `DISPATCH_TEST_HOOKS=1` only | Feed the in-memory agent relay: one frame, `?as=replay` what a new agent view is answered with, `?as=responder` whether anyone answers on the control subject, `?as=drop` ends every open agent view as `dropped`, so the page subscribes again and rebuilds from that replay; not mounted otherwise. |
 | `/api/v1/writes/_test/slow` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | `{method, path, delay_ms}`: every keyed run of that method and exact path waits `delay_ms` on its handler's context once its key is claimed (`503 SLOW_WRITE_CUT_OFF` when that context ends first); `delay_ms: 0` removes it; not mounted otherwise. |
-| `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/ws/live` does, and closes once they no longer resolve (a sign-out, a membership the sign-in issuer no longer confirms), so their editor stops receiving and sending the document's edits. Every 15 s it sends its peer a keep-alive, an awareness update naming no client (`internal/dispatch/docs/keepalive.go`): `@hocuspocus/provider` closes a socket that has delivered no message for 30 s, ygo never echoes a peer's own awareness back to it, and a ping reaches no page, so without it an idle editor's socket closed and re-synced every 33 s. |
+| `/ws/doc/{room}` | GET | user | Join the Hocuspocus document room. The room takes a signed-in person's cookie and no bearer at all (INFRA-264): the editor is the browser's, and nothing else connects. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/ws/live` does, and closes once they no longer resolve (a sign-out, a membership the sign-in issuer no longer confirms), so their editor stops receiving and sending the document's edits. ygo echoes a read-write peer's awareness renewal to its sender and gives a read-only peer a bounded empty awareness response, so an idle provider remains connected without Dispatch writing a keep-alive frame. |
 | `/ws/live` | GET | user or bearer | One live socket per browser tab. Each `subscribe` names a delivery, `events`, or human-only `agent` view; the socket replies on that subscription id with delivery snapshots/deltas/freshness, `events_start` and events, or agent responder/replay/frame data. An `events` resume is its decimal event id, and its `events_start` says `replay_complete: true` when that id is at or below the log's head, so every event after it is replayed before the subscription goes live, and `false` with no resume or one above the head; a delivery resume is its change and revisions; an agent view never resumes. Every quiet socket receives a `heartbeat` every `StreamHeartbeat` (15 s). It closes with 4001 (`max age`) at a random age in [30, 60) minutes, 1012 on restart, 1008 when the caller stops resolving, and 1013 when its hub queue fills. |
 
 ## Dispatch topics

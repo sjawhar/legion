@@ -161,12 +161,17 @@ func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, erro
 	return NewQuoteFinder(doc).Find(quote, occurrence, near)
 }
 
-// QuoteFinder answers FindQuote for many quotes over one document. It validates the document and
-// flattens its text once, at its first Find, and every later Find reuses that text and the forms
-// derived from it, so a write that resolves many quotes against one tree walks it once rather than
-// once a quote. The document must not change while the finder is in use.
+// QuoteFinder answers FindQuote for many quotes over one document. It flattens the document's
+// text once, at its first match (Find or NearestFirst), and every later match reuses that text and
+// the forms derived from it, so a write that resolves many quotes against one tree walks it once
+// rather than once a quote. A finder from NewQuoteFinder validates the document there too, at that
+// first match; one from ValidDocument.QuoteFinder holds a tree validated already and never
+// validates it again. The document must not change while the finder is in use.
 type QuoteFinder struct {
-	doc      *Node
+	doc *Node
+	// valid says the document was validated before the finder was made (ValidDocument.QuoteFinder),
+	// so the first match of a quote flattens its text without validating it again.
+	valid    bool
 	prepared bool
 	err      error
 	text     flattenedText
@@ -175,6 +180,13 @@ type QuoteFinder struct {
 // NewQuoteFinder returns a finder over doc. It reads nothing of doc until its first Find.
 func NewQuoteFinder(doc *Node) *QuoteFinder {
 	return &QuoteFinder{doc: doc}
+}
+
+// QuoteFinder is a finder over d's tree whose first match does not validate it again; every answer
+// is NewQuoteFinder's for the same tree. The zero ValidDocument holds no tree, so its finder
+// answers FindQuote's error for a nil document.
+func (d ValidDocument) QuoteFinder() *QuoteFinder {
+	return &QuoteFinder{doc: d.doc, valid: true}
 }
 
 // Find is FindQuote(doc, quote, occurrence, near): the same range or the same error.
@@ -259,7 +271,10 @@ func (f *QuoteFinder) matches(quote string) ([]quoteMatch, error) {
 	}
 	if !f.prepared {
 		f.prepared = true
-		if f.err = f.doc.Validate(); f.err == nil {
+		if !f.valid {
+			f.err = f.doc.Validate()
+		}
+		if f.err == nil {
 			f.text = buildFlattenedText(f.doc)
 		}
 	}
@@ -404,10 +419,48 @@ func (t flattenedText) normalizedForm() ([]rune, []range16) {
 	return t.forms.normalized, t.forms.spans
 }
 
+// flattenedTextSize is how much buildFlattenedText's second pass appends over doc: units is how
+// many UTF-16 units it writes, which is one positions entry and one marks entry each, and bytes is
+// how many bytes the builder holds. It walks the document once more (Walk), measuring no node and
+// allocating nothing, which costs less than the doubling the appends pay for without it.
+//
+// Per text node the count is exact. nulAsReplacement writes each U+0000 as U+FFFD, three bytes in
+// place of one but one UTF-16 unit either way, so only the byte count moves for it; len16 counts
+// the units of the text as it stands, replaced or not.
+//
+// The gaps are counted high: the second pass writes a space, one position and one mark only
+// between two text nodes whose ProseMirror ranges do not touch, and this counts one gap for every
+// text node after the first.
+//
+// The count sets capacity alone (Grow, make with a capacity), so it decides how often the build
+// grows a buffer and nothing about what the build writes: a count that comes out low costs a
+// regrowth, and one that comes out high leaves capacity unused. Low is possible for a text holding
+// invalid UTF-8, where len counts a stray byte once and the build writes the U+FFFD that ranging
+// over it yields, three bytes.
+func flattenedTextSize(doc *Node) (units, bytes int) {
+	texts := 0
+	Walk(doc, func(node *Node) bool {
+		if node.Type != "text" {
+			return true
+		}
+		texts++
+		units += len16(node.Text)
+		bytes += len(node.Text) + 2*strings.Count(node.Text, "\x00")
+		return true
+	})
+	if texts > 0 {
+		units += texts - 1
+		bytes += texts - 1
+	}
+	return units, bytes
+}
+
 func buildFlattenedText(doc *Node) flattenedText {
+	units, bytes := flattenedTextSize(doc)
 	var out strings.Builder
-	var positions []int
-	var marks []inlineMarkup
+	out.Grow(bytes)
+	positions := make([]int, 0, units)
+	marks := make([]inlineMarkup, 0, units)
 	lastEnd := -1
 	walk(doc, func(node *Node, _ []int, pos, end int) bool {
 		if node.Type != "text" {
@@ -1028,12 +1081,19 @@ type MarkRef struct {
 	ID   string
 }
 
+// Marked is a mark identity in the tree with the `by` attribute its first run carries, empty
+// when it has none.
+type Marked struct {
+	MarkRef
+	By string
+}
+
 // ListMarks returns each distinct Proof or Dispatch mark identity in document
-// order. doc must be a tree Validate accepts: the walk descends into every
-// node's children and computes no positions.
-func ListMarks(doc *Node) []MarkRef {
+// order, with the author its first run names. doc must be a tree Validate accepts: the walk
+// descends into every node's children and computes no positions.
+func ListMarks(doc *Node) []Marked {
 	seen := make(map[MarkRef]struct{})
-	var refs []MarkRef
+	var marked []Marked
 	Walk(doc, func(node *Node) bool {
 		if node.Type != "text" {
 			return true
@@ -1051,11 +1111,12 @@ func ListMarks(doc *Node) []MarkRef {
 				continue
 			}
 			seen[ref] = struct{}{}
-			refs = append(refs, ref)
+			by, _ := mark.Attrs["by"].(string)
+			marked = append(marked, Marked{MarkRef: ref, By: by})
 		}
 		return true
 	})
-	return refs
+	return marked
 }
 
 // MarkAttrs returns a copy of the attributes on the first matching mark run: FindMarks' Attrs,

@@ -18,6 +18,7 @@ import {
   syncArchitectureSource,
 } from "./api";
 import { seedFakeGithub } from "./fake-github-helpers";
+import { inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -148,7 +149,7 @@ test("inbox: an issue closed while the Inbox read is in flight drops its ask fro
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const other = await createIssue({ project: "CORE", title: "Quarterly budget review" });
-  await createAsk(other.key, { question: "An ask that stays" }, bob);
+  const staying = await createAsk(other.key, { question: "An ask that stays" }, bob);
   const closing = await createIssue({ project: "CORE", title: "Flaky deploy step" });
 
   const alice = await asUser(browser, "alice");
@@ -157,7 +158,9 @@ test("inbox: an issue closed while the Inbox read is in flight drops its ask fro
     // The pause below is a page timer of the refresh scheduler: the page's clock fires it.
     await page.clock.install();
     await openLive(page, "/?assignee=everyone");
-    await expect(page.getByText("An ask that stays")).toBeVisible();
+    // The question the Inbox keeps, read as the row it is: from 1280 px its text is also in the
+    // reading pane, which draws the selected row's card (INFRA-575).
+    await expect(inboxRow(page, staying.id)).toBeVisible();
     // The sidebar's project list, whose refresh is the close's barrier below, is mounted on a
     // phone only while its drawer is open.
     if (testInfo.project.name === "iphone") {

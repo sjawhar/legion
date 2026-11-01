@@ -182,6 +182,21 @@ func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 	return tree, nil
 }
 
+// treeOfUnshared is treeOf for a document nothing else reads or writes while the call runs - a
+// write transaction's fork, read on the request goroutine that holds it (readFork, startTree) -
+// which it reads through pmdoc.ReadUnshared, without ygo's ToDelta, and hands back validated once
+// (pmdoc.ValidDocument), so the renders and reads that follow do not validate it again.
+func treeOfUnshared(doc *crdt.Doc) (pmdoc.ValidDocument, error) {
+	if doc == nil {
+		return pmdoc.ValidDocument{}, errDocUnloaded
+	}
+	valid, err := pmdoc.ReadUnshared(doc.GetXmlFragment(fragmentName))
+	if err != nil {
+		return pmdoc.ValidDocument{}, documentSchemaError(err)
+	}
+	return valid, nil
+}
+
 func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmdoc.Node, error) {
 	if fragment == nil {
 		return nil, errDocUnloaded
@@ -251,6 +266,19 @@ func documentMarkdownWithOffsets(tree *pmdoc.Node) (string, []pmdoc.BlockOffset,
 	return markdown, offsets, documentSchemaError(err)
 }
 
+// documentMarkdownValid is documentMarkdown of a tree readFork already validated, which the render
+// then does not validate again (pmdoc.ValidDocument.RenderWithBlockOffsets).
+func documentMarkdownValid(tree pmdoc.ValidDocument) (string, error) {
+	markdown, _, err := documentMarkdownValidWithOffsets(tree)
+	return markdown, err
+}
+
+// documentMarkdownValidWithOffsets is documentMarkdownWithOffsets of a validated tree.
+func documentMarkdownValidWithOffsets(tree pmdoc.ValidDocument) (string, []pmdoc.BlockOffset, error) {
+	markdown, offsets, err := tree.RenderWithBlockOffsets()
+	return markdown, offsets, documentSchemaError(err)
+}
+
 // renderDocument is what doc renders now, or the error that stopped it being read or rendered.
 func renderDocument(doc *crdt.Doc) (string, error) {
 	tree, err := treeOf(doc)
@@ -296,8 +324,16 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 // fold of its stored updates and its read-back, stateThrough), or one update the store appends
 // (appendUpdate, AppendUpdateTx), decoded alone. Its pending queue is maxUpdateItems, the queue
 // every decode of document bytes takes (see maxUpdateItems).
+//
+// It replays without ygo's format cleanup (crdt.WithFormatCleanup), which follows each remote
+// apply that changes formatted text with a commit of its own: every update a copy applies is one
+// the room committed, and every cleanup the room made is already among them (the room's own
+// repairs and sweeps are local commits, which never clean up; a write's publish and a browser's
+// update reach the room as remote applies, and the cleanup either makes is stored), so a copy
+// that cleaned up would hold a state the room never held. A write's fork commits its own writes
+// locally, which never clean up.
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
-	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems))...)
+	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems), crdt.WithFormatCleanup(false))...)
 }
 
 // renderedReplica is the copy of a room's document its update observer renders and the room's

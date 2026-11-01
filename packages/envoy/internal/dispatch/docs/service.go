@@ -17,7 +17,6 @@ import (
 	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
 
-	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -57,7 +56,6 @@ type Deps struct {
 	Persistence       VersionedStore
 	Events            *events.Broker
 	Identity          identity.Identity
-	AgentTokens       *auth.SharedAgentTokens
 	ServerURL         string
 	Settle            time.Duration
 	MarkWait          time.Duration
@@ -95,16 +93,12 @@ type Service struct {
 	persistence       VersionedStore
 	events            *events.Broker
 	identity          identity.Identity
-	agentTokens       *auth.SharedAgentTokens
 	serverURL         string
 	settle            time.Duration
 	markWait          time.Duration
 	unrecordedMarkTTL time.Duration
 	// editNoticeQuiet is Deps.EditNoticeQuiet, with its default applied.
 	editNoticeQuiet time.Duration
-	// keepAlive is how often a document socket's peer is sent a keep-alive (keepalive.go):
-	// documentKeepAlive, which a test shortens.
-	keepAlive time.Duration
 	// afterEditNoticeIDs runs once an edit-notice sweep has read its due ids, with no lock held,
 	// and before it locks the first. Nil outside tests; tests use it to delete a document in that
 	// window.
@@ -617,10 +611,8 @@ func New(deps Deps) *Service {
 		persistence:       persist,
 		events:            deps.Events,
 		identity:          deps.Identity,
-		agentTokens:       deps.AgentTokens,
 		serverURL:         strings.TrimSuffix(deps.ServerURL, "/"),
 		settle:            settle,
-		keepAlive:         documentKeepAlive,
 		markWait:          markWait,
 		now:               time.Now,
 		timers:            make(map[uint64]*time.Timer),

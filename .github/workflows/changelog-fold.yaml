@@ -64,7 +64,7 @@ env:
   # has no release, and its fragments fold under main@<12 hex>.
   CHANGELOG_PACKAGES: >-
     packages/pi-legion=pi-legion-v packages/pi-envoy=pi-envoy-v
-    packages/envoy-plugin=opencode-legion-envoy-v packages/envoy=legion-envoy-v
+    packages/envoy=legion-envoy-v
     packages/claude-envoy packages/contracts packages/envoy-client
 
 jobs:

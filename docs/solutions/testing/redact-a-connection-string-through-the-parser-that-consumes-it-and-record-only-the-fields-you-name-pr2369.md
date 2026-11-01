@@ -44,6 +44,13 @@ Postgres or NATS value.
   `postgres://u:A,B@h/db`, `postgres://h/db?password=A;B`, `postgres://h/db?password=A#B`,
   `postgres://h/db?sslpassword=A`, and `POSTGRES://u:A@h/db`. Grep every step file and output for
   A and B. As the negative control, run the previous redactor with `go test -overlay`.
+- **A planted value holds a character that is not a digit, or more than ten digits.** The output
+  you grep holds the machine's own text too, and one part of it changes from run to run: a
+  temporary directory's random name, which `os.MkdirTemp` writes as a `uint32` in decimal, so ten
+  digits at most. A planted `123` matches it by chance, and the sweep then reports a leak that is
+  not there; `TestAForeignRunsMetaHoldsNoTokenOrPassword` failed that way at random on any pull
+  request. Where the planted value must stay digits, because digits are what the broken parser
+  reads as a port, make it eleven digits or more instead of shortening it.
 
 ## Evidence
 

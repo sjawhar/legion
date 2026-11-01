@@ -17,6 +17,7 @@ import {
   resolveAsk,
 } from "./api";
 import { seedFakeGithub } from "./fake-github-helpers";
+import { inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -93,8 +94,11 @@ test("live: bob's ask updates alice's Inbox and project badges without reload @p
   await expect(navigation.locator('a[href="/projects/CORE"]')).toContainText("1");
   expect(issuePage.url()).toContain(readingIssue.key);
 
-  await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toBeVisible();
-  await expect(inboxPage.getByText("Ship it?")).toBeVisible();
+  // The question arrives as a row of the list, carrying its first line; from 1280 px the
+  // reading column beside it is showing that same row's card (INFRA-575).
+  const arrived = inboxRow(inboxPage, ask.id);
+  await expect(arrived).toBeVisible();
+  await expect(arrived.getByText("Ship it?")).toBeVisible();
 
   await issuePage.screenshot({
     fullPage: true,
@@ -401,8 +405,9 @@ test("live: the stream recovers after the connection drops", async ({ browser },
   await alice.setOffline(false);
 
   await expect(page.getByText("Reconnecting")).toHaveCount(0);
-  await expect(page.getByTestId(`ask-${ask.id}`)).toBeVisible();
-  await expect(page.getByText("Missed while offline?")).toBeVisible();
+  const arrived = inboxRow(page, ask.id);
+  await expect(arrived).toBeVisible();
+  await expect(arrived.getByText("Missed while offline?")).toBeVisible();
   expect(await heading.boundingBox()).toEqual(boundsBeforeOutage);
 
   await alice.close();

@@ -636,7 +636,8 @@ func TestReadGitRemotesReadsWhatGhReads(t *testing.T) {
 	}
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
-	t.Chdir(t.TempDir())
+	repository := t.TempDir()
+	t.Chdir(repository)
 	if remotes, err := readGitRemotes(); err != nil || remotes != nil {
 		t.Errorf("readGitRemotes outside a git repository = %v, %v; want none", remotes, err)
 	}
@@ -650,7 +651,11 @@ func TestReadGitRemotesReadsWhatGhReads(t *testing.T) {
 		{"config", "remote.upstream.promisor", "true"},
 		{"config", "remote.upstream.partialclonefilter", "blob:none"},
 	} {
-		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+		command := exec.Command("git", args...)
+		// readGitRemotes reads the process's working directory, so the fixture runs in the same
+		// directory by name rather than inheriting whatever the process has.
+		command.Dir = repository
+		if out, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}
@@ -684,13 +689,18 @@ func TestReadGitRemotesRefusesALineGhReadsOtherwise(t *testing.T) {
 		{"a URL holding a second URL", "https://example.com/x https://github.com/evilown/y", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Chdir(t.TempDir())
+			repository := t.TempDir()
+			t.Chdir(repository)
 			config := [][]string{{"init", "-q"}, {"remote", "add", "origin", tc.url}}
 			if tc.filter != "" {
 				config = append(config, []string{"config", "remote.origin.promisor", "true"}, []string{"config", "remote.origin.partialclonefilter", tc.filter})
 			}
 			for _, args := range config {
-				if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+				command := exec.Command("git", args...)
+				// The fixture configures the repository readGitRemotes reads, which is the
+				// directory this case chdirs into, named here rather than inherited.
+				command.Dir = repository
+				if out, err := command.CombinedOutput(); err != nil {
 					t.Fatalf("git %v: %v: %s", args, err, out)
 				}
 			}

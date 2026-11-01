@@ -12,6 +12,7 @@ import {
   createIssueArtifact,
   createProject,
   dashboardOrigin,
+  editArtifact,
   getArtifactText,
 } from "./api";
 import { countDocumentSockets, documentEditor, documentTransport, typeAtEnd } from "./editor";
@@ -201,6 +202,49 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
     ).toBe(true);
   }
+});
+
+// The From/To compare of a document shows what changed as the change view, word by word. It is
+// seeded on a document that is not the issue's primary one, because `ArtifactRoutePanel` mounts
+// `ArtifactDetails` - the version history and this compare - only off the primary document's own
+// route (`isPrimaryDocumentArtifactRoute`, `features/refs/routes.ts`).
+test("the version history compares two versions of a document with the change view", async ({
+  page,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "# Lease handover\n\nThe spec itself is the primary document.\n",
+    title: "Version compare",
+  });
+  const notes = await createIssueArtifact(issue.key, {
+    content: "# Review notes\n\nThe ledger keeps three leases.\n",
+    name: "notes.md",
+  });
+  await editArtifact(
+    notes.artifact.id,
+    {
+      ops: [
+        {
+          find: "The ledger keeps three leases.",
+          op: "replace",
+          with: "The ledger keeps seven leases.",
+        },
+      ],
+      summary: "Seven leases",
+    },
+    { as: "agent" }
+  );
+
+  await page.goto(`/issues/${issue.key}/artifacts/notes-md`);
+  const compare = page.getByRole("region", { name: "Compare versions for notes.md" });
+  await compare.getByRole("button", { name: "Show comparison" }).click();
+  await compare.getByLabel("Compare notes.md from").selectOption("1");
+  await compare.getByLabel("Compare notes.md to").selectOption("2");
+  const changed = compare.getByTestId("change-view").locator('[data-change="changed"]');
+  await expect(changed).toHaveCount(1);
+  await expect(changed.locator("del")).toHaveText(["three"]);
+  await expect(changed.locator("ins")).toHaveText(["seven"]);
 });
 
 test("the artifacts tab filter narrows rows by name and kind @phone", async ({
