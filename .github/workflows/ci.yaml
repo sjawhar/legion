@@ -470,6 +470,9 @@ jobs:
               - 'scripts/third-party-notices.ts'
               # tests/envoy-channel-server.test.ts:7 holds the marketplace entry to no version.
               - '.claude-plugin/marketplace.json'
+              # tests/build-inputs.test.ts holds the rebuild's on.push.paths to the files
+              # scripts/build-inputs.txt matches.
+              - '.github/workflows/claude-envoy-rebuild.yaml'
             # The daemon's tests (`go test ./...`, the -race subset, and the daemon
             # scripts/e2e/stage1-skeleton.sh builds) and every file the job's other steps read.
             test:

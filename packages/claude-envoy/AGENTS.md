@@ -297,7 +297,8 @@ above says how to run it).
   own marketplace. `claude -p` has no interactive plan approval, multiple-choice,
   or consent surfaces; workers need pre-approved configuration.
 - A pull request never commits `dist/` or `legion/`. Main's Rebuild Claude Envoy plugin workflow
-  (`.github/workflows/claude-envoy-rebuild.yaml`) commits them after each merge. Its push job waits
+  (`.github/workflows/claude-envoy-rebuild.yaml`) commits them after each merge that changes a
+  build input; a merge that changes none starts no run of it. Its push job waits
   for a runner after its build job, often past the next merge, and lands the build on main's tip
   all the same unless main already holds a newer build; when a build input
   (`scripts/build-inputs.txt`) changed in between, it also starts a fresh run. So main's built
@@ -310,7 +311,9 @@ above says how to run it).
   (`.bun-version`, `bunfig.toml`, the `.gitignore` and `.gitattributes` files, the scripts
   `build.ts` imports or runs, and the files the workflow and `verify-build.sh` read): a pull
   request that makes `build.ts`, `verify-build.sh` or the workflow read a new file adds it to the
-  list itself. The hand-written plugin files (`hooks/hooks.json`, `.mcp.json`, `bin/`,
+  list itself. The same test holds the workflow's `on.push.paths` to the files the list matches, in
+  both directions, so the trigger and the list cannot drift.
+  The hand-written plugin files (`hooks/hooks.json`, `.mcp.json`, `bin/`,
   `.claude-plugin/`) go live at the merge, beside the previous build, so a change that makes one of
   them name a new or renamed bundle is broken on main until the rebuild lands: add the bundle in
   one pull request and the entry that runs it in a later one, once the rebuild commit is on main. A
