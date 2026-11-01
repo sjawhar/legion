@@ -22,6 +22,30 @@ func UseManifestForTest(manifest []byte) (restore func(), err error) {
 	return previous.install, nil
 }
 
+// SetBlockSchemaForTest makes value the block schema, as if the server had been built with it:
+// every reader of this package, SchemaVersion, LinkKinds and the bytes SchemaJSON serves. It
+// refuses value when it is not a valid manifest, and changes nothing then. restore puts back the
+// manifest in use before. Tests reach it through pmdoctest.UseBlockSchema, which says when a test
+// may call it. It differs from UseManifestForTest in taking the manifest as a value rather than
+// as bytes, and in swapping the bytes SchemaJSON serves with it.
+func SetBlockSchemaForTest(value BlockSchema) (restore func(), err error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("encode test block schema: %w", err)
+	}
+	compiled, err := compileManifest(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("test block schema: %w", err)
+	}
+	previous, previousJSON := active, blockSchemaJSON
+	compiled.install()
+	blockSchemaJSON = encoded
+	return func() {
+		previous.install()
+		blockSchemaJSON = previousJSON
+	}, nil
+}
+
 // UseStagedBlockForTest makes the embedded manifest with one more typed block the manifest this
 // package reads and writes by, until restore is called (UseManifestForTest): a block named name,
 // of block content, rendered by the host, which a build reads from schema version 2 and may

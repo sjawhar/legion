@@ -884,7 +884,9 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		writeError(w, "TARGET_NOT_FOUND", http.StatusNotFound, err.Error())
 		return
 	}
-	if errors.Is(err, docs.ErrInvalidMarkdown) {
+	// A block pointer refused on any route but the edit route (which answers INVALID_OP) is the
+	// caller's markdown to fix, as a schema refusal of it is.
+	if errors.Is(err, docs.ErrInvalidMarkdown) || errors.Is(err, pmdoc.ErrBlockPointer) {
 		writeError(w, "INVALID_MARKDOWN", http.StatusBadRequest, err.Error())
 		return
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 )
 
@@ -65,6 +66,11 @@ type compiledManifest struct {
 	versions    map[Element]ElementVersions
 	uncreatable map[Element]bool
 	creatable   int
+	// linkKinds is the edge kinds the manifest's `block[]` attributes make, sorted (LinkKinds),
+	// and pointerAttributes maps each typed block declaring such an attribute to those
+	// attributes' names, sorted.
+	linkKinds         []string
+	pointerAttributes map[string][]string
 	// maxSince is the highest since among the declared elements: no document's DocumentSince
 	// is higher.
 	maxSince int
@@ -99,13 +105,15 @@ func compileManifest(raw []byte) (compiledManifest, error) {
 		return compiledManifest{}, fmt.Errorf("invalid: %w", err)
 	}
 	compiled := compiledManifest{
-		schema:      value,
-		types:       make(map[string]BlockTypeSchema, len(value.Types)),
-		nodes:       make(map[string]bool, len(value.Nodes)),
-		marks:       make(map[string]bool, len(value.Marks)),
-		versions:    make(map[Element]ElementVersions),
-		uncreatable: make(map[Element]bool),
+		schema:            value,
+		types:             make(map[string]BlockTypeSchema, len(value.Types)),
+		nodes:             make(map[string]bool, len(value.Nodes)),
+		marks:             make(map[string]bool, len(value.Marks)),
+		versions:          make(map[Element]ElementVersions),
+		uncreatable:       make(map[Element]bool),
+		pointerAttributes: map[string][]string{},
 	}
+	linkKinds := map[string]struct{}{}
 	declare := func(element Element, versions ElementVersions) error {
 		if _, duplicate := compiled.versions[element]; duplicate {
 			return fmt.Errorf("invalid: %s is declared twice", element)
@@ -148,7 +156,12 @@ func compileManifest(raw []byte) (compiledManifest, error) {
 			return compiledManifest{}, err
 		}
 		compiled.types[typ.Name] = typ
+		var pointers []string
 		for name, attr := range typ.Attributes {
+			if attr.Kind == "block[]" {
+				linkKinds[name] = struct{}{}
+				pointers = append(pointers, name)
+			}
 			if err := declare(Element{Kind: AttributeElement, Block: typ.Name, Name: name}, attr.ElementVersions); err != nil {
 				return compiledManifest{}, err
 			}
@@ -168,7 +181,12 @@ func compileManifest(raw []byte) (compiledManifest, error) {
 				return compiledManifest{}, fmt.Errorf("invalid: type %q attribute %q default %q is creatable later than the attribute", typ.Name, name, fallback)
 			}
 		}
+		if len(pointers) > 0 {
+			slices.Sort(pointers)
+			compiled.pointerAttributes[typ.Name] = pointers
+		}
 	}
+	compiled.linkKinds = slices.Sorted(maps.Keys(linkKinds))
 	if len(compiled.nodes) == 0 {
 		return compiledManifest{}, fmt.Errorf("invalid: must declare its nodes")
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -336,9 +337,10 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 	query := refs.Query{Direction: direction, Kind: target.Kind, ID: target.ID}
 	var unknownKinds []string
 	if kinds := strings.TrimSpace(values.Get("kind")); kinds != "" {
+		linkKinds := pmdoc.LinkKinds()
 		for _, kind := range strings.Split(kinds, ",") {
 			kind = strings.TrimSpace(kind)
-			if !refs.KnownKind(kind) {
+			if !slices.Contains(model.GraphEdgeKinds, kind) && !slices.Contains(linkKinds, kind) {
 				unknownKinds = append(unknownKinds, kind)
 				continue
 			}

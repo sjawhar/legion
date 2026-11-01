@@ -32,14 +32,16 @@ type RebuildReport struct {
 // Every refusal comes before the first write: a room resident in this server, a history that
 // loads, a closed issue (for supplied markdown, which changes the document), a latest version
 // holding an element this build does not know (ErrDocNewerContent, as every read of it answers),
-// and markdown that is not a Proof document or drops an open ask block. Supplied markdown is
-// caller text: it is parsed as an upload is, and its rendering is weighed as a new document's is
-// (SeedText). The latest version is the server's own rendering of the document, read back as
-// every stored rendering is (pmdoc.ParseRendering), so a document whose version is past what one
-// write may make - stored before that bound, or grown past it by browser edits - still rebuilds,
-// and so does one holding an element this build reads but may not create yet, which the seed puts
-// back rather than creates (encodeDocumentTreeHolding). Supplied markdown that differs from the
-// latest version is a document change, so the same transaction writes its
+// and markdown that is not a Proof document, drops an open ask block, or introduces a block
+// pointer to a block of a type its attribute does not allow (refuseBlockPointers, against the
+// latest version). Supplied markdown is caller text: it is parsed as an upload is, and its
+// rendering is weighed as a new document's is (SeedText). The latest version is the server's own
+// rendering of the document, read back as every stored rendering is (pmdoc.ParseRendering), so a
+// document whose version is past what one write may make - stored before that bound, or grown
+// past it by browser edits - still rebuilds, and so does one holding an element this build reads
+// but may not create yet, which the seed puts back rather than creates
+// (encodeDocumentTreeHolding). Supplied markdown that differs from the latest version is a
+// document change, so the same transaction writes its
 // version, which moves the open approval request to it (writeVersionTx, MoveApprovalAsk); the
 // VersionResult is what the caller's artifact.version event names. A rebuild of a closed issue's
 // document from its latest version writes the close's ask states into the tree it seeds, as the
@@ -176,6 +178,18 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	}
 	if markdown != nil {
 		if err := weighRendering("", canonical); err != nil {
+			return RebuildReport{}, VersionResult{}, err
+		}
+		// Supplied markdown is a caller's write, so a block pointer it introduces over the
+		// latest version is checked. That version is read back only when the schema declares a
+		// pointer attribute; one that does not read back holds no pointer.
+		var prior *pmdoc.Node
+		if pmdoc.HasLinkKinds() {
+			if latestTree, err := pmdoc.ParseRendering(latest.markdown); err == nil {
+				prior = latestTree
+			}
+		}
+		if err := refuseBlockPointers(ctx, tx, artifactID, tree, prior, offsets); err != nil {
 			return RebuildReport{}, VersionResult{}, err
 		}
 	}
