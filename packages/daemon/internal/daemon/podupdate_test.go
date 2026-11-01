@@ -401,6 +401,37 @@ func (r *podUpdateRig) replacements() []fake.Call {
 	return r.rt.CallsOf("ReplacePod")
 }
 
+// awaitReplacement sweeps until the pod has been replaced n times, and is how every assertion
+// that a replacement happened reads the count. One tick is not enough on its own:
+// completePodUpdate reads the group live and through the deciding mask (roundGroup), so a claim
+// whose machine is still settling a decision at that read counts as not having answered, the
+// replacement is deferred, and the round is simply decided by the next sweep instead
+// (podupdate.go's completePodUpdate). Nothing is lost by that deferral and the round stays open,
+// so a test that reads the count once, immediately after the tick that follows the last answer,
+// asserts a race rather than the rule: it passes only when no machine happens to be deciding at
+// that moment, which CI run 41340112838 is the reproduction of. Sweeping until the count is
+// reached asks the question the rule answers — the pod is replaced once every worker has
+// answered — without asking it of one particular sweep. An assertion that a replacement has
+// *not* happened needs no such wait and keeps reading the count once, since no deferral can turn
+// nothing-yet into a replacement. Either failure names the count and what the caller waited for:
+// the wait's, the number of replacements it swept for, and the check below it, the number read
+// against the number wanted.
+func (r *podUpdateRig) awaitReplacement(n int, what string) []fake.Call {
+	r.t.Helper()
+	testwait.Eventually(r.t, fmt.Sprintf("%d replacement(s) of the pod %s", n, what), func() bool {
+		if len(r.replacements()) >= n {
+			return true
+		}
+		r.tick()
+		return len(r.replacements()) >= n
+	})
+	calls := r.replacements()
+	if len(calls) != n {
+		r.t.Fatalf("the pod was replaced %d times %s, want %d", len(calls), what, n)
+	}
+	return calls
+}
+
 // The round's whole promise: the pod is replaced only once every claim that blocks the round has
 // answered. A claim with no session — a role nothing has ever launched — blocks nothing.
 func TestPodUpdateReplacesThePodOnlyOnceEveryBlockingClaimHasAnswered(t *testing.T) {
@@ -539,9 +570,7 @@ func TestPodUpdateHoldsTheReplacementWhileAClaimIsWorking(t *testing.T) {
 	rig.handle(claim.RoleImplementer, supervise.StreamTurnEnd{Claim: rig.tokens[claim.RoleImplementer]})
 	rig.tick()
 
-	if calls := rig.replacements(); len(calls) != 1 {
-		t.Fatalf("ReplacePod called %d times once the turn ended, want once", len(calls))
-	}
+	rig.awaitReplacement(1, "once the turn ended")
 }
 
 // A failed claim that has had a worker pins the round: nobody can say whether its workspace holds
@@ -677,9 +706,7 @@ func TestPodUpdateTakesATurnsEndAsTheAnswerOfAClaimBelowTheUpdateContract(t *tes
 
 	rig.tick()
 
-	if calls := rig.replacements(); len(calls) != 1 {
-		t.Fatalf("the pod was replaced %d times once every worker answered, want once", len(calls))
-	}
+	rig.awaitReplacement(1, "once every worker answered")
 	if notices := rig.notices(); len(notices) != 0 {
 		t.Fatalf("the controller was told %+v; a round that finishes by itself needs no one", notices)
 	}
@@ -714,9 +741,7 @@ func TestPodUpdateReplacesThePodWhenTheDriftClearsUnderAnOpenRound(t *testing.T)
 	rig.drifts()
 	rig.tick()
 
-	if calls := rig.replacements(); len(calls) != 1 {
-		t.Fatalf("ReplacePod called %d times once the drift had gone away, want the one replacement the round was opened for", len(calls))
-	}
+	rig.awaitReplacement(1, "once the drift had gone away: the one replacement the round was opened for")
 	rig.awaitClaim(claim.RoleImplementer, "its round to end with the replacement", func(c supervise.Claim) bool {
 		return c.UpdateRound == ""
 	})
@@ -1023,9 +1048,7 @@ func TestPodUpdateResumesAnOpenRoundAfterARestart(t *testing.T) {
 	next.signal(claim.RoleTester, "a1b2c3d")
 	next.tick()
 
-	if calls := next.replacements(); len(calls) != 1 {
-		t.Fatalf("ReplacePod called %d times by the daemon that resumed the round, want once", len(calls))
-	}
+	next.awaitReplacement(1, "by the daemon that resumed the round")
 }
 
 // restart is a second daemon over the same Postgres: new machines, a new runtime, and nothing of
@@ -1104,9 +1127,7 @@ func TestPodUpdateIgnoresARetiredClaimsLeftoverRound(t *testing.T) {
 	rig.signal(claim.RoleImplementer, "a1b2c3d")
 	rig.tick()
 
-	if calls := rig.replacements(); len(calls) != 1 {
-		t.Fatalf("ReplacePod called %d times once the live worker answered, want once", len(calls))
-	}
+	rig.awaitReplacement(1, "once the live worker answered")
 	rig.awaitClaim(claim.RoleImplementer, "its round to end with the replacement", func(c supervise.Claim) bool {
 		return c.UpdateRound == ""
 	})
@@ -1348,9 +1369,7 @@ func TestPodUpdateTellsTheControllerWhenTheReplacementKeepsFailing(t *testing.T)
 	rig.rt.FailReplacePod(errors.New("the api server refused the suspension"))
 	rig.tick()
 
-	if calls := rig.replacements(); len(calls) != 1 {
-		t.Fatalf("ReplacePod called %d times, want the one attempt that failed", len(calls))
-	}
+	rig.awaitReplacement(1, "for the one attempt that failed")
 	if notices := rig.notices(); len(notices) != 0 {
 		t.Fatalf("the controller was told %d times before the notice bound", len(notices))
 	}
@@ -1689,9 +1708,7 @@ func TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld(t *testing.T) {
 	rig.signal(claim.RoleTester, "e4f5a6b")
 	rig.tick()
 
-	if calls := rig.replacements(); len(calls) != 1 {
-		t.Fatalf("the pod was replaced %d times once every worker of the issue answered, want once", len(calls))
-	}
+	rig.awaitReplacement(1, "once every worker of the issue answered")
 }
 
 // A turn that starts while the replacement waits is not cut. The Sandbox runtime takes the pod's
@@ -1753,9 +1770,7 @@ func TestPodUpdateDoesNotCutATurnThatStartsWhileTheReplacementWaits(t *testing.T
 	rig.signal(claim.RoleImplementer, "b2c3d4e")
 	rig.tick()
 
-	if calls := rig.replacements(); len(calls) != 1 {
-		t.Fatalf("the pod was replaced %d times once the worker answered again, want once", len(calls))
-	}
+	rig.awaitReplacement(1, "once the worker answered again")
 }
 
 // A Claude Code worker below the contract that introduced ready_for_update is never posted the
@@ -1829,9 +1844,7 @@ func TestStalePluginLeavesAClaudeWorkerBelowTheContractToItsRound(t *testing.T) 
 	rig.handle(claim.RoleImplementer, supervise.StreamTurnEnd{Claim: token})
 	rig.tick()
 
-	if calls := rig.replacements(); len(calls) != 1 {
-		t.Fatalf("the pod was replaced %d times once the Claude Code worker's turn ended, want once", len(calls))
-	}
+	rig.awaitReplacement(1, "once the Claude Code worker's turn ended")
 	if notices := rig.notices(); len(notices) != 0 {
 		t.Fatalf("the controller was told %+v about a worker the round carries by itself", notices)
 	}
