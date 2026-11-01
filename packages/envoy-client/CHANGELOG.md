@@ -1,5 +1,27 @@
 # Changelog
 
+## [main@ed9113e7c092] - 2026-11-01
+
+### Changed
+
+- `dispatch_whoami` prints the session the caller's credential proved, rather than the host
+  session it is running in, and says plainly when the two differ, so an agent whose access
+  token the secrets broker issued can see which session Dispatch records its writes as. It
+  names the one project that credential may write where it names one, and reads a Dispatch that
+  sends neither field as an older build rather than as "no session", since Dispatch and this
+  client ship separately.
+- `envoy_send` and `envoy_publish` describe `urgency` as how soon the recipient should act, shown on its card, and say that it does not deliver a message sooner or ahead of others.
+
+### Removed
+
+- OpenCode is no longer a host or a harness. `DISPATCH_HOST=opencode` is refused with
+  `dispatch: DISPATCH_HOST is "opencode", not omp or claude.`, and `OPENCODE_CONFIG_DIR` is no
+  longer read: a plugin reads a named Oh My Pi profile's `PI_CODING_AGENT_DIR` or Claude Code's
+  `CLAUDE_CONFIG_DIR` and no other harness's, and a script reads `ENVOY_CONFIG_FILE`, then those
+  two in that order, then the neutral file. The guards against the OpenCode-era files stay: a
+  missing config still names `~/.config/opencode/envoy.json` and its move, and a checkout's
+  `.opencode/envoy.json` still warns.
+
 ## [main@f699b1316430] - 2026-10-31
 
 ### Changed
