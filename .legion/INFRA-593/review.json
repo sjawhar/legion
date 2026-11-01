@@ -2,17 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-593",
-  "completed": "2026-11-01T16:35:47Z",
-  "round": 14,
-  "headReviewed": "fce9e43b7fa26e2d13c78deb53319ffa901dd256",
+  "completed": "2026-11-01T19:39:38Z",
+  "round": 15,
+  "headReviewed": "f533f33ce137a1c0ca3524656fedc27277a64b12",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 1,
-  "roundShape": "round-shape.py v3, old e1928187cc7a6bdca21cefa26e42090abfcb796c (last approved code) -> new fce9e43b7fa26e2d13c78deb53319ffa901dd256: 8 files listed, all the rename of 0160_doc_compaction_owed to 20261028195714_doc_compaction_owed (the script normalises numbered names, not timestamps). Checked by hand: the two SQL files differ only in their first comment line; the changelog, AGENTS.md, cmd/dispatch/README.md and the migration test differ only in the migration's name, the test's constant (157) and its name. No runtime file: a confirmation. The merge against its main parent 4644a072 touches exactly the PR's 77 files.",
-  "ci": "At fce9e43b (run 41317480208), read 16:35 UTC: ci-ok success, pr-title success, and every lane success (lint, typecheck, test, dispatch, envoy-go, envoy-go-race and the rest). But GitHub reports the pull request CONFLICTING with main at 16:35 UTC.",
+  "minor": 6,
+  "roundShape": "round-shape.py v3, old fce9e43b7fa26e2d13c78deb53319ffa901dd256 -> new f533f33ce137a1c0ca3524656fedc27277a64b12: 13 files whose own diff differs, runtime among them (docs/compaction.go, ledger.go, livewrite.go, persistence.go, roomcursor.go, service.go, storedorder.go, tree.go, websocket.go): the merge of #2496, #2387, #2446 and #2394, a full round.",
+  "ci": "At f533f33c (run 41337860302), read 19:39 UTC: required lint, typecheck, test and pr-title passed; envoy-go and envoy-go-race red only on TestMigrationSetTakesNumbersThenTimestamps, main's red that 0642a37a (#2633) fixed after this head; dispatch still in progress; ci-ok not green.",
+  "thermonuclear": "Both run once on the merge (fce9e43b..f533f33c): deep review CHANGES (one medium, two minors), code quality four cleanup findings. Checked clean: every durable append is noted after its commit (Ledger.noteAppended covers live writes, flushes and repairs; AppendRoomFlush; commitSettlement); every replaying copy is a newCappedDocumentCopy; buildFork and the stored-order fold decode through decodeStoredState; nothing of #2496, #2387 or #2446 lost; go vet of docs clean.",
   "keyFindings": [
-    {"severity": "important", "file": "(branch)", "description": "Main moved after 4644a072 (#2387, #2496, #2446) and changed 22 of the PR's files, runtime among them (docs/persistence.go, mutation.go, livewrite.go, websocket.go, tree.go, service.go, ledger.go, rebuild.go, pending_authors.go, store/pool.go, duty/exclusive.go, cmd/dispatch/main.go). The implementer merges main; #2496 changes how stored updates replay, so the next round is a full one."},
-    {"severity": "minor", "file": "docs/solutions/database-issues/a-sweep-over-a-table-too-large-to-migrate-reads-a-worklist-the-hot-write-fills-in-its-own-statement-pr2444.md", "description": "Line 32 still cites 0160_doc_compaction_owed.up.sql; the file is 20261028195714_doc_compaction_owed.up.sql. Fix it with the merge (or in retro, which may change docs/solutions)."}
-  ]
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/storedorder.go", "description": "Lines 179-188: a version created after --since whose doc_update_version is below the base (the compacted row) is counted in VersionsSkipped and the check exits clean. With this PR the queue folds a resident room's rows once 16 are older than 2 minutes or one is older than 15, so a window longer than about 2 minutes is checked only from its last fold; #2496's README (cmd/dispatch/README.md:1494-1499) asks for 'nothing is compacted', which no setting now gives. Refuse, or report as compacted-inside-the-window, a version created at or after since that records an update below the base; update the README."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/compaction.go", "description": "Lines 142-145: a read or fold error returns before passRoomLock, so a failed room's eviction with wait=true does not queue behind a repair holding the lock, against the contract at 163-169."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/persistence.go", "description": "lockRoom (788-800) takes the room's in-process lock (TryLock for wait=false) before Acquire on the 2-connection compaction pool, so a non-waiting compaction blocked on the pool holds the room's in-process lock and stalls that room's AppendRoomFlush; two passRoomLock waits fill the pool. Acquire before the in-process TryLock when wait is false."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/ledger.go", "description": "noteAppended (210-225) builds a map of maxima nothing needs; note each source directly."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/compaction_queue.go", "description": "noteStoredUpdates' comment (43-47) names settleRoomWithin and backfillBlockIDs, which no longer note, and omits AppendRoomFlush and commitSettlement; service.go:326-330 keeps a second copy. Keep one list."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/tree.go", "description": "newDocumentCopy's comment (322-331) lists callers by hand (missing StoreUpdateContext, storedTree, the reanchor copy), restates newCappedDocumentCopy's rule, and the two comments define each other; AGENTS.md:637 copies the list. State the rule once."},
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": "Lines 284 and 479 say a failed room's eviction waits for the lock to write; it now always waits and releases it (passRoomLock) so a repair commits before the room reloads. Say so."}
+  ],
+  "required": "Merge main through 0642a37a (#2633) so ci-ok can go green, with the fixes above."
 }
