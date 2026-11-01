@@ -3839,7 +3839,7 @@ a version labelled `AWSCURRENT` in the same listing's `SecretVersionsToStages`, 
 GCP: `versions/latest` is `ENABLED`, one `GetSecretVersion` per listed secret);
 a secret scheduled for deletion (AWS `DeletedDate`, GCP `expire_time`) is one the store does not hold, left out of `List` and `ErrNotFound` from `Describe` and `Read`;
 and the value check comes after every other reason, so a secret refused for a tag or its key is logged for that (`secrets.Local` gives a secret created without a value no version, as Secrets Manager does);
-an owner tag naming a service is refused as malformed unless `Loader.Services` lists it, which `cmd/broker` fills with `BROKER_SERVICES`' distinct services;
+an owner tag naming a service is refused as malformed unless `Loader.Services` lists it, which `cmd/broker` fills with the distinct services of `BROKER_SERVICES` and `BROKER_VM_SERVICES` together (`serviceNames`);
 and `Loader.secretName` asks `Store.ValidName` whether a name can exist in the store at all (Secrets Manager's 512-character limit;
 Secret Manager's 255-character `[A-Za-z0-9_-]` id), so no lookup is made for one that cannot.
 `secrets.GCP` counts against Secret Manager's 600-a-minute per-project read quota for every call but `AccessSecretVersion` (`TestGCPReadQuotaCost` pins a `List` at 1+N, a `Describe` at 2, a `Read` at 1), so `Current.RefreshOne` anchors a reread only when it changed the live answer, and `NewGCPClient` retries `UNAVAILABLE` (not `RESOURCE_EXHAUSTED`) on `ListSecrets`, `GetSecret` and `GetSecretVersion`.

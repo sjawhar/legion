@@ -21,7 +21,7 @@ const MaxTokenLoginLifetime = time.Hour
 
 // ErrServiceLogsInWithToken refuses a device-code machine login that names a service, and a
 // decision on one opened before token logins: a service logs in with its own token.
-var ErrServiceLogsInWithToken = errors.New("a service logs in with its own Kubernetes ServiceAccount token at POST /v1/launcher-credentials/token, never through a code a person approves")
+var ErrServiceLogsInWithToken = errors.New("a service logs in with its own token at POST /v1/launcher-credentials/token (a Kubernetes ServiceAccount's projected token, or a Google VM's identity token), never through a code a person approves")
 
 var (
 	// ErrTokenLoginsOff is VerifyServiceToken's refusal on a broker that trusts no Kubernetes token

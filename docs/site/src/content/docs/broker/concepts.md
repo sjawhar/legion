@@ -245,11 +245,12 @@ that service's accounts: the Legion daemon's worker pods, for `legion-daemon`. A
 as a service with its own token, for an account `BROKER_SERVICE_LOGINS` names; the pod's own token
 proving the pods' account is what makes a pod the service's.
 
-`BROKER_VM_SERVICES` binds a service to one Google service account its Compute Engine VMs run as,
-in the one project `BROKER_VM_PROJECTS` names and with names matching the glob
-`BROKER_VM_INSTANCES` gives. A VM of that account, project and name logs in as that service with its
-own identity token and enrolls itself as a `vm`; that VM is then the service's own session, so the
-service's secrets go to it at once.
+`BROKER_VM_SERVICES` binds a service to the Google service accounts its Compute Engine VMs run as,
+one entry per account, each account bound to one service; for each account, `BROKER_VM_PROJECTS`
+names the one project its VMs run in and `BROKER_VM_INSTANCES` the glob their names match. A VM of
+a bound account, from that account's project and with a matching name, logs in as that service
+with its own identity token and enrolls itself as a `vm`; that VM is then the service's own
+session, so the service's secrets go to it at once.
 
 A service's secrets go to its own sessions and to no one else. That includes a person's own
 session, and a pod run under another service account even when a launcher logged in as the service

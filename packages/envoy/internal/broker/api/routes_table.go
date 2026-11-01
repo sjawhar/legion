@@ -94,8 +94,8 @@ func routes() []apiRoute {
 		// Revoke an enrollment made under the caller's machine credential's operator, or a pod
 		// enrollment the caller's own machine credential made.
 		{http.MethodDelete, "/v1/enrollments/{id}", launcherAuth((*server).deleteEnrollment)},
-		// Log a service in with its own Kubernetes ServiceAccount token, which no person approves:
-		// answers its launcher credential's id and expiry.
+		// Log a service in with its own token, a Kubernetes ServiceAccount's or a Google VM's
+		// identity token, which no person approves: answers its launcher credential's id and expiry.
 		{http.MethodPost, "/v1/launcher-credentials/token", public((*server).tokenLogin)},
 		// Start a person's machine login as an OAuth device authorization (RFC 8628): answers the
 		// device code the machine polls with and the code the person types. Rate-limited per source

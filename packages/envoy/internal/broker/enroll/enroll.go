@@ -92,8 +92,10 @@ type LiveCredential struct {
 	// Service names the service a service's login is for (legion-daemon); nil for a person's own
 	// machine.
 	Service *string
-	// Subject is the ServiceAccount a service's token login proved
-	// (system:serviceaccount:<namespace>:<name>); nil for every login a person approved.
+	// Subject is what a service's token login proved: its ServiceAccount
+	// (system:serviceaccount:<namespace>:<name>), or a VM's runtime id (VMClaims.RuntimeID,
+	// <service account email>@<project>/<zone>/<instance id>); nil for every login a person
+	// approved.
 	Subject *string
 	// ApprovedBy is the login of the person who approved it, "" for a service's token login, which
 	// no person approves.

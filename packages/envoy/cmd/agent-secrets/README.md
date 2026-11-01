@@ -45,8 +45,11 @@ On a machine that runs agents directly, `agent-secrets-helper` (`../agent-secret
 each session's key and signs for it; in a container or a Kubernetes pod, the session's key lives in
 `AGENT_SECRETS_KEY_DIR`.
 
-A Google Cloud VM holds no key and no machine login: it enrols itself with the identity token its
-own metadata server signs, and no person approves it.
+A Google Cloud VM needs no credential a person installs and no machine login a person approves: it
+logs in and enrols itself with the identity token its own metadata server signs. It then holds a
+session key and its enrollment id in its key dir, as a box does, and a machine login, which
+Dispatch's machine-login page lists; each `enroll --vm` run logs in again with a launcher key it
+keeps only in memory.
 
 ```sh
 export AGENT_SECRETS_URL=https://broker.example AGENT_SECRETS_KEY_DIR=/run/agent-secrets
