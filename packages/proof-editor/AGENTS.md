@@ -32,7 +32,7 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/tests/*.test.ts` | The suites that came with those files |
 | `src/directive-factories.ts` | `factoryName`, `factoryLabel` and `factoryAttributes`, copied from micromark-extension-directive 4.0.0 (`lib/factory-name.js`, `lib/factory-label.js` and `lib/factory-attributes.js`), which does not export them: `src/directive-container.ts` tokenizes a `:::` opener's name, label and attributes with them. They are kept whole, the `disallowEol` branches for `false` that neither call takes included (INFRA-581) |
 
-Nineteen files under `src/` are legion's own rather than copies, so the file-by-file audit below does
+Twenty files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
 
 | File | What it is |
@@ -40,6 +40,7 @@ not reach them:
 | `src/collab-cursor-plugin.ts` | The peer-cursor plugin: y-prosemirror's, except that a peer's caret is not drawn while it sits on the focused local caret, where Chromium and WebKit otherwise drop or misplace typing (LEGION-289); it is also biome-checked |
 | `src/editor/schema/dom-attributes.ts` | `withDomAttributes`, the DOM-output-spec helper lifted out of `block-ids.ts` so the typed-block schema can use it too |
 | `src/editor-highlights.ts` | Presentation-only active and pulse highlights for marks and blocks, drawn as a cached ProseMirror `DecorationSet`, because a host class write on editor DOM is read back as an edit (LEGION-458). The set is mapped through edits inside one node and rebuilt when the active or pulsed set changes, or an edit can change which nodes carry a highlighted id or where a highlighted block ends: a mark or attribute step, inserted content that holds a highlighted target (a collaborator's update replaces the whole document), and, while a block is highlighted, a replace across a node boundary; it is also biome-checked |
+| `src/editor-change-decorations.ts` | Presentation-only change marks a host draws over a read-only document, as a ProseMirror `DecorationSet`, for the same reason `src/editor-highlights.ts` is one (INFRA-575): one `setChangeDecorations({ text, widgets })` carries the whole set and replaces the last one, since its one caller computes both lists from one `ChangeMarks`. A text entry draws a class over a run of a block's own text, by a `range` of character offsets into that text (the block's inline content is walked, counting each leaf node the characters its type's `leafText` draws, a `hardbreak`'s newline among them, exactly as `textContent` counts them, so an offset after an inline atom or a hard break still lands on its character) or over the whole block where it names no range - the two ends are one optional field, so an entry with only one end cannot be written - and a widget entry draws a piece of text beside the document, before the top-level block it names or at the end of it. An entry names its block by index among the document's top-level blocks, and one naming a block the document does not hold, or text it does not reach, is dropped. The editor this serves is read-only and `setMarkdown` replaces its whole document, so a document change rebuilds the set from the entries rather than mapping stale positions; it is also biome-checked |
 | `src/trailing-newline-input.ts` | Types over a selection that would leave its text block ending in a newline, where Firefox otherwise puts the text before a code block's newline or deletes a paragraph's hard break (LEGION-289); it is also biome-checked |
 | `src/editor/schema/uuid.ts` | `uuidV4`, the block-id default generator: a v4 UUID from `crypto.getRandomValues`, which every browsing context defines, where `crypto.randomUUID` exists only in a secure context, so a document opened over plain HTTP by a LAN address or a host name minted no id (LEGION-461); it is also biome-checked |
 | `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes out of undo history in both undo managers, so neither undo nor redo writes one back: a write of `proofComment`, `proofSuggestion` or `dispatchAsk` steps that takes nothing from another record (it removes no span, as a creation over another record's mark does not since the three declare `excludes: ''`, or puts back what it removes, as upstream's suggestion restamp does), and `removeRecordMark`'s removal; any other removal of a record mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
@@ -80,7 +81,10 @@ cursors through `collabCursorPlugin` from `./collab-cursor-plugin` instead of ca
 `./record-mark-history`; `src/lib.ts` routing `removeMark` and the new `retypeMark` through
 `./record-mark-retype`; `src/lib.ts` installing `editorHighlightsPlugin` and routing
 `setActiveMarks`, `setActiveBlocks`, `focusMark`'s pulse and `focusBlock`'s pulse through
-`./editor-highlights`; `src/dispatch-marks.ts`'s `dispatchAsk` schema declaring `excludes: ''`,
+`./editor-highlights`; `src/lib.ts` installing `editorChangeDecorationsPlugin` and routing the
+handle's new `setChangeDecorations` through `./editor-change-decorations`, whose
+`ChangeDecorations`, `TextDecoration` and `BlockWidget` it re-exports (INFRA-575);
+`src/dispatch-marks.ts`'s `dispatchAsk` schema declaring `excludes: ''`,
 so two readers' asks may cover the same text, with `removeAskMark` removing that mark's instance
 by id rather than every `dispatchAsk` over its range and the parse runner closing its own span of
 nested asks rather than every open ask (LEGION-458); `src/dispatch-mark-events.ts` reading the mark
@@ -252,7 +256,7 @@ against the source stays readable. `assist` matters as much as the other two: it
 `organizeImports` is a safe fix, so one `biome check --write` or an editor with organize-on-save
 would reorder the copy's imports. `upstream/` is excluded the same way, for the same reason:
 it is tsc's output, not source. Anything legion writes here — `scripts/`, `tests/`,
-`src/block-pointers.ts`, `src/collab-cursor-plugin.ts`, `src/editor-highlights.ts`, `src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`,
+`src/block-pointers.ts`, `src/collab-cursor-plugin.ts`, `src/editor-highlights.ts`, `src/editor-change-decorations.ts`, `src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`,
 `src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/record-mark-target.ts`, `src/read-only-directives.ts`, `src/typed-block-drawing.ts`, `src/ask-content.ts`, `src/mermaid-svg.ts`, `src/mermaid-render.ts`, `src/mermaid-code-block-view.ts`,
 `src/directive-container.ts`,
 `src/tests/harness.ts` — follow the

@@ -3,17 +3,17 @@
 #
 # operator_dispatch resolves it as every command does, through lib/operator-dispatch.ts: the
 # envoy.json `envoyConfigPath("command")` chooses (ENVOY_CONFIG_FILE, which the operator's own
-# session sets, then the omp profile, Claude Code (only under CLAUDE_CODE_CHILD_SESSION=1) and
-# OpenCode directories, then ${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json), the working
-# directory's .envoy/envoy.json, and the environment as it is when the function is called, read by
-# `dispatchSettings`: its URL and bearer, the same-server rule for a file's token, and a `!` token
-# run. It sets operator_dispatch_file to the envoy.json that rule chose, and operator_dispatch_url
-# and operator_dispatch_token to Dispatch's URL and bearer; when nothing configures Dispatch or a
-# file turns it off, both are empty and operator_dispatch_notice says why. A file, a URL or a token
-# that prevents Dispatch fails the call through the caller's `fail`, naming it. The bearer crosses
-# from the TypeScript through a 0600 file in a private directory this function makes and removes,
-# never stdout, and stays in this shell's unexported variable: it reaches no argv and no process's
-# environment.
+# session sets, then the omp profile and Claude Code (only under CLAUDE_CODE_CHILD_SESSION=1)
+# directories, then ${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json), the working directory's
+# .envoy/envoy.json, and the environment as it is when the function is called, read by
+# `dispatchSettings`: its URL and bearer, the same-server rule for a file's token, and a `!`
+# token run. It sets operator_dispatch_file to the envoy.json that rule chose, and
+# operator_dispatch_url and operator_dispatch_token to Dispatch's URL and bearer; when nothing
+# configures Dispatch or a file turns it off, both are empty and operator_dispatch_notice says
+# why. A file, a URL or a token that prevents Dispatch fails the call through the caller's
+# `fail`, naming it. The bearer crosses from the TypeScript through a 0600 file in a private
+# directory this function makes and removes, never stdout, and stays in this shell's unexported
+# variable: it reaches no argv and no process's environment.
 #
 # A run that must not hand the operator's bearer to anything it starts (the Stage 3 scripts) calls
 # operator_dispatch_hold_token once at start, and production_baseline reads its audit baseline from
