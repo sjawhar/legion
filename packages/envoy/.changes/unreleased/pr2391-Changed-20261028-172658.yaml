@@ -1,0 +1,5 @@
+kind: Changed
+body: 'The webhook redelivery sweep still sweeps at start, but then waits two minutes plus up to a tenth again after each sweep, drawn afresh every period, as the delivery reconcile and the architecture import do, in place of a plain two-minute ticker, so two processes started together no longer reach its lease in step every two minutes.'
+time: 2026-10-28T17:26:58.026586221Z
+custom:
+    Issue: pr2391

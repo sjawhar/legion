@@ -120,7 +120,7 @@ func TestTheCompactionSweepListsADocumentOnceAnAppendGivesItASecondRow(t *testin
 	database := storetest.Open(t)
 	one := storeAgedRows(t, database, 1, time.Hour)
 	createDocument(t, database, "none")
-	if got := owedDocuments(t, database); len(got) != 0 {
+	if got := compactionOwedDocuments(t, database); len(got) != 0 {
 		t.Fatalf("the sweep lists %v after documents of one row and of none, want nothing", got)
 	}
 	two := storeAgedRows(t, database, 2, 0)
@@ -138,7 +138,7 @@ func TestTheCompactionSweepListsADocumentOnceAnAppendGivesItASecondRow(t *testin
 		t.Fatalf("list the documents to compact: %v", err)
 	}
 	slices.Sort(listed)
-	if want := owedDocuments(t, database); !slices.Equal(listed, want) {
+	if want := compactionOwedDocuments(t, database); !slices.Equal(listed, want) {
 		t.Fatalf("the sweep's candidates are %v, want the documents doc_compaction_owed names %v", listed, want)
 	}
 }
@@ -232,8 +232,8 @@ func TestTheCompactionSweepForgetsADocumentWithNoRowAfterItsFirst(t *testing.T) 
 	requireRowsAsStored(t, database, young, youngRows)
 }
 
-// owedDocuments is every document doc_compaction_owed names, sorted.
-func owedDocuments(t *testing.T, database *store.Store) []string {
+// compactionOwedDocuments is every document doc_compaction_owed names, sorted.
+func compactionOwedDocuments(t *testing.T, database *store.Store) []string {
 	t.Helper()
 	rows, err := database.Pool.Query(context.Background(), `select artifact_id::text from doc_compaction_owed`)
 	if err != nil {
@@ -252,7 +252,7 @@ func requireOwed(t *testing.T, database *store.Store, what string, want ...strin
 	t.Helper()
 	want = slices.Clone(want)
 	slices.Sort(want)
-	if got := owedDocuments(t, database); !slices.Equal(got, want) {
+	if got := compactionOwedDocuments(t, database); !slices.Equal(got, want) {
 		t.Fatalf("doc_compaction_owed names %v, want %s %v", got, what, want)
 	}
 }

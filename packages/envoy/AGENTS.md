@@ -16,9 +16,9 @@ Envoy owns transport, routing, delivery, and the native Dispatch event path:
 - publishes ordinary notifications through JetStream and ad-hoc topics (any `notifications.` topic no stream subject captures) through core NATS;
   `POST /v1/messages/publish` forwards a role message to its holder, and an ad-hoc topic's message to each self-subscribed session registered on it, with a receipt, answering once each recipient confirmed it, or 504
 
-- resolves target OpenCode sessions
+- resolves target agent sessions
 
-- delivers to a session registered with a serve port (OpenCode) by hot `prompt_async`, ordinary events staying in JetStream for retry while that session is unavailable;
+- delivers to a session registered with a serve port by hot `prompt_async`, ordinary events staying in JetStream for retry while that session is unavailable;
   a self-subscribed session (Oh My Pi, Claude Code) receives on its own NATS subscriptions, the listener skips its push to it (`internal/session/session.go`), and it reads back what it missed while those were down from the stream through `POST /v1/replay` ("Listener API")
 
 - publishes retained `notifications.dispatch.issue.<KEY>.<type>`, `notifications.dispatch.document.<PROJECT>.<slug>.<type>`, and `notifications.dispatch.project.<PROJECT>.<type>` envelopes
@@ -136,7 +136,8 @@ Each item below names a task and where its code is, then notes on it.
   Dispatch's and the secrets broker's listeners:
   one LISTEN connection that dials, reports each notification, pings itself when idle, wakes a caller on its own goroutine, and redials on every failure (`Listener`, `Run`, `RedialBackoff`), because a connection waiting for a notification must outlive every failure between it and the server (INFRA-66).
   Shared the way `internal/pgmigrate` is, since the broker's cross-pod secret-reread fan-out (`internal/broker/reread`) listens on the same kind of connection as Dispatch's delivery hub and event stream relay (`internal/dispatch/api`) and its stale-room evictor (`internal/dispatch/docs`);
-  each caller sets `Listener.Owner`, the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch`
+  each caller sets `Listener.Owner`, the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch`.
+  `Hub` shares one `Listener` among many subscribers and channels: `cmd/dispatch` runs one per process (`dispatch background wakes`) for its woken background loops, and every `Wake` is signalled after each successful LISTEN as well as on each notification, so a subscriber catches up then on what it missed while the listener had no connection (`cmd/dispatch/README.md`, "Background loops")
 
 - **GitHub webhook redelivery**: `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go`
 
@@ -145,8 +146,8 @@ Each item below names a task and where its code is, then notes on it.
 - **Meaning search's embedder and coverage**: `internal/dispatch/embed/`, `internal/dispatch/embedqueue/`, `cmd/dispatch/embedder.go`
 
   Cohere Embed v4 on AWS Bedrock (`bedrock.go`, the default) or Azure AI Foundry (`azure.go`, `azuretoken.go` for the keyless Entra exchange), chosen by `DISPATCH_EMBEDDER`;
-  each client's `Identity` is what `embeddings.model` records and search compares, and its `Limits` pace the queue.
-  `embedqueue/coverage.go` is the coverage pass the server runs at start and every 10 minutes (no backfill subcommand) and the report `GET /api/v1/search/coverage` serves (`cmd/dispatch/README.md`, "Search")
+  each client's `Identity` is what `embeddings.model` records and search compares, and its `Limits` pace the queue, which scans when `embeddings_enqueue` notifies `dispatch_embeddings` (migration 0151) or a pending row falls due.
+  `embedqueue/coverage.go` is the coverage pass the server runs once at start (no backfill subcommand), whose identity steps alone run again while another identity's rows remain, and the report `GET /api/v1/search/coverage` serves (`cmd/dispatch/README.md`, "Search")
 
 - **Document tree (Proof schema)**: `internal/dispatch/pmdoc/`
 
@@ -322,10 +323,10 @@ goldmark's tree before the Proof schema's refusals, so a spec holding a table ro
 Both skip an item emptied of its text, since the renderer writes one as a plain `- `, and both read front matter as Parse does, so they agree on every document both can read.
 Every version write records the count in its own transaction (`docs.RecordTaskProgress` from `writeVersionTx`;
 issue creation and an upload call `docs.RecordTaskProgressMarkdown` after they insert their version row, so the count names it).
-The row the API reads (`model.IssueProgress`, on `IssueSummary` and the issue read, never on an event payload) can lag its document - every row the migration found, any the task a deploy replaces versions while both run (its code records no count), a row another writer held - so `cmd/dispatch` runs `docs.Service.RunTaskProgressReconciliation`, which at start and every five minutes (`TaskProgressReconcileInterval`) counts again every issue whose `tasks_version` is not its document's greatest `artifact_versions.number` (`taskProgressDrift`), in batches of 50 under `for no key update … skip locked`:
-a full batch with drift left goes straight to the next, and a short or failed one is retried a bounded number of times in the pass;
-so a stale or missing count lasts at most that interval, and `tasks: null` on the API means a spec with no task list (total
-0) or one still inside that window.
+The row the API reads (`model.IssueProgress`, on `IssueSummary` and the issue read, never on an event payload) can lag its document - every row the migration found, a version a build predating LEGION-542 wrote (its code records no count), a row another writer held - so `cmd/dispatch` runs `docs.Service.RunTaskProgressReconciliation`, which once at start counts again every issue whose `tasks_version` is not its document's greatest `artifact_versions.number` (`taskProgressDrift`), in batches of 50 under `for no key update … skip locked`:
+a full batch with drift left goes straight to the next, and a short or failed one is retried a bounded number of times in the pass.
+No timer follows it: every build a deploy runs beside this one records the count in each version write, so the only drift left is rows another writer held during the pass, which it retries up to six more passes (`taskProgressBootRetries`, one second after it and doubling, at most a minute apart) and, if any remain, logs at WARN and leaves to the next start.
+`tasks: null` on the API means a spec with no task list (total 0) or a count that reconciliation has not reached yet.
 
 A write never puts one block id on two blocks.
 `EnsureBlockIDs` keeps a repeated id for the first holder in document order, and ask rows and anchors are keyed on block ids, so a block written ahead of an answered ask under its id would take the ask's row and answer, and the question would come back as a fresh open ask.
@@ -396,7 +397,7 @@ Three paths compact, all under that tail rule and none on a request goroutine:
 ygo's room close (`servicePersistenceAdapter.Compact`, on the room's worker as it exits, the server's shutdown included);
 the per-process compaction queue (`compactionQueue`), which every committed append and every load notes and whose one worker compacts a document once it has 16 rows older than two minutes after its first row (`compactMinRows`) or one row after its first older than 15 minutes (`compactMaxTailAge`), retrying a compaction that found the lock busy, was dropped or failed after 1 s, doubling to 1 min;
 and the hourly sweep (`RunCompactionSweep`, lease `document-compaction`, a `duty.RunLeased` ticker of one hour whose first tick is at start), which compacts every document due by the same rule whether or not NATS is configured, and so catches what a restart, `Shutdown` or `Quiesce` dropped from a queue.
-The sweep reads only the documents `doc_compaction_owed` (migration `0151`) names, never a scan of `doc_updates`:
+The sweep reads only the documents `doc_compaction_owed` (migration `0160`) names, never a scan of `doc_updates`:
 every append names its document there in the statement that inserts its row once that row is not the document's first, a compaction that leaves no row above its fold point removes it in its write's transaction, as do a rebuild and `Delete`, and the sweep removes an entry whose document holds no row after its first (a prune's or an artifact deletion's), each under the document's lock.
 `PgVersioned.Compact`, ygo's interface, folds under a keep-N rule instead and is scheduled by nothing in Dispatch.
 A compacted `doc_updates`, and any backup of it taken later, therefore holds no text a write deleted once that write is about 75 minutes old - the two-minute tail, the 15-minute age rule and the hourly sweep:
@@ -1110,12 +1111,17 @@ An edit, a named version, a seed, a rebuild and a settlement render the tree onc
 an upload that changes the document renders it twice, as it did before excerpts - `ReplaceText`'s render of the replacement, which is the stored markdown, and `applyLive`'s render of the fork - and its excerpts are cut from `applyLive`'s render only when the two agree.
 A null `excerpt_version` marks a mention owed an excerpt:
 every row 0092 found, each one `rebuild-refs` inserts, and every mention of an upload whose replacement left the document as it was, the one version write that records no rendering (`refs.ClearExcerpts`, which keeps the payload the row holds for the reconciliation but sets its version null).
-`cmd/dispatch` runs `docs.Service.RunReferenceExcerptReconciliation`, which reads owed rows through the partial index `refs_excerpt_drift` (an empty index once it has caught up), stores one batch of 20 documents per tick, every 2 s while a batch is full and every five minutes after, and for the hour after its start first marks owed the excerpts a version written by the binary a deploy replaces left behind (`refs.MarkStaleExcerpts`).
-A document the reconciliation cannot read for any reason but an unloadable history or a tree outside the schema (which it records as having no block), or whose excerpts it cannot store, is logged at ERROR and skipped for that tick, its mentions left owed, so one document never holds back the rest of its batch.
+`cmd/dispatch` runs `docs.Service.RunReferenceExcerptReconciliation`, a woken loop (`duty.RunWoken`, lease `reference-excerpts`):
+a row trigger on `refs` (migration 0153) notifies `dispatch_excerpts_owed` whenever a mention is left owed, whoever wrote it, and the loop, woken through the server's shared listener (`pglisten.Hub`), reads owed rows through the partial index `refs_excerpt_drift` (an empty index once it has caught up) and stores one batch of 20 documents per pass, passes at least 2 s apart, the next at once while a full batch leaves documents it can still record.
+Each process's first pass also marks owed, once, the excerpts a version written by a binary predating 0092 left behind (`refs.MarkStaleExcerpts`);
+every build since records them in each version write.
+A document the reconciliation cannot read for any reason but an unloadable history or a tree outside the schema (which it records as having no block), or whose excerpts it cannot store, is logged at ERROR and deferred in `reference_excerpt_backoff` (migration 0152, `refs.DeferExcerpts`):
+one minute after its first failure at that version, doubling to at most six hours, plus up to a fifth again of jitter;
+its mentions stay owed, and `refs.DriftedExcerpts` leaves it out of the batches until it falls due, so one document never holds back the rest of its batch, the batches after it or the loop's pace.
+A success deletes its row.
+The earliest due row (`refs.NextExcerptRetry`) is the loop's only timer; with nothing owed and nothing deferred it holds none and sends no statement.
 `refs.StoredExcerpts` serves only a row whose `excerpt_version` is non-null;
 a row owed an excerpt is answered with the document's name, not the payload it still holds.
-One window is left: during the one rolling deploy that ships 0092, a version the binary it replaces writes leaves the previous version's excerpt with its `excerpt_version` still set, and the route serves that excerpt until `refs.MarkStaleExcerpts` marks it owed at the reconciliation's next tick, which starts within five minutes (`docs.ReferenceExcerptReconcileInterval`) of the last one ending.
-The deploy's overlap lies inside the hour after the new task starts, the only hour `MarkStaleExcerpts` runs.
 A `?to=` read lists a mention that one of the citing document's blocks holds from that block, with the block's own excerpt (below), so the excerpt on the `refs` row is what a document mention no block holds is shown with:
 one in a document the block index has not reached.
 
@@ -2196,7 +2202,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A healthy source whose head is the recorded commit only refreshes `last_sync_at` (no fetch, no event);
   a moved head whose subtree sha equals `last_tree_sha` records the commit without re-fetching or re-projecting
   — so a caller looping a sync route is bounded to the head lookups.
-  Triggers: a five-minute jittered ticker in `cmd/dispatch/main.go` (idle without App credentials) that syncs every enabled source by project and then id, going on past a failure;
+  Triggers: a five-minute ticker in `cmd/dispatch/main.go` (`duty.RunJittered`:
+  each wait the interval plus up to a tenth again, drawn afresh every period;
+  idle without App credentials) that syncs every enabled source by project and then id, going on past a failure;
   `POST /api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync` (one source;
   authAny; 200 with `last_error` on a recorded failure, 409 `SOURCE_ACCESS` for credential/branch problems, 404 `SOURCE_NOT_FOUND` when the repository is not a source of the project);
   `POST /api/v1/projects/{key}/architecture-sources/sync` (every source of the project in id order, each attempted whatever another's import did;
@@ -2346,8 +2354,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   Neither event is published to the ask's followers:
   `publishFollowerRoutes` routes `ask.answered`, `ask.edited`, `ask.handed_back`, `ask.resolved` and `comment.created`/`resolved`/`reopened`/`edited` with an `ask_id`, and no other type.
 
-- Keep Envoy API-level with OpenCode.
-  Do not add DB introspection or OpenCode-specific hidden coupling unless there is no API path.
+- Keep Envoy API-level with the agent harnesses it serves.
+  Do not add DB introspection or harness-specific hidden coupling unless there is no API path.
 
 - Dispatch caps (`CAP_EXCEEDED` 400) read `<field> is N characters over the M-character limit (L/M)` (`capExceededError`, UTF-16 units) or `<field> is N over the M-item limit (C/M)` for counts;
   `GET /asks/{id}`, `/comments/{id}`, and `/issues/{key}/messages/{id}` answer a non-uuid id with 400 `<KIND>_ID_INPUT` (`requireUUIDPath`);
@@ -3331,6 +3339,7 @@ a cleanup that failed is logged at WARN (`registry role claim old holder cleanup
 
 `send` and `publish` accept optional `in_reply_to`, `supersedes`, `urgency`, `expects_reply`, and `expires_at`, and `publish` additionally `dedupe_key`; empty optional fields are omitted.
 `urgency` is `low`, `med`, `high`, or `blocking`; `expects_reply` is `none`, `optional`, or `required`.
+`urgency` is informational: the renderers show it to the reader, and no part of Envoy orders, holds or delivers a message by it.
 A session id or role that becomes a KV key NATS would refuse (`bus.EnsureKeyValue`) is a 413 naming its size when too long and a 400 naming the key when it holds an empty token or whitespace, or a character outside nats.go's key alphabet (`ses:bad`, `bus.ErrInvalidKey`), on every route that reads or writes one.
 Every `/v1` 4xx/5xx response, including the startup gate's 503, is JSON: `{"error":"<message>","expected":["field"]}`.
 `expected` appears when the caller must provide a field.
@@ -3447,7 +3456,7 @@ The row holds a SHA-256 of the method, the route pattern, its path values, the q
 The delivery sweep (`internal/dispatch/api/delivery_sweep.go`) finishes the deliveries a dead process left.
 Every write that delivers to sessions - a send to one session, the live view's model and thinking switch, a broadcast's recipients, an issue message to a session, a comment's and a document comment's mentions, and a retry from an agent card - claims each attempt before its send and settles it after, on a context its client's cancellation does not reach.
 A process that dies between the two leaves the attempt pending under a claim nobody holds.
-Every pass of the maintenance loop (`RunSuggestionOutcomeSweep`, once a minute, the `ResumeDeliveries` that `api.Register` and `routes.New` return in `api.Background` beside `Wait`) calls `resumeOwedDeliveries`.
+Every pass of the maintenance loop (`RunMaintenanceSweep`, once a minute across the processes under the `suggestion-outcomes` lease, the `ResumeDeliveries` that `api.Register` and `routes.New` return in `api.Background` beside `Wait`) calls `resumeOwedDeliveries`.
 It first settles `failed`, with the receipt the row owes, every owed attempt nothing can send, 100 of each kind a read until a read comes back short or a round settles nothing:
 a message attempt on a closed issue and a keyed send with no attempt on a closed issue (given a failed attempt 1), `not sent: the issue closed before this attempt was delivered`;
 a mention attempt whose document is no longer a project's, `not sent: the document is gone`, or whose issue closed, as above;
@@ -3472,7 +3481,7 @@ a context that ends during the wait answers `503 SLOW_WRITE_CUT_OFF` and the han
 The browser suite drives a write Dispatch is slow to finish with it.
 
 A key is kept 24 hours (`IDEMPOTENCY_KEY_TTL_MS`):
-the suggestion-outcome sweep's pass deletes every older row (`sweepRequestKeys`), a row a dead process left in flight with it, and a repeat that finds an older row not yet swept treats the key as unused.
+the maintenance sweep's pass deletes every older row (`sweepRequestKeys`), a row a dead process left in flight with it, and a repeat that finds an older row not yet swept treats the key as unused.
 The hand-written key path before it is gone, and so is its table:
 `broadcast_idempotency_keys` (migration `0055`), dropped by `0141_drop_broadcast_idempotency_keys`, in a release later than `0137`'s, which stopped reading and writing it.
 Neither send route takes a body `idempotency_key` any more; the header carries the key.
@@ -3766,7 +3775,7 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   a document has no delivery route, so the same author routes above are the only way an involved session learns about a human reply, resolution, reopening, or edit on its ask or comment thread, or a human's new comment on a document it wrote.
 
 - `artifact.human_edited` goes to the issue's route and to each session the document credits, never to a person.
-  Dispatch appends it once a document has been quiet for 30 seconds after a person's last settled browser version (`document_edit_notices`, migration 0129, swept every 5 s under the `edit-notices` lease by `docs.RunEditNotices`);
+  Dispatch appends it once a document has been quiet for 30 seconds after a person's last settled browser version (`document_edit_notices`, migration 0129, sent by `docs.RunEditNotices` under the `edit-notices` lease, a woken loop that the row trigger of migration 0157 wakes and that waits for the earliest due time, sweeps at least 5 s apart);
   its actor is the last person the window knows edited, and its payload names the document, the two versions the quiet window spans, each person who edited, and the unified diff of the two versions, cut at its last line end within 4,096 bytes (`ArtifactHumanEditedEventPayload` in `packages/contracts/src/dispatch-api.ts`).
   The document is the payload's `artifact_id`, and its sessions are read as a comment's are (`loadDocumentSessionAuthors`).
   That person is the sender of a version's latest edit (`docs.latestEditSource`):
@@ -3795,7 +3804,7 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   it is not a failed delivery to the others.
   A session with a NATS connection of its own (pi-envoy, claude-envoy) receives it directly and through the forward, and drops the second copy by its `event_id`;
   the forward's copy is stored on its agent subject (once, by `Nats-Msg-Id`), which is how its replay recovers one it missed while disconnected.
-  A session the listener delivers to on its serve port (the OpenCode plugin) is not confirmed:
+  A session the listener delivers to on its serve port is not confirmed:
   it holds no NATS connection to answer a receipt, and receives the topic through its machine's listener when that listener runs with `ENVOY_SUBSCRIBE_ALL_TOPICS=1`:
   the live topics lane (`openLiveTopics`, `liveDeliveryHandler`) is a second bus client holding one core queue subscription on `notifications.>` in the group `envoy-listener-live-<machine id>` (`bus.ListenerLiveQueue`), which leaves a subject under `notifications.role.` to the role lane and a subject the stream captures (`bus.StreamCaptures`) to the durable, and fans every other topic out to the sessions on its machine subscribed to it, by the same `prompt_async`.
   A refused delivery publishes its exception over core NATS, which the lane reads back and fans out like any topic;
@@ -3869,10 +3878,9 @@ a pod is a requester with no operator, whose service is its launcher credential'
 Migration 0007 is forward-only: an older broker binary's conflict lookup reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled back past it once a slotted enrollment exists.
 An older broker binary refuses a `BROKER_SERVICES` that names a service for more than one account (`must give each service once`), and the broker is one pod, so once the setting names a service twice the image is never rolled back past this change without moving the setting back in the same step.
 An enrollment the broker creates is of kind `session` (an agent session on a machine its person logged in:
-the helper's own, or a key a launcher such as agentbox brings through the helper's `enroll-session-key`) or `pod`.
-The `enrollments` kind constraint also admits `vm` (migration 0020), which no route creates.
+the helper's own, or a key a launcher such as agentbox brings through the helper's `enroll-session-key`), `pod`, or `vm` (migration 0020), a Google Compute Engine VM enrolling itself.
 Migration 0012 rewrote every stored `box`/`host` to `session`.
-`POST /v1/enrollments` takes only `session` and `pod` (`400 INVALID_KIND` otherwise):
+`POST /v1/enrollments` takes `session`, `pod`, and `vm` only on a broker with a VM verifier (`enroll.Service.VM`, set when `BROKER_GOOGLE_OIDC_AUDIENCE` is), `400 INVALID_KIND` otherwise:
 the `host` and `box` of a helper before legion-envoy 10 are refused, since such a helper can no longer log in again.
 No reader of stored data needs them: the kind constraint admits neither, and a record body that predates 0012 keeps its `box`/`host` as text its id hashes, which `record.ParseBody` reads without checking the kind.
 The helper still asks an older broker, which answers `session` `400 INVALID_KIND`, once more as `host` or `box` (`helper/broker.go`, `enroll`:
@@ -3901,9 +3909,17 @@ a pod renewer stops only on it or `POD_TOKEN_REQUIRED`, and retries `POD_IDENTIT
 a real mismatch ends with the lease, after which the renewal is `ENROLLMENT_NOT_LIVE`.
 Its iat/key/URL failures remain `PROOF_INVALID` and retry.
 Other session routes map a not-live proof to `PROOF_INVALID` as before.
+A `vm` enrollment carries `vm_token`, the VM's Google identity token, which `enroll.Service.verifyVMToken` verifies (`VMVerifier`, before any transaction) and `Create` requires to prove the runtime id, `VMClaims.RuntimeID` (`<account>@<project>/<zone>/<instance id>`, since an instance id is unique only within a project and a zone), under the launcher credential whose `subject` is that same runtime id, the VM's own token login's;
+a mismatch, another VM's or a Kubernetes service's credential included, is `403 VM_IDENTITY_MISMATCH`, an expired token `403 VM_TOKEN_EXPIRED`.
+Its `subject` is the token's verified email, and it carries no operator and no slot. No launcher credential ends it, its own included (`Revoke`: `403 VM_ENDS_BY_LOGIN_REVOKE`), because a VM's one credential follows whoever last logged in with that VM's token: a token copied off the VM and replayed after the VM enrolled logs in and holds the credential until the VM's next login, and, could it end the VM's enrollment by id, it could then enroll its own key in the VM's place. A VM's enrollment ends when a person revokes its machine login (`RevokeCredential`) or with its lease; a copier's own enrollment is `409 ALREADY_ENROLLED` while the VM's is live.
+A revoke does not revoke the copied token: `IssueTokenLogin`'s upsert matches only an unrevoked row of the subject, so within the token's hour the copy logs in again under a new credential and enrolls afresh (`TestACopiedTokenNeitherEndsNorTakesOverALiveVM` pins it); taking the VM out of the fleet's settings ends that (the operate page's "A copied VM token").
+Every renewal of a `vm` enrollment carries the VM's current token as `vm_token` (`RenewVM`): none is `403 VM_TOKEN_REQUIRED`, another VM's `403 VM_IDENTITY_MISMATCH`, an expired one `403 VM_TOKEN_EXPIRED`, and a body with both a `pod_token` and a `vm_token` `400 INVALID_RENEWAL`; a `vm_token` on any other kind's renewal is the VM identity mismatch, and a `pod_token` on a `vm` renewal the pod one.
+There is no ratchet: the kind is new, so a copy of a VM's key renews nothing off the VM from the first renewal.
+`Create` and `RenewVM` also hold the VM to its fleet (`enroll.Service.VMService`: `BROKER_VM_SERVICES` binds its account to the service, `BROKER_VM_PROJECTS` names its project, the `BROKER_VM_INSTANCES` glob matches its name), else `ErrVMNotListed` (`403 VM_NOT_LISTED`, which `agent-secrets renew` stops on, exit 76); over HTTP the checks before them answer first for a VM the settings already exclude (its launcher credential is `401 LAUNCHER_INVALID` at `AuthenticateLauncher`, its session `401` at `Lookup`), so the code is seen only when the settings change between those checks and the call.
+An enrolled VM the fleet no longer allows has no identity at all: `enroll.Service.Lookup` answers its enrollment not live (`tokenLoginListed` over its runtime id, its credential's service and host), so every call it signs, renewal included (`401 ENROLLMENT_NOT_LIVE`), is refused as an ended session's is, and `requests.Machine` treats it as not live too (`vmRemoved`: `enrollment` answers `pgx.ErrNoRows`, `Values` `ErrGrantNotLive`, and `ApplyDecision`'s approval ends the request denied, naming why, with no grant).
 `internal/broker/policy` decides who may have which secret from the secret's own tags (below);
 `internal/broker/proof` authenticates a session's or a launcher's signed request against its live enrollment or credential;
-`internal/broker/machine` decides typed-code machine logins, logs services in with their Kubernetes tokens, and mints the launcher credentials both issue;
+`internal/broker/machine` decides typed-code machine logins, logs services in with their Kubernetes or Google VM tokens, and mints the launcher credentials both issue;
 and `internal/broker/secrets` is the secret store:
 `secrets.Store`, the one interface the policy lists and describes agent secrets through and a grant's value is read through (`List`, `Describe`, `Read`, `ValidName`), with `secrets.AWS` over AWS Secrets Manager and KMS, `secrets.GCP` over Google Cloud Secret Manager, and, for local development, `secrets.Local`, an in-memory stand-in for the AWS calls.
 
@@ -3922,15 +3938,16 @@ a version labelled `AWSCURRENT` in the same listing's `SecretVersionsToStages`, 
 GCP: `versions/latest` is `ENABLED`, one `GetSecretVersion` per listed secret);
 a secret scheduled for deletion (AWS `DeletedDate`, GCP `expire_time`) is one the store does not hold, left out of `List` and `ErrNotFound` from `Describe` and `Read`;
 and the value check comes after every other reason, so a secret refused for a tag or its key is logged for that (`secrets.Local` gives a secret created without a value no version, as Secrets Manager does);
-an owner tag naming a service is refused as malformed unless `Loader.Services` lists it, which `cmd/broker` fills with `BROKER_SERVICES`' distinct services;
+an owner tag naming a service is refused as malformed unless `Loader.Services` lists it, which `cmd/broker` fills with the distinct services of `BROKER_SERVICES` and `BROKER_VM_SERVICES` together (`serviceNames`);
 and `Loader.secretName` asks `Store.ValidName` whether a name can exist in the store at all (Secrets Manager's 512-character limit;
 Secret Manager's 255-character `[A-Za-z0-9_-]` id), so no lookup is made for one that cannot.
 `secrets.GCP` counts against Secret Manager's 600-a-minute per-project read quota for every call but `AccessSecretVersion` (`TestGCPReadQuotaCost` pins a `List` at 1+N, a `Describe` at 2, a `Read` at 1), so `Current.RefreshOne` anchors a reread only when it changed the live answer, and `NewGCPClient` retries `UNAVAILABLE` (not `RESOURCE_EXHAUSTED`) on `ListSecrets`, `GetSecret` and `GetSecretVersion`.
 `secrets.GCP` opens Secret Manager under Application Default Credentials (`NewGCPClient`:
 on GKE, Workload Identity for the pod's ServiceAccount, no key file), with the client library's logger off, since at debug it prints response bodies, a value among them, and logs a failed call's gRPC status code alone, never its message, which can quote a request.
-A session's `policy.Requester.Service` is the `service` of the launcher credential that enrolled it (`launcher_credentials.service`, joined by `requests.Machine`'s enrollment reads into `enrollmentRow.Service`) only when the session is a pod and its verified `enrollments.subject` is one of the accounts `BROKER_SERVICES` maps to that service (`requests.Machine.ServicesByAccount`, `requester()`):
-a credential's service is the one a token login's `BROKER_SERVICE_LOGINS` entry names, or, for a service login a person approved through a code before token logins, the machine's own claim.
-So a `legion-worker` pod the Legion daemon's login enrolled is `legion-daemon`'s, and a service's secret goes at once to those pods and to no one else.
+A session's `policy.Requester.Service` is the `service` of the launcher credential that enrolled it (`launcher_credentials.service`, joined by `requests.Machine`'s enrollment reads into `enrollmentRow.Service`) only when the session is a pod and its verified `enrollments.subject` is one of the accounts `BROKER_SERVICES` maps to that service (`requests.Machine.ServicesByAccount`), or a VM its fleet still allows (`requests.Machine.vmAllowed`: `VMServicesByAccount` binds its verified email to that service, and the credential's host, `<project>/<zone>/<instance name>`, joined as `enrollmentRow.Host`, names the project `VMProjects` gives and an instance name the `VMInstancePatterns` glob matches), in `Machine.requester`, which all four of its callers (`Create`, `ApplyDecision`, `Values` and the reuse check) call; a VM the fleet no longer allows never reaches it (`vmRemoved`, above):
+a credential's service is the one a token login's `BROKER_SERVICE_LOGINS` or `BROKER_VM_SERVICES` entry names, or, for a service login a person approved through a code before token logins, the machine's own claim.
+So a `legion-worker` pod the Legion daemon's login enrolled is `legion-daemon`'s, a fleet VM that enrolled itself is its fleet's service's, and a service's secret goes at once to those sessions and to no one else.
+`cmd/broker`'s `serviceNames` registers both settings' services with the policy loader, so a secret a VM service owns is served rather than refused `owner-tag-malformed`.
 The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without the alarm, and a failed reload keeps the last set;
 a reload cut short because `NewCurrent`'s context ended (the broker shutting down) is no failed load and logs nothing.
 `Set.Version`, the SHA-256 of every served secret's name, owner, tier, source, max grant and GitHub owners, is recorded on every request.
@@ -4404,9 +4421,10 @@ A bad credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or, for `account
 — and `ACCOUNT_LACKS_POWER`, for a listed caller reaching a route its name does not carry, naming that caller and that route.
 No refusal repeats the token.
 Each `accountAuth` row declares the power it needs, `readsTokensBack` (`POST /v1/oauth/introspect`) or `relaysDecisions` (the ten routes Dispatch's server relays a person's decisions, ends one of the broker's tokens and reads through), `accountPowers` says which powers each caller name carries, and `authenticate` checks the two before the handler runs, so listing an account for introspection alone never gives it approval or revocation authority (`TestEveryAccountRouteDeclaresItsPower` fails on a row that declares none).
-`accountCaller` is the check a service's token login makes (`machine.Service.VerifyServiceToken`), against the same verifier and with the same taxonomy);
+`accountCaller` is the check a daemon's token login makes (`machine.Service.VerifyKubernetesServiceToken`, the Kubernetes half of `VerifyServiceToken`), against the same verifier and with the same taxonomy);
 `serviceAuth` is that same check, taken as the whole of a route's authentication:
 the handler is given the service `BROKER_SERVICE_LOGINS` says the calling account logs in as, a token of an account that list does not name is `403 ACCOUNT_NOT_LISTED` and every other refusal is `accountCaller`'s, and the class holds `POST /v1/oauth/exchange/pod-sessions` alone.
+A Google VM's identity token, which logs a VM in as its fleet's service at the token-login route, authenticates no route of this class: it is the cluster verifier's to judge there, which refuses it as another issuer's (`401 ACCOUNT_TOKEN_INVALID`), and a broker with no Kubernetes issuer answers `401 ACCOUNT_TOKENS_OFF` whatever VM settings it has (`TestAVMTokenAuthenticatesNoDaemonRoute`).
 It is a class rather than a power of `accountAuth`'s because the two lists are two authorities:
 a deployment's daemon registering the pods it starts is not a caller that relays a person's decisions, and putting it on `BROKER_API_ACCOUNTS` would hand it the approval relays.
 `renewAuth` alone adds `ENROLLMENT_NOT_LIVE` for a valid session proof that names an ended enrollment.
@@ -4536,16 +4554,19 @@ a machine login whose access token is ended still refreshes, and only a caller p
 The one consequence a reader needs: a revoked access token is `active: false` to `POST /v1/oauth/introspect` at once, so a resource server that cached an affirmative introspection refuses it within that cache's life and no longer
 — the broker's answer changes the moment the revocation commits, and nothing recalls a cache.
 
-A service, such as the Legion daemon, logs in with its own projected Kubernetes ServiceAccount token (`POST /v1/launcher-credentials/token`:
-`machine.Service.VerifyServiceToken`, then `TokenLogin`), and no person approves it.
+A service, such as the Legion daemon, logs in with its own projected Kubernetes ServiceAccount token, and a Compute Engine VM of a fleet with its own Google identity token (`POST /v1/launcher-credentials/token`:
+`machine.Service.VerifyServiceToken`, then `TokenLogin`), and no person approves either.
 The body carries the token and a machine request object the login's key signed, with one `launcher_credential` detail naming the service.
 The broker verifies the token with `enroll.Service.Pod.VerifyAccount`, the verifier pod enrollment uses against `BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` (a token bound to no pod is accepted, so a `kubectl create token` token logs a daemon off the cluster in), refuses a token that names no `iat` or whose `exp` lies more than `MaxTokenLoginLifetime` (an hour) plus the request skew past it, `401 TOKEN_TOO_LONG_LIVED`, so a copied token logs in for at most an hour after it was minted, and maps its subject through `BROKER_SERVICE_LOGINS` (`enroll.Service.ServiceLogins`, keyed by exact subject, no wildcard) to the one service it logs in as;
-a subject not listed, or listed for another service than the request names, is `403 ACCOUNT_NOT_LISTED`, an expired token `401 TOKEN_EXPIRED`, any other verification failure `401 TOKEN_INVALID`, a request object that does not verify or repeats a `jti` `400 REQUEST_INVALID` (`verifyLauncherRequest`, the check `LoginDevice` shares), a key another live credential holds `409 KEY_HOLDS_LIVE_CREDENTIAL`, and a broker with no issuer `404 TOKEN_LOGIN_OFF`.
+a subject not listed, or listed for another service than the request names, is `403 ACCOUNT_NOT_LISTED`, an expired token `401 TOKEN_EXPIRED`, any other verification failure `401 TOKEN_INVALID`, a request object that does not verify or repeats a `jti` `400 REQUEST_INVALID` (`verifyLauncherRequest`, the check `LoginDevice` shares), a key another live credential holds `409 KEY_HOLDS_LIVE_CREDENTIAL`, and a broker with neither a Kubernetes issuer nor a Google audience `404 TOKEN_LOGIN_OFF`.
+`VerifyServiceToken` picks one verifier per token by its unverified `iss` (`oidc.Verifier.Issues`, through `enroll.VMVerifier.Issues`): a token naming the VM verifier's issuer (`enroll.Service.VM`, `GoogleVMVerifier` against `config.GoogleOIDCIssuer` and `BROKER_GOOGLE_OIDC_AUDIENCE`) goes to it alone, and every other token to the Kubernetes verifier alone, exactly as on a broker with no VM verifier, so neither issuer's tokens make the broker fetch the other's keys (on a broker with no Kubernetes issuer every token goes to the VM verifier).
+A VM's token (`verifyVM`) must carry a verified email and the `google.compute_engine` claims (`format=full`), else `401 TOKEN_INVALID`, is held to the same hour, and must be a VM its fleet allows (`enroll.Service.VMService`), each else `403 ACCOUNT_NOT_LISTED` naming what did not match; its refusals name the VM's identity token (`vmRefusal`, which wraps the same sentinels) rather than a ServiceAccount, whose texts are unchanged.
 `enroll.Service.IssueTokenLogin` writes the credential.
 Each subject holds one live launcher credential (migration 0015, `launcher_credentials.subject`, its partial unique index on live rows, and a check that a row with a subject names a service and no record):
-the first login inserts it, with no operator, the service, host `<namespace>/<name>` and no `record_id`, and each later one moves it, in one upsert under the same id, to the request's key and to the token's expiry, at most an hour away, so a key that was already the credential's (the daemon's renewals) changes nothing but the expiry, a new key (a restart) stops the previous one authenticating at once, and every pod the account enrolled stays under the same credential.
+the first login inserts it, with no operator, the service, the login's host (`<namespace>/<name>` for an account, `<project>/<zone>/<instance name>` for a VM) and no `record_id`, and each later one moves it, in one upsert under the same id, to the request's key and to the token's expiry, at most an hour away, so a key that was already the credential's (the daemon's renewals) changes nothing but the expiry, a new key (a restart) stops the previous one authenticating at once, and every pod the account enrolled stays under the same credential.
+A VM's subject is its runtime id, `enroll.VMClaims.RuntimeID`, never the fleet's shared account, so each VM holds a credential of its own and one VM's login never moves another's (an account-wide subject would let each VM's login stop the last one's enrollment and revocation).
 Each login writes one `launcher_credential.token_login` audit row naming the credential as actor, the subject, the pod the token is bound to, the key, and both the credential's and the token's expiry (`token_expires_at`).
-`AuthenticateLauncher` authenticates such a credential while `enroll.Service.ServiceLogins` still names its subject for its service, rather than through a record's chain, so removing the entry and redeploying ends it at its next call.
+`AuthenticateLauncher` authenticates such a credential while its subject is still listed for its service (`tokenLoginListed`: `enroll.Service.ServiceLogins` for an account; for a VM's runtime id, `VMService` over the account and project it names and the instance name in the credential's host), rather than through a record's chain, so removing the entry, or narrowing a fleet, and redeploying ends it at its next call.
 A revoke on Dispatch's machine-login page ends it as any service's login (anyone signed in, through `record.MayDecide`;
 `LiveCredentials` lists it with `approved_by` empty and its `subject`), and the service's next login inserts a new credential, which enrolls the pods it launches next;
 the daemon never enrolls a pod the revoke ended again.
