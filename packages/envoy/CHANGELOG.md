@@ -1,5 +1,41 @@
 # Changelog
 
+## [26.1.0] - 2026-11-01
+
+### Added
+
+- A Google Compute Engine VM logs in to the secrets broker and enrolls itself with the identity
+  token its metadata server signs, with no stored credential and no person approving it. With
+  `BROKER_GOOGLE_OIDC_AUDIENCE` set, the broker discovers Google's issuer at startup (one
+  `google vm identity` log line), and `POST /v1/launcher-credentials/token` also takes a VM's
+  token (`format=full`) whose account `BROKER_VM_SERVICES` binds, from the project
+  `BROKER_VM_PROJECTS` names and with an instance name `BROKER_VM_INSTANCES` matches; anything else
+  is `403 ACCOUNT_NOT_LISTED` naming what did not match, or `401 TOKEN_INVALID`. Each token goes to
+  the one verifier whose issuer it names, so a VM's token never makes the broker read the
+  cluster's keys, nor a cluster token Google's. Each VM holds its own launcher credential and its
+  own `vm` enrollment, keyed by `<account>@<project>/<zone>/<instance id>`, so VMs that share an
+  account never move or end each other's. No launcher credential ends a VM's enrollment
+  (`DELETE /v1/enrollments/{id}` is `403 VM_ENDS_BY_LOGIN_REVOKE`), so a token copied off the VM
+  cannot end or take over its live enrollment; revoking the VM's machine login, or its lease,
+  ends it. A revoke does not revoke the copied token, which logs in again within its hour; taking
+  the VM out of the fleet's settings ends that. `POST /v1/enrollments` takes kind `vm` with `vm_token`
+  (`403 VM_IDENTITY_MISMATCH`, `403 VM_TOKEN_EXPIRED`), every renewal of one carries the VM's
+  current token (`403 VM_TOKEN_REQUIRED` without it), and a VM service's secrets go to its own VMs
+  at once. A VM its fleet's settings no longer allow (its account dropped, or another project or
+  instance-name glob configured) has no identity from then on: every call it signs is refused
+  `401`, as an ended session's is, so it releases no grant it holds, opens no request and renews
+  nothing, and a person's approval of a request it left pending grants nothing; its launcher
+  credential no longer authenticates (`401 LAUNCHER_INVALID` on a new enrollment), and its next
+  login is `403 ACCOUNT_NOT_LISTED`. On the client, `agent-secrets enroll --vm --service <name>
+  [--audience <aud>] [--out <dir>]` fetches the token, logs in with a key it keeps in memory,
+  enrolls `key.pem`, and prints the enrollment id; run again over the same directory it keeps
+  `key.pem` and extends the lease. `agent-secrets renew --vm` renews with a fresh token each time
+  and stops (exit 76) on `VM_TOKEN_REQUIRED`, `VM_NOT_LISTED` or `ENROLLMENT_NOT_LIVE`. Both ask
+  the metadata server directly, never through a proxy `HTTP_PROXY` names, since the token logs
+  in as the VM. With no
+  Google audience nothing changes: kind `vm` is still `400 INVALID_KIND`, and the Kubernetes and
+  GitHub paths are untouched.
+
 ## [25.2.0] - 2026-11-01
 
 ### Changed
