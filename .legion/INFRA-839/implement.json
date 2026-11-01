@@ -2,84 +2,70 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-839",
-  "completed": "2026-11-01T08:20:00Z",
-  "round": 8,
-  "codeHead": "a4b9ededf432b025a66d1405e75780845152928f",
+  "completed": "2026-11-01T13:05:00Z",
+  "round": 9,
+  "codeHead": "628cb287a5aea06580605d5f12c65d70a64aad64",
+  "branchHead": "9c02143e3c9d28d57567ec9ef214a0cda99e03e5",
   "answersReviewFindings": [
     {
-      "finding": "Item 1 (tests/envoy-role-reassertion.test.ts:191 and :240): claude-envoy's typecheck is red. The base made ChannelSessionOptions.clientInstanceID required and this branch's two new startChannelSession calls predate it, outside every conflict marker of the forward merge.",
-      "fix": "Both calls pass clientInstanceID, the same literal lines 99 and 146 of that file already use.",
-      "test": "No new test: the typecheck is the check. cd packages/claude-envoy && bun run typecheck is clean where it printed TS2345 at both lines before, and bun test is 290 pass / 15 skip / 0 fail."
+      "finding": "Finding A (role_keep.go:507): a failed first resolution of the holder ends the handover at Debug and reports nothing, so the copies wait for the 5-minute sweep, whose handover can end the same way, and they age past roleKeepWindow with nothing above Debug. The doc's premise was false: resolveRoleHolder errs only when a read failed, and a role nobody holds comes back roleHolderUnclaimed with a nil error, which the handover already ends on.",
+      "fix": "The reviewer's one rule, applied to both reads. walked and holderUnresolved are gone; one retry(line, cause) closure writes the read's Debug line and then reads cfg.registry.CachedRoleHolder(role). A claim naming a session earns the next pause and sets readErr, so ended() carries the failure out and reportKeptRoleDrain logs it at Error; a role no claim names, or a claim read that itself failed, ends the handover at Debug. Both false premises are deleted from the docs.",
+      "test": "TestAHandoverOfAClaimedRoleRetriesAHolderResolutionThatFailed, which fails at a4b9ededf432 with 'the handover forwarded [], want [envoy.role.forward.kept-holder-read-00]: a resolution that did not answer is retried, not read as a role nobody holds'."
     },
     {
-      "finding": "Item 2 (api_test.go:712): envoy-go-race is red on TestRoleHolderStateIsNamedByEachRoutesAnswer/publish. The test's own first publish keeps a copy, whose background handover resolves the holder, finds the claim lapsed and releases it before the second publish reads it, so the answer is unclaimed instead of holder_lapsed.",
-      "fix": "The test, not the code: the product behaviour is right, since any resolution may release a lapsed claim. The subtest now names its deps and holds the role's handover guard for its whole run (defer deps.delivery.roleKeepDrains.hold(\"reviewer\")()), so no keep's handover resolves the holder while it sets its claim up. A grep for the same shape found one more rig, TestADispatchRoleRoutedEventToAnUnheldRoleReachesTheNextHolder, whose keep runs through harness.coreHandler and so carries the harness's own forward past the rig's stand-in; it now delivers through *lane.deps.delivery, so whichever handover forwards, the rig records it. Every other keep-then-claim rig keeps with keepRoleMessage, which starts no handover, or runs both handovers on one forward.",
-      "test": "The two rigs themselves, under the detector: CGO_ENABLED=1 go test -race -count=20 -timeout 3300s -run 'TestRoleHolderStateIsNamedByEachRoutesAnswer|TestAHandover|TestTheSweep|TestAKeptCopy|TestADispatchRoleRouted' ./cmd/listener -> ok 533.628s."
+      "finding": "Finding B (role_keep.go:529): the lane-read retry has no exit for a role nobody holds, so an undecodable cursor or a refusing bus costs the full 10-minute handover window and about 25 reads; and hold was a plain Lock that did not see ctx while runKeptRoleDrain started its window before it, so every keep for that role queued one more goroutine on the guard, each logging its own Error line.",
+      "fix": "The same rule ends an unclaimed role's handover at once at Debug, so the retry runs only while the role is claimed. roleKeepGuards' per-role guard is now a channel of one: hold(ctx, role) (func(), bool) gives the wait up when ctx ends, so a handover whose window has run out queues nothing behind one that is failing through its window; tryHold keeps its meaning for the sweep; drainKeptRole reports nothing when the guard was not taken.",
+      "test": "TestAHandoverForAnUnclaimedRoleEndsOnACursorNoReadCanDecode (fails at a4b9ededf432, reporting the undecodable cursor after 3.29 s of retries; 0.04 s and nothing reported here) and TestAKeptLaneGuardStopsWaitingWhenTheHandoversContextEnds, the architect's third test for the round, which shows a second hold waiting, returning false within 10 s of its context ending, and leaving the guard with its first holder."
     },
     {
-      "finding": "Item 3 (role_keep.go:476): a lane-head read that fails on the first pass ends a claim's handover at Debug, because the shared `failed` closure treats it as the keep's no-holder case. In round 4 that read sat inside the walk, after walked = true, so it was retried and reported at Error.",
-      "fix": "The lane-head read no longer goes through that closure. A read that did not answer logs its debug line, earns roleKeepDrainBackoff and the pass runs again, on the first pass as on any other; the closure, renamed holderUnresolved, is reached only by the holder resolution, where the first failure is still the keep's own case. A new headErr carries the last failing read out of the handover through ended(), so one that ends while still failing is reported by reportKeptRoleDrain at Error rather than silently.",
-      "test": "TestAHandoverRetriesALaneHeadReadThatFailedOnItsFirstPass, which fails at the previous code with 'the handover whose lane-head reads all failed reported nothing, so the lane it left undrained is said nowhere above Debug'."
+      "finding": "Minor role_keep.go:493: holderUnresolved has one caller, the backoff pair appears three times, and ended() is returned at two exits while err is returned at five, which agree only because headErr is reset every pass with nothing saying so.",
+      "fix": "One retry() closure for both reads, one waitOut() for the three backoff pairs, ended() returned at every exit, and readErr reset once per pass right after the pause with that invariant stated in the code and in the function's doc. roleKeepDrainBackoff's doc now covers a failed head read.",
+      "test": "No new test: the handover tests of rounds 3 to 6 drive every branch of the rewritten loop and pass unchanged, which is what 'the behaviour does not change' means here."
     },
     {
-      "finding": "Item 4 (role_keep.go:613): the lane head is read up to three times per handover, the sweep reads it before it checks the claim, and the file is 1001 lines.",
-      "fix": "walkKeptRole takes the pass's keptLaneHead and its own opening read is gone - a cursor that moved since that read fails the compare-and-swap with ErrCursorMoved and ends the walk roleKeepLaneBusy, exactly as the re-read did. The sweep reads the claim, tryHolds and starts the handover with no head read of its own, the handover's first pass ending on !head.left without resolving a holder, so a lane of an unclaimed role costs one claim read a pass and nothing else. writeRoleKeepCursor is folded into roleKeepLaneCursor.write and readRoleKeepCursor into readKeptLaneHead, with one doc reference in delivery.go following the fold. role_keep.go is 979 lines.",
-      "test": "No new test of its own: the existing walk, handover and sweep tests all drive the single read now, and TestTheSweepHandsOverALaneNoHandoverIsDraining and TestAHandoverOfAnEmptyKeptLaneResolvesNoHolder fail if the one 'anything left' test is wrong. wc -l proves the line count."
-    },
-    {
-      "finding": "Minor role_keep.go:362 - the comment still names roleKeepDrainAgain, deleted in efa9c9be.",
-      "fix": "It names the switch in handOverKeptRole.",
-      "test": "None; prose."
-    },
-    {
-      "finding": "Minor role_keep.go:590 - 'costs no round trip' is wrong for the case the check exists for, since an unclaimed role is never in the view (kv.go:487) and the read goes to the bucket (kv.go:1145-1152).",
-      "fix": "The comment says a claimed role is in the view and costs no round trip, and an unclaimed one costs the one bucket read its miss makes.",
-      "test": "None; prose."
-    },
-    {
-      "finding": "Minor legion-phase-hook.test.ts:379 - the comment says the notice asks for no keep: false, which is false: the hook uses the shared createPhaseReminder, which sends it.",
-      "fix": "The comment says the notice does send keep: false, so the stubbed 404 is the ordinary answer for an unheld architect role rather than an older listener's.",
-      "test": "None; prose. The behaviour it describes is pinned by pi-shared/src/phase-reminder.test.ts:234."
+      "finding": "Minor role_keep.go:665: since the sweep no longer reads the head it starts a handover for every claimed role with any kept copy, drained lanes included, and logged 'found a lane no handover was draining' for each.",
+      "fix": "The line is now 'listener kept role sweep is handing over a claimed role's kept lane', true of a drained lane as of any other, and the sweep's doc no longer claims a passed-over unclaimed lane is logged, since nothing is logged for it. The line stays at the sweep rather than moving into the handover: the sweep's decision is what it records, and the handover's own end is already reported by reportKeptRoleDrain.",
+      "test": "None; prose and a log line."
     }
   ],
   "proof": [
     {
-      "criterion": "Acceptance 1 to 3 end to end at this round's head: a role message the listener cannot deliver is kept, the sender is told, the role's next claim is handed each kept copy once carrying kept_at, and a sender with a queue of its own still gets the 404.",
+      "criterion": "Acceptance 1 to 3 end to end at the head that merges: a role message the listener cannot deliver is kept, the sender is told, the role's next claim is handed each kept copy once carrying kept_at, and a sender with a queue of its own still gets the 404.",
       "surface": "The real local stack: a built Envoy listener, a real nats-server and a real session process that registers, claims and reads its agent subject (packages/envoy/scripts/e2e-local.sh), run in this issue pod.",
       "command": "cd -- \"$LEGION_WORKSPACE\" && timeout 1200 bash packages/envoy/scripts/e2e-local.sh",
-      "observed": "exit 0 with 'unclaimed-role window: kept message 6aa4c7675f57f09fde75aaded477e96b reached the fake session exactly once, carrying kept_at', 'lapsed-claim window: kept message 90aa6d15b0da8f0dc6d9098492fd8c95 reached the fake session exactly once, carrying kept_at', 'keep-false control: the unheld role answered 404, nothing was stored and its claimant was handed nothing', and both PASS lines.",
-      "headSha": "a4b9ededf432b025a66d1405e75780845152928f",
+      "observed": "exit 0 at the merge head 9c02143e3c9d with 'unclaimed-role window: kept message 3ab5f0e528571dcea84125084a932ba6 reached the fake session exactly once, carrying kept_at', 'lapsed-claim window: kept message 77996209978621995befbecddeb25a67 reached the fake session exactly once, carrying kept_at', 'keep-false control: the unheld role answered 404, nothing was stored and its claimant was handed nothing', and both PASS lines.",
+      "headSha": "9c02143e3c9d28d57567ec9ef214a0cda99e03e5",
       "negativeControl": "Before the change, on this round's two candidate bases: the unheld role answered 404 {\"error\":\"no holder for role t0-unheld\",\"reason\":\"unclaimed\"} and the lapsed claim 404 with \"holder_lapsed\",\"claim_released\":true, nothing stored and nothing delivered to the claimant."
     },
     {
-      "criterion": "The two jobs CI failed on at e19f161c6ca8 are green here, and the race the reviewer traced cannot recur.",
-      "surface": "The listener's Go suite under the race detector, and the claude-envoy package's own typecheck and tests, which are what ci.yaml's envoy-go-race and claude-envoy jobs run.",
-      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && CGO_ENABLED=1 GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -race -count=1 -timeout 2400s -run 'TestRoleHolderState|Role|Kept|Keep' ./cmd/listener; then the same with -count=20 -timeout 3300s -run 'TestRoleHolderStateIsNamedByEachRoutesAnswer|TestAHandover|TestTheSweep|TestAKeptCopy|TestADispatchRoleRouted'; then cd ../claude-envoy && bun run typecheck && bun test",
-      "observed": "ok github.com/sjawhar/envoy/cmd/listener 186.421s and ok 533.628s, neither printing WARNING: DATA RACE; claude-envoy typecheck clean and bun test 290 pass, 15 skip, 0 fail.",
-      "headSha": "a4b9ededf432b025a66d1405e75780845152928f",
-      "negativeControl": "CI run 41254878038 at e19f161c6ca8 concluded failure on exactly these two jobs: the claude-envoy typecheck with TS2345 at tests/envoy-role-reassertion.test.ts lines 191 and 240, and envoy-go-race with TestRoleHolderStateIsNamedByEachRoutesAnswer/publish reporting 'kept response = {Kept:true KeptReason:unclaimed ...}, want kept with reason holder_lapsed'. A budget fact for whoever repeats this: -race -count=20 over the whole Role|Kept|Keep set is killed by a 2400 s timeout in this pod and prints no DATA RACE line at all, so it reports nothing either way; the five race-prone tests at the same count finish in 533 s."
+      "criterion": "The handover's failure paths: a failed read is retried only while the role is claimed and reported at Error if the handover ends still failing, an unclaimed role ends at once, and a keep waiting on the guard stops when its context ends.",
+      "surface": "The listener's own Go suite, the three tests driving a handover through a failing stream read, a failing session read and a held guard.",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -count=1 -timeout 900s -run 'TestAKeptLaneGuardStopsWaitingWhenTheHandoversContextEnds|TestAHandoverForAnUnclaimedRoleEndsOnACursorNoReadCanDecode|TestAHandoverOfAClaimedRoleRetriesAHolderResolutionThatFailed' -v ./cmd/listener",
+      "observed": "--- PASS for all three: TestAHandoverForAnUnclaimedRoleEndsOnACursorNoReadCanDecode 0.26s, TestAHandoverOfAClaimedRoleRetriesAHolderResolutionThatFailed 1.04s, TestAKeptLaneGuardStopsWaitingWhenTheHandoversContextEnds 0.10s; ok 1.454s.",
+      "headSha": "628cb287a5aea06580605d5f12c65d70a64aad64",
+      "negativeControl": "At the committed a4b9ededf432, with the same tests: the unclaimed-cursor test fails after 3.29 s of retries, reporting 'read role kept-unclaimed-head-read's kept-lane cursor stored at 2: unexpected end of JSON input, want nothing reported for a lane no claim is coming for', and the claimed-role test fails with 'the handover forwarded [], want [envoy.role.forward.kept-holder-read-00]'."
     },
     {
-      "criterion": "Acceptance 4 and 5 and the rest of the change still hold after this round's rework of the handover, the walk and the sweep.",
-      "surface": "The repository's own Go suites and static gates over the changed tree.",
-      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -count=1 -timeout 2400s ./cmd/listener ./internal/bus ./internal/dispatch/outbox ./internal/store; then gofmt, go build, go vet and bunx biome check",
-      "observed": "ok cmd/listener 694.039s, ok internal/bus 338.051s, ok internal/store 30.783s; gofmt silent, build and vet clean, biome 'Checked 87 files. No fixes applied.' with one pre-existing warning in packages/claude-envoy/tests/dist-fresh.test.ts, a file this change does not touch. ./internal/dispatch/outbox is the one package not green in this pod, and it is the pod rather than the change: all three runs reach PASS with zero '--- FAIL' lines and then fail in teardown with 'storetest: drop isolated database ...: ERROR: permission denied to terminate process (SQLSTATE 42501)', because this pod's legion_test login is not a superuser (select usesuper -> f) and cannot terminate the backend still on its isolated database. ci.yaml's envoy-go runs as postgres and passed that package at e19f161c6ca8 in run 41254878038.",
-      "headSha": "a4b9ededf432b025a66d1405e75780845152928f",
-      "negativeControl": "role_keep.go went from 1001 lines to 979, and the walk's own opening read is gone: a cursor that moves between the pass's read and the walk's write still ends the walk roleKeepLaneBusy through ErrCursorMoved, which TestADrainStopsWhenTheRoleChangesHolderUnderIt and the claim-race tests exercise."
+      "criterion": "The whole change still holds at the head that merges, after the base merge GitHub's CONFLICTING required, with no race in the paths this round rewrote.",
+      "surface": "The repository's Go and TypeScript suites and static gates over the merged tree.",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" go test -p 1 -count=1 -timeout 2400s ./cmd/listener ./internal/bus; then CGO_ENABLED=1 go test -race -count=20 -timeout 3300s -run 'TestRoleHolderStateIsNamedByEachRoutesAnswer|TestAHandover|TestTheSweep|TestAKeptCopy|TestADispatchRoleRouted|TestAKeptLaneGuard' ./cmd/listener; then bun run typecheck and bun test in claude-envoy and envoy-client; then gofmt, go build, go vet and check-private-names.sh",
+      "observed": "ok cmd/listener 704.858s and ok internal/bus 336.603s; the race lane ok 554.990s with no WARNING: DATA RACE; claude-envoy typecheck clean with 290 pass / 16 skip / 0 fail; envoy-client tsc clean with 1354 pass / 0 fail; gofmt silent, build and vet clean, check-private-names clean over 7247 files.",
+      "headSha": "9c02143e3c9d28d57567ec9ef214a0cda99e03e5",
+      "negativeControl": "The merge's own two conflicts were each a sentence both branches rewrote, and each resolution was checked against both parents: had either been taken whole, the tool-contract description would have lost either the kept lane's three answers or the base's serve-port wording, and deliveries.md one of its two bullets. The fingerprint changed, 1166794f to b8b48949, so this head goes through the tester as a new one."
     }
   ],
   "filesChanged": [
     "packages/envoy/cmd/listener/role_keep.go",
-    "packages/envoy/cmd/listener/delivery.go",
-    "packages/envoy/cmd/listener/api_test.go",
     "packages/envoy/cmd/listener/role_keep_handover_test.go",
-    "packages/claude-envoy/tests/envoy-role-reassertion.test.ts",
-    "packages/claude-envoy/tests/legion-phase-hook.test.ts"
+    "packages/envoy/cmd/listener/api_test.go",
+    "packages/envoy-client/src/tool-contract.ts",
+    "skills/envoy/references/deliveries.md"
   ],
   "trickyParts": [
-    "This round was written twice as well: the pod was recreated again mid-round and the INFRA merge lane pushed what it found to legion/INFRA-839-rescue at cdd31a08. That branch held two files, both already identical in the rebuilt workspace, so nothing was taken back from it and the lane deleted it at my request.",
-    "The outbox package's red in this pod is a teardown permission, not a test: every test passes and the drop of storetest's isolated database is refused because legion_test is not a superuser. Whoever reads a red here should check for '--- FAIL' lines before believing the package summary.",
-    "-race -count=20 over the whole Role|Kept|Keep set does not fit a 2400 s timeout in this pod and dies with a goroutine dump that looks like a detected race until the last line is read. The five tests that can race, at the same count, finish in 533 s and are what the proof uses."
+    "api_test.go changed outside the files the round named, and it had to: TestRoleHolderStateIsNamedByEachRoutesAnswer holds the reviewer role's guard, and hold now takes a context and reports whether it was taken, so the call is release, held := ...hold(context.Background(), \"reviewer\") with a t.Fatalf on !held. Nothing else in that test moved.",
+    "The base had moved again by the time the merge ran: the round named legion/INFRA-594 at 1050502b, and the tip was 6ef5cefabac2. The merge is against the tip, and the forward-merge comment says so.",
+    "role_keep.go is 999 lines, twenty up from round 5's 979 and still under the limit the reviewer set: the ctx-aware guard and the retry closure cost more lines than the two they replaced.",
+    "The pod fault from round 5 still stands and is not this change: ./internal/dispatch/outbox reaches PASS with zero --- FAIL lines and then fails in teardown because legion_test cannot terminate the backend on its isolated database. This round's suite run leaves that package out for that reason; ci.yaml's envoy-go runs it as postgres and passed it at a4b9ededf432."
   ],
   "openQuestions": []
 }
