@@ -107,6 +107,10 @@ type bootConfig struct {
 	// rather than share the process's five-second copy; only DISPATCH_TEST_ROSTER_UNCACHED=1, under
 	// the test hooks, sets it.
 	ListenerRosterUncached bool
+	// ReconcileAtStart makes the delivery reconcile run one pass as it starts rather than only after
+	// its jittered first tick; only DISPATCH_TEST_RECONCILE_AT_START=1, under the test hooks, sets
+	// it.
+	ReconcileAtStart bool
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -588,7 +592,11 @@ func main() {
 	// (it never touches it); the NATS consumer that catches events between reconcile passes needs
 	// a client, exactly like the outbox above. Both take the event broker: each writes
 	// issue.deployed on a pull request's issue once its shipping run is known (LEGION-781).
-	go delivery.NewReconcile(database.Pool, appCtx.GitHub(), broker).Run(ctx, leases)
+	reconcile := delivery.NewReconcile(database.Pool, appCtx.GitHub(), broker)
+	if boot.ReconcileAtStart {
+		reconcile.FirstPassAtStart()
+	}
+	go reconcile.Run(ctx, leases)
 	// waitIntakes waits for the intakes' stop, which shutdown runs before it closes the database
 	// pool; with no NATS client there is nothing to wait for.
 	waitIntakes := func() {}
@@ -869,6 +877,12 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_ROSTER_UNCACHED")
 		}
 		boot.ListenerRosterUncached = raw == "1"
+	}
+	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_RECONCILE_AT_START")); raw != "" {
+		if !boot.TestHooksEnabled {
+			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_RECONCILE_AT_START")
+		}
+		boot.ReconcileAtStart = raw == "1"
 	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {

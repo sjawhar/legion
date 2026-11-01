@@ -437,12 +437,15 @@ func drainEnvelopes(t *testing.T, from <-chan contracts.Envelope, quiet time.Dur
 // ───── the delivery durables ────────────────────────────────────────────────
 
 // githubFake is the loopback GitHub the test's processes send their App calls to, so no call
-// leaves the machine. It answers an empty list to everything, and holds the first webhook
-// delivery listing - the webhook redelivery sweep's own first request, made at boot - until
-// release is closed, which is how a row makes one process hold that sweep's lease long enough
-// for the other to find it held. It counts those listings too: the listing is the call the
-// webhook-redelivery lease exists to make once however many processes sweep, so a row about
-// that lease reads the count rather than the log alone.
+// leaves the machine. It answers each path the processes read in the shape GitHub's API gives it
+// (githubFakeAnswer): an empty webhook delivery list, the App's one installation on acme/deploy
+// granting the reads the delivery reconcile checks for, an installation token, that
+// installation's one repository, an empty pull-request search and empty workflow run and job listings, and GitHub's 404 for any other
+// path. It holds the first webhook delivery listing - the webhook redelivery sweep's own first
+// request, made at boot - until release is closed, which is how a row makes one process hold that
+// sweep's lease long enough for the other to find it held. It counts those listings too: the
+// listing is the call the webhook-redelivery lease exists to make once however many processes
+// sweep, so a row about that lease reads the count rather than the log alone.
 type githubFake struct {
 	server  *httptest.Server
 	release chan struct{}
@@ -461,14 +464,51 @@ func startGitHubFake(t *testing.T) *githubFake {
 			fake.countDeliveryListing()
 			fake.holdFirstDeliveryListing(r.Context())
 		}
+		status, body := githubFakeAnswer(r)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, "[]")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
 	}))
 	t.Cleanup(func() {
 		fake.Release()
 		fake.server.Close()
 	})
 	return fake
+}
+
+// githubFakeInstallation is GitHub's installation object for the App on acme/deploy (the deploy
+// repository seedDeliverySettings names), with the Actions and Pull requests reads the delivery
+// reconcile's permission check requires (githubapp.Client.DeliveryPermissions).
+const githubFakeInstallation = `{"id":1,"app_slug":"multiprocess","account":{"login":"acme"},` +
+	`"permissions":{"actions":"read","pull_requests":"read","contents":"read","metadata":"read"}}`
+
+// githubFakeAnswer is GitHub's status and body for r, in the shape its API gives each path the
+// processes read: the webhook redelivery sweep's listings, the installation lookups and token
+// mint every installation-token call makes, the installation's repository list and the
+// reconcile's GraphQL pull-request search over it, and its workflow run and job listings. Every listing is empty, so a pass reads its whole sequence and
+// finds nothing to import.
+func githubFakeAnswer(r *http.Request) (int, string) {
+	path := r.URL.Path
+	switch {
+	case strings.HasPrefix(path, "/app/hook/deliveries"):
+		return http.StatusOK, "[]"
+	case path == "/app/installations":
+		return http.StatusOK, "[" + githubFakeInstallation + "]"
+	case r.Method == http.MethodPost && strings.HasPrefix(path, "/app/installations/") && strings.HasSuffix(path, "/access_tokens"):
+		return http.StatusCreated, fmt.Sprintf(`{"token":"ghs_multiprocess","expires_at":%q}`,
+			time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	case strings.HasPrefix(path, "/repos/") && strings.HasSuffix(path, "/installation"):
+		return http.StatusOK, githubFakeInstallation
+	case path == "/installation/repositories":
+		return http.StatusOK, `{"total_count":1,"repositories":[{"id":1,"name":"deploy","full_name":"acme/deploy","private":true,"owner":{"login":"acme"}}]}`
+	case r.Method == http.MethodPost && path == "/graphql":
+		return http.StatusOK, `{"data":{"search":{"issueCount":0,"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[]}}}`
+	case strings.Contains(path, "/actions/workflows/") && strings.HasSuffix(path, "/runs"):
+		return http.StatusOK, `{"total_count":0,"workflow_runs":[]}`
+	case strings.Contains(path, "/actions/runs/") && strings.HasSuffix(path, "/jobs"):
+		return http.StatusOK, `{"total_count":0,"jobs":[]}`
+	}
+	return http.StatusNotFound, `{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}`
 }
 
 // holdFirstDeliveryListing blocks the first listing until Release, the caller gives up, or
@@ -514,12 +554,19 @@ func (f *githubFake) URL() string { return f.server.URL }
 // of them binds each durable and the other stands by - an ordinary state, logged at INFO and
 // never as a failure - polling every two seconds, so the work resumes within seconds of the
 // holder dying rather than waiting for a deploy.
+//
+// The delivery reconcile reads GitHub from whichever process takes its lease. Its first pass is
+// jittered over its first five minutes, so without a knob it lands inside this row's window
+// only now and then; DISPATCH_TEST_RECONCILE_AT_START runs it as each process starts, so every
+// run of this row meets it, and neither process may log a delivery error for it.
 func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 	pair := newPair(t)
 	seedDeliverySettings(t, pair.database)
 	fake := startGitHubFake(t)
 	fake.Release()
-	pair.start(t, githubAppEnv(t, fake.URL()))
+	env := githubAppEnv(t, fake.URL())
+	env["DISPATCH_TEST_RECONCILE_AT_START"] = "1"
+	pair.start(t, env)
 
 	conn := testnats.Connect(t, pair.nats)
 	js, err := conn.JetStream()
@@ -545,6 +592,17 @@ func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 			t.Fatalf("read %s: %v", durable, err)
 		} else if !info.PushBound {
 			t.Errorf("NATS reports nothing bound to %s, though %s logged that it bound it", durable, pair.name(holder))
+		}
+	}
+
+	// The reconcile's pass at start has read GitHub as a deployment's does: its permission check,
+	// its searches and its run listings, answered in GitHub's own shapes. The lease logs its run
+	// once the pass has returned, so every line it wrote is in the log by then.
+	waitForLease(t, pair, leaseRan, "delivery-reconcile", 60*time.Second)
+	for _, process := range []*dispatchProcess{pair.a, pair.b} {
+		if errorLines := process.logLines("level=ERROR", "dispatch delivery:"); len(errorLines) > 0 {
+			t.Errorf("%s logged a delivery error while the reconcile read GitHub:\n%s",
+				pair.name(process), strings.Join(errorLines, "\n"))
 		}
 	}
 
