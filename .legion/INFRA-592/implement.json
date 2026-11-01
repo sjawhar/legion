@@ -2,58 +2,64 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-592",
-  "completed": "2026-11-01T00:30:47Z",
+  "completed": "2026-11-01T06:57:14Z",
   "proof": [
     {
-      "criterion": "A body still arriving holds no write unit; bodies and answers are bounded by idle time and a rate floor, so honest slow transfers complete (review 2, PRRT_kwDORFy7ds6yULlZ)",
-      "surface": "go test against a real Postgres 16 (UTF-8), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB",
-      "command": "go test -run 'TestABodyThatKeepsArrivingIsTakenHoweverLongItTakes|TestATricklingBodyDoesNotHoldItsWriteUnitWithoutEnd|TestASlowButSteadyReaderOfALargeAnswerIsAnsweredInFull|TestAPinnedReadGivesItsConnectionBackWhenItsClientStopsReading' ./internal/dispatch/api/",
-      "observed": "all pass in the api suite at the head; a write beside two trickling bodies is admitted at once, a steady body past the old total bound is taken, a slow-but-steady reader of a large answer is answered in full",
-      "headSha": "1176657a34d07c50da022dbb68c305b37ee45c78",
-      "negativeControl": "At 44aada0b the tricklers held the write units and a body arriving past 60 s total was answered 400 REQUEST_BODY_UNREADABLE (the reviewer's finding; the new tests encode both)"
+      "criterion": "A queued write whose client hangs up is logged 499 and gives its queue slot up at once (architect round 13, item 1)",
+      "surface": "go test against a real Postgres 16 (UTF-8), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, a real httptest.Server connection",
+      "command": "go test -run 'TestAQueuedWriteWhoseClientHangsUpIsLoggedClientGone$' ./internal/dispatch/api/ (the tester's red test 0e2b3ea9, unmodified)",
+      "observed": "passes; request_bounds_test.go differs from 0e2b3ea9 only by the new TestAWriteWhoseBodyOutlastsItsWaitIsAdmittedAfterIt",
+      "headSha": "b7312fc12916d748b53d8ecaffa2d27bf557e711",
+      "negativeControl": "At 1176657a: 'the queued write whose client hung up left the queue 10.009456118s later and logged: ... status=429 elapsed_ms=10000 ... want status=499'"
     },
     {
-      "criterion": "A commit timeout with the client gone logs its ERROR line; gone clients (queued, mid-body, asset branches) are recorded 499 (PRRT_kwDORFy7ds6yULlc, PRRT_kwDORFy7ds6yULld)",
+      "criterion": "A write waits for admission once, in arrival order: a parked write resumes ahead of later arrivals and its total queue wait is bounded once (item 2)",
       "surface": "go test against a real Postgres 16 (UTF-8), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB",
-      "command": "go test -run 'TestACommitPastItsBoundIsLoggedWhenItsClientHasGone|TestARequestWhoseClientLeavesWhileItIsQueuedIsLoggedClientGone' ./internal/dispatch/api/; go test ./internal/dispatch/accesslog/ ./internal/dispatch/routes/",
-      "observed": "pass; accesslog and routes ok",
-      "headSha": "1176657a34d07c50da022dbb68c305b37ee45c78",
-      "negativeControl": "At 44aada0b the queued case logged status=200 and the commit timeout with the client gone only a DEBUG 499 line"
+      "command": "go test -run 'TestAnEarlierArrivalIsQueuedAheadOfLaterOnesAlreadyWaiting|TestAResumedTicketIsGrantedAheadOfLaterArrivals|TestAQueuedThenParkedRequestWaitsOnceOverAll' ./internal/dispatch/admission/; CGO_ENABLED=1 go test -race -count=1 -timeout 20m ./internal/dispatch/admission/; go test -run TestAWriteWhoseBodyOutlastsItsWaitIsAdmittedAfterIt ./internal/dispatch/api/",
+      "observed": "all pass; admission -race ok",
+      "headSha": "b7312fc12916d748b53d8ecaffa2d27bf557e711",
+      "negativeControl": "With the old queue (PushBack, sequence at queue time, a full wait per ask): 'a queued request was never answered', 'the parked ticket never resumed', 'the parked write waited 1.00127111s more after 600ms in the queue, want no more than the 400ms left of its 1s wait'"
     },
     {
-      "criterion": "planRepairs decides the settlement pass's ending; MaxAdmittedUnits derived from store.SharedPoolSize; keyedUploads, keyedReplays and issueUploadRoute folded onto the rows; editArtifact publishes before it releases; a related check waits for its meaning stage (PRRT_kwDORFy7ds6yULlf, \u2026Llg, \u2026Llh, \u2026Llm, review body)",
-      "surface": "go test against a real Postgres 16 (UTF-8), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB",
-      "command": "go test -run 'TestASettlementThatWithholdsReturnedAnswersCompletes|TestCopyLock|TestEveryRoutesOversizedBodyIsAnsweredByItsRowsLimit|TestARelatedCheckWaitsForItsHeldMeaningStagesConnection|TestRoutesTable' ./internal/dispatch/api/; go test ./internal/dispatch/docs/ ./internal/dispatch/store/ ./internal/dispatch/admission/; infra gcp ConnectionsPer",
-      "observed": "all pass; docs ok (1236 s), store ok, admission ok; ConnectionsPerProcess 89 = dispatchConnectionsPerPod 89; the oversized-body test covers 66 non-GET rows",
-      "headSha": "1176657a34d07c50da022dbb68c305b37ee45c78",
-      "negativeControl": "TestARelatedCheckWaitsForItsHeldMeaningStagesConnection fails without the wait: 'the check answered ... while its meaning stage still held a request-pool connection'"
+      "criterion": "10x write refusal latency remeasured on the tester's pair shape (item 2)",
+      "surface": "INFRA-589's 2-core load reproduction, fresh stack seeded by base main 072a7d34, adjacent base/head 10x pairs on pod 5be9ec7a-cae5-48b9-98ff-2df107a9930c, nothing else of the implementer's running",
+      "command": "run-step.sh r13-{base,head}-10x-{a,b} --events 40 --sessions 1000 --requests 600 (/legion/scratch/tmp/infra-592/pairs13.sh)",
+      "observed": "head: write refusals 6,064 and 6,083, all 429 OVERLOADED, p50 1,032 ms, p90 1,090-1,091, p99 1,204-1,209, max 3,009-3,579; read refusal p99 175-178 ms; 0 connection failures; 6.01-6.12 events/s committed. Base (main): 1.49-1.52 events/s, about 30,000 write timeouts. Written in the PR body's risk line. Artifacts infra-592-implementer-r13-r13-*-tar-gz. Sampled memory peak 10.58 GiB of 19 (1,187 samples)",
+      "headSha": "b7312fc12916d748b53d8ecaffa2d27bf557e711",
+      "negativeControl": "The tester's round 12 at 1176657a: write refusal p99 2,126-2,157 ms, max 5,283-5,791 ms"
     },
     {
-      "criterion": "The suites pass at the merged head",
+      "criterion": "editArtifact publishes before it releases its writer gate, pinned by a test",
       "surface": "go test against a real Postgres 16 (UTF-8), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB",
-      "command": "go test ./internal/dispatch/api/ ./cmd/dispatch/ ./internal/dispatch/admission/ ./internal/dispatch/accesslog/ ./internal/dispatch/routes/ ./loadtest/ at 1176657a; check-ci-filters.sh; semantic-line-breaks on packages/envoy/AGENTS.md and cmd/dispatch/README.md",
-      "observed": "api: every test but TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (collation); cmd/dispatch, admission, accesslog, routes, loadtest ok; filters: 28 gates covered; both guides pass the layout check",
-      "headSha": "1176657a34d07c50da022dbb68c305b37ee45c78",
-      "negativeControl": "Before the merge resolution docs/marks.go conflicted with main's #2548/#2604"
+      "command": "go test -run 'TestAnEditHoldsItsDocumentsGateUntilItsEventsArePublished$' ./internal/dispatch/api/",
+      "observed": "passes",
+      "headSha": "b7312fc12916d748b53d8ecaffa2d27bf557e711",
+      "negativeControl": "With release() and s.publish swapped: 'a second writer of the document answered 200 while the first edit's events were still unpublished'"
+    },
+    {
+      "criterion": "The suites pass at the head, after the forward merge of main 072a7d34",
+      "surface": "go test against a real Postgres 16 (UTF-8), -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB",
+      "command": "go test ./internal/dispatch/api/ ./internal/dispatch/admission/ ./cmd/dispatch/ ./internal/dispatch/docs/ ./internal/dispatch/store/ ./internal/dispatch/routes/ ./loadtest/; check-ci-filters.sh; infra gcp ConnectionsPer; semantic-line-breaks on packages/envoy/AGENTS.md",
+      "observed": "api: every test but TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (collation); admission, cmd/dispatch, docs (1272 s), store, routes, loadtest ok; filters 28 gates; 89 connections; layout ok; the merged route table holds main's routes exactly",
+      "headSha": "b7312fc12916d748b53d8ecaffa2d27bf557e711",
+      "negativeControl": "Before the merge resolution the PR conflicted with main in seven files"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/api/{body_drain,server,request_keys,routes_table,artifacts,suggestions}.go and tests",
-    "packages/envoy/internal/dispatch/docs/settlement.go",
-    "packages/envoy/internal/dispatch/admission/admission.go",
-    "packages/envoy/internal/dispatch/store/{pools,store,pool,acquire}.go",
-    "packages/envoy/internal/dispatch/routes/router.go",
-    "packages/envoy/cmd/dispatch/conn_age.go",
-    "packages/envoy-client/src/dispatch-http.ts",
-    "docs and fragments named in the review"
+    "packages/envoy/internal/dispatch/admission/admission.go and tests",
+    "packages/envoy/internal/dispatch/api/{server,body_drain,request_keys,project_scope}.go and tests",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/cmd/dispatch/README.md",
+    "packages/envoy/.changes/unreleased/INFRA-592-{admission,request-body-and-answer-bounds}.yaml",
+    "merge: routes_table.go, server.go, server_test.go, storable_text.go, suggestion_outcomes.go, docs/service.go, AGENTS.md"
   ],
   "trickyParts": [
-    "The ticket is parked inside drainedBody's reads, so every layer that reads a body (keyed spool, decode, multipart, drain) is covered once",
-    "TestEveryRoutesOversizedBodyIsAnsweredByItsRowsLimit is a guard, not a red test: a missing keyedUploads entry was not observable before"
+    "The body is read before admission only when there is no room and the client did not ask to continue; an admitted write still parks while its body arrives, and its resume returns to its arrival place within its one wait",
+    "The merge with main was resolved by a worker in a session the pod restart ended; it came back through legion/INFRA-592-rescue(-jj); its build, the route set against main and the suites were checked here"
   ],
   "deviations": [
-    "No load run this round: the changes are request-path bounds, refactors and prose; leftover check (ps -eo pid,args | grep -E 'memory.usage_in_bytes|sleep 2|go test|run-step|loadgen') listed nothing",
-    "Work from the pod before its restart came back through legion/INFRA-592-rescue (3f43e99c), verified by its tests and committed as fe08fb02 and 0647b935; the rescue branch is deleted"
+    "Leftover check after the runs (ps -eo pid,args | grep -E 'memory.usage_in_bytes|sleep 2|go test|run-step|loadgen|pairs13'): it listed nothing",
+    "Main's #2549, #2599, #2609 landed after the merge; they merge cleanly (git merge-tree) and add no api call sites, so they are not taken this round"
   ],
   "openQuestions": []
 }
