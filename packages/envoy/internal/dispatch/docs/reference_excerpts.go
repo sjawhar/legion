@@ -3,8 +3,8 @@ package docs
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,17 +23,22 @@ import (
 // twice - ReplaceText's render of the replacement, which is the version's markdown, and
 // applyLive's render of the fork, which the ledger records - so the excerpts and blocks are cut
 // from applyLive's render only when the two agree. It refuses a context that was not joined.
+//
+// The version's time, which dates its new references and blocks, is the transaction's now()
+// (Ledger.Now): every writer of a version in a joined transaction dates it so, by the column's
+// default or explicitly (NextVersion), and its row may not be written yet - its insert can be
+// queued for the write phase like the index's own writes.
 func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string, version int, markdown string) (model.ReferenceChanges, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {
 		return model.ReferenceChanges{}, errUnjoined
 	}
-	var versionAt time.Time
-	if err := tx.QueryRow(ctx, `select created_at from artifact_versions where artifact_id = $1 and number = $2`,
-		artifactID, version).Scan(&versionAt); err != nil {
-		return model.ReferenceChanges{}, fmt.Errorf("read version %d of %s: %w", version, artifactID, err)
+	ledger := ledgerFrom(ctx)
+	versionAt, err := ledger.Now(ctx)
+	if err != nil {
+		return model.ReferenceChanges{}, err
 	}
-	rendered := ledgerFrom(ctx).writtenRendering(artifactID)
+	rendered := ledger.writtenRendering(artifactID)
 	if rendered.tree != nil && rendered.markdown != markdown {
 		slog.Warn("dispatch: a document version left its reference excerpts and blocks to the reconciliation: the tree its transaction wrote does not render as the version's markdown",
 			"artifact", artifactID, "version", version)
@@ -43,7 +48,7 @@ func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string
 }
 
 // indexDocument indexes one document version, written at versionAt, in its writer's transaction,
-// which holds the document's owner row, from the render the version's markdown came from:
+// which holds the document owner's lock, from the render the version's markdown came from:
 // indexRenderedVersion with rendered's blocks. The blocks are rendered.offsets; GET …/blocks lists
 // one block per offset of the same renderer (renderedBlocks), so both list one set of blocks. A
 // version with no rendering - an upload whose replacement changed nothing, which writes no tree -
@@ -62,25 +67,30 @@ func (s *Service) indexDocument(ctx context.Context, tx pgx.Tx, artifactID strin
 }
 
 // indexRenderedVersion indexes one document version, written at versionAt, in a transaction
-// holding the document's owner row: its references, the excerpt of each mention, and its blocks
-// with the mentions each holds (refs.IndexBlocks), all from one extraction of markdown. blocks
+// holding the document owner's lock: its references, the excerpt of each mention, and its blocks
+// with the mentions each holds (refs.PlanBlocks), all from one extraction of markdown. blocks
 // index into markdown, the render they came from. The event the caller appends names the counted
 // targets the document's references and their excerpts, its blocks and its blocks' mentions moved
-// (refs.ReplaceDocumentCounted), since a node is counted once for each block citing it.
+// (replaceVersionRefs), since a node is counted once for each block citing it. The extraction,
+// the index's plans and the counted targets are worked out where it is called; its writes go
+// through write, in the order the index makes them.
 func (s *Service) indexRenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, blocks []model.ArtifactBlock) (model.ReferenceChanges, error) {
 	located := text.ExtractAt(markdown, s.serverURL)
 	// The blocks are indexed before the document's own references are reconciled: a first
 	// indexing dates a block's mention from the document's refs row for its target, which a
 	// surviving target already holds and a new one gets with this same time.
-	moved, err := refs.IndexBlocks(ctx, tx, artifactID, version, versionAt, markdown, blocks, located)
+	moved, indexBlocks, err := planBlockIndex(ctx, tx, artifactID, version, versionAt, markdown, blocks, located)
 	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	if err := write(ctx, tx, indexBlocks); err != nil {
 		return model.ReferenceChanges{}, err
 	}
 	return replaceVersionRefs(ctx, tx, artifactID, version, versionAt, located, moved, refs.MentionExcerpts(markdown, blocks, located))
 }
 
 // indexUnrenderedVersion indexes one document version with no rendering, written at versionAt, in
-// a transaction holding the document's owner row: its references alone. It indexes no blocks and
+// a transaction holding the document owner's lock: its references alone. It indexes no blocks and
 // marks the document's mentions owed an excerpt (refs.ClearExcerpts) for the excerpt
 // reconciliation, which reads the document itself.
 func (s *Service) indexUnrenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string) (model.ReferenceChanges, error) {
@@ -88,10 +98,147 @@ func (s *Service) indexUnrenderedVersion(ctx context.Context, tx pgx.Tx, artifac
 }
 
 // replaceVersionRefs reconciles the document's references, dated versionAt, to the mentions
-// located in its version, stores excerpts on them (nil: marks them owed), and counts the targets
-// moved, which its blocks and their mentions moved, as well (refs.ReplaceDocumentCounted).
+// located in its version, stores excerpts on them (nil: marks them owed, refs.ClearExcerpts), and
+// counts the targets moved, which its blocks and their mentions moved, as well. A document mention
+// shows the block holding it as its excerpt, so a target whose kept edge now stores another block
+// is counted beside the ones whose edges the version inserted or deleted (refs.ExcerptsMoved,
+// worked out here, before the reconciliation and the excerpts are written, in that order, by one
+// write).
 func replaceVersionRefs(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, located []text.Located, moved []refs.Target, excerpts map[refs.Target]model.GraphExcerpt) (model.ReferenceChanges, error) {
-	return refs.ReplaceDocumentCounted(ctx, tx, artifactID, version, versionAt, text.Refs(located), moved, excerpts)
+	replacement, err := planReplacement(ctx, tx, "artifact", artifactID, text.Refs(located), &versionAt)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	counted := slices.Concat(replacement.Changed(), moved)
+	writeExcerpts := func(b *store.WriteBatch) { refs.ClearExcerpts(b, artifactID) }
+	if excerpts != nil {
+		recorded, err := refs.ExcerptsMoved(ctx, tx, artifactID, version, replacement.Held(), excerpts)
+		if err != nil {
+			return model.ReferenceChanges{}, err
+		}
+		counted = append(counted, recorded...)
+		writeExcerpts = func(b *store.WriteBatch) { refs.QueueRecordExcerpts(b, artifactID, version, excerpts) }
+	}
+	changes, err := refs.CountedChanges(ctx, tx, counted)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	return changes, write(ctx, tx, func(b *store.WriteBatch) error {
+		replacement.Queue(b)
+		writeExcerpts(b)
+		return nil
+	})
+}
+
+// planBlockIndex plans version's block index of artifactID (refs.PlanBlocks) and returns the
+// targets it moves, the cited blocks it changes included (refs.BlockIndexing.Cited), and the step
+// that writes it. It plans against what the index holds: as the transaction's own queued indexing
+// of the document leaves it, when there is one, else as read in tx; and it records what this one
+// leaves for a later indexing of the same document.
+func planBlockIndex(
+	ctx context.Context,
+	tx pgx.Tx,
+	artifactID string,
+	version int,
+	versionAt time.Time,
+	markdown string,
+	blocks []model.ArtifactBlock,
+	located []text.Located,
+) ([]refs.Target, WriteStep, error) {
+	ledger := queueFor(ctx, tx)
+	index, held := refs.BlockIndex{}, false
+	if ledger != nil {
+		index, held = ledger.blockIndexes[artifactID]
+	}
+	if !held {
+		var err error
+		if index, err = refs.ReadBlockIndex(ctx, tx, artifactID); err != nil {
+			return nil, nil, err
+		}
+	}
+	indexing := refs.PlanBlocks(index, artifactID, version, versionAt, markdown, blocks, located)
+	cited, err := indexing.Cited(ctx, tx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if ledger != nil {
+		if ledger.blockIndexes == nil {
+			ledger.blockIndexes = make(map[string]refs.BlockIndex)
+		}
+		ledger.blockIndexes[artifactID] = indexing.Held()
+	}
+	return slices.Concat(indexing.Moved(), cited), func(b *store.WriteBatch) error {
+		indexing.Queue(b)
+		return nil
+	}, nil
+}
+
+// planReplacement plans the reconciliation of fromKind/fromID's references with found, a new edge
+// dated insertedAt (nil: the transaction's time), against the source's edges as the transaction's
+// own queued reconciliation of it leaves them, when there is one, else as read in tx, and records
+// what this one leaves.
+func planReplacement(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) (refs.Replacement, error) {
+	ledger := queueFor(ctx, tx)
+	source := refs.Target{Kind: fromKind, ID: fromID}
+	var replacement refs.Replacement
+	held, known := []refs.Target(nil), false
+	if ledger != nil {
+		held, known = ledger.referenced[source]
+	}
+	if known {
+		replacement = refs.PlanReplaceFrom(held, fromKind, fromID, found, insertedAt)
+	} else {
+		var err error
+		if replacement, err = refs.PlanReplace(ctx, tx, fromKind, fromID, found, insertedAt); err != nil {
+			return refs.Replacement{}, err
+		}
+	}
+	if ledger != nil {
+		if ledger.referenced == nil {
+			ledger.referenced = make(map[refs.Target][]refs.Target)
+		}
+		ledger.referenced[source] = replacement.Held()
+	}
+	return replacement, nil
+}
+
+// planReplaceCounted is refs.ReplaceCounted split in two: it plans the reconciliation of
+// fromKind/fromID's references with found (planReplacement), resolves the counted targets it and
+// moved move, and returns those with the step that writes it.
+func planReplaceCounted(
+	ctx context.Context,
+	tx pgx.Tx,
+	fromKind, fromID string,
+	found []text.Ref,
+	insertedAt *time.Time,
+	moved []refs.Target,
+) (model.ReferenceChanges, WriteStep, error) {
+	replacement, err := planReplacement(ctx, tx, fromKind, fromID, found, insertedAt)
+	if err != nil {
+		return model.ReferenceChanges{}, nil, err
+	}
+	changes, err := refs.CountedChanges(ctx, tx, slices.Concat(replacement.Changed(), moved))
+	if err != nil {
+		return model.ReferenceChanges{}, nil, err
+	}
+	return changes, func(b *store.WriteBatch) error {
+		replacement.Queue(b)
+		return nil
+	}, nil
+}
+
+// planAskReferences is planReplaceCounted for ask askID, whose references are the ones its
+// question cites.
+func planAskReferences(ctx context.Context, tx pgx.Tx, askID, question, serverURL string) (model.ReferenceChanges, WriteStep, error) {
+	return planReplaceCounted(ctx, tx, "ask", askID, text.Extract(question, serverURL), nil, nil)
+}
+
+// planEditedAskReferences is planAskReferences for an edit of the ask's question from previous:
+// it also counts every target the question still cites when the edit moves the head of its text,
+// which each of the ask's edges shows (refs.EditedTargets).
+func planEditedAskReferences(ctx context.Context, tx pgx.Tx, askID, previous, question, serverURL string) (model.ReferenceChanges, WriteStep, error) {
+	found := text.Extract(question, serverURL)
+	return planReplaceCounted(ctx, tx, "ask", askID, found, nil, refs.EditedTargets(previous, question, found))
 }
 
 // referenceExcerptBatch is how many documents one reconciliation tick reads; referenceExcerptStep

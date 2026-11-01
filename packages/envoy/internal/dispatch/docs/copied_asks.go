@@ -41,9 +41,10 @@ import (
 // owner under one id asking the same thing are therefore one question to a copy, the earlier. The
 // copy shows its source's state as of its own last settlement, and an answer, a resolution or a
 // restoration of the source settles it again. The rows are read, never locked or written:
-// settlement holds this document's owner row and room lock, and a source's answer route takes the
-// source's ask row before its own document's room. A project document's settlement also takes its
-// project's copy lock first (lockProjectCopies), and then reads the sources (readCopiedAskSources).
+// settlement holds this document's owner lock and room lock, and a source's answer route takes the
+// source's owner lock before its own document's room. A project document's settlement also takes
+// its project's copy lock first (lockProjectCopies), and then reads the sources
+// (readCopiedAskSources).
 func copiedAskSources(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -102,6 +103,13 @@ func readCopiedAskSources(
 		if err != nil {
 			return nil, fmt.Errorf("scan copied ask source: %w", err)
 		}
+		// A source whose row the transaction has queued a write of is read as the write leaves it
+		// (recordAskBlock): a reopen's restored asks read open, as they would once written.
+		if ledger := queueFor(ctx, tx); ledger != nil && ask.BlockArtifactID != nil {
+			if pending, queued := ledger.askBlocks[*ask.BlockArtifactID][*ask.BlockID]; queued && pending.ID == ask.ID {
+				ask = pending
+			}
+		}
 		if settlementRetracted(ask) {
 			continue
 		}
@@ -156,8 +164,11 @@ type copiedSource struct {
 // hashtext.
 const projectCopiesLock = `select pg_advisory_xact_lock($1, hashtext($2))`
 
-// copiedAsksLockNamespace is the first key of every copy lock ("COPY"). No other lock of this
-// module is taken in the two-key form.
+// copiedAsksLockNamespace is the first key of every copy lock ("COPY"). The two-key form is taken
+// with a namespace of its own by each family of locks that uses it: the copy locks, the owner locks
+// (store.LockOwner, "OWNR") and duty's leases ("LOOP"), and with the hashtext of a name by the
+// issue-dependency, repository-mapping and delivery session-group locks; no two of those first keys
+// are equal.
 const copiedAsksLockNamespace int32 = 0x434F5059
 
 // lockProjectCopies serialises, for a project document, its project's copy bookkeeping: a
@@ -167,25 +178,24 @@ const copiedAsksLockNamespace int32 = 0x434F5059
 // all through owedCopiesOf, as the boot's restoration does (RestoreDecidedWordings). Without it
 // two copies of one retracted ask settling at once would each find no source and each open an ask.
 // An issue's documents need no lock of their own, since every one of those transactions already
-// holds their issue's row (lockArtifactOwner, requireOpenOwner); a project document's owner row is
-// the document itself, which no sibling takes. The lock is a transaction advisory lock keyed on the
-// project, so read marks, event appends and issue creation, which lock the project's row, never
-// wait on a settlement.
+// holds their issue's owner lock (lockArtifactOwner, requireOpenOwner); a project document's owner
+// is the document itself, which no sibling's settlement takes. The lock is a transaction advisory
+// lock keyed on the project, so read marks, event appends and issue creation, which take the
+// project's owner lock, never wait on a settlement.
 //
-// It takes the two-key form, whose key space Postgres keeps apart from the single-key one: every
-// other advisory lock here - a document's room (lockDocumentRoom), a project's rank allocation, an
-// agent's artifacts, the migration runner's - is a single key, so a copy lock never waits on one of
-// those, whatever the project's name hashes to. Within the two-key space only the copy locks take
-// copiedAsksLockNamespace: the one other namespace of it anywhere in the server is
-// internal/dispatch/duty's (duty.leaseNamespace), under which a background loop holds the lease
-// that keeps one process at a time running its periodic pass, so a copy lock cannot collide with a
-// lease either. hashtext is 32 bits wide, so two projects can still share the second key. They
-// then take turns on their copy bookkeeping and on nothing else, and cannot deadlock: a holder
-// takes the copy lock before any doc_settlements_pending row and before any event append
-// (TestCopyLockComesBeforeEveryPendingRowAndEvent), and an append locks only its event owner's row,
-// which for the holder's appends is the owner row it took before the copy lock, so the
-// transaction waiting on it holds nothing the holder goes on to take. A settlement takes it right
-// after its owner row and room lock, an answer or a resolution after its owner row and ask row. The
+// It takes the two-key form, whose key space Postgres keeps apart from the single-key one, so a
+// copy lock never waits on a single-key advisory lock - a document's room (lockDocumentRoom), a
+// project's rank allocation, an agent's artifacts, the migration runner's - whatever the project's
+// name hashes to. Within the two-key space only the copy locks take copiedAsksLockNamespace (see
+// it above), so a copy lock cannot collide with an owner lock or a lease either. hashtext is 32
+// bits wide, so two projects can still share the second key. They then take turns on their copy
+// bookkeeping and on nothing else, and cannot deadlock: a holder takes the copy lock before any
+// doc_settlements_pending row and before any event append
+// (TestCopyLockComesBeforeEveryPendingRowAndEvent), and an append takes only its event owner's
+// lock and row, which for the holder's appends are the owner lock it took before the copy lock and
+// that owner's row, which no writer takes without that lock, so the transaction waiting on it
+// holds nothing the holder goes on to take. A settlement takes it right after its owner lock and
+// room lock, an answer or a resolution after its owner lock and its read of the ask row. The
 // copy-source read is the next statement, so under READ COMMITTED its snapshot holds every ask a
 // sibling's settlement committed while this one waited, and the ask createAskBlock opens commits
 // in this transaction, which holds the lock until then. A settlement whose blocks all have asks
@@ -294,8 +304,8 @@ func owedCopiesOf(ctx context.Context, tx pgx.Tx, documents ...documentAsks) ([]
 // block's id (copiesOf). A document's latest version is read for the block's opener
 // (`:::ask{#<id> …}`), so one that quotes the opener elsewhere, in code, is settled for nothing.
 // The caller has taken no pending row and appended no event. A copy's settlement waits on the row
-// this marks holding its own owner row and room lock, which the caller never takes, and deletes its
-// own row before it appends an event, so the two can wait on each other in only one direction.
+// this marks holding its own owner lock and room lock, which the caller never takes, and deletes
+// its own row before it appends an event, so the two can wait on each other in only one direction.
 func lockedCopiesOf(ctx context.Context, tx pgx.Tx, documents ...documentAsks) ([]string, error) {
 	var projects []string
 	for _, document := range documents {
@@ -363,9 +373,9 @@ func documentOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artifactO
 // of ask's owner showing a copy of it (owedCopiesOf), and arms each once that transaction commits
 // (Ledger.Commit), so a copy shows an answer or a resolution of its source a settlement delay after
 // it, rather than at its own next edit. ask is a block ask, its BlockID and BlockArtifactID set.
-// The caller holds ask's owner row and ask row, and calls this before it writes the source's block
-// or appends an event: the copy lock and the copies' pending rows come before the source's room
-// lock, its own pending row and its events.
+// The caller holds ask's owner lock, under which it read the ask, and calls this before it writes
+// the source's block or appends an event: the copy lock and the copies' pending rows come before
+// the source's room lock, its own pending row and its events.
 func (s *Service) SettleCopiesOf(ctx context.Context, ask model.Ask) error {
 	tx, joined := txFromContext(ctx)
 	if !joined {

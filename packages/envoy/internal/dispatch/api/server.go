@@ -1191,20 +1191,31 @@ func (s *server) begin(ctx context.Context) (pgx.Tx, error) {
 	return tx, nil
 }
 
-// requireOpenIssue locks an issue row and returns its lifecycle status, rejecting mutations
-// after completion without a second issue query.
+// requireOpenIssue takes the issue's owner lock and returns its lifecycle status, rejecting
+// mutations after completion without a second issue query. The read is the statement after the
+// lock, sent with it, so it sees a close the lock's previous holder committed while this one
+// waited (store.LockOwnerAndRead).
 func (s *server) requireOpenIssue(ctx context.Context, tx pgx.Tx, key string) (string, error) {
-	return issueOpenStatus(ctx, tx, key, ownerRowLock)
+	return issueOpenStatus(ctx, key, lockedOwnerRead(tx))
 }
 
-// issueOpenStatus is that same read and refusal made through q under lock, so the check a
-// comment makes from the pool before its transaction opens refuses exactly what the locked
-// check will.
-func issueOpenStatus(ctx context.Context, q queryer, key, lock string) (string, error) {
+// issueOpenStatusRead reads an issue's lifecycle status and whether it is open.
+const issueOpenStatusRead = `select status, closed_at is null from issues where key = $1`
+
+// issueOpenStatus is that read and its refusal, made through read: under the issue's owner lock
+// for the check that decides (requireOpenIssue), through the pool for the check a comment makes
+// before its transaction opens, which refuses exactly what the locked check will.
+func issueOpenStatus(ctx context.Context, key string, read ownerRead) (string, error) {
 	var status string
 	var open bool
-	if err := q.QueryRow(ctx, `
-		select status, closed_at is null from issues where key = $1`+lock, key).Scan(&status, &open); err != nil {
+	err := read(ctx, store.IssueOwner(key), issueOpenStatusRead, []any{key}, &status, &open)
+	return refuseClosedIssue(status, open, err)
+}
+
+// refuseClosedIssue is the refusal of issueOpenStatusRead's answer: err as the read returned it, a
+// closed issue's ISSUE_CLOSED, else the issue's status.
+func refuseClosedIssue(status string, open bool, err error) (string, error) {
+	if err != nil {
 		return "", err
 	}
 	if !open {
@@ -1222,26 +1233,47 @@ func artifactCreatedEventPayload(artifact model.Artifact, changes model.Referenc
 	return payload
 }
 
-func (s *server) namedVersionDiff(ctx context.Context, tx pgx.Tx, artifactID string, version model.Version) (*string, error) {
+// namedVersionDiff is the diff a named version's event carries: from the version before it to it.
+// Either may be the version this transaction has just queued (ledger), which the table holds only
+// once Commit has run its insert, so each is taken from the ledger when it is that version, and
+// read from the table otherwise (transactionVersionMarkdown).
+func (s *server) namedVersionDiff(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, artifactID string, version model.Version) (*string, error) {
 	if !version.Named || version.Number < 2 {
 		return nil, nil
 	}
-	var previous, current string
-	if err := tx.QueryRow(ctx, `
-		select markdown from artifact_versions where artifact_id = $1 and number = $2
-	`, artifactID, version.Number-1).Scan(&previous); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
+	previous, found, err := transactionVersionMarkdown(ctx, tx, ledger, artifactID, version.Number-1)
+	if err != nil {
 		return nil, fmt.Errorf("load previous artifact version: %w", err)
 	}
-	if err := tx.QueryRow(ctx, `
-		select markdown from artifact_versions where artifact_id = $1 and number = $2
-	`, artifactID, version.Number).Scan(&current); err != nil {
+	if !found {
+		return nil, nil
+	}
+	current, found, err := transactionVersionMarkdown(ctx, tx, ledger, artifactID, version.Number)
+	if err == nil && !found {
+		err = pgx.ErrNoRows
+	}
+	if err != nil {
 		return nil, fmt.Errorf("load current artifact version: %w", err)
 	}
 	diff := text.UnifiedDiff(previous, current)
 	return &diff, nil
+}
+
+// transactionVersionMarkdown is the markdown of version number of artifactID as tx sees it once its
+// queue has run: the ledger's, when it is the version this transaction queued
+// (docs.Ledger.PendingVersionMarkdown), else the stored row's. False when neither holds it.
+func transactionVersionMarkdown(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, artifactID string, number int) (string, bool, error) {
+	if markdown, pending := ledger.PendingVersionMarkdown(artifactID, number); pending {
+		return markdown, true, nil
+	}
+	var markdown string
+	err := tx.QueryRow(ctx, `
+		select markdown from artifact_versions where artifact_id = $1 and number = $2
+	`, artifactID, number).Scan(&markdown)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	return markdown, err == nil, err
 }
 
 func externalRef(ref string) (repo string, number string, err error) {

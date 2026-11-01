@@ -102,6 +102,10 @@ type testServerOptions struct {
 	lifetime context.Context
 	// streamHeartbeat replaces the sockets' fifteen-second heartbeat.
 	streamHeartbeat time.Duration
+	// tracer is installed on every connection of the server's pool (storetest.Traced), so a test
+	// sees each statement the server runs; nil leaves the pool untraced. The xid window tests
+	// (xid_window_test.go) pass a storetest.XidTracer.
+	tracer pgx.QueryTracer
 	// liveSocketAge is the server's Deps.LiveSocketAge: nil draws each socket's age as
 	// production does.
 	liveSocketAge func() time.Duration
@@ -176,6 +180,9 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		lifetime = t.Context()
 	}
 	database := storetest.Open(t)
+	if options.tracer != nil {
+		database = storetest.Traced(t, database, options.tracer)
+	}
 	broker := events.NewBroker()
 	var documentPersistence docs.VersionedStore
 	if options.persistence != nil {
@@ -1613,9 +1620,8 @@ func TestConcurrentStatusPatchesUseCommittedPreimage(t *testing.T) {
 		t.Fatalf("begin status lock: %v", err)
 	}
 	defer func() { _ = lock.Rollback(context.Background()) }()
-	var lockedKey string
-	if err := lock.QueryRow(context.Background(), `select key from issues where key = $1 for update`, child.Key).Scan(&lockedKey); err != nil {
-		t.Fatalf("lock child: %v", err)
+	if err := store.LockOwner(context.Background(), lock, store.IssueOwner(child.Key)); err != nil {
+		t.Fatalf("take the child's owner lock: %v", err)
 	}
 	responses := make(chan *httptest.ResponseRecorder, 2)
 	go func() {

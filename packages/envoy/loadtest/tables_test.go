@@ -75,31 +75,45 @@ func TestTablesRenderTheSamplersAndTheirFailedReads(t *testing.T) {
 			LockType: "advisory", Target: "commit_order_lock", Mode: "ExclusiveLock", WaitersP50: 12, WaitersMax: 40, ShareWithWaiter: 0.96,
 			TopPairs: []waitPair{{WaiterQuery: "select a | b", BlockerQuery: "", Count: 800}},
 		}}},
+		XIDHolds: &xactSummary{IntervalMs: 10, Samples: 17000, SamplesPerS: 94.4, XIDHolders: 640, CommittedEvents: 700,
+			XIDHoldMs: stat{N: 640, P50: 180, P99: 1900, Max: 2400}, XactMs: stat{N: 640, P50: 400, P99: 2600, Max: 3100},
+			IdleInXactWithXIDMs: stat{N: 640, P50: 120, P99: 1500, Max: 2000}, IdleInXactNoXIDMs: stat{N: 640, P50: 0, P99: 300, Max: 450},
+			LongestXIDHolders: []xidHolder{{HoldMs: 2400, XactMs: 3100, Query: "update a | b"}, {HoldMs: 2100, XactMs: 2500, Query: ""}}},
 	}
-	// Samplers that failed: the lock probe never connected, the ungranted-lock sampler's reads all
-	// failed, the transaction-id probe has no rate.
+	// Samplers that failed: the lock probe and the transaction-id hold sampler never connected, the
+	// ungranted-lock sampler's reads all failed, the transaction-id probe has no rate.
 	failed := summary{
 		Config:          summaryConfig{Step: "failed"},
 		Resources:       &resourcesSummary{},
 		CommitOrderLock: lockSummary{Errors: 1},
+		XIDHolds:        &xactSummary{IntervalMs: 10, Errors: 1},
 		UngrantedLocks:  ungrantedSummary{Errors: 160},
 	}
-	md := renderTables([]stepData{{name: "failed", sum: failed}, {name: "new", sum: cur}})
+	// The transaction-id hold sampler turned off (-xact-interval 0).
+	off := summary{Config: summaryConfig{Step: "off"}, XIDHolds: &xactSummary{}}
+	md := renderTables([]stepData{{name: "failed", sum: failed}, {name: "new", sum: cur}, {name: "off", sum: off}})
 
 	for _, c := range []struct{ title, failed, cur string }{
 		{"Delivery from sending, and live socket frames", "| failed | - | - | - | 0 | 0 |", "| new | 120 / 900 | 40 / 300 | 5 / 60 | 1,200 | 2 |"},
 		{"Commit-order lock", "| failed (1 failed read) | - | - | - | - | - |", "| new | - | - | - | - | - |"},
 		{"Ungranted locks", "| failed (160 failed reads) | - | - | - |", `| new | 97% | advisory commit_order_lock ExclusiveLock 96%, 12 / 40 | select a \| b → (none) (800) |`},
 		{"Transaction ids", "| failed | - |", "| new | 412.3 |"},
+		{"Transaction-id holds", "| failed (1 failed read) | - | - | - | - | - | - | - |",
+			`| new | 10 (94) | 640 / 700 | 180 / 1,900 / 2,400 | 400 / 2,600 / 3,100 | 120 / 1,500 / 2,000 | 0 / 300 / 450 | 2,400 update a \| b; 2,100 (none) |`},
+		{"Transaction-id holds", "| off | off | - | - | - | - | - | - |", "| off | off | - | - | - | - | - | - |"},
 	} {
 		text := section(md, c.title)
 		if !strings.Contains(text, c.failed+"\n") || !strings.Contains(text, c.cur+"\n") {
 			t.Errorf("section %q lacks %q or %q:\n%s", c.title, c.failed, c.cur, text)
 		}
 	}
-	for _, c := range []struct{ title, key string }{{"Commit-order lock", "commit_order_lock.errors"}, {"Ungranted locks", "ungranted_locks.errors"}} {
-		if note := noteLine(section(md, c.title), "(<n> failed reads)"); !strings.Contains(note, "`"+c.key+"`") {
-			t.Errorf("section %q has no note of the failed-reads mark that names summary.json `%s`:\n%s", c.title, c.key, md)
+	for _, c := range []struct{ title, view, key string }{
+		{"Commit-order lock", "pg_locks", "commit_order_lock.errors"},
+		{"Ungranted locks", "pg_locks", "ungranted_locks.errors"},
+		{"Transaction-id holds", "pg_stat_activity", "xid_holds.errors"},
+	} {
+		if note := noteLine(section(md, c.title), "(<n> failed reads)"); !strings.Contains(note, "read of "+c.view) || !strings.Contains(note, "`"+c.key+"`") {
+			t.Errorf("section %q has no note of the failed-reads mark that names the read of %s and summary.json `%s`:\n%s", c.title, c.view, c.key, md)
 		}
 	}
 	if strings.Contains(md, "| new (") {

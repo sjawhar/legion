@@ -141,7 +141,7 @@ func parseStampedAt(markdown string, at origin, budget *WriteBudget) (*Node, err
 // (RepeatedBlockID), and the repair keeps it for its first block, as settlement would. Each untyped
 // block of live the markdown leaves unchanged keeps its id (carryBlockIDs), which the markdown
 // cannot name, so the write leaves it as it was. A block id of any length is written; one longer
-// than text.MaxBlockIDBytes is simply no graph node (refs.IndexBlocks). A document whose rendering,
+// than text.MaxBlockIDBytes is simply no graph node (refs.PlanBlocks). A document whose rendering,
 // the markdown it is stored as, reads back otherwise is refused (RefuseMisreadDocument).
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
 	doc, err := parseForWrite(markdown, live, true, NewWriteBudget())

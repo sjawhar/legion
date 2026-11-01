@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // An approval ask's fixed options: the labels a human's answer is matched against, and the ones
@@ -56,7 +59,7 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 // belongs to one, else the document itself. askID is the approval ask the review answers, nil
 // when it was given from the document header with no request open. The review row keeps the
 // event's sequence on that owner (event_seq), which places a read of the review among the owner's
-// events. Every caller already holds the owner's row before it calls this; inside WriteReview the
+// events. Every caller already holds the owner's lock before it calls this; inside WriteReview the
 // row is inserted before the event is appended and its sequence written after. The update that
 // writes the sequence runs the foreign-key checks again, since Postgres re-checks a row its own
 // transaction inserted, and so asks for the same FOR KEY SHARE locks the insert took: the
@@ -66,22 +69,46 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 // itself, and the row is right for any read the caller makes before it commits. The trigger then
 // finds the row sequenced and leaves it. The caller owns the transaction and publishes the event.
 func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact model.Artifact, version int, state string, actor model.Actor, reason *string, askID *string) (model.ArtifactReview, model.Event, error) {
+	var review model.ArtifactReview
+	var event model.Event
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		return QueueReview(b, broker, artifact, version, state, actor, reason, askID, func(written model.ArtifactReview, appended model.Event) {
+			review, event = written, appended
+		})
+	}); err != nil {
+		return model.ArtifactReview{}, model.Event{}, err
+	}
+	return review, event, nil
+}
+
+// QueueReview is WriteReview queued on a write phase's batch. The review's id is chosen here, so
+// the statement that writes its event's sequence names the row, and takes the sequence from the
+// event the statements before it appended (store.LatestEventID): nothing is read back in Go
+// between them. written receives the review and its event as the batch leaves them.
+func QueueReview(b *store.WriteBatch, broker *events.Broker, artifact model.Artifact, version int, state string, actor model.Actor, reason *string, askID *string, written func(model.ArtifactReview, model.Event)) error {
 	actorJSON, err := json.Marshal(actor)
 	if err != nil {
-		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("encode review actor: %w", err)
-	}
-	review, err := ScanReview(tx.QueryRow(ctx, `
-		insert into artifact_reviews (artifact_id, version, state, actor, reason, ask_id)
-		values ($1, $2, $3, $4, $5, $6)
-		returning `+ReviewColumns, artifact.ID, version, state, actorJSON, reason, askID))
-	if err != nil {
-		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("insert artifact review: %w", err)
+		return fmt.Errorf("encode review actor: %w", err)
 	}
 	eventType := "artifact.approved"
 	if state == "changes_requested" {
 		eventType = "artifact.changes_requested"
 	}
-	event, err := broker.Append(ctx, tx, documentAskEvent(
+	id := uuid.NewString()
+	var review model.ArtifactReview
+	var event model.Event
+	b.Queue("", `
+		insert into artifact_reviews (id, artifact_id, version, state, actor, reason, ask_id)
+		values ($1, $2, $3, $4, $5, $6, $7)
+		returning `+ReviewColumns, id, artifact.ID, version, state, actorJSON, reason, askID).QueryRow(func(row pgx.Row) error {
+		scanned, err := ScanReview(row)
+		if err != nil {
+			return fmt.Errorf("insert artifact review: %w", err)
+		}
+		review = scanned
+		return nil
+	})
+	if err := broker.QueueAppend(b, documentAskEvent(
 		artifactOwner{IssueKey: artifact.IssueKey}, artifact.ID, eventType, actor,
 		model.ArtifactReviewEventPayload{
 			ArtifactID: artifact.ID,
@@ -91,16 +118,19 @@ func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact
 			Reason:     reason,
 			AskID:      askID,
 		},
-	))
-	if err != nil {
-		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("append %s: %w", eventType, err)
+	), func(appended model.Event) { event = appended }); err != nil {
+		return fmt.Errorf("append %s: %w", eventType, err)
 	}
-	seq := int64(event.Seq)
-	if _, err := tx.Exec(ctx, `update artifact_reviews set event_seq = $2 where id = $1`, review.ID, seq); err != nil {
-		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("record the sequence of %s: %w", eventType, err)
-	}
-	review.EventSeq = &seq
-	return review, event, nil
+	b.Queue("record the sequence of "+eventType, `
+		update artifact_reviews set event_seq = (select seq from events where id = `+store.LatestEventID+`)
+		where id = $1
+	`, id).Exec(func(pgconn.CommandTag) error {
+		seq := int64(event.Seq)
+		review.EventSeq = &seq
+		written(review, event)
+		return nil
+	})
+	return nil
 }
 
 // latestApprovedReviewQuery selects the newest approval of the document $1 names. Like

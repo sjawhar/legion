@@ -101,9 +101,9 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 		ledgerTwo.Discard()
 		secondDone <- err
 	}()
-	// The second edit takes the document's owner row first (see liveWrite), so it waits there,
+	// The second edit takes the document owner's lock first (see liveWrite), so it waits there,
 	// in the database, holding nothing of the document.
-	waitForLockWait(t, ctx, database, "%from issues where key = $1 for %", secondDone)
+	waitForLockWait(t, ctx, database, "%as owner_lock%", secondDone)
 
 	snapshotDone := make(chan error, 1)
 	go func() {
@@ -124,7 +124,7 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 
 	// txTwo's connection belongs to the second edit until ApplyOps returns, so the deferred
 	// rollback may not run under it. Ending the first transaction and its write lets the edit
-	// through: its owner row, then the writer slot, then the unchanged document's token.
+	// through: its owner lock, then the writer slot, then the unchanged document's token.
 	if err := txOne.Rollback(ctx); err != nil {
 		t.Fatalf("roll back the first transaction: %v", err)
 	}
@@ -139,7 +139,9 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 	}
 }
 
-// ownerLockedTransaction holds the document's owner row for the duration of one test.
+// ownerLockedTransaction holds the document owner's lock for the duration of one test, and the
+// owner's row as an event append's write phase holds it (events.lockEventOwner, `for no key
+// update`), so neither may block a durable writer.
 func ownerLockedTransaction(t *testing.T, ctx context.Context, database *store.Store, id string) pgx.Tx {
 	t.Helper()
 	tx, err := database.Pool.Begin(ctx)
@@ -149,6 +151,11 @@ func ownerLockedTransaction(t *testing.T, ctx context.Context, database *store.S
 	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
 	if _, _, err := lockArtifactOwner(ctx, tx, id); err != nil {
 		t.Fatalf("lock the document owner: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		select last_seq from artifacts where id = $1 and issue_key is null for no key update
+	`, id); err != nil {
+		t.Fatalf("hold the document owner's row: %v", err)
 	}
 	return tx
 }
@@ -169,7 +176,7 @@ func awaitUnblocked(t *testing.T, subject string, op func() error) {
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("run %s while the owner row is held: %v", subject, err)
+			t.Fatalf("run %s while the owner's lock and row are held: %v", subject, err)
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatalf("lock-order inversion: %s is blocked by the document's owner lock", subject)
@@ -177,14 +184,14 @@ func awaitUnblocked(t *testing.T, subject string, op func() error) {
 }
 
 // An owner-locked writer and a room-locked writer must not block each other. A settlement, an
-// event append and a comment write all lock the document's owner row - for a project document
-// that is the artifact row itself - while the durable writers take the room lock and then
-// reach that same row through doc_updates', doc_snapshots' and doc_checkpoints' foreign keys.
-// A `for update` owner lock would conflict with those key-share checks, so the two would close
-// a cycle that Postgres breaks with `deadlock detected` - a 500 for an upload that races the
-// settlement its own previous write armed. The owner lock is `for no key update`: it still
-// serialises the writers that take it, including the event sequence allocation, and does not
-// block a foreign key.
+// event append and a comment write all take the document owner's lock - for a project document
+// that owner is the artifact itself - and an append then its row, while the durable writers take
+// the room lock and then reach that same row through doc_updates', doc_snapshots' and
+// doc_checkpoints' foreign keys. A `for update` row lock would conflict with those key-share
+// checks, so the two would close a cycle that Postgres breaks with `deadlock detected` - a 500
+// for an upload that races the settlement its own previous write armed. The owner lock is an
+// advisory lock and the append's row lock is `for no key update`: they still serialise the
+// writers that take them, including the event sequence allocation, and do not block a foreign key.
 func TestDurableAppendIsNotBlockedByTheOwnerLock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()

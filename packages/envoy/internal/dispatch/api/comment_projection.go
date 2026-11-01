@@ -109,3 +109,66 @@ func (s *server) commentArtifactName(ctx context.Context, tx pgx.Tx, comment mod
 	}
 	return name, nil
 }
+
+// registerCommentAnchor records comment's anchored row on ledger as the route's queued write of it
+// leaves it (docs.Ledger.RegisterPendingAnchor): the anchor refreshes the transaction runs after
+// that write - ProjectMark's - read the open anchors from the table, which holds the write only
+// once Commit has run it, so they take this row from the ledger, as they would have read it after
+// the write. An unresolved row is refreshed, and a refresh that moves its anchor prepares its
+// event (commentAnchorRefreshEvent); a resolved one no longer is. A comment without an anchor has
+// nothing to register. stored says the table already holds the row (an update rather than a new
+// comment's insert).
+func (s *server) registerCommentAnchor(ledger *docs.Ledger, comment model.Comment, actor model.Actor, stored bool) {
+	if comment.Anchor == nil {
+		return
+	}
+	kind := docs.MarkComment
+	if comment.Suggestion != nil {
+		kind = docs.MarkSuggestion
+	}
+	row := docs.PendingAnchor{ID: comment.ID, Kind: kind, Anchor: *comment.Anchor, Open: !comment.Resolved}
+	if row.Open {
+		row.Event = func(ctx context.Context, tx pgx.Tx) (func(model.Anchor) (model.Event, error), error) {
+			return s.commentAnchorRefreshEvent(ctx, tx, comment, actor, stored)
+		}
+	}
+	ledger.RegisterPendingAnchor(row)
+}
+
+// commentAnchorRefreshEvent builds comment's comment.anchor_refreshed event for a refresh that
+// moves its anchor (docs.PendingAnchor.Event): the row as the route's write leaves it, with the
+// quote and orphaned flag the refresh writes, as the refresh reads a stored row back. What it
+// reads - the anchor document's name and key, and a stored row's mention and delivery rows - it
+// reads here, in the read phase, once the refresh has found the anchor moved; a new comment's
+// mention rows are inserted after its projection, so the refresh read none. The builder only
+// assembles the event.
+func (s *server) commentAnchorRefreshEvent(ctx context.Context, tx pgx.Tx, comment model.Comment, actor model.Actor, stored bool) (func(model.Anchor) (model.Event, error), error) {
+	row := comment
+	row.Mentions, row.Deliveries = []model.Mention{}, []model.CommentDelivery{}
+	if stored {
+		hydrated, err := s.hydrateCommentSideTables(ctx, tx, []model.Comment{row})
+		if err != nil {
+			return nil, fmt.Errorf("load refreshed comment %q: %w", comment.ID, err)
+		}
+		row = hydrated[0]
+	}
+	anchor := *comment.Anchor
+	var payload model.CommentEventPayload
+	if err := tx.QueryRow(ctx, `
+		select name, coalesce(project_key, ''), slug
+		from artifacts where id = $1
+	`, anchor.ArtifactID).Scan(&payload.ArtifactName, &payload.ProjectKey, &payload.ArtifactSlug); err != nil {
+		return nil, fmt.Errorf("load refreshed comment %q artifact: %w", comment.ID, err)
+	}
+	return func(refreshed model.Anchor) (model.Event, error) {
+		moved := anchor
+		moved.Quote, moved.Orphaned = refreshed.Quote, refreshed.Orphaned
+		payload := payload
+		payload.Comment = row
+		payload.Comment.Anchor = &moved
+		return model.Event{
+			IssueKey: row.IssueKey, ArtifactID: row.ArtifactID,
+			Type: "comment.anchor_refreshed", Actor: actor, Payload: payload,
+		}, nil
+	}, nil
+}

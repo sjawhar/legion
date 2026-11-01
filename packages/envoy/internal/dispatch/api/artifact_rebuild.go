@@ -58,9 +58,9 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	var published []model.Event
+	var published []*model.Event
 	if written.Wrote {
-		event, err := s.commitArtifactVersionEvent(r.Context(), tx, ownerForArtifact(artifact), actor, artifact.ID, artifact.Name, written, nil)
+		event, err := s.commitArtifactVersionEvent(ledger, ownerForArtifact(artifact), actor, artifact.ID, artifact.Name, written, nil)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -71,7 +71,7 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(published...)
+	s.publish(appendedEvents(published...)...)
 	WriteJSON(w, http.StatusOK, report)
 }
 

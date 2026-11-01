@@ -735,7 +735,9 @@ func pendingAuthorsAt(authors map[string]model.Actor, version persistence.Versio
 // statement, each as recorded by its own update. An author keeps one row per update that recorded
 // it, so an upload that holds one of those updates and not another deletes only the first.
 // authors must name each author at most once per update: one statement cannot write one row twice,
-// so a repeated author and version is refused, naming it, before anything is written.
+// so a repeated author and version is refused, naming it, before anything is written. Its
+// statement goes through write, so a transaction whose writes are queued runs it in its write
+// phase; deletePendingAuthors, deleteHeldPendingAuthors and markSettlementPending do the same.
 func upsertPendingAuthors(ctx context.Context, tx pgx.Tx, room string, authors []pendingAuthor) error {
 	if len(authors) == 0 {
 		return nil
@@ -764,15 +766,12 @@ func upsertPendingAuthors(ctx context.Context, tx pgx.Tx, room string, authors [
 		encoded = append(encoded, string(raw))
 		versions = append(versions, int64(author.writtenThrough))
 	}
-	if _, err := tx.Exec(ctx, `
+	return writeExec(ctx, tx, "record the document's pending authors", `
 		insert into doc_pending_authors (artifact_id, actor_kind, actor_id, actor, written_through)
 		select $1::uuid, kind, id, actor, version
 		from unnest($2::text[], $3::text[], $4::jsonb[], $5::bigint[]) as author(kind, id, actor, version)
 		on conflict (artifact_id, actor_kind, actor_id, written_through) do update set actor = excluded.actor
-	`, room, kinds, ids, encoded, versions); err != nil {
-		return fmt.Errorf("record the document's pending authors: %w", err)
-	}
-	return nil
+	`, room, kinds, ids, encoded, versions)
 }
 
 // readPendingAuthors is R for room, keyed by actorKey. It says nothing about who edited last: the
@@ -818,26 +817,20 @@ func deletePendingAuthors(ctx context.Context, tx pgx.Tx, room string, authors [
 		kinds = append(kinds, actor.Kind)
 		ids = append(ids, actor.ID)
 	}
-	if _, err := tx.Exec(ctx, `
+	return writeExec(ctx, tx, "delete the document's listed pending authors", `
 		delete from doc_pending_authors
 		where artifact_id = $1 and (actor_kind, actor_id) in (select * from unnest($2::text[], $3::text[]))
-	`, room, kinds, ids); err != nil {
-		return fmt.Errorf("delete the document's listed pending authors: %w", err)
-	}
-	return nil
+	`, room, kinds, ids)
 }
 
 // deleteHeldPendingAuthors deletes, in an upload's transaction, every R row of room whose writing
 // update the upload's room instance held: written through the head it loaded, or by an update it
 // took since.
 func deleteHeldPendingAuthors(ctx context.Context, tx pgx.Tx, room string, held heldUpdates) error {
-	if _, err := tx.Exec(ctx, `
+	return writeExec(ctx, tx, "delete the pending authors an upload's room held", `
 		delete from doc_pending_authors
 		where artifact_id = $1 and (written_through <= $2 or written_through = any($3::bigint[]))
-	`, room, held.through, held.since); err != nil {
-		return fmt.Errorf("delete the pending authors an upload's room held: %w", err)
-	}
-	return nil
+	`, room, held.through, held.since)
 }
 
 // recordLatestEditSource records lastActor as the latest edit source on room's pending-settlement
@@ -911,17 +904,14 @@ func markSettlementPending(ctx context.Context, tx pgx.Tx, rooms []string, lastA
 	if err != nil {
 		return fmt.Errorf("encode the document's latest person sender: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `
+	return writeExec(ctx, tx, "record the document's pending settlement", `
 		insert into doc_settlements_pending (artifact_id, last_actor, last_person)
 		select unnest($1::uuid[]), $2::jsonb, $5::jsonb
 		on conflict (artifact_id) do update set
 			last_actor = case when $3 then excluded.last_actor else doc_settlements_pending.last_actor end,
 			marked_at = case when $4 then now() else doc_settlements_pending.marked_at end,
 			last_person = case when $6 then excluded.last_person else doc_settlements_pending.last_person end
-	`, rooms, encoded, setLastActor, updateMarkedAt, encodedPerson, setPerson); err != nil {
-		return fmt.Errorf("record the document's pending settlement: %w", err)
-	}
-	return nil
+	`, rooms, encoded, setLastActor, updateMarkedAt, encodedPerson, setPerson)
 }
 
 // encodeActor is actor as the jsonb text the pending-settlement row stores, nil for none.

@@ -851,7 +851,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 	default:
 		var block *namedBlock
 		if input.InReplyToBlock != nil {
-			block, err = s.replyBlockOf(r.Context(), tx, refs.ItemMessage, message.ID, *input.InReplyToBlock, "in_reply_to_block", "INVALID_MESSAGE")
+			block, err = s.replyBlockOf(r.Context(), tx, nil, refs.ItemMessage, message.ID, *input.InReplyToBlock, "in_reply_to_block", "INVALID_MESSAGE")
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return

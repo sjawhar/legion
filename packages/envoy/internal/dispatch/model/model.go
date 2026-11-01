@@ -1022,7 +1022,7 @@ type AskAnsweredEventPayload struct {
 // Ancestors the issue's parent chain,
 // parent first up to the root ([] for a root), and ThreadLogins, only when the status moved,
 // whose Replies count the move can change: for a close or a reopen every login with a Replies row
-// on one of the issue's open asks (events.IssueThreadLogins), for any other status move [].
+// on one of the issue's open asks (events.IssueLoginsOf), for any other status move [].
 // Each is absent from an event written before them.
 type IssueEventPayload struct {
 	Issue
@@ -1039,6 +1039,15 @@ func NewIssueEventPayload(issue Issue, changes ReferenceChanges) IssueEventPaylo
 		Issue:                   issue,
 		ReferenceChangesPayload: NewReferenceChangesPayload(changes),
 	}
+}
+
+// WithOwnerLastSeq is the payload carrying seq as the issue's last_seq. An issue event's payload
+// holds the issue row as the event leaves it, and the event's own sequence is what that row's
+// last_seq becomes when it is appended, so the append derives both from one expression
+// (events.Broker.QueueAppend) and no writer counts the events queued before its own.
+func (p IssueEventPayload) WithOwnerLastSeq(seq int) any {
+	p.LastSeq = seq
+	return p
 }
 
 // AskEditEventPayload is the full edited ask plus its prior mutable content, the actor who made

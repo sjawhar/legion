@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // owner identifies the issue, unlinked artifact, or project that owns collaboration.
@@ -94,40 +95,69 @@ func (s *server) requireOpenOwner(ctx context.Context, tx pgx.Tx, owner owner) e
 }
 
 // requireOpenOwnerStatus also returns the lifecycle status for an issue owner.
-// Project documents have no issue status and return nil.
+// Project documents have no issue status and return nil. It takes the owner's lock first and
+// reads the owner in the next statement, never in the same one: a statement's snapshot is taken
+// before it waits, so a read combined with the lock would miss a close committed while it waited
+// (store.LockOwner), and the write it guards would land on a closed owner. The two go in one round
+// trip (store.LockOwnerAndRead).
 func (s *server) requireOpenOwnerStatus(ctx context.Context, tx pgx.Tx, owner owner) (*string, error) {
-	return ownerOpenStatus(ctx, tx, owner, ownerRowLock)
+	return ownerOpenStatus(ctx, owner, lockedOwnerRead(tx))
 }
 
-// ownerRowLock is the clause a refusal adds when it runs inside the transaction that will
-// write, so the owner it decides on cannot close underneath that write.
-const ownerRowLock = " for no key update"
+func ownerInvalid() error {
+	return errorf(http.StatusBadRequest, "OWNER_INVALID", "owner requires exactly one issue or artifact")
+}
+
+// ownerRead makes the read an owner check decides on: the statement, the arguments it takes and
+// the destinations its one row is scanned into, for the owner named. The check that guards a
+// write takes that owner's lock ahead of it (lockedOwnerRead); the one that only spares work
+// takes no lock (pooledOwnerRead).
+type ownerRead func(ctx context.Context, owner store.Owner, sql string, args []any, dest ...any) error
+
+// lockedOwnerRead reads under the owner's lock in tx: the lock first and the read in the next
+// statement, never in the same one, the two in one round trip (store.LockOwnerAndRead).
+func lockedOwnerRead(tx pgx.Tx) ownerRead {
+	return func(ctx context.Context, owner store.Owner, sql string, args []any, dest ...any) error {
+		return store.LockOwnerAndRead(ctx, tx, owner, sql, args, dest...)
+	}
+}
+
+// pooledOwnerRead reads through q, the pool, for a check made before any transaction opens. It
+// locks nothing, so a write on a busy owner waits for that lock once rather than twice.
+func pooledOwnerRead(q queryer) ownerRead {
+	return func(ctx context.Context, _ store.Owner, sql string, args []any, dest ...any) error {
+		return q.QueryRow(ctx, sql, args...).Scan(dest...)
+	}
+}
 
 // ownerOpenStatus is the refusal table an owner gets, spelled once for both the check that
 // decides and the one that only spares work: an owner naming neither an issue nor a document,
-// an issue that is closed, a document that does not exist. q is the transaction whose lock the
-// refusal takes, or the pool for a read made before any transaction opens; lock is that lock's
-// clause, empty for the unlocked read.
-func ownerOpenStatus(ctx context.Context, q queryer, owner owner, lock string) (*string, error) {
+// an issue that is closed, a document that does not exist. The two differ in read alone, so both
+// refuse exactly the same.
+func ownerOpenStatus(ctx context.Context, owner owner, read ownerRead) (*string, error) {
 	if (owner.IssueKey == nil) == (owner.ArtifactID == nil) {
-		return nil, errorf(http.StatusBadRequest, "OWNER_INVALID", "owner requires exactly one issue or artifact")
+		return nil, ownerInvalid()
 	}
 	if owner.IssueKey != nil {
-		status, err := issueOpenStatus(ctx, q, *owner.IssueKey, lock)
+		status, err := issueOpenStatus(ctx, *owner.IssueKey, read)
 		if err != nil {
 			return nil, err
 		}
 		return &status, nil
 	}
-	if err := q.QueryRow(ctx, `
-		select true from artifacts where id = $1 and issue_key is null`+lock,
-		*owner.ArtifactID).Scan(new(bool)); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, errorf(http.StatusNotFound, "ARTIFACT_NOT_FOUND", "artifact not found")
-		}
-		return nil, err
+	return nil, refuseMissingArtifact(read(ctx, store.ArtifactOwner(*owner.ArtifactID), unlinkedArtifactRead, []any{*owner.ArtifactID}, new(bool)))
+}
+
+// unlinkedArtifactRead reads a row for a document no issue owns.
+const unlinkedArtifactRead = `select true from artifacts where id = $1 and issue_key is null`
+
+// refuseMissingArtifact is the refusal of unlinkedArtifactRead's answer err: a document that does
+// not exist is ARTIFACT_NOT_FOUND, any other failure err itself.
+func refuseMissingArtifact(err error) error {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errorf(http.StatusNotFound, "ARTIFACT_NOT_FOUND", "artifact not found")
 	}
-	return nil, nil
+	return err
 }
 
 // refuseClosedOwnerBeforeResolving answers, from the pool and locking nothing, the refusal
@@ -142,6 +172,6 @@ func (s *server) refuseClosedOwnerBeforeResolving(ctx context.Context, owner own
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return errorf(http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database unavailable")
 	}
-	_, err := ownerOpenStatus(ctx, s.deps.Store.Pool, owner, "")
+	_, err := ownerOpenStatus(ctx, owner, pooledOwnerRead(s.deps.Store.Pool))
 	return err
 }

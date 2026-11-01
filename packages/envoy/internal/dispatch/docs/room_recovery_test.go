@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 
@@ -519,13 +518,13 @@ func TestAWriterWaitingForTheSlotFinishesWhenTheRoomFails(t *testing.T) {
 		_, err := service.ReplaceText(secondJoined, artifactID, "second", model.Actor{Kind: "user", ID: "bob"})
 		returned <- err
 	}()
-	// The second write waits on the document's owner row while the first transaction is open;
-	// once that commits, it takes the row and goes on to wait for the first write's slot.
-	waitForLockWait(t, ctx, database, "%from issues where key = $1 for %", returned)
+	// The second write waits on the document owner's lock while the first transaction is open;
+	// once that commits, it takes the lock and goes on to wait for the first write's slot.
+	waitForLockWait(t, ctx, database, "%as owner_lock%", returned)
 	if err := firstLedger.commit(ctx); err != nil {
 		t.Fatalf("commit first transaction: %v", err)
 	}
-	awaitOwnerRowTaken(t, ctx, database, returned)
+	awaitOwnerLockTaken(t, ctx, database, returned)
 	service.failRoom(artifactID, errors.New("injected room failure"))
 
 	published := make(chan struct{})
@@ -559,33 +558,28 @@ func TestAWriterWaitingForTheSlotFinishesWhenTheRoomFails(t *testing.T) {
 	}
 }
 
-// awaitOwnerRowTaken returns once another transaction holds DOC-1's owner row, and fails at once
-// with the waiting operation's result if it returns first.
-func awaitOwnerRowTaken(t *testing.T, ctx context.Context, database *store.Store, returned <-chan error) {
+// awaitOwnerLockTaken returns once another transaction holds DOC-1's owner lock, and fails at once
+// with the waiting operation's result if it returns first. The probe tries the lock without
+// waiting, in a statement of its own, and so holds it only for that statement.
+func awaitOwnerLockTaken(t *testing.T, ctx context.Context, database *store.Store, returned <-chan error) {
 	t.Helper()
 	deadline := time.Now().Add(recoveryBound)
 	for time.Now().Before(deadline) {
 		select {
 		case err := <-returned:
-			t.Fatalf("the operation returned (%v) before it took the owner row", err)
+			t.Fatalf("the operation returned (%v) before it took the owner lock", err)
 		default:
 		}
-		probe, err := database.Pool.Begin(ctx)
+		taken, err := store.TryLockOwners(ctx, database.Pool, store.IssueOwner("DOC-1"))
 		if err != nil {
-			t.Fatalf("begin owner row probe: %v", err)
+			t.Fatalf("probe the owner lock: %v", err)
 		}
-		_, err = probe.Exec(ctx, `select 1 from issues where key = 'DOC-1' for no key update nowait`)
-		_ = probe.Rollback(ctx)
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+		if len(taken) == 0 {
 			return
-		}
-		if err != nil {
-			t.Fatalf("probe the owner row: %v", err)
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("no transaction took the owner row")
+	t.Fatal("no transaction took the owner lock")
 }
 
 // Settlement is a transaction too: it holds the document's advisory lock while it stamps block

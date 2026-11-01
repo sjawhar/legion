@@ -1350,11 +1350,11 @@ func TestAFreshHubServesDeliveryChangesWhileATransactionHoldsTheEventHorizon(t *
 }
 
 // A gap held open above the safe horizon (an id still open below one that committed) has the hub
-// re-read the event log every 10-250 ms until the gap closes, for as long as the transaction holding
-// it stays open. That re-read asks only the horizon, on the horizon's own connections, and reads the
-// shared pool once the horizon has moved past the hub's cursor, so a gap a long transaction holds
-// open takes no connection a request needs. The reset check, two shared-pool queries, runs on the
-// catch-ups a notification wakes.
+// re-read the event log - once at once, then on the fallback of 10-250 ms - until the gap closes,
+// for as long as the transaction holding it stays open. That re-read asks only the horizon, on the
+// horizon's own connections, and reads the shared pool once the horizon has moved past the hub's
+// cursor, so a gap a long transaction holds open takes no connection a request needs. The reset
+// check, two shared-pool queries, runs on the catch-ups a notification wakes.
 func TestAHubGapRereadTakesNoSharedConnectionWhileTheHorizonStandsStill(t *testing.T) {
 	rig := newHubRig(t, nil)
 	first := createHubIssue(t, rig.handler, map[string]any{"title": "First"})

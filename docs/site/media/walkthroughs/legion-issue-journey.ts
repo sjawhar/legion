@@ -101,7 +101,9 @@ const legionIssueJourney: Walkthrough<Seeded> = {
       ],
       open: async (page, seeded) => {
         await page.goto(`/issues/${seeded.next.key}`);
-        await expect(page.getByRole("heading", { level: 1 })).toContainText(DELIVERY_DATE.title);
+        await expect(
+          page.getByTestId("issue-header").getByRole("heading", { level: 1 })
+        ).toContainText(DELIVERY_DATE.title);
       },
       act: async (page, seeded, cue) => {
         await linger(page, 0.5);

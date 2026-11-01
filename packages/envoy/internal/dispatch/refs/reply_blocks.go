@@ -10,6 +10,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -20,10 +21,45 @@ import (
 // for a comment or an issue message its own refs, at the time its body was written; a direct
 // message writes no mention. A reply that names a block of the item calls it first, so the block
 // it names is one of the item's current body; the block-index reconciliation drains owed items
-// through it (IndexOwedItemBlocks). The caller holds the item's owner row (the reconciliation
-// holds none) and the item row; IndexItem takes the state row after them. It reports whether the
-// item was owed and so indexed.
+// through it (IndexOwedItemBlocks). The caller holds the item's owner, the reconciliation
+// included, and a reply holds the message row it answers; the index takes the state row after
+// them. It reports whether the item was owed and so indexed. It is PlanItemIfOwed and Queue back
+// to back, the queued statements run at once as a batch of their own; a transaction that decides
+// before it writes plans the repair and queues it in its write phase, reading the blocks it
+// leaves from the plan (ItemRepair.Block).
 func IndexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serverURL string) (bool, error) {
+	repair, err := PlanItemIfOwed(ctx, tx, kind, itemID, serverURL)
+	if err != nil {
+		return false, err
+	}
+	if !repair.Owed() {
+		return false, nil
+	}
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		repair.Queue(b)
+		return nil
+	}); err != nil {
+		return false, fmt.Errorf("index the blocks of %s %s: %w", kind, itemID, err)
+	}
+	return true, nil
+}
+
+// ItemRepair is the index an item is owed (IndexItemIfOwed), planned against what its block
+// index holds (PlanItemIfOwed) and written by Queue, which puts its statements on a write
+// phase's batch. A repair of an item that owes none writes nothing and holds no plan: its
+// blocks stand as the index stored them (CurrentItemBlock).
+type ItemRepair struct {
+	kind     ItemKind
+	itemID   string
+	owed     bool
+	mentions bool
+	indexing ItemIndexing
+	refs     Replacement
+}
+
+// PlanItemIfOwed plans the index comment or message itemID is owed, read and planned from its
+// stored body as IndexItemIfOwed indexes it; an item that owes none plans nothing.
+func PlanItemIfOwed(ctx context.Context, q Queryer, kind ItemKind, itemID, serverURL string) (ItemRepair, error) {
 	var query string
 	switch kind {
 	case ItemComment:
@@ -39,32 +75,61 @@ func IndexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serv
 			from messages m left join message_block_state s on s.message_id = m.id
 			where m.id = $1::uuid`
 	default:
-		return false, fmt.Errorf("index the blocks of %s %s: not an item kind", kind, itemID)
+		return ItemRepair{}, fmt.Errorf("index the blocks of %s %s: not an item kind", kind, itemID)
 	}
 	var body string
 	var writtenAt time.Time
 	var mentions, stated, owed bool
 	var sum *string
-	if err := tx.QueryRow(ctx, query, itemID).Scan(&body, &writtenAt, &mentions, &stated, &owed, &sum); err != nil {
-		return false, fmt.Errorf("read the block state of %s %s: %w", kind, itemID, err)
+	if err := q.QueryRow(ctx, query, itemID).Scan(&body, &writtenAt, &mentions, &stated, &owed, &sum); err != nil {
+		return ItemRepair{}, fmt.Errorf("read the block state of %s %s: %w", kind, itemID, err)
 	}
 	if stated && !owed && sum != nil && *sum == itemblocks.BodySHA256(body) {
-		return false, nil
+		return ItemRepair{kind: kind, itemID: itemID}, nil
 	}
+	repair := ItemRepair{kind: kind, itemID: itemID, owed: true, mentions: mentions}
 	var located []text.Located
 	if mentions {
 		located = text.ExtractAt(body, serverURL)
 	}
-	if _, err := IndexItem(ctx, tx, kind, itemID, body, writtenAt, located, nil); err != nil {
-		return false, fmt.Errorf("index the blocks of %s %s: %w", kind, itemID, err)
+	index, err := ReadItemIndex(ctx, q, kind, itemID)
+	if err != nil {
+		return ItemRepair{}, fmt.Errorf("index the blocks of %s %s: %w", kind, itemID, err)
+	}
+	if repair.indexing, err = PlanItemIndex(index, kind, itemID, body, writtenAt, located, nil); err != nil {
+		return ItemRepair{}, fmt.Errorf("index the blocks of %s %s: %w", kind, itemID, err)
 	}
 	if !mentions {
-		return true, nil
+		return repair, nil
 	}
-	if _, err := replaceRefs(ctx, tx, string(kind), itemID, text.Refs(located), &writtenAt); err != nil {
-		return false, fmt.Errorf("index %s %s: %w", kind, itemID, err)
+	if repair.refs, err = PlanReplace(ctx, q, string(kind), itemID, text.Refs(located), &writtenAt); err != nil {
+		return ItemRepair{}, fmt.Errorf("index %s %s: %w", kind, itemID, err)
 	}
-	return true, nil
+	return repair, nil
+}
+
+// Owed reports whether the item owed an index, so the repair has statements to queue.
+func (r ItemRepair) Owed() bool {
+	return r.owed
+}
+
+// Queue queues the repair's writes on a write phase's batch: the item's blocks and their
+// mentions, then, for a comment or an issue message, its own references.
+func (r ItemRepair) Queue(b *store.WriteBatch) {
+	if !r.owed {
+		return
+	}
+	r.indexing.Queue(b)
+	if r.mentions {
+		r.refs.Queue(b)
+	}
+}
+
+// Block is the node id and stored excerpt of block blockID of the item as the repair leaves it,
+// which a reply naming that block reads in place of the stored one (CurrentItemBlock); found is
+// false when the repaired body holds no such block.
+func (r ItemRepair) Block(blockID string) (nodeID, excerpt string, found bool) {
+	return r.indexing.Block(blockID)
 }
 
 // CurrentItemBlock is block blockID of comment or message itemID while a current revision of the
@@ -86,6 +151,15 @@ func CurrentItemBlock(ctx context.Context, q Queryer, kind ItemKind, itemID, blo
 		return "", "", false, fmt.Errorf("read block %s of %s %s: %w", blockID, kind, itemID, err)
 	}
 	return nodeID, excerpt, true, nil
+}
+
+// ItemBlockRef is the reference of block blockID of comment or message itemID, the one ReplyBlocks
+// reads for a reply naming it: the item addressed under its issue (issueKey), or, for a comment
+// on a document, under that document (project, slug). A direct message has no address, and so
+// its blocks have no reference. A write that names a block before its reply row exists, which
+// that read has nothing to join, builds the reference with it.
+func ItemBlockRef(kind ItemKind, issueKey *string, project, slug, itemID, blockID string) string {
+	return BlockRef(itemRef(string(kind), issueKey, project, slug, itemID), blockID)
 }
 
 // ReplyBlocks reads the block each of the replies replyIDs (comments or messages, by kind) names

@@ -321,7 +321,7 @@ goldmark's tree before the Proof schema's refusals, so a spec holding a table ro
 Both skip an item emptied of its text, since the renderer writes one as a plain `- `, and both read front matter as Parse does, so they agree on every document both can read.
 Every version write records the count in its own transaction (`docs.RecordTaskProgress` from `writeVersionTx`;
 issue creation and an upload call `docs.RecordTaskProgressMarkdown` after they insert their version row, so the count names it).
-The row the API reads (`model.IssueProgress`, on `IssueSummary` and the issue read, never on an event payload) can lag its document - every row the migration found, any the task a deploy replaces versions while both run (its code records no count), a row another writer held - so `cmd/dispatch` runs `docs.Service.RunTaskProgressReconciliation`, which at start and every five minutes (`TaskProgressReconcileInterval`) counts again every issue whose `tasks_version` is not its document's greatest `artifact_versions.number` (`taskProgressDrift`), in batches of 50 under `for no key update … skip locked`:
+The row the API reads (`model.IssueProgress`, on `IssueSummary` and the issue read, never on an event payload) can lag its document - every row the migration found, any the task a deploy replaces versions while both run (its code records no count), a row another writer held - so `cmd/dispatch` runs `docs.Service.RunTaskProgressReconciliation`, which at start and every five minutes (`TaskProgressReconcileInterval`) counts again every issue whose `tasks_version` is not its document's greatest `artifact_versions.number` (`taskProgressDrift`), in batches of 50, taking each issue's owner lock without waiting (`store.TryLockOwners`, the advisory form of `for no key update … skip locked`):
 a full batch with drift left goes straight to the next, and a short or failed one is retried a bounded number of times in the pass;
 so a stale or missing count lasts at most that interval, and `tasks: null` on the API means a spec with no task list (total
 0) or one still inside that window.
@@ -339,7 +339,7 @@ The graph bounds a block id at `text.MaxBlockIDBytes`, 256 bytes of UTF-8 (`MAX_
 it keys a block by its id, and a Postgres B-tree key holds at most 2704 bytes.
 The bound decides only which blocks the graph keys, never whether a write is taken:
 a seeded spec, an upload, an `insert`, a rebuild from markdown, an accepted suggestion or a browser's edit naming a longer id is written, and the document stores, renders and versions it as any other;
-its block is no graph node (`refs.IndexBlocks`, below).
+its block is no graph node (`refs.PlanBlocks`, below).
 A reference is bounded as a whole too: its target id (`text.TargetID`:
 an issue's key, a document's `<KEY or PROJECT>/<slug>` or `agent/<session id>/<slug>`, a document block's `<KEY or PROJECT>/<slug>#<block id>`, a comment's or message's block's `<item kind>/<item id>#<block id>`, an ask's, a comment's or a message's id, a component's `<project>/<id>`), which `refs.to_id`, `block_refs.to_id` and the item block mentions' `to_id` hold in B-tree keys, is at most `text.MaxTargetBytes`, 2048 bytes (`MAX_REFERENCE_TARGET_BYTES`, `referenceTargetFits` in `@legion/contracts`), since neither a slug nor an item id has a bound of its own.
 Both bounds hold only what text cites: `text.Extract` drops a reference past either (`inBound`), so the text citing it is written with no edge.
@@ -426,12 +426,32 @@ Every mutate starts from the tree `applyLive` already read (`startTree`, `editTr
 and a write drops its fork and rendering once it commits, before its publish loads the room (`releaseFork`), since a pooled connection's context can keep the write reachable long after it answered (LEGION-504).
 A token's encoding (`pmdoc.EncodeTokenJSON`) is held once per call, in one buffer for the document and all its blocks, and dropped when the call returns;
 LEGION-504's concern was more copies per token and their retention, and neither holds.
-The handler ends the transaction with `ledger.Commit`, which records each settlement credit with the document content and takes each version's authors back out of that record, commits, credits the writes' actor to their rooms, releases the authors a version the transaction wrote named, then applies and broadcasts the updates, and last publishes the events its document operations appended, ahead of the handler's own;
-it defers `ledger.Discard`, so a transaction that does not commit leaves the room, every connected browser, every version and the durable document as they were.
+Until the handler ends the transaction with `ledger.Commit`, the transaction is in its read phase:
+it takes its locks, reads, runs every document operation's work (renders, anchor walks, version capture, reference extraction, approval carry) and its write advice, and writes nothing.
+Every document operation's write and every write of the handler's own is queued on the ledger instead (`docs.WriteStep`: `Ledger.Queue`, which in package `api` the route calls itself or through `queueExec`, `queueEvent` and `queueStampedEvent`, `api/write_queue.go`), at the point the transaction makes it, so the queue holds the transaction's statements, the document operations' and the handler's, in the order they were made, and so its events append in the order they were made.
+A read that would have seen one of the transaction's own writes reads it from the ledger:
+a pending append counts toward the document's head (`withOwnAppends`), a pending anchor toward the anchors a refresh walks (`RegisterPendingAnchor`), a pending version's number, time and markdown (`NextVersion`, `Now`, `PendingVersionMarkdown`).
+`ledger.Commit` first runs the transaction's write phase:
+every queued step puts its statements on one `store.WriteBatch`, the settlement credit's statements join it last, and the batch goes to Postgres as one pipelined `pgx.Batch`.
+The server runs the statements back to back and the client reads their results once, so the transaction holds its id for the server's work, a client wake or two and the commit, never while this process waits to be scheduled between two statements (under CPU load that wait was 10-140 ms per round trip).
+A step reads no result:
+a value a later statement needs from an earlier one is derived in SQL - an event's sequence from its owner row and the owner's `last_seq` and `updated_at` from the row inserted (one CTE statement per append, `events.Broker.QueueAppend`), an event's `thread_logins` from `user_threads` as the writes queued before it, and the triggers they fired, left them (read by the event's own insert, `events.Broker.QueueAppendWithLogins`, `events.ThreadLoginsOf`), an `ask.opened` payload's `opened_event_id` and a stamp's `source_seq` from the events id sequence's `currval` (`store.LatestEventID`, `refs.QueueStamp`), a review's `event_seq` from the event just appended - or read in the read phase (a row's `now()`/`clock_timestamp()`, its id);
+a value the handler needs after `Commit` (the appended event) is filled by the statement's callback.
+The first statement that fails, or the first callback that refuses its result (a guarded update's `ALREADY_ACTIONED`, an edit-notice claim that no longer matches), stops the write phase, the transaction rolls back, nothing reaches a room, and `Commit` returns that error unchanged, so the handler answers what it answers for that error (`TestAFailedWritePhaseLeavesNothing`, `TestWritePhaseSendsItsStatementsAsOneBatch`).
+`Commit` then commits, credits the writes' actor to their rooms, releases the authors a version the transaction wrote named, then applies and broadcasts the updates, and last publishes the events its document operations appended, ahead of the handler's own;
+the handler defers `ledger.Discard`, which drops the queue, so a transaction that does not commit leaves the room, every connected browser, every version and the durable document as they were.
+A write outside any ledger runs its statements as a batch of their own (`store.RunWrite`):
+`events.Broker.Append`, a message's insert, references, event and stamp.
+An issue's patch keeps its row writes inline, since their results steer it (a component or blocker refusal, a taken external link), but a close or a reopen does its document work - the withdrawn or restored asks' blocks and copies (`prepareWithdrawal`, `prepareRestoration`, `docs.WriteIssueAskStates`) - before the first of them and before it reads its advice, so the advice knows which asks it withdraws or restores (`adviceAsks`), and queues those document writes, the asks' rows and every event it appends on its ledger (`recordWithdrawnAsksTx`, `recordRestoredAsksTx`), so the write phase runs them after the row writes in the order made;
+the response's `last_seq` is the sequence of the last event the write phase appended on the issue (`issueLastSeq`) and the status event's payload records its own sequence, derived by its insert (`model.IssueEventPayload.WithOwnerLastSeq`), since a count made here would miss the events a document write queues - an anchor refresh of a document the close rewrote - on the same owner row; the status event's `thread_logins` is read by its own insert (`events.IssueLoginsOf`).
+Settlement and the background passes (block-index backfill, decided-wording restoration, task-progress reconciliation, the edit-notice sweep, the close's final sweep of its issue's ask blocks, the repair of a closed or reopened issue's asks) likewise do every read and all their work before their first write;
+settlement, the block-index backfill, the decided-wording restoration, the close's sweep and the ask repair queue their writes on a ledger and send them as one batch right before they commit.
 
 While a transaction's write to a document is open it holds that room's writer slot, so another transaction's joined operation on the document waits for it to be published or discarded, and it holds off the room's settlement, which runs once the write is published or discarded.
 The docs layer takes a document's locks in one order, wherever a handler starts:
-the owner row (`lockArtifactOwner`), then the writer slot, then the advisory lock; a joined read takes the owner row before it waits for the slot.
+the owner's advisory lock (`lockArtifactOwner`, `store.LockOwner`), the transaction's first lock; then the writer slot; then the copy lock where it takes one; then the document's advisory lock; and only in the write phase the owner row (`lockEventOwner`) with every row write.
+A joined read takes the owner lock before it waits for the slot.
+None of the locks before the write phase is a row lock, so a transaction holds no transaction id while it waits for them or holds them.
 The slot is in memory, where Postgres cannot see a wait for it, so no transaction may wait for it while holding a lock its holder still needs.
 A failed room's eviction flushes and compacts under the advisory lock, so no transaction waits for a failed room to recover either:
 a document operation inside a transaction (a handler's, or settlement's own) that meets one fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`, whatever failed the room), the transaction rolls back, and the caller retries once the room has reloaded;
@@ -452,9 +472,10 @@ Beside it, `decision_block_checks` lists each block the edit added, in document 
 the related-item check run on the block's question once the edit has committed (`decisionBlockChecks`), the first five checked at once under one 5 s allowance and each past them answered, and recorded, as not made; it is omitted when the edit added none.
 A conditional edit releases its document's edit gate at the commit, before those checks run, so they never hold the next conditional edit.
 A document write that stored a version replacing the one a person approved reports `superseded_approval` (`{approved_version, version, approved_by}`), on an issue document's advice and in the document report of a project document's:
-a document edit, and an upload that replaced an existing document, each read their transaction's newest review of the document after writing their own version and any approval carry it made (`supersededApprovalAdvice` over `docs.NewestReview`, in `docs.ReviewOrder`, behind a savepoint of its own that is always rolled back), and report only an approval of the version right below the one they stored.
+a document edit, and an upload that replaced an existing document, each read the document's newest review in their read phase, where their own version and any approval carry it made are queued (`supersededApprovalAdvice` over `docs.NewestReview`, in `docs.ReviewOrder`, behind a savepoint of its own that is always rolled back), taking a carry's own approval off the ledger (`docs.Ledger.PendingReview`, which the carry records as it queues its review), and report only an approval of the version right below the one they stored.
 A document nobody approved, an approval that was already stale, a newer changes request, and a version the carry approved itself each report nothing, so the field names the write that closed a Legion design gate and no other.
-Issue-state advice is computed in the write transaction after its event is appended, so it includes that write.
+Issue-state advice is read in the write transaction's read phase, before its first write, so its queries hold no transaction id;
+the write's own event is not appended yet, so a write that appends one the consecutive-write count counts (`message.created`, `comment.created`, `ask.opened`) adds it (`writeAdvice`'s `appending`), and under the issue's owner lock no other event of the issue can commit in between, so the answer still includes that write.
 A stored document's decision blocks and unparsed openers are read from one parse of the canonical Markdown after the write transaction commits (`readDocumentBlocks`).
 Advice queries run behind a savepoint with a 500 ms timeout that is restored before the savepoint is released:
 a failure of either session-scoped query is logged and omits `advice` without preventing the write from committing, while the `legion_managed_status` walk, which takes a savepoint of its own inside that one, is logged and omits that field alone, keeping the advice already assembled.
@@ -886,7 +907,7 @@ A document token protects every operation;
 a block guard must name every content block the resolved batch changes, while unrelated sections can change concurrently.
 Insert and move require the document token because their meaning depends on document order.
 Tokens include inline marks, so a fresh anchor makes the relevant document or block guard stale.
-After resolving the artifact, the conditional path takes a bounded in-memory gate keyed by its artifact id before starting the write transaction or warming its room, then takes the document's owner row and writer slot, then `pg_advisory_xact_lock(hashtext(artifact_id))`, and enters its one Yjs transaction;
+After resolving the artifact, the conditional path takes a bounded in-memory gate keyed by its artifact id before starting the write transaction or warming its room, then takes the document's owner lock and writer slot, then `pg_advisory_xact_lock(hashtext(artifact_id))`, and enters its one Yjs transaction;
 it reads, checks, resolves, and applies the batch inside that transaction.
 Admission waiters hold no database connection; `EDIT_QUEUE_FULL` is a `429` response that means back off, while `PRECONDITION_FAILED` means re-read.
 This protects unrelated document reads, websocket authorisation, room loading, settlement, and browser persistence from a stale-edit flood exhausting the shared pool.
@@ -901,28 +922,44 @@ It is never re-read after the commit, where a concurrent writer's change would f
 Settlement cannot move it: `tokenAttrs` hashes neither block ids nor server-owned attributes.
 So a chain of guarded edits passes each response's token as the next `precondition.document` and reads the document once.
 
-The room lock and the document's **owner row** — the artifact itself for a project document, its issue otherwise — are governed by two rules, both load-bearing.
-**Level:** no lock on `issues`, `artifacts`, `projects` or `asks` is `for update`.
-Weaker levels are free — `for no key update` where a writer must serialise against other writers of the same row, `for share` or `for key share` where it need not
-— and `TestNoForUpdateOnOwnerTables` (`api/lock_level_test.go`) enforces the prohibition over the way these locks are written:
-a `for update` spelled in a string literal, or in a chain of literals and package-level constants, `var`s included, resolved to a fixpoint, which is every site here.
+The room lock and the document's **owner** — the artifact itself for a project document, its issue otherwise — are governed by two rules, both load-bearing.
+**Level:** writers of one owner serialise on the owner's transaction advisory lock (`store.LockOwner`, below), never on a row lock of the owner, and no lock on `issues`, `artifacts`, `projects` or `asks` is `for update`.
+`TestNoForUpdateOnOwnerTables` (`api/lock_level_test.go`) enforces both over the way these locks are written:
+it refuses `for update` on those four tables, and any row lock (`for update`, `for no key update`, `for share`, `for key share`) on `issues`, `artifacts` or `projects` outside the write phase's own, the events' `lockEventOwner`.
+It reads a lock clause spelled in a string literal, or in a chain of literals and package-level constants, `var`s included, resolved to a fixpoint, which is every site here.
 An operand the check cannot resolve is read through its own string literals alone, spliced in with a space at each end, so a clause that forms across that splice is refused too, and only a clause the scanned text never spells, including a keyword the splice splits mid-word, is outside its reach and is a review matter.
 What `for update` costs is the `for key share` a foreign key takes:
 under it an insert into `doc_updates`, `doc_snapshots`, `doc_checkpoints`, `comments`, or any child table added later waits on the owner row, and a durable writer holding the room lock then deadlocks against whoever holds that row.
-`for no key update` conflicts with itself exactly as `for update` did, so writers of one owner still serialise and the per-owner event sequence is unchanged.
+The owner row is locked only in a transaction's write phase:
+`lockEventOwner` takes it `for no key update` to read the sequence an append continues, under the owner lock it takes first, so no other Dispatch writer holds it then, and that level never blocks the key share.
 One transaction would still need `for update` on these tables:
 one that deletes such a row or changes a key column, which is what the weaker level does not cover.
 Nothing does either today; the check refuses it if something starts to, and that red is the prompt to revisit this rule, not to reach for a weaker level that would not hold.
-**Order:** a transaction that takes both an owner row and the room lock takes the owner row first.
-The durable writers take no owner row at all
-— `appendUpdate`, `CaptureSnapshot`, `PruneAfter`, `Compact` and `Delete` reach the room through `withRoomLock`, which holds a session-level `pg_advisory_lock` on its own connection before it opens a transaction, so no row lock can precede it there
+**Order:** a transaction that takes both the owner lock and the room lock takes the owner lock first, as its first lock:
+the owner lock (several sorted by lock key), the in-memory writer slot, the copy lock where it takes one, the room lock, and only then, in the write phase, the owner row with the transaction's writes.
+The durable writers take no owner lock and no owner row at all
+— `appendUpdate`, `CaptureSnapshot`, `PruneAfter`, `Compact` and `Delete` reach the room through `withRoomLock`, which holds a session-level `pg_advisory_lock` on its own connection before it opens a transaction, so no lock can precede it there
 — which is why order alone could not be the whole rule;
-but a transaction that does take both, such as an upload appending its event after writing the document, deadlocks against a settlement if it takes them the other way round.
+but a transaction that does take both, such as an upload appending its event after writing the document, deadlocks against a settlement if it takes them the other way round, since two exclusive holds of one owner's lock conflict.
 
 Each rule holds off a failure.
 Under `for update` those locks block a child insert, and a durable writer holding the room lock deadlocks against a settlement or an event append holding the owner row;
 on the live path the loser is `failRoom`, which evicts the room and drops the update.
-At the weaker level with the order broken, a project-document upload that takes the room lock before its event's owner lock deadlocks against a settlement holding that row.
+With the order broken, a project-document upload that takes the room lock before its event's owner lock deadlocks against a settlement holding that owner's lock.
+
+**The owner lock and the two phases of a write.**
+`store.LockOwner` (`store/ownerlock.go`) is `pg_advisory_xact_lock(0x4F574E52, hashtext('<kind>:<key>'))`, kind `issue`, `artifact` (a project document) or `project`:
+a two-key namespace of its own (`OWNR`), apart from the copy locks' (`COPY`), duty's leases' (`LOOP`) and every single-key lock.
+`LockOwners` takes several in one statement, sorted and deduplicated by lock key rather than by owner name, so two owners whose names hash alike never lock in opposite orders;
+`TryLockOwners` is the advisory form of `skip locked` a background pass takes; `LockOwnerShared` is `putThreadRead`'s.
+The lock and the read it guards are always two statements (`store.LockOwnerAndRead` and `LockOwnersAndRead` send them in one round trip, as one batch):
+under READ COMMITTED a statement's snapshot is taken before it waits, so `select pg_advisory_xact_lock(...), closed_at from issues ...` would read the row as it stood before the wait and let a write land on an issue closed meanwhile (`TestACloseCommittedWhileAWriterWaitsOnTheOwnerLockIsRefused`).
+No lock taken before the write phase is a row lock, so a write transaction holds no transaction id until its first write:
+its read phase - the owner lock, its reads, every document operation's work and its write advice - holds none, a writer waiting its turn on the owner lock holds none (`TestTwoWritersOfOneOwnerSerializeWithoutATransactionID`), and its write phase sends its statements as one pipelined batch and commits (`ledger.Commit`, above).
+A reader that waits for every older transaction id to end therefore waits only for other writes' statements.
+One cost remains: the read phase still holds its pooled connection, idle in transaction.
+`refreshAnchors`' writes, an update and a `*.anchor_refreshed` append per changed anchor, ride in the same batch, so they add statements to the server's work but no round trip (folding them into one statement is INFRA-605's).
+A process of a release that serialised on the owner row and a process of this one do not exclude each other's writes to one owner, so the release that moved owners onto the advisory lock rolls out with `Recreate` at one replica.
 
 **One caller, one connection.**
 Nothing holding a connection of the shared pool (`store.Pool`)
@@ -950,7 +987,7 @@ the refusal on every guarded method, concurrent reads each holding one connectio
 — the parameter is read from `pgx.ParseConfig`'s `RuntimeParams`, because `pgxpool.ParseConfig` is the layer that folds it into `MaxConns` and deletes it, so pgxpool's own parse cannot answer the question and a raw-string scan answers a different one.
 The other pool parameters are not refused, because the shared pool keeps whatever minimums the connection string sets.
 pgx's default, `max(4, NumCPU)`, is four on production's one Fargate task at `cpu="512"`, and four is a connection per blocked writer:
-with four writers parked on one issue's row lock, a read of an unrelated issue waits for as long as the lock is held.
+with four writers parked on one issue's owner lock, a read of an unrelated issue waits for as long as the lock is held.
 Sixteen ran out too: under heavy agent load the API held all sixteen and every other caller, the events outbox included, waited behind them.
 The database has hundreds of connections spare, so 64 is deliberate headroom.
 
@@ -960,7 +997,7 @@ A cold document room loads on the rooms pool (`store.Pool.Rooms`, four connectio
 that load is deliberately outside the writer's transaction, because the room outlives the request and its updates must not roll back with it.
 Everything the load needs comes from that pool, `onLoadDocument`'s issue read included
 
-- a writer holding a connection and the issue's row lock waits for the load, so a load that waited for the shared pool would close the same cycle without a transaction of its own.
+- a writer holding a connection and the issue's owner lock waits for the load, so a load that waited for the shared pool would close the same cycle without a transaction of its own.
   The pool belongs to the store rather than to each `PgVersioned`, so a caller that constructs one to read a document borrows those connections instead of opening more.
   The load balancer's probe takes the other one:
   `store.Pool.Healthy` reads the highest applied schema version from the health pool (one connection, used by nothing else) under a `store.healthProbeTimeout` deadline derived from the caller's context, two seconds covering dial and query, and `/healthz` answers with the result, reporting that version as `schema_version`.
@@ -984,7 +1021,7 @@ The watch's last reading is how the failure names the lock and its holders: Post
 
 Everywhere else a read runs through the transaction it is already inside:
 the issue state an anchored write checks before it stamps its mark (`issueOpen` through `queryFrom`), table anchor checks (`rejectLiveTableAnchors`, `rejectUnindexedTableMarks`), recorded mark refs, and the suggestion kind and browser-mark verification the comment routes ask for while their transaction is open.
-Settlement marks its injections owner-verified (`withOwnerVerified`) because it has already read and locked the owner row in its own transaction, so `allowInject` does not read it again.
+Settlement marks its injections owner-verified (`withOwnerVerified`) because it already holds the owner's lock and has read the owner in its own transaction, so `allowInject` does not read it again.
 An injection that is not owner-verified does read the issue through the shared pool, and that read is outside the cycle only because ygo runs `OnInject` before `getOrCreateRoom` (`provider/websocket/inject.go:321-330`):
 an injection refused there has published no room placeholder for a connection-holder to park on.
 A handler that must read outside its transaction commits or rolls back first - `issue_create.go` rolls back at the duplicate-external branch before it opens the advice transaction - and a scan that publishes drains its rows first (`scanPendingEvents`, `documentRooms`), because an open cursor holds its connection until it closes.
@@ -1059,15 +1096,14 @@ Both statements a settle transaction makes are scoped to the claim its sender to
 Both transactions lock the event's owner before the attempt row, the order every other delivery transaction takes them in;
 locking the attempt first would invert against the claim and deadlock two concurrent retries.
 
-Table row and column deletion records a mark snapshot during prevalidation, then locks the corresponding ask/comment rows with `FOR SHARE` in the edit transaction before its token check and Yjs transaction, and re-derives the selected cells' mark set inside Yjs before applying.
-A reopen waits behind the row lock or is observed as open;
+Table row and column deletion records a mark snapshot during prevalidation, then reads the corresponding ask/comment rows in the edit transaction, under the document owner's lock, before its token check and Yjs transaction (`checkTableAnchorRows`: every writer of an anchored ask or comment takes that lock first, so the rows hold still until the edit commits), and re-derives the selected cells' mark set inside Yjs before applying.
+A reopen waits behind the owner lock or is observed as open;
 a newly committed anchor changes the mark snapshot and refuses the deletion; an unaccounted mark with no committed ask/comment row fails closed.
 
 References form one graph.
-Mentions (`dispatch://` refs and same-origin dashboard URLs in a document version, ask question, comment body, or issue message) are derived on every write into `refs` by `refs.ReplaceCounted` or one of its variants:
-`refs.ReplaceCountedEdit` for an edit of an ask's question, `refs.ReplaceCountedItem` and `refs.ReplaceCountedItemEdit` for a comment's or an issue message's write and a comment's edit (which first index the item's blocks, below), and `refs.ReplaceDocumentCounted` for a document version whose mentions its index has already extracted.
-All of them reconcile through the unexported `replaceRefs` rather than rewrite:
-an edge that survives keeps its `created_at` and `source_seq` (the `events.id` that introduced it, stamped by `refs.Stamp` right after the source's event is appended, in the same transaction).
+Mentions (`dispatch://` refs and same-origin dashboard URLs in a document version, ask question, comment body, or issue message) are derived on every write into `refs` by `refs.ReplaceCounted` or `refs.ReplaceCountedItem` (a comment's or an issue message's write, which first indexes the item's blocks, below), or by a `refs.Replacement` a write plans in its read phase (`refs.PlanReplace`, `refs.PlanReplaceFrom`) and queues in its write phase (`refs.Replacement.Queue`), beside the `refs.ItemIndexing` an item's write plans with it (`refs.ReadItemIndex`, `refs.PlanItemIndex`).
+All of them reconcile rather than rewrite:
+an edge that survives keeps its `created_at` and `source_seq` (the `events.id` that introduced it, stamped right after the source's event is appended, in the same transaction: by `refs.Stamp` with the id in hand, or in a write phase's batch by `refs.QueueStamp`, which names the id as `store.LatestEventID`, the events id sequence's `currval`, so nothing between the event and its stamp may append another event).
 Structural relations stay in the columns that own them and the `graph_edges` view (migration 0032) unions both into one typed edge relation:
 `mentions`, `child_of` (`issues.parent_key`), `blocked_by` (`issue_links`), `attached_to` (`artifacts.issue_key`), `anchored_to` (ask/comment anchors), `owned_by` (project-document asks/comments), `replies_to` (comment and message threads), `followed_by` (`ask_followers`), since migration 0121 a block's `mentions` (`block_refs`) and its `part_of` edge to its document (`document_blocks`), and since migration 0142 the same two for a block of a comment or message (`comment_block_refs` and `message_block_refs`, `comment_blocks` and `message_blocks`) and a reply's `replies_to` edge to the block it names (`replies_to_block`).
 An issue may wait only on issues in its own project through `blocked_by`.
@@ -1096,10 +1132,10 @@ one in a document the block index has not reached.
 
 Each identified block of a document is a graph node too (and so is each block of a comment or message, below):
 kind `block`, id `<document ref_key>#<block id>` (`text.TargetID`), its reference the document's with `#b-` and the id as `text.EncodeBlockID` writes it (`refs.BlockRef`).
-`refs.IndexBlocks` indexes a version's blocks in the version writer's transaction, from the same render and extraction as its references:
+`refs.PlanBlocks` plans a version's blocks in the version writer's read phase, from the same render and extraction as its references, and `BlockIndexing.Queue` writes them in its write phase:
 the blocks the render's offsets name, which `GET /api/v1/artifacts/{id}/blocks` lists, the first holder of a repeated id being the node.
 A block whose id is longer than `text.MaxBlockIDBytes` is no node (`uniqueBlocks`):
-a mention inside it starts at the innermost node holding it, or at the document when none does, and `IndexBlocks` logs a warning naming the document, the version, how many such blocks it skipped, the longest one's id bytes and the bound.
+a mention inside it starts at the innermost node holding it, or at the document when none does, and `PlanBlocks` logs a warning naming the document, the version, how many such blocks it skipped, the longest one's id bytes and the bound.
 The version is still written.
 Its tables are migration 0121's: `document_blocks` holds each block the latest indexed version holds, with its text's sha256, its text cut to 480 runes as its excerpt, and `changed_version` and `changed_at`, the version its text last changed in, which an unchanged text keeps.
 `document_block_texts` records a block's whole text in each version that makes it new, changes it, restores it, or deletes it (a null text).
@@ -1160,10 +1196,10 @@ Without `blocks`, with a `base_revision` that is no longer the stored one (anoth
 (4) every other takes the next new id; (5) a current stored block nothing took is removed.
 The body itself is taken as it was before blocks: its blocks never refuse a write.
 
-Every comment and issue message writes its mentions twice in the transaction that writes it (`refs.ReplaceCountedItem`, or `refs.ReplaceCountedItemEdit` for a comment's edit):
+Every comment and issue message writes its mentions twice in the transaction that writes it (`refs.ReplaceCountedItem`, or, where that transaction decides before it writes, the plan `api.planItemWrite` makes of the same index and reconciliation):
 its own `refs` rows, as before, and one row per (block, target) in `comment_block_refs` or `message_block_refs`, each mention at the block whose extent holds its start.
 A new block row takes the write's time, or at the item's first indexing its own `refs` row's `created_at` and `source_seq`, and `refs.Stamp` gives the others their event;
-the targets whose block rows moved join the item's own in the event's `references_changed`, so a link that moves between two blocks of one comment is named, beside every cited target an edit that moves the head of the comment's text names (`ReplaceCountedEdit`'s rule).
+the targets whose block rows moved join the item's own in the event's `references_changed`, so a link that moves between two blocks of one comment is named, beside every cited target an edit that moves the head of the comment's text names (`refs.EditedTargets`' rule).
 `heldByABlock` covers comments and messages as it covers documents, so `?to=<target>` lists a comment's or message's link from the block holding it, a node whose `parent` is the item, and `refs.BacklinkCounts` counts it once per citing block:
 a comment citing a node from two paragraphs counts 2.
 A comment's or message's own read (`?to=` or `?from=` its reference) lists the edges at its current blocks, each naming its block as `block`, and leaves out their `part_of` edges unless `?kind=` names them.
@@ -1194,8 +1230,9 @@ The reply stores the block's node id in `replies_to_block`, `graph_edges` lists 
 A block the item does not hold now is `400 INVALID_COMMENT` (`INVALID_MESSAGE` for a message) `<field> <block> is not a block of <kind>
 <id>`, and so is `reply_to_block` without `reply_to` or `in_reply_to_block` without `in_reply_to`, a delivery callback's error report naming a block, and a message follow-up (`?follow_up=true` once the attempt is answered) naming one;
 a reply in an ask's thread (`ask_id`, a `reply_to` whose thread's head is an ask, or a delivery callback on a comment in one) naming a block is `400 INVALID_COMMENT` `a reply in an ask's thread names no block yet`.
-When the named item is owed an index, or was indexed from another body than it stores, the reply's transaction indexes it first under the locks it already holds (`refs.IndexItemIfOwed`;
-a message parent is taken `for no key update` after its issue, `lockReplyParentMessage`), so the block named is one of the body as stored.
+When the named item is owed an index, or was indexed from another body than it stores, the reply's transaction indexes it itself, so the block named is one of the body as stored:
+a route that writes as it goes indexes it there and then (`refs.IndexItemIfOwed`), and one that runs a write phase plans that index in its read phase and queues it with its own writes (`api.planReplyBlock`, `refs.PlanItemIfOwed`), reading the block it names off the plan.
+A message parent is taken `for no key update` before those writes, after its issue's owner lock (`queueReplyParentMessageLock`, `lockReplyParentMessage`).
 Every comment and message a route returns, and every `comment.*` and `message.*` event payload, carries `reply_block` (`model.ReplyBlock`:
 `node`, `ref`, absent for a direct message's block, which has no address, `block_id`, `text`, `removed`), null when the reply names no block, read in one batched query per kind (`refs.ReplyBlocks`, `hydrateCommentReplyBlocks`, `hydrateMessageReplyBlocks`):
 `text` is the block's stored excerpt, which a removal keeps, so a removed block reads the last text it held, and `removed` is true while no current revision holds it.
@@ -1204,7 +1241,8 @@ A reply naming no block answers the whole item, as before.
 
 Every comment and message has a state row, `comment_block_state` (`revision`, `next_block`, `body_sha256`, `owed_at`) or `message_block_state` (`body_sha256`, `owed_at`).
 Migrations 0143 and 0144 attach `item_blocks_owe` to `comments` (after an insert or an update of `body`) and to `messages` (after an insert, a direct message included), which upserts the row with `owed_at = now()`, and seed an owed row for each item already stored.
-Every write of this build - a comment's create, edit and delivery reply, an issue message, a direct message, a session's reply, each copy of a broadcast - indexes the item in its own transaction, which clears `owed_at`, taking the owner row, then the item row, then its state row.
+Every write of this build - a comment's create, edit and delivery reply, an issue message, a direct message, a session's reply, each copy of a broadcast - indexes the item in its own transaction, which clears `owed_at`, under the item's owner - its advisory lock (`store.LockOwner`), or, for the reconciliation, which holds none, the item row it takes first - with the state row taken by the index's own first statement, so the index of one item is written by one transaction at a time.
+A transaction that runs a write phase plans that index against what the index holds while it holds no transaction id (`refs.ReadItemIndex`, `refs.PlanItemIndex`) and queues its statements, the state row's lock first (`refs.ItemIndexing.Queue`).
 A write by a build without item blocks, during the roll or after a rollback, leaves the item owed, and that build neither reads these tables nor drains them;
 the block-index reconciliation's third batch indexes what is owed (below), and a reply naming a block of an owed item indexes it first (above).
 `GET /api/v1/comments/{id}/blocks` and `GET /api/v1/messages/{id}/blocks` (`api/item_blocks.go`) answer `{item, revision, indexed, blocks: [{id, type, text, ref, from, to, changed_revision,
@@ -1289,7 +1327,7 @@ Only then are the version blocks no row claimed aligned by type and live text wi
 A text either side still holds more than once takes no part in that alignment.
 Last, the version blocks and live blocks of each text both still unmatched are paired in order wherever the two sides hold equally many:
 a text held more than once is matched only so, and otherwise not until a settlement, so a copy typed after the close is never dated to the version (an original left unmatched is dated to the reopen's version), and a text held once on each side keeps the version of a block an edit moved in a document with no row yet.
-A live block that repeats an earlier block's id (a paste keeps its source's id until a settlement stamps a new one) takes part in no step, since `refs.IndexBlocks` indexes only the first holder of an id, and no step gives an id a block has taken.
+A live block that repeats an earlier block's id (a paste keeps its source's id until a settlement stamps a new one) takes part in no step, since `refs.PlanBlocks` indexes only the first holder of an id, and no step gives an id a block has taken.
 A stored row whose text the version does not hold (indexed at an older version this one changed) and whose live text it does not hold either is still recorded deleted at it.
 A live block only an unsettled edit made is not indexed until the reopen's settlement writes the version that holds it, so block history names only versions that hold a block's text.
 The loop remembers a skipped document only when its listing read the issue open, and counts it again without reading it while its latest version and its pending settlement's `marked_at` (which every update append moves) stay as they were, the listing still reads the issue open, and this server holds no room for it:
@@ -1306,19 +1344,19 @@ it leaves `block_grammar_owed` alone, since it has just re-read every item itsel
 
 Blocker-list and parent changes serialize per project through `lockProjectIssueDependencies` (`api/issue_parent.go`), using the two-key advisory-lock namespace `dispatch-issue-dependencies`.
 That transaction lock comes before any row or rank lock.
-A PATCH then locks every issue row it names `for no key update` in one key order, the order `LockOwners` takes event owners (`lockPatchRows`, `lockIssueRows`):
+A PATCH then takes the owner lock of every issue it names in one statement, sorted by lock key, the order `LockOwners` takes event owners (`lockPatchOwners`, `lockIssueOwners`, `store.LockOwners`):
 the issue; its current parent when a status change or a reparent appends to it; the proposed parent; and the rank neighbours.
-`LockOwners` then re-locks rows already held, so no PATCH holds one of these rows while waiting for another that a second write holds.
+`LockOwners` then takes locks already held, which returns at once, so no PATCH holds one of these locks while waiting for another that a second write holds.
 The current parent is read before the lock and again under it:
-a parent a concurrent reparent moved in between releases the attempt's locks (a savepoint) and is locked again in key order, and one that moves at both attempts is `409 PARENT_CONTENDED`, with nothing applied.
+a parent a concurrent reparent moved in between releases the attempt's locks (a savepoint, whose rollback gives back the advisory locks taken under it) and is locked again in key order, and one that moves at both attempts is `409 PARENT_CONTENDED`, with nothing applied.
 The bounded dependency walk uses plain reads rather than contending on unrelated issue rows.
 Status-only, title, labels and rank writes take no dependency lock.
 Creation takes it with non-empty `blocked_by` or a `parent`, before allocating the issue number or rank;
-creation without either takes no dependency lock, and no creation takes an explicit parent-row lock.
+creation without either takes no dependency lock, and no creation takes an explicit lock on its parent.
 An issue sits at most `parentDepthCap` (32) links below its root:
 a create under a parent, or a reparent whose subtree's deepest issue would sit deeper, is `409 PARENT_INPUT` (`refuseParentTooDeep`, under the dependency lock, so two writes cannot each pass alone and together pass it), and every recursive issue walk stops at that depth.
 `blocked_by` inputs are limited to `contracts.MaxIssueBlockers` entries before deduplication on both create and PATCH;
-excess entries are `400 BLOCKED_BY_INPUT` naming the limit before any issue-row lock is acquired, and a PATCH naming the issue itself is `400 BLOCKED_BY_INPUT` too.
+excess entries are `400 BLOCKED_BY_INPUT` naming the limit before any issue's owner lock is taken, and a PATCH naming the issue itself is `400 BLOCKED_BY_INPUT` too.
 A mention's source is the node whose text holds it, never the issue that text belongs to:
 a citation in an issue's spec is an edge out of the spec document, so `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the issue's own `child_of`, `blocked_by` and `affects` edges, and the cited node's `?to=` backlink names the spec's innermost block holding the citation (a `block` node whose `document` is the spec), or the spec itself while the block index has not reached it.
 A citation in a comment or an issue message is named the same way, by the item's block holding it (a `block` node whose `parent` is the comment or message), or by the item while no block of it holds the citation (an item a build without item blocks wrote, until the reconciliation indexes it).
@@ -1615,15 +1653,15 @@ a recurring templated ask under an id its author chose, asking what an earlier d
 After a retraction the first copy to settle opens the block's own ask, credited to the author who wrote the block into it, whom the room keeps owed while the block is a copy;
 every other copy then matches that ask and names it, so copies of one owner share one ask once their source is retracted and the question waits in one place, and a block pasted elsewhere and then cut, in either order, is open in one place.
 That needs the owner's copies to settle one at a time:
-an issue's documents do, under their issue's row (`lockArtifactOwner`), but a project document's owner row is the document itself, so a project's copy bookkeeping - a settlement's copy-source read, and every marking of copies owed - takes a transaction advisory lock keyed on the project (`lockProjectCopies`), so nothing that locks the project's row waits on it.
+an issue's documents do, under their issue's owner lock (`lockArtifactOwner`), but a project document's owner is the document itself, so a project's copy bookkeeping - a settlement's copy-source read, and every marking of copies owed - takes a transaction advisory lock keyed on the project (`lockProjectCopies`), so nothing that takes the project's owner lock waits on it.
 It is the two-key form, `pg_advisory_xact_lock(copiedAsksLockNamespace,
-hashtext(project))`, whose key space Postgres keeps apart from the single-key locks every other advisory lock here takes (a document's room, a project's rank allocation), so it never waits on one of those;
+hashtext(project))`, whose namespace no other two-key lock takes (the owner locks' is `0x4F574E52`) and whose key space Postgres keeps apart from the single-key locks every other advisory lock here takes (a document's room, a project's rank allocation), so it never waits on one of those;
 two projects whose hashes collide only take turns on their copy bookkeeping.
-Every holder takes it before any `doc_settlements_pending` row and before any event append (`TestCopyLockComesBeforeEveryPendingRowAndEvent`, a static check of every Dispatch function's calls in statement order), and its own appends then lock only the owner row it took before the copy lock, so the transaction waiting on it holds nothing the holder goes on to take.
+Every holder takes it before any `doc_settlements_pending` row and before any event append (`TestCopyLockComesBeforeEveryPendingRowAndEvent`, a static check of every Dispatch function's calls in statement order), and its own appends then take only the owner lock it took before the copy lock and that owner's row, which no writer takes without that lock, so the transaction waiting on it holds nothing the holder goes on to take.
 A settlement deletes its own pending row before it appends its first event, and every other writer of a document's own pending row takes it before it appends an event too:
 an upload's or a seed's document write marks it (`appendUpdateTxClass`) before the route appends its event, so `Ledger.Commit`'s later record of the edit source touches a row the transaction already holds (`TestAnUploadOfACopyAndAnAnswerToItsSourceBothTakeTheCopysPendingRowBeforeTheirEvents`).
-An event append locks only its own owner's row, so neither order is what keeps these writers from a deadlock with a route marking the document owed:
-that route appends on its source's owner, a row the writer never takes.
+An event append takes only its own owner's lock and row, so neither order is what keeps these writers from a deadlock with a route marking the document owed:
+that route appends on its source's owner, whose lock and row the writer never takes.
 A copy whose text is changed and an id no ask of the owner indexes open an ask as any new block does (LEGION-651).
 A project document's lookups read `artifacts_project_documents` (migration 0091), an issue document's `artifacts_issue_key`, and the owed copies' latest versions `artifact_versions`' unique `(artifact_id, number)`; `copied_asks_plan_test.go` holds each.
 Finding the owed copies reads, with `LIKE`, the latest markdown of every other document of the owner, so a retraction, an answer or a resolution of a block ask costs in proportion to the owner's markdown bytes.
@@ -1760,7 +1798,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   Issue and pinned lists sort by lifecycle status, then rank, then creation time, then key;
   priority is a badge and a filter, never a sort key, so the List and the Board (whose columns keep the list's order) show the same order.
   `PATCH /api/v1/issues/{key}` accepts neighboring issue keys as `rank.before` and/or `rank.after`, validates they share the project, and serializes rank allocation per project;
-  it locks both neighbours together with every other issue row the PATCH names, in one key order, then rewrites only that issue's order key.
+  it takes the owner locks of both neighbours together with every other issue the PATCH names, in one lock-key order (`store.LockOwners`), then rewrites only that issue's order key.
 
 - Every issue has a nullable `parent_key` (`graph_edges.child_of` is a live view over it).
   `POST /api/v1/issues` validates a supplied `parent` exists in the same project (`400 PARENT_INPUT`) and leaves the new issue at most `parentDepthCap` (32) links below its root (`409 PARENT_INPUT`), and `PATCH /api/v1/issues/{key}` accepts a tri-state `parent`:
@@ -1810,7 +1848,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   The body rejects unknown fields, so an invented one is refused rather than ignored.
   It succeeds when the issue is unclaimed, when this actor already holds it (idempotent:
   the claim keeps its original time and appends no event), and when the holder is a session the Envoy listener's session store no longer holds a record of (`fetchHolderLiveness` reads that one session's record by id, with no transaction or pooled connection held, and `claimBlockedBy` — the whole taking rule, in one place
-  — decides from it under the issue's row lock), which records the takeover.
+  — decides from it under the issue's owner lock), which records the takeover.
   Against a live holder it answers `409 ISSUE_CLAIMED` with the claim in the body and the holder's session, live title and claim time in the message;
   a human's claim, which has no session to be running and none to message, is refused with the person's login and no liveness lookup at all.
   `{"force": true}` takes either anyway and is human-only (`403 HUMAN_ONLY` for a bearer), and only this route has that force
@@ -1820,7 +1858,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   nothing was applied, and nothing about that holder's liveness was established, so it is never `ISSUE_CLAIMED`.
   `DELETE /api/v1/issues/{key}/claim` releases it:
   the holder, any human, or anyone once the holding session is gone; releasing an unclaimed issue is a 200 no-op.
-  Both answer `claimAnswer`: the issue flat, with `legion_managed_status` — whether Legion owns its status, the walk `claimLegionManagedStatus` runs under the issue's row lock before the claim is written
+  Both answer `claimAnswer`: the issue flat, with `legion_managed_status` — whether Legion owns its status, the walk `claimLegionManagedStatus` runs under the issue's owner lock before the claim is written, holding no transaction id
   — beside it, omitted when that walk failed or timed out, which costs the field and never the claim.
 
 - Claiming and releasing never move the status, and no status write ever claims (a move to `done` is the one that touches a claim, clearing it), because humans may track work by the status;
@@ -1919,7 +1957,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   While it is `human` the call hands nothing back:
   the same summary, or none, writes nothing, and a different one is `409 APPROVAL_WAITS_ON_HUMAN`, naming the question the human is reading, since rewording it would rewrite that card with no turn of theirs and refuse an answer they had started.
   The route answers 201 when it wrote anything and 200 when it wrote nothing, with the document's `approval` as the call left it.
-  `docs.OpenApprovalAsk` locks that one row, `docs.RewriteApprovalAsk` is the one rewording a version move and a new summary share, and `handBackApprovalAsk` (`api/reviews.go`) the one hand-back.
+  `docs.OpenApprovalAsk` reads that one row under the document owner's lock, which every writer of an approval ask takes first, `docs.RewriteApprovalAsk` is the one rewording a version move and a new summary share, and `handBackApprovalAsk` (`api/reviews.go`) the one hand-back.
   Every writer passes `MoveApprovalAsk` the actor whose edit moved the request:
   a route passes its own actor, settlement its latest known browser editor, and ambiguous browser content `SettlementActor`, `{kind: "system", id: "document-settlement"}`;
   how many authors the version credits does not choose the mover.
@@ -1930,11 +1968,11 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   `Request changes` requires text) writes an `artifact_reviews` row pinned to the version it names, which is the latest settled version at answer time, and appends `artifact.approved` or `artifact.changes_requested` (`{artifact_id, name, version, actor, reason, ask_id}`) on the document's owner alongside `ask.answered`.
   `POST /api/v1/artifacts/{id}/reviews` `{state, reason?}` (humans only) writes the same review from the document header, pinned to the version settled when the request arrives, and answers the open approval ask when present so the review keeps its thread.
   Both write their row through `docs.WriteReview`, which appends the review's event and keeps that event's sequence on the owner in the row (`artifact_reviews.event_seq`, migration 0120, in the same transaction; null for a review recorded before it).
-  Migration 0120's deferred constraint trigger `artifact_reviews_event_seq` writes the same column at the commit of any transaction that inserted a review without it - the release before 0120, still serving during a rollout and again during a rollback, inserts every review naming no `event_seq` - from that transaction's own event of the review's type, document and version on the owner, which the owner's row lock keeps the newest there until the commit;
+  Migration 0120's deferred constraint trigger `artifact_reviews_event_seq` writes the same column at the commit of any transaction that inserted a review without it - the release before 0120, still serving during a rollout and again during a rollback, inserts every review naming no `event_seq` - from that transaction's own event of the review's type, document and version on the owner, which the owner's lock keeps the newest there until the commit;
   a row `WriteReview` already sequenced is left as it is.
   The third review is the carry (`docs.carryApproval`, `docs/approval_carry.go`, run by `writeVersionTx` after `MoveApprovalAsk` inside the version's own transaction):
   a human's answer to a decision block, when it is the whole change since the version he approved, carries his approval to the version it writes rather than leaving it stale and asking him to approve again what he just decided.
-  Who answered what is the asks rows of this document (`block_artifact_id` and `block_id`, read and locked by `loadAskBlocks` as settlement reads them, under the owner row every version write holds), never N's block attributes:
+  Who answered what is the asks rows of this document (`block_artifact_id` and `block_id`, read by `loadAskBlocks` as settlement reads them, under the owner lock every version write holds), never N's block attributes:
   a peer on the document socket writes those as it likes, and settlement writes them back from the row only for a block it can read.
 
 - Every ask node of N must be held once (`askNodes`;
@@ -1959,7 +1997,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 
 - Every document read carries `approval` (`draft | awaiting | approved | stale | changes_requested`, with `latest_version`, the latest review's `version/by/at/reason/ask_id` and `seq`, and `requested_by` and `waiting_on` while awaiting, the request's turn by `waitingOnExpression`, so an agent whose own revision moved its request, which sends it no event, reads that the request waits on it);
   `at` is the review's `created_at`, which its event shares, and `seq` that event's sequence on the document's owner, absent for a review recorded before migration 0120 and on every read the release before it serves during a rollout or a rollback, so a missing `seq` does not prove an older review:
-  the owner's row lock orders its events as they commit, so `seq` places the review among them where `at`, its transaction's start, cannot, and it orders a review without saying which versions it covers, which `version` does (a carried approval's `seq` can be below its version's own `artifact.version`);
+  the owner's lock orders its events as they commit, so `seq` places the review among them where `at`, its transaction's start, cannot, and it orders a review without saying which versions it covers, which `version` does (a carried approval's `seq` can be below its version's own `artifact.version`);
   `stale` is derived from versions: approved at a version below the latest, which a later version leaves it at unless the carry approves the new one.
   Every approval ask names its document and no other ask names one:
   `asks_approval_kind_check` (migration 0053) refuses a row that pairs `kind` and `approval` otherwise.
@@ -1969,7 +2007,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   the document read's `approval` (`attachApprovals`, one `distinct on (artifact_id)` over the set), its `reviews` list (`loadReviews`), `docs.LatestApprovedReview` (the approval an approval request names as the one it follows), `latestReviewBy` (a carry candidate's latest review) and `docs.NewestReview` (the review a document write's `superseded_approval` advice reads).
   The last three take the first entry of the document's range in `artifact_reviews_by_artifact_event_seq` (migration 0120, that order per document) rather than sort its reviews, which `docs/review_order_plan_test.go` holds:
   it explains each query of `newestReviewQueries` and refuses a query constant of `docs/approval_review.go` that reads one row of the table and is not in that list.
-  `created_at` is the review's transaction start, so two reviews written at once can carry it in the other order than they committed in, and the owner's row lock their events take is what orders them;
+  `created_at` is the review's transaction start, so two reviews written at once can carry it in the other order than they committed in, and the owner's lock their events take is what orders them;
   every review committed after migration 0120 carries a sequence, whichever release wrote it (`WriteReview` writes it, and the migration's trigger gives one to a review the previous release writes), and every row without one was committed before it, so every sequenced row is newer than every unsequenced one, which `nulls last` says.
   That holds only while `WriteReview` is the table's one writer, which `TestOnlyWriteReviewWritesReviews` (`api/review_write_guard_test.go`) enforces:
   it refuses an insert into or an update of `artifact_reviews` in any other non-test Go file of the module, and fails when it can no longer see `WriteReview`'s own two statements.
@@ -1981,7 +2019,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   Dispatch trims labels, preserves case, removes case-insensitive duplicates, and returns `400 LABELS_INPUT` for blank or over-40-character labels;
   every label update emits `issue.updated` with its labels.
   `PATCH` also takes `labels_add` instead of `labels` (both together are `400 LABELS_INPUT`):
-  the labels it names are merged, under the issue's row lock, into the labels the issue holds when the write commits, normalized as above and held to the same 20, so a label another writer added after the caller read the issue survives.
+  the labels it names are merged, under the issue's owner lock, into the labels the issue holds when the write commits, normalized as above and held to the same 20, so a label another writer added after the caller read the issue survives.
   `PATCH` takes `expected_sequence` too, the issue's `last_seq` the caller read:
   the write is refused `409 ISSUE_CHANGED` when the issue's last event is no longer that one.
   The Legion daemon's hand-over writes `status: todo` with both, so a person's change after its read is never overwritten;
@@ -2006,15 +2044,17 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 - Every open ask read carries `waiting_on` (`human` | `agent`), and `waitingOnExpression` (`api/ask_rows.go`) is the rule's one home:
   the ask reads (`askReadColumns`, which alias it `waiting_on` so the Inbox order names that column and evaluates the rule once a row), `listOpenAsks`, a document's awaiting approval (`attachApprovals`), and the approval route's hand-back decision (`askWaitingOn`) all embed it.
   A reply learns its `ask_waiting_on` with no second statement:
-  the comment write reads the ask it joins with the rule's moved-request arm, `approvalMoved` (`describeAsk`), under the owner row every version write and hand-back takes first, and once inserted the reply is the thread's newest, so `commentThreadTarget.waitingOnAfter` applies the rule to it in Go - `agent` for a moved request, otherwise the reply's own `turn`.
+  the comment write reads the ask it joins with the rule's moved-request arm, `approvalMoved` (`describeAsk`), under the owner lock every version write and hand-back takes first, and once inserted the reply is the thread's newest, so `commentThreadTarget.waitingOnAfter` applies the rule to it in Go - `agent` for a moved request, otherwise the reply's own `turn`.
   An approval request whose `requested_version` is below its current `version` is waiting on its agent.
   One whose newest thread reply is the reply its last hand-back answered (`handed_back_reply_id`) is waiting on the human, and so is one nobody has replied to;
   otherwise the newest comment's `turn` decides.
   The newest reply is the one that committed last:
-  `comments.created_at` defaults to `clock_timestamp()` (migration 0065), the moment its insert runs, and both comment inserts (`createCommentFor`, `replyComment`) leave it to the default and run once their transaction holds the owner row.
-  The old default, `now()`, was the transaction's start, which sorted a reply that began first but waited for the row before one that committed while it waited;
+  `comments.created_at` defaults to `clock_timestamp()` (migration 0065), the moment its insert runs;
+  `replyComment` leaves it to the default, and `createCommentFor`, whose insert is queued for its write phase, reads `clock_timestamp()` at the insert's place in its read phase and writes it explicitly.
+  Both read that clock once their transaction holds the owner lock, so it orders an owner's comments as they commit.
+  The old default, `now()`, was the transaction's start, which sorted a reply that began first but waited for the owner before one that committed while it waited;
   an older binary still serving during a rollout names no `created_at` either, so the default orders its replies too.
-  The hand-back reads that reply under the same owner row, so a reply that inserts after the hand-back sorts after the reply it recorded and decides the turn, however early its own transaction began.
+  The hand-back reads that reply under the same owner lock, so a reply that inserts after the hand-back sorts after the reply it recorded and decides the turn, however early its own transaction began.
   It is on `GET /api/v1/inbox` rows, `GET /api/v1/asks/{id}`, `GET /api/v1/issues/{key}/asks`, `GET /api/v1/artifacts/{id}/asks`, and the issue detail's `open_asks`;
   closed asks and every `ask.*` event payload omit it.
   A `comment.created` or `comment.answered` payload that replies to an open ask carries the resulting `ask_waiting_on`, and every route that writes a comment (`POST /api/v1/issues/{key}/comments`, `POST /api/v1/artifacts/{id}/comments`, and the delivery callback `POST /api/v1/comments/{id}/reply`) answers the same `ask_waiting_on` beside the comment row (`commentWriteResponse`, `api/comment_projection.go`;
@@ -2034,8 +2074,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   — are excluded from that count and from `?to=<ask>`; `?kind=replies_to` still returns them.
 
 - A write that moves the reference graph names what it moved.
-  `refs.ReplaceCounted` and its variants are the one way to index a body:
-  each reconciles that source's edges (`replaceRefs`, unexported, so no producer can reconcile without holding what moved) and keeps the targets a reader refreshes by name (`refs.CountedChanges`)
+  `refs.ReplaceCounted` and `refs.ReplaceCountedItem` (a comment's or an issue message's write, which indexes the item's blocks with it), or a plan a write makes in its read phase and queues in its write phase - a `refs.Replacement` whose moved targets it resolves with `refs.CountedChanges`, beside a `refs.ItemIndexing` for an item (`docs.planReplaceCounted` and `docs.replaceVersionRefs`, `api.planReferences`, `api.planFoundReferences` and `api.planItemWrite`) - is how a body is indexed:
+  each reconciles that source's edges and keeps the targets a reader refreshes by name (`refs.CountedChanges`)
   — an issue and an ask, whose readers carry a batched count, a document or file, whose Referenced by panel lists its edges, and a block of a document, whose own panel and every link to it read one graph read and whose document's panel lists the edges at its blocks
   — which the event carries as `references_changed` (`[{kind, id, issue_key?, artifact_id?, ref?}]`:
   an issue by key; an ask by id with the issue or document whose ask list holds its row;
@@ -2047,20 +2087,19 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A citation of a comment, a message, a block of either or a component is not named:
   nothing counts it, and its panel refreshes on the graph itself (the dashboard refreshes the reads of a comment's blocks on that comment's own `comment.*` events instead).
 
-- `ReplaceCounted` names the targets whose edges it inserted or deleted, which is all a first write of a body moves.
-  `ReplaceCountedEdit` (an edit of an ask's question, through `s.replaceEditedReferences` in the API) also names every target the text still cites when the edit changes the head of its text, which every edge such a source writes shows as its excerpt.
-  A comment's or an issue message's body goes through `ReplaceCountedItem` (a create) or `ReplaceCountedItemEdit` (a comment's edit, `PATCH /api/v1/comments/{id}`), which first index the item's blocks (`refs.IndexItem`, taking the editor's carried block ids) and name the targets of the block mentions they inserted or deleted with the item's own, so an edit that moves a link from one block of the comment to another names its target, and so does an edit that changes the excerpt (the first 480 runes) of a block that keeps a link, since that block's excerpt is what the target's panel shows;
-  in the same one reconcile, `ReplaceCountedItemEdit` also names every cited target when the edit changes the head of the text, as `ReplaceCountedEdit` does.
-  `ReplaceDocumentCounted` is a document version's index (`docs.indexDocument`), handed the references it extracted, dated the version's time, and what `refs.IndexBlocks` moved:
+- A reconciliation names the targets whose edges it inserted or deleted, which is all a first write of a body moves.
+  An edit of an ask's question or a comment's body (`api.queueEditedReferences`, `api.queueEditedItemReferences`, `docs.planEditedAskReferences`) also names every target the text still cites when the edit changes the head of its text, which every edge such a source writes shows as its excerpt (`refs.EditedTargets`).
+  A comment's or an issue message's write indexes the item's blocks and the mentions each holds beside its own references (`refs.PlanItemIndex`, taking a comment edit's carried block ids), and names the targets of the block mentions it inserted or deleted with them, so an edit that moves a link from one block of the comment to another names its target, and so does one that changes the excerpt (the first 480 runes) of a block that keeps a link, since that excerpt is what the target's panel shows.
+  A document version's index (`docs.indexDocument`, `replaceVersionRefs`) is handed the references it extracted, dated the version's time, and what its block index moved (`refs.PlanBlocks`, `BlockIndexing.Cited`):
   the targets of the block mentions it inserted or deleted, the target of each mention it kept in a block whose text changed (that block's text is the mention's excerpt), and each block it changed or deleted that a source cites (`citedBlocks`:
   the block's text is what every link to it shows).
-  It stores each mention's excerpt (`RecordExcerpts`, which returns the targets whose served excerpt it changed) and names those too, or marks the excerpts owed (`ClearExcerpts`) for a version with no rendering.
+  It stores each mention's excerpt (`refs.QueueRecordExcerpts`, once `refs.ExcerptsMoved` has worked out in the read phase the targets whose served excerpt the update changes, as `refs.RecordExcerpts` returns them for the excerpt reconciliation) and names those too, or marks the excerpts owed (`ClearExcerpts`) for a version with no rendering.
   An issue's own `child_of` and `blocked_by` edges are named through `issueEdgeChanges` (`api/issue_event_fields.go`):
   a retitle keeps those edges but moves the title they show, so `PATCH /api/v1/issues/{key}` names its parent and the issues it is blocked by;
   a `blocked_by` change moves each added or removed blocker's `referenced_by_count`, so the PATCH names those blockers and `issue.created` names every blocker the new issue holds, merged with what its spec cites (`refs.MergeChanges`, which names each target once and keeps the per-kind cap).
   A consumer refreshes exactly those rows (the ask's lists, its thread and the Inbox, the issue's detail, the backlink panels, a document's panel, a block's read and its document's panel) instead of sweeping every list;
   a write that cited nothing named carries neither field.
-  `grep -rn 'refs\.Replace\(Counted\|CountedEdit\|CountedItem\|CountedItemEdit\|DocumentCounted\)(' --include=*.go internal` lists every write that indexes a body, and the reconcile half is callable only from inside `refs`.
+  `grep -rn 'refs\.ReplaceCounted\|refs\.ReplaceCountedItem\|refs\.PlanReplace\|refs\.PlanItemIndex' --include=*.go internal` lists every write that indexes a body.
 
 - Every payload family that can carry reference changes is built by a helper that takes them, so a producer that forgets does not compile:
   `artifact.*` through `api.artifactCreatedEventPayload` and `docs.ArtifactVersionEventPayload` (`writeVersionTx` returns `model.ReferenceChanges`, `SnapshotVersion` and `NamedVersion` return them on a `docs.VersionResult`, and the six producers
@@ -2081,11 +2120,11 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   — `title`, `status`, `closed_at` (whether the issue is closed, so a close or a reopen, which a status alone cannot say), `rank`, `priority`, `assignee`, `parent`, `labels`, `route`, `repo` (its own or the one it resolves to), `components` (the effective attachment, an inherited change included), `blocked_by`, `external_links`;
   for `issue.created`, measured from `unsetIssue`, every field the new issue holds a value in) and `ancestors` (`issueAncestors`:
   the parent chain, parent first up to the root, `[]` for a root, capped at `parentDepthCap`).
-  `thread_logins` is every login with a Replies row (`user_threads`) on the write's thread once the write is in (`events.ThreadLogins`, sorted, never nil):
+  `thread_logins` is every login with a Replies row (`user_threads`) on the write's thread once the write is in (`events.ThreadLogins`, sorted, never nil), which a write whose statements run as one batch has its event's own insert read, after the write and the triggers it fired (`events.Broker.QueueAppendWithLogins`, `events.ThreadLoginsOf`):
   on `comment.created` and `comment.answered` (the thread its trigger files it under:
   its ask, else the root it replies to, else itself), an issue message's `message.created` and `message.answered` (its root up `in_reply_to`;
   a direct conversation has no Replies thread and carries none), and `ask.opened`, `ask.answered` and `ask.resolved` (the ask's own thread);
-  an `issue.updated` or `issue.closed` that moved the status carries it too, as `events.IssueThreadLogins` (the logins with a row on one of the issue's open asks) for a close or a reopen, which moves exactly those rows, and `[]` for any other status move.
+  an `issue.updated` or `issue.closed` that moved the status carries it too, as `events.IssueLoginsOf` (the logins with a row on one of the issue's open asks) for a close or a reopen, which moves exactly those rows, and `[]` for any other status move.
   `user_state.updated` carries `changed`, which of `pinned`, `last_read_seq` and `dismissed` the write moved from the row it read (`api/state.go`), or `["snoozed"]` for a snooze or an un-snooze of one Inbox row (`askSnoozeEvent`, `api/ask_snooze.go`), whose payload is exactly `{login, changed: ["snoozed"]}`:
   the stream has no per-viewer filter, so every signed-in person and agent replays it, and it names no ask and no `state` of the writer's (the writer's tabs refetch their whole Inbox);
   an event without `changed` predates snooze events, so a reader takes it as any of `pinned`, `last_read_seq` and `dismissed`.
@@ -2129,8 +2168,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   `[&since=<RFC3339>]` reports `opened_since` over all asks in scope so a just-closed ask still disarms an automatic reminder.
 
 - Event IDs are the events view's resume cursor on `/ws/live`, but they do not commit in id order across owners.
-  `events.Broker.Append` takes only its owner's row lock (none for an ownerless, session-addressed event), so one owner's events commit in id order and two owners' never wait for each other.
-  A transaction that appends to multiple owners must call `LockOwners` with every owner before its first append, so two such transactions never take shared owners in opposite orders.
+  `events.Broker.Append` takes only its owner's locks - the owner's advisory lock, which returns at once when the transaction took it in its read phase, then the owner row `for no key update`, the write-phase statement that gives the transaction its id and reads the sequence it continues - and none for an ownerless, session-addressed event, which takes only that id, so one owner's events commit in id order and two owners' never wait for each other.
+  A transaction that appends to multiple owners must call `LockOwners` with every owner before its first append;
+  it takes their owner locks sorted by lock key (`store.LockOwners`), so two such transactions never take shared owners in opposite orders.
   Every reader that pages the log by a global id cursor
   — the event stream relay that feeds every events subscription, the delivery hub, `GET /api/v1/references?since=` — reads only up to the safe horizon of the process's one `events.Horizon` (`events/horizon.go`) and delivers in id order, and GET /auth/whoami's `event_head`, which a page resumes its first events subscription from, is an id at or below which every event is already final (`eventFeedHead`, `api/events.go`).
   Append takes its transaction id before the insert draws the event id, which the horizon's proof needs, and `events_id_seq` must keep `CACHE 1`;
@@ -2277,7 +2317,10 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A row's `ref` names the thread's root, never the reply, so an anchored root still redirects to its document.
   `PUT /api/v1/me/threads/{id}/read` `{read_through}` stores `least(value, now())`, Postgres casting the caller's text so an answer's nanosecond time rounds as the trigger rounded it, and only moves forward, with `agentStateCutoffSkew`'s minute of allowance (`400 INVALID_STATE` past it);
   a non-uuid id is `400 THREAD_ID_INPUT`, a thread the caller has no row for writes nothing, and both answer `204`.
-  It locks the thread's owner row `for share` before it touches the caller's row, since every writer holds that owner `for no key update` before its trigger fires, and appends `user_thread_state.updated` (`{login, thread_id}`, owned by the row's project, never notifying) only when the mark moved, so a revisit announces nothing.
+  It takes the thread owner's lock in shared mode (`store.LockOwnerShared`) before it touches the caller's row, since every writer that moves a `user_threads` row holds that owner's lock exclusively from its read phase on, before its trigger fires:
+  the mark waits for a writer in its read phase to commit (`TestAThreadReadWaitsForAWritersReadPhase`), as the owner row's `for share` once waited for a writer's `for no key update`, rather than take the row first and wait on a writer that waits on it;
+  two marks never wait on each other.
+  It appends `user_thread_state.updated` (`{login, thread_id}`, owned by the row's project, never notifying) only when the mark moved, so a revisit announces nothing.
   A person's own reply or answer needs no call: the trigger moves their mark in the write's own transaction.
   How the SPA shows and marks threads is `packages/dispatch/AGENTS.md`'s.
 
@@ -3414,7 +3457,7 @@ The row holds a SHA-256 of the method, the route pattern, its path values, the q
   every write the holder makes to the row is scoped to its own attempt, so a holder that was only slow changes nothing once it has lost the key.
 
 - A write that also mutates foreign state keeps its own recovery point ("Implementing Stripe-like Idempotency Keys in Postgres"):
-  it commits what it made into the row in its own transaction (`bindRequestKeyRecovery`), and a repeat that finds the point is answered by its route's `keyedReplay` rather than from the stored bytes or a `KEY_COMMITTED`, however its first request ended (finished, lapsed, or released after a 5xx):
+  it commits what it made into the row in its own transaction (`bindRequestKeyRecovery`, or `queueRequestKeyRecovery` where that transaction sends its writes as one batch: the same statement, queued at the place the write makes it, whose refusal the write phase reports), and a repeat that finds the point is answered by its route's `keyedReplay` rather than from the stored bytes or a `KEY_COMMITTED`, however its first request ended (finished, lapsed, or released after a 5xx):
   whatever delivery is still owed is resumed first, then what it made is read again, under `201` and `Idempotency-Replayed: ?1`.
   Four routes do: the single-session send and the broadcast (below), the issue message (`POST /api/v1/issues/{key}/messages`), and a comment (`POST /api/v1/issues/{key}/comments` and `POST /api/v1/artifacts/{id}/comments`), whose replay resumes every mention whose latest attempt is pending under a lapsed claim, under that attempt's own number (so its dedupe key is the same and the stream drops a frame that landed), then answers the comment with its mentions and deliveries in the first answer's shape, read fresh, keeping from the stored answer only its `advice` and `ask_waiting_on`, and only when that answer was a 2xx; the issue message does the same.
   The layer replays the answer; the delivery code decides what is still owed.

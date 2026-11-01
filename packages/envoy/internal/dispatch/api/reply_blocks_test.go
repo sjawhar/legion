@@ -68,19 +68,20 @@ func eventReplyBlock(t *testing.T, handler http.Handler, issueKey, eventType, id
 	return nil, ""
 }
 
-// commentThread is GET /api/v1/comments/{id}'s answer.
-type commentThread struct {
+// commentThreadRead is GET /api/v1/comments/{id}'s answer. It is not commentThread, the thread a
+// comment's logins are filed under (thread_logins.go).
+type commentThreadRead struct {
 	Comment model.Comment   `json:"comment"`
 	Replies []model.Comment `json:"replies"`
 }
 
-func readCommentThread(t *testing.T, handler http.Handler, id string) commentThread {
+func readCommentThread(t *testing.T, handler http.Handler, id string) commentThreadRead {
 	t.Helper()
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+id, nil, "alice")
 	if response.Code != http.StatusOK {
 		t.Fatalf("read comment %s: status=%d body=%s", id, response.Code, response.Body.String())
 	}
-	return decodeBody[commentThread](t, response)
+	return decodeBody[commentThreadRead](t, response)
 }
 
 // sendFrame is the message event a listener send carries, with the fields a reply block moves.
@@ -438,7 +439,7 @@ func TestRepliesWrittenBeforeThisChangeStillShow(t *testing.T) {
 	}
 
 	commentRead := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+x.ID, nil, "alice")
-	thread := decodeBody[commentThread](t, commentRead)
+	thread := decodeBody[commentThreadRead](t, commentRead)
 	if len(thread.Replies) != 1 || thread.Replies[0].ID != reply || !strings.Contains(commentRead.Body.String(), `"reply_block":null`) {
 		t.Fatalf("GET the comment = %s, want the older reply naming no block", commentRead.Body.String())
 	}

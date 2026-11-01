@@ -101,13 +101,15 @@ func TestTitleLexemesFillEveryStoredTitleAndFollowEveryRetitle(t *testing.T) {
 }
 
 // 0089 holds no issue's row while it waits for a write that holds one. Its update locks every
-// issue's row in the order the rows lie on disk, and a reparent locks the issue and its new parent
-// in key order (lockIssueRows, api/issue_parent.go:71), which is text order: reparenting
+// issue's row in the order the rows lie on disk, and a reparent of the release 0089 shipped in
+// locked the issue and its new parent rows in key order, which is text order: reparenting
 // CORE-9 under CORE-10 locks CORE-10, the later row on disk, first. A reparent that held CORE-10
 // while the update, already holding CORE-9, waited for it, and then asked for CORE-9, closed a
 // cycle, and Postgres's deadlock check killed one side with 40P01: the boot, or the reparent with
 // a 500. 0089 takes issues EXCLUSIVE before it writes, so it waits for the reparent's table lock
-// holding nothing, the reparent's second row lock is granted, it commits, and 0089 then runs.
+// holding nothing, the reparent's second row lock is granted, it commits, and 0089 then runs. (A
+// reparent now takes owner advisory locks instead, and its rows only with its update; the row
+// locks below stand for that release's.)
 func TestMigrate0089WaitsForAReparentWithoutDeadlockingIt(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)

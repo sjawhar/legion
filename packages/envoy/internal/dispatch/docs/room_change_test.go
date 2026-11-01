@@ -109,8 +109,12 @@ func TestAnAnchorWhoseQuoteTheRoomDeletedIsOrphanedByTheVersionWrite(t *testing.
 	if _, err := service.SnapshotVersion(joinedCtx, artifactID, alice); err != nil {
 		t.Fatalf("snapshot version: %v", err)
 	}
+	// The version's anchor refresh is a write, which the transaction's write phase runs at Commit.
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the snapshot: %v", err)
+	}
 	var encoded []byte
-	if err := tx.QueryRow(ctx, `select anchor from asks where id = $1`, askID).Scan(&encoded); err != nil {
+	if err := service.store.Pool.QueryRow(ctx, `select anchor from asks where id = $1`, askID).Scan(&encoded); err != nil {
 		t.Fatalf("read the ask's anchor: %v", err)
 	}
 	var anchor model.Anchor

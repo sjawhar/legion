@@ -1055,10 +1055,10 @@ func TestClaimJudgedAgainstNobodyNeverTakesALiveHoldersClaim(t *testing.T) {
 }
 
 // whileTheRowIsHeld answers request with the claim moved to holder strictly between the
-// request's pre-lock read and its locked re-read. The test holds the row itself — the same
-// `select ... for no key update` claimWrite takes — waits until the request is queued behind that
-// lock, writes the new holder and commits, so the change lands inside the request with no
-// production seam and no second server.
+// request's pre-lock read and its locked re-read. The test holds the issue's owner lock itself —
+// the same store.LockOwner claimWrite takes — waits until the request is queued behind that lock,
+// writes the new holder and commits, so the change lands inside the request with no production
+// seam and no second server.
 func whileTheRowIsHeld(
 	t *testing.T, database *store.Store, key string, holder string,
 	request func() *httptest.ResponseRecorder,
@@ -1070,8 +1070,8 @@ func whileTheRowIsHeld(
 		t.Fatalf("begin: %v", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := tx.QueryRow(ctx, `select key from issues where key = $1 for no key update`, key).Scan(new(string)); err != nil {
-		t.Fatalf("hold the issue row: %v", err)
+	if err := store.LockOwner(ctx, tx, store.IssueOwner(key)); err != nil {
+		t.Fatalf("hold the issue's owner lock: %v", err)
 	}
 	answered := make(chan *httptest.ResponseRecorder, 1)
 	go func() { answered <- request() }()
@@ -1220,7 +1220,7 @@ func awaitRowLockWaiter(t *testing.T, database *store.Store) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("the request never reached the issue's row lock")
+			t.Fatal("the request never reached the issue's owner lock")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

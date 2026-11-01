@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // Document approval: a human review pinned to a document version. Approve, or
@@ -257,6 +258,10 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// The answer of the open approval request and the review are this route's writes, queued on
+	// the ledger in the order it makes them and sent as one batch by Commit.
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
 	artifact, err := s.loadArtifact(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -286,32 +291,37 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	events := []model.Event{}
+	appended := []*model.Event{}
 	var askID *string
 	if open != nil {
 		selected := docs.ApprovalOptionApprove
 		if state == "changes_requested" {
 			selected = docs.ApprovalOptionRequestChanges
 		}
-		answered, answeredEvents, err := s.closeAskTx(r.Context(), tx, open.ID, actor, answerTransition(actor, []string{selected}, reason, answerOptions{}))
+		answered, answeredEvents, err := s.closeAskTx(documentCtx, tx, ledger, open.ID, actor, answerTransition(actor, []string{selected}, reason, answerOptions{}))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		events = append(events, answeredEvents...)
+		appended = append(appended, answeredEvents...)
 		askID = &answered.ID
 	}
-	review, event, err := docs.WriteReview(r.Context(), tx, s.deps.Events, artifact, version, state, actor, reason, askID)
-	if err != nil {
+	var review model.ArtifactReview
+	reviewEvent := new(model.Event)
+	if err := ledger.Queue(func(b *store.WriteBatch) error {
+		return docs.QueueReview(b, s.deps.Events, artifact, version, state, actor, reason, askID, func(written model.ArtifactReview, event model.Event) {
+			review, *reviewEvent = written, event
+		})
+	}); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	events = append(events, event)
-	if err := tx.Commit(r.Context()); err != nil {
+	appended = append(appended, reviewEvent)
+	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(events...)
+	s.publish(appendedEvents(appended...)...)
 	WriteJSON(w, http.StatusCreated, review)
 }
 
@@ -535,7 +545,7 @@ func (s *server) renewApprovalAsk(
 		summary = openSummary
 	}
 	// Every version write moves the open request to its version (docs.MoveApprovalAsk) under the
-	// owner row this request holds, so the turn read here is the one every read reports.
+	// owner lock this request holds, so the turn read here is the one every read reports.
 	waitingOn, err := askWaitingOn(ctx, tx, open.ID)
 	if err != nil {
 		return nil, err
@@ -571,7 +581,7 @@ func (s *server) renewApprovalAsk(
 
 // handBackApprovalAsk returns the open approval request to the human at version and appends its
 // ask.handed_back event. It records version as the one handed back and the thread's newest reply as
-// the one this hand-back answered (waitingOnExpression). The caller holds the owner row every reply
+// the one this hand-back answered (waitingOnExpression). The caller holds the owner lock every reply
 // takes before it inserts, so no reply commits between that read and this transaction's commit, and
 // a reply that inserts after it gets a later created_at (the insert time, migration 0065), sorts
 // after the one recorded and decides the turn, however early its own transaction began. The

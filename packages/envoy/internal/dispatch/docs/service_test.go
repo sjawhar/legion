@@ -5221,9 +5221,7 @@ func TestShutdownContextDoesNotWaitForBlockedSettlement(t *testing.T) {
 		t.Fatalf("begin blocker transaction: %v", err)
 	}
 	defer blocker.Rollback(context.Background())
-	if _, err := blocker.Exec(context.Background(), `
-		select 1 from issues where key = (select issue_key from artifacts where id = $1) for update
-	`, artifactID); err != nil {
+	if _, _, err := lockArtifactOwner(context.Background(), blocker, artifactID); err != nil {
 		t.Fatalf("lock document issue: %v", err)
 	}
 	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
@@ -5411,9 +5409,7 @@ func TestSettleCapturesAuthorsAtSnapshotTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin blocker transaction: %v", err)
 	}
-	if _, err := blocker.Exec(context.Background(), `
-		select 1 from issues where key = (select issue_key from artifacts where id = $1) for update
-	`, artifactID); err != nil {
+	if _, _, err := lockArtifactOwner(context.Background(), blocker, artifactID); err != nil {
 		t.Fatalf("lock document issue: %v", err)
 	}
 	settled := make(chan struct{})
@@ -6069,8 +6065,12 @@ func TestAWarmedReadSurvivesItsRoomsEviction(t *testing.T) {
 			if err != nil {
 				t.Fatalf("name a version of a room evicted once warm: %v", err)
 			}
+			// The version's insert is a write, which the transaction's write phase runs at Commit.
+			if err := ledger.Commit(ctx); err != nil {
+				t.Fatalf("commit the named version: %v", err)
+			}
 			var markdown string
-			if err := tx.QueryRow(ctx, `select markdown from artifact_versions where artifact_id = $1 and number = $2`, artifactID, result.Version.Number).Scan(&markdown); err != nil {
+			if err := service.store.Pool.QueryRow(ctx, `select markdown from artifact_versions where artifact_id = $1 and number = $2`, artifactID, result.Version.Number).Scan(&markdown); err != nil {
 				t.Fatal(err)
 			}
 			if markdown != "The quick brown fox\n" {

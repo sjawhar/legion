@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -67,6 +68,32 @@ func (e *adviceQueryError) Unwrap() error {
 	return e.err
 }
 
+// sessionWriteTypes are the events session_writes_since_human counts; its query binds them.
+var sessionWriteTypes = []string{"message.created", "comment.created", "ask.opened"}
+
+// adviceOpenAskLimit is how many of the caller's open asks your_open_asks names: the oldest two,
+// enough to tell a session it is waiting on answers without listing a backlog.
+const adviceOpenAskLimit = 2
+
+// adviceAsks is how a write moves the asks your_open_asks names, which its own read cannot see:
+// the read runs in the write's read phase, before the write's statements (writeAdvice), so a
+// close's withdrawals and a reopen's restorations are queued rather than written. excluded names
+// the asks the answer leaves out - the ask the write is about, which it never echoes back, and
+// the asks a close withdraws, whose rows the read still finds open - and opened the asks a reopen
+// restores, whose rows the read still finds resolved; a write names an ask in at most one of
+// them. The adjustment keeps the read's order, created_at then id, and its cap, so the answer is
+// the one the same read gave after the write.
+type adviceAsks struct {
+	excluded []string
+	opened   []model.Ask
+}
+
+// adviceOpenAsk is one open ask with what your_open_asks orders by.
+type adviceOpenAsk struct {
+	adviceAsk
+	createdAt time.Time
+}
+
 // computeWriteAdvice runs the issue-scoped advice queries for a session's write. Two of them are
 // about the calling session itself - its own writes since the last human event, its own open
 // asks - so writeAdvice calls this only for a session actor. The third, whether Legion owns the
@@ -74,15 +101,20 @@ func (e *adviceQueryError) Unwrap() error {
 // decides, so an ordinary write on an ordinary issue gains no query at all. status is the
 // issue's status as the write committed it, the same value writeAdvice reports. route names the
 // caller for the one query whose failure is logged rather than returned
-// (legionManagedStatusAdvice).
+// (legionManagedStatusAdvice). appending is the event the write appends after the advice is read
+// (writeAdvice), and asks what the write moves about the issue's open asks (adviceAsks). row is
+// the issue row as the write leaves it when the write reads its advice before it writes that row
+// (writeAdviceBefore), nil to read the stored one.
 func (s *server) computeWriteAdvice(
 	ctx context.Context,
 	tx pgx.Tx,
 	route string,
 	issueKey string,
 	actor model.Actor,
-	excludeAskID string,
+	asks adviceAsks,
 	status string,
+	appending string,
+	row *adviceIssueRow,
 ) (*writeAdvice, error) {
 	advice := &writeAdvice{YourOpenAsks: []adviceAsk{}, IssueStatus: status}
 	if err := s.runAdviceQueryHook(ctx, tx, "session_writes_since_human"); err != nil {
@@ -95,38 +127,65 @@ func (s *server) computeWriteAdvice(
 		)
 		select count(*) from events, last_human
 		where issue_key = $1 and actor->>'kind' = 'session' and actor->>'id' = $2
-		  and type in ('message.created', 'comment.created', 'ask.opened')
+		  and type = any($3::text[])
 		  and id > last_human.last_id
-	`, issueKey, actor.ID).Scan(&advice.SessionWritesSinceHuman); err != nil {
+	`, issueKey, actor.ID, sessionWriteTypes).Scan(&advice.SessionWritesSinceHuman); err != nil {
 		return nil, &adviceQueryError{query: "session_writes_since_human", err: err}
+	}
+	// The write's own event is not appended yet (writeAdvice), and it is the session's newest
+	// write: under the issue's owner lock no other event of the issue commits before it, and the
+	// write appends no human event, so the count it would have read after the append is one more.
+	if slices.Contains(sessionWriteTypes, appending) {
+		advice.SessionWritesSinceHuman++
 	}
 	if err := s.runAdviceQueryHook(ctx, tx, "your_open_asks"); err != nil {
 		return nil, &adviceQueryError{query: "your_open_asks", err: err}
 	}
 	rows, err := tx.Query(ctx, `
-		select id::text, question from asks
+		select id::text, question, created_at from asks
 		where issue_key = $1 and state = 'open'
 		  and author->>'kind' = 'session' and author->>'id' = $2
-		  and ($3 = '' or id::text <> $3)
+		  and id::text <> all(coalesce($3::text[], '{}'))
 		order by created_at, id
-		limit 2
-	`, issueKey, actor.ID, excludeAskID)
+		limit $4
+	`, issueKey, actor.ID, asks.excluded, adviceOpenAskLimit)
 	if err != nil {
 		return nil, &adviceQueryError{query: "your_open_asks", err: err}
 	}
 	defer rows.Close()
+	open := make([]adviceOpenAsk, 0, adviceOpenAskLimit+len(asks.opened))
 	for rows.Next() {
-		var ask adviceAsk
-		if err := rows.Scan(&ask.ID, &ask.Question); err != nil {
+		var ask adviceOpenAsk
+		if err := rows.Scan(&ask.ID, &ask.Question, &ask.createdAt); err != nil {
 			return nil, &adviceQueryError{query: "your_open_asks", err: err}
 		}
-		advice.YourOpenAsks = append(advice.YourOpenAsks, ask)
+		open = append(open, ask)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, &adviceQueryError{query: "your_open_asks", err: err}
 	}
+	// The asks the write opens that the read found resolved, merged into the read's own order:
+	// every stored open ask past the cap sorts after the ones it answered, so the oldest of the
+	// merged list are the oldest of them all.
+	for _, ask := range asks.opened {
+		if ask.Author.Kind != "session" || ask.Author.ID != actor.ID {
+			continue
+		}
+		open = append(open, adviceOpenAsk{
+			adviceAsk: adviceAsk{ID: ask.ID, Question: ask.Question}, createdAt: ask.CreatedAt,
+		})
+	}
+	slices.SortFunc(open, func(left, right adviceOpenAsk) int {
+		if order := left.createdAt.Compare(right.createdAt); order != 0 {
+			return order
+		}
+		return strings.Compare(left.ID, right.ID)
+	})
+	for _, ask := range open[:min(len(open), adviceOpenAskLimit)] {
+		advice.YourOpenAsks = append(advice.YourOpenAsks, ask.adviceAsk)
+	}
 	if status == model.IssueStatusTriage {
-		advice.LegionManagedStatus = s.legionManagedStatusAdvice(ctx, tx, route, issueKey)
+		advice.LegionManagedStatus = s.legionManagedStatusAdvice(ctx, tx, route, issueKey, row)
 	}
 	return advice, nil
 }
@@ -147,7 +206,7 @@ func (s *server) computeWriteAdvice(
 // would be dropped anyway. The failure is logged once, in the shape every omitted advice query
 // takes. The 500 ms bound writeAdvice set still covers it: SET LOCAL holds across a savepoint
 // opened under it.
-func (s *server) legionManagedStatusAdvice(ctx context.Context, tx pgx.Tx, route, issueKey string) *bool {
+func (s *server) legionManagedStatusAdvice(ctx context.Context, tx pgx.Tx, route, issueKey string, row *adviceIssueRow) *bool {
 	walk, err := tx.Begin(ctx)
 	if err != nil {
 		s.logAdviceError(route, issueKey, "legion_managed_status", err)
@@ -158,7 +217,12 @@ func (s *server) legionManagedStatusAdvice(ctx context.Context, tx pgx.Tx, route
 		s.logAdviceError(route, issueKey, "legion_managed_status", err)
 		return nil
 	}
-	managed, err := legionManagedStatus(ctx, walk, issueKey)
+	var managed bool
+	if row != nil {
+		managed, err = legionManagedStatusOfRow(ctx, walk, issueKey, row.parent, row.labels)
+	} else {
+		managed, err = legionManagedStatus(ctx, walk, issueKey)
+	}
 	if err != nil {
 		_ = walk.Rollback(ctx)
 		s.logAdviceError(route, issueKey, "legion_managed_status", err)
@@ -178,19 +242,70 @@ func (s *server) runAdviceQueryHook(ctx context.Context, tx pgx.Tx, query string
 	return s.adviceQueryHook(ctx, tx, query)
 }
 
+// writeAdvice answers what a write tells its caller about the issue it wrote. A write joined to a
+// document ledger reads it in its read phase, before Commit runs its writes, so its queries hold no
+// transaction id (INFRA-636), and its own event is not in the table yet. appending names the event
+// the write appends for actor after this read - "" for none, or for a write that appends before
+// it reads its advice - and a counted one (sessionWriteTypes) is counted as if appended, so the
+// answer is the one the same read gave after the append. asks names the asks the write moves,
+// which the read finds as they stood (adviceAsks).
 func (s *server) writeAdvice(
 	ctx context.Context,
 	tx pgx.Tx,
 	route string,
 	issueKey string,
 	actor model.Actor,
-	excludeAskID string,
+	asks adviceAsks,
 	status string,
+	appending string,
+) *writeAdvice {
+	return s.adviseWrite(ctx, tx, route, issueKey, actor, asks, status, appending, nil)
+}
+
+// adviceIssueRow is the part of an issue row a write's advice reads - its parent and its labels,
+// which the walk for who owns the issue's status starts from (legionManagedStatusOfRow) - as the
+// write leaves the row.
+type adviceIssueRow struct {
+	parent *string
+	labels []string
+}
+
+// writeAdviceBefore is writeAdvice for a write that reads its advice before it writes the issue
+// row the advice describes, so that the advice runs before the write's first statement and holds
+// no transaction id (INFRA-636): a create, whose row does not exist yet, and a patch, which may
+// change the row's labels, its parent or its status. status and row are the row as the write
+// leaves it, and asks what it moves about the issue's open asks (adviceAsks), so the answer is
+// the one the same read gave after the write; the write appends no counted event, and a new issue
+// has neither events nor asks.
+func (s *server) writeAdviceBefore(
+	ctx context.Context,
+	tx pgx.Tx,
+	route string,
+	issueKey string,
+	actor model.Actor,
+	status string,
+	row adviceIssueRow,
+	asks adviceAsks,
+) *writeAdvice {
+	return s.adviseWrite(ctx, tx, route, issueKey, actor, asks, status, "", &row)
+}
+
+// adviseWrite is writeAdvice and writeAdviceBefore: row nil reads the stored issue row.
+func (s *server) adviseWrite(
+	ctx context.Context,
+	tx pgx.Tx,
+	route string,
+	issueKey string,
+	actor model.Actor,
+	asks adviceAsks,
+	status string,
+	appending string,
+	row *adviceIssueRow,
 ) *writeAdvice {
 	// A human write has no advice query to run - every one of them is about the calling session,
 	// and the triage line this answers is about what a session is told - so it is answered here,
 	// outside the savepoint and the two statement_timeout statements that would otherwise run
-	// inside the write's own transaction while it holds the issue row. Such a write still gets
+	// inside the write's own transaction while it holds the issue's owner lock. Such a write still gets
 	// the triage advice, which is true for a reader who may move the status. A human is the only
 	// non-session actor that reaches a write: optionalActor returns an actor only for the cookie
 	// identity, which is always Kind "user", and every bearer goes through bearerSessionActor,
@@ -206,13 +321,13 @@ func (s *server) writeAdvice(
 		return nil
 	}
 	// Healthy advice queries complete in single-digit milliseconds. Bound them at 500 ms so a
-	// future plan regression cannot hold the issue row lock and a pool connection indefinitely.
+	// future plan regression cannot hold the issue's owner lock and a pool connection indefinitely.
 	if _, err := adviceTx.Exec(ctx, "set local statement_timeout = '500ms'"); err != nil {
 		_ = adviceTx.Rollback(ctx)
 		s.logAdviceError(route, issueKey, "statement_timeout", err)
 		return nil
 	}
-	advice, err := s.computeWriteAdvice(ctx, adviceTx, route, issueKey, actor, excludeAskID, status)
+	advice, err := s.computeWriteAdvice(ctx, adviceTx, route, issueKey, actor, asks, status, appending, row)
 	if err != nil {
 		_ = adviceTx.Rollback(ctx)
 		query := "unknown"
@@ -290,19 +405,19 @@ type supersededApproval struct {
 }
 
 // supersededApprovalAdvice reports the approval the write of version just made stale, or nil when
-// it made none, which is every write of a document nobody has approved. It runs inside the write's
-// own transaction, after the version row and the approval carry (docs.carryApproval) are written,
-// so it reads what the write left: a carried approval is pinned to version itself and reports
+// it made none, which is every write of a document nobody has approved. It runs in the write's
+// read phase, where the version row and the approval carry (docs.carryApproval) are queued rather
+// than written, so the carry's own review comes off the ledger (docs.Ledger.PendingReview) and
+// everything else from the table: a carried approval is pinned to version itself and reports
 // nothing, which is right - the gate reopens on that carry's own artifact.approved event.
 //
 // The read is the newest review of the document (docs.NewestReview), one entry of
 // artifact_reviews_by_artifact_event_seq in docs.ReviewOrder, the order the reviews' events
-// committed: artifact_reviews.created_at is its transaction's start and its id is random, so the
-// carry's own approval of this version can carry an earlier pair than an approval committed while
-// this write was open, and ordering by those two alone would report a gate this write did not
-// close. It reports only when that newest review approves the version right below this one: an
-// older approval was already stale before this write, and a newer changes request had already
-// closed the gate.
+// committed: artifact_reviews.created_at is its transaction's start and its id is random, so an
+// approval committed while this write was open can carry an earlier pair than an older one, and
+// ordering by those two alone would report a gate this write did not close. It reports only when
+// that newest review approves the version right below this one: an older approval was already
+// stale before this write, and a newer changes request had already closed the gate.
 //
 // Like every other advice query this runs behind a savepoint, because a failed statement aborts
 // the transaction it ran in and this must never fail the write it describes. It writes nothing,
@@ -310,11 +425,17 @@ type supersededApproval struct {
 func (s *server) supersededApprovalAdvice(
 	ctx context.Context,
 	tx pgx.Tx,
+	ledger *docs.Ledger,
 	route string,
 	issueKey string,
 	artifactID string,
 	version int,
 ) *supersededApproval {
+	// A review this transaction queued is newer than every stored one and no read of the table
+	// can see it before the write phase runs, so it answers for the newest review by itself.
+	if review, queued := ledger.PendingReview(artifactID); queued {
+		return supersededBy(&review, version)
+	}
 	adviceTx, err := tx.Begin(ctx)
 	if err != nil {
 		s.logAdviceError(route, issueKey, "superseded_approval", err)
@@ -343,14 +464,20 @@ func newestReviewAsApproval(ctx context.Context, q docs.Queryer, artifactID stri
 	if err != nil {
 		return nil, fmt.Errorf("read the document's newest review: %w", err)
 	}
+	return supersededBy(review, version), nil
+}
+
+// supersededBy is that rule over one review, whichever read answered it: the document's newest,
+// reported when it approves the version right below version and nothing otherwise.
+func supersededBy(review *model.ArtifactReview, version int) *supersededApproval {
 	if review == nil || review.State != "approved" || review.Version != version-1 {
-		return nil, nil
+		return nil
 	}
 	return &supersededApproval{
 		ApprovedVersion: review.Version,
 		Version:         version,
 		ApprovedBy:      review.Actor.ID,
-	}, nil
+	}
 }
 
 // documentWriteAdvice is the whole advice of a document write with no issue state to report: a

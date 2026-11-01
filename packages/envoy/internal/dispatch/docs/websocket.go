@@ -35,8 +35,8 @@ type connectionContextKey struct{}
 type ownerVerifiedContextKey struct{}
 
 // ownerVerifiedToken is installed only on the server's own calls, by a caller that already
-// knows the document's owner state: a settlement, which holds the owner row locked in its
-// transaction; the publish of a committed live write, whose transaction held that row until it
+// knows the document's owner state: a settlement, which holds the owner's lock in its
+// transaction; the publish of a committed live write, whose transaction held that lock until it
 // committed; or the block-id backfill, which is a command run against a database nobody is
 // serving from. Their injections skip the issue read in allowInject - for the settlement that
 // read would be a second pooled connection taken while its transaction is open
@@ -447,7 +447,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		return err
 	}
 	// Everything this load needs comes from the pool that owns loads. A writer holding a
-	// pooled connection and the issue's row lock waits for this load, so a read of the shared
+	// pooled connection and the issue's owner lock waits for this load, so a read of the shared
 	// pool here waits for a connection only that writer can release: the wedge, arrived at
 	// without a transaction of its own and so invisible to the pool's guard.
 	rooms, err := s.store.Pool.Rooms()

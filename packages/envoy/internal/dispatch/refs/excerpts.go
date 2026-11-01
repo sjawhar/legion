@@ -1,12 +1,16 @@
 package refs
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -22,7 +26,7 @@ type Execer interface {
 // blocks holding its first mention that lies inside a block - the block with the tightest byte
 // range - as the references route shows it: the block's id and its markdown cut to
 // BlockExcerptRunes. A target none of whose mentions lies inside a block has none. The block is
-// any of blocks, not only a graph node: IndexBlocks makes no node of a block whose id is past
+// any of blocks, not only a graph node: PlanBlocks makes no node of a block whose id is past
 // text.MaxBlockIDBytes, empty or unstorable, nor of a later holder of a repeated id
 // (uniqueBlocks), and writes the mention from the innermost node holding it, if any. Such a block
 // still gives the excerpt, so its excerpt_block_id can name a block the graph does not hold.
@@ -76,19 +80,11 @@ func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, located []te
 // It returns the targets whose excerpt the route answers differently after the write, in kind and
 // id order: the route serves a row's stored block and text only once its version is set and its
 // text is not null (StoredExcerpts), and the document's name otherwise, so a row moves when what it
-// served before differs from what it serves now. A version write names them on its event
-// (ReplaceDocumentCounted).
+// served before differs from what it serves now. A version write names them on its event; one
+// that writes in a write phase works them out first (ExcerptsMoved) and queues the statement alone
+// (QueueRecordExcerpts).
 func RecordExcerpts(ctx context.Context, q Queryer, fromID string, version int, excerpts map[Target]model.GraphExcerpt) ([]Target, error) {
-	kinds := make([]string, 0, len(excerpts))
-	ids := make([]string, 0, len(excerpts))
-	blockIDs := make([]string, 0, len(excerpts))
-	texts := make([]string, 0, len(excerpts))
-	for target, excerpt := range excerpts {
-		kinds = append(kinds, target.Kind)
-		ids = append(ids, target.ID)
-		blockIDs = append(blockIDs, excerpt.BlockID)
-		texts = append(texts, excerpt.Text)
-	}
+	kinds, ids, blockIDs, texts := excerptColumns(excerpts)
 	// The target's excerpt is one row-valued subquery, so a mention whose target excerpts lacks
 	// (no block holds it) is still updated, with no excerpt, and leaves the drift index. Every
 	// part of the statement reads the one snapshot, so prior holds each row as it was.
@@ -118,6 +114,99 @@ func RecordExcerpts(ctx context.Context, q Queryer, fromID string, version int, 
 		return nil, fmt.Errorf("record reference excerpts of %s: %w", fromID, err)
 	}
 	return moved, nil
+}
+
+// QueueRecordExcerpts queues RecordExcerpts' update on a write phase's batch, without the targets
+// it moved, which the writer worked out in its read phase (ExcerptsMoved).
+func QueueRecordExcerpts(b *store.WriteBatch, fromID string, version int, excerpts map[Target]model.GraphExcerpt) {
+	kinds, ids, blockIDs, texts := excerptColumns(excerpts)
+	b.Queue("record reference excerpts of "+fromID, `
+		with e(kind, id, block_id, text) as (select * from unnest($3::text[], $4::text[], $5::text[], $6::text[]))
+		update refs r
+		set excerpt_version = $2,
+		    (excerpt_block_id, excerpt_text) = (select e.block_id, e.text from e where e.kind = r.to_kind and e.id = r.to_id)
+		where r.from_kind = 'artifact' and r.from_id = $1
+		  and coalesce(r.excerpt_version, 0) <= $2
+	`, fromID, version, kinds, ids, blockIDs, texts)
+}
+
+// ExcerptsMoved is what RecordExcerpts would return for the document fromID's version, worked out
+// in a writer's read phase for the update it queues in its write phase right after its
+// reconciliation of the document's references: held is the targets the document cites once that
+// reconciliation is written (Replacement.Held), so a new edge, which holds no excerpt yet, is
+// judged as RecordExcerpts would judge it. It reads the excerpts q holds on the document's edges;
+// nothing in the transaction writes them before the update.
+func ExcerptsMoved(ctx context.Context, q Queryer, fromID string, version int, held []Target, excerpts map[Target]model.GraphExcerpt) ([]Target, error) {
+	type storedExcerpt struct {
+		version     *int
+		block, text *string
+	}
+	rows, err := q.Query(ctx, `
+		select to_kind, to_id, excerpt_version, excerpt_block_id, excerpt_text
+		from refs
+		where from_kind = 'artifact' and from_id = $1
+	`, fromID)
+	if err != nil {
+		return nil, fmt.Errorf("read the reference excerpts of %s: %w", fromID, err)
+	}
+	defer rows.Close()
+	stored := make(map[Target]storedExcerpt)
+	for rows.Next() {
+		var target Target
+		var row storedExcerpt
+		if err := rows.Scan(&target.Kind, &target.ID, &row.version, &row.block, &row.text); err != nil {
+			return nil, fmt.Errorf("scan a reference excerpt of %s: %w", fromID, err)
+		}
+		stored[target] = row
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the reference excerpts of %s: %w", fromID, err)
+	}
+	moved := []Target{}
+	seen := make(map[Target]struct{}, len(held))
+	for _, target := range held {
+		if _, dup := seen[target]; dup {
+			continue
+		}
+		seen[target] = struct{}{}
+		row := stored[target]
+		if row.version != nil && *row.version > version {
+			continue
+		}
+		// What the route serves: a stored block and text once the version is set and the text is
+		// not null, the document's name otherwise.
+		servedBefore := row.version != nil && row.text != nil
+		var blockBefore, textBefore string
+		if servedBefore {
+			textBefore = *row.text
+			if row.block != nil {
+				blockBefore = *row.block
+			}
+		}
+		after, servedAfter := excerpts[target]
+		if servedBefore != servedAfter || (servedAfter && (blockBefore != after.BlockID || textBefore != after.Text)) {
+			moved = append(moved, target)
+		}
+	}
+	slices.SortFunc(moved, func(a, b Target) int {
+		return cmp.Or(strings.Compare(a.Kind, b.Kind), strings.Compare(a.ID, b.ID))
+	})
+	return moved, nil
+}
+
+// excerptColumns is excerpts as the unnested columns RecordExcerpts' statement reads.
+func excerptColumns(excerpts map[Target]model.GraphExcerpt) (kinds, ids, blockIDs, texts []string) {
+	kinds = make([]string, 0, len(excerpts))
+	ids = make([]string, 0, len(excerpts))
+	blockIDs = make([]string, 0, len(excerpts))
+	texts = make([]string, 0, len(excerpts))
+	for target, excerpt := range excerpts {
+		kinds = append(kinds, target.Kind)
+		ids = append(ids, target.ID)
+		blockIDs = append(blockIDs, excerpt.BlockID)
+		texts = append(texts, excerpt.Text)
+	}
+	return kinds, ids, blockIDs, texts
 }
 
 // StoredExcerpts is, by citing document, the excerpt stored on each mention of (toKind, toID) a
@@ -199,17 +288,15 @@ func DriftedExcerpts(ctx context.Context, q Queryer, limit int) ([]ExcerptDrift,
 	return drifted, nil
 }
 
-// ClearExcerpts marks every mention the document fromID writes as owed an excerpt, keeping the
-// payload each holds for the reconciliation to overwrite. StoredExcerpts does not serve it while
-// excerpt_version is null, so the route uses the document's name until the reconciliation stores
-// the latest excerpt: what a version write that cannot cut its excerpts leaves.
-func ClearExcerpts(ctx context.Context, q Execer, fromID string) error {
-	if _, err := q.Exec(ctx, `
+// ClearExcerpts queues, on a write phase's batch, the mark of every mention the document fromID
+// writes as owed an excerpt, keeping the payload each holds for the reconciliation to overwrite.
+// StoredExcerpts does not serve it while excerpt_version is null, so the route uses the
+// document's name until the reconciliation stores the latest excerpt: what a version write that
+// cannot cut its excerpts leaves.
+func ClearExcerpts(b *store.WriteBatch, fromID string) {
+	b.Queue("mark the reference excerpts of "+fromID+" owed", `
 		update refs set excerpt_version = null where from_kind = 'artifact' and from_id = $1
-	`, fromID); err != nil {
-		return fmt.Errorf("mark the reference excerpts of %s owed: %w", fromID, err)
-	}
-	return nil
+	`, fromID)
 }
 
 // MarkStaleExcerpts marks owed every mention whose excerpt is older than its document's latest

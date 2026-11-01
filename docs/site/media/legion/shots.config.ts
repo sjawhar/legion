@@ -83,7 +83,9 @@ const legion: ShotSet<LegionJourney> = {
       viewport: "desktop",
       theme: "light",
       ready: async (page) => {
-        await expect(page.getByRole("heading", { level: 1 })).toContainText(SAVED_CART.title);
+        await expect(
+          page.getByTestId("issue-header").getByRole("heading", { level: 1 })
+        ).toContainText(SAVED_CART.title);
       },
       steps: async (page) => {
         await page.getByRole("button", { name: "Edit labels" }).click();
@@ -224,7 +226,9 @@ const legion: ShotSet<LegionJourney> = {
         journey.report = (await postDailyReport([{ example: SAVED_CART, issue: journey }])).key;
       },
       ready: async (page) => {
-        await expect(page.getByRole("heading", { level: 1 })).toContainText("Legion daily report");
+        await expect(
+          page.getByTestId("issue-header").getByRole("heading", { level: 1 })
+        ).toContainText("Legion daily report");
         await expect(page.getByRole("combobox", { name: "Status" })).toHaveValue("icebox");
         await expect(turns(page)).toContainText("Finished:");
       },

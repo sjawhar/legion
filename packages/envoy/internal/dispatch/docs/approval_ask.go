@@ -12,10 +12,13 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// OpenApprovalAsk returns the open approval ask on artifactID, locked, or nil. The caller holds the
-// document owner's row, so it observes the same version the review and approval routes use.
+// OpenApprovalAsk returns the open approval ask on artifactID, or nil. The caller holds the document
+// owner's lock, which every writer of an approval ask takes first (a request, a review, a version
+// move or carry), so it observes the same version the review and approval routes use and the row
+// holds still until the caller's transaction ends; the read takes no row lock.
 func OpenApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.Ask, error) {
 	row := tx.QueryRow(ctx, `
 		select `+AskColumns+`
@@ -23,7 +26,6 @@ func OpenApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.
 		where a.kind = 'approval' and a.state = 'open' and a.approval->>'artifact_id' = $1
 		order by a.created_at desc, a.id desc
 		limit 1
-		for no key update
 	`, artifactID)
 	ask, err := ScanAsk(row)
 	if err == nil {
@@ -35,30 +37,53 @@ func OpenApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.
 	return nil, fmt.Errorf("read open approval ask: %w", err)
 }
 
+// openApprovalAsk is OpenApprovalAsk as the transaction's queued writes leave the request: the
+// request a version write of this transaction moved (moveApprovalAsk), nil once a queued answer
+// closed it (carryApproval), else the stored one.
+func openApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.Ask, error) {
+	if ledger := queueFor(ctx, tx); ledger != nil {
+		if pending := ledger.approvals[artifactID]; pending != nil {
+			if pending.closed {
+				return nil, nil
+			}
+			return pending.ask, nil
+		}
+	}
+	return OpenApprovalAsk(ctx, tx, artifactID)
+}
+
 // MoveApprovalAsk advances the document's one open approval ask to a new settled version. mover is
 // the actor whose edit moved the request: the caller knows it even when the version credits more
 // than one author. The row and its thread stay open; requested_version records that the agent must
 // hand it back before a human sees it in Waiting on you again. Only the first move since the
 // request was opened or handed back wakes anyone, even when a thread reply already left it waiting
 // on its agent; a later one, while requested_version is already below the version it named, is
-// quiet (RewriteApprovalAsk).
-func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, mover model.Actor, serverURL string) ([]model.Event, error) {
-	ask, err := OpenApprovalAsk(ctx, tx, artifactID)
+// quiet (RewriteApprovalAsk). The event it appends goes to the ledger of the transaction it runs
+// in, as every document operation's does (eventSink), which publishes it after its Commit.
+func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, mover model.Actor, serverURL string) error {
+	return moveApprovalAsk(ctx, tx, broker, artifactID, version, mover, serverURL, eventSink(ctx))
+}
+
+// moveApprovalAsk is MoveApprovalAsk handing the event it appends to sink. Where its writes are
+// queued, the ledger records the request as moved (pendingApproval), so the carry that follows in
+// the same version write reads the request as this move leaves it.
+func moveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, mover model.Actor, serverURL string, sink func(model.Event)) error {
+	ask, err := openApprovalAsk(ctx, tx, artifactID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if ask == nil || ask.Approval.Version == version.Number {
-		return nil, nil
+		return nil
 	}
 	summary, err := ApprovalAskSummary(*ask)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	event, err := RewriteApprovalAsk(ctx, tx, broker, ask, mover, version.Number, summary, serverURL)
-	if err != nil {
-		return nil, err
+	if err := rewriteApprovalAsk(ctx, tx, broker, ask, mover, version.Number, summary, serverURL, sink); err != nil {
+		return err
 	}
-	return []model.Event{event}, nil
+	recordPendingApproval(ctx, tx, artifactID, pendingApproval{ask: ask})
+	return nil
 }
 
 // RewriteApprovalAsk rewords one open approval row to name version with summary, indexes its new
@@ -67,7 +92,10 @@ func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 // stays as it was. A move of a request that an earlier version already moved since it was opened
 // or handed back, requested_version below the version it named, is recorded quiet
 // (model.AskEditEventPayload.Quiet): it changes only that version, so like a human's unnamed version
-// it wakes nobody.
+// it wakes nobody. It returns the event it appended, which its caller publishes: the one route
+// that rewords a request of its own (renewApprovalAsk) queues no writes, so the append has run by
+// the time this returns. A version move, whose transaction does queue them, rewords through
+// moveApprovalAsk instead.
 func RewriteApprovalAsk(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -77,41 +105,74 @@ func RewriteApprovalAsk(
 	version int,
 	summary, serverURL string,
 ) (model.Event, error) {
+	var rewritten model.Event
+	if err := rewriteApprovalAsk(ctx, tx, broker, ask, actor, version, summary, serverURL, func(event model.Event) {
+		rewritten = event
+	}); err != nil {
+		return model.Event{}, err
+	}
+	return rewritten, nil
+}
+
+// rewriteApprovalAsk is RewriteApprovalAsk handing the event it appends to sink. The new question,
+// the approval it encodes, the references it cites and its edited_at are worked out where it is
+// called; the update, the references' writes, the append and the stamp are one step (write).
+// edited_at is clock_timestamp(), read here rather than in the update, so the event's copy of the
+// row carries it before the write phase runs, and so does ask, which a later step of the same
+// transaction queues from (carryApproval's answer).
+func rewriteApprovalAsk(
+	ctx context.Context,
+	tx pgx.Tx,
+	broker *events.Broker,
+	ask *model.Ask,
+	actor model.Actor,
+	version int,
+	summary, serverURL string,
+	sink func(model.Event),
+) error {
 	previous := model.NewAskEditPrevious(*ask)
 	quiet := version != ask.Approval.Version && ask.Approval.RequestedVersion < ask.Approval.Version
 	ask.Question = ApprovalQuestion(ask.Approval.Name, version, summary)
-	ask.Approval.Version = version
+	// A fresh approval rather than the old one changed in place: the event below keeps its own
+	// copy of the row, which a later rewording of the same request in this transaction must not
+	// reach before the event is appended.
+	moved := *ask.Approval
+	moved.Version = version
+	ask.Approval = &moved
 	approval, err := EncodeApproval(ask.Approval)
 	if err != nil {
-		return model.Event{}, err
+		return err
+	}
+	changes, index, err := planEditedAskReferences(ctx, tx, ask.ID, previous.Question, ask.Question, serverURL)
+	if err != nil {
+		return fmt.Errorf("index approval ask: %w", err)
 	}
 	var editedAt time.Time
-	if err := tx.QueryRow(ctx, `
-		update asks
-		set question = $2, approval = $3, edited_at = clock_timestamp()
-		where id = $1
-		returning edited_at
-	`, ask.ID, ask.Question, approval).Scan(&editedAt); err != nil {
-		return model.Event{}, fmt.Errorf("rewrite approval ask: %w", err)
+	if err := tx.QueryRow(ctx, `select clock_timestamp()`).Scan(&editedAt); err != nil {
+		return fmt.Errorf("read approval ask edit time: %w", err)
 	}
 	ask.EditedAt = askTimestamp(&editedAt)
-	changes, err := refs.ReplaceCountedEdit(ctx, tx, "ask", ask.ID, previous.Question, ask.Question, serverURL)
-	if err != nil {
-		return model.Event{}, fmt.Errorf("index approval ask: %w", err)
-	}
-	payload := model.NewAskEditEventPayload(*ask, previous, actor, changes)
+	row := *ask
+	payload := model.NewAskEditEventPayload(row, previous, actor, changes)
 	payload.Quiet = quiet
-	event, err := broker.Append(ctx, tx, model.Event{
-		IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
-		Type: "ask.edited", Actor: actor, Payload: payload,
+	return write(ctx, tx, func(b *store.WriteBatch) error {
+		b.Queue("rewrite approval ask", `
+			update asks
+			set question = $2, approval = $3, edited_at = $4
+			where id = $1
+		`, ask.ID, row.Question, approval, editedAt)
+		if err := index(b); err != nil {
+			return fmt.Errorf("index approval ask: %w", err)
+		}
+		if err := broker.QueueAppend(b, model.Event{
+			IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
+			Type: "ask.edited", Actor: actor, Payload: payload,
+		}, sink); err != nil {
+			return fmt.Errorf("append approval ask edit: %w", err)
+		}
+		refs.QueueStamp(b, "ask", ask.ID)
+		return nil
 	})
-	if err != nil {
-		return model.Event{}, fmt.Errorf("append approval ask edit: %w", err)
-	}
-	if err := refs.Stamp(ctx, tx, "ask", ask.ID, event.ID); err != nil {
-		return model.Event{}, fmt.Errorf("stamp approval ask references: %w", err)
-	}
-	return event, nil
 }
 
 // EncodeApproval is an approval ask's approval as asks.approval stores it.

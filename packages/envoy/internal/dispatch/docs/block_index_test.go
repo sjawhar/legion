@@ -1688,9 +1688,10 @@ func TestOlderItemTextCitingABlockIsReindexed(t *testing.T) {
 	}
 }
 
-// An edit of a comment that lands while the tick indexes it is not lost: the tick waits on the row
-// the edit holds, indexes the edited text once the edit commits, and leaves the comment owed, since
-// the edit moved its owed row; the next tick settles it. Neither waits on the other for good.
+// An edit of a comment that lands while the tick indexes it is not lost: the tick waits on the
+// comment's owner lock, which an edit holds from before its first read to its commit, indexes the
+// edited text once the edit commits, and leaves the comment owed, since the edit moved its owed
+// row; the next tick settles it. Neither waits on the other for good.
 func TestADrainedItemKeepsAConcurrentEdit(t *testing.T) {
 	database, service := blockIndexService(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1708,6 +1709,10 @@ func TestADrainedItemKeepsAConcurrentEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer writer.Rollback(context.Background())
+	// The edit as a route makes it: the owner's lock first, its write after.
+	if err := store.LockOwner(ctx, writer, store.IssueOwner("CORE-1")); err != nil {
+		t.Fatalf("take the comment's owner lock: %v", err)
+	}
 	if _, err := writer.Exec(ctx, `
 		update comments set body = 'Read dispatch://CORE-1/spec#b-other first.', edited_at = now() where id = $1
 	`, comment); err != nil {
@@ -1721,7 +1726,7 @@ func TestADrainedItemKeepsAConcurrentEdit(t *testing.T) {
 		tick, err = service.ReconcileBlockIndex(ctx, "", liveAheadDocuments{})
 		ticked <- err
 	}()
-	waitForLockWait(t, ctx, database, "%from comments where id%", ticked)
+	waitForLockWait(t, ctx, database, "%owner_lock%", ticked)
 	if err := writer.Commit(ctx); err != nil {
 		t.Fatalf("commit the edit: %v", err)
 	}

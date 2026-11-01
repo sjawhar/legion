@@ -1,11 +1,16 @@
 package refs
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -50,4 +55,61 @@ func TestUniqueBlocksKeepsTheFirstHolderOfEachID(t *testing.T) {
 	if !slices.Equal(nodes, want) || long != 2 || longest != 3200 {
 		t.Fatalf("uniqueBlocks = %#v, %d long, longest %d; want %#v, 2 long, longest 3200", nodes, long, longest, want)
 	}
+}
+
+// IndexBlocks records version `version` (written at versionAt) of document artifactID's blocks as
+// graph nodes, and each mention written inside a block as an edge out of the innermost block
+// holding its start, in the caller's transaction, which holds the document's owner lock. blocks
+// are the version's rendered blocks in document order, each parent before its children; the first
+// holder of a repeated id is the node. located must be text.ExtractAt(markdown, …). A block whose
+// id is longer than text.MaxBlockIDBytes, which no key of the index can hold, is no node: a
+// mention inside it starts at the innermost node holding it, if any, and the indexing logs a
+// warning naming the document, the longest such id's length and the bound.
+//
+// A block whose text (markdown[From:To]) is unchanged keeps its changed version; a new, changed
+// or restored block takes this version, and its text is recorded in document_block_texts; a
+// block the version no longer holds is deleted, recorded there with no text, and the edges at it
+// stop resolving until a version holds its id again. A block's stored excerpt is its text cut to
+// BlockExcerptRunes, the excerpt a document's mention has shown since migration 0092.
+//
+// A pair (block, target) that survives keeps its created version, time and source event. A new
+// pair takes this version and versionAt, and the source event Stamp gives it. On the document's
+// first indexing (no block rows yet), a new pair dates instead from the document's own refs row
+// for that target, when one exists. The version is recorded as indexed, and as the version the
+// document's blocks stand at (document_block_versions). It returns the targets of the pairs it
+// inserted or deleted, whose counts moved: a node is counted once for each block citing it. It
+// also returns what else a Referenced by panel or a link shows that the version moved: the target
+// of each pair it kept in a block whose text it changed (the block's text is that link's excerpt),
+// and each block it changed or deleted that some source cites (BlockIndexing.Cited), whose text
+// every link to it and its own panel show.
+//
+// It is the tests' one call for all of that: ReadBlockIndex, PlanBlocks, Cited and Queue back to
+// back, the queued statements run at once as a batch of their own. A version writer plans the
+// indexing in its read phase and queues it in its write phase instead (docs.indexDocument).
+func IndexBlocks(
+	ctx context.Context,
+	tx pgx.Tx,
+	artifactID string,
+	version int,
+	versionAt time.Time,
+	markdown string,
+	blocks []model.ArtifactBlock,
+	located []text.Located,
+) ([]Target, error) {
+	index, err := ReadBlockIndex(ctx, tx, artifactID)
+	if err != nil {
+		return nil, err
+	}
+	indexing := PlanBlocks(index, artifactID, version, versionAt, markdown, blocks, located)
+	cited, err := indexing.Cited(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		indexing.Queue(b)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return append(indexing.Moved(), cited...), nil
 }
