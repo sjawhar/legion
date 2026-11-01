@@ -2,79 +2,43 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "round": 22,
-  "previousHandoff": "2a6d5ffa2dc6096a6c3ba219be2bbec4851f60e0",
-  "headTested": "253a1afccf556c7f90d96901ce909400d9572342",
-  "handoffHead": "6ef20e69bc44385bbefbfb6a5ba5cd651496c26a",
+  "round": 23,
+  "previousHandoff": "05f21326314b6f48c07a33fa5feb898a5ae65c86",
+  "headTested": "92d2faba5e8b9a634c7f329aa50979186b225232",
+  "handoffHead": "1e9ff3b3fb54adb4baaa861583d3b12a023db538",
   "roundShape": {
-    "verdict": "full round (the architect's call: main moved far and the mention key changed in runtime code)",
+    "verdict": "confirmation round (forward-merge re-check 253a1afc -> 92d2faba: fingerprint unchanged)",
     "tool": "round-shape.py v3, run from the workspace with 2406",
-    "oldHead": "25206ba7ab966c710745e882522af7bfb99dcadf",
-    "newHead": "253a1afccf556c7f90d96901ce909400d9572342",
-    "differingFiles": [
-      ".dispatch/architecture/dispatch-api.md (doc)",
-      "packages/contracts/src/dispatch-api.ts (runtime: main's additions beside the PR's; tsc clean)",
-      "packages/envoy/.changes/unreleased/pr2406-Changed-20261028-113305.yaml (changelog)",
-      "packages/envoy/AGENTS.md (doc)",
-      "packages/envoy/internal/dispatch/api/comment_delivery.go (runtime: the key fix)",
-      "packages/envoy/internal/dispatch/api/comment_delivery_claim_test.go (test)",
-      "packages/envoy/internal/dispatch/api/comment_delivery_deploy_test.go (test, new)",
-      "packages/envoy/internal/dispatch/api/comment_delivery_duplicate_test.go (test)",
-      "packages/envoy/internal/dispatch/api/comment_delivery_supersede_test.go (test)",
-      "packages/envoy/internal/dispatch/api/delivery_live_hub_test.go (test)",
-      "packages/envoy/internal/dispatch/api/delivery_sweep.go (comments only)",
-      "packages/envoy/internal/dispatch/api/delivery_sweep_test.go (test)",
-      "packages/envoy/internal/dispatch/api/envoy_resolve.go (comments only)",
-      "packages/envoy/internal/dispatch/api/events.go (comments only)",
-      "packages/envoy/internal/dispatch/api/handler_errors.go (runtime: main's Retry-After from writeHandlerError carried into the PR's moved function)",
-      "packages/envoy/internal/dispatch/api/keyed_delivery_repeat_test.go (test)",
-      "packages/envoy/internal/dispatch/api/server.go (runtime: main's 85+/23- applied, minus the four lines now in handler_errors.go)",
-      "packages/envoy/internal/dispatch/model/model.go (runtime: the key fix)",
-      "packages/envoy/internal/dispatch/outbox/mentions.go (runtime: the key fix)",
-      "packages/envoy/internal/dispatch/outbox/publisher_mentions_test.go (test)"
-    ],
-    "equalOnlyAfterNormalisation": [
-      "packages/envoy/cmd/dispatch/README.md",
-      "packages/envoy/internal/dispatch/store/migrations/NNNN_comment_fallback_copies.census.sql (0150 -> 0151)",
-      "packages/envoy/internal/dispatch/store/migrations/NNNN_comment_fallback_copies.up.sql (0150 -> 0151)"
-    ]
+    "oldHead": "253a1afccf556c7f90d96901ce909400d9572342",
+    "newHead": "92d2faba5e8b9a634c7f329aa50979186b225232",
+    "differingFiles": [],
+    "equalOnlyAfterNormalisation": [],
+    "toolCheck": "25206ba7 -> 253a1afc on the same tool lists 20 differing files and 3 equal after normalisation"
   },
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round22-checkpoint-md (version 3); dispatch://INFRA-606/artifact/infra606-tester-round22-restart-tar-gz",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round23-checkpoint-md; round 22's evidence stands for the rest",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's deploy test, the outbox, deliveryaudit, store and pgmigrate suites, and the claimant live proof at 253a1afc; all pass. The deploy test's negative control reproduces with 45530037's key."
+    "how": "The PR's own diff is unchanged at 92d2faba (round-shape.py, 0 files), as the implementer reports."
   },
-  "failures": [],
-  "failed": 0,
+  "failures": [
+    {
+      "criterion": "The fallback table's migration has a number no other migration uses.",
+      "evidence": "Main 225f2bea (#2391, merged 09:21:49Z) now holds 0151_embeddings_notify through 0157_document_edit_notices_notify. This PR's 0151_comment_fallback_copies.up.sql and .census.sql collide with 0151_embeddings_notify, which pgmigrate's shared-version guard and TestMigrationSetIsNumberedOneToN refuse after a merge. When I first read main (4b0b98ec, about 08:50Z) its highest migration was 0150_dpop_proofs. The implementer renumbers to the next free number (0158 at main 225f2bea; the architect names 0161)."
+    }
+  ],
+  "failed": 1,
   "proof": [
     {
-      "criterion": "Review round 9 finding 1: a mention sent under main's key, then resent from this build, reaches its session as one frame.",
-      "surface": "internal/dispatch/api against a superuser Postgres 16 on the issue volume, through the test listener with repeat-dropping on",
-      "command": "GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 ./internal/dispatch/api/ -run '^TestAMentionThePreviousBuildDeliveredIsDroppedAsARepeatAfterTheDeploy$' -count=3; the same with -overlay ov/oldkey.json, whose model.go returns <comment>:<target> as 45530037 did",
-      "observed": "Both subtests (a sweep resend of a stranded attempt, a same-mode Retry of a receipt timeout) pass 3 of 3. The test hands the listener the previous build's frame under the literal key <comment>:session:s1:steer, so it does not derive the old key from the function under test.",
-      "headSha": "253a1afccf55",
-      "negativeControl": "With 45530037's key both subtests fail: 's1 was handed 2 frames of the comment'."
-    },
-    {
-      "criterion": "Migrations: one number each, and a fresh database migrates through 0151 with comment_fallback_copies present, both ways against main.",
-      "surface": "store and pgmigrate suites; a scratch database 'mig' with the real envoy-dispatch binaries of head and of main e622d943",
-      "command": "go test -p 1 ./internal/dispatch/store/ ./internal/pgmigrate/...; mig.sh main, head, main, head",
-      "observed": "TestMigrationSetIsNumberedOneToN passes; store and pgmigrate (its version guard included) pass. Main migrates a fresh database to 150; head applies 151, with comment_fallback_copies and its 2 indexes beside main's dpop_proofs; main then starts healthy on the 151 database, and head starts again.",
-      "headSha": "253a1afccf55",
-      "negativeControl": "Round 21 recorded the collision at 45530037: 0150_comment_fallback_copies against main's 0150_dpop_proofs."
-    },
-    {
-      "criterion": "Delivery and stream behaviour hold on the merged binary: the outbox, deliveryaudit and api mention groups, the claimant live proof, and a restart with resuming live sockets.",
-      "surface": "Go suites; scripts/e2e/dispatch-claimant-delivery.sh on the head binary (real envoy-dispatch, the run's own NATS, the fake listener); the load-test restart scenario on a stack seeded at migration 151",
-      "command": "go test -p 1 ./internal/dispatch/outbox/... ./internal/dispatch/deliveryaudit/...; go test -p 1 ./internal/dispatch/api/ -run 'Mention|Retry|Sweep|Keyed|Fallback|Supersede|Claimant|Refresh|Lane|Deploy|Duplicate|Silent|Abandoned|Listener'; DATABASE_URL=<scratch> DISPATCH_BIN=<head> bash scripts/e2e/dispatch-claimant-delivery.sh; run-step.sh r22-restart --events 4 --sessions 400 --requests 60 --live 50 --live-resume 1 --live-stale 10 --restart-at 90s --mention-frac 0.2 --mentions 3 --envoy-rtt 200ms",
-      "observed": "outbox and deliveryaudit pass; the api groups give 166 PASS and 1 SKIP. Claimant proof: 15 ok, 0 FAIL. Restart (build 6ef20e69, clean tree): 50 reconnects, replayed frames per reconnect at most 172 for last_id sockets and 33 for stale ones, all under the 256-event bound; the 10 stale sockets refetched; 5,901 KiB replayed in total; 15.2 Dispatch CPU-s in the minute after the restart. Sampled memory peak 4.63 GiB of 19 over 2,700 samples during the suites.",
-      "headSha": "253a1afccf55",
-      "negativeControl": "The replay bound's control is round 17's, on the base build: an unbounded resume replays the whole backlog. Not re-run this round."
+      "criterion": "Confirmation at 92d2faba: the PR's own diff is unchanged from 253a1afc.",
+      "surface": "round-shape.py over the two heads",
+      "command": "python3 round-shape.py 253a1afccf556c7f90d96901ce909400d9572342 92d2faba5e8b9a634c7f329aa50979186b225232 2406",
+      "observed": "0 files differ, and none is equal only after normalisation.",
+      "headSha": "92d2faba5e8b",
+      "negativeControl": "The same tool on 25206ba7 -> 253a1afc lists 20 differing files."
     }
   ],
   "notes": [
-    "CI at 253a1afc, read at 08:14Z: every lane is green except two, and ci-ok is queued behind them. pi-legion failed on legion-background-subagent-omp.test.ts:477, where two millisecond timestamps were equal; this PR touches no file under packages/pi-legion or packages/pi-shared, and the controller says main fixed that test with #2621 (081e9e60) after this run's merge ref was taken. dispatch failed one browser test, overlapping-marks.e2e.ts:311 @phone, on a 30 s timeout; the whole file passes 40 of 40 at head locally (--project chromium --repeat-each 5), and this PR changes no editor or marks code. Both are flakes. The controller asks that #2406 get a fresh run on the new main by closing and reopening it, since a re-run tests the old merge ref. ci-ok is unread.",
-    "Restart time was 37.7 s (round 17: 11.7 s): the old process logged 'shutting down' at 07:26:49 and drained in-flight requests until about 07:27:20. The box was CPU-starved before the restart too ('announce the server fleet's build: context deadline exceeded' every ~10 s from 07:26:02). I did not run a base build beside it, so I make no claim on that figure.",
-    "The memory sampler's 2,700 samples cover the Go suites; it had ended before the restart run, whose memory is not sampled. Leftover check (ps for memory.usage_in_bytes, sleep 2, envoy-dispatch, playwright, chrome-headless): nothing listed. The load stack is stopped."
+    "CI at 92d2faba, read at 09:22Z: only changes (success) and pr-title (queued) had started. ci-ok and every other lane are unread.",
+    "No Go suite or load run in this round; nothing of mine runs except the CI watcher job, which I stop before completing."
   ]
 }
