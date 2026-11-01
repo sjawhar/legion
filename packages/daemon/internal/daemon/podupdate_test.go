@@ -678,17 +678,21 @@ func TestPodUpdateTakesATurnsEndAsTheAnswerOfAClaimBelowTheUpdateContract(t *tes
 	}
 }
 
-// Drift that clears — the operator put the configuration back — ends the round where it stands,
-// and the task the round was holding back goes to the worker that had answered.
-func TestPodUpdateEndsTheRoundWhenTheDriftClears(t *testing.T) {
+// Drift that clears while a round is open — the operator put the configuration back — ends
+// nothing. A round, once opened, ends only by replacing its pod or because that pod is gone: it
+// has already asked every worker in the pod to push its work and to start no new work, each has
+// answered or is about to, and no path is left that lets one carry on in a pod it was told would
+// be replaced. So the pod is replaced here too, which is one restart of each worker in its own
+// session.
+func TestPodUpdateReplacesThePodWhenTheDriftClearsUnderAnOpenRound(t *testing.T) {
 	rig := newPodUpdateRig(t, readyWorker(claim.RoleImplementer))
 	rig.drifts(podUpdateDrift)
 
 	rig.tick()
 	rig.awaitRound(claim.RoleImplementer, podUpdateRound)
 	rig.signal(claim.RoleImplementer, "a1b2c3d")
-	// The worker's turn — the one it answered from — ends, which retires the round's own task.
-	// The next task then arrives while the round holds it back.
+	// The worker's turn — the one it answered from — ends, which retires the round's own task,
+	// so nothing of the round is left in its hands when the next tick reads it.
 	token := rig.tokens[claim.RoleImplementer]
 	answered := rig.claimOf(claim.RoleImplementer).Pending.ID
 	rig.handle(claim.RoleImplementer, supervise.StreamTurnStart{Claim: token})
@@ -696,23 +700,15 @@ func TestPodUpdateEndsTheRoundWhenTheDriftClears(t *testing.T) {
 	rig.awaitClaim(claim.RoleImplementer, "the round's own task to retire with the turn", func(c supervise.Claim) bool {
 		return c.Pending == nil
 	})
-	rig.handle(claim.RoleImplementer, supervise.RequestDeliver{Claim: token, ID: "after-the-round", Task: "Carry on implementing."})
-	conn := rig.workers[claim.RoleImplementer]
-	if prompts := promptsOf(conn, "after-the-round"); len(prompts) != 0 {
-		t.Fatalf("the task was sent while the round held it: %+v", prompts)
-	}
 
 	rig.drifts()
 	rig.tick()
 
-	rig.awaitClaim(claim.RoleImplementer, "its round to end with the drift", func(c supervise.Claim) bool {
-		return c.UpdateRound == ""
-	})
-	if calls := rig.replacements(); len(calls) != 0 {
-		t.Fatalf("ReplacePod called %d times for a pod that no longer drifts", len(calls))
+	if calls := rig.replacements(); len(calls) != 1 {
+		t.Fatalf("ReplacePod called %d times once the drift had gone away, want the one replacement the round was opened for", len(calls))
 	}
-	testwait.Eventually(t, "the task the round held to be sent", func() bool {
-		return len(promptsOf(conn, "after-the-round")) == 1
+	rig.awaitClaim(claim.RoleImplementer, "its round to end with the replacement", func(c supervise.Claim) bool {
+		return c.UpdateRound == ""
 	})
 }
 
@@ -803,10 +799,9 @@ func (r *podUpdateRig) podGone() {
 // one tick later, over the claims that record the pod that replaced it, by telling the issue
 // what the workers that had not answered lost.
 //
-// Read as a round whose drift cleared, this would end the round over a pod that took the
-// implementer's unpushed work with it: the issue would be told nothing, and the tester, by then
-// running in the new pod, would be sent the task that says the daemon replaced no process and no
-// pod under it and that its work is still on its disk.
+// Read as a round whose drift cleared, this would carry the round on over a pod that took the
+// implementer's unpushed work with it: the round would wait to replace a pod that is not there,
+// and the issue would be told nothing of what was lost.
 func TestPodUpdateDecidesNothingWhileTheRoundsPodIsGone(t *testing.T) {
 	rig := newPodUpdateRig(t, readyWorker(claim.RoleImplementer), readyWorker(claim.RoleTester))
 	rig.drifts(podUpdateDrift)
@@ -868,21 +863,18 @@ func TestPodUpdateDecidesNothingWhileTheRoundsPodIsGone(t *testing.T) {
 	}
 }
 
-// A round can end in four ways, and only one of them leaves its worker needing a word from the
-// daemon. The worker here has answered and its turn is over, so it holds nothing: the pod round's
-// own ask retired with that turn, and the round held every task since. Where the pod the round
-// was opened over is gone — the replacement this round made, a pod that went without its round,
-// or a pod that went for a failure of its own and left the round's last tick reading no drift
-// over the pod that replaced it — the worker comes back on a new session and a new disk and its
-// launch is what starts it, so the sweep's end says the pod went and the machine tells it
-// nothing. Only the round whose own pod is still running ends with that worker holding nothing
-// and no launch coming, and only there is it told to carry on.
-func TestPodUpdateTellsTheWorkerToCarryOnOnlyWhereItsPodStayed(t *testing.T) {
+// A round ends in three ways, and none of them leaves its worker a word from the daemon. The
+// worker here has answered and its turn is over, so it holds nothing: the pod round's own ask
+// retired with that turn, and the round held every task since. The pod the round was opened over
+// is gone whichever way the round ended — the replacement this round made, a pod that went
+// without its round, or a pod that went for a failure of its own and left the round's last tick
+// reading no drift over the pod that replaced it — so the worker comes back on a new session and
+// a new disk, where its launch is what starts it.
+func TestPodUpdateTellsItsWorkerNothingHoweverTheRoundEnds(t *testing.T) {
 	for name, tc := range map[string]struct {
 		roles        []podUpdateRole
 		end          func(*podUpdateRig)
 		replacements int
-		want         int
 	}{
 		"the round replaced the pod": {
 			roles:        []podUpdateRole{readyWorker(claim.RoleImplementer)},
@@ -896,11 +888,6 @@ func TestPodUpdateTellsTheWorkerToCarryOnOnlyWhereItsPodStayed(t *testing.T) {
 		"the drift cleared over the pod that replaced the round's own": {
 			roles: []podUpdateRole{readyWorker(claim.RoleImplementer)},
 			end:   func(r *podUpdateRig) { r.drifts(); r.tickBackIn(podUpdateReplacementPod) },
-		},
-		"the drift cleared over the round's own pod": {
-			roles: []podUpdateRole{readyWorker(claim.RoleImplementer)},
-			end:   func(r *podUpdateRig) { r.drifts(); r.tick() },
-			want:  1,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -927,18 +914,8 @@ func TestPodUpdateTellsTheWorkerToCarryOnOnlyWhereItsPodStayed(t *testing.T) {
 			if calls := rig.replacements(); len(calls) != tc.replacements {
 				t.Fatalf("ReplacePod called %d times, want %d: this is not the end under test", len(calls), tc.replacements)
 			}
-			sent := conn.Prompts()[before:]
-			if len(sent) != tc.want {
-				t.Fatalf("the worker was sent %+v after the round ended, want %d tasks", sent, tc.want)
-			}
-			if tc.want == 0 {
-				return
-			}
-			if strings.HasPrefix(sent[0].DeliveryID, "update:") {
-				t.Errorf("the task after the round = %+v, want the daemon's own word rather than another ask of a round", sent[0])
-			}
-			if c := rig.claimOf(claim.RoleImplementer); c.Pending == nil || c.Pending.ID != sent[0].DeliveryID {
-				t.Errorf("pending after the round = %+v, want the task just sent", c.Pending)
+			if sent := conn.Prompts()[before:]; len(sent) != 0 {
+				t.Fatalf("the worker was sent %+v after the round ended, want nothing: its pod is gone, and its launch is what starts it", sent)
 			}
 		})
 	}

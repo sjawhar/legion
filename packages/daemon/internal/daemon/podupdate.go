@@ -66,8 +66,10 @@ func (s *supervision) reconcilePodUpdates(ctx context.Context, claims []supervis
 //
 // The decisions are taken in this order, and the order is the rule. A pod the group has replaced
 // with another went while its round was open, whatever the runtime says of a pod that is not
-// there. Then the drift: a pod that has drifted from nothing needs no replacement, so a round
-// open over it ends rather than replaces it, however many workers have answered. Only then is a
+// there. Then the drift: a pod that has drifted from nothing and has no round open over it needs
+// no replacement, and one whose round's own pod is already gone ends that round, which replaces
+// nothing. A round open over the pod the claims still record goes on, drift or no drift: once
+// opened, a round ends only by replacing its pod, or because that pod is gone. Only then is a
 // complete round acted on, and only then is a round opened or kept open.
 //
 // A group whose claims record no pod at all decides nothing: not that the pod went, and not that
@@ -114,21 +116,34 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 	if !ok {
 		return
 	}
-	if len(reasons) == 0 {
+	if len(reasons) == 0 && open != supervise.PodRound(pod) {
+		// The round's own pod is gone: the claims record another one in its place, and that pod
+		// has drifted from nothing. A round that still had a worker to lose work with the pod
+		// was taken by the branch above, so this one lost nothing and ends here, over the pod
+		// that replaced its own.
 		if open != "" {
-			// The round's pod is still running unless the claims record another one in its
-			// place: a pod that went for a failure of its own after every claim had answered
-			// reaches this branch over the pod that replaced it, the branch above having taken
-			// every round that still had a worker to lose work.
-			replaced := open != supervise.PodRound(pod)
-			s.log.Info("supervise: the pod of this issue has drifted from nothing now; its update round is over",
-				"issue", issue, "round", open, "replaced", replaced)
-			s.endPodUpdates(group, replaced)
+			s.log.Info("supervise: the pod this issue's update round was opened over is gone, and the pod in its place has drifted from nothing; the round is over",
+				"issue", issue, "round", open, "pod", pod)
+			s.endPodUpdates(group)
 		}
 		s.reconcilePluginUpdates(ctx, group, now)
 		return
 	}
 	joined := strings.Join(reasons, ", ")
+	if len(reasons) == 0 {
+		// The drift this round was opened for has gone away — an operator rolled the release
+		// back — and the round replaces the pod all the same. The round has already asked every
+		// worker in that pod to push its work and to start no new work, each has answered or is
+		// about to, and no path is left that lets a worker carry on in the pod it was told would
+		// be replaced. Replacing it is one restart of each worker in its own session, which the
+		// alternative — a release of the answered workers that the daemon alone knows about —
+		// is not.
+		//
+		// What the task the worker reads and the notice the operator reads name is the round's
+		// own recorded reasons: the live drift says nothing now, and both of them must say why
+		// the round was opened.
+		joined = roundReasons(group, open)
+	}
 	// One live read, given to both decisions below. Read live by the replacement and from the
 	// snapshot by the post, the two would disagree exactly where it costs most: a snapshot every
 	// claim of which has answered, beside a live read that finds one answer taken back, leaves
@@ -181,8 +196,8 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 // and the orphan reaping behind it wait. The bound costs the round nothing. The suspension that
 // displaces the pod has already landed when it hits. Once that pod is gone, PodDrift answers
 // runtime.ErrPodGone and the sweep decides nothing until the claims record the pod that
-// replaced it, where the round ends as replaced; nothing is deleted earlier than it would have
-// been, and the round stays open until then.
+// replaced it, where the round ends; nothing is deleted earlier than it would have been, and the
+// round stays open until then.
 func (s *supervision) completePodUpdate(ctx context.Context, issue string, snapshot, live []supervise.Claim, round, pod, reasons string, now time.Time) bool {
 	if waiting := waitingClaims(live, round); len(waiting) > 0 {
 		if len(waitingClaims(snapshot, round)) == 0 {
@@ -224,7 +239,7 @@ func (s *supervision) completePodUpdate(ctx context.Context, issue string, snaps
 	}
 	s.log.Info("supervise: every worker of this update round has answered; the pod is replaced and the round is over",
 		"issue", issue, "round", round, "pod", pod)
-	s.endPodUpdates(live, true)
+	s.endPodUpdates(live)
 	return true
 }
 
@@ -415,7 +430,7 @@ func (s *supervision) podWentWithoutItsRound(ctx context.Context, issue string, 
 		s.log.Error("supervise: write on the issue that its pod went without its update round",
 			"issue", issue, "round", round, "error", err)
 	}
-	s.endPodUpdates(group, true)
+	s.endPodUpdates(group)
 }
 
 // openPodUpdate opens the round, or keeps it open: every claim that blocks it is posted
@@ -604,16 +619,16 @@ func (s *supervision) writeOnIssue(ctx context.Context, issue, body string) erro
 	return s.enqueue(ctx, issue, record.MessagePost{Body: body})
 }
 
-// endPodUpdates ends the round on every claim of the group that is in one. replaced is the pod
-// the round was opened over gone, which every post carries and only the caller knows
-// (supervise.PodUpdateEnded): the round's own id says nothing of its pod's fate, and the machine
-// tells a worker that the round changed nothing under it on this word alone.
-func (s *supervision) endPodUpdates(group []supervise.Claim, replaced bool) {
+// endPodUpdates ends the round on every claim of the group that is in one. A round ends only
+// where the pod it was opened over is gone — replaced by the round itself, replaced under it, or
+// gone for a failure of its own — so the post carries nothing of that pod's fate
+// (supervise.PodUpdateEnded).
+func (s *supervision) endPodUpdates(group []supervise.Claim) {
 	for _, c := range group {
 		if c.UpdateRound == "" {
 			continue
 		}
-		s.supervisor.post(c.Token, supervise.PodUpdateEnded{Claim: c.Token, Round: c.UpdateRound, Replaced: replaced})
+		s.supervisor.post(c.Token, supervise.PodUpdateEnded{Claim: c.Token, Round: c.UpdateRound})
 	}
 }
 
@@ -625,12 +640,12 @@ func (s *supervision) endPodUpdates(group []supervise.Claim, replaced bool) {
 // The pod the claims record not being there is the one error of its own (runtime.ErrPodGone),
 // and it reports false for that too: nothing can be read of a pod that is not there, so this
 // issue decides nothing this tick, as it decides no replacement where its claims record no pod
-// at all (reconcileIssuePodUpdate). Read as a pod that has drifted from nothing, it would end
-// the round over a pod that took its workers' unpushed work with it — the issue would be told
-// nothing of what was lost, and every worker that had answered would be sent the task saying the
-// daemon replaced no pod under it. What ends the round instead is the claims recording the pod
-// that replaced this one, one relaunch later, which is what says the pod went
-// (podWentWithoutItsRound). It is no failure, so it is logged as the wait it is.
+// at all (reconcileIssuePodUpdate). Read as a pod that has drifted from nothing, it would carry
+// the round on over a pod that took its workers' unpushed work with it: the round would wait to
+// replace a pod that is not there, and the issue would be told nothing of what was lost. What
+// ends the round instead is the claims recording the pod that replaced this one, one relaunch
+// later, which is what says the pod went (podWentWithoutItsRound). It is no failure, so it is
+// logged as the wait it is.
 func (s *supervision) groupDrift(ctx context.Context, issue string, group []supervise.Claim) ([]string, bool) {
 	var reasons []string
 	for _, c := range group {

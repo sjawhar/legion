@@ -546,13 +546,6 @@ type Machine struct {
 	// a claim still stale (refreshStalePlugins in internal/daemon), so a restart that forgets this
 	// mark finds the same claim again, and letGo drops it with the process it was made for.
 	staleRelaunch *string
-	// roundOver is the update round's end held for the agent's turn to end (endPodUpdate,
-	// turnEnded), nil for none. A worker that answered its round from inside a turn still holds
-	// the round's own ask, so the end cannot tell it the round is over until that turn is done;
-	// held here, the machine itself ends the round at the turn's end rather than leaving the
-	// worker for the next sweep. It is memory only, as the held relaunch is: the sweep posts the
-	// end again for a round still open, and letGo drops it with the process it was made for.
-	roundOver *PodUpdateEnded
 	// unseenTurn is the claim in a turn this daemon never saw begin: one an earlier daemon's
 	// process was already in, which this one learns of from the agent's own get_state answer
 	// (sendPending's askFirst branch, askTurnOver's streaming branch, and turnStarted where only
@@ -1311,16 +1304,15 @@ func (m *Machine) retire(ctx context.Context) error {
 // letGo ends what the machine had with the claim's process: no timer watches it, no relaunch waits
 // on one (relaunchLater), no send talks to it, no suspension is held for its turn, no stale-plugin
 // relaunch waits for that turn either (refreshPlugin) — the process it was to replace is gone —
-// and no update round's end waits for it (endPodUpdate), and the process the claim records, when
-// it records one, moves into previous — the claim no longer runs it (it was stopped, found dead,
-// or left behind), and the next launch of the same session waits it out.
+// and the process the claim records, when it records one, moves into previous — the claim no
+// longer runs it (it was stopped, found dead, or left behind), and the next launch of the same
+// session waits it out.
 func (m *Machine) letGo() {
 	m.disarmAll()
 	m.relaunch = nil
 	m.forgetSend()
 	m.held = nil
 	m.staleRelaunch = nil
-	m.roundOver = nil
 	m.unseenTurn = false
 	if enrollment := ClearEnrollment(&m.claim); enrollment != nil {
 		m.revoke(*enrollment)
