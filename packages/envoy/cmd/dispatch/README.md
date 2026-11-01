@@ -1492,25 +1492,36 @@ snapshot for minutes, and an open snapshot on the primary holds back vacuum. On 
 `--since` or point `DATABASE_URL` at a read replica.
 
 The oldest retained row is the base: compaction folds older history into it and a rebuild seeds
-the history there, so its own class is not checked and a version recorded before it is skipped. A
-history a prune rewrote after the base (a checkpoint standing, a gap, a version past the head or
-behind an earlier one) is refused. `--since` folds rows and versions created before that time
-without checking them, so history an earlier build wrote is not read as this build's: run it with
-the start of the window under test, while the rooms are resident and nothing is compacted.
+the history there, so its own class is not checked and a version recording an update below it is
+compared with nothing. Compaction runs on its own, and no setting holds it off: a resident room's
+rows fold once 16 of them are older than two minutes or one is older than fifteen minutes, and an
+hourly sweep folds every document due that rule. So a version created inside the checked window
+can record an update a compaction has already folded into the base. The check counts those
+versions `versions_compacted` and prints a reason naming the base; a document's first version,
+recorded before any row of it was stored, names no update and is skipped as it always was. A
+document the counted versions leave with no version compared is `unchecked`, never clean,
+whatever classes the fold measured, and a document with versions at or above the base is clean
+only on what it compared. A history a prune rewrote after the base (a checkpoint standing, a gap,
+a version past the head or behind an earlier one) is refused. `--since` folds rows and versions
+created before that time without checking them, so history an earlier build wrote is not read as
+this build's: run it with the start of the window under test, and read `versions_compacted` for
+how much of that window a compaction folded away.
 
 The check holds only for one renderer: run it from the same commit as the Dispatch whose history it
 reads. A version an earlier build rendered (a change to `pmdoc`'s Markdown output) differs from
 this build's render of the same state.
 
 Output, every line starting `stored-order: `: one line per document (`<uuid> base=…
-updates_checked=… updates_skipped=… versions_checked=… versions_skipped=… mismatches=…`, with
-`refused="<reason>"` for a refused document), one line per mismatch (`class update=… stored=…
-expected=…`, `pending update=… parked_items=… parked_delete_ranges=…`, or `version number=…
-doc_update_version=… stored_md5=… stored_length=… fold_md5=… fold_length=…`), and last a summary
-(`documents=… clean=… mismatched=… refused=… failed=… unchecked=…`). It prints no document text. A
-document whose check compared no update and no version is `unchecked`, never clean. Exit 0 when
-every document checked is clean, 1 on any mismatch, refusal, read failure, missing `DATABASE_URL`,
-unchecked document `--artifact` names, or a run that checked no document at all (an empty database
+updates_checked=… updates_skipped=… versions_checked=… versions_skipped=… versions_compacted=…
+mismatches=…`, with `compacted="<reason>"` for a document whose versions record updates below its
+base and `refused="<reason>"` for a refused document), one line per mismatch (`class update=…
+stored=… expected=…`, `pending update=… parked_items=… parked_delete_ranges=…`, or `version
+number=… doc_update_version=… stored_md5=… stored_length=… fold_md5=… fold_length=…`), and last a
+summary (`documents=… clean=… mismatched=… refused=… failed=… unchecked=…`). It prints no document
+text. A document whose check compared no update and no version, one whose versions inside the
+window all sit below the base included, is `unchecked`, never clean. Exit 0 when every document
+checked is clean, 1 on any mismatch, refusal, read failure, missing `DATABASE_URL`, unchecked
+document `--artifact` names, or a run that checked no document at all (an empty database
 included), 2 on a usage error. So exit 0 always means the check compared something.
 
 `packages/envoy/loadtest/browsertype` is the browser side of a load test this check judges: it

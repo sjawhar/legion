@@ -25,10 +25,16 @@ import (
 //
 // The fold starts from the document's oldest retained update, its base. Compaction folds older
 // history into that row (Compact) and a rebuild replaces the whole history with one row there
-// (RebuildTx), so the base is a state and its own class is not checked; a version recorded before
-// it is skipped. A history rewritten after the base - a prune's checkpoint standing, or a prune
-// that finished and was appended past (PruneAfter, recoverPruneTx) - is refused: the versions
-// recorded against it name updates the store no longer holds.
+// (RebuildTx), so the base is a state and its own class is not checked. Compaction runs on its
+// own, under no setting a check can hold off: the per-process queue folds a room's rows once
+// compactMinRows of them are older than compactTail or one is older than compactMaxTailAge, and
+// the sweep folds every document due that rule once an hour. So a version created inside the
+// checked window can record an update already folded into the base, and the check compares
+// nothing of it: it counts those versions (VersionsCompacted) rather than passing over them, and
+// a document they leave with no version compared is unchecked. A history rewritten after the
+// base - a prune's checkpoint standing, or a prune that finished and was appended past
+// (PruneAfter, recoverPruneTx) - is refused: the versions recorded against it name updates the
+// store no longer holds.
 
 // StoredOrderDB is what the check reads a document through: a pool it opens one read-only
 // transaction on (*store.Pool, *pgxpool.Pool).
@@ -103,9 +109,12 @@ type StoredOrderReport struct {
 	// UpdatesChecked counts the updates after the base whose class was checked; UpdatesSkipped
 	// those folded unchecked because they were stored before the check's since time.
 	UpdatesChecked, UpdatesSkipped int
-	// VersionsChecked counts the versions compared with the fold; VersionsSkipped those recorded
-	// before the base or before the since time.
-	VersionsChecked, VersionsSkipped int
+	// VersionsChecked counts the versions compared with the fold; VersionsSkipped those created
+	// before the since time and those recording no stored update at all - a document's first,
+	// written before any row of it was stored, which no fold ever reaches - and
+	// VersionsCompacted those created inside the window recording an update below the base,
+	// which a compaction folded into it: nothing of those was compared either.
+	VersionsChecked, VersionsSkipped, VersionsCompacted int
 	// Refused says why the document's history cannot be checked; a refused document never passes.
 	Refused    string
 	Mismatches []StoredOrderMismatch
@@ -117,8 +126,13 @@ func (r StoredOrderReport) Clean() bool {
 	return r.Checked() && r.Refused == "" && len(r.Mismatches) == 0
 }
 
-// Checked reports whether the check compared at least one update or version with the fold.
+// Checked reports whether the check compared at least one update or version with the fold. A
+// document whose versions inside the window all record updates below the base is not checked,
+// whatever classes the fold measured: the check read no version against the history it folded.
 func (r StoredOrderReport) Checked() bool {
+	if r.VersionsCompacted > 0 && r.VersionsChecked == 0 {
+		return false
+	}
 	return r.UpdatesChecked > 0 || r.VersionsChecked > 0
 }
 
@@ -176,15 +190,22 @@ func checkStoredOrderTx(ctx context.Context, tx pgx.Tx, artifactID string, since
 		report.Refused = refusal
 		return nil
 	}
-	// The versions each update is compared against, by the update they record. A version recorded
-	// before the base, or created before since, is skipped.
+	// The versions each update is compared against, by the update they record. A version created
+	// before since is skipped, and so is one that records no update: the document's first, held
+	// before any row of it was stored, names a state no fold starts from. A version created
+	// inside the window that records an update below the base is counted as compacted, since a
+	// compaction folded that row into the base and the fold no longer reaches it. A document
+	// with no stored update holds no fold at all, so every version of it is skipped.
 	at := make(map[int64][]storedVersion)
 	for _, version := range versions {
-		if count == 0 || version.docUpdateVersion < first || version.createdAt.Before(since) {
+		switch {
+		case count == 0 || version.createdAt.Before(since) || version.docUpdateVersion == 0:
 			report.VersionsSkipped++
-			continue
+		case version.docUpdateVersion < first:
+			report.VersionsCompacted++
+		default:
+			at[version.docUpdateVersion] = append(at[version.docUpdateVersion], version)
 		}
-		at[version.docUpdateVersion] = append(at[version.docUpdateVersion], version)
 	}
 	if count == 0 {
 		return nil
