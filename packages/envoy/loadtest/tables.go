@@ -243,6 +243,7 @@ func renderTables(steps []stepData) string {
 	eventsTable(&md, steps)
 	kindsTable(&md, steps)
 	resourcesTable(&md, steps)
+	sessionDeliveryTable(&md, steps)
 	commitOrderLockTable(&md, steps)
 	liveTable(&md, steps)
 	ungrantedTable(&md, steps)
@@ -432,6 +433,70 @@ func heapCell(r *resourcesSummary) (cell string, old bool) {
 		return cell, false
 	}
 	return cell + " " + memStatsHeapMark, true
+}
+
+// sessionDeliveryTable is how the sessions took their messages (core subscriptions or the
+// listener's relay of their consumers), the delivery latency from publish, the events lost, and
+// what the listener and nats-server spent on it, early and late in the window.
+func sessionDeliveryTable(md *markdown, steps []stepData) {
+	md.line("\n## Session delivery, listener and NATS\n")
+	md.header("step", "session delivery asked", "sessions on consumer / core", "delivery ms from publish p50 / p99",
+		"delivery ms from arrival p50 / p99", "issue-topic receipts lost", "relay frames / duplicates / redelivered",
+		"listener cores first / last third", "listener RSS MiB first / last third (max)", "NATS cores first / last third",
+		"NATS RSS MiB first / last third (max)", "JetStream consumers max", "pull requests/s all / session", "JetStream API requests/s")
+	unread := false
+	for _, s := range steps {
+		e, r := s.sum.Events, s.sum.Resources
+		unread = unread || e.commitsUnread()
+		asked := s.sum.Config.SessionDelivery
+		if asked == "" {
+			asked = sessionDeliveryCore
+		}
+		sessions, frames := "-", "-"
+		if d := s.sum.Sessions.Delivery; d != nil {
+			sessions = fmt.Sprintf("%d / %d", d.ConsumerSessions, d.CoreSessions)
+			if len(d.CoreReasons) > 0 {
+				reasons := make([]string, 0, len(d.CoreReasons))
+				for _, kv := range byCount(d.CoreReasons) {
+					reasons = append(reasons, fmt.Sprintf("%s %d", kv.k, kv.v))
+				}
+				sessions += " (" + strings.Join(reasons, ", ") + ")"
+			}
+			frames = fmt.Sprintf("%d / %d / %d", d.Frames, d.Duplicates, d.Redelivered)
+		}
+		lost := s.commitCount(num(float64(e.Missing), 0))
+		trendCores, trendRSS := func(string) string { return "-" }, func(string) string { return "-" }
+		consumers, pulls, api := "-", "-", "-"
+		if r != nil {
+			trendCores = func(name string) string {
+				t, ok := r.Trends[name]
+				if !ok {
+					return "-"
+				}
+				return num(t.CoresFirstThird, 3) + " / " + num(t.CoresLastThird, 3)
+			}
+			trendRSS = func(name string) string {
+				t, ok := r.Trends[name]
+				if !ok {
+					return "-"
+				}
+				return fmt.Sprintf("%s / %s (%s)", num(t.RSSMiBFirstThird, 0), num(t.RSSMiBLastThird, 0), num(r.RSSMiBMax[name], 0))
+			}
+			if r.JSConsumersMax != nil {
+				consumers = num(*r.JSConsumersMax, 0)
+			}
+			if r.PullRequestsPerS != nil && r.SessionPullRequestsPerS != nil {
+				pulls = num(*r.PullRequestsPerS, 1) + " / " + num(*r.SessionPullRequestsPerS, 1)
+			}
+			if r.JSAPIPerS != nil {
+				api = num(*r.JSAPIPerS, 1)
+			}
+		}
+		md.row(s.commitsLabel(), asked, sessions, pair(e.DeliveryMsFromPublish, p50, p99, 0), pair(e.DeliveryMsFromArrival, p50, p99, 0), lost, frames,
+			trendCores("listener"), trendRSS("listener"), trendCores("nats"), trendRSS("nats"), consumers, pulls, api)
+	}
+	md.line("\nUnder consumer delivery a relay frame is a session's receipt, and the delivery latency from publish is its receipt time minus the stream's store time of the event (the frame's `Envoy-Stored-At`); on the core path it is `-`. Lost is the expected issue-topic receipts minus those got. A step whose sessions answered core measured the core path.")
+	commitsUnreadNote(md, unread, "the delivery latencies and the receipts lost", "show")
 }
 
 // failedReadsNote defines the failed-reads mark under a table, when a row has it: what names the

@@ -15,7 +15,7 @@ same step before and after its change, and compares the two rows.
 
 | File | What it is |
 | --- | --- |
-| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `seed-refs`, `refs-shape`, `refs-fetch`, `run`, `plan-docs`, `tables`, `seed-finish`, `cgroup-merge`, `curves`, `codepaths`, `series-sessions`, `trigger-sql`, `box-busy`, `replay-fetch`, `replay-pack`, `replay-unpack`, `replay-verify-bundle`, `replay-seed`, `replay-check-seed`, `replay-checksum`, `replay-logical-dump`, `replay-plan` |
+| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `seed-refs`, `refs-shape`, `refs-fetch`, `run`, `plan-docs`, `tables`, `backlog`, `restart-report`, `seed-finish`, `cgroup-merge`, `curves`, `codepaths`, `series-sessions`, `trigger-sql`, `box-busy`, `replay-fetch`, `replay-pack`, `replay-unpack`, `replay-verify-bundle`, `replay-seed`, `replay-check-seed`, `replay-checksum`, `replay-logical-dump`, `replay-plan` |
 | `api.go` | The Dispatch HTTP client, with the request trace that gives the arrival time; `callRaw` sends a body of any type (a multipart upload), and `callKeyed` and `callRetryKeyed` send a write under an idempotency key |
 | `seed.go` | The seed: 4 projects, 1,000 issues and 8,000 comments through Dispatch's API, and `seed.json` |
 | `seedfinish.go` | `loadgen seed-finish`: the steps after the seed (the wait for the outbox, the wait for the block-index backfill, `vacuum analyze`, the commit-time trigger), which `stack.sh seed` and `cluster.sh seed` both run |
@@ -25,6 +25,9 @@ same step before and after its change, and compares the two rows.
 | `pgclock.go` | `meta.json`'s `pg_clock`: Postgres's clock against `loadgen`'s, from 10 timed reads at the step's start and after its window |
 | `copymeta.go` | `loadgen run -copy-meta`: the cluster copy's description, which `meta.json` records under `copy` |
 | `sessions.go` | The simulated sessions: their NATS subscriptions and receipts, their listener registrations and heartbeats |
+| `relay.go` | Consumer delivery of the simulated sessions (`LOADTEST_SESSION_DELIVERY=consumer`): relay frames, their replies and receipts, `relay-frames.csv`, and the pull-request spy |
+| `backlog.go` | `loadgen backlog`: the publisher of a session backlog, for the listener restart (The listener restart, below) |
+| `restartreport.go` | `loadgen restart-report`: one restart run's backlog times and duplicate verdicts |
 | `events.go` | The five write kinds, the event mix and each write's plan |
 | `marker.go` | The write marker `lgm<nonce><counter>x`: its format, the run's nonce and the parse that keeps one run's markers |
 | `routes.go` | The route-mix file parser and the request paths |
@@ -71,7 +74,8 @@ same step before and after its change, and compares the two rows.
 | `replay.sh` | The LINUX replay's `stack.sh` commands, sourced by it: `replay-seed-patch-check`, `replay-seed`, `replay-manifest`, `replay-get`, `replay-prepare` and the `reset --replay` that resets from a prepared template |
 | `run-step.sh` | The one command for a named step |
 | `run-series.sh` | The series of six steps, 0.25x to 10x |
-| `common.sh` | What the three scripts share, sourced by each: the `LOADTEST_ROOT` and `LOADTEST_SRC` paths, the run lock (One run at a time, below), and the setup, start, seed and migration check before a step. Also the replay's download and verify of the manifest's parts, file artifacts of `LOADTEST_REPLAY_ISSUE` (`replay_fetch_parts`, `replay_get_bundle`), which `stack.sh replay-get` and `cluster/cluster.sh replay-prepare` both call |
+| `restart-step.sh` | One step whose listener is killed in the middle of the window, and its report (The listener restart, below) |
+| `common.sh` | What the step scripts share, sourced by each: the `LOADTEST_ROOT` and `LOADTEST_SRC` paths, the run lock (One run at a time, below), and the setup, start, seed and migration check before a step. Also the replay's download and verify of the manifest's parts, file artifacts of `LOADTEST_REPLAY_ISSUE` (`replay_fetch_parts`, `replay_get_bundle`), which `stack.sh replay-get` and `cluster/cluster.sh replay-prepare` both call |
 | `*_test.go` | Unit tests. They need no Postgres and no NATS: `cd packages/envoy && go test ./loadtest/` |
 | `run-step.test.sh` | The test of the run lock. It fakes `go` and `uv` and needs no stack: `cd packages/envoy && bash loadtest/run-step.test.sh` |
 | `common.test.sh` | The test of `lock_root`: a series step keeps the lock after its parent dies, a refusal names the live holder, a token without the holder's descriptor is refused, a lock held by a process that this PID namespace cannot see is refused as held (never as free), a caller takes the lock once its holder has ended, two callers waiting at once never name each other as the holder, and a record of another PID namespace whose pid runs here is refused without naming that pid. It needs no stack: `cd packages/envoy && bash loadtest/common.test.sh` |
@@ -125,6 +129,8 @@ same step before and after its change, and compares the two rows.
 | `LOADTEST_GOMAXPROCS` | nproc | Dispatch's `GOMAXPROCS` (`run-step.sh --replay --gomaxprocs`). |
 | `LOADTEST_REPLAY_ISSUE` | unset | The issue the replay's bundle and seed parts are file artifacts of. `stack.sh replay-get` and a `run-step.sh --replay` step require it and refuse before they start without it; the manifest names no issue. To find it, search Dispatch for the bundle parts' name before `.tar.zst` (the manifest's `bundle.parts[].file`; for this manifest, `dispatch search --query 'linux-replay-2026-10-26'`): among the hits is that issue's comment naming the parts. A search for the manifest's file name does not find it. |
 | `DISPATCH_URL`, `DISPATCH_TOKEN_FILE` | unset | Read by `stack.sh replay-get` alone, in its own shell, to download the replay's parts. |
+| `LOADTEST_SESSION_DELIVERY` | `core` | `consumer` has the sessions take their messages from the listener's relay of their consumers (Consumer delivery, below). `stack.sh loadgen` passes it to `loadgen run` (`-session-delivery`). |
+| `LOADTEST_NO_RESUME` | unset | `1`, under consumer delivery, leaves the resume point out of every registration's `delivery`, as a plugin sends that never wrote a frame. `stack.sh loadgen` passes it to `loadgen run`. |
 
 Every process listens on `127.0.0.1`. The default ports follow `LOADTEST_ROOT`: the root's block
 `k` is the first 8 hex digits of the sha256 of its physical path, modulo 200, and each port is
@@ -272,6 +278,95 @@ starts, keeps the root when `run-series.sh` is killed. A caller with the token b
 descriptor is refused. No stack process holds the lock: `stack.sh` starts each one with
 descriptor 9 closed.
 
+## The listener restart
+
+`restart-step.sh` runs one step and kills its listener in the middle of the window, so that the
+step answers two questions: once the listener is back, how long is it before every session has the
+backlog that built up while it was down, and does any relay frame reach a session twice?
+
+```bash
+packages/envoy/loadtest/restart-step.sh <name> [--events 40] [--sessions 1000] [--requests 600] \
+  [--duration 300s] [--out <dir>] [--warm-at 60] [--kill-at 120] [--down 30] \
+  [--backlog-per 3] [--backlog-over 25s] [--warm-over 10s] [other run-step.sh flags]
+```
+
+`--warm-at`, `--kill-at` and `--down` are whole seconds; `--duration`, `--backlog-over` and
+`--warm-over` are durations as Go reads them. Any other flag goes to `run-step.sh`.
+
+The step is a `run-step.sh` step under consumer delivery, which the script sets
+(`LOADTEST_SESSION_DELIVERY=consumer`). Its defaults are the series' `step-10x` row with a 300 s
+window. Counted from the window start (`meta.json` `window_start`):
+
+| When | What happens |
+| --- | --- |
+| `--warm-at` (60 s) | One envelope to each session (`loadgen backlog -per 1`, event ids from 910,000,000). Each session answers it `done`, so each holds a resume point, as a session that has been running for a while does. With `LOADTEST_NO_RESUME=1` this step is left out and no registration carries a resume point. |
+| `--kill-at` (120 s) | The stack's listener is SIGKILLed. |
+| +2 s | The backlog: `--backlog-per` envelopes to each session over `--backlog-over` (`loadgen backlog`), so every session has one while the listener is down. |
+| `--down` (30 s) after the kill | The listener is started again with the same binary, arguments and environment, read from `/proc/<pid>` before the kill. Its output is appended to the stack's listener log and its pid goes into the stack's pidfile, so `stack.sh stop` stops the new one. A start that exits at once (on gVisor the killed listener's port can still be held: `bind: address already in use`) is started again after 1 s. The restart time is the start that stayed up. |
+| The window end | The step ends, and `loadgen restart-report` reads what the run recorded. |
+
+The step fails by design: its sampler sees the listener's pid exit, so `summary.json` carries
+`stack_exits` and `run-step.sh` exits non-zero. `restart-step.sh` accepts that one failure and no
+other: a step that exited for anything but the listener it killed fails the script.
+
+Beside what every step writes, the step directory holds `restart.json` (the kill, the first start
+attempt, the start that stayed up, its first answer, all in Unix ns, and the start attempts),
+`backlog.json` and `warm.json` (the backlog runs' summaries) and `restart-report.json`.
+
+### The backlog publisher
+
+```bash
+packages/envoy/loadtest/stack.sh loadgen backlog -sessions 1000 -per 3 -over 25s [-id-base 900000000] -out <file>
+```
+
+It publishes `-per` envelopes to each of the first `-sessions` sessions' agent subjects
+(`notifications.agent.ses-lg-<i>`), as Dispatch's outbox publishes a message meant for one session.
+The envelopes go out in rounds, evenly spread over `-over`: every session has its first envelope
+before any has its second. Each one is an agent-sourced envelope whose payload carries its event
+id, where `relay.go` and the plugins read it, and each goes over JetStream under a `Nats-Msg-Id` of
+its own, so a run started twice by mistake stores one copy of each. The NATS URL is the stack's;
+one that differs is refused, as the endpoint flags of `loadgen run` are, and the guard first reads
+`/varz` to confirm the server is the stack's own.
+
+The summary names the id range (`id_from`, `id_to`) and counts the publishes: `published` is what
+the stream acknowledged, `publish_duplicates` those it acknowledged as a repeat of an id it held,
+`publish_errors` those it refused or failed, and `publish_pending` those whose acknowledgement had
+not arrived when the wait ran out. Every acknowledgement is waited for, so a failed asynchronous
+publish is counted, never taken for a stored message. Such a publish is named on standard error
+and does not fail the command, because the restart report shows the count beside the envelopes the
+sessions received; a run that stored nothing at all is an error.
+
+### The restart report
+
+```bash
+packages/envoy/loadtest/stack.sh loadgen restart-report -run <step dir>
+```
+
+It reads the run's `relay-frames.csv`, `restart.json` and `backlog.json`, writes
+`restart-report.json` in the run directory and prints it.
+
+| Field | What it holds |
+| --- | --- |
+| `listener_down_s`, `starts`, `first_start_to_restart_ms`, `restart_to_first_answer_ms` | The kill to the exec of the start that stayed up; the start attempts; the first attempt to that exec (above 0 when a start exited at once and was tried again); that exec to the listener's first answer on `/v1/sessions`. |
+| `backlog_ms_after_restart` | Each session's last backlog frame, in ms after that exec, as `n`, `p50`, `p90`, `p99` and `max`. A session's backlog is every first frame whose message the stream stored while the listener was down, and every one stored before the kill but received after it (in flight at the kill). The `max` is the run's "every session has its backlog" time, the one the plan's bar of 10 s applies to. |
+| `backlog_ms_after_first_answer_max` | The same maximum counted from the listener's first answer. |
+| `sessions_with_backlog`, `backlog_frames`, `backlog_frames_per_session_median` | How much backlog there was. |
+| `backlog_published`, `backlog_publish_errors` | The backlog run's own counts, from `backlog.json`. |
+| `backlog_envelopes_received_once`, `..._more_than_once`, `..._missing`, `..._missing_ids` | Each published envelope over the id range, by how many sessions got it. A clean run has every envelope received once and none missing. |
+| `duplicate_counts`, `duplicates` | Every relay frame whose stream sequence its session already had: its session, event id, stream sequence, subject, whether it came before or after the kill, whether the session had answered the earlier copy `done`, its dedupe identity, and the verdict below. The list is bounded at 500 rows, every defect first; the counts cover them all. |
+
+The verdict on a duplicate is what the real plugin would do with it
+(`packages/envoy-client/src/consumer-delivery.ts`, and the ledger `pi-envoy` and `claude-envoy`
+persist). A plugin answers a frame `done` once it has written it and recorded its dedupe identity
+(the envelope's `event_id`, else its `dedupe_key`) in its ledger, so `relay-frames.csv` carries
+both the `done` answer and the `identity` of every frame.
+
+| Verdict | What the plugin does |
+| --- | --- |
+| `ledger_dedupe` | The earlier copy was answered `done`, so the plugin had written it and its ledger holds the identity. The ledger answers this copy `done` without showing it. |
+| `unwritten_redelivery` | The earlier copy was not answered `done`, so the plugin had not written it. A copy that arrives while the first is still held is attached to it by its `<stream id>:<stream sequence>` claim, and a copy that arrives after the first was given up on is that frame's first write. The transcript holds it once either way. |
+| `shown_twice` | The earlier copy was written, but the frame carries no dedupe identity, so nothing in the ledger could recognise it and the session would be shown it again. This is a defect: `restart-report` names the run and the frames and exits non-zero, and `restart-step.sh` fails with it. |
+
 ## Run the series
 
 ```bash
@@ -413,6 +508,7 @@ project, `artifact_id` (the spec), `spec_name`, `spec_bytes`, `quotes` (the requ
 for the issue keys.
 
 `$LOADTEST_ROOT/seed.meta.json` records `migration` (the highest Dispatch migration applied),
+`migrations` (every Dispatch migration version applied, in order),
 `build_commit` and `build_dirty` (the checkout), `dispatch_commit`, `dispatch_binary_sha256` and
 `dispatch_build` (the whole of `$LOADTEST_ROOT/bin/envoy-dispatch.json`: the Dispatch that made the
 seed, another commit than `build_commit` when `setup` ran with `LOADTEST_DISPATCH_COMMIT`),
@@ -480,11 +576,14 @@ hold this package.
 `run-step.sh` with another `LOADTEST_SRC` prepares the stack for that checkout: it runs `setup`,
 which builds that checkout's Dispatch, listener and loadgen into `$LOADTEST_ROOT/bin` over the ones
 the seed used, `start` and `seed`, which does nothing while the template and `seed.meta.json` exist.
-Then it compares the highest migration file in that checkout
-(`packages/envoy/internal/dispatch/store/migrations`) with `seed.meta.json`. It refuses a build
-that is older than the seed, and names both levels; a build at the seed's level runs. For a build
-that is newer than the seed, it prints a note: a backfill that the new migrations start runs inside
-each step of that build. For example, a build at migration 0128 on a seed at 0120 indexes the
+Then it compares the set of migration versions in that checkout
+(`packages/envoy/internal/dispatch/store/migrations`) with the set `seed.meta.json` records. It
+refuses a build that lacks a version the seed holds, naming it; a build holding the seed's set runs.
+A migration merged below the seed's highest is caught too, which comparing only the highest would
+read as equal. For a build that holds versions the seed lacks, it prints a note naming how many: a
+backfill that those migrations start runs inside each step of that build. A `seed.meta.json`
+written before it recorded `migrations` is compared by its highest migration alone, with a note
+saying so. For example, a build at migration 0128 on a seed at 0120 indexes the
 blocks of all 1,000 specs in every step. A newer build migrates the restored copy forward when
 Dispatch starts; an older build cannot start on a seed that a newer build made. To measure one
 build alone, seed with it (`stack.sh seed --force`, with a checkout that has `seed-refs`).
@@ -513,6 +612,33 @@ the same wrap. A step with fewer than 1,000 sessions touches only the first N is
   to the topics of its five issues (`notifications.dispatch.issue.<key>.>`). The sessions share 50
   NATS connections. `run.log` records the subscriptions (N × 6 expected), the sessions registered
   and the registration errors.
+
+#### Consumer delivery
+
+With `LOADTEST_SESSION_DELIVERY=consumer` (or `loadgen run -session-delivery consumer`), each
+session also does what the pi plugin does in consumer mode:
+
+- It subscribes its relay subject, `notifications.envoy.deliver.<session>`, before it registers.
+- Its registration carries `delivery: {consumer: true, epoch}`, with one random epoch per NATS
+  connection. The run reads each answer's `delivery.mode`. `summary.json`
+  `sessions.delivery` counts the sessions whose last answer was `consumer`, and those whose last
+  answer was `core`, by reason. A step whose sessions answered `core` measured the core path.
+- It answers each relay frame `received`, then `done`, on the frame's reply subject. The frame is
+  the session's receipt: the first frame of each stream sequence counts, matched to its write by
+  the event id in the payload as a core receipt is. A frame of a sequence that the session has
+  received already counts as a duplicate, not as a receipt.
+- It keeps its core subscriptions. While the listener relays the session, a core copy is not
+  counted; on the agent topic it answers the empty lane receipt when it has a reply subject.
+
+A relay frame carries the stream's store time of the event (`Envoy-Stored-At`). The **delivery
+latency from publish** is the receipt time minus that time, over the same receipts as the other
+latencies (`events.delivery_ms_from_publish`). A core receipt has no such time. Each relay frame
+is a row of `relay-frames.csv` in the step directory.
+
+In both modes, `loadgen` subscribes `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` on a
+connection of its own and counts the pull requests on the stream's consumers, those of session
+consumers (`s-<session>`) apart. The 5 s sampler also reads NATS `/jsz`: the JetStream consumers
+and API requests.
 
 ### Event kinds
 
@@ -1228,8 +1354,10 @@ Every percentile in the harness is the lower nearest rank: the value at index
 | `heap.top.txt` | `go tool pprof -top` of `heap.pprof`, by in-use bytes (40 nodes). |
 | `envelope-<type>.json` | One envelope that a session got on an issue topic, per event type, with a marker when one arrived. |
 | `envelope-agent.<type>.json` | The same for an agent topic. |
+| `relay-frames.csv` | Under consumer delivery, one row per relay frame: the session, the stored subject, the stream sequence, `Envoy-Delivered`, the store time and the receipt time (Unix ns), the event id, whether it was a duplicate, the frame's dedupe identity (the envelope's `event_id`, else its `dedupe_key`) and whether the session answered it `done`. |
 | `dispatch.log` | Dispatch's log for the step. |
 | `listener.log`, `nats.log` | The listener's and NATS's logs since their restart in the reset. |
+| `restart.json`, `backlog.json`, `warm.json`, `restart-report.json` | Of a `restart-step.sh` step only: the restart's times and start attempts, the backlog runs' summaries, and the report (The listener restart, above). |
 
 A file that a step could not take is absent, and `run.log` names the reason. The Postgres log stays
 in `$LOADTEST_ROOT/pg/log`, the proxy log in `$LOADTEST_ROOT/logs/proxy.out`.
@@ -1243,7 +1371,7 @@ series `TABLES.md`, because `run-step.sh` already wrote them for each step.
 
 ## The tables
 
-`TABLES.md` has eight tables, with one row per step, and a ninth, Replay, when a step replayed.
+`TABLES.md` has nine tables, with one row per step, and a tenth, Replay, when a step replayed.
 The window is the measured window (`--duration`). "Cores" means CPU-seconds per second. A cell is
 `-` when it has no value, and also when the read that it comes from failed; a failed read also
 marks the step name with `(commit rows not read)`, `(1 failed read)` or `(<n> failed reads)`
@@ -1355,6 +1483,24 @@ totals count every sample from the warm-up to the end of the grace period, while
 two totals can differ. A failed read enters no statistic, so the Postgres, goroutine, pool-waiter
 and heap columns are over the reads that worked, and a column with no read that worked shows `-`,
 not 0. `TABLES.md` repeats this under the table when a row has the mark.
+
+### Session delivery, listener and NATS
+
+| Column | Unit | What it shows | Source |
+| --- | --- | --- | --- |
+| `step` | name | The step name, with the mark `(commit rows not read)` as in the first table. | `config.step`, `events.commits_error` |
+| `session delivery asked` | text | `core` or `consumer` (Consumer delivery, above). | `config.session_delivery` |
+| `sessions on consumer / core` | count | The sessions whose last registration answered `consumer`, then `core`, with each core reason and its count. `-` on the core path. | `sessions.delivery` |
+| `delivery ms from publish p50 / p99` | ms | Delivery latency from publish, over the issue-topic receipts of primary events that carry the store time. `-` on the core path, and when the commit rows were not read. | `events.delivery_ms_from_publish` |
+| `delivery ms from arrival p50 / p99` | ms | As in the first table. | `events.delivery_ms_from_arrival` |
+| `issue-topic receipts lost` | count | Expected minus got. | `events.missing` |
+| `relay frames / duplicates / redelivered` | count | The relay frames, those of a sequence already received, and those with `Envoy-Delivered` above 1. | `sessions.delivery` |
+| `listener cores first / last third` | cores | The listener's cores over the first and the last third of the window's samples. | `resources.trends.listener` |
+| `listener RSS MiB first / last third (max)` | MiB | Its mean RSS in each third, then its highest. `resources.trends.listener.rss_slope_mib_per_min` holds the least-squares slope. | `resources.trends.listener`, `resources.rss_mib_max.listener` |
+| `NATS cores first / last third`, `NATS RSS MiB first / last third (max)` | cores, MiB | The same for `nats-server`. | `resources.trends.nats` |
+| `JetStream consumers max` | count | The most JetStream consumers in a sample (`/jsz`). | `resources.js_consumers_max` |
+| `pull requests/s all / session` | per second | The pull requests on the stream's consumers, then those on session consumers. | `resources.pull_requests_per_s`, `resources.session_pull_requests_per_s` |
+| `JetStream API requests/s` | per second | The JetStream API requests (`/jsz` `api.total`). | `resources.js_api_per_s` |
 
 ### Commit-order lock
 
@@ -1559,7 +1705,9 @@ Give `-nats-server-name` to keep the NATS check. The sampler gets no pids. `meta
   share of the route mix is plain GETs. The live sockets subscribe to the event feed alone (no
   delivery or agent views), time each event frame, and do nothing more.
 - **One listener, sessions on NATS.** The sessions receive from NATS directly, as the pi plugin's
-  self-subscription does. They register with port 0, so the listener delivers nothing to them.
+  self-subscription does. They register with port 0, so the listener delivers nothing to them,
+  unless they ask for consumer delivery (Consumer delivery, above): then the one listener relays
+  every session's consumer.
 - **One process each.** One Dispatch process, one NATS server and one listener, all on
   `127.0.0.1`. Dispatch's `GOMAXPROCS` is `LOADTEST_GOMAXPROCS`, nproc by default; production's
   was 16.

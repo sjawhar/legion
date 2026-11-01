@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -149,9 +150,7 @@ func TestTheLingersSuspensionWaitsForTheArchitectsTurnToEnd(t *testing.T) {
 		t.Fatalf("three stop timeouts into the turn the architect is %s after %d suspensions, want its turn still running",
 			got, len(rt.CallsOf("Suspend")))
 	}
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: architect}); err != nil {
-		t.Fatalf("the turn's end: %v", err)
-	}
+	endTurn(ctx, t, machine, architect)
 	if got := machine.Claim().State; got != supervise.StateSuspended || len(rt.CallsOf("Suspend")) != 1 {
 		t.Fatalf("after its turn the architect is %s after %d suspensions, want suspended once", got, len(rt.CallsOf("Suspend")))
 	}
@@ -370,6 +369,55 @@ func TestReadmissionResumesTheClaimsTheTreesCloseSuspended(t *testing.T) {
 		if got := machine.Claim().State; got != supervise.StateLaunching || len(resumesOf(rt, token)) != 1 {
 			t.Fatalf("after re-admission %s is %s with %d resumes, want its session relaunched once", token, got, len(resumesOf(rt, token)))
 		}
+	}
+}
+
+// A root parked after its architect exhausted the launch budget keeps that failed claim and its
+// session into re-admission. Forgetting that stopped claim's session before the root is admitted
+// again makes the workflow start a fresh architect rather than repeat the failed resume.
+func TestReadmissionSpawnsAFreshArchitectAfterForgettingItsSession(t *testing.T) {
+	rootArchitect := mustClaimToken(t, "LEGION-208", claim.RoleArchitect)
+	var rt *fake.Runtime
+	var sup *supervisor
+	var architect claim.Token
+	var readmit func()
+	rt, sup, architect, _, readmit, _ = readmissionRig(t, func(sup *supervisor, token claim.Token) {
+		machine, _ := sup.Machine(token)
+		if token == rootArchitect {
+			refused := fake.SpawnResult{Err: errors.New("the session table holds no such session")}
+			sup.deps.Runtime.(*fake.Runtime).ScriptResume(refused, refused, refused)
+			if err := machine.Handle(context.Background(), supervise.RuntimeObservation{Observation: runtime.Observation{
+				Locator: *machine.Claim().Locator, Kind: runtime.Gone,
+			}}); err == nil {
+				t.Fatal("the missing-session relaunches answered no error")
+			}
+			return
+		}
+		if err := machine.Handle(context.Background(), supervise.RequestSuspend{
+			Claim: token, Reason: "the tree of LEGION-208 is parked", By: supervise.SuspendedByDaemon,
+		}); err != nil {
+			t.Fatalf("park %s: %v", token, err)
+		}
+	})
+	architectMachine, _ := sup.Machine(architect)
+	if failed := architectMachine.Claim(); failed.State != supervise.StateFailed || failed.SessionFile == "" {
+		t.Fatalf("parked architect = %+v, want failed with its session still recorded", failed)
+	}
+	if err := architectMachine.Handle(context.Background(), supervise.RequestForgetSession{
+		Claim: architect, Session: architectMachine.Claim().Session,
+	}); err != nil {
+		t.Fatalf("forget the architect session: %v", err)
+	}
+	if cleared := architectMachine.Claim(); cleared.Session != "" || cleared.SessionFile != "" {
+		t.Fatalf("architect after forget = %+v, want no recorded session", cleared)
+	}
+	before := len(rt.CallsOf("Spawn"))
+
+	readmit()
+
+	spawns := rt.CallsOf("Spawn")
+	if len(spawns) != before+1 || spawns[len(spawns)-1].Spec.Claim != architect || spawns[len(spawns)-1].Spec.ResumeSessionFile != "" {
+		t.Fatalf("re-admission spawns = %+v, want one fresh architect spawn", spawns)
 	}
 }
 

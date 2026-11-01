@@ -69,10 +69,25 @@ events and sends them to the current Claude Code session as supported
   gave the session (below, "Session title"); its `timeout` is 5 s, and it is a bundle of its own
   because Claude Code holds the prompt until it returns.
 - The channel server subscribes directly to `notifications.agent.<session_id>` and to every topic
-  followed by `envoy_subscribe`. It renders every envelope with the shared
-  `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
-- A message published while those subscriptions were down (NATS restarting, the connection
-  dropped, the session not running) is recovered from Envoy's notification stream, which keeps
+  followed by `envoy_subscribe`; those subscriptions carry the lane receipts, the live team topics
+  and the core fallback, never the session's own messages. It renders every envelope with the
+  shared `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
+- The session's messages come from a durable consumer the listener keeps for it on
+  Envoy's notification stream and relays on `notifications.envoy.deliver.<session_id>`, which
+  the server subscribes before it registers: the session's own subject, the stored copies of role
+  messages to a role it holds, and every followed topic the stream stores, in stream order. The
+  server answers each frame `received` as it decodes and `done` once Claude Code has it: in a
+  Legion pane once the bridge reports that Claude Code took the delivery, and in channel mode once
+  the channel notification is written, the last signal Claude Code gives there, so a notification
+  Claude Code drops after that (a channel it did not load) is not sent again. A frame not taken
+  yet when Claude Code stops, or published while the session was not running or disconnected,
+  comes again and is delivered once, for up to 72 hours. Team and other ad-hoc topics, which the
+  stream does not store, stay live only. The resume point is kept in `replay-<session id>.json`
+  with the replay state below. `packages/envoy/AGENTS.md`, "Session consumers", states the rule.
+- The core path is the rollout fallback dispatch://INFRA-771 removes (a listener that answers
+  `core`, or one of an earlier release). There a message
+  published while those subscriptions were down (NATS restarting, the connection dropped, the
+  session not running) is recovered from Envoy's notification stream, which keeps
   messages for 72 hours: the server asks its listener (`POST /v1/replay`) for what the stream
   stored on the session's own subject and on each topic it follows, at start (a resume included),
   after a reconnect, on every heartbeat and after a new follow, and delivers each missed message
@@ -80,7 +95,7 @@ events and sends them to the current Claude Code session as supported
   was down. It runs nothing: a Dispatch delivery recovered this way is that event and no more.
   The server pings NATS every 10 seconds and drops a connection that leaves two pings unanswered,
   so a connection that stops answering without closing is left within 30 seconds and redialed.
-  Role messages and team or other ad-hoc topics are live only and are not recovered, and neither
+  On this path, role messages and team or other ad-hoc topics are not recovered, and neither
   is anything older than 72 hours, from before the session followed the topic, or from before it
   first ran this version of the plugin; a `/clear` starts afresh, as a new session does. What the
   session was shown and where it read to are kept in `replay-<session id>.json` in the plugin's
@@ -173,20 +188,29 @@ events and sends them to the current Claude Code session as supported
   `registry`, `both`).
 - `envoy_role_set` persists the held role in `${CLAUDE_PLUGIN_DATA}/roles/<session-id>.json`.
   `claude --resume <session-id>` finds that file and soft-reclaims the role with the saved
-  `previous_session_id`; a plain relaunch is a new session and inherits nothing. Every healthy
-  registration heartbeat checks and reasserts the role if the listener lost it. Shutdown (stdin
-  end, SIGTERM, SIGINT, or the SIGHUP a closing pane sends the whole process group) drains NATS
-  and deregisters the session.
+  `previous_session_id`; a plain relaunch is a new session and inherits nothing. The listener
+  moves the role off that predecessor only when the predecessor has no live registration, when
+  its live registration carries this process's own client instance id, or when either side
+  carries no instance id. A predecessor another process still runs keeps the role, and the claim
+  is refused naming it: this session goes on running and registered without the role, claims it
+  again only on an explicit claim, and keeps the predecessor's role file, since that record
+  belongs to the live holder. Every healthy registration heartbeat checks and reasserts the role
+  if the listener lost it. Shutdown (stdin end, SIGTERM, SIGINT, or the SIGHUP a closing pane
+  sends the whole process group) drains NATS and deregisters the session, naming this process's
+  client instance id, so the listener removes the registry entry only while it still carries
+  that id or none.
 - `/clear` mints a new Claude session id, but a stdio MCP server keeps the `CLAUDE_CODE_SESSION_ID`
   it was spawned with. The SessionStart hook writes the current id to
   `${CLAUDE_PLUGIN_DATA}/sessions/<claude-pid>/session-id` (keyed by the `claude` process both the
   hook and the server are children of, so concurrent sessions never share a file). The server
   polls that file every 250 ms and follows a changed id within that time, with the heartbeat as the
-  fallback: it subscribes the new direct subject first, deregisters the old id, drops the old
-  subject, registers the new one, and moves a held role by soft claim. The listener merges
-  registered topics into the entry and never removes one, so the old subject goes before the
-  registration, and the server sends its registry writes one at a time, each registration reading
-  the id and topics when it runs.
+  fallback: it subscribes the new direct subject first, deregisters the old id under this
+  process's client instance id, drops the old subject, registers the new one, and moves a held
+  role by soft claim. The listener removes the old entry only while it still carries this
+  instance's id, so a process that resumed that id keeps both its registration and its role.
+  The listener merges registered topics into the entry and never removes one, so the old subject
+  goes before the registration, and the server sends its registry writes one at a time, each
+  registration reading the id and topics when it runs.
   Asks authored before `/clear` carry the old Dispatch actor id and drop out of the open-asks
   summary (the same shape as OMP on fork). `ENVOY_SESSION_ID` (QA override) disables the handoff.
 - `envoy_inbox` is local recovery state: the most recent 50 event summaries, with no envelope
@@ -208,7 +232,7 @@ Claude Code drops invalid meta keys, so the server filters them before writing t
 | `topic` | NATS subject that delivered the event. |
 | `event_id` | Envoy event identity of this publish; the listener mints a new one for every send. The channel uses it to deliver one copy of a publish that arrives on two overlapping subscriptions. |
 | `dedupe_key` | Identity a re-send shares with the first delivery; the channel uses it to drop the re-send. |
-| `urgency` | Optional Envoy priority. |
+| `urgency` | Optional: how soon the sender asks the reader to act. Informational only: it does not change when or in what order deliveries arrive. |
 | `from_session` | Optional source session identifier. |
 | `expects_reply` | Optional Envoy reply expectation. |
 | `in_reply_to` | Optional correlated inbound event id. |
@@ -275,7 +299,10 @@ Claude Code when `legion.yaml` sets `worker_backends: {<role>: claude}` (tmux ru
   user turn, since print mode delivers no channel notification (`src/legion-inbox.ts`): the bridge
   starts a turn with it when Claude Code is idle, and sends it as the next user message of the
   running turn otherwise. So the session advertises `steer` (Dispatch's Send) beside `aside`, and
-  the bridge handles both alike.
+  the bridge handles both alike. The bridge runs Claude Code with `--replay-user-messages` and
+  answers a delivery only once Claude Code re-emits it as the user message it took, or with an
+  error once Claude Code ended a step without taking it or exited; a relayed frame is `done` on
+  that answer.
 
 `legion/` is generated by `scripts/build.ts` from Legion's worker skills and task agents; main's
 Rebuild Claude Envoy plugin workflow commits it with the bundle (below), and nobody edits it by
@@ -560,10 +587,11 @@ in the session's Dispatch state directory carries the same name. Its negative co
 first case again against the committed `dist/envoy-channel.js` of `BASE_REV` (default
 `0306bcbe16df-`, the last revision without the fallback), which registers the folder name instead.
 It needs `bun`, `curl`, `jq`, `go` and `nats-server`
-(`go install github.com/nats-io/nats-server/v2@v2.11.4`), and no Claude authentication, since
-Claude Code is not installed in an issue pod and the two hook payloads are written by the script;
-that the field arrives at all rests on Claude Code's documentation. Like the other two, it is
-never a CI step:
+(`go install github.com/nats-io/nats-server/v2@v2.11.4`), and no Claude authentication: the two
+hook payloads are written by the script, and that the field arrives at all rests on Claude Code's
+documentation. Claude Code is not installed in an issue pod's image, though it runs there from
+`bunx --package @anthropic-ai/claude-code@<version> claude`, as
+`scripts/e2e/envoy-session-delivery.sh` runs it. Like the other two, it is never a CI step:
 
 ```bash
 bash packages/claude-envoy/scripts/smoke-session-title.sh

@@ -30,6 +30,8 @@ commands:
   cgroup-merge     reduce a cluster sampler's cgroup.jsonl to a step directory's cgroup.json
   curves           CURVES.md, curves.csv, KNEES.md, refine.txt and TREND.md from cluster step directories
   codepaths        CODEPATHS.md and codepaths.json: a replay step's CPU and memory by code path beside the outage
+  backlog          publish envelopes to the sessions' agent subjects (restart-step.sh); writes a JSON summary
+  restart-report   the backlog and duplicate report of one restart run (restart-step.sh)
   series-sessions  print the session count of the series step at a load factor
   trigger-sql      print the commit-time trigger SQL (commit-trigger.sql)
   box-busy         print the box's busy fraction over the next 5 s, from /proc/stat
@@ -83,6 +85,10 @@ func main() {
 		err = runCurves(os.Args[2:])
 	case "codepaths":
 		err = runCodepaths(os.Args[2:])
+	case "backlog":
+		err = runBacklog(os.Args[2:])
+	case "restart-report":
+		err = runRestartReport(os.Args[2:])
 	case "series-sessions":
 		err = runSeriesSessions(os.Args[2:])
 	case "replay-fetch":
