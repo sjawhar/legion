@@ -41,6 +41,8 @@ function describe(event: Event): string | AgentPart[] {
       return "Agent conversation state updated";
     case "user_thread_state.updated":
       return "Thread read";
+    case "decision.kept":
+      return "Kept a decision";
     case "ask.resolved":
       return askResolutionParts(event.payload.resolution);
     case "ask.answered":

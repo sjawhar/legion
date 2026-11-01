@@ -341,6 +341,41 @@ func BlockLinks(ctx context.Context, q Queryer, fromArtifact, toArtifact string)
 	return result, nil
 }
 
+// BlockChange is when a block of a document last changed: the version its text last changed in
+// and that version's time, as document_blocks records them (IndexBlocks).
+type BlockChange struct {
+	Version int
+	At      time.Time
+}
+
+// BlockChanges is each current block of document artifactID, by block id, with when its text last
+// changed. It is the document's own half of the out-of-date rule a decision record is read by: a
+// decision's changed version and time are the greatest of its blocks', and BlockLinks gives the
+// same facts for the blocks it links to. A document the block index has not reached has no rows
+// and answers an empty map.
+func BlockChanges(ctx context.Context, q Queryer, artifactID string) (map[string]BlockChange, error) {
+	rows, err := q.Query(ctx, `
+		select block_id, changed_version, changed_at from document_blocks where artifact_id = $1::uuid
+	`, artifactID)
+	if err != nil {
+		return nil, fmt.Errorf("list the block changes of %s: %w", artifactID, err)
+	}
+	defer rows.Close()
+	changes := map[string]BlockChange{}
+	for rows.Next() {
+		var blockID string
+		var change BlockChange
+		if err := rows.Scan(&blockID, &change.Version, &change.At); err != nil {
+			return nil, fmt.Errorf("scan a block change of %s: %w", artifactID, err)
+		}
+		changes[blockID] = change
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the block changes of %s: %w", artifactID, err)
+	}
+	return changes, nil
+}
+
 // blockFirstVersion is a left join lateral, aliased alias, over the first version that held block
 // block of document artifact (SQL expressions of the outer row): F, the lowest version
 // document_block_texts records a text of the block in, as alias.version, and F's authors and

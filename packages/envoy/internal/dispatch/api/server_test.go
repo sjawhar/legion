@@ -712,6 +712,7 @@ func TestEventNotifyRules(t *testing.T) {
 		{name: "project default assignee", event: model.Event{Type: "settings.project_default_assignee.updated", Actor: user}, want: false},
 		{name: "user state", event: model.Event{Type: "user_state.updated", Actor: user}, want: false},
 		{name: "user thread state", event: model.Event{Type: "user_thread_state.updated", Actor: user}, want: false},
+		{name: "user decision kept", event: model.Event{Type: "decision.kept", Actor: user}, want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := broker.Notify(test.event); got != test.want {
