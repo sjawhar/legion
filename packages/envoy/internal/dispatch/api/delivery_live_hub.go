@@ -151,7 +151,11 @@ func (h *deliveryHub) dropLocked(conn deliveryLiveConn, id string) {
 const (
 	deliveryChangesChannel   = "delivery_changes"
 	deliveryFreshnessChannel = "delivery_freshness"
-	dispatchEventsChannel    = "dispatch_events"
+	// EventsChannel is the channel every event commit announces itself on (events_notify,
+	// migration 0107), whichever process committed it: besides the delivery hub and the event
+	// stream relay, it is the channel whose pglisten.Hub wake the server passes to
+	// RunSuggestionOutcomeSweep.
+	EventsChannel = "dispatch_events"
 )
 
 // deliveryHub keeps every open Delivery and Pipeline page current (LEGION-690). It learns of a change
@@ -379,7 +383,7 @@ func (h *deliveryHub) start() {
 		listener := &pglisten.Listener{
 			Owner:       "dispatch",
 			Dial:        h.dial,
-			Channels:    []string{deliveryChangesChannel, deliveryFreshnessChannel, dispatchEventsChannel},
+			Channels:    []string{deliveryChangesChannel, deliveryFreshnessChannel, EventsChannel},
 			ListenIdle:  h.listenIdle,
 			PingTimeout: h.pingTimeout,
 			Backoff:     h.backoff,
@@ -435,7 +439,7 @@ func (h *deliveryHub) onNotify(channel, payload string) {
 	switch channel {
 	case deliveryChangesChannel:
 		signal(h.wakeChanges)
-	case dispatchEventsChannel:
+	case EventsChannel:
 		signal(h.wakeEvents)
 	case deliveryFreshnessChannel:
 		h.applyFreshness(payload)

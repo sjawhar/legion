@@ -253,7 +253,7 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 		listener := &pglisten.Listener{
 			Owner:       "dispatch",
 			Dial:        dial,
-			Channels:    []string{dispatchEventsChannel},
+			Channels:    []string{EventsChannel},
 			ListenIdle:  r.listenIdle,
 			PingTimeout: r.pingTimeout,
 			Backoff:     r.backoff,

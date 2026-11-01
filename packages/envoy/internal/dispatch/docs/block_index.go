@@ -66,10 +66,10 @@ type BlockIndexTick struct {
 // once none is, until ctx ends.
 //
 // The ticks are duty.RunLeasedAfterEachPass's, each one the wait the pass before it asked for after
-// that pass returned, and so is the period each runs under: that wait, as in
-// RunReferenceExcerptReconciliation, so a tick inside it is one some process already made. A tick
-// whose lease another process holds, or whose period that process has already served, waits the
-// full interval: that process is doing this work.
+// that pass returned, and so is the period each runs under: that wait, blockIndexStep while a batch
+// is full and the full interval once none is, so a tick inside it is one some process already
+// made. A tick whose lease another process holds, or whose period that process has already served,
+// waits the full interval: that process is doing this work.
 func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
 	var cursor string

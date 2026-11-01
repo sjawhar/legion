@@ -77,7 +77,7 @@ const (
 	// a listed lease; a pass refused here skips (duty.Exclusive), and the next tick tries again.
 	leaseAcquireBound = 2 * time.Second
 	// listenAcquireBound is the listener pool's. Its one connection is hijacked as soon as it is
-	// dialled (listenerPoolSize), so an acquire is a wait for the dials ahead of it - three
+	// dialled (listenerPoolSize), so an acquire is a wait for the dials ahead of it - four
 	// listeners at most - and then a dial of its own: milliseconds on a database that answers,
 	// and far longer than ten seconds only on one that does not, where a listener that gives up
 	// redials on its own backoff (pglisten.Listener) instead of waiting out the two-minute

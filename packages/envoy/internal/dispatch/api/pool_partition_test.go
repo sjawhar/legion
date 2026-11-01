@@ -113,7 +113,6 @@ func TestASuggestionSweepPassCompletesWhileTheRequestPoolIsFullyAcquired(t *test
 	}, "alice"); continued.Code != http.StatusCreated {
 		t.Fatalf("continue the source issue: status=%d body=%s", continued.Code, continued.Body.String())
 	}
-	leases := sweepLeases(t, database)
 	background, err := database.Pool.Background()
 	if err != nil {
 		t.Fatalf("open the background pool: %v", err)
@@ -122,14 +121,17 @@ func TestASuggestionSweepPassCompletesWhileTheRequestPoolIsFullyAcquired(t *test
 	holdEveryConnection(t, database.Pool)
 	ctx, stop := context.WithCancel(t.Context())
 	done := make(chan struct{})
-	go func() { defer close(done); RunSuggestionOutcomeSweep(ctx, background, sweepLeaseTick, leases, nil) }()
+	go func() {
+		defer close(done)
+		runSuggestionOutcomeSweep(ctx, background, events.NewHorizon(background), nil, sweepRunnerSchedule)
+	}()
 	defer func() { stop(); <-done }()
 	var outcome string
 	for deadline := time.Now().Add(30 * time.Second); outcome != "overridden"; {
 		if time.Now().After(deadline) {
 			t.Fatalf("no sweep pass recorded the outcome with the request pool held: it is %q, want overridden", outcome)
 		}
-		time.Sleep(sweepLeaseTick)
+		time.Sleep(sweepRunnerSchedule.minGap)
 		if err := background.QueryRow(t.Context(), `
 			select outcome from write_suggestions where source_issue_key = $1 and suggested_id = $2
 		`, source.Key, target.Key).Scan(&outcome); err != nil {

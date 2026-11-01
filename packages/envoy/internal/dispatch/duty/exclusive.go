@@ -16,7 +16,9 @@ import (
 const (
 	// DocumentCompactionLease is outbox.compactDocuments': the daily document compaction.
 	DocumentCompactionLease = "document-compaction"
-	// SuggestionOutcomeLease is api's suggestion-outcome sweep's.
+	// SuggestionOutcomeLease is api.RunMaintenanceSweep's: the keyed writes' maintenance sweep,
+	// which keeps the name the suggestion-outcome sweep carried that work under. The suggestion
+	// outcome sweep itself takes no lease (api/suggestion_outcomes.go).
 	SuggestionOutcomeLease = "suggestion-outcomes"
 	// ReferenceExcerptLease is docs.RunReferenceExcerptReconciliation's.
 	ReferenceExcerptLease = "reference-excerpts"
@@ -129,15 +131,13 @@ const (
 // tick's delay, and no tolerance constant has to be chosen to make that true.
 //
 // The period is stored and compared beside the boundary because a boundary means nothing on
-// another period's scale. docs.RunReferenceExcerptReconciliation varies its own period between
-// ticks - two seconds while drift remains, five minutes when none does - and its two-second
-// boundary lies at or after the current five-minute one for all but the first two seconds of
-// every five-minute bucket, so a comparison that ignored the scale would refuse that loop's
-// interval tick about 149 times in 150 (measured; and under the bucket-number form this
-// replaces, which was scale-dependent in the same way, it refused every later tick for ever).
-// A record made on another scale therefore serves nothing: the first tick of a changed period
-// runs, and the loop is on its own scale from then on. That costs one pass at each change, which
-// is the direction to err in - the other direction is a loop that stops.
+// another period's scale: a two-second boundary lies at or after the current five-minute one for
+// all but the first two seconds of every five-minute bucket, so a comparison that ignored the scale
+// would refuse a five-minute tick after a two-second record about 149 times in 150. A lease's
+// period changes when a release changes its loop's interval and runs beside the release before it
+// during a roll. A record made on another scale therefore serves nothing: the first tick of a
+// changed period runs, and the loop is on its own scale from then on. That costs one pass at each
+// change, which is the direction to err in - the other direction is a loop that stops.
 //
 // The boundary is on this process's clock, the clock the tick's own timer runs on, so two
 // processes judge the same period by their hosts' clocks, which NTP keeps within milliseconds of
