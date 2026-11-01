@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-714",
-  "completed": "2026-11-01T07:30:00Z",
+  "completed": "2026-11-01T08:40:00Z",
   "proof": [
     {
       "criterion": "A3 / R1 - a red CI settlement moves no issue and reaches the phase holder, the implementer and the architect as one message naming each check and its conclusion, and the result they are told is the code head's latest attempt, carried by a handoff-only head.",
@@ -169,7 +169,7 @@
       "surface": "The repository tree, read with a command that can fail, and the e2e-tagged build.",
       "command": "cd packages/daemon && go vet -tags e2e ./internal/daemon/ && cd ../.. && grep -rnE 'merged-root-waits|no-required-checks|merged_root_waits|no_required_checks' . | grep -v '^./.jj' | grep -v node_modules | grep -v '^./docs/solutions' | grep -v '^./.legion/'",
       "observed": "`go vet -tags e2e ./internal/daemon/` exit 0 with `merged_root_waits_live_test.go` removed, and the sweep prints nothing and exits 1 (grep's no-match status). Everything outside the two exclusions is clean: `docs/solutions/` records what past changes did and keeps its text by the repository's own rule, and `.legion/` holds this issue's committed handoffs, whose earlier rounds quote the names. The two the tester found are fixed at their own words rather than by deleting the sentence: `scripts/e2e/README.md:3520` now names `child-adoption.sh`, the one script that still makes that run, and `conflict_no_takeover_live_test.go:35` names `child_adoption_live_test.go`, the driver it really shares `live_proof_test.go` with.",
-      "headSha": "<pending>",
+      "headSha": "cd9457ed734dfaa1a95fd49d0db31d2e2e58df98",
       "negativeControl": "The same command run at the head before this round prints the two lines it is meant to catch — `./scripts/e2e/README.md:3520:The four checks below are ... the run `merged-root-waits.sh` and `no-required-checks.sh` make too.` and `./packages/daemon/internal/daemon/conflict_no_takeover_live_test.go:35:// harness this driver shares with merged_root_waits_live_test.go).` — where the entry's old command printed nothing at either head, which is why it proved nothing."
     },
     {
@@ -243,6 +243,14 @@
       "observed": "Every package ok. main had gained thirteen commits, among them Legion workers running background jobs (#2571) and Dispatch's broker-issued token (#2541), and the merge took about fifty two-sided conflicts, all resolved keeping both sides. This branch's migrations are renumbered 0069 to 0081, leaving 0068 to INFRA-484's pull request, whose contract is 45 against this branch's 46. Four things the resolution had to fix, each caught by a test rather than by reading: main's 0066 phase_ended kind, which this branch's 0077 kind-check rewrite would have dropped; phases.merge_note, which this branch stops rather than drops and the record's column expectation had lost; the phase-ended message, which a resolution widened from the conflicting head to the approval and the merge, sending a message with no reason that the outbox refuses; and a turn's delivery, which now ends at its prompt result rather than at any agent_end, so the ready-worker rig sends one.",
       "headSha": "432d1a0df7a7cb89ee7744c7afdee8fdb1cb43da",
       "negativeControl": "Each of the four was a red run before its fix and green after, in this pod: `migration_0066_test.go:46: queue a phase_ended row after 0066: ERROR: new row for relation \"outbox\" violates check constraint \"outbox_kind_check\"`; `store_test.go:1838: phases columns = [... merge_note ...], want [...]`; `review_test.go:709: ApplyFact half-0: a phase-ended message carries the reason the architect's notice carries`, which took internal/workflow, internal/admit and internal/daemon red together; and `ready_worker_resume_test.go:204: after its turn the tester still holds &{... Prompted:true}, want the task retired with the turn`."
+    },
+    {
+      "criterion": "Round nine as a whole: nothing of the change moved, so what is proven is that the tree still builds and runs with the two prose lines corrected.",
+      "surface": "The daemon package that owns the corrected file, over the pod's PostgreSQL and a JetStream nats-server.",
+      "command": "cd packages/daemon && gofmt -l ./internal && go build ./... && go vet -tags e2e ./internal/daemon/ && go test ./internal/daemon/ -count=1 -timeout 40m -skip '<the ten names this pod cannot run>'",
+      "observed": "gofmt silent, build and e2e-tagged vet exit 0, and `ok github.com/sjawhar/legion/daemon/internal/daemon 515.195s`. The e2e-tagged vet matters here because the corrected comment is in a file only the `e2e` tag compiles, so an ordinary build would not have read it.",
+      "headSha": "cd9457ed734dfaa1a95fd49d0db31d2e2e58df98",
+      "negativeControl": "None is possible or wanted: this round changes two comment lines and no behaviour, so no test can be made to fail by reverting them. What stands in for one is the sweep in the entry above, which printed the two lines before the change and prints nothing after it."
     }
   ],
   "filesChanged": [
@@ -286,5 +294,5 @@
     "cmd/legion's TestProbeImageReadsEachRolesOwnOverlaysAsTheRoleStarts fails in a Kubernetes issue pod on this branch's base as well; it was reproduced at the parent commit with every changed file restored. internal/intake's TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead starts a NATS container and internal/runtime/tmux's TestNewRefusesLaunchersItCannotRun wants tmux on PATH, neither of which a pod has, and nine internal/daemon tests are the known gVisor and Docker cases. CI's run at this head is the proof for all of them.",
     "TestTheKeeperRetriesAControllerWhoseLaunchesRanOut was a race rather than a pre-existing failure, which two workers reported it as. Its three refused launches and the keeper's retry all fell between two ten-millisecond polls, so the wait read zero spawns and then four and never the failure it exists to prove. The retry is now two seconds; the test ran five times green."
   ],
-  "previousHandoff": "75349c55131d99b2d5aab2401e4ba3431140a769"
+  "previousHandoff": "03005ece5f45a63c88c66c867c857e9aeadfc85a"
 }
