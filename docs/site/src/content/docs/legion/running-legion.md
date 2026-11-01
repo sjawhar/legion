@@ -420,8 +420,12 @@ What each part is for:
   `legion claims list` shows it `suspended` by `idle`. Anything that reaches the worker before the
   wait is spent — a task, a turn of its own — ends the wait, and a whole new one begins the moment
   the worker has nothing to do again: its turn ended, or the task it was given went to a phase its
-  issue has since left and was dropped. A daemon restart does not give a worker longer: the wait
-  begins again for every idle worker the restart adopts. `0` keeps every idle worker running.
+  issue has since left and was dropped. A daemon restart begins the wait again for every idle
+  worker it adopts, so a restart near the deadline keeps that worker's process a whole wait
+  longer. The loader refuses a value below the worker's own end-of-turn reminder
+  (`LEGION_STALL_WAITING_MS`, 900 s by default), since a worker that replied `WAITING` on an open
+  phase holds its only wake in the process the suspension would take. `0` keeps every idle worker
+  running.
 - **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
   `worker_backends: {implementer: claude}`. Each key is an issue role, each value `omp` (the
   default) or `claude`. Claude Code runs the phase workers (`planner`, `implementer`, `tester`,
@@ -718,15 +722,18 @@ Closing the terminal leaves the project without one, and the daemon logs
 
    **An operator's suspension holds until the operator resumes the claim.** The daemon keeps every
    role of an open issue live and idle between phases, while the root waits on a person, and when a
-   child re-enters. It suspends or ends claims only when an issue leaves the workflow, when a claim
-   moves to another tree, or for a production check after the issue is done. A phase start gives
+   child re-enters. It suspends or ends claims when an issue leaves the workflow, when a claim
+   moves to another tree, for a production check after the issue is done, and, for a phase worker
+   that has had nothing to do for `worker_idle_suspend_seconds`, for idling: that one keeps the
+   session, and the next task resumes the same agent. A phase start gives
    its task to that live claim. At boot the daemon resumes by rule a suspended worker that still
    owns its issue's phase, but never a claim an operator suspended; a start for an
    operator-suspended claim waits instead. A notice for an operator-suspended architect waits until
    the operator resumes it. A drain therefore ends with the operator resuming every claim they
    suspended, one `legion claims resume` each; `legion claims list --json` names each one's
-   `suspendedBy` (`operator`, `daemon`, `exit`, or `unknown` for one suspended before this
-   release). A daemon suspension of a claim whose issue left the workflow waits for its current turn
+   `suspendedBy` (`operator`, `daemon`, `exit`, `idle`, or `unknown` for one suspended before the
+   release that recorded the source). A daemon suspension of a claim whose issue left the
+   workflow waits for its current turn
    to finish, with no stop timeout: a child parked in Dispatch (`backlog` or `icebox`) stops its
    worker only once the worker's current turn ends, and a lingering tree's claims stay suspended
    until the tree is re-admitted.

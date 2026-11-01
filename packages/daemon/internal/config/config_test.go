@@ -160,6 +160,45 @@ func TestLoadTakesZeroAsTheIdleSuspendTurnedOff(t *testing.T) {
 	}
 }
 
+// The idle suspend is refused below the worker's own end-of-turn reminder: a phase worker that
+// replied WAITING on an open phase is woken by that reminder inside its own process, which the
+// suspension would take, leaving the phase with nothing to wake it. The reminder's length is the
+// daemon's own LEGION_STALL_WAITING_MS, which it passes to every worker it starts, so the floor
+// moves with it, and a deployment that turns the idle suspend off (0) is not judged against it.
+func TestLoadRefusesAnIdleSuspendBelowTheWaitingReminder(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		seconds string
+		env     func(string) string
+		want    string
+	}{
+		{name: "below the default reminder", seconds: "899", env: noEnv,
+			want: "worker_idle_suspend_seconds must be at least 900"},
+		{name: "below the daemon's own reminder", seconds: "1200",
+			env:  func(k string) string { return map[string]string{"LEGION_STALL_WAITING_MS": "1800000"}[k] },
+			want: "worker_idle_suspend_seconds must be at least 1800"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := Load(writeConfigFile(t, minimalFile+"worker_idle_suspend_seconds: "+c.seconds+"\n"), c.env)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("Load error = %v, want one containing %q", err, c.want)
+			}
+		})
+	}
+}
+
+// A reminder the deployment shortened lowers the floor with it, so an idle suspend above it loads.
+func TestLoadTakesAnIdleSuspendAboveAShortenedWaitingReminder(t *testing.T) {
+	env := func(k string) string { return map[string]string{"LEGION_STALL_WAITING_MS": "60000"}[k] }
+	cfg, err := Load(writeConfigFile(t, minimalFile+"worker_idle_suspend_seconds: 120\n"), env)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WorkerIdleSuspend != 120*time.Second {
+		t.Errorf("WorkerIdleSuspend = %s, want 2m0s", cfg.WorkerIdleSuspend)
+	}
+}
+
 // Stage 2 command paths only need the local daemon record. They keep loading until Task 3.12
 // wires the workflow's App and Dispatch clients, which is the first operation that needs them.
 func TestLoadAllowsStage2ConfigWithoutWorkflowKeys(t *testing.T) {
