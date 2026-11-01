@@ -189,8 +189,9 @@ by changing its project or its instance-name glob, ends every VM it no longer al
 its next call the VM has no session identity, so releasing a grant it holds, opening a request and
 renewing are all refused `401` (`ENROLLMENT_NOT_LIVE` for the renewal, on which `agent-secrets
 renew` stops, exit 76), its credential stops authenticating, a person's approval of a request it
-left pending ends that request denied with no grant, and a new enrollment of it is
-`403 VM_NOT_LISTED`. A value the VM already read before the change stays with it: the broker
+left pending ends that request denied with no grant, its launcher credential no longer
+authenticates, so a new enrollment under it is refused `401 LAUNCHER_INVALID`, and its next login is
+`403 ACCOUNT_NOT_LISTED`. A value the VM already read before the change stays with it: the broker
 cannot take back a secret it released, so rotate any it must no longer hold. Its enrollment row
 ends with its lease.
 
@@ -203,7 +204,7 @@ A VM runs, with `AGENT_SECRETS_URL` naming the broker:
 
 ```sh
 agent-secrets enroll --vm --service example-fleet --audience example-vm-audience --out /var/lib/agent-secrets
-AGENT_SECRETS_KEY_DIR=/var/lib/agent-secrets agent-secrets --reason "git fetch" GITHUB_TOKEN -- printenv GITHUB_TOKEN
+AGENT_SECRETS_KEY_DIR=/var/lib/agent-secrets agent-secrets --reason "git fetch" GITHUB_TOKEN -- sh -c 'test -n "$GITHUB_TOKEN" && echo "GITHUB_TOKEN is set"'
 ```
 
 `enroll --vm` reads the token from

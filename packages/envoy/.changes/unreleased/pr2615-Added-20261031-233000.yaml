@@ -10,14 +10,18 @@ body: |-
     the one verifier whose issuer it names, so a VM's token never makes the broker read the
     cluster's keys, nor a cluster token Google's. Each VM holds its own launcher credential and its
     own `vm` enrollment, keyed by `<account>@<project>/<zone>/<instance id>`, so VMs that share an
-    account never move or end each other's. `POST /v1/enrollments` takes kind `vm` with `vm_token`
+    account never move or end each other's. No launcher credential ends a VM's enrollment
+    (`DELETE /v1/enrollments/{id}` is `403 VM_ENDS_BY_LOGIN_REVOKE`), so a token copied off the VM
+    cannot end or take over its live enrollment; revoking the VM's machine login, or its lease,
+    ends it. `POST /v1/enrollments` takes kind `vm` with `vm_token`
     (`403 VM_IDENTITY_MISMATCH`, `403 VM_TOKEN_EXPIRED`), every renewal of one carries the VM's
     current token (`403 VM_TOKEN_REQUIRED` without it), and a VM service's secrets go to its own VMs
     at once. A VM its fleet's settings no longer allow (its account dropped, or another project or
     instance-name glob configured) has no identity from then on: every call it signs is refused
     `401`, as an ended session's is, so it releases no grant it holds, opens no request and renews
-    nothing, and a person's approval of a request it left pending grants nothing; a new enrollment
-    of it is `403 VM_NOT_LISTED`. On the client, `agent-secrets enroll --vm --service <name>
+    nothing, and a person's approval of a request it left pending grants nothing; its launcher
+    credential no longer authenticates (`401 LAUNCHER_INVALID` on a new enrollment), and its next
+    login is `403 ACCOUNT_NOT_LISTED`. On the client, `agent-secrets enroll --vm --service <name>
     [--audience <aud>] [--out <dir>]` fetches the token, logs in with a key it keeps in memory,
     enrolls `key.pem`, and prints the enrollment id; run again over the same directory it keeps
     `key.pem` and extends the lease. `agent-secrets renew --vm` renews with a fresh token each time

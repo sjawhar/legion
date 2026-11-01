@@ -66,11 +66,13 @@ An enrollment has **ended** once its launcher revokes it (the helper does
 as soon as a registered session's process exits), whoever may revoke its machine login revokes that
 login
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)), or its
-lease lapses. A `pod` or `vm` enrollment's launcher is the one machine login that made it: another login,
+lease lapses. A `pod` enrollment's launcher is the one machine login that made it: another login,
 even another login of the same service, such as the Legion daemon's after a restart or after its
 login reached its expiry and it logged in again, is refused
 `NOT_ENROLLING_CREDENTIAL`, and that pod's enrollment ends with its lease or with that machine
-login. From the moment the lease lapses, its next renewal is refused
+login. A `vm` enrollment is ended by no launcher at all (`VM_ENDS_BY_LOGIN_REVOKE`): a VM's machine
+login moves to whoever last logged in with that VM's token, so it is ended by revoking that login
+or by its lease. From the moment the lease lapses, its next renewal is refused
 `ENROLLMENT_NOT_LIVE`; other session calls remain `PROOF_INVALID`. The broker's sweep, which runs
 every `BROKER_SWEEP_SECONDS`, then ends the enrollment on its first run after the lapse. Ending an
 enrollment any of these ways revokes every grant it held and cancels every request it still had

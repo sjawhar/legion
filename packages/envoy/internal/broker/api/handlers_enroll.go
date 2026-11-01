@@ -172,6 +172,8 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 // enrolled the pod (enroll.Service.Revoke says why, and what that leaves a restarted Legion daemon)
 // — so a mismatch is always 403 (OPERATOR_MISMATCH, or NOT_ENROLLING_CREDENTIAL for another
 // service credential's pod), never a no-op 204, regardless of whether the target enrollment is live.
+// A VM's enrollment is never ended here: 403 VM_ENDS_BY_LOGIN_REVOKE, since a VM's credential
+// follows whoever last logged in with that VM's token; revoking the VM's machine login ends it.
 func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
 	id, ok := pathUUID(w, r, "id", "ENROLLMENT_ID_INPUT", "enrollment")
 	if !ok {
@@ -184,6 +186,9 @@ func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request, cred e
 		return
 	case errors.Is(err, enroll.ErrNotEnrollingCredential):
 		writeError(w, http.StatusForbidden, "NOT_ENROLLING_CREDENTIAL", err.Error())
+		return
+	case errors.Is(err, enroll.ErrVMEndsByRevokingItsLogin):
+		writeError(w, http.StatusForbidden, "VM_ENDS_BY_LOGIN_REVOKE", err.Error())
 		return
 	case err != nil && !errors.Is(err, enroll.ErrNotLive):
 		writeInternal(w, "revoke enrollment", err)

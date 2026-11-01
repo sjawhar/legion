@@ -223,9 +223,10 @@ func TestAVMReadsItsServicesSecretAtOnce(t *testing.T) {
 
 // TestTwoVMsOfOneAccountLogInInTurnAndEachEnrolsAndRevokes: the fleet shares one service account,
 // and each VM's login holds a credential of its own (keyed by its runtime id), so the second VM's
-// login moves nothing of the first's: the first VM's credential still enrolls and revokes its own
-// enrollment afterwards, the second's enrollment outlives that revoke and renews, and neither VM's
-// credential ends the other's enrollment.
+// login moves nothing of the first's: the first VM's credential still enrolls afterwards. No VM's
+// launcher credential ends a VM's enrollment, its own included (403 VM_ENDS_BY_LOGIN_REVOKE); a
+// person revoking the first VM's machine login on Dispatch ends the first VM's enrollment alone, and
+// the second's renews.
 func TestTwoVMsOfOneAccountLogInInTurnAndEachEnrolsAndRevokes(t *testing.T) {
 	ts := newVMTestServer(t)
 	one, two := member("example-zone-a", "1001"), member("example-zone-a", "1002")
@@ -240,20 +241,26 @@ func TestTwoVMsOfOneAccountLogInInTurnAndEachEnrolsAndRevokes(t *testing.T) {
 		t.Fatalf("the first VM's enrollment after the second VM's login = %d %s, want 201", status, body)
 	}
 	oneEnrollment := decode[wireEnrolled](t, body).EnrollmentID
-	if status, body := ts.launcher(t, oneKey, oneCred, http.MethodDelete, "/v1/enrollments/"+twoEnrollment, nil); status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_ENROLLING_CREDENTIAL" {
-		t.Fatalf("the first VM revoking the second's enrollment = %d %s, want 403 NOT_ENROLLING_CREDENTIAL", status, body)
+	for _, tc := range []struct {
+		name, credential, enrollment string
+		key                          *ecdsa.PrivateKey
+	}{
+		{"the first VM revoking the second's enrollment", oneCred, twoEnrollment, oneKey},
+		{"the first VM revoking its own enrollment", oneCred, oneEnrollment, oneKey},
+		{"the second VM revoking its own enrollment", twoCred, twoEnrollment, twoKey},
+	} {
+		if status, body := ts.launcher(t, tc.key, tc.credential, http.MethodDelete, "/v1/enrollments/"+tc.enrollment, nil); status != http.StatusForbidden || decode[wireError](t, body).Code != "VM_ENDS_BY_LOGIN_REVOKE" {
+			t.Fatalf("%s = %d %s, want 403 VM_ENDS_BY_LOGIN_REVOKE", tc.name, status, body)
+		}
 	}
-	if status, body := ts.launcher(t, oneKey, oneCred, http.MethodDelete, "/v1/enrollments/"+oneEnrollment, nil); status != http.StatusNoContent {
-		t.Fatalf("the first VM revoking its own enrollment = %d %s, want 204", status, body)
+	if status, body := ts.ui(t, http.MethodPost, "/v1/launcher-credentials/"+oneCred+"/revoke-by-approver", map[string]any{"approver": testApprover}); status != http.StatusOK {
+		t.Fatalf("a person revoking the first VM's machine login = %d %s, want 200", status, body)
 	}
 	if status, body := ts.renewVM(t, oneSession, oneEnrollment, map[string]any{"vm_token": ts.current(t, one)}); status != http.StatusUnauthorized {
-		t.Fatalf("the first VM's renewal after its revoke = %d %s, want 401", status, body)
+		t.Fatalf("the first VM's renewal after its login's revoke = %d %s, want 401", status, body)
 	}
 	if status, body := ts.renewVM(t, twoSession, twoEnrollment, map[string]any{"vm_token": ts.current(t, two)}); status != http.StatusOK {
 		t.Fatalf("the second VM's renewal after the first's revoke = %d %s, want 200", status, body)
-	}
-	if status, body := ts.launcher(t, twoKey, twoCred, http.MethodDelete, "/v1/enrollments/"+twoEnrollment, nil); status != http.StatusNoContent {
-		t.Fatalf("the second VM revoking its own enrollment = %d %s, want 204", status, body)
 	}
 }
 
@@ -578,6 +585,60 @@ func TestANarrowedVMNeitherRenewsNorEnrolls(t *testing.T) {
 				t.Fatalf("the VM's login after the fleet was narrowed to %s = %d %s, want 403 ACCOUNT_NOT_LISTED", name, status, body)
 			}
 		})
+	}
+}
+
+// TestACopiedTokenNeitherEndsNorTakesOverALiveVM: a VM's identity token copied off the VM and
+// replayed after the VM enrolled logs in (the VM's one credential now holds the copier's key) but
+// enrolls no key of its own (409 ALREADY_ENROLLED), and its credential cannot end the VM's
+// enrollment even knowing its id (403 VM_ENDS_BY_LOGIN_REVOKE). The VM's enrollment and grant keep
+// working, its next `enroll --vm` (a fresh login, then the same session key) gets its enrollment
+// back, and a person revoking the VM's machine login still ends it.
+func TestACopiedTokenNeitherEndsNorTakesOverALiveVM(t *testing.T) {
+	ts := newVMTestServer(t)
+	vm := member("example-zone-a", "1001")
+	victimCred, _, enrollmentID, sessionKey := ts.enrolled(t, vm)
+	status, body := ts.askAs(t, sessionKey, enrollmentID, "FLEET_KEY")
+	granted := decode[wireCreateRequestResponse](t, body)
+	if status != http.StatusOK || granted.GrantID == nil {
+		t.Fatalf("the VM asking for FLEET_KEY = %d %s, want granted", status, body)
+	}
+
+	copied, copierKey := ts.current(t, vm), newSigningKey(t)
+	status, body = ts.vmLogin(t, vm, copied, copierKey)
+	if status != http.StatusOK || decode[wireTokenLogin](t, body).CredentialID != victimCred {
+		t.Fatalf("the copied token's login = %d %s, want 200 on the VM's own credential", status, body)
+	}
+	if status, body := ts.enrolVM(t, victimCred, copierKey, vm, copied, newSigningKey(t)); status != http.StatusConflict || decode[wireError](t, body).Code != "ALREADY_ENROLLED" {
+		t.Fatalf("the copier enrolling its own key = %d %s, want 409 ALREADY_ENROLLED", status, body)
+	}
+	if status, body := ts.launcher(t, copierKey, victimCred, http.MethodDelete, "/v1/enrollments/"+enrollmentID, nil); status != http.StatusForbidden || decode[wireError](t, body).Code != "VM_ENDS_BY_LOGIN_REVOKE" {
+		t.Fatalf("the copier ending the VM's enrollment = %d %s, want 403 VM_ENDS_BY_LOGIN_REVOKE", status, body)
+	}
+
+	if status, body := ts.renewVM(t, sessionKey, enrollmentID, map[string]any{"vm_token": ts.current(t, vm)}); status != http.StatusOK {
+		t.Fatalf("the VM's renewal after the copier's login = %d %s, want 200", status, body)
+	}
+	if status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/"+*granted.GrantID+"/values", nil); status != http.StatusOK {
+		t.Fatalf("the VM's grant values after the copier's login = %d %s, want 200", status, body)
+	}
+	relogin := newSigningKey(t)
+	status, body = ts.vmLogin(t, vm, ts.current(t, vm), relogin)
+	if status != http.StatusOK {
+		t.Fatalf("the VM's next login = %d %s, want 200", status, body)
+	}
+	if status, body := ts.enrolVM(t, victimCred, relogin, vm, ts.current(t, vm), sessionKey); status != http.StatusOK || decode[wireEnrolled](t, body).EnrollmentID != enrollmentID {
+		t.Fatalf("the VM's next enrollment of its own key = %d %s, want 200 with enrollment %s", status, body, enrollmentID)
+	}
+	if status, body := ts.enrolVM(t, victimCred, copierKey, vm, copied, newSigningKey(t)); status != http.StatusUnauthorized {
+		t.Fatalf("the copier's key after the VM logged in again = %d %s, want 401", status, body)
+	}
+
+	if status, body := ts.ui(t, http.MethodPost, "/v1/launcher-credentials/"+victimCred+"/revoke-by-approver", map[string]any{"approver": testApprover}); status != http.StatusOK {
+		t.Fatalf("a person revoking the VM's machine login = %d %s, want 200", status, body)
+	}
+	if status, body := ts.renewVM(t, sessionKey, enrollmentID, map[string]any{"vm_token": ts.current(t, vm)}); status != http.StatusUnauthorized {
+		t.Fatalf("the VM's renewal after its login's revoke = %d %s, want 401", status, body)
 	}
 }
 

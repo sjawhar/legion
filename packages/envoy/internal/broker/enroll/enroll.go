@@ -45,10 +45,15 @@ var (
 	ErrInvalidSlot     = errors.New("a slot is only for a pod enrollment and must match ^[a-z][a-z0-9-]{0,62}$")
 	ErrNoCredential    = errors.New("no such machine login")
 	ErrNotApprover     = errors.New("only the person who approved a person's machine login may revoke it")
-	// ErrNotEnrollingCredential refuses a revoke of a pod or vm enrollment by any launcher credential
-	// but the one that enrolled it (Revoke).
+	// ErrNotEnrollingCredential refuses a revoke of a pod enrollment by any launcher credential but
+	// the one that enrolled it (Revoke).
 	ErrNotEnrollingCredential = errors.New("only the machine login that enrolled a pod may end its enrollment")
-	ErrPodTokenRequired       = errors.New("a pod enrollment's renewal must carry its projected token")
+	// ErrVMEndsByRevokingItsLogin refuses every launcher credential's revoke of a vm enrollment
+	// (Revoke): a VM's one credential moves to whoever logs in last with that VM's token, a copied
+	// token included, so a launcher proof never ends a VM's enrollment. Revoking the VM's machine
+	// login (RevokeCredential), or its lease, ends it.
+	ErrVMEndsByRevokingItsLogin = errors.New("a VM's enrollment ends when its machine login is revoked on Dispatch's machine-login page, or with its lease; no launcher credential ends it")
+	ErrPodTokenRequired         = errors.New("a pod enrollment's renewal must carry its projected token")
 	// ErrVMIdentity is a VM identity token that does not prove this VM: one that does not verify
 	// (another issuer or audience, a bad signature, no verified email, no Compute Engine claims),
 	// another instance's or account's token, or a vm enrollment under a launcher credential that
@@ -836,11 +841,14 @@ func authorized(cred Credential, kind string, operator *string) bool {
 // plausible-looking. A row that does not exist at all has no operator/kind to check ownership
 // against, so that case alone falls through to ErrNotLive below rather than ErrOperatorMismatch.
 //
-// A pod or vm enrollment carries no operator, so the operator cannot tell one service's pods or
-// VMs from another's: such an enrollment is ended only by the launcher credential that created it
+// A pod enrollment carries no operator, so the operator cannot tell one service's pods from
+// another's: it is ended only by the launcher credential that created it
 // (ErrNotEnrollingCredential for any other), never by another service's credential nor a second
-// credential of the same service; a VM's credential is its own login's, so one VM never ends
-// another's enrollment. A Legion daemon's token login keeps its account's one credential
+// credential of the same service. A vm enrollment is ended by no launcher credential at all
+// (ErrVMEndsByRevokingItsLogin): a VM's credential follows whoever last logged in with that VM's
+// token, a copied token included, so its proof shows nothing about who holds the VM; the VM's
+// enrollment ends when a person revokes its machine login (RevokeCredential) or with its lease. A
+// Legion daemon's token login keeps its account's one credential
 // across its restarts (machine.Service.TokenLogin), so it ends here every pod it enrolled. An
 // enrollment another credential made — a service login a person approved before token logins, or
 // the daemon's credential before someone revoked it — ends when its pod stops renewing, one lease
@@ -873,7 +881,10 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	if !authorized(cred, kind, operator) {
 		return ErrOperatorMismatch
 	}
-	if (kind == "pod" || kind == "vm") && enrolledBy != cred.ID {
+	if kind == "vm" {
+		return ErrVMEndsByRevokingItsLogin
+	}
+	if kind == "pod" && enrolledBy != cred.ID {
 		return ErrNotEnrollingCredential
 	}
 	if revokedAt != nil {

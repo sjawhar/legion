@@ -185,8 +185,9 @@ func TestAVMEnrollmentRejectsAnotherInstancesToken(t *testing.T) {
 
 // TestTwoVMsOfOneAccountEnrolSeparatelyAndOneRevocationLeavesTheOther (review focus 4): two VMs of
 // one service account each log in under a credential of their own and hold an enrollment of their
-// own. One VM's revoke ends its enrollment alone: the other's stays live and renews, and neither VM's
-// credential ends the other's enrollment.
+// own. No launcher credential ends a VM's enrollment, its own included (ErrVMEndsByRevokingItsLogin);
+// a person revoking one VM's machine login (RevokeCredential) ends that VM's enrollment alone: the
+// other's stays live and renews.
 func TestTwoVMsOfOneAccountEnrolSeparatelyAndOneRevocationLeavesTheOther(t *testing.T) {
 	r := newVMRig(t)
 	ctx := context.Background()
@@ -199,23 +200,29 @@ func TestTwoVMsOfOneAccountEnrolSeparatelyAndOneRevocationLeavesTheOther(t *test
 	if oneEnr.ID == twoEnr.ID {
 		t.Fatalf("two VMs share enrollment %s; want one each", oneEnr.ID)
 	}
-	if err := r.svc.Revoke(ctx, oneCred, twoEnr.ID.String(), "launcher:"+oneCred.ID.String()); !errors.Is(err, ErrNotEnrollingCredential) {
-		t.Fatalf("Revoke(the second VM's enrollment, by the first VM's credential) = %v, want ErrNotEnrollingCredential", err)
+	for _, tc := range []struct {
+		name string
+		cred Credential
+		id   string
+	}{
+		{"the second VM's enrollment, by the first VM's credential", oneCred, twoEnr.ID.String()},
+		{"the first VM's own enrollment, by its own credential", oneCred, oneEnr.ID.String()},
+	} {
+		if err := r.svc.Revoke(ctx, tc.cred, tc.id, "launcher:"+tc.cred.ID.String()); !errors.Is(err, ErrVMEndsByRevokingItsLogin) {
+			t.Fatalf("Revoke(%s) = %v, want ErrVMEndsByRevokingItsLogin", tc.name, err)
+		}
 	}
-	if err := r.svc.Revoke(ctx, oneCred, oneEnr.ID.String(), "launcher:"+oneCred.ID.String()); err != nil {
-		t.Fatalf("Revoke(the first VM's own enrollment) = %v", err)
+	if err := r.svc.RevokeCredential(ctx, oneCred.ID.String(), "ada@example.com", "human:ada@example.com"); err != nil {
+		t.Fatalf("RevokeCredential(the first VM's machine login) = %v", err)
 	}
 	if _, live, err := r.svc.Lookup(ctx, oneEnr.ID.String()); err != nil || live {
-		t.Fatalf("the first VM's enrollment after its revoke: live = %v, %v; want ended", live, err)
+		t.Fatalf("the first VM's enrollment after its login's revoke: live = %v, %v; want ended", live, err)
 	}
 	if _, live, err := r.svc.Lookup(ctx, twoEnr.ID.String()); err != nil || !live {
 		t.Fatalf("the second VM's enrollment after the first's revoke: live = %v, %v; want live", live, err)
 	}
 	if _, err := r.svc.RenewVM(ctx, twoEnr.ID.String(), r.current(t, two)); err != nil {
 		t.Fatalf("RenewVM(the second VM) after the first's revoke = %v", err)
-	}
-	if err := r.svc.Revoke(ctx, twoCred, twoEnr.ID.String(), "launcher:"+twoCred.ID.String()); err != nil {
-		t.Fatalf("Revoke(the second VM's own enrollment) = %v", err)
 	}
 }
 
