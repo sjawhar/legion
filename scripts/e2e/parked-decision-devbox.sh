@@ -267,14 +267,31 @@ EOF
 # which legion.yaml already names. Every pane's gh and jj are the daemon's PATH's, so the real
 # binaries' directory goes first (rig, real_bin_path). HOME, OMP_PROFILE and PATH are the daemon's
 # alone, set by its env, not the held-port helper's that runs it, and LEGION_OMP_PATH would outrank
-# omp_invocation's build, so the daemon runs without it.
+# omp_invocation's build, so the daemon runs without it, and daemon_runs_the_pinned_omp checks the
+# binary it resolved, in the part of the daemon's log this start writes (from offset).
 start_daemon() {
+  local offset=0
+  [ ! -f "$evidence/logs/daemon.log" ] || offset=$(wc -c <"$evidence/logs/daemon.log")
   start_kept daemon daemon_keeper LEGION_LISTEN_FD -- \
     env -u LEGION_OMP_PATH -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
     -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" \
     "$work/legion" start --config "$work/legion.yaml"
   await_start daemon "$daemon_pid" 180 "the Go daemon to answer /healthz" \
     curl -fsS --max-time 5 "http://127.0.0.1:$port_daemon/healthz"
+  daemon_runs_the_pinned_omp "$offset"
+}
+
+# daemon_runs_the_pinned_omp OFFSET fails the current check unless the daemon start whose log
+# begins at byte OFFSET resolved its boot probes and panes to $pin's own bin/omp: the one build the
+# plugin installs ran, never one LEGION_OMP_PATH or a wrapper on PATH put in its place (Stage 2 and
+# Stage 3 check the same).
+daemon_runs_the_pinned_omp() {
+  local expected
+  expected=$(readlink -f "$(mise where "$pin")/bin/omp")
+  tail -c +"$(($1 + 1))" "$evidence/logs/daemon.log" | jq -R -e --arg binary "$expected" '
+    fromjson? | select(.msg == "legion daemon resolved OMP invocation for boot probes and panes" and (.invocation | contains($binary)))
+  ' >/dev/null || fail "the daemon did not log $expected, $pin's own omp, as the binary for its boot probes and panes ($evidence/logs/daemon.log)"
+  note "the daemon resolved $pin's own omp, $expected, for its boot probes and panes"
 }
 
 claim_session_file() {
