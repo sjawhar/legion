@@ -1866,8 +1866,10 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   `parseIssuePage` (`api/issue_page.go`) reads both, and a repeated, blank, non-integer or out-of-range value is `400 INVALID_QUERY` naming the parameter;
   so is `cursor`, which the listing does not page with, since answering it with the first page would hand back rows the caller cannot tell from the ones it asked for (LEGION-406:
   the route ignored all three and answered every row).
-  The page is cut after every filter, `route_status` included, which is applied in Go after the query, so `total` is what the filters match.
-  `route_status` is judged against one stored listener answer, the `route_roster` row (migration `0159`, `api/issue_route_status.go`), at most five seconds old by the database's clock and the same on every process, so which process serves a page does not change what the page holds.
+  The page is cut by the statement that reads it, which counts in the same read what the filters match, so a page and its `total` cannot come from two readings of a moving table, and the six values each listed issue carries are resolved for that page's rows alone (`issueSummaryQuery`, `api/issue_queries.go`, writes the listing's four statement texts: paged and unpaged, each of them pinned or not).
+  A `route_status` request is the one exception: that filter runs in Go after the Envoy roster answers, so it reads the unpaged statement and its page is cut after the filter (`issuePage.of`), `total` counting what is left.
+  `route_status` is judged against one stored listener answer, the `route_roster` row (migration `0159_route_roster`, `api/issue_route_status.go`), at most five seconds old by the database's clock and the same on every process, so which process serves a page does not change what the page holds.
+  A paged request therefore answers 500 for a parent chain that is too deep or loops only when the bad issue is on the page it asked for, where the unpaged listing answers 500 for any issue it matches.
   The order ends on the key, the one column no two issues share:
   nothing makes a rank unique (`issues_project_rank` is a plain index, and every project's first issue is `U`), and `created_at` is the creating transaction's start, so without the key consecutive offsets could show a row twice or never even over a listing that holds still.
   A walk of the pages is exact only on an unchanged listing:
@@ -1956,10 +1958,10 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   absent leaves it, `null` clears it, a string is canonicalised as a mapping's path is;
   not `owner/name` is `400 INVALID_ISSUE`, not mapped `400 REPO_NOT_MAPPED`, checked under a key-share lock on the mapping row so the mapping cannot move or go before the write commits;
   a closed issue refuses it, `409 ISSUE_CLOSED`).
-  Every issue read and every issue event carries `repo` and `resolved_repo`, resolved on read by `issueRepoLateral`:
-  the nearest issue on the parent chain (itself first) whose own `repo` is set, else the project's default mapping (`repo_projects.is_default`, at most one per project by the partial unique index `repo_projects_default_per_project`), else null.
-  The walk keeps a depth counter and stops at `parentDepthCap` (32) links, the most any issue sits below its root, so it costs at most 33 steps per issue;
-  a chain still going at the cap (a loop, or one a direct database write or an earlier release's API built) fails the read (500) rather than answer with the default.
+  Every issue read and every issue event carries `repo` and `resolved_repo`, resolved on read by `issueRepoTerms`:
+  one walk climbs the parent chains of every issue the read answers for at once — its `subjects` term, which is a listing's page, a listing's whole match or the one issue a read names — and each issue takes the nearest issue on its chain (itself first) whose own `repo` is set, else its project's default mapping (`repo_projects.is_default`, at most one per project by the partial unique index `repo_projects_default_per_project`, read for every project of the read in one join), else null.
+  A chain stops at the first issue that names a repository or at `parentDepthCap` (32) links, the most any issue sits below its root, so it costs at most 33 rows per issue;
+  a chain still going at the cap (a loop, or one a direct database write or an earlier release's API built) fails the read (500) rather than answer with the default, and a paged listing walks its own page alone, so such a chain fails the page it is on and no other.
   An earlier release's API could build a chain of any depth, so migration `0113` refuses to apply while any issue sits more than 32 links below its root or in a parent loop:
   its census counts them for the pre-deploy gate, and the migration, holding `repo_projects` and `issues` in ACCESS EXCLUSIVE from before its count to its commit so no earlier release's write commits in between, names up to 20 and the repair (`PATCH` an ancestor with `{"parent": null}` on the release still running).
   Only this release's API holds the cap after that, under the project's dependency lock; nothing in the database does.
@@ -2144,7 +2146,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A replayed delivery callback, which writes nothing, answers the stored reply alone.
 
 - Every ask read also carries `referenced_by_count`:
-  how many `graph_edges` rows point at that ask from a node kind this build reads (`refs.BacklinkCounts` binds the kinds `nodeLoaders` resolves, so a newer build's row is left out of the count as it is out of the list;
+  how many edges point at that ask from a node kind this build reads (`refs.BacklinkCounts` unions only the arms of `graph_edges` that can point at a node of the kind asked for — the view's own `to_kind` is a parameter, so reading the view itself makes a custom plan plan all 23 arms on every call — and reads each of those arms through its own index;
+  the counts are the view's, arm for arm, and `refs/backlink_counts_test.go` holds them to it arm by arm, failing when the view gains an arm the count does not declare, while a node kind with no declared arms is refused rather than counted low;
+  it binds the kinds `nodeLoaders` resolves, so a newer build's row is left out of the count as it is out of the list;
   a document's, comment's or message's mention that one of its blocks holds counts once for each citing block, in place of the item's own row, `heldByABlock`), counted for the whole page in one grouped query (`attachAskBacklinkCounts`, `api/ask_rows.go`) rather than one request per card.
   It is on `GET /api/v1/inbox` rows, `GET /api/v1/asks/{id}`, `GET /api/v1/issues/{key}/asks`, `GET /api/v1/artifacts/{id}/asks`, and the issue detail's `open_asks`;
   mutation responses omit it, and so does an `ask.*` event off the live broker
@@ -2327,8 +2331,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   `POST`/`PATCH /api/v1/issues[/{key}]` take `components` as a tri-state raw field like `parent`:
   `null`/`{mode: inherit}` deletes the row, `explicit` needs one to fifty slug ids that are components of the issue's project, from any of its sources, and not `external` (`400 COMPONENTS_INPUT` names each unknown, retired, external, or other-project id), `none` needs a non-blank `reason`;
   the closed-issue gate exempts `components` like `rank`, and a write bumps `issues.updated_at` and rides the ordinary `issue.updated` event with the whole issue.
-  Resolution is on read, never stored: `issueComponentsLateral` is one `left join lateral` (a depth-capped `union` walk up `parent_key` to the nearest row of either mode
-  — `none` is inherited exactly like `explicit` — splitting members into live and retired ids) that `loadIssue`, both list queries, and the tree route share, so every `Issue`/`IssueSummary` carries `components {mode, ids, unknown, reason, inherited_from}` from the same query.
+  Resolution is on read, never stored: `issueComponentsTerms` is one set of `with` terms — a depth-capped `union all` walk up `parent_key`, climbing the chains of every issue of the read's `subjects` term together, to the nearest row of either mode (`none` is inherited exactly like `explicit`), then one grouped read splitting each owner's members into live and retired ids — that `loadIssue`, the listing's four statements, the tree route and the delivery timeline's issue facts share, so every `Issue`/`IssueSummary` carries `components {mode, ids, unknown, reason, inherited_from}` from one rule and the walk costs a read one pass rather than one per row.
   `GET /api/v1/projects/{key}/architecture` (`api/architecture_tree.go`, authAny, `404 SOURCE_NOT_FOUND`) computes the counting rule once:
   every project issue's effective set joined to the component containment closure (recursive over `components.parent`, depth-capped), one row per (issue, component) with the strongest way it qualified (`direct` > `inherited` > `contained` with `via`), aggregated in Go into `done`/`total` (distinct issues, icebox and closed included) and `own_*` (those naming the component itself), plus the `unassigned` (no row anywhere), `not_architectural` (a `none` row, own or inherited), and `retired_links` (non-empty `unknown`) lists and `totals` (`components_without_work` counts non-external components with `total == 0`).
   `graph_edges` gains the `affects` arm (`issue` → `component` per explicit member, `created_at` the row's `updated_at`;

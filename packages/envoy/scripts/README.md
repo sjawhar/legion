@@ -286,3 +286,72 @@ p95 and max over 20 runs for the text of the issue `DISPATCH_RECALL_LATENCY_ISSU
 cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<test database> DISPATCH_RECALL_CORPUS="$TMPDIR/recall.jsonl" \
   go test ./internal/dispatch/api -run 'TestRelatedRecallOnDuplicates|TestRelatedCheckLatencyOnRecallCorpus' -v -count=1 -timeout 60m
 ```
+
+## Measuring Dispatch's statements and its write routes on the seeded database
+
+These are INFRA-325's own measurements: every changed statement's plan and time (A8), and the
+median wall time of the six write routes the new triggers slow (A9). Both run against the seeded
+measurement database `cmd/dispatch-seed` fills, never against a test database and never against
+production. `DISPATCH_BENCH_DATABASE_URL` is the one gate: CI leaves it unset, so CI runs no
+measurement.
+
+### The statement timings
+
+`internal/dispatch/benchtime` is the runner, and each package that owns statement texts carries
+its own `statement_timing_test.go`, all named `TestStatementTimings`: `internal/dispatch/api`,
+`internal/dispatch/refs` and `internal/dispatch/docs`. The runner takes a named pair of statement
+texts with their arguments, runs `EXPLAIN (ANALYZE, BUFFERS)` of each alternately on one
+connection, reports planning plus execution as the median of runs 2 to 12, prints both plans and
+fails when the after text's median is not below the before text's. It records the server settings
+it found and the subjects it bound (the largest project, its most heavily linked issue, the most
+anchored document, five sessions, an embedding and three words), each read from the database at
+run time, so a re-seed moves them with it.
+
+```bash
+cd packages/envoy && DISPATCH_BENCH_DATABASE_URL=<seeded database> \
+  go test -run TestStatementTimings -v -count=1 -timeout 90m \
+  ./internal/dispatch/api ./internal/dispatch/refs ./internal/dispatch/docs
+```
+
+A statement whose gain needs an index or a table this change adds has no such pair, because one
+schema cannot hold both sides of it. Each of those carries its head text alone, measured the same
+way with no bound; its before side is this same test run against a database migrated from a
+checkout of main. Each test file says which statement is under which protocol and why.
+
+`TestRelatedTermsRefreshTiming`, in `internal/dispatch/api`, measures the related-terms refresh,
+which has no statement pair: it times one whole pass of the release before this one, one whole
+pass of this build with no change, and eleven rounds each preceded by a hundred item writes
+outside the timed part, and reports the median of the eleven. It writes 1,100 items to the
+database it measures and leaves them there, so run it after the statement timings.
+
+```bash
+cd packages/envoy && DISPATCH_BENCH_DATABASE_URL=<seeded database> \
+  go test -run TestRelatedTermsRefreshTiming -v -count=1 -timeout 90m ./internal/dispatch/api
+```
+
+### The write routes
+
+`route-timings.sh` times the six write routes against one running server: the median wall time of
+50 requests to each of `POST /api/v1/issues/{key}/comments`, `.../asks`, `.../messages`,
+`.../artifacts` under a name that already exists, that same upload over a 100-660 KB document,
+and `PATCH /api/v1/issues/{key}` with a title alone. It prints one tab-separated line per route -
+the label, the route, the median in milliseconds and every reading - so a reader sees the spread.
+
+The caller gives it the base URL and the issue key, so one command measures the base server and
+the head server, and the plan's three base-and-head pairs are a loop:
+
+```bash
+for round in 1 2 3; do
+  packages/envoy/scripts/route-timings.sh --url "$BASE_URL" --issue SEED1-1 --label "base-$round" >>runs.tsv
+  packages/envoy/scripts/route-timings.sh --url "$HEAD_URL" --issue SEED1-1 --label "head-$round" >>runs.tsv
+done
+packages/envoy/scripts/route-timings.sh --summarise runs.tsv
+```
+
+`--summarise` prints each route's runs, the highest base run - what a rise is judged against,
+since a rise inside the spread of the base runs is no rise - and each head run against it.
+`DISPATCH_USER` names the caller (default `bench`), and the server must take it as a human
+identity. The script writes 50 comments, 50 asks, 50 messages, 100 document versions and 50 title
+edits for every run, which is what A9 measures: run it after the statement timings, and re-seed
+before anything reads a row count again. `--requests`, `--body-bytes`, `--artifact` and
+`--large-artifact` are the knobs; `--help` lists them.

@@ -454,24 +454,26 @@ func (m anchoredMark) markRef() pmdoc.MarkRef {
 	return pmdoc.MarkRef{Type: m.markType, ID: m.anchor.MarkID}
 }
 
+// openAnchoredMarksQuery is the statement openAnchoredMarks runs over target's table: every row
+// anchored on the document bound to $1 whose mark is still open, oldest first. The open filter
+// is the target's own (anchorTarget.open), so a table added to anchorTargets brings the
+// predicate that holds its rows open with it.
+func openAnchoredMarksQuery(target anchorTarget) string {
+	return fmt.Sprintf(`
+			select id::text, anchor, %s
+			from %s
+			where %s and %s
+			order by created_at, id
+		`, commentMarkType(target.table), target.table, target.anchoredOn(), target.open)
+}
+
 // openAnchoredMarks lists the open anchored asks, then the unresolved anchored comments, each by
 // creation time and id, so a refresh announces its rows, and an upload re-anchors them, in the same
 // order every time it runs over the same rows.
 func (s *Service) openAnchoredMarks(ctx context.Context, source Queryer, artifactID string) ([]anchoredMark, error) {
 	var marks []anchoredMark
-	for _, target := range []struct {
-		table string
-		where string
-	}{
-		{table: "asks", where: "state = 'open'"},
-		{table: "comments", where: "not resolved"},
-	} {
-		rows, err := source.Query(ctx, fmt.Sprintf(`
-			select id::text, anchor, %s
-			from %s
-			where anchor is not null and anchor->>'artifact_id' = $1 and %s
-			order by created_at, id
-		`, commentMarkType(target.table), target.table, target.where), artifactID)
+	for _, target := range anchorTargets {
+		rows, err := source.Query(ctx, openAnchoredMarksQuery(target), artifactID)
 		if err != nil {
 			return nil, fmt.Errorf("list %s anchors: %w", target.table, err)
 		}
@@ -761,35 +763,70 @@ func loadAnchorRefreshedCommentDeliveries(ctx context.Context, tx pgx.Tx, id str
 	return deliveries, nil
 }
 
-// recordedMarkTarget is one table a document's recorded marks live in: its name, the SQL
-// expression that reads an anchor's artifact_id as a uuid there, and the anchor index that
-// carries exactly that expression. The expression differs per table because the index does: an
-// ask's is store.CanonicalUUID's guarded cast, written out in migration 0148, a comment's the
-// plain cast of comments_anchor_artifact (0032).
-type recordedMarkTarget struct {
+// anchorTarget is one table a document's anchored rows live in: its name, the SQL expression
+// that reads an anchor's artifact_id as a uuid there, the anchor index that carries exactly
+// that expression, and the predicate that holds one of its rows open. The expression differs
+// per table because the index does: an ask's is store.CanonicalUUID's guarded cast, written out
+// in migration 0148, a comment's the plain cast of comments_anchor_artifact (0032). The open
+// predicate differs because the state does: an ask carries a state column, a comment a resolved
+// flag.
+type anchorTarget struct {
 	table      string
 	artifactID string
 	index      string
+	open       string
 }
 
-// recordedMarkTargets are the tables recordedMarkRefs reads, in the order it reads them.
-var recordedMarkTargets = []recordedMarkTarget{
-	{table: "asks", artifactID: store.CanonicalUUID(`anchor->>'artifact_id'`), index: "asks_anchor_artifact_id"},
-	{table: "comments", artifactID: `(anchor->>'artifact_id')::uuid`, index: "comments_anchor_artifact"},
+// asksAnchorTarget and commentsAnchorTarget are the two tables every anchor read of this package
+// finds a document's rows in. Each table's facts are written once, here: the uuid expression,
+// which must stay byte-identical to the one its index is built on, that index's name, which the
+// plan tests hold each read to, and the predicate that holds a row of the table open. A read
+// names its target instead of spelling any of them again.
+var (
+	asksAnchorTarget     = anchorTarget{table: "asks", artifactID: store.CanonicalUUID(`anchor->>'artifact_id'`), index: "asks_anchor_artifact_id", open: "state = 'open'"}
+	commentsAnchorTarget = anchorTarget{table: "comments", artifactID: `(anchor->>'artifact_id')::uuid`, index: "comments_anchor_artifact", open: "not resolved"}
+
+	// anchorTargets are both, in the order the reads that read both tables read them.
+	anchorTargets = []anchorTarget{asksAnchorTarget, commentsAnchorTarget}
+)
+
+// anchoredOn is the predicate that finds the rows of the target's table anchored on the document
+// bound to $1: `anchor is not null`, the text comparison the anchor reads of the release before
+// migration 20261101182419 ran, and the uuid comparison this table's anchor index is built on,
+// in that order.
+//
+// `anchor is not null` is the partial predicate of asks_anchor_artifact_id (0148), which Postgres
+// cannot prove from a clause on anchor->>'artifact_id' alone, so without it that index is not
+// eligible at all; ->> is strict, so a row either comparison matches carries a non-null anchor
+// already and no read loses a row to it.
+//
+// The text comparison keeps the row set exactly the one that release returned, and it is what
+// docs/write_hold_test.go's counter sees a refresh pass by, so a read that drops it both widens
+// its answer and goes uncounted. A row whose artifact_id is not a lower-case document id - an
+// upper-case spelling of a real id, or, on asks, a value that is no uuid at all - is left out of
+// asks_anchor_artifact_id by migration 0148's guard and was never matched by the text comparison
+// either, while the uuid comparison alone would return the upper-case one. On comments the uuid
+// side is comments_anchor_artifact's plain (anchor->>'artifact_id')::uuid (0032), which raises
+// 22P02 on an artifact_id that is no uuid where the text comparison returns no row; only that
+// index's own cast keeps such a row out of comments today, and the text comparison is what holds
+// the read to that release's answer whatever the table carries.
+//
+// The uuid comparison is written out as its index's expression, byte for byte, so the read is an
+// index scan rather than a scan of a table holding every ask or comment of the instance. Every
+// read that binds $1 is passed a document id the server holds, never a caller's text, so the cast
+// of the parameter raises on no input.
+func (t anchorTarget) anchoredOn() string {
+	return `anchor is not null and anchor->>'artifact_id' = $1 and ` + t.artifactID + ` = $1::uuid`
 }
 
 // recordedMarksQuery is the statement that lists the anchor and mark type of every row of
-// target's table whose anchor names the artifact $1. It compares target's uuid expression, the
-// one that table's anchor index carries, so the read is an index scan. It keeps the text
-// comparison beside the uuid one, so it returns exactly the rows that comparison alone would: a
-// row an index guard leaves out, whose artifact_id is not a lower-case document id, is a row the
-// text comparison never matched either, since the artifact ids the server passes are lower-case.
-func recordedMarksQuery(target recordedMarkTarget) string {
+// target's table whose anchor names the artifact $1.
+func recordedMarksQuery(target anchorTarget) string {
 	return fmt.Sprintf(`
 		select anchor, %s
 		from %s
-		where anchor is not null and anchor->>'artifact_id' = $1 and %s = $1::uuid
-	`, commentMarkType(target.table), target.table, target.artifactID)
+		where %s
+	`, commentMarkType(target.table), target.table, target.anchoredOn())
 }
 
 // recordedMarkRefs is every mark an ask or comment row anchored on artifactID records, read by the
@@ -798,7 +835,7 @@ func recordedMarksQuery(target recordedMarkTarget) string {
 // other anchor readers read it.
 func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[pmdoc.MarkRef]struct{}, error) {
 	recorded := make(map[pmdoc.MarkRef]struct{})
-	for _, target := range recordedMarkTargets {
+	for _, target := range anchorTargets {
 		rows, err := s.queryFrom(ctx).Query(ctx, recordedMarksQuery(target), artifactID)
 		if err != nil {
 			return nil, fmt.Errorf("list recorded %s marks: %w", target.table, err)

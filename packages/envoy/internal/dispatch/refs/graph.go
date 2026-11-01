@@ -58,47 +58,6 @@ type Query struct {
 // opens read the same exclusion.
 var AskBacklinkExclusions = []string{"replies_to"}
 
-// BacklinkCounts is how many edges point at each of ids, in one grouped query: the number a
-// list carries beside a row, counted the same way the rows behind it are listed. It counts only
-// edges whose source is a node kind this build reads, so the count is the rows its list shows,
-// and counts a document's, comment's or message's mention once for each of its blocks' links to
-// the node, in place of the item's own edge (heldByABlock): a comment citing a node from two
-// paragraphs counts 2, and a document's block pointing at the node counts once whatever its link's
-// kind. A node with no inbound edge is absent from the result; the caller decides what zero means.
-func BacklinkCounts(
-	ctx context.Context,
-	q Queryer,
-	toKind string,
-	ids []string,
-	excludeKinds []string,
-) (map[string]int, error) {
-	counts := make(map[string]int, len(ids))
-	if len(ids) == 0 {
-		return counts, nil
-	}
-	sql := `select g.to_id, count(*)::int from graph_edges g
-		where g.to_kind = $1 and g.to_id = any($2) and g.from_kind = any($3) and not ` + heldByABlock("g")
-	args := []any{toKind, ids, nodeKinds}
-	if len(excludeKinds) > 0 {
-		args = append(args, excludeKinds)
-		sql += " and not (g.kind = any($4))"
-	}
-	rows, err := q.Query(ctx, sql+" group by g.to_id", args...)
-	if err != nil {
-		return nil, fmt.Errorf("count %s backlinks: %w", toKind, err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		var count int
-		if err := rows.Scan(&id, &count); err != nil {
-			return nil, fmt.Errorf("scan %s backlink count: %w", toKind, err)
-		}
-		counts[id] = count
-	}
-	return counts, rows.Err()
-}
-
 // resolvedEdge is a graph edge plus the ref_key of an artifact node, which the legacy
 // referenced-by shape still reports.
 type resolvedEdge struct {
@@ -401,7 +360,9 @@ var nodeLoaders = map[string]nodeLoader{
 }
 
 // nodeKinds is every node kind nodeLoaders resolves, sorted, as the reads that filter
-// graph_edges in SQL bind it.
+// graph_edges in SQL bind it. BacklinkCounts binds it on its mention arm alone, the one arm
+// whose from_kind is a column; every other arm it reads fixes from_kind as a literal this list
+// holds, so the filter would drop nothing there.
 var nodeKinds = slices.Sorted(maps.Keys(nodeLoaders))
 
 // resolveNodes loads every distinct other end by kind.

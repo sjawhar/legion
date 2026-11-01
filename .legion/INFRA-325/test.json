@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-325",
+  "completed": "2026-11-01T10:10:00Z",
+  "previousHandoff": "cb26fe9076c0cda3d62c8d3cda693b0ed3a015c2",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "This round is a forward-merge re-check, not a new round of work. The head took main forward for sjawhar/legion#2621, which fixes the millisecond tie in main's own background-subagent test - the single red check of the previous head, and the one failure this phase reported. The branch's own diff is untouched: the unchanged-diff fingerprint is 35dbdfb5381ab1d71d580ac37dda99d9ce0e219e89fd0979199f15e72deb9eaf at 2207494d, the head this phase verified in full, and the same at ffafd7ec, which is what the implementer's forward-merge comment reports too. So the bare gates alone were run, as skill://legion-worker/references/conflicts-and-rewrites.md says, and the full round of 2207494d stands as this head's evidence: the census at the renumbered migrations, protocol 1 and protocol 2, A9 faster on all six routes, and the reads over HTTP."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "forward-merge re-check cb26fe90 → b858997d: fingerprint unchanged, bare gates only (A1-A9 carried from the full round at 2207494d).",
+      "surface": "The pull request's own diff, computed with jj against the base the branch was cut from at each head, leaving out .legion and docs/solutions.",
+      "command": "base=$(gh pr view 2589 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json') && jj -R \"$LEGION_WORKSPACE\" git fetch && jj -R \"$LEGION_WORKSPACE\" diff --from \"fork_point(${base}@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at 2207494d and at ffafd7ec",
+      "observed": "Both heads hash to 35dbdfb5381ab1d71d580ac37dda99d9ce0e219e89fd0979199f15e72deb9eaf, so no line of this change moved; the merge brings main's work alone (250 files between the two code heads, 25 of them under packages/envoy, all main's). The implementer's comment reports the same pair of hashes and 'unchanged', and nothing names this a parent's last round, so this is a re-check rather than a full round.",
+      "headSha": "ffafd7ec624bebda4ebb0afab97c464122348754",
+      "negativeControl": "The same command at the two heads of the round before, where the merge renumbered the migrations, answers two different hashes (23ead08a… → 35dbdfb5…), which is what sent that round through a full test round. So an equal pair here is the check working, not the check missing a change."
+    },
+    {
+      "criterion": "The bare gates at the new head: the repository's CI, read on GitHub, and the smoke check of the changed surface.",
+      "surface": "GitHub's check runs at the code head b858997d, and a Dispatch server built from this head and booted against the head-schema copy of the seeded 13 GB measurement database, driven with curl.",
+      "command": "gh api repos/sjawhar/legion/commits/b858997dc25e/check-runs; and cd packages/envoy && go build -o <server> ./cmd/dispatch, then curl of /api/v1/issues/SEED1-1, /api/v1/issues?project=SEED1[&limit=20&offset=20], /api/v1/projects, /api/v1/search?q=fuibd&project=SEED1, /api/v1/issues/SEED1-1/references, /api/v1/projects/SEED1/related?title=…&text=…, /api/v1/issues/SEED1-6/asks, /api/v1/issues/SEED1-401/artifacts/spec, with psql beside it for the oracles.",
+      "observed": "CI at 10:07:39Z: 28 checks pass, one is skipped, and one lane, dispatch, is still in progress - it started at 09:56:32Z, and the whole run was held in GitHub's queue for nearly an hour before it began. pi-legion, the one red check of the previous head, passes here. The smoke check answers exactly what the full round answered: referenced_by_count 112 with 104 children; the first page of 20 at offset 20 equal to that slice of the unpaged list with total 8000; the project list's counts (SEED1 8988, SEED2 1981, SEED10 1315) equal to main's own subquery-per-project statement over the same rows; search 20 results across the document, comment, ask and message arms; the related-item check outcome 'found' with three results through the new table; the references route, an issue's asks and the document read each 200; and document_search holding, for all 40,002 documents, the number and the tsvector of that document's latest version with markdown, with no mismatch and no orphan.",
+      "headSha": "ffafd7ec624bebda4ebb0afab97c464122348754",
+      "negativeControl": "GET /api/v1/issues/NOPE-999 answers 404 NOT_FOUND and the same read with no identity answers 401."
+    }
+  ],
+  "notes": [
+    "The dispatch lane was still running at the last read and this phase waits on no lane; it is read as running. Its subject is not carried from the previous head, since the merge changed 25 files of packages/envoy, all of them main's. If it settles red the daemon moves the issue back by itself.",
+    "The measurement Postgres is Job infra-325-postgres-wb4f6 in the builds namespace and must be deleted when the last measurement is done: kubectl -n builds delete job infra-325-postgres-wb4f6, which takes its Service with it. It holds the seeded original at main's schema and three copies: the A9 base side, the A9 head side, and an untouched head copy the statements were read on."
+  ]
+}

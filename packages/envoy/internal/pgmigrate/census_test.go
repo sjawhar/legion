@@ -198,7 +198,7 @@ func TestReportPrintsAnExemptMigrationsLargeTable(t *testing.T) {
 	}}}
 	var out strings.Builder
 	report.Write(&out)
-	want := "census: 0122_x.up.sql touches artifact_versions: 5.2 GiB, above the 1.0 GiB limit, from which the migration is exempt because its statements are only create function and create trigger, which change the catalog and read no row, so its rows were not counted; locks held by other sessions: none\n"
+	want := "census: 0122_x.up.sql touches artifact_versions: 5.2 GiB, above the 1.0 GiB limit, from which the migration is exempt because its statements are only create function and create trigger, which change the catalog or the transaction's own settings and read no row, so its rows were not counted; locks held by other sessions: none\n"
 	if !strings.Contains(out.String(), want) || !strings.HasSuffix(out.String(), "census: ok\n") {
 		t.Errorf("report:\n%s\nwant the line %q and census: ok", out.String(), want)
 	}

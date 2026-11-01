@@ -264,6 +264,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	// document_search (migration 20261101182447) holds each document's latest search vector,
+	// 20261101182454's trigger keeps it in step from the deploy on, and this fills it for the
+	// documents stored before that. It runs here, in committed batches, rather than as migration
+	// 20261101182501: one transaction over artifact_versions measured 35.5 s on a
+	// production-shaped database, and 20261101182454's trigger makes every concurrent version
+	// write to a document the pass has already written wait that whole transaction out
+	// (20261101182501's comment holds the measurement).
+	//
+	// A failure stops the boot, unlike the count below: this release's search reads
+	// document_search alone, so a process that served with the table unfilled would answer a
+	// search with documents missing. The rolling deploy keeps that correct - the release
+	// before this one serves every request until this process has filled the table and begins
+	// serving.
+	if filled, err := database.FillDocumentSearch(ctx); err != nil {
+		slog.Error("dispatch: fill document_search for the documents stored before this release", "error", err)
+		os.Exit(1)
+	} else if filled > 0 {
+		slog.Info("dispatch: filled document_search for the documents stored before this release", "rows", filled)
+	}
+
 	// asks_anchor_artifact_id (migration 0148) indexes the anchors whose artifact_id is a
 	// lower-case document id, the form every server-written anchor carries. A row an earlier
 	// release stored with another spelling is left out, and settlement records no mark for it:

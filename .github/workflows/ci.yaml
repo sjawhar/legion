@@ -876,6 +876,8 @@ jobs:
               - 'packages/envoy/internal/dispatch/accesslog/*'
               - 'packages/envoy/internal/dispatch/asks/*'
               - 'packages/envoy/internal/dispatch/auth/*'
+              # docs/statement_timing_test.go measures this package's statements through it.
+              - 'packages/envoy/internal/dispatch/benchtime/*'
               - 'packages/envoy/internal/dispatch/docs/*'
               - 'packages/envoy/internal/dispatch/docs/crafted/*'
               - 'packages/envoy/internal/dispatch/docs/docstest/*'

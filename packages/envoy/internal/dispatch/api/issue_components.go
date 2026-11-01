@@ -141,39 +141,44 @@ func writeIssueComponents(ctx context.Context, tx pgx.Tx, key, project string, i
 	return nil
 }
 
-// issueComponentsLateral resolves the effective attachment of the issue aliased `i` in the
-// enclosing query: the nearest issue on its parent chain (itself first) with an
-// issue_components row of either mode, that row's members split into ids still in the
-// project's component model and ids a re-import retired. Joined `left join lateral (...) comp
-// on true`, it yields one row per issue, all null when no ancestor chose. The recursive walk
-// uses `union` with parentDepthCap like loadChildren so it terminates even if a raced reparent
-// ever commits a cycle.
-var issueComponentsLateral = `
-	left join lateral (
-		with recursive chain as (
-			select i.key as key, i.parent_key, 0 as depth
-			union
-			select p.key, p.parent_key, c.depth + 1
-			from issues p join chain c on p.key = c.parent_key
-			where c.depth < ` + parentDepthCapSQL + `
-		), owner as (
-			select c.key, ic.mode, ic.reason
-			from chain c join issue_components ic on ic.issue_key = c.key
-			order by c.depth limit 1
-		)
-		select o.key as owner_key, o.mode, o.reason,
-		       coalesce((select array_agg(m.component_id order by m.component_id)
-		                 from issue_component_members m
-		                 join components x on x.project_key = m.project_key and x.id = m.component_id
-		                 where m.issue_key = o.key), '{}'::text[]) as ids,
-		       coalesce((select array_agg(m.component_id order by m.component_id)
-		                 from issue_component_members m
-		                 where m.issue_key = o.key
-		                   and not exists (select 1 from components x where x.project_key = m.project_key and x.id = m.component_id)), '{}'::text[]) as unknown
-		from owner o
-	) comp on true`
+// issueComponentsTerms resolve the effective attachment of every issue of `subjects`, the
+// one-column term of issue keys each statement that splices these defines before them: for each
+// of those issues the nearest issue on its parent chain (itself first) with an issue_components
+// row of either mode, that row's members split into ids still in the project's component model
+// and ids a re-import retired. One walk climbs every subject's chain together and one grouped
+// read splits every owner's members, so a listing pays one set of joins rather than a walk and
+// two subqueries per row; `comp` holds a row for each issue an ancestor chose for, and
+// issueComponentsJoin leaves the columns null for an issue none chose for, as the per-row lateral
+// this replaced did. The walk climbs with `union all` bounded by parentDepthCap, like
+// issueRepoTerms, so it terminates even if a raced reparent ever commits a cycle: a row carries
+// its depth, so no two rows of one chain are equal and `union`'s distinct step would remove
+// nothing.
+var issueComponentsTerms = `comp_chain as (
+		select s.key as start, i.key, i.parent_key, 0 as depth
+		from subjects s join issues i on i.key = s.key
+		union all
+		select c.start, p.key, p.parent_key, c.depth + 1
+		from comp_chain c join issues p on p.key = c.parent_key
+		where c.depth < ` + parentDepthCapSQL + `
+	), comp_owner as (
+		select distinct on (c.start) c.start as key, c.key as owner_key, ic.mode, ic.reason
+		from comp_chain c join issue_components ic on ic.issue_key = c.key
+		order by c.start, c.depth
+	), comp as (
+		select o.key, o.owner_key, o.mode, o.reason,
+		       coalesce(array_agg(m.component_id order by m.component_id) filter (where x.id is not null), '{}'::text[]) as ids,
+		       coalesce(array_agg(m.component_id order by m.component_id) filter (where m.component_id is not null and x.id is null), '{}'::text[]) as unknown
+		from comp_owner o
+		left join issue_component_members m on m.issue_key = o.owner_key
+		left join components x on x.project_key = m.project_key and x.id = m.component_id
+		group by o.key, o.owner_key, o.mode, o.reason
+	)`
 
-// issueComponentsColumns are the lateral's columns in the order scanComponents expects.
+// issueComponentsJoin attaches issueComponentsTerms' answer to the issue aliased `i` in the
+// enclosing query. It yields one row per issue, all null when no ancestor chose.
+const issueComponentsJoin = `left join comp on comp.key = i.key`
+
+// issueComponentsColumns are comp's columns in the order componentsScan expects.
 const issueComponentsColumns = `comp.owner_key, comp.mode, comp.reason, comp.ids, comp.unknown`
 
 // componentsScan receives issueComponentsColumns for one issue.

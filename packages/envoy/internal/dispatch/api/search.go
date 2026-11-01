@@ -62,6 +62,14 @@ const (
 // block_id is an ask's typed block only while it is a node of the reference graph
 // (askBlockNodeSQL). The ask arm's anchor cast is store.CastableUUID's, which answers the document
 // every spelling of an artifact_id Postgres casts names.
+//
+// The document arm reads document_search (migration 20261101182447), one row per document
+// holding its latest version's vector under a GIN index, rather than the lateral over
+// artifact_versions it read before: that table's search column has no index and can have none
+// (0010 left it out, and its 5.2 GiB is above what the pre-deploy census lets a migration
+// touch), so the arm tested every document's latest version in turn. The rows are the same
+// ones - 20261101182454's trigger holds document_search at each document's latest version
+// with markdown - and the join to artifacts still decides the arm's project, kind and issue.
 func searchKeywordLegs(rank func(searchColumn string) string) string {
 	return `
   select 'issue' as kind, 'keyword' as list, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
@@ -74,11 +82,10 @@ func searchKeywordLegs(rank func(searchColumn string) string) string {
          i.title, i.status, p.key, a.slug, a.name,
          coalesce(i.updated_at, v.created_at),
          false, ` + rank("v.search") + `
-    from artifacts a
+    from document_search v
+    join artifacts a on a.id = v.artifact_id
     left join issues i on i.key = a.issue_key
-    join projects p on p.key = a.project_key
-    join lateral (select v.search, v.created_at from artifact_versions v
-                  where v.artifact_id = a.id order by v.number desc limit 1) v on true, q
+    join projects p on p.key = a.project_key, q
    where a.kind = 'doc' and v.search @@ q.tsq and ($2 = '' or p.key = $2)
   union all
   select 'comment' as kind, 'keyword', c.issue_key, c.artifact_id, coalesce(c.artifact_id, (c.anchor->>'artifact_id')::uuid), c.id::text, null::text,

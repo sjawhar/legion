@@ -224,6 +224,8 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"message_block_state",
 		"comment_block_refs",
 		"message_block_refs",
+		"document_search",
+		"search_term_queue",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select tablename
@@ -239,7 +241,6 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"refs_to",
 		"refs_excerpt_drift",
 		"events_unpublished",
-		"asks_open_artifact",
 		"issues_search",
 		"comments_search",
 		"asks_search",
@@ -251,6 +252,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"asks_anchor_artifact_id",
 		"comments_anchor_artifact",
 		"ask_followers_ask_id_text",
+		"ask_followers_session_id",
 		"events_ask_answered_by_user",
 		"comments_ask_replies_by_user",
 		"document_blocks_node_id",
@@ -273,12 +275,23 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"events_person_words",
 		"comment_deliveries_session",
 		"message_deliveries_session_created",
+		"asks_issue_key",
+		"messages_issue_roots",
+		"document_search_vector",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select indexname
 		from pg_indexes
 		where schemaname = current_schema()
 	`, expectedIndexes)
+	// Migration 20261101182440 drops asks_open_artifact, the partial index 0009 built for the one
+	// read that lists a document's open asks: that read uses asks_artifact_id, which
+	// api.TestTheAuditedReadsSearchTheirIndex holds it to.
+	assertDatabaseObjectsAbsent(t, ctx, store.Pool, `
+		select indexname
+		from pg_indexes
+		where schemaname = current_schema()
+	`, []string{"asks_open_artifact"})
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select viewname
 		from pg_views

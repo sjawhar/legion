@@ -1,0 +1,211 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-325",
+  "completed": "2026-10-31T02:28:00Z",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase worker's own rules — read every committed handoff first, commit only this phase's paths, push before completing.",
+      "skill://legion-worker/references/pr-body.md: the pull request body, what a proof is (criterion, surface, command, observed, headSha, negativeControl), and the simplify pass the body must record.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md: the branch takes main in more than once (the open pull requests on migration 0150, and sjawhar/legion#2535 on refs/graph.go), and how to compare heads after a forward merge.",
+      "skill://legion-worker/references/skip-checks-trailer.md: a handoff-only push carries the trailer; a code push does not.",
+      "skill://legion-worker/references/tools.md: how a pod with no Postgres server, no Docker and no root stands one up, and which packages a pod cannot test (internal/dispatch/api, whose collation check this pod cannot satisfy).",
+      "skill://ce-simplify-code: the simplify pass pr-body.md requires on settled, recently changed code.",
+      "skill://dispatch and skill://dispatch-writing-specs: any comment or ask this phase writes.",
+      "skill://asd-ste100: every message to the architect or another role."
+    ],
+    "test": [
+      "skill://legion-worker: the tester's phase rules and the committed handoff shape.",
+      "skill://legion-worker/references/pr-body.md: each proof needs a surface, a command, an observation, the head SHA and a negative control; the surfaces here are CI's envoy-go job, the pod's test cluster for refs/docs/store, a booted Dispatch over HTTP, the seeded measurement cluster, and the pre-deploy census.",
+      "skill://legion-worker/references/tools.md: the two Postgres clusters this change runs on and the packages the pod cannot test.",
+      "skill://dispatch: reading the issue, its spec and its work-areas reference.",
+      "skill://asd-ste100: every message."
+    ],
+    "review": [
+      "skill://legion-worker: the reviewer's phase rules, including that a prose-only finding is fixed by the reviewer itself.",
+      "skill://legion-worker/references/review-threads.md: replying on, listing and resolving review threads, and judging a bot's finding; this pull request is large and commit-grouped by seam.",
+      "skill://legion-worker/references/merge-gate.md: approving the head by SHA and what READY compares against it.",
+      "skill://ce-simplify-code: judging the simplify pass the implementer recorded.",
+      "skill://asd-ste100: every message."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1 (pass 2). The one Postgres the plan designated cannot run the test command the plan designated on it: /legion/scratch/pg/setup.sh runs initdb --locale=C, this pod's locale -a offers only C, C.utf8 and POSIX, and api/rank_test.go fails a suite whose collation is byte order. The same cluster runs with fsync, synchronous_commit and full_page_writes off and 128 MB of shared_buffers, so no measurement should be taken on it either.",
+        "answer": "The plan now names two clusters. CI's envoy-go job is the authoritative surface for every CI test, as LEGION-752 prescribes; in the pod the implementer runs refs, docs and store only and names api in the handoff as the package the pod could not run. Seam 1 builds a second cluster under /legion/scratch/pg-bench with fsync, synchronous_commit and full_page_writes on, shared_buffers 2GB, maintenance_work_mem 1GB and effective_cache_size 6GB, and every measurement records those settings."
+      },
+      {
+        "finding": "F2 (pass 2). Seam 5 never said what a step refresh writes into the snapshot column. If it leaves the full build's snapshot, later queue rows are undroppable and are applied twice; if it writes its own, the old-release detector needs to tell its marker from the old release's.",
+        "answer": "Seam 5 now carries the whole contract: items, refreshed_at, snapshot and snapshot_at. Every new-code refresh writes all four in the one counting statement; a step pass drops only the queue rows visible in its own snapshot. Round 3's review then showed that a null snapshot is not the old-release signal, because searchTermStatsRebuild updates items and refreshed_at alone and leaves a new-code snapshot in place, so the signal is refreshed_at is distinct from snapshot_at, and a fourth A7 case tests exactly that order."
+      },
+      {
+        "finding": "F3 (pass 2). Seam 5 had no measurement: the refresh has no statement pair, and the seed wrote no search_term_totals rows, so the first pass on a seeded database is a full build for every project.",
+        "answer": "The plan adopts work-areas' own protocol 3 for the refresh — one pass before, one after with no change, and 11 rounds each preceded by 100 item writes outside the timed part, median of the 11 reported — and seam 1 now ends with one full build for every project and an empty queue, so no measured pass is a first-use full build."
+      },
+      {
+        "finding": "F4 (pass 2). A4's loops=1 has two readings, and under one of them the counting laterals fail: a lateral's inner node reports loops = page size, only the enclosing join reports loops=1.",
+        "answer": "Seam 3 names the node the assertion reads: the node that attaches each value to the page, which is the enclosing Nested Loop or Hash Join. The check that the per-row walk is gone is work-areas' second assertion, that the recursive walk's base term starts from at most limit issue keys."
+      },
+      {
+        "finding": "F5 (pass 2). The live open-ask value is count(a.id) filter (where i.closed_at is null): a closed issue reports 0 open asks. A counting lateral written as select count(*) from asks silently changes every closed issue's count.",
+        "answer": "Seam 3 states that the lateral carries the i.closed_at is null condition, and that A5's fixture holds a closed issue with at least one open ask, or the equality test passes on a wrong count."
+      },
+      {
+        "finding": "F6 (pass 2). The seed is also run at the head — by CI at --scale 0.01 and by a replacement pod — where its inserts fire seams 4 and 5's triggers, leaving roughly half a million queue rows each carrying a copy of an old tsvector, and a checksum over transaction-id columns that differ between runs.",
+        "answer": "Seam 1 now says the seed ends by truncating the queue and running one full build per project, so a head-seeded database starts in a steady state; the checksum's exclusion list covers every transaction-id column as well as the now() columns; and the plan records that at the head the document-search table is filled by its trigger rather than by the backfill, which seam 4's own backfill test proves separately."
+      },
+      {
+        "finding": "F7 (pass 2). refs.MarkStaleExcerpts re-owes a mention whose excerpt_version is below its document's max(number), which the plan's non-null check cannot see; the 28-version documents make that the common case.",
+        "answer": "Seam 1's answer 1 now requires excerpt_version to equal the citing document's highest version number and adds a fifth count to the check, plus an excerpt-reconciliation tick beside the block-index tick."
+      },
+      {
+        "finding": "F8 (pass 2). Calling refs.IndexBlocks needs three things the plan did not name: block offsets that come from pmdoc.RenderWithBlockOffsets over the stored markdown, a deterministic block-id generator, and a fixed server URL for text.ExtractAt; and the seed makes about 430,000 IndexItem calls with no bulk form.",
+        "answer": "Seam 1's answer 8 now names each: pmdoc.Parse then RenderWithBlockOffsets with the rendered markdown stored in artifact_versions.markdown, pmdoc.SetBlockIDGenerator for the ids, one fixed server URL, only the latest version block-indexed, and fixed-size transaction batching with progress."
+      },
+      {
+        "finding": "F9 (pass 2). Seam 4's trigger had no WHEN guard: a version with a null markdown gives a null search and, its number being higher, blanks the document's row. Migration 0122 carries when (new.markdown is not null) for the same reason.",
+        "answer": "Seam 4 now states the guard, says why no artifact-kind filter is added (it would need a read inside the trigger, and a non-doc row is harmless because every reader joins artifacts on a.kind = 'doc'), and adds an A6 case: a binary version written after a text version leaves the document's row as it was."
+      },
+      {
+        "finding": "F10 (pass 2). The plan defined A8 twice, by a committed same-schema harness and by a two-commit run, and the two disagree wherever the schema is part of the change; listArtifactAsksQueryOpen's before cannot exist on the head schema at all.",
+        "answer": "The plan now names three protocols and says which statements each covers. Round 3's review then showed the two-commit run's before could not be a commit of this branch, because seam 0 is already committed there, so the before is main at the branch's merge base: migrate from a checkout of main, seed with --no-migrate, measure main's texts, apply the head's migrations and measure again."
+      },
+      {
+        "finding": "F11 (pass 2). A9's upload case is a 1-20 KB document, but the two new triggers cost most on the 400 documents whose latest version is 100-660 KB, each of which copies that tsvector twice.",
+        "answer": "Seam 7's A9 gains a sixth case, the same upload over one of those large documents, and the plan records it as a departure."
+      },
+      {
+        "finding": "F12 (pass 2). The claim that eight open pull requests claim migration 0150 is false — five do (#2394, #2406, #2444, #2546, #2387), the highest any claims being 0152 — and seam 5's five one-trigger-per-table migrations are more numbers than the census exemption requires.",
+        "answer": "The Migrations section now names the five pull requests. Seam 5's five queue triggers go in one migration, in a fixed lock order over four small tables, which the census exempts as a whole; seam 4's trigger on the 5.2 GiB artifact_versions stays alone, as the spec requires. The block is nine or ten migrations from 0151."
+      },
+      {
+        "finding": "F13 (pass 2). The pinned list is paged today, and the plan excluded it from R3's page push-down without declaring a departure.",
+        "answer": "Seam 3 now has four statement texts — paged, paged-pinned, full, full-pinned — so the pinned list gets the push-down and no departure is needed."
+      },
+      {
+        "finding": "F14 (pass 2). R6 names searchTermItemsSQL and A6 asks for its equality test, but seam 4's draft excludes it and seam 5 never mentioned it.",
+        "answer": "Seam 5 carries it: an equality test with main's text as the oracle, because the full-build path seam 5 rewrites is what reads it."
+      },
+      {
+        "finding": "F15 (pass 2). Work-areas' trigger fires on insert or update of markdown, search, where the spec's Design says markdown alone, and the plan did not record it as a departure.",
+        "answer": "Recorded as departure 7, with its reason: api/related_recall_test.go writes artifact_versions.search directly."
+      },
+      {
+        "finding": "F16 (pass 2, risks). Four risks the plan did not carry: a create trigger on the 5.2 GiB artifact_versions can fail the deploy on a lock wait with no census refusal; seam 4's backfill holds the migration advisory lock for its whole run; the queue can grow unbounded with copies of large tsvectors and has no stated recovery; and the seed's 285,000 per-row HNSW insertions at 64 MB of maintenance memory dominate its run time.",
+        "answer": "All four are now in the Risks section, and the HNSW one is answered in seam 1's answer 9: the seed drops embeddings_cosine before it writes the vectors and rebuilds it afterwards under the measurement cluster's 1 GB. The queue's recovery is the full rebuild the new code already does when it finds no snapshot of its own, and the pull request records the queue's size after one round of writes."
+      },
+      {
+        "finding": "F17 (pass 2). Every background loop runs during seam 7's measurement, and one of them is the statement seam 5 changes, so the before and after route medians carry different background load.",
+        "answer": "Seam 7 now states that no Dispatch server runs while a statement timing is taken, and that for A9 the server is left to settle until its first related-terms pass has finished and its boot reconciliations are quiet, with that wait recorded. It also records that with no embedder a route's search is keyword-only, so the meaning arms are exercised only by the statement-timing test with the seed's printed vector and model."
+      },
+      {
+        "finding": "Pass 1 findings that the architect's scope change settled: the size of this change against one pull request (F16 of pass 1), and which parts belong to child issues (F3, F4, F5, F7, F8, F10, F11 of pass 1).",
+        "answer": "The red-team verdict on the issue put the whole spec in one pull request with no child issues, and the architect then set one implementing round with the seams as commit groups. Every pass-1 finding that the narrowed plan deferred is now answered inside its seam."
+      },
+      {
+        "finding": "Pass 1 findings carried forward into this plan unchanged: the sjawhar/legion#2535 conflict and its merge-order rule; the Design's sentence about the block arms against what migration 0142 actually writes; A2's fixture needing a removed block; and the ask_followers census risk.",
+        "answer": "Each is in the plan: the Other pull requests section, seam 0's two arm tables and departure 4, seam 0's A2 paragraph, and the Risks section."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "rejected",
+    "rounds": 3,
+    "remainingIssues": [
+      {
+        "issue": "Seam 5's `snapshot is null` rule contradicts A7: the old release's searchTermStatsRebuild updates items and refreshed_at on an existing row and never clears a third column, so after a new-code pass it leaves that pass's snapshot in place; a rule keyed on a null snapshot reads the row as the new code's own and applies the queued changes the old release's rebuild already counted, which is the exact order spec A7's second bullet tests.",
+        "evidence": "packages/envoy/internal/dispatch/api/related_terms.go:101-111 (update search_term_totals set items = (...), refreshed_at = statement_timestamp() where project_key = $1) and :90-91 (searchTermTotalsClaim, on conflict do nothing). The plan was revised after this review: the signal is now `refreshed_at is distinct from snapshot_at`, with a new snapshot_at column written in the same statement as snapshot, and a fourth A7 case for that order. The reviewer did not see the revision."
+      },
+      {
+        "issue": "Protocol 2 gave seam 0's backlink count no before: the plan defined the two-commit run's before as this branch's seed-tool commit, but seam 0 is already committed below it, so that tree carries the new per-arm count and the new index and before equals after. The same gap reached seam 6's closure, which the plan put in protocol 1 although its gain comes from seam 2's indexes rather than from new text.",
+        "evidence": "git log --oneline -3 legion/INFRA-325 gives 6431f3084 (seam 0) over 4f93c30d3 and main 92619d8df; git show --stat 6431f308 shows refs/graph.go (+193) and store/migrations/0150_ask_followers_session.up.sql. The plan was revised after this review: protocol 2's before is now main at the branch's merge base, reached by migrating from a checkout of main and seeding with --no-migrate, and the closure moved to protocol 2. The reviewer did not see the revision."
+      }
+    ]
+  },
+  "specDepartures": [
+    {
+      "spec": "A8 says 'the pull request shows, on the larger test database, the plan and the time of each changed statement before and after, and each changed statement's time is lower after'.",
+      "plan": "Three named protocols, one per statement class, and the pull request says which one each statement used: a committed test gated on DISPATCH_BENCH_DATABASE_URL that runs main's text and the new text alternately in one process on one fixture for a statement whose gain is text alone; a two-commit run from main at the merge base to the branch head for a statement whose gain needs a different schema; and, for the related-terms refresh, which has no statement pair at all, work-areas' own protocol of one pass before, one after with no change, and 11 rounds of 100 item writes with the median reported.",
+      "evidence": "A8 as written names no hardware, no repetition rule and no variance bound, and it does not say what 'each changed statement' means once one statement becomes one per kind or has no counterpart. No single schema holds both sides of an index: listArtifactAsksQueryOpen's before needs asks_open_artifact, which this change drops. The tree already holds two env-gated harnesses of this shape, api/search_bench_test.go and api/related_recall_test.go.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A8 is met by a named protocol per statement, two of the three committed as tests, rather than by a table in the body alone."
+        ]
+      }
+    },
+    {
+      "spec": "A1 says 'a CI plan test shows that the backlink count, for each node kind, has an index condition on every scan and no sequential scan', and A4 asks each anchor read and each ask and message read to use a named index.",
+      "plan": "Every index assertion names the index the scan must use, or checks that the scan's index condition is on that index's first key column, read with pg_get_indexdef(indexrelid, 1, true).",
+      "evidence": "Seam 0's A1 as committed passes with its own migration 0150 removed, because ask_followers' primary key (ask_id, session_id) gives the session arm a full index scan that still carries an Index Cond; Postgres puts a non-leading column's qual into Index Cond. The stronger form is a closer reading of R1's 'each arm is read through an index'.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A1 and A4 assert the index by name or by its first key column, not only the presence of an index condition."
+        ]
+      }
+    },
+    {
+      "spec": "A2 says the equality test 'fills every arm of the view, with block-held mentions and a source of an unknown kind'.",
+      "plan": "The fixture also holds a removed block: a comment_blocks or message_blocks row whose position is null that still holds a block-refs row for a node the same item also mentions through refs.",
+      "evidence": "The view's mention arms over comment_block_refs and message_block_refs join their block table with position is not null (migration 0142_item_blocks.up.sql, lines 212 to 220), while heldByABlock's exists probes in refs/graph.go carry no position filter, so a removed block makes the link vanish from main's count. No row the spec names reaches that case.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A2's fixture gains one row beyond the arms the spec names, so the equality test can decide the position rule."
+        ]
+      }
+    },
+    {
+      "spec": "The Design says 'The comment-block and message-block arms keep the view's join on position is not null', in the bullet about the structural arms of the counted kind.",
+      "plan": "The filter is given arm by arm, read off migration 0142: the mention arms over comment_block_refs and message_block_refs carry it, the part_of arms targeting comment and message carry it, the two replies_to arms targeting comment_block and message_block do not, and heldByABlock's probes do not.",
+      "evidence": "migration 0142_item_blocks.up.sql: lines 206 to 220 carry where b.position is not null; lines 222 to 226 do not. refs/graph.go's blockHolds builds three exists probes with no position predicate.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "The Decision 'Test database sizes' names the fixture, and A8 and A9 ask for before-and-after numbers on it, but no requirement says who builds the fixture or the measurement.",
+      "plan": "The seed tool (packages/envoy/cmd/dispatch-seed), the measurement cluster it builds, and the timing harness (packages/envoy/internal/dispatch/benchtime with one statement_timing_test.go per package) are work of this change, and the seed tool is the first seam.",
+      "evidence": "packages/envoy/loadtest seeds 4 projects, 1,000 issues and 8,000 comments through the HTTP API; nothing in the tree builds a database at the Decision's sizes. Without the fixture and the harness, A8 and A9 cannot be met.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The seed tool, the measurement cluster and the timing harness are delivered by this pull request."
+      }
+    },
+    {
+      "spec": "R10 names the write routes as 'the API routes that create a comment, an ask, a message and a document version, and that edit an issue's title', and A9 bounds the median of 50 requests to each at 10%.",
+      "plan": "The five routes are named by method and path, the document-version route being POST /api/v1/issues/{key}/artifacts (an upload under a name that exists), and a sixth case is added: the same upload over one of the 400 documents whose latest version is 100 to 660 KB. Each side is run as at least three base-and-head pairs, with each run's median and the highest base run reported.",
+      "evidence": "api/routes_table.go carries the five routes. The two new triggers each copy the version's tsvector, so their cost follows the document's size, and the 400 large documents are the case the 1-20 KB upload does not reach. Three pairs and the highest base run are what let a reader tell a 10% rise from load noise.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A9 gains a sixth case, an upload over a large document, and a repetition rule of at least three base-and-head pairs."
+        ]
+      }
+    },
+    {
+      "spec": "The Design says the search trigger 'fires after insert or update of markdown on artifact_versions'.",
+      "plan": "It fires after insert or update of markdown, search, and carries when (new.markdown is not null).",
+      "evidence": "api/related_recall_test.go writes artifact_versions.search directly, so a trigger on markdown alone would leave the new table behind it. A column list does not restrict an insert, so a version with a null markdown would fire the trigger with a null search (search_vector is strict) and, its number being higher, blank the document's row; migration 0122_artifact_versions_block_index_trigger.up.sql carries the same guard for the same reason.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A6 gains a case: a binary version written after a text version leaves the document's row as it was."
+        ]
+      }
+    },
+    {
+      "spec": "The Design says 'A full build by the old release, during the roll, records no snapshot. When the new code finds that refreshed_at moved and no snapshot came with it, it rebuilds that project in full.' A7 lists five cases.",
+      "plan": "search_term_totals gains both a snapshot and a snapshot_at column, written together in the one counting statement by every new-code refresh. The signal that somebody else wrote the row is refreshed_at is distinct from snapshot_at; a null snapshot still forces a full rebuild, but it is not the only signal. A7 gains four cases: the snapshot after a step pass, a queue deeper than one batch, a no-change pass leaving all three columns, and an old-release rebuild between two step passes forcing a full rebuild.",
+      "evidence": "api/related_terms.go's searchTermStatsRebuild updates items and refreshed_at on an existing row and clears no other column, and its insert is on conflict do nothing, so after a new-code pass the old release leaves that pass's snapshot in place. A rule keyed on a null snapshot would then apply the queue on top of counts the old release's rebuild already held, which is the order spec A7's second bullet tests.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A7 gains four cases, and the Design's old-release signal is read as refreshed_at is distinct from snapshot_at rather than as a null snapshot."
+        ]
+      }
+    }
+  ]
+}

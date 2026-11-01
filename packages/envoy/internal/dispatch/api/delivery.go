@@ -780,7 +780,7 @@ func (s *server) firstToWarn(ctx context.Context, key warnedProductionRun, jobNa
 
 // deliveryIssue is what the timeline reads of one issue a pull request names: its project, title,
 // priority, and effective components (qualified `<project>/<id>`, resolved as every issue read
-// resolves them: the nearest issue on its parent chain that chose, through issueComponentsLateral).
+// resolves them: the nearest issue on its parent chain that chose, through issueComponentsTerms).
 type deliveryIssue struct {
 	project    string
 	title      string
@@ -788,17 +788,24 @@ type deliveryIssue struct {
 	components []string
 }
 
+// deliveryIssueFactsQuery is the pull-request timeline's read of the issues a delivery names,
+// with their components. The text is built once, at start, for the reason
+// issueWithProgressQuery gives.
+var deliveryIssueFactsQuery = `
+		with recursive subjects as (select i.key from issues i where i.key = any($1)),
+		` + issueComponentsTerms + `
+		select i.key, i.project_key, i.title, i.priority, coalesce(comp.ids, '{}'::text[])
+		from issues i
+		` + issueComponentsJoin + `
+		where i.key = any($1)
+	`
+
 func (s *server) deliveryIssueFacts(ctx context.Context, keys []string) (map[string]deliveryIssue, error) {
 	issues := make(map[string]deliveryIssue, len(keys))
 	if len(keys) == 0 {
 		return issues, nil
 	}
-	rows, err := s.deps.Store.Pool.Query(ctx, `
-		select i.key, i.project_key, i.title, i.priority, coalesce(comp.ids, '{}'::text[])
-		from issues i
-		`+issueComponentsLateral+`
-		where i.key = any($1)
-	`, keys)
+	rows, err := s.deps.Store.Pool.Query(ctx, deliveryIssueFactsQuery, keys)
 	if err != nil {
 		return nil, err
 	}

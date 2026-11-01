@@ -761,7 +761,23 @@ func (s *Service) prevalidateOperations(ctx context.Context, artifactID string, 
 	return snapshots, nil
 }
 
-func (s *Service) rejectUnindexedTableMarks(ctx context.Context, artifactID, axis string, index int, marks []pmdoc.MarkRef) error {
+// tableAnchorRecordsQuery lists the mark ids that the asks and comments anchored on the document
+// bound to $1 record, among the marks bound to $2. Each arm finds its table's rows through that
+// table's anchor index (anchorTarget.anchoredOn), so neither arm scans a table that holds every
+// ask or comment of the instance. The text is built once, at start: it carries no value of its
+// own, and pgx caches a prepared plan per statement text.
+var tableAnchorRecordsQuery = `
+		select anchor->>'mark_id' from asks
+		where ` + asksAnchorTarget.anchoredOn() + ` and anchor->>'mark_id' = any($2::text[])
+		union
+		select anchor->>'mark_id' from comments
+		where ` + commentsAnchorTarget.anchoredOn() + ` and anchor->>'mark_id' = any($2::text[])
+	`
+
+// tableAnchorMarkIDs are the ids of the marks a table anchor can record: an ask's, a comment's
+// and a suggestion's. A mark of any other type is recorded on no row, so it is left out and the
+// two readers below answer at once when nothing is left.
+func tableAnchorMarkIDs(marks []pmdoc.MarkRef) []string {
 	markIDs := make([]string, 0, len(marks))
 	for _, mark := range marks {
 		switch mark.Type {
@@ -769,16 +785,15 @@ func (s *Service) rejectUnindexedTableMarks(ctx context.Context, artifactID, axi
 			markIDs = append(markIDs, mark.ID)
 		}
 	}
+	return markIDs
+}
+
+func (s *Service) rejectUnindexedTableMarks(ctx context.Context, artifactID, axis string, index int, marks []pmdoc.MarkRef) error {
+	markIDs := tableAnchorMarkIDs(marks)
 	if len(markIDs) == 0 {
 		return nil
 	}
-	rows, err := s.queryFrom(ctx).Query(ctx, `
-		select anchor->>'mark_id' from asks
-		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
-		union
-		select anchor->>'mark_id' from comments
-		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
-	`, artifactID, markIDs)
+	rows, err := s.queryFrom(ctx).Query(ctx, tableAnchorRecordsQuery, artifactID, markIDs)
 	if err != nil {
 		return fmt.Errorf("list table anchor records: %w", err)
 	}
@@ -870,27 +885,28 @@ func (s *Service) validateTableEditAnchors(ctx context.Context, artifactID strin
 	return s.rejectLiveTableAnchors(ctx, artifactID, axis, index, marks)
 }
 
-func (s *Service) rejectLiveTableAnchors(ctx context.Context, artifactID, axis string, index int, marks []pmdoc.MarkRef) error {
-	markIDs := make([]string, 0, len(marks))
-	for _, mark := range marks {
-		switch mark.Type {
-		case string(MarkAsk), string(MarkComment), string(MarkSuggestion):
-			markIDs = append(markIDs, mark.ID)
-		}
-	}
-	if len(markIDs) == 0 {
-		return nil
-	}
-	rows, err := s.queryFrom(ctx).Query(ctx, `
+// activeTableAnchorsQuery names every open ask and unresolved comment that is anchored on the
+// document bound to $1 and records one of the marks bound to $2 - the anchors an edit would
+// take with the table row it removes. Each arm finds its table's rows through that table's
+// anchor index (anchorTarget.anchoredOn) and holds the row open by that table's own predicate
+// (anchorTarget.open), and the text is built once, as tableAnchorRecordsQuery's is.
+var activeTableAnchorsQuery = `
 		select 'ask', id::text, anchor->>'mark_id'
 		from asks
-		where anchor->>'artifact_id' = $1 and state = 'open' and anchor->>'mark_id' = any($2::text[])
+		where ` + asksAnchorTarget.anchoredOn() + ` and ` + asksAnchorTarget.open + ` and anchor->>'mark_id' = any($2::text[])
 		union all
 		select 'comment', id::text, anchor->>'mark_id'
 		from comments
-		where anchor->>'artifact_id' = $1 and not resolved and anchor->>'mark_id' = any($2::text[])
+		where ` + commentsAnchorTarget.anchoredOn() + ` and ` + commentsAnchorTarget.open + ` and anchor->>'mark_id' = any($2::text[])
 		order by 1, 2
-	`, artifactID, markIDs)
+	`
+
+func (s *Service) rejectLiveTableAnchors(ctx context.Context, artifactID, axis string, index int, marks []pmdoc.MarkRef) error {
+	markIDs := tableAnchorMarkIDs(marks)
+	if len(markIDs) == 0 {
+		return nil
+	}
+	rows, err := s.queryFrom(ctx).Query(ctx, activeTableAnchorsQuery, artifactID, markIDs)
 	if err != nil {
 		return fmt.Errorf("list active table anchors: %w", err)
 	}

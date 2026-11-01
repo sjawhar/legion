@@ -934,9 +934,15 @@ func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, 
 	return ask, nil
 }
 
-// pgx caches prepared plans by query text. State and ownership each have a fixed
-// query so the partial open-ask index remains eligible under generic plans. They are vars, not
-// consts, because askReadFrom builds its anchor join from store.CastableUUID.
+// pgx caches prepared plans by query text. State and ownership each have a fixed query, with the
+// state written in as a literal, so that the index a state carries stays eligible under a
+// generic plan too: an issue's open asks read asks_open (0001), the partial index on
+// (issue_key) where state = 'open', which a $-parameterized state would lose. A document's asks
+// read asks_artifact_id (0032) and filter the state, whatever state is asked for:
+// asks_open_artifact, the partial index 0009 built for the open case, went unused for the nine
+// days the index audit measured and migration 20261101182440 drops it. An issue's asks with no
+// state filter read asks_issue_key (20261101182426). They are vars, not consts, because
+// askReadFrom builds its anchor join from store.CastableUUID.
 var (
 	listIssueAsksQueryAll = `select ` + askReadColumns + ` ` + askReadFrom + `
 		where a.issue_key = $1 order by a.created_at, a.id`
