@@ -20,6 +20,8 @@ import type {
   ArchitectureTree,
   Artifact,
   ArtifactBlock,
+  ArtifactGrant,
+  ArtifactGrantsResponse,
   ArtifactRebuildReport,
   ArtifactReview,
   ArtifactReviewState,
@@ -418,6 +420,12 @@ export type ArtifactOwner = { issue: string } | { project: string } | { session:
 export interface CreateArtifactReviewInput {
   state: ArtifactReviewState;
   reason?: string;
+}
+
+/** The body of `POST /api/v1/artifacts/{id}/grants`: the data file to grant this page file, as
+ *  `dispatch://<issue or project>/artifact/<slug>`, optionally pinned `@v<N>`. */
+export interface CreateArtifactGrantInput {
+  ref: string;
 }
 
 function pathSegment(value: string): string {
@@ -1324,6 +1332,33 @@ export class DispatchApiClient {
   ): Promise<void> {
     await this.remove(
       `/api/v1/artifacts/${pathSegment(id)}/subscribers/${pathSegment(sessionId)}`,
+      bounds
+    );
+  }
+
+  /** `GET /api/v1/artifacts/{id}/grants`: the data files a person has granted this page file,
+   *  oldest first. `415 NOT_A_PAGE` when the artifact is not a page file. */
+  async listArtifactGrants(id: string): Promise<ArtifactGrant[]> {
+    return (await this.json<ArtifactGrantsResponse>(`/api/v1/artifacts/${pathSegment(id)}/grants`))
+      .grants;
+  }
+
+  /** `POST /api/v1/artifacts/{id}/grants`: grants this page file one data file, named by
+   *  reference. A person alone may: every token is answered `403 HUMAN_ONLY`. The answer is the
+   *  grant, whether this call made it or it was already there. */
+  createArtifactGrant(
+    id: string,
+    input: CreateArtifactGrantInput,
+    bounds: WriteBounds
+  ): Promise<ArtifactGrant> {
+    return this.post<ArtifactGrant>(`/api/v1/artifacts/${pathSegment(id)}/grants`, input, bounds);
+  }
+
+  /** `DELETE /api/v1/artifacts/{id}/grants/{grant_id}`: takes one grant off this page file. A
+   *  person alone may. */
+  async deleteArtifactGrant(id: string, grantId: string, bounds: WriteBounds): Promise<void> {
+    await this.remove(
+      `/api/v1/artifacts/${pathSegment(id)}/grants/${pathSegment(grantId)}`,
       bounds
     );
   }

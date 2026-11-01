@@ -46,6 +46,10 @@ const (
 	// already stored past it, under a key Postgres compressed into the index, keeps its name and
 	// key: an upload naming it stores a version as before.
 	maxNewArtifactKeyBytes = 2692
+	// maxPageBytes bounds a version the page route serves. A page holds the code that draws it
+	// and no data, and a minified echarts is 1,121,883 bytes, so 5 MiB leaves a page room and
+	// keeps one frame's download small (INFRA-682, R6).
+	maxPageBytes int64 = 5 << 20
 )
 
 // artifactColumns is the canonical artifact column list scanArtifact reads.
@@ -832,6 +836,84 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.serveFileVersion(w, r, artifact.ID, number, content, contentType, sha, size)
+}
+
+// getArtifactVersionPage is GET /api/v1/artifacts/{id}/versions/{number}/page: one version of a
+// page file, as an HTML page in an opaque origin, for the frame a view block inserts. A page file
+// is a file whose stored type is text/html, or whose name ends .html or .htm.
+//
+// The refusals run in this order, so a file that is not a page never has its bytes read: the
+// artifact, its kind, the version's row without its content, the page test, the size, and only
+// then the bytes. A document is refused 415 before any version is read, because no version of a
+// document is a page file. For a file the stored type is on the version row, so the version must
+// exist before the page test can run, and a version that is not there is 404 rather than 415.
+//
+// Go's ServeMux serves HEAD from this GET pattern, so a HEAD gets each refusal too: that is the
+// request the block sends before it inserts a frame.
+func (s *server) getArtifactVersionPage(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	number, err := strconv.Atoi(r.PathValue("number"))
+	if err != nil || number < 1 {
+		writeError(w, "INVALID_VERSION", http.StatusBadRequest, "version number must be positive")
+		return
+	}
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind == "doc" {
+		writeNotAPage(w)
+		return
+	}
+	var contentType, sha *string
+	var size *int64
+	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
+		select mime, sha256, size from artifact_versions where artifact_id = $1 and number = $2
+	`, artifact.ID, number).Scan(&contentType, &sha, &size); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, "ARTIFACT_NOT_FOUND", http.StatusNotFound, "artifact version not found")
+			return
+		}
+		s.writeHandlerError(w, err)
+		return
+	}
+	if !isPageFile(artifact.Name, deref(contentType)) {
+		writeNotAPage(w)
+		return
+	}
+	// A file version records its size, so the cap is applied to the row and the bytes stay where
+	// they are until it passes.
+	if size != nil && *size > maxPageBytes {
+		writeError(w, "PAGE_TOO_LARGE", http.StatusRequestEntityTooLarge, fmt.Sprintf("a page is at most %d bytes", maxPageBytes))
+		return
+	}
+	var content []byte
+	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
+		select content from artifact_versions where artifact_id = $1 and number = $2
+	`, artifact.ID, number).Scan(&content); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.serveFilePage(w, r, artifact.ID, number, content, sha, size)
+}
+
+// writeNotAPage refuses a version of an artifact the page route does not serve.
+func writeNotAPage(w http.ResponseWriter) {
+	writeError(w, "NOT_A_PAGE", http.StatusUnsupportedMediaType, "this artifact is not a page file")
+}
+
+// isPageFile reports whether a file is an HTML page: the type it is stored under is text/html, or
+// its name ends .html or .htm. The caller refuses a document before it asks, since a document's
+// text is markdown Dispatch rewrites and never a page.
+func isPageFile(name, storedType string) bool {
+	if mediaType, _, err := mime.ParseMediaType(storedType); err == nil && mediaType == "text/html" {
+		return true
+	}
+	lowercase := strings.ToLower(name)
+	return strings.HasSuffix(lowercase, ".html") || strings.HasSuffix(lowercase, ".htm")
 }
 
 // deref is the string a nullable column holds, or "".

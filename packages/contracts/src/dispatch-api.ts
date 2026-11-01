@@ -476,8 +476,9 @@ export interface IssueSummaryPage {
 /**
  * One artifact of an `IssueReferenceSummary`: what a reference to an issue's document shows.
  * `latest_version` is its greatest version number, null only for an artifact with no version,
- * which no committed write leaves. `primary` marks the issue's spec, the document a reference to
- * a block of the spec (`dispatch://<issue>/spec#b-…`) names.
+ * which no committed write leaves. `size` is that version's size in bytes, null when the artifact
+ * has no version and on a document, which records none. `primary` marks the issue's spec, the
+ * document a reference to a block of the spec (`dispatch://<issue>/spec#b-…`) names.
  */
 export interface IssueReferenceSummaryDocument {
   readonly id: string;
@@ -485,6 +486,7 @@ export interface IssueReferenceSummaryDocument {
   readonly name: string;
   readonly kind: Artifact["kind"];
   readonly latest_version: number | null;
+  readonly size: number | null;
   readonly primary: boolean;
 }
 
@@ -652,6 +654,27 @@ export interface ArtifactReview {
   readonly reason: string | null;
   readonly ask_id: string | null;
   readonly created_at: string;
+}
+
+/** One data grant on a page file: the data file one page file may read, as the panel on that
+ *  page file's view lists it (`dispatch://INFRA-682`, "Data grants"). `id` is the grant's own,
+ *  which `DELETE /api/v1/artifacts/{id}/grants/{grant_id}` names; `artifact_id`, `ref` and
+ *  `name` are the data file's. `version` is the version the grant pins, `null` for a grant that
+ *  covers every version of that file, the newest included. Only a person grants one, so
+ *  `granted_by` is a person's login. */
+export interface ArtifactGrant {
+  readonly id: string;
+  readonly artifact_id: string;
+  readonly ref: string;
+  readonly name: string;
+  readonly version: number | null;
+  readonly granted_by: string;
+  readonly created_at: string;
+}
+
+/** What `GET /api/v1/artifacts/{id}/grants` answers for a page file: its grants, oldest first. */
+export interface ArtifactGrantsResponse {
+  readonly grants: ArtifactGrant[];
 }
 
 /** The document's approval as of its latest version: `draft` has never been reviewed or
@@ -2314,6 +2337,16 @@ export interface ArtifactReviewEventPayload {
   readonly ask_id: string | null;
 }
 
+/** `artifact.grants_changed`: a person added or removed a data grant on a page file, so which
+ *  data files Dispatch gives that page has changed. It names the page file alone: every reader
+ *  re-reads the whole list, because a view block applies all of it to the files its attributes
+ *  name. The page file owns the event, so it carries the issue for an issue page file and the
+ *  project with a null `issue_key` for a project one. No token can write one: the two routes
+ *  behind it answer every token `403 HUMAN_ONLY`. */
+export interface ArtifactGrantsChangedEventPayload {
+  readonly artifact_id: string;
+}
+
 /** A server-owned typed-block attribute was restored from its indexed row. */
 export interface BlockRepairedEventPayload {
   readonly block_id: string;
@@ -2589,6 +2622,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "artifact.changes_requested";
       readonly payload: ArtifactReviewEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "artifact.grants_changed";
+      readonly payload: ArtifactGrantsChangedEventPayload;
     })
   | (DispatchEventBase & { readonly type: "ask.opened"; readonly payload: AskEventPayload })
   | (DispatchEventBase & {

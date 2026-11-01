@@ -6,6 +6,7 @@ import { dangerText, linkHoverText, linkText } from "../../theme/classes";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { buildIssuePath, type DispatchRoute } from "../refs/routes";
 import { ArtifactDetails } from "./ArtifactDetails";
+import { ArtifactGrantsPanel } from "./ArtifactGrantsPanel";
 import { ArtifactBlobView, ArtifactHeader } from "./ArtifactHeader";
 import { ArtifactsTab } from "./ArtifactsTab";
 
@@ -76,6 +77,7 @@ export function ArtifactRoutePanel({
                   <ArtifactBlobView artifact={artifact} version={artifactRoute.version} />
                 )}
               </ArtifactHeader>
+              <ArtifactGrantsPanel artifact={artifact} version={artifactRoute.version} />
               <ArtifactDetails artifact={artifact} />
             </div>
           )

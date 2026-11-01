@@ -11,6 +11,7 @@ import {
   renderAskBlockShell,
   renderTypedBlock,
 } from "./typed-block-drawing";
+import { ViewBlockView } from "./view-block";
 
 /** The node view of a host-owned typed block other than `ask`: `renderTypedBlock`'s drawing,
  * under the block's id. It stamps `data-block-id` the way `AskBlockView` does, from the node's
@@ -157,7 +158,8 @@ export const askBlockEditingPlugin = new Plugin({
 });
 
 /** Installs the document's typed blocks in the editor: `AskBlockView` for every `ask` node,
- * reporting the live set of hosts (in document order) whenever it changes,
+ * reporting the live set of hosts (in document order) whenever it changes, `ViewBlockView` for
+ * every `view` node (the sandboxed frame its page runs in, beside the editable caption),
  * `renderTypedBlock`'s node view for every other type in the block schema, `pictureNodeView` for
  * every `image` node (a picture whose source is a Dispatch reference draws from its version's
  * bytes route), while keeping the library's other node views, and `askBlockEditingPlugin`. Call
@@ -182,13 +184,14 @@ export function installTypedBlocks(
       ...view.props.nodeViews,
       ...Object.fromEntries(
         blockSchema.types
-          .filter((type) => type.name !== "ask")
+          .filter((type) => type.name !== "ask" && type.name !== "view")
           .map((type) => [
             type.name,
             (node: ProseMirrorNode) => typedBlockView(node, view.dom.ownerDocument, type),
           ])
       ),
       ask: (node) => new AskBlockView(node, view.dom.ownerDocument, registry, publish),
+      view: (node) => new ViewBlockView(node, view.dom.ownerDocument),
       image: pictureNodeView(view),
     },
     plugins: [...(view.props.plugins ?? []), askBlockEditingPlugin],

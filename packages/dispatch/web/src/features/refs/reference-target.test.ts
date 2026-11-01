@@ -39,6 +39,7 @@ function spyReads() {
         latest_version: 2,
         name: "design.md",
         primary: true,
+        size: null,
         slug: "design",
       },
     ],
@@ -71,6 +72,7 @@ function spyReads() {
       latest_version: 4,
       name: "Runbook.md",
       project: "CORE",
+      size: null,
       slug: "runbook-md",
     }),
     getReferences: spyOn(api, "getReferences").mockResolvedValue({

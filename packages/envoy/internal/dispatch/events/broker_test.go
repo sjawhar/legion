@@ -64,6 +64,7 @@ func TestQuietSeparatesAnAgentsActivityFromBookkeeping(t *testing.T) {
 		{name: "a message receipt", event: model.Event{Type: "message.delivery", Actor: person}, quiet: true},
 		{name: "an anchor refresh", event: model.Event{Type: "comment.anchor_refreshed", Actor: person}, quiet: true},
 		{name: "per-viewer bookkeeping", event: model.Event{Type: "user_state.updated", Actor: person}, quiet: true},
+		{name: "a person's grant change", event: model.Event{Type: "artifact.grants_changed", Actor: person}, quiet: true},
 		{
 			name: "a targeted message its session already had",
 			event: model.Event{Type: "message.created", Actor: person, Payload: model.MessageEventPayload{

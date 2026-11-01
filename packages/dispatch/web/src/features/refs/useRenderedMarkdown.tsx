@@ -10,6 +10,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { type AskBlockHost, applyAskBlockShell, askShellSlots } from "../doc/typed-block-drawing";
+import { collectViewSlots, ViewBlock, type ViewBlockSlot } from "../view/ViewBlock";
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
 import { TextAskCard } from "./markdown-cards";
 import { renderWithEngine, type SoftBreaks } from "./markdown-engine";
@@ -28,6 +29,8 @@ const NO_ANCHORS: readonly ReferenceAnchor[] = [];
 const NO_PICTURES: readonly PictureAnchor[] = [];
 /** The same, for a body with no decision card to mount. */
 const NO_ASK_HOSTS: readonly AskBlockHost[] = [];
+/** The same, for a body with no `view` block. */
+const NO_VIEWS: readonly ViewBlockSlot[] = [];
 
 /**
  * A host for each `ask` shell `paint` drew under `element` (`renderAskBlockShell`), paired in
@@ -149,6 +152,7 @@ export function useRenderedMarkdown(
   const [referenceAnchors, setReferenceAnchors] = useState<readonly ReferenceAnchor[]>(NO_ANCHORS);
   const [pictureAnchors, setPictureAnchors] = useState<readonly PictureAnchor[]>(NO_PICTURES);
   const [askHosts, setAskHosts] = useState<readonly AskBlockHost[]>(NO_ASK_HOSTS);
+  const [viewSlots, setViewSlots] = useState<readonly ViewBlockSlot[]>(NO_VIEWS);
   const [isFallback, setIsFallback] = useState(false);
 
   useLayoutEffect(() => {
@@ -177,6 +181,8 @@ export function useRenderedMarkdown(
       setReferenceAnchors(anchors.length === 0 ? NO_ANCHORS : anchors);
       const placeholders = collectPictureAnchors(element);
       setPictureAnchors(placeholders.length === 0 ? NO_PICTURES : placeholders);
+      const slots = collectViewSlots(element);
+      setViewSlots(slots.length === 0 ? NO_VIEWS : slots);
       if (engine !== undefined && parsed !== undefined) {
         cancelDraw = drawMermaidDiagrams(element, parsed, markdown, (source) =>
           engine.parse(source, softBreaks)
@@ -201,6 +207,13 @@ export function useRenderedMarkdown(
           <DispatchPicture caption={caption} route={route} variant={pictures} />,
           anchor,
           key
+        )
+      ),
+      ...viewSlots.map((slot) =>
+        createPortal(
+          <ViewBlock caption={slot.caption} data={slot.data} host={slot.host} page={slot.page} />,
+          slot.host,
+          slot.key
         )
       ),
       ...(Card === undefined

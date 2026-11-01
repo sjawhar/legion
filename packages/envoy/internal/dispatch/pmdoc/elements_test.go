@@ -355,6 +355,7 @@ func TestEveryNodeOfTheSchemaWeighsWhatItMakes(t *testing.T) {
 		"text":                {repeated("a*b*"), repeated(")_")},
 		"callout":             {repeated(":::callout{}\n:::\n\n"), repeated(":::callout{}\na\n:::\n\n")},
 		"ask":                 {numbered(":::ask{#ask-%d}\n:::\n\n"), numbered(":::ask{#ask-%d}\nq\n:::\n\n")},
+		"view":                {repeated(":::view{}\n:::\n\n"), repeated(":::view{}\na\n:::\n\n")},
 	}
 	oneADocument := map[string]bool{"doc": true, "frontmatter": true}
 	types := typedBlockNames()

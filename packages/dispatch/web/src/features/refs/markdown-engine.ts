@@ -4,7 +4,11 @@ import { useLayoutEffect, useState } from "react";
 
 import type { BlockSchema } from "../../api/types";
 import { loadBlockSchema } from "../doc/schema";
-import { renderAskBlockShell, renderTypedBlock } from "../doc/typed-block-drawing";
+import {
+  renderAskBlockShell,
+  renderTypedBlock,
+  renderViewBlockShell,
+} from "../doc/typed-block-drawing";
 import { referenceSpans } from "./reference-spans";
 import {
   buildDispatchReference,
@@ -135,7 +139,11 @@ function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
         blockSchema,
         readOnly: true,
         renderBlock: (node, type) =>
-          type.name === "ask" ? renderAskBlockShell(node) : renderTypedBlock(node, type),
+          type.name === "ask"
+            ? renderAskBlockShell(node)
+            : type.name === "view"
+              ? renderViewBlockShell(node)
+              : renderTypedBlock(node, type),
       })
     )
     .then((proof) => {

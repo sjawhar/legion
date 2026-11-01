@@ -6,6 +6,7 @@ import { api } from "../../api/client";
 import { QueryError } from "../../components/QueryError";
 import { dangerText } from "../../theme/classes";
 import { ArtifactDocument } from "../artifacts/ArtifactDocument";
+import { ArtifactGrantsPanel } from "../artifacts/ArtifactGrantsPanel";
 import { ArtifactBlobView, ArtifactHeader } from "../artifacts/ArtifactHeader";
 import { ArtifactQueryStates } from "../artifacts/ArtifactQueryStates";
 import type { DocumentToolbar } from "../doc/ProofDocument";
@@ -160,6 +161,7 @@ export function DocumentPage(): ReactNode {
           <ArtifactBlobView artifact={artifact.data} version={version} />
         )}
       </ArtifactHeader>
+      <ArtifactGrantsPanel artifact={artifact.data} version={version} />
       <ReferencedBy reference={buildDispatchReference(documentReferenceRoute(artifact.data))} />
     </section>
   );

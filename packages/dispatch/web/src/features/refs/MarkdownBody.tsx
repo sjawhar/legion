@@ -69,8 +69,109 @@ const paintInline: PaintMarkdown = (element, parsed, serializer) => {
   }
 };
 
+/** The `view` block's frame slot, which the mounted block owns (`renderViewBlockShell`). */
+const FRAME_SLOT = "[data-dispatch-view-frame]";
+
+/** Whether this node is a frame slot or holds one, and so must stay in the document. */
+function holdsFrameSlot(node: Node): node is Element {
+  return (
+    node instanceof Element && (node.matches(FRAME_SLOT) || node.querySelector(FRAME_SLOT) !== null)
+  );
+}
+
+/** The `page` of every frame slot at or under `element`, in document order: what a repaint pairs
+ *  a live element with a fresh one by. A block's own `#id` is only what its author wrote and can
+ *  repeat, so it names nothing here. */
+function slotPages(element: Element): string {
+  const pages = element.matches(FRAME_SLOT)
+    ? [element.getAttribute("data-dispatch-view-page") ?? ""]
+    : [];
+  for (const slot of element.querySelectorAll(FRAME_SLOT)) {
+    pages.push(slot.getAttribute("data-dispatch-view-page") ?? "");
+  }
+  return pages.join(" ");
+}
+
+/** Writes the fresh element's attributes onto the live one it replaces. A frame slot keeps every
+ *  attribute it already has, because the mounted block stamps its own; every other element is
+ *  made to carry exactly what the fresh paint says. */
+function copyAttributes(live: Element, fresh: Element): void {
+  for (const attribute of [...fresh.attributes]) {
+    if (live.getAttribute(attribute.name) !== attribute.value) {
+      live.setAttribute(attribute.name, attribute.value);
+    }
+  }
+  if (live.matches(FRAME_SLOT)) {
+    return;
+  }
+  for (const name of live.getAttributeNames()) {
+    if (!fresh.hasAttribute(name)) {
+      live.removeAttribute(name);
+    }
+  }
+}
+
+/**
+ * Writes the freshly painted children over the live ones, keeping every element that holds a
+ * `view` block's frame slot where it is. An `<iframe>` that leaves the document, even for an
+ * instant, loads again, and a second load reads as "the page moved away", which is permanent; so
+ * a repaint must move no frame and must take none out.
+ *
+ * At each level the children that hold a slot are paired in order, by tag name and by the
+ * sequence of `page` values under them. On a pair, the fresh attributes are written onto the
+ * live element and its own children are spliced the same way, and a kept element is never passed
+ * to `insertBefore`. Every other fresh child is inserted around that kept chain. Any mismatch
+ * falls back to replacing the level's children, whose worst case is one reload.
+ */
+function spliceChildren(parent: Element, incoming: readonly Node[]): void {
+  const liveKept = [...parent.childNodes].filter(holdsFrameSlot);
+  const freshKept = incoming.filter(holdsFrameSlot);
+  const paired =
+    liveKept.length === freshKept.length &&
+    liveKept.every((live, index) => {
+      const fresh = freshKept[index];
+      return (
+        fresh !== undefined &&
+        live.tagName === fresh.tagName &&
+        slotPages(live) === slotPages(fresh)
+      );
+    });
+  if (!paired) {
+    parent.replaceChildren(...incoming);
+    return;
+  }
+  const kept = new Set<Node>(liveKept);
+  for (const child of [...parent.childNodes]) {
+    if (!kept.has(child)) {
+      child.remove();
+    }
+  }
+  let keptIndex = 0;
+  for (const node of incoming) {
+    if (!holdsFrameSlot(node)) {
+      parent.insertBefore(node, liveKept[keptIndex] ?? null);
+      continue;
+    }
+    const live = liveKept[keptIndex];
+    keptIndex += 1;
+    if (live === undefined) {
+      continue;
+    }
+    copyAttributes(live, node);
+    // The slot itself is React's: no pass of the repaint writes inside it.
+    if (!live.matches(FRAME_SLOT)) {
+      spliceChildren(live, [...node.childNodes]);
+    }
+  }
+}
+
 const paintBlock: PaintMarkdown = (element, parsed, serializer) => {
-  element.replaceChildren(serializer.serializeFragment(parsed.content));
+  const painted = serializer.serializeFragment(parsed.content);
+  if (element.querySelector(FRAME_SLOT) === null) {
+    element.replaceChildren(painted);
+  } else {
+    spliceChildren(element, [...painted.childNodes]);
+  }
   drawTaskCheckboxes(element);
   for (const item of element.querySelectorAll("li[data-spread='false']")) {
     const paragraph = item.firstElementChild;
