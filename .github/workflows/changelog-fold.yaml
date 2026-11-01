@@ -10,6 +10,13 @@ name: Fold Changelog Fragments
 # envoy-client have no release of their own, so their fragments land under main@<the first 12 hex
 # digits of main's tip> (`release-push.sh fold-plan`'s header paragraph).
 #
+# The packages whose fragments are folded are the specs in .github/changelog-packages, one per
+# line, each <package-dir>[=<tag-prefix>]: a tag prefix is the one the package's release workflow
+# passes to `release-push.sh version`; a package without one has no release, and its fragments
+# fold under main@<12 hex>. Every step below reads that one file, and so does ci.yaml's lint job,
+# which runs `release-push.sh fold-orphans` over it on every pull request and fails one that adds
+# a fragment of a package the file does not name.
+#
 # It is a workflow of its own, and the release workflows are untouched: it runs after each run of
 # either release workflow on main (a new tag is what makes a fragment foldable), once a day, and by
 # hand. Every run folds everything foldable on main's tip from the tags as they are then, so a
@@ -26,9 +33,9 @@ name: Fold Changelog Fragments
 # holds the credential, the deploy key in the env of the push step alone, and the tripwire last in
 # fold_build. It does not read which commit a job checks out: this workflow keeps both jobs on
 # github.sha, which the event fixes, so fold_build never chooses the commit whose code
-# fold_publish runs. A pull request that changes the fold runs fold_build on its own merge commit,
-# so changie, the plan and the notes run on GitHub before the merge; fold_publish runs on main
-# alone, so nothing lands from a pull request.
+# fold_publish runs. A pull request that changes the fold runs fold_build on its own merge
+# commit, so changie, the plan and the notes run on GitHub before the merge; fold_publish runs on
+# main alone, so nothing lands from a pull request.
 on:
   workflow_run:
     workflows: ["Release Packages", "Release Envoy Listener"]
@@ -37,10 +44,12 @@ on:
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
-  # The fold's own files only: a fragment under .changes/ gets no pull-request check.
+  # The fold's own files only, .github/changelog-packages among them. A fragment of its own is no
+  # trigger here: ci.yaml's lint job checks it (`release-push.sh fold-orphans`).
   pull_request:
     paths:
       - .github/workflows/changelog-fold.yaml
+      - .github/changelog-packages
       - .github/scripts/release-push.sh
       - .github/actions/install-changie/**
       - packages/*/.changie.yaml
@@ -57,15 +66,6 @@ permissions: {}
 concurrency:
   group: changelog-fold-${{ github.ref }}
   cancel-in-progress: false
-
-env:
-  # The packages whose fragments are folded, each <package-dir>[=<tag-prefix>]: a tag prefix is the
-  # one the package's release workflow passes to `release-push.sh version`; a package without one
-  # has no release, and its fragments fold under main@<12 hex>.
-  CHANGELOG_PACKAGES: >-
-    packages/pi-legion=pi-legion-v packages/pi-envoy=pi-envoy-v
-    packages/envoy=legion-envoy-v
-    packages/claude-envoy packages/contracts packages/envoy-client
 
 jobs:
   # Plans the fold and renders the planned fragments with changie into notes, one file per package
@@ -94,8 +94,9 @@ jobs:
       - name: Plan the fold
         id: plan
         run: |
-          # shellcheck disable=SC2086 # $CHANGELOG_PACKAGES is the spec list, split on purpose
-          plan=$(.github/scripts/release-push.sh fold-plan $CHANGELOG_PACKAGES)
+          packages=$(<.github/changelog-packages)
+          # shellcheck disable=SC2086 # $packages is the spec list, split on purpose
+          plan=$(.github/scripts/release-push.sh fold-plan $packages)
           if [ -n "$plan" ]; then
             printf '%s\n' "$plan"
             echo "fold=true" >> "$GITHUB_OUTPUT"
@@ -108,8 +109,9 @@ jobs:
 
       - name: Render the fragments with changie
         run: |
-          # shellcheck disable=SC2086 # $CHANGELOG_PACKAGES is the spec list, split on purpose
-          .github/scripts/release-push.sh fold-notes "$RUNNER_TEMP/changelog-notes" $CHANGELOG_PACKAGES
+          packages=$(<.github/changelog-packages)
+          # shellcheck disable=SC2086 # $packages is the spec list, split on purpose
+          .github/scripts/release-push.sh fold-notes "$RUNNER_TEMP/changelog-notes" $packages
 
       # The notes, exactly as rendered, for fold_publish; an empty plan writes none.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -169,5 +171,6 @@ jobs:
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          # shellcheck disable=SC2086 # $CHANGELOG_PACKAGES is the spec list, split on purpose
-          .github/scripts/release-push.sh push-fold "$BASE" "$RUNNER_TEMP/changelog-notes" $CHANGELOG_PACKAGES
+          packages=$(<.github/changelog-packages)
+          # shellcheck disable=SC2086 # $packages is the spec list, split on purpose
+          .github/scripts/release-push.sh push-fold "$BASE" "$RUNNER_TEMP/changelog-notes" $packages

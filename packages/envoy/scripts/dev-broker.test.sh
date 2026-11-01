@@ -23,9 +23,12 @@
 # stale, or script-precomputed value, the exact property that closes the race where a
 # port collision let a losing instance report "ready" while a different, already-running
 # instance's broker actually answered; (e) the two concurrent instances bind two different
-# ports; and (f) each instance's broker trusts the dev-oidc-issuer that instance started, lists
+# ports; (f) each instance's broker trusts the dev-oidc-issuer that instance started, lists
 # its dev caller and exchange account, exports the caller token that issuer wrote, and stops the
-# issuer on exit.
+# issuer on exit; and (g) that same issuer serves the code flow for the broker's own sign-in
+# client and signs the approver in, the broker's BROKER_SIGNIN_* naming that issuer, client,
+# domain and a 0600 secret file in the run's workdir, and the banner names the broker's own
+# approval page.
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -106,13 +109,15 @@ chmod +x "${fake_bin_dir}/psql"
 
 # --- Fake go: "go build -o <path> ./cmd/<pkg>" installs a stub executable at <path> instead of
 # compiling. The client stubs are never run by dev-broker.sh (it only prints their directory); the
-# broker stub logs the issuer and the callers it was configured with, then a "broker listening
-# addr=..." line exactly like the real cmd/broker does once it binds — using its own PID as a
-# stand-in for the kernel-assigned port a real Listen would report, since two concurrently
-# running stub processes always have distinct PIDs — and then stays alive as the backgrounded
-# "server" process dev-broker.sh waits on and kills during cleanup. The dev-oidc-issuer stub writes
-# each --token's file, then logs "issuer listening url=..." as the real one does, its own PID
-# standing in for its port the same way, and stays alive until cleanup kills it. ---
+# broker stub logs the issuer, the callers and the sign-in client it was configured with, then a
+# "broker listening addr=..." line exactly like the real cmd/broker does once it binds — using its
+# own PID as a stand-in for the kernel-assigned port a real Listen would report, since two
+# concurrently running stub processes always have distinct PIDs — and then stays alive as the
+# backgrounded "server" process dev-broker.sh waits on and kills during cleanup. The
+# dev-oidc-issuer stub writes each --token's file, logs the --code-flow client, the mode of the
+# secret file it would read and the --sign-in-as person, then logs "issuer listening url=..." as
+# the real one does, its own PID standing in for its port the same way, and stays alive until
+# cleanup kills it. ---
 cat >"${fake_bin_dir}/go" <<'EOF'
 #!/usr/bin/env bash
 out=""
@@ -135,14 +140,32 @@ DEVRELAY
   */dev-oidc-issuer)
     cat >"$out" <<'ISSUER'
 #!/usr/bin/env bash
+client="" secret_file="" sign_in_as=""
 while [[ $# -gt 0 ]]; do
-  if [[ "$1" == --token ]]; then
-    account_and_file="${2#*=}"
-    printf 'fake-token-for-%s\n' "${account_and_file%%=*}" >"${account_and_file#*=}"
-    shift
-  fi
-  shift
+  case "$1" in
+    --token)
+      account_and_file="${2#*=}"
+      printf 'fake-token-for-%s\n' "${account_and_file%%=*}" >"${account_and_file#*=}"
+      ;;
+    --code-flow)
+      client="${2%%=*}"
+      secret_file="${2#*=}"
+      ;;
+    --sign-in-as) sign_in_as="$2" ;;
+    *)
+      echo "fake dev-oidc-issuer: unexpected argument $1" >&2
+      exit 2
+      ;;
+  esac
+  shift 2 || exit 2
 done
+# The real issuer reads the code flow's client secret as it parses --code-flow, and refuses a
+# file it cannot read or one holding nothing but whitespace, so the file must be there by now.
+secret_mode="empty-or-missing"
+if [[ -s "$secret_file" ]]; then
+  secret_mode="$(stat -c %a "$secret_file")"
+fi
+echo "fake issuer: code-flow client=$client secret-file=$secret_file secret-mode=$secret_mode sign-in-as=$sign_in_as" >&2
 echo "dev-oidc-issuer: issuer listening url=http://127.0.0.1:$$" >&2
 exec sleep 999999
 ISSUER
@@ -155,6 +178,7 @@ if [[ $# -ne 0 ]]; then
   exit 2
 fi
 echo "fake broker: issuer=${BROKER_K8S_OIDC_ISSUER:-} callers=${BROKER_API_ACCOUNTS:-} exchange=${BROKER_EXCHANGE_ACCOUNTS:-}" >&2
+echo "fake broker: sign-in issuer=${BROKER_SIGNIN_ISSUER:-} client=${BROKER_SIGNIN_CLIENT_ID:-} secret-file=${BROKER_SIGNIN_CLIENT_SECRET_FILE:-} domain=${BROKER_SIGNIN_DOMAIN:-}" >&2
 echo "broker listening addr=127.0.0.1:$$" >&2
 exec sleep 999999
 BROKER
@@ -334,6 +358,32 @@ assert_instance_isolated() {
     exit 1
   fi
   printf 'PASS: %s trusts its own issuer (%s), lists its caller, and exports the caller token that issuer wrote\n' "$label" "$issuer"
+  # The same issuer process signs people in for the broker's own client: the issuer serves the
+  # code flow for the client and secret file the broker names, a file in this run's own workdir
+  # that was there, non-empty and readable by its owner alone, before the issuer started, and
+  # signs in the approver whose own domain the broker holds a signed-in person to; the secret
+  # itself is never printed; and the banner tells a person to approve a secret on this broker's
+  # own page.
+  local workdir signin_file
+  workdir="$(grep -o 'dev-broker: workdir [^ ]*' "$log_file" | head -n1 | cut -d' ' -f3 || true)"
+  signin_file="${workdir}/signin-client-secret"
+  if [[ -z "$workdir" ]] \
+    || ! grep -qF "fake issuer: code-flow client=dev-broker secret-file=${signin_file} secret-mode=600 sign-in-as=ada@example.com" "$log_file" \
+    || ! grep -qF "fake broker: sign-in issuer=${issuer} client=dev-broker secret-file=${signin_file} domain=example.com" "$log_file"; then
+    cat "$log_file" >&2
+    echo "FAIL: $label's issuer and broker do not share one sign-in client with a 0600 secret in ${workdir:-its workdir}" >&2
+    exit 1
+  fi
+  if grep -qF "$(cat "$signin_file")" "$log_file"; then
+    echo "FAIL: $label printed its sign-in client's secret" >&2
+    exit 1
+  fi
+  if ! grep -qF "(http://127.0.0.1:${bound}/approve/<record>)" "$log_file"; then
+    cat "$log_file" >&2
+    echo "FAIL: $label does not tell a person to approve a secret on its own broker's page (port $bound)" >&2
+    exit 1
+  fi
+  printf 'PASS: %s signs people in to its broker at that same issuer, with a 0600 secret it never prints, and names its broker'"'"'s approval page\n' "$label"
   port="$bound"
 
   local pid="${instance_pid[$n]}"
