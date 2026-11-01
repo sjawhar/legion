@@ -35,28 +35,28 @@ belong to the operation that began next, so the caller fails or deletes the wron
 ## Evidence
 
 `packages/envoy/internal/dispatch/docs/websocket.go` (sjawhar/legion#2519).
-`servicePersistenceAdapter.LoadDoc` (`:90`) takes `load := a.service.beginRoomLoad(room)` and has
-one `defer`: it recovers a panic into `err` and, for any error, calls
-`a.service.failRoomLoad(room, load, err)` with the `*roomLoad` itself in hand (`:92-99`).
-`failRoomLoad` does `s.roomLoads.CompareAndDelete(room, load)` and then `s.failRoom(room, cause)`
-(`:175-178`), so the record it removes is the one that load began and no other.
+`servicePersistenceAdapter.LoadDoc` takes `load := a.service.beginRoomLoad(room)` and has one
+`defer`: it recovers a panic into `err` and, for any error, calls
+`a.service.failRoomLoad(room, load, err)` with the `*roomLoad` itself in hand. `failRoomLoad` does
+`s.roomLoads.CompareAndDelete(room, load)` and then `s.failRoom(room, cause)`, so the record it
+removes is the one that load began and no other.
 
 `LoadDoc`'s docblock states the window and cites the library for it: nothing of ygo's own runs
 between this read and the hook it calls next (sjawhar/ygo v1.54.1-sami.3,
 `provider/websocket/server.go:1913-1918`), so "the only way a load fails with nothing of this
-service still to run on its goroutine is a panic out of this read" (`:73-79`). It also says why
+service still to run on its goroutine is a panic out of this read". It also says why
 ygo's own recovery is not enough: ygo "recovers such a panic too and hands every waiter the
 load's error (server.go:1904-1923), but it does so with the record this load began still standing
 under the room's name and the room healthy, which left the failure to whichever caller's Apply
 met it - a caller that cannot tell the load it waited on from the load that began after it, since
-ygo removes the room before any waiter wakes (server.go:1932-1941)" (`:84-89`).
+ygo removes the room before any waiter wakes (server.go:1932-1941)".
 
 The deletion is the proof. `applyRoom`, `failUnfinishedLoad`, `roomLoadWaitedOn`, `roomLoadNumber`,
 `loadsBegun` and `beforeFailUnfinishedLoad` appear nowhere under
-`packages/envoy/internal/dispatch/`; the ten non-test `s.srv.Apply(` call sites in
-`internal/dispatch/docs` are the library's own call again (`service.go` 3, `livewrite.go` 2,
-`marks.go` 2, `mutation.go` 2, `testhooks.go` 1); and `websocket.go` is 884 lines, 91 fewer than
-before.
+`packages/envoy/internal/dispatch/`; the nine non-test `s.srv.Apply(` call sites in
+`internal/dispatch/docs` are the library's own call again (`service.go` 3, `marks.go` 2,
+`mutation.go` 2, `livewrite.go` 1, `testhooks.go` 1); and `websocket.go` lost the wrapper and the
+naming machinery with it.
 
 The cross-head control is in the pull request body: this head's `websocket_test.go`, run against
 the previous head's seven source files copied under `$TMPDIR` with the workspace untouched,
