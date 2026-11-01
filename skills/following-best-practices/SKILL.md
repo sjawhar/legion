@@ -1,6 +1,6 @@
 ---
 name: following-best-practices
-description: "Use with any other skill before choosing a design, writing options, a spec or plan, or approval."
+description: "Use before choosing a design, writing options, a spec or plan, or requesting approval."
 ---
 
 # Following best practices
