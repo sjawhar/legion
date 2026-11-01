@@ -1635,14 +1635,21 @@ LEGION-631 is one: it deletes the `/legion/v1/gh-token` and `/legion/v1/git-cred
 Such a release is pinned only after every tree is drained (step 1 of the runbook above) or every issue pod is relaunched onto the new image.
 The daemon's boot log, and every orphan sweep after it, names each pod still on another image
 — `sandbox runtime: <sandbox> runs image <image>, the configured image is <image>; its agents call
-this daemon as the older release until the pod is relaunched` (`warnImageDrift` in `internal/runtime/sandbox/sandbox.go`)
+this daemon as the older release until the pod is relaunched` (`warnPodDrift` in `internal/runtime/sandbox/sandbox.go`)
 — and the daemon replaces such a pod at the next launch of any of its roles (`imageDrift` beside the moved-stream trigger in `relaunch.go`), which interrupts the roles live in it once:
 they end with the pod and resume in the new one, as a moved worker stream already makes them (below).
-The daemon-launched controller's pod is in scope for both the warning and the replacement, which happens only when the controller's process is being started anyway.
+The same log names each pod running as a ServiceAccount other than `runtime.kubernetes.pod.service_account`
+— `sandbox runtime: <sandbox> runs as ServiceAccount <account>, the configured ServiceAccount is
+<account>; its agents hold that identity until the pod is relaunched` (`accountDrift`, warned by the same function)
+— one warning per Sandbox per kind of drift, so a pod holding both is named twice.
+A pod runs as the account it was created with for its whole life, so changing `service_account` reaches a running pod only by replacing it, which the next launch of any of its roles does (`accountDrift` in `relaunch.go`), and its agents hold the old account's identity until then.
+That replacement is outside the one exemption image drift has: a launch installing a stale-plugin pair keeps a pod whose image alone drifted, and replaces one running as another account, since no install can move the account.
+The daemon-launched controller's pod is in scope for both warnings and both replacements, which happen only when the controller's process is being started anyway.
+An unset `service_account` is read as the namespace's `default` on both sides, so a deployment that names none keeps a pod running as `default` and replaces one running as any other account.
 The boot action is the log line alone: refusing to adopt a drifted pod would stop observing a live pod and trigger nothing.
 
 A launch replaces a pod other roles of its issue still run in when the pod cannot run the launching role as a pod created now would:
-it runs another image; it holds a worker stream, a secrets broker enrollment or a session database URL key that a pod created now is not handed;
+it runs another image; it runs as another ServiceAccount; it holds a worker stream, a secrets broker enrollment or a session database URL key that a pod created now is not handed;
 or a role's launcher Secret no longer binds it.
 The replacement ends those roles' processes wherever their turns stood, and that end is the daemon's act, not theirs (LEGION-729).
 The patch that suspends the pod also names it on the Sandbox, as the `legion.dev/displaced-pod` annotation:
@@ -1829,7 +1836,7 @@ the role's shim runs the start wrapper, `/bin/sh -c '<start script>' legion-star
 `<n>` is the setup command's word count, 0 with none), whose install step runs `bun add --backend=copyfile --exact @sjawhar/pi-legion@<version> @sjawhar/pi-envoy@<version>` (a tarball path or URL source is handed to `bun add` as written;
 `--backend=copyfile` because the issue's bun install cache and the generation directory now share the issue's volume, where bun would otherwise hardlink the installed files out of that cache and an in-place edit of either would corrupt the other for the life of the volume) into a fresh generation directory, `$XDG_STATE_HOME/legion-plugins/g<generation>/` (`/legion/scratch/state/<role>/legion-plugins/g<N>/`), checks with a `node -e` snippet that the installed `pi-legion`'s `legion.daemonApiVersion` equals the daemon's own (exiting 1 before `exec`, printing `legion plugins: @sjawhar/pi-legion@<v> declares daemon API contract <got>; this daemon requires <want>` when it does not), and then `exec "$@"`s into Oh My Pi, which starts with `--extension <gen dir>/node_modules/@sjawhar/pi-envoy --extension <gen dir>/node_modules/@sjawhar/pi-legion` in place of `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`.
 A pod replaced for any other reason in the same relaunch
-— a suspended Sandbox, a lost launcher binding, a failed init container, a moved address
+— a suspended Sandbox, a lost launcher binding, a failed init container, a moved address, a pod running as another ServiceAccount
 — installs nothing: it comes up on the configured image, whose copies the boot gate already holds to the daemon's contract;
 and a relaunch that is not a stale-plugin one (a death, a moved address) still replaces a pod on another image as the section above says.
 An install failure ends the child before Oh My Pi starts;
@@ -2900,8 +2907,8 @@ each `mapped[]` repository carries `cache` (`repo`, `sandbox`, `state` — `star
 — `ready`, `address`, the cache's Service, while Ready behind its own Service, and from the last health read of the pod it runs now `head`, `lastFetchAt` and `bytes`, or `healthError`) once the cache exists, and `caches` lists the caches of repositories the mapping no longer names, each with `retainedUntil`.
 
 An issue pod's launch makes its repository's cache when there is none yet, and the daemon makes the cache of each repository it serves at boot and on every orphan sweep after it, once a minute:
-a missing cache is created (its Sandbox `Suspended`, then its Secret owned by that Sandbox, then its pod template and `Running`), and a cache whose pod runs another image than the daemon's, has ended, or was left `Suspended`, or whose Sandbox's pod template reserves other than `runtime.kubernetes.repository_cache.resources` now says, gets a new pod while its Sandbox and volume stay, so a new release or a new reservation costs a pod, not a clone.
-The reservation is read from the Sandbox's pod template, never from the pod, since GKE Autopilot rewrites a pod's requirements at admission.
+a missing cache is created (its Sandbox `Suspended`, then its Secret owned by that Sandbox, then its pod template and `Running`), and a cache whose pod runs another image than the daemon's, runs as a ServiceAccount other than `runtime.kubernetes.pod.service_account`, has ended, or was left `Suspended`, or whose Sandbox's pod template reserves other than `runtime.kubernetes.repository_cache.resources` now says, gets a new pod while its Sandbox and volume stay, so a new release, a new account or a new reservation costs a pod, not a clone.
+The reservation is read from the Sandbox's pod template, never from the pod, since GKE Autopilot rewrites a pod's requirements at admission; the account is read from the pod, where the API server keeps a named account as written and writes `default` for a pod that names none.
 A pod still running is replaced only once it serves no stream:
 the daemon asks its `/healthz` first, whose `streams` counts the tars it is sending or holding in its queue, and while that is above 0 it logs `repository cache pod is replaced once it serves no
 stream` and leaves the pod to a later sweep, because the replacement would end every one of those tars, failing each fetch reading one and making its issue pod again.
@@ -3786,7 +3793,8 @@ Neither holds an issue's clone or workspace.
 Every end of an issue pod is therefore the end of that pod's disk, and the ends are these:
 
 - **a launch replaces the pod**, because it cannot run the launching role as a pod created now would:
-  another image, a moved worker stream, a secrets-broker enrollment, session-database key or `role_config_files` mount the pod lacks, a role's launcher Secret that no longer binds it, or a Sandbox of the disk shape before this release ([Pinning a release that drops what a running pod still uses](#pinning-a-release-that-drops-what-a-running-pod-still-uses), [Cutting over to the pod-owned disk](#cutting-over-to-the-pod-owned-disk));
+  another image, another ServiceAccount, a moved worker stream, a secrets-broker enrollment, session-database key or `role_config_files` mount the pod lacks, a role's launcher Secret that no longer binds it, or a Sandbox of the disk shape before this release ([Pinning a release that drops what a running pod still uses](#pinning-a-release-that-drops-what-a-running-pod-still-uses), [Cutting over to the pod-owned disk](#cutting-over-to-the-pod-owned-disk)).
+  A change of `runtime.kubernetes.pod.service_account` therefore costs every live issue pod its disk at the next launch of one of its roles, so a deployment moving its pods to another account drains its trees first, or accepts that each pod's unpushed work goes with it;
 
 - **the issue is stopped**: its close as `done`, or a move to `backlog`, `icebox` or `triage`, runs the durable suspend effect, which sets the Sandbox `Suspended`, waits its pod out and deletes the Sandbox with the six role Secrets it owns (`SuspendIssue`, `internal/runtime/sandbox/issue_suspend.go`), logging `sandbox runtime: deleted the closed
   issue's Sandbox and the role Secrets it owned`.
@@ -4305,7 +4313,8 @@ each issue's pod (every role of it alike) and the image probe's.
   a `secret` or `config_map` source may set `default_mode`, the octal mode of every file it projects, such as `0440` in place of Kubernetes' default 0644 ([Configuration](#configuration));
   a projected `service_account_token` must last at least 600 s, the least the API server issues, and its `audience` may not still hold a `${…}` placeholder, which nothing expands.
   `volume_mounts` are read-only unless `read_only: false`, and may use `sub_path`.
-  `service_account` is the pods' ServiceAccount; unset, pods run as the namespace's `default` ServiceAccount.
+  `service_account` is the pods' ServiceAccount (unset, pods run as the namespace's `default` ServiceAccount); it may not still hold a `${…}` placeholder, which nothing expands, as a projected token's `audience` may not.
+  Changing it replaces each live issue or controller pod at the next launch of one of its roles, and each repository cache's pod at the first boot, sweep or new issue pod of its repository that finds it serving no stream; an issue pod's disk goes with its pod ([Pinning a release that drops what a running pod still uses](#pinning-a-release-that-drops-what-a-running-pod-still-uses)).
   A name or path that collides with Legion's own is refused at load, naming both:
   a variable the runtime, the worker image's `ENV` or every launch sets, a volume name Legion uses, or a mount at, under or above a path Legion mounts, the image owns, or a tool runs from, or `workspace-init`'s state home (`/home/legion/.local/state`, where `workspace-init` keeps the XDG state it provisions the issue under:
   no role's agent keeps its Oh My Pi state there any more
