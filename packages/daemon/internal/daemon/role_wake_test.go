@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"testing"
 	"time"
@@ -29,9 +30,11 @@ func workerClaim(t *testing.T, sup *supervisor, issue string, role claim.Role, s
 // A review round that ends with no decision is the one path the daemon cannot end on its own: the
 // reviewer must submit a review, and the daemon tells the architect so with a review-stuck notice
 // whose Topic names the reviewer's role topic, which the architect answers with its own
-// envoy_publish. While the idle suspend holds that reviewer, nobody holds the role, the architect's
-// publish is refused outright by the listener (a 404 that raises no exception), and the round is
-// frozen until a person acts. So the notice's own publish resumes the reviewer first.
+// envoy_publish. While the idle suspend holds that reviewer, nobody holds the role and the
+// listener refuses the architect's publish with its 404. The role_unheld report of that refusal
+// resumes the reviewer too (TestARoleLaneExceptionResumesTheIdleSuspendedWorker), but only after
+// the architect's first publish has failed. So the notice's own publish resumes the reviewer first,
+// and the reviewer holds its role by the time the architect answers.
 //
 // It resumes nothing else: an operator's suspension is the operator's to end, a daemon suspension
 // is its workflow's, a failed or retired claim is not coming back for a message, a worker of a
@@ -89,27 +92,39 @@ func TestAReviewStuckNoticeResumesTheIdleSuspendedReviewer(t *testing.T) {
 	}
 }
 
-// The listener reports a role-lane forward it could not complete, whoever published: a peer agent's
-// envoy_publish to a worker that finished its phase as much as a message of the daemon's own. A
-// report for a worker the idle suspend holds resumes it, so the sender's next attempt finds its
-// role held. Every other report changes nothing here: a reason the listener does not name, a topic
-// of another project, a role the idle suspend is not for (an architect's, which keeps its own
-// re-hold path), and a claim an operator suspended or that failed.
+// The listener reports a role message it could not deliver, whoever published: a peer agent's
+// envoy_publish to a worker that finished its phase as much as a message of the daemon's own. That
+// is a forward it accepted and then failed, or a publish it refused with its 404 because nobody
+// holds the role (role_unheld): the role was never claimed, or its holder's registration lapsed,
+// which is how a worker the idle suspend stopped looks once its session's registration has gone. A
+// report for a worker the idle suspend holds resumes it, so the sender's next attempt finds its role
+// held. Every other report changes nothing here: a reason the listener does not name, a topic of
+// another project, a role the idle suspend is not for (an architect's, which keeps its own re-hold
+// path), a claim an operator suspended or that failed, and the role_unheld report of this daemon's
+// own publish, whose executor already had the 404 and decided what it means for its row.
 func TestARoleLaneExceptionResumesTheIdleSuspendedWorker(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		role    claim.Role
-		state   supervise.ClaimState
-		by      supervise.SuspendSource
-		reason  string
-		topic   string
-		resumes int
+		name      string
+		role      claim.Role
+		state     supervise.ClaimState
+		by        supervise.SuspendSource
+		reason    string
+		topic     string
+		key       string
+		recipient string
+		resumes   int
 	}{
 		{name: "a peer's message found the holder gone", role: claim.RoleReviewer, state: supervise.StateSuspended, by: supervise.SuspendedByIdle, reason: "no_holder", resumes: 1},
 		{name: "a forward that failed", role: claim.RoleTester, state: supervise.StateSuspended, by: supervise.SuspendedByIdle, reason: "delivery_failed", resumes: 1},
 		{name: "a receipt that never came", role: claim.RoleMerger, state: supervise.StateSuspended, by: supervise.SuspendedByIdle, reason: "receipt_timeout", resumes: 1},
+		{name: "a peer's publish the listener refused: the role is unclaimed", role: claim.RoleImplementer, state: supervise.StateSuspended, by: supervise.SuspendedByIdle, reason: "role_unheld", resumes: 1},
+		{name: "a peer's publish the listener refused: the holder's registration lapsed", role: claim.RoleReviewer, state: supervise.StateSuspended, by: supervise.SuspendedByIdle, reason: "role_unheld",
+			recipient: "ses_reviewer", resumes: 1},
+		{name: "this daemon's own publish the listener refused", role: claim.RoleTester, state: supervise.StateSuspended, by: supervise.SuspendedByIdle, reason: "role_unheld",
+			key: "legion-outbox:9"},
 		{name: "a reason the listener does not name", role: claim.RoleReviewer, state: supervise.StateSuspended, by: supervise.SuspendedByIdle, reason: "something_else"},
 		{name: "an operator's suspension", role: claim.RoleReviewer, state: supervise.StateSuspended, by: supervise.SuspendedByOperator, reason: "no_holder"},
+		{name: "an operator's suspension the listener reports unheld", role: claim.RoleReviewer, state: supervise.StateSuspended, by: supervise.SuspendedByOperator, reason: "role_unheld"},
 		{name: "a failed claim", role: claim.RoleReviewer, state: supervise.StateFailed, reason: "no_holder"},
 		{name: "a live worker", role: claim.RoleReviewer, state: supervise.StateIdle, reason: "no_holder"},
 		{name: "a topic of another project", role: claim.RoleReviewer, state: supervise.StateSuspended, by: supervise.SuspendedByIdle, reason: "no_holder",
@@ -128,8 +143,9 @@ func TestARoleLaneExceptionResumesTheIdleSuspendedWorker(t *testing.T) {
 			}
 			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", now: time.Now}
 			// A peer agent's publish: no outbox dedupe key, and a summary that is no notice of this
-			// daemon's.
-			report := laneReport{"evt-peer", tc.reason, topic, "a question about the review", map[string]string{"message": "why did you set this aside?"}, "publish.peer-1", ""}
+			// daemon's. A row of this daemon's own outbox publishes under its row's key instead.
+			key := cmp.Or(tc.key, "publish.peer-1")
+			report := laneReport{"evt-peer", tc.reason, topic, "a question about the review", map[string]string{"message": "why did you set this aside?"}, key, tc.recipient}
 
 			if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
 				t.Fatalf("rehold the peer report: %v", err)

@@ -256,7 +256,10 @@ live holder sent no receipt (`bus.ErrReceiptTimeout`, which the client returns f
 wait alone — never from the flush, whose own timeout is the same `nats.ErrTimeout` value), and
 `delivery_failed` when the message is not known to have reached the holder (no live holder to
 forward to, a holder lookup that failed or ran out of time, or a publish or flush to the server
-that failed or timed out). The route publishes no exception: its sender has the answer.
+that failed or timed out). Only the `404` also publishes an exception: the route reports the
+refused envelope as `role_unheld` (below) within its window, after the answer is written, since a
+session that can bring the role's holder back, such as the Legion daemon resuming a phase worker
+its idle suspend stopped, is not the sender. Every other answer is the sender's alone.
 
 An ad-hoc topic sent through the route is published over core NATS, then forwarded the same way
 to each session registered on it, on any machine, that holds its own NATS connection
@@ -279,15 +282,17 @@ time and forwards once, and its outcome is one of three exception reasons: `no_h
 session claims the role, `delivery_failed` or `receipt_timeout` as above. A role claimant does not
 subscribe directly to its role subject, and a role message is not retained for a future claimant.
 
-When a control delivery has no holder, cannot be forwarded, or draws no receipt, Envoy emits an
-envelope on `notifications.envoy.exceptions.<original-topic>`. The exception payload preserves
-the original delivery fields:
+When a control delivery has no holder, cannot be forwarded, or draws no receipt, and when the
+publish route answers a role topic `404`, Envoy emits an envelope on
+`notifications.envoy.exceptions.<original-topic>`. The exception payload preserves the original
+delivery fields:
 
 | Field | Meaning |
 | --- | --- |
 | `original_topic` | Original envelope topic |
 | `event_id` | Original envelope event ID |
-| `reason` | `no_holder`, `delivery_failed`, or `receipt_timeout` (defined above) |
+| `reason` | `no_holder`, `delivery_failed`, `receipt_timeout` (defined above), or `role_unheld`, the publish route's `404` for a role nobody holds (unclaimed, or its holder's registration lapsed) |
+| `recipient_session` | The session the delivery was for, when one is known; for `role_unheld`, the lapsed holder |
 | `payload_summary`, `payload` | Original human summary and distinct machine payload |
 | `dedupe_key` | Original envelope dedupe key |
 | `source`, `source_session` | Original envelope source fields |

@@ -271,3 +271,22 @@ func TestWithTheIdleSuspendOffAnIdleWorkerKeepsItsProcess(t *testing.T) {
 	h.wantState(StateIdle)
 	h.wantCalls("Suspend", 0)
 }
+
+// A workflow suspension of a claim the idle suspend holds takes the suspension over: the issue
+// left the workflow — its child was parked, its tree lingers — and only the workflow may put that
+// worker back, while a claim left marked `idle` would be resumed by the next message to its role
+// (internal/daemon's wakeIdleSuspendedRole). The reverse never happens: the idle suspend's timer
+// is armed for no suspended claim.
+func TestAWorkflowSuspensionTakesOverTheIdleSuspends(t *testing.T) {
+	h := idleHarness(t)
+	h.reach(StateIdle)
+	h.advance(testIdleSuspend)
+	h.wantState(StateSuspended)
+	h.must(RequestSuspend{Claim: h.token, Reason: "its child was parked", By: SuspendedByDaemon})
+	if c := h.claim(); c.SuspendedBy != SuspendedByDaemon {
+		t.Fatalf("suspended by %q, want daemon", c.SuspendedBy)
+	}
+	if stored := h.store.load(h.token); stored.SuspendedBy != SuspendedByDaemon {
+		t.Fatalf("stored suspended by %q, want daemon", stored.SuspendedBy)
+	}
+}

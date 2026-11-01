@@ -1081,8 +1081,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	// Each subtest is a test of its own to testnats.URL, with an account of its own, so the holder
 	// stand-in connects with the parent's.
 	uri := testnats.URL(t)
-
-	t.Run("unheld role returns 404 without publishing", func(t *testing.T) {
+	t.Run("unheld role returns 404 and publishes a role-unheld exception", func(t *testing.T) {
 		roleProbe, err := client.Conn.SubscribeSync("notifications.role.unheld")
 		if err != nil {
 			t.Fatalf("subscribe to unheld role: %v", err)
@@ -1118,7 +1117,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 			}
 		}
 		assertNoMessage("unheld role", roleProbe)
-		assertNoMessage("unheld-role exception", exceptionProbe)
+		assertRoleUnheldException(t, exceptionProbe, "notifications.role.unheld", "")
 	})
 
 	t.Run("live holder is returned", func(t *testing.T) {
@@ -1141,7 +1140,15 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 		}
 	})
 
-	t.Run("stale holder returns 404 from publish and lookup", func(t *testing.T) {
+	t.Run("stale holder returns 404 from publish and lookup and publishes a role-unheld exception", func(t *testing.T) {
+		exceptionProbe, err := client.Conn.SubscribeSync("notifications.envoy.exceptions.notifications.role.reviewer")
+		if err != nil {
+			t.Fatalf("subscribe to lapsed-role exception lane: %v", err)
+		}
+		t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
+		if err := client.Conn.Flush(); err != nil {
+			t.Fatalf("flush lapsed-role subscription: %v", err)
+		}
 		if err := sessions.Delete(context.Background(), "ses_holder"); err != nil {
 			t.Fatalf("delete holder session: %v", err)
 		}
@@ -1154,12 +1161,57 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 		if publishRecorder.Code != http.StatusNotFound {
 			t.Fatalf("publish status = %d, want 404; body = %s", publishRecorder.Code, publishRecorder.Body.String())
 		}
+		t.Logf("publish lapsed role: %s", publishRecorder.Body.String())
+		var refused struct {
+			Reason string `json:"reason"`
+			Holder string `json:"holder"`
+		}
+		if err := json.Unmarshal(publishRecorder.Body.Bytes(), &refused); err != nil {
+			t.Fatalf("decode lapsed publish answer: %v", err)
+		}
+		if refused.Reason != "holder_lapsed" || refused.Holder != "ses_holder" {
+			t.Fatalf("lapsed publish answer = %+v, want holder_lapsed naming ses_holder", refused)
+		}
+		assertRoleUnheldException(t, exceptionProbe, "notifications.role.reviewer", "ses_holder")
 		roleRecorder := httptest.NewRecorder()
 		roleGetHandler(state).ServeHTTP(roleRecorder, httptest.NewRequest(http.MethodGet, "/v1/roles/reviewer", nil))
 		if roleRecorder.Code != http.StatusNotFound {
 			t.Fatalf("role lookup status = %d, want 404; body = %s", roleRecorder.Code, roleRecorder.Body.String())
 		}
 	})
+}
+
+// assertRoleUnheldException reads the one report probe receives of a publish the route refused
+// with its 404: the role_unheld exception on notifications.envoy.exceptions.<topic>, naming the
+// refused envelope's topic, the publish's own summary, and recipient, the lapsed holder or "" for
+// an unclaimed role.
+func assertRoleUnheldException(t *testing.T, probe *nats.Subscription, topic, recipient string) {
+	t.Helper()
+	message, err := probe.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatalf("read role-unheld exception: %v", err)
+	}
+	t.Logf("role-unheld exception: %s", message.Data)
+	var exception contracts.Envelope
+	if err := json.Unmarshal(message.Data, &exception); err != nil {
+		t.Fatalf("decode role-unheld exception: %v", err)
+	}
+	if err := exception.Validate(); err != nil {
+		t.Fatalf("validate role-unheld exception: %v", err)
+	}
+	var payload deliveryExceptionPayload
+	if err := json.Unmarshal([]byte(exception.Payload), &payload); err != nil {
+		t.Fatalf("decode role-unheld exception payload: %v", err)
+	}
+	if exception.Source != "envoy" || exception.SourceEventID != payload.EventID ||
+		exception.Topic != bus.ExceptionTopicPrefix+topic || exception.PayloadSummary != "delivery exception: role_unheld" {
+		t.Fatalf("role-unheld exception = %+v", exception)
+	}
+	if payload.OriginalTopic != topic || payload.Reason != "role_unheld" ||
+		payload.RecipientSession != recipient || payload.EventID == "" || !strings.HasPrefix(payload.DedupeKey, "publish.") ||
+		payload.PayloadSummary != "please review" || payload.Payload != "" || payload.Source != "agent" {
+		t.Fatalf("role-unheld exception payload = %+v", payload)
+	}
 }
 
 func TestRoleGetHandlerReturnsLiveHolder(t *testing.T) {

@@ -2380,7 +2380,10 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   Every later attempt resolves the live holder by the lane's rule (a claim whose holder heartbeated within `session.ClaimStaleAfter`), so a holder that relaunched between attempts gets the next one, and makes a receipt-backed request to that holder's agent subject (`bus.Client.RequestCoreTo`) with a receipt window of two seconds or what is left of the send;
   after a miss it waits 100 ms (`publishRetryPause`) and tries again, until a receipt arrives or 4 s from the request's arrival have passed (`publishDeliveryWindow`, which bounds every read, forward and pause of the send, and keeps the answer inside envoy-client's 5 s attempt and the Legion daemon's 10 s client).
   Every attempt forwards the same envelope, one `event_id` under the dedupe key `envoy.role.forward.<key>`, so a holder that took two copies drops the second.
-  The route answers the outcome to its sender (the Listener API's `/v1/messages/publish` row), writes it on its `listener publish` record line, and publishes no exception.
+  The route answers the outcome to its sender (the Listener API's `/v1/messages/publish` row) and writes it on its `listener publish` record line.
+  Its 404 for a role with no live holder, unclaimed or lapsed, also publishes a delivery exception with reason `role_unheld` (`roleSend.noHolder`), within the send's window, because a session that can bring the holder back is not the sender:
+  the Legion daemon resumes a phase worker its idle suspend stopped on that report, and a peer agent's publish to that worker's role reaches the daemon no other way.
+  Every other outcome of the route publishes no exception.
 
 - The role lane — the listener's core queue subscriber on the role subjects
   — stays the transport for a client that publishes a role topic straight onto NATS (a listener of an earlier release during a rollout, an operator's `nats pub`):
@@ -2404,7 +2407,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   Each role key records `holder_session_id`, `claimed_at`, and `previous_session_id`;
   listener restart restores the claim from that record, but routes only while the holder is present in the `envoy_sessions` registry.
   Reaping stale interests never releases a role;
-  a restored absent holder gets one registry TTL to re-register, then loses its claim atomically on the role reaper or next resolution, while the first role delivery still reports its normal failure (an exception on the role lane, the answer itself on the publish route).
+  a restored absent holder gets one registry TTL to re-register, then loses its claim atomically on the role reaper or next resolution, while the first role delivery still reports its normal failure (an exception on the role lane;
+  on the publish route the answer, and a `role_unheld` exception beside a 404).
   A listener reads a claim from the role bucket itself but a holder's liveness from its cache of `envoy_sessions`, which trails that bucket, so a holder another listener registered and gave the role a moment ago is in both buckets before it is in this cache;
   during a rolling deploy the old task resolves every claim the replacement accepts.
   Nothing is taken from a holder on the cache's word:
@@ -2459,17 +2463,20 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   That removes every revision of the key, every listener's cache drops it at once, and the purge marker it leaves is collected as any other (the interest bucket's marker collection, `nats kv compact <bucket>` for the others).
   A JetStream purge filtered to the subject (`nats req '$JS.API.STREAM.PURGE.KV_<bucket>' '{"filter":"$KV.<bucket>.<key>"}'`) leaves no marker, but nothing a watcher sees, so a listener's interest cache keeps the key, and its reaper keeps warning, until the listener restarts.
 
-- A failed control delivery or a terminal capability refusal during generic fanout emits `notifications.envoy.exceptions.<original-topic>`.
+- A failed control delivery, a publish route 404 for a role with no live holder, or a terminal capability refusal during generic fanout emits `notifications.envoy.exceptions.<original-topic>`.
   Control exceptions keep their ordinary transport:
-  a role lane's `notifications.envoy.exceptions.notifications.role.<role>` takes core NATS because no stream subject captures it (`bus.UsesCoreTransport`), and an agent subject's `notifications.envoy.exceptions.notifications.agent.<id>` is the one exception subject the stream captures, so it keeps JetStream.
+  a role topic's `notifications.envoy.exceptions.notifications.role.<role>` takes core NATS because no stream subject captures it (`bus.UsesCoreTransport`), and an agent subject's `notifications.envoy.exceptions.notifications.agent.<id>` is the one exception subject the stream captures, so it keeps JetStream.
   A fanout refusal's original topic is never a control topic, since `listenerDeliveryHandler` sends a `notifications.role.` topic to `roleTopicDelivery` and a `notifications.agent.` topic to `agentSubjectDelivery` and only what remains to `fanoutDelivery`, the one place `fanoutRefusal` is set;
-  its exception subject is therefore never one the stream captures either, so `bus.UsesCoreTransport` already routes it over core NATS and the explicit `client.PublishCore` in `publishDeliveryException` now only restates the routing rule's own answer for every reachable input.
-  The payload preserves `original_topic`, `event_id`, `reason` (one of `no_holder`, `delivery_failed`, `receipt_timeout`), `recipient_session` when a recipient is known (the receiving session, not `source_session`;
+  its exception subject is therefore never one the stream captures either, so `bus.UsesCoreTransport` already routes it over core NATS and the explicit `client.PublishCoreContext` in `publishDeliveryException` now only restates the routing rule's own answer for every reachable input.
+  The payload preserves `original_topic`, `event_id`, `reason` (one of `no_holder`, `delivery_failed`, `receipt_timeout`, `role_unheld`), `recipient_session` when a recipient is known (the receiving session, not `source_session`;
+  for `role_unheld` the holder whose registration lapsed;
   omitted rather than empty when unknown), `payload_summary`, the original machine `payload`, `dedupe_key`, `source`, and `source_session`;
   the exception lane is not recursively exceptional.
   Each refusal records its recipient before publishing its exception, so an identical redelivery emits at most one exception during the attempt-cache window and never NAKs the original envelope.
-  A role or ad-hoc topic sent through `/v1/messages/publish` raises no exception:
-  the route answers its sender instead, 404 for an unheld role and 403 or 504 for a recipient that did not take it (the Listener API).
+  `role_unheld` is the publish route's (`roleSend.noHolder`):
+  the route answers its sender 404 with reason `unclaimed` or `holder_lapsed`, then reports the same refused envelope within the send's window, and a report that does not go out is logged `listener exception publish failed` and changes nothing about the answer.
+  No other outcome of `/v1/messages/publish` raises an exception:
+  the route answers its sender instead, 403 or 504 for a role or ad-hoc recipient that did not take it (the Listener API).
 
 - **Source-specific vs generic ingestion**:
   Envoy has two ingestion paths: listener-hosted webhook handlers behind the listener's starting gate (`internal/webhook/{github,slack,ghostwispr}.go`, `startingGate` in `cmd/listener/main.go`) and the generic MCP bridge (`cmd/mcp/`).
@@ -3080,7 +3087,8 @@ Each item below names an endpoint and its method, then its contract, and an item
   the listener forwards it to the live holder's agent subject itself and waits for the holder's receipt, forwarding again until one arrives (`sendToRole`, `cmd/listener/confirmed.go`;
   the "Role messages use core NATS" rule under "Critical conventions" has the retry).
   An ad-hoc topic (`bus.UsesCoreTransport`) is published over core NATS, for the serve-port sessions the live topics lane delivers to and any subscriber the registry does not know, then forwarded the same way, `event_id` and `dedupe_key` unchanged, to the agent subject of each `self_subscribed` session registered on it on any machine (`store.Registry.MatchAll`), the `source_session` excepted, all at once (`sendToTopic`).
-  Both are answered once each recipient confirmed, or once 4 s from the request's arrival have passed (`publishDeliveryWindow`), and neither publishes a delivery exception: the sender has the answer.
+  Both are answered once each recipient confirmed, or once 4 s from the request's arrival have passed (`publishDeliveryWindow`), and the sender has the answer;
+  only a role topic's 404 also publishes a delivery exception, `role_unheld` (below).
   Only a receipt that arrived through the route counts as a confirmation:
   the route keeps its own record of each session that confirmed a dedupe key (`listenerDeps.confirmed`, 10 minutes), which a later send of the key reads, apart from the delivery handlers' dedupe cache, where the live topics lane's fanout and the durable's inbox delivery record a self-subscribed session whose push they skipped without hearing from it.
 
@@ -3102,6 +3110,8 @@ Each item below names an endpoint and its method, then its contract, and an item
 
 - A role topic answers `200` with the envelope and `holder`, the session that took it, once the holder's receipt arrived, and also, forwarding nothing, when `source_session` holds the role or the holder already confirmed this dedupe key through the route.
   It answers `404 {"error":…,"reason":"unclaimed"}` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the listener still keeps the holder's final heartbeat (until the interest reaper's grace has passed, `store.InterestReapGrace` + `store.InterestRefreshAge` after the holder left the session cache), whether the first resolution or a later attempt's finds it so.
+  Either 404 is also reported on `notifications.envoy.exceptions.notifications.role.<role>` with reason `role_unheld`, naming the original topic, event id, summary, payload and dedupe key, and the lapsed holder as `recipient_session` (none for an unclaimed role), published within the send's window after the answer is written (`roleSend.noHolder`;
+  the "A failed control delivery" rule under "Critical conventions").
   It answers `403 {"error":…,"reason":"capability","holder":…}`, forwarding nothing, when the holder does not advertise the payload's delivery mode or the mode cannot be read unambiguously, as `/v1/messages/send` refuses it.
   It answers `504 {"error":…,"reason":…,"event_id":…,"dedupe_key":…,"holder":…,"attempts":N}` when the window ended without a receipt:
   `reason` is `receipt_timeout` when the last forward reached the server and drew no receipt (a holder that stopped running while its registration lives gives it), else `delivery_failed` (no live holder to forward to, a later attempt's read that failed or ran out of time, a forward not shown to have reached the server);
@@ -3781,7 +3791,7 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   Off (unset, empty or `0`, the default), the listener takes no ad-hoc topic off the bus.
   Its grant publishes all of `notifications.>` either way.
 
-- A failed control delivery publishes `notifications.envoy.exceptions.<original-topic>`.
+- A failed control delivery, and a publish route 404 for a role with no live holder, publishes `notifications.envoy.exceptions.<original-topic>`.
 
 ## Secrets broker
 

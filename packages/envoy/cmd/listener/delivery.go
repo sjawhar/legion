@@ -155,7 +155,12 @@ func isExceptionsTopic(topic string) bool {
 	return strings.HasPrefix(topic, bus.ExceptionTopicPrefix)
 }
 
-func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool) error {
+// publishDeliveryException publishes the report of item's failed delivery on
+// notifications.envoy.exceptions.<item's topic>, naming reason and recipientSession, within ctx: a
+// delivery handler, which answers no caller, passes context.Background() and so takes the bus's
+// own publishBound, and the publish route's role send passes its send's window, so its answer is
+// never held past it.
+func publishDeliveryException(ctx context.Context, client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool) error {
 	payload, err := json.Marshal(deliveryExceptionPayload{
 		OriginalTopic:    item.Topic,
 		EventID:          item.EventID,
@@ -186,12 +191,12 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 		return fmt.Errorf("validate delivery exception: %w", err)
 	}
 	if fanoutRefusal {
-		if err := client.PublishCore(exception); err != nil {
+		if err := client.PublishCoreContext(ctx, exception.Topic, exception); err != nil {
 			return fmt.Errorf("publish fanout delivery exception: %w", err)
 		}
 		return nil
 	}
-	if err := client.Publish(exception); err != nil {
+	if err := client.PublishWithin(ctx, exception); err != nil {
 		return fmt.Errorf("publish delivery exception: %w", err)
 	}
 	return nil
@@ -250,7 +255,7 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 		outcome.log(cfg.logger)
 	}
 	if outcome.exceptionReason != "" && !isExceptionsTopic(item.Topic) && (isControlTopic(item.Topic) || outcome.fanoutRefusal) {
-		if err := publishDeliveryException(cfg.client, item, outcome.exceptionReason, outcome.sessionID, outcome.fanoutRefusal); err != nil {
+		if err := publishDeliveryException(context.Background(), cfg.client, item, outcome.exceptionReason, outcome.sessionID, outcome.fanoutRefusal); err != nil {
 			cfg.logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
 			if outcome.exceptionFailureClearsAttempt {
 				cfg.attemptCache.Clear(item.DedupeKey, outcome.sessionID)
