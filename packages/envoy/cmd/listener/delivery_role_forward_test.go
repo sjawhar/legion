@@ -14,13 +14,14 @@ import (
 // The role lane forwards an envelope to its holder with RequestCoreTo, under
 // contracts.RoleForwardDedupePrefix and the envelope's own dedupe key, to the holder's agent
 // subject, which the stream captures, and chooses the forward's MsgId from the envelope before the
-// prefix is added (roleTopicDelivery). A forward of an envelope whose key names its event -
+// prefix is added (roleForward.msgID). A forward of an envelope whose key names its event -
 // Dispatch's, or a webhook's, whose key the prefix hides from
-// contracts.DedupeKeyNamesTheUpstreamEvent - is stored once however often it is sent. Two distinct
-// envelopes that share a key their sender chose are two messages, and the stream stores both. Each
-// envelope is delivered by a handler with dedupe and attempt caches of its own, as another listener
-// of the machine's queue group, or this one after a restart, would deliver it again.
-func TestARoleForwardIsStoredOnceOnlyWhenItsEnvelopeNamesItsEvent(t *testing.T) {
+// contracts.DedupeKeyNamesTheUpstreamEvent - is named by that key and is stored once however often
+// it is sent. Any other forward is named by its event id, so two distinct envelopes that share a key
+// their sender chose are two messages, and the stream stores both. Each envelope is delivered by a
+// handler with dedupe and attempt caches of its own, as another listener of the machine's queue
+// group, or this one after a restart, would deliver it again.
+func TestARoleForwardIsStoredOncePerMessageAndTwoUnderOneChosenKeyTwice(t *testing.T) {
 	chosen := func(name string) contracts.Envelope {
 		item := listenerTestEnvelope("", "shared-key")
 		item.SourceEventID = "src-" + name

@@ -28,9 +28,10 @@ body: |-
     (`bus.ForwardMsgID`) when the original envelope's key names its event
     (`contracts.DedupeKeyNamesTheUpstreamEvent`, asked of the key without
     `contracts.RoleForwardDedupePrefix`), so a forward sent again until its receipt arrives is stored
-    once per message and recipient; one under a key its caller chose carries none, since two distinct
-    envelopes can share that key, and the stream stores each. A send NATS does not acknowledge on a
-    live connection is now backed off with its attempt counted and the error kept in
+    once per message and recipient; one under a key its caller chose carries its `event_id` and
+    subject instead, since two distinct envelopes can share that key, and the stream stores each. A
+    send NATS does not acknowledge on a live connection is now backed off with its attempt counted
+    and the error kept in
     `events.publish_error`, where it was resent at every scan. When a comment-recipient,
     primary-document-author or document-credit read fails, only the events that asked for it back
     off, and the owner's later events wait for that event's retry before reaching any agent or role

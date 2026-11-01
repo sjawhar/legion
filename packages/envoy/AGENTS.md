@@ -2517,7 +2517,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A holder served on a port answers no receipt, so a send to it counts as delivered once the stream acknowledges storing the forward (`bus.Client.StartRequestStoredTo`, `roleForwardStoredOnly`), and that stored copy is what reaches its port.
   Every attempt forwards the same envelope, one `event_id` under the dedupe key `envoy.role.forward.<key>`, so a holder that took two copies drops the second.
   `RequestCoreTo` sends a forward under the `Nats-Msg-Id` its caller passes, and none when that is empty:
-  the route passes the forward's dedupe key and subject (`bus.ForwardMsgID`) on every attempt, so the stream, which captures agent subjects, keeps one copy per message and recipient however many attempts it makes, while the role lane (`roleTopicDelivery`) passes one only when the original envelope's key names its event (`contracts.DedupeKeyNamesTheUpstreamEvent`, asked of the envelope before `contracts.RoleForwardDedupePrefix` is added to its key), since two distinct envelopes can share a key their sender chose and the stream must store each.
+  the route passes the forward's dedupe key and subject (`bus.ForwardMsgID`) on every attempt, so the stream, which captures agent subjects, keeps one copy per message and recipient however many attempts it makes, and the role lane passes the name `roleForward.msgID` chooses (below): the forward's dedupe key and subject when the original envelope's key names its event (`contracts.DedupeKeyNamesTheUpstreamEvent`, asked of the envelope before `contracts.RoleForwardDedupePrefix` is added to its key), and its `event_id` and subject otherwise, since two distinct envelopes can share a key their sender chose and the stream must store each.
   The route answers the outcome to its sender (the Listener API's `/v1/messages/publish` row), writes it on its `listener publish` record line, and publishes no exception.
 
 - The role lane stays the transport for a role topic published straight onto NATS (a listener of an earlier release during a rollout, an operator's `nats pub`):
@@ -2567,7 +2567,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   Nothing is taken from a holder on the cache's word:
   before a lookup or a role delivery releases a claim as lapsed, the role reaper ends one, or a soft claim supersedes its holder, a holder the cache misses (or, for a role delivery, holds with a heartbeat older than `session.ClaimStaleAfter`) is read from the bucket itself (`liveSessionEntry`, `session.SessionRegistry.Refresh`; `cmd/listener/role_holder.go`).
 
-- A lookup, a role send through the publish route and a role delivery all resolve the holder through `roles.ResolveHolder` (`internal/roles`), the resolution Dispatch's outbox uses too, behind the listener's own `resolveRoleHolder`:
+- A lookup, a role send through the publish route and a role delivery all resolve the holder through `roles.ResolveHolderFrom` (`internal/roles`), behind the listener's own `resolveRoleHolder` and `resolveRoleHolderFrom`, the role delivery reading its first claim from the registry's watched copy of the role bucket (`store.Registry.CachedRoleHolder`); Dispatch's outbox uses the same resolution as `roles.ResolveHolder`, which reads every claim from the bucket:
   it releases a lapsed claim and resolves the role once more when the release finds a fresh claim in its place, so a claim raced by a live replacement resolves to that replacement rather than being reported stale.
   A holder no session can register as (a key `bus.KeyValue` refuses, one outside nats.go's key alphabet such as `ses:bad` among them) counts as gone.
   A read that does not answer within `roleHolderReadTimeout` (2 s, inside the 10 s HTTP write timeout) releases nothing:
@@ -3132,7 +3132,7 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
 - A receipt-backed forward to a session's agent subject (`bus.Client.RequestCoreTo`:
   a role message, an ad-hoc topic's copy) carries the `Nats-Msg-Id` its sender passes - the forward's dedupe key and that subject (`bus.ForwardMsgID`) - and none when its sender passes none.
   The publish route stamps every forward it makes, so the stream, which captures every agent subject, keeps one copy per message and recipient however many attempts the route makes, while every attempt still reaches the core subscribers on the subject;
-  the role lane stamps only a forward whose original envelope's key names its event (`roleTopicDelivery`, under "Critical conventions"), since two distinct envelopes can share a key their sender chose.
+  the role lane stamps every forward too, by its dedupe key when the original envelope's key names its event and by its `event_id` otherwise (`roleForward.msgID`, under "Critical conventions"), since two distinct envelopes can share a key their sender chose.
   Every listener's durable takes that stored copy, and `listenerDeliveryHandler` acknowledges an envelope stored on an agent subject whose `topic` is not that subject without delivering it:
   the forward already reached its session over core NATS, and fanning the copy out by its topic would push it to serve-port sessions a second time.
   The durable no longer needs the role forward mark for this;

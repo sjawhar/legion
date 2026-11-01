@@ -242,8 +242,8 @@ func TestRequestCoreToFlushTimeoutIsNotErrReceiptTimeout(t *testing.T) {
 
 // RequestCoreTo sends the forward under the MsgId its caller passes, so a forward sent again under
 // one MsgId to an agent subject the stream captures is stored once, and one sent with none is
-// stored each time. Which forward carries a MsgId is the listener role lane's choice
-// (cmd/listener, roleTopicDelivery).
+// stored each time. Which MsgId a forward carries is its caller's choice (cmd/listener,
+// roleForward.msgID; the publish route's bus.ForwardMsgID).
 func TestARequestCoreToUnderOneMsgIDIsStoredOnce(t *testing.T) {
 	_, url, client := requestClient(t)
 	item := contracts.Envelope{
