@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "previousHandoff": "18ad8b69262281aded93a5d8725b601f65077e9f",
+  "previousHandoff": "b05c202bbef73fb20a087565e82e0bfe43f60c42",
   "proof": [
     {
       "criterion": "The branch builds a daemon that migrates its database (the tester's round-24 failure)",
       "surface": "the daemon's store package and the property model at the merge head, which now carries main's timestamp-aware migration loader",
       "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u OMP_SESSION_SQL_DSN_FILE LEGION_TEST_PG_DSN=<own Postgres on the issue volume> LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 ./internal/store/... ./internal/record/ ./internal/supervise/",
       "observed": "Merge bc514a0d84a0dd5a4b5c2071f8b9ed912b786755 (jj new legion/INFRA-251 main, main 6b1524cdb8aa, no conflict). store 215s ok (TestMigrateAppliesEveryEmbeddedMigration among them), store/migrations ok, record ok, supervise ok; the property model's seeds migrate and run. Changed lines of the branch diff are identical before and after the merge (sha256 of the +/- lines 3fd71f3b41125e75 both sides; 78 files, 12233 insertions, 259 deletions both sides).",
-      "headSha": "0094662cca8a6fd8acac61c2509cc14a8a6bd10a",
+      "headSha": "42250925f8e9f62dc22d46c5e83163a7bd9398b3",
       "negativeControl": "At the tester's d90356ab (the renamed migrations without main's loader) TestMigrateAppliesEveryEmbeddedMigration fails: 'unable to encode 20261101163106 into binary format for int4' (tester's evidence)."
     },
     {
@@ -17,7 +17,7 @@
       "surface": "kept_decision_property_test.go keptRun.tell/held with keptForgetStore.failedTellings; kept_decision_regression_seeds_test.go",
       "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u OMP_SESSION_SQL_DSN_FILE LEGION_TEST_PG_DSN=<own Postgres on the issue volume> LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 -run '^TestKeptDecisionsRegressionSeeds$' ./internal/daemon/ ; LEGION_KEPT_PROPERTY_RUNS=150 LEGION_KEPT_PROPERTY_STEPS=300 go test -run '^TestKeptDecisionsReachTheCurrentArchitectOnce$' ./internal/daemon/",
       "observed": "Pinned seeds 39 of 39 pass, seed-41-at-300-steps among them (4.12 s). 150 seeds x 300 steps pass. A throwaway driver of tell() (deleted) showed: failed catch-up 112 then catch-up 115 accepted; the same with the write not failed rejected 'told 2 times'; failed 112 and 115 then 118 rejected 'told 3 times'; prompt then non-retold prompt rejected; prompt then retold prompt accepted; failed catch-up then a retold prompt rejected; a telling to another tree's architect unaffected. The tester's seed-41 trace (row 112's forget errored at step 288, row 115 named ask-0015 at step 304) matches the case the oracle now accepts.",
-      "headSha": "0094662cca8a6fd8acac61c2509cc14a8a6bd10a",
+      "headSha": "42250925f8e9f62dc22d46c5e83163a7bd9398b3",
       "negativeControl": "With tellingFailed forced false, the throwaway driver's accept case fails 'ask-0015 was told 2 times'. Seed 41 itself did not reproduce on this pod in 50 runs (25 at 100 steps, 25 at 300) nor in a 150x300 sweep under the old oracle: it reaches the case only on some schedules, as the tester's single failure in 150 did."
     }
   ],
