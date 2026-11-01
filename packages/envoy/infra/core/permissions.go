@@ -195,12 +195,18 @@ func DispatchPermissions(machineID string) Permissions {
 }
 
 // SessionPermissions is the grant any agent session needs, with * for the session id. Publish:
-// reply inboxes (the receipt a role delivery waits for, and the receipt of each relay frame),
-// then its agent stream's frames (contracts.AgentStreamFramesSubject). Subscribe: its own relay
-// subject (bus.DeliverSubject), the subject the listener that owns the session publishes every
-// message of the session's consumer (bus.SessionConsumerName) on, then its agent stream's control
-// subject (contracts.AgentStreamControlSubject). A session subscribes to no notification topic:
-// it receives what its consumer delivers, on that one subject, and nothing else.
+// reply inboxes (the receipt a role delivery waits for, the receipt of each relay frame, and the
+// answer to a presence probe), then its agent stream's frames
+// (contracts.AgentStreamFramesSubject). Subscribe: its own relay subject (bus.DeliverSubject),
+// the subject the listener that owns the session publishes every message of the session's
+// consumer (bus.SessionConsumerName) on, then the presence probe the listener sends before it
+// reports a send delivered (notifications.envoy.presence.<session id>, dispatch://INFRA-626,
+// which owns the prefix's constant), then its agent stream's control subject
+// (contracts.AgentStreamControlSubject). A session subscribes to no notification topic that
+// carries a message: it receives what its consumer delivers, on the relay subject, and nothing
+// else. The presence subject carries none, and no stream subject captures it
+// (TestSessionPresenceSubjectIsStoredByNoStream), so nothing is ever stored or read there: the
+// probe is a core request whose answer is the session saying it is running.
 //
 // A Legion controller session needs nothing added for its project's notice lane
 // (notifications.legion.<project>.controller, the daemon's notify.ControllerTopic): it registers
@@ -210,15 +216,26 @@ func DispatchPermissions(machineID string) Permissions {
 // which this set rightly refuses.
 //
 // What this set does not solve: every session on a shared user holds the same set, so the relay
-// subject carries * and one session can read another's relay frames until the per-session
-// credentials of dispatch://INFRA-840. dispatch://INFRA-778 is what hands a deployment's sessions
-// this grant; nothing here does.
+// subject carries * and one session can read another's relay frames, and the presence subject
+// carries * and one session can answer another's probe — reporting a stopped session live —
+// until the per-session credentials of dispatch://INFRA-840. dispatch://INFRA-778 is what hands
+// a deployment's sessions this grant; nothing here does.
 func SessionPermissions() Permissions {
 	return Permissions{
-		Publish:   Rules{Allow: []string{inboxes, contracts.AgentStreamFramesSubject("*")}},
-		Subscribe: Rules{Allow: []string{bus.DeliverSubject("*"), contracts.AgentStreamControlSubject("*")}},
+		Publish: Rules{Allow: []string{inboxes, contracts.AgentStreamFramesSubject("*")}},
+		Subscribe: Rules{Allow: []string{
+			bus.DeliverSubject("*"),
+			sessionPresenceSubject,
+			contracts.AgentStreamControlSubject("*"),
+		}},
 	}
 }
+
+// sessionPresenceSubject is the presence probe of every session, with * for the session id: the
+// core request a listener sends to find out whether the session is running before it reports a
+// send delivered (dispatch://INFRA-626). The prefix's constant lives in internal/bus with that
+// change; this literal is the grant's own copy until the two meet.
+const sessionPresenceSubject = "notifications.envoy.presence.*"
 
 // DaemonPermissions is the NATS grant one Legion daemon needs. The grant itself lives with
 // Envoy's subject names so the daemon's real-NATS proof and the hub's rendered user share it.

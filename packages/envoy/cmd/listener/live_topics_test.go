@@ -20,8 +20,8 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// These tests drive the built listener against a real NATS and a fake serving port: the OpenCode
-// plugin's way of being reached, where the listener POSTs each notification to
+// These tests drive the built listener against a real NATS and a fake serving port: how a session
+// that serves an HTTP port is reached, where the listener POSTs each notification to
 // /session/<id>/prompt_async. They use only what the listener had before INFRA-122 (its binary,
 // its /v1 API and the bus), so the file compiles unchanged at the commit before the change. There
 // TestAServingPortReceivesATopicTheStreamDoesNotStore and
@@ -95,8 +95,8 @@ func (p *servingPort) noPrompt(t *testing.T, window time.Duration) {
 	}
 }
 
-// registerServingSession registers sessionID with the listener as the OpenCode plugin does: its
-// serving port, the host it runs on, and its topics. The listener must answer 200.
+// registerServingSession registers sessionID with the listener as a session that serves an HTTP
+// port does: its serving port, the host it runs on, and its topics. The listener must answer 200.
 func registerServingSession(t *testing.T, listener *listenerProcess, serving *servingPort, host string, topics ...string) {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{

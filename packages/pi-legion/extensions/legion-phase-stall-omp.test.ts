@@ -737,12 +737,12 @@ test.skipIf(skip)(
 // result wakes the session into the next turn. Nothing in the plugin decides this, which is
 // exactly why only the real binary can say it: a pin that stopped deferring would remind a
 // working worker that it has done nothing, with every unit test still green.
-test.skipIf(omp === undefined && !onActions)(
+test.skipIf(skip)(
   "a turn that ends while the session waits on its own background job gets no reminder, and the job's result wakes it",
   async () => {
-    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const run = setup();
     const pane = await stallPane(
-      omp,
+      run,
       [
         [call("bash", { command: "sleep 4; echo background-done", async: true })],
         [{ type: "text", text: "I started the build; I will be woken when it is done." }],

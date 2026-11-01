@@ -1,8 +1,0 @@
-kind: Fixed
-body: |-
-  A message the session missed is no longer shown twice when its live copy arrives while the
-  replayed one is being written. The replay engine's frame is now claimed in the same dedupe a
-  live frame is, from before it is handed to the channel's write queue until the engine records it
-  in the replay ledger, so whichever copy comes second is a repeat and is not shown; the claim is
-  released when the frame was not shown after all, so a later copy still reaches the session
-  (INFRA-594).

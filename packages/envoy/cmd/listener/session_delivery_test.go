@@ -368,8 +368,8 @@ func jsonUint(n uint64) string {
 	return string(encoded)
 }
 
-// A session on a serving port gets a consumer at registration with no delivery field, since its
-// plugin (OpenCode's) asks nothing; its answer says so.
+// A session on a serving port gets a consumer at registration with no delivery field, since a
+// session registered with a port asks nothing; its answer says so.
 func TestSessionConsumerServingPortRegistrationGetsAConsumer(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 	const sessionID = "ses_serving"

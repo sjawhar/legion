@@ -127,21 +127,66 @@ pg_client() {
     docker run --init --rm --network host -e PGPASSWORD -e DATABASE_URL "$PG_DUMP_IMAGE" sh -c "$2"
 }
 
-# schema_version prints the highest migration the database has applied, the `schema_version`
-# Dispatch's /healthz reports. It first takes the advisory lock Dispatch's migration runner holds
-# for each migration (internal/dispatch/store/store.go, migrationLockKey), in a statement of its
-# own, so a migration transaction still in flight, one a stopped image sent its commit for
-# included, ends before the read takes its snapshot. psql's stderr is dropped, since its
-# diagnostics can quote the connection; a failure prints nothing and returns psql's status, or 1
-# for an answer that is no version.
-schema_version() {
-  local version
+# schema_applied prints a value standing for the set of migrations the database has applied:
+#
+#   <max>-<count>-<sha256 of the versions, ascending, one per line>
+#
+# Not max(version) alone, the `schema_version` Dispatch's /healthz reports: a migration whose
+# version is below one already applied, a numbered migration merged after a timestamped one
+# deployed, leaves max where it was, and a guard reading max alone would start the previous image
+# on a schema it never ran against. The max and the count are there for a reader of a log line;
+# the digest is what changes whenever the set changes.
+#
+# It first takes the advisory lock Dispatch's migration runner holds for each migration
+# (internal/dispatch/store/store.go, migrationLockKey), in a statement of its own, so a migration
+# transaction still in flight, one a stopped image sent its commit for included, ends before the
+# read takes its snapshot; the versions then come back in one statement, ordered by the database.
+# psql's stderr is dropped, since its diagnostics can quote the connection; a failure prints
+# nothing and returns psql's status, or 1 for an answer that is no list of versions.
+schema_applied() {
+  local versions line count max digest
   # shellcheck disable=SC2016 # $DATABASE_URL expands in the container's shell, from its environment
-  version=$(pg_client 60 'psql -X -q -At -v ON_ERROR_STOP=1 -c "set lock_timeout = 30000" -c "select pg_advisory_lock(8150001)" -c "select coalesce(max(version), 0) from schema_migrations" "$DATABASE_URL"' 2>/dev/null) ||
+  versions=$(pg_client 60 'psql -X -q -At -v ON_ERROR_STOP=1 -c "set lock_timeout = 30000" -c "select pg_advisory_lock(8150001)" -c "select version from schema_migrations order by version" "$DATABASE_URL"' 2>/dev/null) ||
     return
-  version="${version##*$'\n'}"
-  [[ "$version" =~ ^[0-9]+$ ]] || return 1
-  printf '%s\n' "$version"
+  count=0
+  max=0
+  digest=""
+  while IFS= read -r line; do
+    # pg_advisory_lock returns void, which prints as an empty line; a version never does.
+    [[ -z "$line" ]] && continue
+    [[ "$line" =~ ^[0-9]+$ ]] || return 1
+    digest+="$line"$'\n'
+    count=$((count + 1))
+    max="$line"
+  done <<<"$versions"
+  digest=$(printf '%s' "$digest" | sha256sum) || return 1
+  printf '%s-%s-%s\n' "$max" "$count" "${digest%% *}"
+}
+
+# schema_changed answers whether the applied set moved from a recorded baseline to the set the
+# database holds now: 0 when it moved, 1 when it did not. A baseline in the form above holds the
+# whole set, so any difference is a move; a bare max(version), which the deployer before this one
+# recorded, holds only the highest version, so all it can show is a version applied above it.
+schema_changed() {
+  local baseline="$1"
+  local now="$2"
+  if [[ "$baseline" == *-* ]]; then
+    [[ "$now" != "$baseline" ]]
+    return
+  fi
+  ((${now%%-*} > baseline))
+}
+
+# schema_label describes a value for a log line: the highest version applied, and, for a value
+# that holds the set, how many versions that set holds.
+schema_label() {
+  local rest
+  if [[ "$1" == *-* ]]; then
+    rest="${1#*-}"
+    printf '%s (%s applied)\n' "${1%%-*}" "${rest%%-*}"
+  else
+    printf '%s\n' "$1"
+  fi
 }
 
 newest_published_main() {
@@ -213,8 +258,14 @@ rollback() {
 # and an image older than its database's schema can write what the newer release fails to read
 # (packages/envoy/cmd/dispatch/README.md, "Database migrations"). So it stops $sha first and
 # confirms the stop, then reads the schema, so nothing $sha runs can move it after the read. Once the
-# schema has moved, or the stop or the read fails, it starts nothing and fails, for an operator to
-# recover forward.
+# set of applied migrations has changed, or the stop or the read fails, it starts nothing and fails,
+# for an operator to recover forward. It compares the whole set, not max(version): a migration
+# applied below one already applied leaves the max where it was.
+#
+# A $baseline the deployer before this one recorded is a bare max(version), with no set behind it.
+# While the tag that wrote it is still deployed, it is compared the old way, so a retry in flight
+# across the upgrade keeps the safety it started with; the first deploy under a new tag records the
+# set.
 roll_back_or_stop() {
   local sha="$1"
   local previous="$2"
@@ -223,7 +274,8 @@ roll_back_or_stop() {
   local running
   local now
   local status
-  local refusing="so refusing to roll back to $previous, which runs against schema $baseline, and forward recovery is required"
+  local refusing
+  refusing="so refusing to roll back to $previous, which runs against schema $(schema_label "$baseline"), and forward recovery is required"
   if ! compose 120 stop dispatch; then
     log "could not stop $sha, $refusing"
     return 1
@@ -232,16 +284,16 @@ roll_back_or_stop() {
     log "could not confirm $sha stopped, $refusing"
     return 1
   fi
-  now=$(schema_version) || {
+  now=$(schema_applied) || {
     status=$?
     log "could not read the schema version after stopping $sha (status $status), $refusing"
     return 1
   }
-  if ((now > baseline)); then
-    log "refusing to roll back to $previous: it runs against schema $baseline, and $sha moved the schema to $now before it failed. $sha is stopped, and forward recovery is required: deploy an image that fixes it, or start $sha by hand once its failure is understood. Never start $previous against schema $now"
+  if schema_changed "$baseline" "$now"; then
+    log "refusing to roll back to $previous: it runs against schema $(schema_label "$baseline"), and $sha changed the applied migrations to $(schema_label "$now") before it failed. $sha is stopped, and forward recovery is required: deploy an image that fixes it, or start $sha by hand once its failure is understood. Never start $previous against schema $(schema_label "$now")"
     return 1
   fi
-  log "rolling back to $previous (schema $now)"
+  log "rolling back to $previous (schema $(schema_label "$now"))"
   rollback "$previous" "$dispatchPort"
 }
 
@@ -278,19 +330,21 @@ deploy() {
   fi
   dispatchPort=$(env_value DISPATCH_PORT)
   dispatchPort="${dispatchPort:-8766}"
-  before=$(schema_version) || {
+  before=$(schema_applied) || {
     status=$?
     log "could not read the schema version (status $status); not deploying $sha"
     return 1
   }
-  # ENVOY_IMAGE_SCHEMA is <tag>:<version>, the schema version the deployed tag was running against
-  # when the deployer first tried to replace it. Kept while that tag stays deployed, it is what a
-  # rollback to it needs: a retry after a failed deploy that migrated starts from the moved schema.
+  # ENVOY_IMAGE_SCHEMA is <tag>:<value>, where <value> stands for the set of migrations the
+  # deployed tag was running against when the deployer first tried to replace it (schema_applied,
+  # above). Kept while that tag stays deployed, it is what a rollback to it needs: a retry after a
+  # failed deploy that migrated starts from the moved schema. A value the deployer before this one
+  # wrote is a bare max(version), which roll_back_or_stop compares the old way.
   recorded=$(env_value ENVOY_IMAGE_SCHEMA)
   if [[ -n "$recorded" && "${recorded%:*}" == "$previous" ]]; then
     baseline="${recorded##*:}"
-    if [[ ! "$baseline" =~ ^[0-9]+$ ]]; then
-      log "ENVOY_IMAGE_SCHEMA in $COMPOSE_ENV is '$recorded', not <tag>:<version>; not deploying $sha"
+    if [[ ! "$baseline" =~ ^[0-9]+-[0-9]+-[0-9a-f]{64}$ && ! "$baseline" =~ ^[0-9]+$ ]]; then
+      log "ENVOY_IMAGE_SCHEMA in $COMPOSE_ENV is '$recorded', not <tag>:<max>-<count>-<digest>; not deploying $sha"
       return 1
     fi
   else

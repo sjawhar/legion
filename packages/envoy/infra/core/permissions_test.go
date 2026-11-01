@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sjawhar/envoy/infra/core"
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 // listenerBasePublish is the publish grant every user that runs a listener holds for
@@ -128,14 +129,33 @@ func TestListenerPermissionsNameTheDurableAndQueueOfAMachineIDWithASpace(t *test
 	require.Contains(t, p.Subscribe.Allow, "notifications.role.> envoy-listener-example-host")
 }
 
-// A session subscribes to its own relay subject and its agent stream's control subject, and to no
-// notification topic at all: a notification reaches it as a relay frame of its own consumer,
-// which the listener owning the session publishes there, or not at all.
+// A session subscribes to its own relay subject, the presence probe a listener sends it, and its
+// agent stream's control subject, and to no notification topic that carries a message: a
+// notification reaches it as a relay frame of its own consumer, which the listener owning the
+// session publishes there, or not at all.
 func TestSessionPermissions(t *testing.T) {
 	require.Equal(t, core.Permissions{
-		Publish:   core.Rules{Allow: []string{"_INBOX.>", "agentstream.*.frames"}},
-		Subscribe: core.Rules{Allow: []string{"notifications.envoy.deliver.*", "agentstream.*.control"}},
+		Publish: core.Rules{Allow: []string{"_INBOX.>", "agentstream.*.frames"}},
+		Subscribe: core.Rules{Allow: []string{
+			"notifications.envoy.deliver.*",
+			"notifications.envoy.presence.*",
+			"agentstream.*.control",
+		}},
 	}, core.SessionPermissions())
+}
+
+// The presence subject the set above lets a session subscribe to is captured by no stream
+// subject, so a probe and its answer are never stored and the subscribe reads nothing of any
+// other session's traffic: it is a core request whose answer says the session is running
+// (dispatch://INFRA-626). A stream subject that captured it would turn this one wildcard
+// subscribe into a read of stored messages.
+func TestSessionPresenceSubjectIsStoredByNoStream(t *testing.T) {
+	for _, subject := range []string{
+		"notifications.envoy.presence.ses_probe",
+		"notifications.envoy.presence.ses_probe.anything",
+	} {
+		require.False(t, bus.StreamCaptures(subject), "%s must be captured by no stream subject", subject)
+	}
 }
 
 // A user holding SessionPermissions alone publishes a reply and never subscribes to a reply inbox,

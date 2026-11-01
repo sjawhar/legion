@@ -1,7 +1,0 @@
-kind: Changed
-body: |-
-  `envoy_subscribe` and `envoy_publish` describe stored delivery: a stored topic (agent, dispatch,
-  github, slack, legion, ghostwispr, whatsapp, and a role message, which reaches its holder as a
-  stored copy on the holder's agent topic) reaches each subscribed session once from the durable
-  consumer its listener relays to it, also one that was away or restarted; team and other ad-hoc
-  topics are live only (INFRA-594).

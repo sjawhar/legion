@@ -1112,7 +1112,7 @@ func TestDeleteSessionHandler_RejectsOtherMethods(t *testing.T) {
 }
 
 func TestIsValidRole(t *testing.T) {
-	valid := []string{"legion-controller", "opencode_dev", "r2d2", "a"}
+	valid := []string{"legion-controller", "pi_dev", "r2d2", "a"}
 	for _, role := range valid {
 		if !isValidRole(role) {
 			t.Fatalf("expected role %q to be valid", role)

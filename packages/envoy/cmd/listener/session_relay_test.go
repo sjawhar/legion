@@ -748,7 +748,7 @@ func (p *scriptedPort) noPush(t *testing.T, window time.Duration) {
 	}
 }
 
-// registerScriptedSession registers port's session with listener as the OpenCode plugin does.
+// registerScriptedSession registers port's session with listener by its serving port and nothing else.
 func registerScriptedSession(t *testing.T, listener *listenerProcess, port *scriptedPort) {
 	t.Helper()
 	postListener(t, listener.port, "/v1/interests/subscribe",

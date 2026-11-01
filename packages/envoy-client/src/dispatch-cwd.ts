@@ -1,7 +1,7 @@
 // Cwd-derived defaults for the dispatch tool: which GitHub repo a thread
 // belongs to, and where a human jumps back to reply. Every host plugin (OMP,
-// OpenCode, Claude) calls this from inside the session's own process, so this
-// is the one place that needs to know about the working directory.
+// Claude) calls this from inside the session's own process, so this is the one
+// place that needs to know about the working directory.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -38,7 +38,7 @@ const REMOTE_LOOKUP_MS = 5_000;
 const TMUX_PANE_LOOKUP_MS = 1_000;
 
 /** The coding-agent hosts that ship a `dispatch` tool. Each plugin asserts its own value. */
-export type DispatchHost = "omp" | "opencode" | "claude";
+export type DispatchHost = "omp" | "claude";
 
 /** Provenance attached to every dispatch turn so a human can find the asking session. */
 export interface DispatchOrigin {
