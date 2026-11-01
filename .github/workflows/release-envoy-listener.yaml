@@ -92,6 +92,15 @@ jobs:
   # this job needs, but it's what every other job in this workflow (and the wider CI config) does
   # regardless of how much of the tree it touches; a sparse or shallow checkout here alone would
   # be the inconsistency.
+  #
+  # It also derives the image every job below pushes, tags, attests or reads back, from
+  # $GITHUB_REPOSITORY (.github/scripts/repo-paths.sh), so moving the repository to another owner
+  # or name moves the image with it instead of leaving a literal in five places. It is derived
+  # here and read everywhere else through this job's output because each of those jobs holds
+  # packages: write, contents: write, id-token or attestations: write, and a job holding a
+  # credential runs no script of this repository (.github/scripts/check-release-credentials.sh).
+  # This job holds contents: read alone, so it may run one - which makes it a build job, hence the
+  # tripwire last, as in build, docker and release_build.
   targets:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -99,12 +108,19 @@ jobs:
       contents: read
     outputs:
       envoy: ${{ steps.read.outputs.envoy }}
+      envoy_image: ${{ steps.read.outputs.envoy_image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: read
-        run: echo "envoy=$(jq -c .envoy .github/go-release-targets.json)" >> "$GITHUB_OUTPUT"
+        run: |
+          {
+            echo "envoy=$(jq -c .envoy .github/go-release-targets.json)"
+            echo "envoy_image=$(.github/scripts/repo-paths.sh envoy_image)"
+          } >> "$GITHUB_OUTPUT"
+      - name: Check this job holds no credential (tripwire)
+        run: .github/scripts/release-push.sh no-credential
 
   build:
     needs: targets
@@ -153,7 +169,10 @@ jobs:
   # last leg's value, so the digests travel as artifacts instead.
   docker:
     name: docker (${{ matrix.arch }})
-    needs: build
+    # targets as well as build: `needs` carries direct dependencies only, so a job reading
+    # needs.targets.outputs.envoy_image must name targets itself, however far back it already
+    # reaches through build.
+    needs: [build, targets]
     strategy:
       fail-fast: true
       matrix:
@@ -274,8 +293,9 @@ jobs:
           provenance: mode=min
           # Pushes this platform by digest, with no tag: only image_index tags `envoy:<sha>`, once
           # both legs have pushed. `outputs` replaces `push` and `tags`; `push` beside it would
-          # request a second exporter.
-          outputs: type=image,name=ghcr.io/sjawhar/legion/envoy,push-by-digest=true,name-canonical=true,push=true
+          # request a second exporter. The image comes from targets, which derived it from
+          # $GITHUB_REPOSITORY, so a rename moves every push, tag and attestation together.
+          outputs: type=image,name=${{ needs.targets.outputs.envoy_image }},push-by-digest=true,name-canonical=true,push=true
           # envoy-dispatch's /healthz reports this as the commit it was built from; the
           # Dockerfile refuses anything but a full sha.
           build-args: |
@@ -308,7 +328,10 @@ jobs:
   # docker buildx runs imagetools, so this job checks out nothing and sets up no builder, and with
   # no dependency code it ends in no tripwire.
   image_index:
-    needs: docker
+    # targets as well as docker: this job holds packages: write, so it runs no script of its own
+    # to derive the image, and `needs` is not transitive - reading needs.targets.outputs here
+    # means naming targets here.
+    needs: [docker, targets]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # Pushes the index and its tag to ghcr.io; nothing here writes to the repository.
@@ -333,7 +356,9 @@ jobs:
       - name: Create the image index
         id: index
         env:
-          IMAGE: ghcr.io/sjawhar/legion/envoy
+          # Derived by targets from $GITHUB_REPOSITORY, not written here: the index this job tags
+          # must name the same repository the legs pushed their platforms to.
+          IMAGE: ${{ needs.targets.outputs.envoy_image }}
           SHA: ${{ github.sha }}
         run: |
           shopt -s nullglob
@@ -378,7 +403,10 @@ jobs:
   # (`provenance: mode=min`), which the index carries. A branch dispatch attests too, and its
   # certificate names `refs/heads/<branch>`, which the command above refuses.
   attest:
-    needs: image_index
+    # targets as well as image_index: this job holds id-token and attestations: write, so it runs
+    # no script to derive the image it names, and reads it from targets' output - which `needs`
+    # carries only to a job that names targets directly.
+    needs: [image_index, targets]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # id-token: write is the OIDC token Sigstore issues the signing certificate for; attestations:
@@ -392,7 +420,7 @@ jobs:
     steps:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-name: ghcr.io/sjawhar/legion/envoy
+          subject-name: ${{ needs.targets.outputs.envoy_image }}
           subject-digest: ${{ needs.image_index.outputs.digest }}
 
   # agent-secrets (packages/envoy/cmd/agent-secrets) and the host helper
@@ -525,10 +553,16 @@ jobs:
     # any other branch publishes its `envoy:<sha>` image above and stops there. `latest` moves
     # whatever release_build did; the release steps run only on its success and once "Confirm the
     # version" finds no other run took the version.
-    needs: [build, image_index, release_build]
+    # targets too: this job holds contents: write, the deploy key and the rest, so it runs no
+    # script to derive the image it tags and reads back, and takes it from targets' output, which
+    # `needs` carries only to a job naming targets directly.
+    needs: [build, image_index, release_build, targets]
+    # On `always()`, so a skipped release_build does not skip this job; every job whose outputs
+    # the steps below read has its result tested, targets' among them.
     if: >-
       always() && github.ref == 'refs/heads/main' &&
-      needs.build.result == 'success' && needs.image_index.result == 'success'
+      needs.build.result == 'success' && needs.image_index.result == 'success' &&
+      needs.targets.result == 'success'
     concurrency:
       # One run at a time, and every run's turn comes: `queue: max` keeps up to 100 jobs pending
       # in the group, first in, first out, where the default keeps one and cancels it for the
@@ -570,7 +604,10 @@ jobs:
       - name: Determine latest
         id: latest
         env:
-          IMAGE: ghcr.io/sjawhar/legion/envoy
+          # The image targets derived from $GITHUB_REPOSITORY. This job holds contents: write,
+          # the deploy key and the rest, so it runs no script to derive it for itself
+          # (.github/scripts/check-release-credentials.sh).
+          IMAGE: ${{ needs.targets.outputs.envoy_image }}
           OWN_DIGEST: ${{ needs.image_index.outputs.digest }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -608,9 +645,15 @@ jobs:
               latest_has_revision=$(printf '%s\n' "$latest_manifest" | jq -r '(.annotations // {}) | has("org.opencontainers.image.revision")')
               latest_sha=$(printf '%s\n' "$latest_manifest" | jq -r '(.annotations // {})["org.opencontainers.image.revision"] // empty')
 
-              # Resolve the one legacy unannotated latest tag through its GHCR package-version metadata.
+              # Resolve the one legacy unannotated latest tag through its GHCR package-version
+              # metadata. The package is the image without its registry and owner
+              # (ghcr.io/<owner>/ -> <name>/envoy), whose remaining slash is percent-encoded
+              # because the package name is one segment of the API's path; taken from $IMAGE so
+              # that this lookup moves with the repository as the tag above does.
               if [ "$latest_has_revision" = false ]; then
-                if ! legacy_source=$(gh api "users/$GITHUB_REPOSITORY_OWNER/packages/container/legion%2Fenvoy/versions?per_page=100" --paginate --jq '.[] | select(.metadata.container.tags | index("latest")) | [.name, (.metadata.container.tags[] | select(test("^[0-9a-f]{40}$")))] | @tsv'); then
+                package=${IMAGE#"ghcr.io/$GITHUB_REPOSITORY_OWNER/"}
+                package=${package//\//%2F}
+                if ! legacy_source=$(gh api "users/$GITHUB_REPOSITORY_OWNER/packages/container/$package/versions?per_page=100" --paginate --jq '.[] | select(.metadata.container.tags | index("latest")) | [.name, (.metadata.container.tags[] | select(test("^[0-9a-f]{40}$")))] | @tsv'); then
                   echo "::error title=Cannot establish latest provenance::Unable to resolve legacy latest through GHCR."
                   exit 1
                 fi
@@ -686,7 +729,9 @@ jobs:
       - name: Advance latest image
         if: steps.latest.outputs.should_tag_latest == 'true'
         env:
-          IMAGE: ghcr.io/sjawhar/legion/envoy
+          # targets' derivation again, for the same reason as "Determine latest" above: the
+          # `latest` tag must move on the image this run's index was pushed to.
+          IMAGE: ${{ needs.targets.outputs.envoy_image }}
           SHA: ${{ steps.latest.outputs.latest_sha }}
           DIGEST: ${{ steps.latest.outputs.latest_digest }}
         run: |

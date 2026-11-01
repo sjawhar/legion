@@ -904,6 +904,13 @@ jobs:
       attestations: write
     with:
       attest_digest: ${{ needs.worker_image.outputs.digest }}
+      # The image repository the attestation names. worker-image.yaml derives it from
+      # $GITHUB_REPOSITORY in its build job, which this call skips (attest_digest), and its attest
+      # job holds id-token and attestations: write, so it runs no script to derive it for itself.
+      # The build-only call above reported the repository it pushed to as its `image` output, so
+      # this call hands that value back: both calls name one image, whatever the repository is
+      # called.
+      image: ${{ needs.worker_image.outputs.image }}
       skip_attest: ${{ github.ref == 'refs/heads/main' && needs.publish.outputs.pair_ok != 'true' }}
 
   # Names the worker image on the legion release this run made: tags the image's digest with the
