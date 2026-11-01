@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-607",
+  "previousHandoff": "202e917332b1bff3eedd136e36c118a99102b5a0",
+  "testedHead": "7520213919ce8497fb8ad861edad3631b2bbfacb",
+  "codeHead": "57b0a9281b49af44d0ca577e24ac5041b26812dd",
+  "round": 22,
+  "scope": "Confirmation round (architect, 06:33Z): code unchanged at 57b0a928; the implementer re-ran the failed jobs of CI run 41266479256 and pushed only a handoff. The evidence is my round-21 checks at 57b0a928 (dispatch://INFRA-607/artifact/round21-test-json), whose completion the daemon's move to implementing on pi-legion's red ci-ok overtook; their results are copied below.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Every check the architect named at 02:50Z for 57b0a928 passed in round 21 (proof below). Above the code head: gh api compare 57b0a928...75202139 reports ahead 2, behind 0, one file, .legion/INFRA-607/implement.json."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Main's DPoP sweep moved onto RunMaintenanceSweep: an expired spent proof is deleted within about a minute, an unexpired one kept, one process sweeps under the lease, #2541's tests pass unmodified",
+      "surface": "Two real dispatch processes of 57b0a928 on one Postgres 16 with log_statement=all (database first created at schema 150 by main f93dd689), NATS 2.10.29, the Envoy listener; go test on the export",
+      "command": "insert into dpop_proofs three rows (expiring 02:54:07, 02:54:42, 03:14:12); sample the table every 10 s; read the statement log. go test ./internal/brokertoken/; go test -run '<broker_token_test.go and project_scope_test.go tests>|TestMaintenance.*|.*DPoP.*' ./internal/dispatch/api/; go test -run '^(TestTheMaintenanceLoop.*|TestTheDeliverySweep.*)$' ./internal/dispatch/api/",
+      "observed": "Both expired rows gone by 02:55:03; the unexpired row kept through 02:59:14. 'delete from dpop_proofs where expires_at <= now()' ran exactly once a minute (02:55:01, 02:56:01, 02:57:01, 02:58:01, 02:59:01) across the two processes, alternating backends. dpop_proofs_test.go, brokertoken_test.go, broker_token_test.go and project_scope_test.go are identical at f93dd689 and 57b0a928. brokertoken ok; api broker-token, project-scope and DPoP tests 42 pass, 0 fail; maintenance-loop and delivery-sweep tests 7 pass. Evidence dispatch://INFRA-607/artifact/round21-dpop-sweep-evidence-tar-gz",
+      "headSha": "57b0a9281b49af44d0ca577e24ac5041b26812dd",
+      "negativeControl": "The unexpired proof (03:14:12) survived every pass, so the sweep deletes by expiry and not all rows."
+    },
+    {
+      "criterion": "Migrations 0151-0157 after main's 0150_dpop_proofs; connections 90",
+      "surface": "The same database; the store and pgmigrate suites on a superuser Postgres 16 on the issue volume; infra/gcp test",
+      "command": "select version from schema_migrations where version >= 148; go test ./internal/dispatch/store/ ./internal/pgmigrate/...; go test -run '^(TestMigrationSetIsNumberedOneToN|TestEveryMigrationFileIsEmbedded|TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny|...)$'; (cd infra && go test ./gcp/ -run Connections)",
+      "observed": "148-157 with no gap. store ok 233.7 s, pgmigrate ok, pgmigratetest ok; the numbering, embedding and shared-version tests pass; dispatchConnectionsPerPod = 90 and TestDispatchConnectionsPerPodIsTheServers passes. Main's highest migration is still 0150_dpop_proofs at 06:33Z (contents API on main).",
+      "headSha": "57b0a9281b49af44d0ca577e24ac5041b26812dd",
+      "negativeControl": "Main's build stops at 150, so 151-157 are this PR's."
+    },
+    {
+      "criterion": "TestEditNoticeRestart waits on the room rendering 'after' before the close and passes 100 of 100 without a weaker assertion",
+      "surface": "The export of 57b0a928, the pod's test Postgres (LEGION_TEST_PG_DSN)",
+      "command": "GOFLAGS=-p=1 GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -count=100 -timeout 56m -v -run '^TestEditNoticeRestart$' ./cmd/dispatch/",
+      "observed": "100 PASS, 0 FAIL, ok in 1,800 s. The commit adds waitForDocumentText (GET /api/v1/artifacts/{id}/text until markdown == 'after\\n', 10 s bound) before the close and changes no assertion. Evidence dispatch://INFRA-607/artifact/round21-editnotice100-tar-gz",
+      "headSha": "57b0a9281b49af44d0ca577e24ac5041b26812dd",
+      "negativeControl": "An earlier attempt whose test Postgres died with the pod failed 88 of 100 on 'dial tcp 127.0.0.1:25432: connection refused', so the run is a real run against the database."
+    },
+    {
+      "criterion": "Idle on the merged binary: no timer loop runs while nothing changes",
+      "surface": "Two real dispatch processes of 57b0a928, Postgres 16 with log_statement=all, NATS, listener",
+      "command": "count.py over the statement log, 04:10:14-04:20:14",
+      "observed": "4,006 statements: 3.34 per second per process (round 16: 3.31). Woken-loop statements: one suggestion pass at 04:10:34, the end of the seeding writes' settle, and none in the 9.7 minutes after. The maintenance timer's once-a-minute sweeps (dpop_proofs 10, request_keys 10) are the leased timer this PR keeps. Evidence dispatch://INFRA-607/artifact/round21-idle-tar-gz",
+      "headSha": "57b0a9281b49af44d0ca577e24ac5041b26812dd",
+      "negativeControl": "The seeding's settle pass shows in the same counter, so a 0 after it is a real absence."
+    }
+  ],
+  "memory": "Named-job samplers: 187 samples (sampled peak 2.66 GiB of 19) before the 03:02Z pod restart, 1,287 samples (2.42 GiB of 19) after.",
+  "leftoverCheck": "After each proc kill, ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|<samples file>|t21/bin|t21/pg' printed no lines.",
+  "ci": "Run 41266479256 at 57b0a928: attempt 1 failure (pi-legion only: legion-background-subagent-omp.test.ts:477, a strict < between two times in one millisecond; this PR changes nothing under packages/pi-legion or pi-shared). Attempt 2, read myself: conclusion success, 23 jobs success and 9 skipped, pi-legion success (06:12:14Z), ci-ok success (06:31:37Z). No lane unread. PR MERGEABLE."
+}
