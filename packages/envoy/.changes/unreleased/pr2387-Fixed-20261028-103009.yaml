@@ -1,9 +1,0 @@
-kind: Fixed
-body: |-
-    An issue's claim time, an ask's answer time (the answer route's and a carried approval's) and
-    the "snooze must be in the future" check use the database's clock, not the clock of the host
-    that served the request, so two processes on hosts whose clocks disagree no longer order a
-    claim or an answer against the other's times wrongly or refuse a snooze the other would take.
-time: 2026-10-28T10:30:09.000000000Z
-custom:
-    Issue: pr2387
