@@ -2,65 +2,50 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-177",
-  "previousHandoff": "fa59a830b3f3f41580992cde74de7d42a87e1058",
-  "round": 22,
-  "headTested": "2905c0c4ea5a27428193af2ee812f0b6b2d3f5bc (code head fe131b9406fc, the merge with main 0642a37a; since round 21's d29a6a04: f4a8e6f7, 398ea7b8, 9e3fe863 (#2585), 91ab50e0 (#2411, both migrations renamed to UTC stamps), fe131b94 (#2633))",
-  "scope": "A full round on what moved since round 21, since this change's own lines moved: fingerprint 0e9a858f at e6a3698a -> 1cf097ae at fe131b94 (PR diff against its fork point, context 0, hunk headers and index lines stripped; .legion, docs/solutions and claude-envoy dist/ and legion/ left out), 57 files moved.",
-  "checks": {
-    "numbers": "Read from main@origin 0642a37a's committed tree, not the workspace: DaemonAPIVersion 44 and daemon-api/version.json 44 there, 45 at the head; daemon migrations end at 0067 on main, and the head adds 20261101144900_handoff_records; main's Dispatch migrations end at 20261101144855_block_pointer_links, and the head adds 20261101144901_handoffs (up and census). No file outside docs/solutions names 0150_handoffs or 0065_handoff_records. docs/kubernetes.md's section says contract 45 and the rollback names 20261101144900.",
-    "mergeWithMain2585": "Worker texts at the head (daemon prompts, skills, pi-shared, pi-legion src) carry no previousHandoff, no completed stamp and no .legion/<issue>/<phase>.json: tester.md's handoff is 'schemaVersion, phase, issue, implementerProof, failures', with Dispatch recording the time. skill-scenarios score.ts and rig.sh drop previousHandoff and completed the same way.",
-    "mergedCode": "handoff.go takes the claim's session (main renamed held to c), engine.go reads row.Completed(), record/store.go selects and writes handoff_record and handoff_version beside main's new assignment column, and routes_table.go classes POST /api/v1/issues/{key}/handoffs/{phase} as scopeProject under main's new project-scoped write check.",
-    "generatedCopies": "packages/claude-envoy/legion still carries the skip-checks text, as main's does: it is the rebuild workflow's output after the merge, as in rounds 20 and 21."
+  "previousHandoff": "663dbc2b7f8716993a5bfa0f2e4cc0fa30f3eeb9",
+  "round": 23,
+  "headTested": "77ac89f1cb05342072731a17e71f6fe2c0570a75 (code head fad8b67a86b1, review 17's six Minor findings; nothing else moved since round 22's fe131b94)",
+  "scope": "Per the architect: the six findings only, past the round cap. No full round.",
+  "findings": {
+    "1-docs/kubernetes.md:1830": "now says an upgrade back would end a review round on an approval alone, or move an implementing issue to testing on its next pull request event before the implementer completed anything. That matches the code: workflow/pullrequest.go:94 and :181 call implementationReady whenever the implementer's row is Completed(), and record.go:357 counts a handoff_record as completed.",
+    "2-20261101144901_handoffs.up.sql": "the 'every migration after 0149_event_horizon' sentence is gone; the header says its identifier is the UTC moment it was written, as migrationid requires of every migration past the numbered series, and repeats no number.",
+    "3-api/handoff.go staleAssignment": "both refusals now say 'never this completion's record, commit or verdict'.",
+    "4-score.ts/score.test.ts": "the comment names previousHandoff (main's prompt since #2585) and completed (before it); the new case 'a tester handoff of a checkout whose prompt asks for previousHandoff is read too' passes, and fails with the fix reverted (below).",
+    "5-firstLineOf": "removed; its one call inlined as strings.Cut(strings.TrimSpace(out), \"\\n\"). No firstLineOf remains in packages/daemon; main's firstLine (ci_red_no_takeover_live_test.go:688) is untouched.",
+    "6-stall constant": "waitMs = 1_500 feeds both LEGION_STALL_WAITING_MS and waitedAtLeastMs = waitMs - 100, which both assertions use; no 1_400 literal is left."
   },
-  "mergeability": "GitHub: MERGEABLE, BLOCKED (required checks not yet run) at 2905c0c4; main@origin is the fork 0642a37a, so the head is up to date with main.",
-  "ci": "Read 19:57Z: at the code head fe131b94, 32 check runs, changes success and every other lane, test included, queued; the tip 2905c0c4 is handoff-only and has none. The required test job has not run and has not settled green. Read as running, not waited for.",
+  "ci": "Read 21:04Z at fad8b67a, CI run 41349022205: changes success, test in_progress, 27 lanes queued; ci-ok has no check run yet (the aggregator reports last), so it is recorded unjudged. pr-title success (run 41349158350; five earlier pr-title runs of the same head cancelled by it). The tip 77ac89f1 is handoff-only.",
+  "mergeability": "GitHub: MERGEABLE, BLOCKED at 77ac89f1; main moved to 05d65789 past the fork 0642a37a, and GitHub reports no conflict.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran handoff-records.sh and the handoffs and budget browser specs at this head, recomputed the fingerprint (1cf097ae, equal to the implementer's) and read the numbers from main's committed tree."
+    "how": "Read fad8b67a's diff against each of review 17's six findings, and re-ran handoff-records.sh, score.test.ts, the stall test against the real omp and go test ./internal/api at this head."
   },
-  "notesForRetro": "Main added nine active notes since d7e1daaa that match the old handoff mechanism (handoff commit, handoff-only, skip-checks: true, .legion/<issue>, previousHandoff); per the architect's ruling they are retro's census, not this round's failure: best-practices/a-field-no-reader-reads-can-be-load-bearing-through-its-bytes-INFRA-336, best-practices/a-path-query-answers-the-commit-that-deleted-the-path-too-INFRA-336, legion/a-first-retro-note-a-later-round-falsifies-is-corrected-in-that-round-INFRA-336, legion/a-prose-only-fix-to-agent-facing-text-is-a-behaviour-change-INFRA-336, legion/a-red-check-in-a-package-the-branch-does-not-touch-is-mains-until-mains-own-run-says-otherwise-pr2580, legion/a-reruns-green-arrives-with-the-aggregator-and-a-send-back-burns-the-handoff-commit-it-accepted-pr2541b, legion/an-out-of-paths-red-is-triaged-by-whether-it-is-deterministic-at-the-merge-commit-...-pr2619, skill-patterns/a-command-inside-an-instruction-is-copied-from-the-code-that-runs-it-and-anchored-INFRA-336, testing/a-two-label-agent-comparison-scores-the-rule-only-when-every-shared-component-takes-both-checkouts-shapes-INFRA-336.",
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Handoff records end to end at the merged head (A3, A6, A7, A10, HANDOFF_NOT_NEW)",
-      "surface": "scripts/e2e/handoff-records.sh: the real dispatch CLI, the real Dispatch server and the whole daemon, on the pod's own Postgres",
-      "command": "LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/legion_t22?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh",
-      "observed": "every check ok, among them a6 (40 KB reads back byte-identical, versions 1 and 2), a3 (another session's record refused at completion), a7 and handoff-not-new; handoff records e2e: PASS in 61s",
-      "headSha": "2905c0c4ea5a27428193af2ee812f0b6b2d3f5bc",
-      "negativeControl": "a6-control: a body one byte over the cap refused; a3: another session's record refused HANDOFF_SESSION_MISMATCH"
+      "criterion": "Finding 4: the scorer reads a tester handoff that carries previousHandoff and no completed",
+      "surface": "packages/pi-legion/scripts/skill-scenarios/score.test.ts at this head",
+      "command": "cd packages/pi-legion && bun test scripts/skill-scenarios/score.test.ts",
+      "observed": "73 pass, 0 fail",
+      "headSha": "77ac89f1cb05342072731a17e71f6fe2c0570a75",
+      "negativeControl": "TestHandoff switched from z.looseObject to z.strictObject (score.ts:130, restored after): '(fail) a tester handoff of a checkout whose prompt asks for previousHandoff is read too', 0 pass 1 fail"
     },
     {
-      "criterion": "The handoff write sits under main's project-scoped write check: a token scoped to one project cannot write a handoff on another project's issue",
-      "surface": "the Dispatch API router at this head with a broker-issued DPoP token scoped to project BRK (main's brokerTokenRig), on Postgres",
-      "command": "a throwaway test in internal/dispatch/api (deleted after the run): POST /api/v1/issues/OTH-1/handoffs/test and /api/v1/issues/BRK-1/handoffs/test with the BRK-scoped token, DISPATCH_TEST_DATABASE_URL on the pod's server",
-      "observed": "BRK-1: 201, version 1, author session ses_b1c2d3e4f5a6 project BRK",
-      "headSha": "2905c0c4ea5a27428193af2ee812f0b6b2d3f5bc",
-      "negativeControl": "OTH-1 as the BRK-scoped caller: 403 {\"code\":\"PROJECT_SCOPE\",\"error\":\"this request's credential may write project BRK; this write belongs to project OTH\"}, and OTH-1's handoff list read afterwards is []"
+      "criterion": "Finding 6: the stall test's one constant still bounds the WAITING wait",
+      "surface": "packages/pi-legion/extensions/legion-phase-stall-omp.test.ts against the real Oh My Pi",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts",
+      "observed": "10 pass, 0 fail (183 s)",
+      "headSha": "77ac89f1cb05342072731a17e71f6fe2c0570a75",
+      "negativeControl": "the env wait shortened to waitMs - 1_000 with the bound left (restored after): 'a WAITING reply buys its quiet wait...' fails, Expected >= 1400, Received 597"
     },
     {
-      "criterion": "The renamed daemon migration upgrades a store at main's schema and the documented rollback undoes it",
-      "surface": "the daemon store's own Migrate (internal/store) of main 0642a37a and of this head, and the psql block in docs/kubernetes.md 'Handoff records on the Dispatch issue (daemon API contract 45)'",
-      "command": "Migrate with main's tree on a fresh database (applied=67, schemaVersion 67), then with this head's (applied=1, schemaVersion 20261101144900); on the e2e's database, the docs' rollback block twice, then this head's Migrate again",
-      "observed": "upgrade: versions 20261101144900,67,66; rollback run 1: ALTER TABLE, DELETE 1, schema back to 67 with both columns gone; re-applied: applied=1, schemaVersion 20261101144900, handoff_record text '' and handoff_version integer 0 restored",
-      "headSha": "2905c0c4ea5a27428193af2ee812f0b6b2d3f5bc",
-      "negativeControl": "rollback run 2: two NOTICEs that the columns do not exist, ALTER TABLE, DELETE 0, as the docs say"
-    },
-    {
-      "criterion": "The renamed Dispatch migration rolls onto a database at main's schema, and its pre-deploy census passes",
-      "surface": "Dispatch's store Census and Migrate (internal/dispatch/store) of main 0642a37a and of this head",
-      "command": "Migrate with main's tree on a fresh database, then this head's store.Census, then this head's Migrate",
-      "observed": "census: fresh=false schemaVersion=20261101144855 refused=false, the one pending migration 20261101144901_handoffs.up.sql with its census over issues; migrated; to_regclass('public.handoffs') = handoffs",
-      "headSha": "2905c0c4ea5a27428193af2ee812f0b6b2d3f5bc",
-      "negativeControl": "before this head's Migrate, the main-migrated database had no handoffs table and recorded 20261101144855 as its newest version"
-    },
-    {
-      "criterion": "The Conversation shows handoffs live, and the page's request budget counts its handoffs read (398ea7b8)",
-      "surface": "Dispatch's browser suite (packages/dispatch, bun run e2e) on the pod's Postgres with a fresh web build",
-      "command": "DATABASE_URL=postgres://legion_test@127.0.0.1:5433/e2e_t22_<n> bun run e2e -- e2e/handoffs.e2e.ts e2e/live.e2e.ts -g 'handoff|bounded request budget' --project=chromium --project=iphone",
-      "observed": "5 passed: handoffs.e2e.ts's three in chromium (versions and fields, live arrival, one Activity line per version), and the budget spec in chromium and iphone",
-      "headSha": "2905c0c4ea5a27428193af2ee812f0b6b2d3f5bc",
-      "negativeControl": "the implementer's red at fa59a830 before 398ea7b8: run 41177359220, job 124475084987, live.e2e.ts:529, 2 failed (budget 20/18 against 21/19 requests)"
+      "criterion": "Handoff records end to end, and the daemon's api package, after the fixes",
+      "surface": "scripts/e2e/handoff-records.sh (the real dispatch CLI, the real Dispatch server and the whole daemon) and go test ./internal/api",
+      "command": "LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/legion_t23?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh; cd packages/daemon && go test ./internal/api/ -count=1",
+      "observed": "handoff records e2e: PASS in 69s, every check ok; ok github.com/sjawhar/legion/daemon/internal/api 179.7s",
+      "headSha": "77ac89f1cb05342072731a17e71f6fe2c0570a75",
+      "negativeControl": "the e2e's a6-control (a body one byte over the cap refused) and a3 (another session's record refused HANDOFF_SESSION_MISMATCH)"
     }
   ]
 }
