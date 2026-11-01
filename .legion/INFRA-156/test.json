@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-156",
+  "previousHandoff": "9a5d7e4514adb944b3eb27d77902ae455fb7c721",
+  "completed": "2026-11-01T06:40:00Z",
+  "headTested": "d0589f82c6aeb5c1ea4214b78a787c449f3ce21a",
+  "previousHeadTested": "ff2209033ee7968221b03afa90f68ee7eac7d958",
+  "fingerprint": "5e8713e157a55157",
+  "fingerprintCheck": "forward-merge re-check ff220903 -> d0589f82 (code 6ad11876, main ed9113e7): changed in guide text only (two lines of packages/proof-editor/AGENTS.md); bare gates only.",
+  "provider": "Anthropic (anthropic/claude-opus-5-5), the model that answered this testing session",
+  "outcome": "Pass on the bare gates. CI run 41280355077 at d0589f82 queued when read; the previous code head's run 41270358702 at 9a5d7e45 succeeded. GitHub: MERGEABLE.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Bare gates at d0589f82 on a database first migrated by main ed9113e7: t.py 80/80, which carries the implementer's A3 steps 1, 5 and 12 (https://github.com/sjawhar/legion/pull/2394#issuecomment-6554418767)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Migration 0151_block_pointer_links applies on a database at main's 0150 and keeps every existing edge",
+      "surface": "main's Dispatch server at ed9113e7, then the head's server on the same Postgres 17 + pgvector database",
+      "command": "bash $TMPDIR/infra156-tester/upgrade.sh <main ed9113e7 binary> <head binary> infra156_tester_up22 8795 (https://github.com/sjawhar/legion/pull/2394#issuecomment-6554418767)",
+      "observed": "schema_version 150 -> 151; graph_edges holds block_ref_listed; existing block_refs rows kept, to_types null; the same four mentions edges (spec, document, comment, message blocks)",
+      "headSha": "d0589f82c6aeb5c1ea4214b78a787c449f3ce21a",
+      "negativeControl": "a block[] pointer to a callout on the upgraded database is refused 400 INVALID_MARKDOWN (t.py check 1f)"
+    },
+    {
+      "criterion": "A3 checks, CI filters, and the merged guide's counts",
+      "surface": "t.py against the head's server; check-ci-filters.sh in a scratch clone; packages/proof-editor/AGENTS.md at the head",
+      "command": "python3 t.py; uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh; count the rows of the 'files under src/ are legion's own' table (https://github.com/sjawhar/legion/pull/2394#issuecomment-6554418767)",
+      "observed": "t.py 80/80; filters exit 0; the table has 20 rows and the guide says Twenty; Twenty-four kinds of edit at lines 61 and 151 agree",
+      "headSha": "d0589f82c6aeb5c1ea4214b78a787c449f3ce21a",
+      "negativeControl": "serves naming a callout -> 400 INVALID_MARKDOWN (t.py check 1f)"
+    }
+  ]
+}
