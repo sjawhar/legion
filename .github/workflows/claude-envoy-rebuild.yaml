@@ -33,16 +33,47 @@ name: Rebuild Claude Envoy plugin
 # it starts no CI or release run of its own; `build` ran the private-name check over the bundle
 # already. A failed run lands nothing and is red on its own; the next run builds again.
 #
-# Every push to main starts a run, and only a newer run replaces a pending one, so the newest main
-# is always built. The daily run is there only for a push that started no run of this workflow: a
-# commit carrying GitHub's skip keyword, such as a release's version bump, that changed a build
-# input.
+# A push to main that changes a build input starts a run, and only a newer run replaces a pending
+# one, so the newest main is always built. A push that changes no build input - a document, a
+# daemon or listener source, a workflow this build never reads - builds the same bundles main
+# already holds, so it starts no run at all. `paths:` below is what decides
+# that, and packages/claude-envoy/tests/build-inputs.test.ts holds it to every file
+# packages/claude-envoy/scripts/build-inputs.txt matches, the same list release-push.sh push-built
+# reads, so the two cannot drift. The list is the pathspecs' whole directories, with none of their
+# exclusions: a file the list calls a non-input costs one run that lands nothing, where a missed
+# input would leave main's build behind until the daily run.
+#
+# The daily run is there for a push that started no run of this workflow: a commit carrying
+# GitHub's skip keyword, such as a release's version bump, that changed a build input, and now
+# also a push `paths:` leaves out, whatever changed it.
 #
 # A pull request that changes this workflow, release-push.sh or verify-build.sh runs `build` on its
 # merge commit, its own proof before merge; `push` runs only on main.
 on:
   push:
     branches: [main]
+    # Every positive pathspec of packages/claude-envoy/scripts/build-inputs.txt, as a glob. The
+    # pathspecs that name no file of the repository today (.gitattributes, bunfig.toml,
+    # packages/.gitignore, packages/.gitattributes) are left out: the test above adds a pattern
+    # here on the change that creates such a file.
+    paths:
+      - ".bun-version"
+      - "bun.lock"
+      - "package.json"
+      - "patches/**"
+      - ".gitignore"
+      - "packages/claude-envoy/**"
+      - "packages/envoy-client/**"
+      - "packages/contracts/**"
+      - "packages/pi-shared/**"
+      - "packages/pi-legion/agents/**"
+      - "skills/**"
+      - "scripts/third-party-notices.ts"
+      - "scripts/pi-plugin-prepack.sh"
+      - ".github/scripts/check-private-names.sh"
+      - ".github/scripts/release-push.sh"
+      - ".github/workflows/claude-envoy-rebuild.yaml"
+      - ".github/actions/setup-bun/**"
   schedule:
     - cron: "23 5 * * *"
   workflow_dispatch:

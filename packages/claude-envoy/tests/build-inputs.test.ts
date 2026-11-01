@@ -87,6 +87,17 @@ async function filesTheBuildReads(scratch: string): Promise<string[]> {
   return [...probes].sort()
 }
 
+/** The pathspecs of scripts/build-inputs.txt, under the list's one rule, as release-push.sh
+ *  push-built applies it: drop empty and # lines. */
+async function buildInputPathspecs(): Promise<string[]> {
+  const pathspecs = (await readFile(join(packageRoot, "scripts", "build-inputs.txt"), "utf8"))
+    .split("\n")
+    .filter((line) => line !== "" && !line.startsWith("#"))
+  // With no pathspec at all, git would list every file and a check over them would pass on nothing.
+  expect(pathspecs.length).toBeGreaterThan(0)
+  return pathspecs
+}
+
 // Main's push job lands a build onto a moved main and decides from scripts/build-inputs.txt alone
 // whether the move changed the build, so the list must match every file the build reads. Git does
 // the matching, as it does in the push job, in a scratch repository holding an empty file at each
@@ -95,13 +106,7 @@ test("scripts/build-inputs.txt matches every file the build reads", async () => 
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-build-inputs-"))
   try {
     const probes = await filesTheBuildReads(join(scratch, "build"))
-    // The list's one rule, as release-push.sh push-built applies it: drop empty and # lines.
-    const pathspecs = (await readFile(join(packageRoot, "scripts", "build-inputs.txt"), "utf8"))
-      .split("\n")
-      .filter((line) => line !== "" && !line.startsWith("#"))
-    // With no pathspec at all, git would list every file and the check would pass on nothing.
-    expect(pathspecs.length).toBeGreaterThan(0)
-
+    const pathspecs = await buildInputPathspecs()
     const repository = join(scratch, "repository")
     const env = { PATH: process.env["PATH"] ?? "", HOME: scratch, GIT_CONFIG_NOSYSTEM: "1" }
     await run(["git", "init", "--quiet", repository], scratch, env)
@@ -119,3 +124,32 @@ test("scripts/build-inputs.txt matches every file the build reads", async () => 
     await rm(scratch, { recursive: true, force: true })
   }
 }, 120_000)
+
+// The rebuild's `on.push.paths` decides which pushes to main are built at all, so it must name
+// every file the list above matches and nothing else: a build input no pattern covers changes the
+// build and starts no run, which leaves main's built plugin behind its source until the daily run,
+// and a pattern no input matches is a name that has moved with nothing saying so. Both directions
+// are read against the repository's tracked files, which is what GitHub matches a push against.
+test(".github/workflows/claude-envoy-rebuild.yaml's push paths cover the build inputs", async () => {
+  const workflow = ".github/workflows/claude-envoy-rebuild.yaml"
+  const parsed = Bun.YAML.parse(await readFile(join(repoRoot, workflow), "utf8")) as {
+    on?: { push?: { paths?: string[] } }
+  }
+  const patterns = parsed.on?.push?.paths ?? []
+  expect(patterns.length).toBeGreaterThan(0)
+
+  const pathspecs = await buildInputPathspecs()
+  const inputs = (await run(["git", "ls-files", "-z", "--", ...pathspecs], repoRoot))
+    .split("\0")
+    .filter((path) => path !== "")
+  // An empty listing (no git repository, say) would hold the patterns to nothing.
+  expect(inputs.length).toBeGreaterThan(0)
+
+  const globs = patterns.map((pattern) => [pattern, new Bun.Glob(pattern)] as const)
+  expect(inputs.filter((input) => !globs.some(([, glob]) => glob.match(input)))).toEqual([])
+  expect(
+    globs
+      .filter(([, glob]) => !inputs.some((input) => glob.match(input)))
+      .map(([pattern]) => pattern),
+  ).toEqual([])
+})
