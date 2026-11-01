@@ -529,7 +529,10 @@ reach any work a pod runs, a test or a tool of your own, not a test suite alone.
   nothing and costs: glibc sizes a default thread stack from the soft limit, so a tool that
   creates a thread pool can fail to allocate one. Set the hard limit too (`ulimit -H -s 131072`
   first, or `-H` and `-S` together): a helper that raises the stack by setting the soft limit to
-  the hard limit otherwise lands on the pod's `unlimited` hard limit and gets 8 MiB.
+  the hard limit otherwise lands on the pod's `unlimited` hard limit and gets 8 MiB. A tool that
+  checks the stack limit itself may refuse to start when the hard limit is below its own
+  minimum, so set the hard limit to what that tool demands; the 128 MiB ceiling applies
+  whichever finite value you choose.
 - **Compare durations within one pod, never across pods.** A gVisor sandbox runs syscall-heavy
   work 2.2 to 3.8 times slower than the same work outside it, and a pod lands on whatever node
   the autoscaler provisions, so two pods are two machines, two sets of neighbours and two
