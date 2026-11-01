@@ -115,20 +115,19 @@ it, and any other change to the head voids it.
 A reviewer's phase ends with its completion, not with its review. Every round writes a handoff
 and takes this order: read CI as above; write, commit and push the handoff; submit the review of
 the head that push made, by its SHA; then complete. A red at the code is a `REQUEST_CHANGES`
-naming the check, never an approval. An unmet goal, or one unmet requirement with no act of the
-owner letting it go, is a `REQUEST_CHANGES` that names it, in the same way. A requirement an open
-child of the tree carries is pending until the parent's last round, which is a full round for you,
-named by the forward-merge comment's `parent's last round: full test round`. A request for changes does not wait, since it stands
-whatever CI says and the issue leaves reviewing with it. The approval waits on nothing at a
-handoff-only commit either: it ends the round whatever CI says there, since the round reads no CI
-verdict, and a red the daemon reads later — at that commit or any above it — is the code's red
-and resumes the implementer from wherever the issue is (reviewing, retro or merging) without the
-reviewer. A head your own push changed beyond `.legion/<issue>/` is the exception. The daemon marks it a
-planned red and sends nothing back for it, so wait for its checks yourself (*Fix a prose-only
-finding yourself*, above). A review of a head the handoff push then replaces names a head the pull
-request no longer has. The daemon moves the issue once both are in — the decision GitHub reports
-and your completion, in either order — so a review posted without a completion leaves the issue in
-reviewing until you finish.
+naming the check, never an approval; so is an unmet goal, or a requirement unmet with no act of
+the owner letting it go, naming that. A requirement an open child of the tree carries is pending
+until the parent's last round, a full round for you, named by the forward-merge comment's
+`parent's last round: full test round`. A request for changes does not wait, since it stands
+whatever CI says and the issue leaves reviewing with it. Nor does the approval at a handoff-only
+commit: it ends the round whatever CI says there, since the round reads no CI verdict, and a red
+the daemon reads later — at that commit or above — is the code's red, resuming the implementer
+from wherever the issue is (reviewing, retro or merging) without the reviewer. A head your own
+push changed beyond `.legion/<issue>/` is the exception: the daemon marks it a planned red and
+sends nothing back for it, so wait for its checks yourself (*Fix a prose-only finding yourself*,
+above). The daemon moves the issue once both the decision GitHub reports and your completion are
+in, in either order, so a review without a completion leaves the issue in reviewing until you
+finish.
 
 ## The architect's acceptance
 
@@ -261,78 +260,67 @@ reviewing until you finish.
 
 ## The production check after the close
 
-- **The merge closes the issue; the production check is the implementer's work after the close.**
-  When the pull request merges, the daemon writes `done` and, in the implementer's session, still
-  live, hands it the check task. On a root whose tree still runs the close, and so the check task,
-  comes later: the merge is recorded, the root waits in `awaiting_merge` until the last other
-  issue of its tree is done or parked, and the check opens with that close. Its first line is
-  `Production check of <KEY>: <title>.`, and it names the repository, the pull request, the merge
-  commit, the look's number, what woke the look (`the merge`, for the first) and whether it is the
-  last. A resumed session tells the check task
-  from its last phase task by that first line. The check carries no phase and no handoff: a look
-  ends with `handoff_complete` carrying a `verdict` and a `summary`, no commit, and the daemon
-  refuses a report on an issue with no open check (`CHECK_NOT_OPEN`), on a look already ended
-  (`CHECK_LOOK_NOT_OPEN`), or with no verdict of `pass`, `pending` or `fail`
+- **The check opens at the close.** At the merge the daemon writes `done` and hands the check
+  task to the implementer's live session; on a root whose tree still runs, the merge is recorded
+  and the root waits in `awaiting_merge` until the last other issue of its tree is done or
+  parked, the check opening with that close. Its first line, which tells it from a phase task in
+  a resumed session, is `Production check of <KEY>: <title>.`, naming the repository, the pull
+  request, the merge commit, the look's number, its wake (`the merge`, for the first) and whether
+  it is the last. The check carries no phase and no handoff: a look ends with `handoff_complete`
+  carrying a `verdict` and a `summary`, no commit, and the daemon refuses a report with no open
+  check (`CHECK_NOT_OPEN`), on an ended look (`CHECK_LOOK_NOT_OPEN`) or with no verdict
   (`CHECK_VERDICT_REQUIRED`).
-- **Each look does three things.** Do what the deployment instructions say to reach the deploy:
-  when they name an agent or role for it, `envoy_publish` the merge commit to that role's topic
-  with `expects_reply: none`, and await no reply. Read whether production carries the merge. Then
-  report one of three outcomes:
-  - `pass`, once you drove the changed path in production through the user's own access path and
-    wrote the record: the PR body's `Production:` line,
+- **Each look does three things.** Reach the deploy as the deployment instructions say: where
+  they name an agent or role, `envoy_publish` the merge commit to that role's topic with
+  `expects_reply: none`. Read whether production carries the merge, and with it every requirement
+  only the deploy can show — read those from the spec version that bound the review and the
+  plan's named observations, and drive each as it names: observing something else is never that
+  requirement observed. Then report one verdict:
+  - `pass`, once you drove the changed path and those requirements in production through the
+    user's own access path and wrote the record: the PR body's `Production:` line,
     `<what was checked in production, how, what was observed> — merge commit <sha>; woken by <event>`,
-    and one pull-request comment carrying the Legion footer. A staging pass is not this, since a
-    staging gate does not run every resource production does. `pass` covers each requirement of
-    the issue that only the deploy can show too — read them from the spec version that bound the
-    review and the plan's named observations — each driven as the requirement names it and named
-    in the record with what was observed; observing something else is never that requirement
-    observed.
+    and one pull-request comment carrying the Legion footer. A staging pass is not this: staging
+    does not run every resource production does.
   - `pending`, when production does not carry the merge yet (a shared profile still holding the
-    previous release, a daemon still running the previous commit, a deploy nobody has run), or
-    when the observation a requirement names has not happened yet (no person has opened the page,
-    for example): the summary names what is missing, and the `Production:` line stays at
-    `pending deploy of <merge sha>`.
-  - `fail`, for a requirement observed as not met, for one still unobserved at the last look, and
-    for a defect: file no issue, and take the path
-    `skill://legion-worker/references/findings.md` gives it. A defect with a clear fix goes to the
-    controller topic, with its evidence comment on the controller's report issue. A defect that
-    needs a decision is a `dispatch ask` on the report issue, and you publish its reference to the
-    controller topic. Either names this issue, the pull request, the merge commit, what you drove
-    and what failed. Name the message or the ask (`dispatch://<REPORT KEY>/ask/<id>`) in the
-    `Production:` line and in the summary.
-- **Nothing waits in the session for a deploy.** A `pending` ends the look. Where no wake is
-  queued yet, the daemon suspends your claim with its session kept, and the issue's Sandbox goes
-  with its pod and disk; where a wake arrived while the look was open, the next look starts at once
-  on the same pod. Either way the daemon wakes the check (after a suspension a new pod comes back
-  on a fresh disk, and your session resumes with a new check task) on Dispatch's
-  `issue.deployed` event for the pull request; when the project's `legion.yaml` names the
-  repository's deploy workflow (`projects.<KEY>.deploys`), at each completed run of that workflow
-  on the default branch whose named step (such as `Apply`) succeeded after the merge, once per such
-  job; or, for `sjawhar/legion`, on a Legion daemon's boot on a build containing the merge, on
-  Dispatch's `server.started` announcing that every server process serves such a build, or on the
-  build the daemon read from Dispatch at its boot. The woken look's task names the event
-  (`Dispatch's issue.deployed: run <id> completed <t>`,
+    previous release, a deploy nobody has run) or a requirement's observation has not happened
+    yet (nobody has opened the page): the summary names what is missing and the `Production:`
+    line stays `pending deploy of <merge sha>`.
+  - `fail`, for a requirement observed as not met, one still unobserved at the last look, or a
+    defect: file no issue; take the path `skill://legion-worker/references/findings.md` gives
+    it — a clear fix to the controller topic, with its evidence comment on the controller's report
+    issue; anything needing a decision as a `dispatch ask` on that report issue, whose reference
+    you publish to the controller topic. Either names this issue, the pull request, the merge
+    commit, what you drove and what failed, and the `Production:` line and summary name it
+    (`dispatch://<REPORT KEY>/ask/<id>`).
+- **Nothing waits in the session for a deploy.** A `pending` ends the look. With no wake queued
+  yet the daemon suspends your claim, session kept, and the issue's Sandbox goes with its pod and
+  disk; with one that arrived while the look was open the next look starts at once on the same
+  pod. Either way the daemon wakes the check (after a suspension on a fresh pod and disk, your
+  session resuming with a new check task) on one of these events, named in the woken look's task
+  and its `Production:` line so the pull request carries the cause:
+  `Dispatch's issue.deployed: run <id> completed <t>`, that event for the pull request;
   `the deploy workflow's run: <repo> <workflow> run <id> attempt <n>, job <job name>: <step> succeeded at <t>`,
-  `the Legion daemon's boot on build <sha>`, `Dispatch serving build <sha> on every server process`,
-  `Dispatch's build <sha>`), and its `Production:` line names it too, so the pull request carries
-  the cause. Never poll for the deploy, never wait on a reply, and never ask anyone for approval
-  to deploy. Open a `dispatch ask` to a person only when the instructions name nobody for that
-  deploy; it starts with the production gap and why it matters, then names the required install or
-  restart step, its risk, and outcome-named options, and the look still ends `pending`.
-- **The bounds.** A look is bounded at 2 hours: one that reports nothing ends as a `pending`
-  would. The whole check is bounded by the project's `production_check_hours` (336, 14 days, by
-  default) from the close, and the wake at that bound is the last look, told so in its task
+  where the project's `legion.yaml` names the deploy workflow (`projects.<KEY>.deploys`), once
+  per completed run of it on the default branch whose named step (such as `Apply`) succeeded
+  after the merge; and, for `sjawhar/legion` alone, `the Legion daemon's boot on build <sha>` for
+  a boot on a build containing the merge, `Dispatch serving build <sha> on every server process`
+  for Dispatch's `server.started` announcing that, and `Dispatch's build <sha>` for the build the
+  daemon read from Dispatch at its boot. Never poll, never wait on a reply, never ask for
+  approval to deploy. Open a `dispatch ask` only where the instructions name nobody for that
+  deploy: the production gap and why it matters, then the required install or restart step, its
+  risk, and outcome-named options; the look still ends `pending`.
+- **The bounds.** A look is bounded at 2 hours; one reporting nothing ends as a `pending`.
+  The check is bounded by the project's `production_check_hours` (336, 14 days, by default) from
+  the close; the wake at that bound is the last look, so told in its task
   (`the bound: production did not carry the merge within <N days>`). A `pass` or `fail` there
-  closes the check as any look's would; a `pending` closes it as not run, and before reporting it
-  you write on the pull request, in the `Production:` line and a comment, that the check did not
-  run because production did not carry the merge within the bound.
+  closes the check as any look's would; a `pending` closes it as not run, written first on the
+  pull request, in the `Production:` line and a comment: the check did not run because production
+  did not carry the merge within the bound.
 - **The record lives on the pull request alone.** Dispatch refuses a message, a comment or an ask
   on a closed issue (`ISSUE_CLOSED`), so the deployment instructions' "on the pull request and the
-  issue" is the pull request for a closed issue. A defect reaches Dispatch by the two paths above:
-  a clear defect as the message to the controller, which gives it to the tree that owns that code,
-  and any other as the ask on the
-  controller's report issue. The architect accepted the issue before the merge and is asked
-  nothing after it. `pass` or
-  `fail` closes the check: your claim is retired and the issue's Sandbox goes with its pod and
-  disk, for a root as for a child. Neither ending retires or suspends anything of an issue back in
-  the workflow (a root reopened inside its linger): its claim and pod are the new run's.
+  issue" is the pull request for a closed issue, and a defect reaches Dispatch by the `fail`
+  verdict's two paths alone, on the controller's report issue. The architect accepted before the
+  merge and is asked nothing after. `pass` or `fail` closes the check: your claim is retired
+  and the issue's Sandbox goes with its pod and disk, for a root as for a child. Neither ending
+  retires or suspends anything of an issue back in the workflow (a root reopened inside its
+  linger): its claim and pod are the new run's.
