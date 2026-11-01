@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-317",
+  "completed": "2026-10-31T10:12:00Z",
+  "plan": "dispatch://INFRA-317/artifact/plan-md (v1). Supporting artifacts: dispatch://INFRA-317/artifact/slow-rows-md (every row >= 2 s in the merge-base CI run with its per-project times) and dispatch://INFRA-317/artifact/slow-row-causes-md (cause, mechanism, lever, expected time, property, assertion and risk for all 469 rows).",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase contract, the shared workspace, the push and handoff_complete; this phase touches 70+ spec files and a workflow file, so commit discipline matters.",
+      "skill://legion-worker/references/pr-body.md: every criterion here is numeric and each proof needs its negative control; the body carries the before/after figures the tester re-runs.",
+      "skill://legion-worker/references/tools.md: T2, T3, T5 and T7 need the Postgres-with-pgvector and Playwright stack stood up in this pod, on the issue volume.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md: T0 brings main into a branch 376 commits behind, and six open pull requests touch the same files.",
+      "skill://legion-worker/references/skip-checks-trailer.md: every push of this phase is a code push and must carry no trailer, or the head gets no CI and the merge stalls.",
+      "skill://legion-worker/references/findings.md: a defect found outside this tree (the base merge will surface some) goes to the controller, not into a new issue.",
+      "skill://dispatch and skill://dispatch-first: the plan and slow-row artifacts live on the issue; search before filing or asking anything.",
+      "skill://ce-simplify-code: the change edits 70+ spec files and the harness; the simplify pass is what keeps it readable at review.",
+      "skill://asd-ste100: the pull-request body, the Envoy reports and any ask are read by people."
+    ],
+    "test": [
+      "skill://legion-worker: the tester's phase contract and its committed handoff.",
+      "skill://legion-worker/references/pr-body.md: the tester re-runs what the body claims; section 6 of the plan names a surface and a command for every criterion.",
+      "skill://legion-worker/references/tools.md: re-running T2's timing command, T6's lane refusals and T7's pod consumers needs the same stack in the pod.",
+      "skill://dispatch: reporting and reading the plan and slow-row artifacts."
+    ],
+    "review": [
+      "skill://legion-worker: the reviewer's phase contract and the prose-only-fix rule.",
+      "skill://legion-worker/references/merge-gate.md: the approval of the head by SHA, which READY later compares.",
+      "skill://legion-worker/references/review-threads.md: a change across 70+ files will draw many bot findings; each needs a reply and a resolution.",
+      "skill://ce-simplify-code: to judge whether the simplify pass was real.",
+      "skill://asd-ste100: the review's own text."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1. R3+A1 (a 12-minute dispatch job) and R4+A2 (12 runner minutes over every job that runs a step of today's dispatch job) cannot both hold: ceil(12*60/60)=12 leaves nothing for dispatch-browser-multiprocess, which repeats six of the dispatch job's steps and costs a measured 4 runner minutes. The measured median of the pair is 67, not the spec's 63.",
+        "answer": "Recorded as departure 3. The plan reports both figures for every execution (the dispatch job's own minutes against 63, the pair's against 67) and reads A2's limit as applying to the dispatch job, the only reading under which A1 and A2 can both hold. Named in the completion summary as a decision for the architect, because it changes the acceptance."
+      },
+      {
+        "finding": "F2. R11/A10's 'at most half' is below the floor the measurements show: 870.8 ms at the base against a best measured head of 481.7 ms (55 %), the remainder being the first page load, which is SPA parse and execute.",
+        "answer": "Recorded as departure 1, with the measured numbers. T3 takes the reset to its measured floor; T5 measures the one remaining lever (a browser context reused per worker) and does not adopt it without the architect, since it trades against R11's own clean-start clause. R11 names this escape itself."
+      },
+      {
+        "finding": "F3. Sign-in reuse is the riskiest part of R11 (session generation, cookie validity, every sign-out row) for 11.7 ms per test, 0.9 s of a 274 s run.",
+        "answer": "Decision D6: kept, because the prototype already passes 64/64 on A10's files and 61/61 on five more including every sign-out row, and the spec's Design 2 asks for it. If it produces one flake in A1's three executions it is dropped and the architect is told with these numbers."
+      },
+      {
+        "finding": "F4. A8's '188.4 minutes' traces to nothing in the spec, and the measured figure over the 25-run window is 164.6 minutes. A8 also names no owner or trigger.",
+        "answer": "Recorded as departure 2: the production check reports 164.6 with the query that produced it. The owner is the workflow's own: the implementer gets the production check after the close."
+      },
+      {
+        "finding": "F5. A1's three executions run with cold caches, because only a push run on main writes an Actions cache entry and no Playwright entry exists today, so Design 8's browser cache does not help A1.",
+        "answer": "Section 2 budgets A1 at cold caches and says so; the go-envoy entry does exist and pull-request runs restore it by prefix, so T8 takes that one (worth 40-50 s of boot) and states that the Playwright cache pays off only in A8."
+      },
+      {
+        "finding": "F6. A5's comment escape is unbounded, and judging per-row times from A1's parallel report punishes rows that contention inflates.",
+        "answer": "T4 sets the marker form '// SLOW(>=2s): <reason>' and a script in packages/dispatch/e2e/tools/ that joins the head JSON report to the markers and exits non-zero on any row that is neither under 2 s nor marked; per-row judgement is made on a one-worker run, and the parallel report is used only for the suite total."
+      },
+      {
+        "finding": "F7. The repository machinery that fails a ci.yaml diff is named nowhere in the spec: the step-name pins in .github/scripts/ci_job_reads.py:554-572, check-ci-filters.sh's rules on new run: go commands and step env: names, the $GITHUB_ENV rule, and the image-digest gate.",
+        "answer": "T8 names each: update ci_job_reads.py for every changed step name, run: line and step env: name; keep the pgvector digest in ci.yaml where check-ci-images.sh reads it; write nothing to $GITHUB_ENV; run check-ci-filters.sh and check-ci-images.sh tree locally before the pull request opens."
+      },
+      {
+        "finding": "F8. The 30 s test timeout meets four-way contention, and 20+ rows already carry per-row test.setTimeout overrides from 45 s to 240 s, while A1 demands three clean executions with retries at 0.",
+        "answer": "T4 re-derives every per-row override from the row's new cause (this breaks no non-goal, which freezes only the suite-wide timeouts), and T8's worker-count measurement is where a row that cannot hold under contention shows up. Listed as risk 5."
+      },
+      {
+        "finding": "F9. The spec's baseline figures come from run 41085647285 (1461 tests, 56.4 min, 446 rows >= 2 s), which is not the merge-base the work branches from.",
+        "answer": "Recorded as departure 4. The plan pins its own measured baseline (run 41153438747, job 124417437513, head 8a72cf79: 1463 tests, 58.13 min, 469 rows) and T1 re-extracts the inventory from the real merge-base job with a committed script, reconciling the row count with the log's own summary."
+      },
+      {
+        "finding": "F10. A10's timing fixture does not exist at the merge-base, so 'we measured the base' is not re-runnable.",
+        "answer": "T2 commits the fixture as its own commit and names its sha; the merge-base measurement is the base tree plus that one commit, with the exact command and the named machine. T2 also names by title the sign-in and session rows A10 gates on, which the spec never lists."
+      },
+      {
+        "finding": "F11. A2's 'k-th execution' has no meaning for jobs the tester does not re-run, since A1 re-runs only the dispatch job.",
+        "answer": "T11 states the rule: for k > 1 the other jobs' k-th execution is their first, and all three sums are computed the same way."
+      },
+      {
+        "finding": "F12. A6 accepts a load-based reproduction, which is a coin flip a tester may not be able to repeat.",
+        "answer": "T9 makes the held read the primary reproduction (a URL predicate on /api/v1/artifacts/<id>/text, the hold counted and asserted to be exactly one, per the INFRA-303 method), with load only as corroboration, and names the cause (the missing readiness gate after reload) and the fix (the suite's own countDocumentSockets idiom)."
+      },
+      {
+        "finding": "F13. The Design cites a decision 'A Postgres server per lane' that the spec's Decisions section does not contain, so the most expensive structural choice has no recorded reason.",
+        "answer": "Decision D3 records it from the code: keyed-writes.e2e.ts:251-255 asserts a server-global pg_stat_activity count of 1, seed.ts:150 reads pg_locks joined to pg_stat_activity, failed-room.e2e.ts:69-73 selects backends to cancel, and store.ConnectionsPerProcess (store/pool.go:315, 89) times four lanes would need max_connections above ~370. The option weighed (one server, N databases) is named."
+      },
+      {
+        "finding": "F14. Design 4's two Postgres paths are not the same path: the pod's fast measurement used binaries and a copied template directory, while CI would use a container.",
+        "answer": "Decision D4 gives the harness both providers (DISPATCH_E2E_PG_IMAGE and DISPATCH_E2E_PG_BIN), keeps the digest in ci.yaml where the image gate reads it, and T8 measures initdb-per-lane against a copied migrated template on the runner before the worker count is fixed."
+      },
+      {
+        "finding": "F15 (the analyst's Part 3). Several acceptance criteria are not machine-checkable as written: A5's 'cause' and 'names why', A4's reason comments, A3's 'adjusted by the tests that changed since', A10's unnamed sign-in and session tests, and the unnamed surfaces of A4's five other modes.",
+        "answer": "The plan makes each one checkable: the SLOW(>=2s) and '// serial:' marker forms with a joining script (T4, T6), the pinned merge-base run id and a named added/removed list (T1, T11), the sign-in and session rows named by title (T2), and a surface with a command for each of A4's modes (T7) and for every criterion (section 6)."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "R11 and A10: 'The per-test sum of those parts falls to at most half of its median at the merge-base' (database reset, fake resets, sign-in, first page load).",
+      "plan": "The plan aims at the measured floor, about 55 % of the merge-base sum, and reports the real ratio rather than claiming half. T5 measures the one remaining lever (one browser context reused per worker) and does not adopt it without the architect, because it trades against R11's own clean-start clause.",
+      "evidence": "Measured in this issue pod on main's harness at one worker: base 426.1 + 13.8 + 11.7 + 419.2 = 870.8 ms. Best measured head: reset through one long-lived connection deleting only the tables that hold rows 48.7 ms, fakes 13.8 ms (concurrent), sign-in 0 ms (storage state reused, prototype passing 64/64 and 61/61), first page load 419.2 ms = 481.7 ms, 55 %. The first page load is SPA parse and execute: 298.7 ms cold against 287.6 ms with the 1.41 MB bundle cached, so caching buys 11 ms, and R10 forbids changing the production bundle for tests.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A10's 'The head's median sum is at most half of the merge-base's' becomes 'at most the measured floor', with both numbers reported; R11 names this escape itself ('the measured numbers go to the human as a decision')."
+        ]
+      }
+    },
+    {
+      "spec": "A8: 'the median time from run creation to the end of the dispatch job, beside 188.4 minutes over the 25 runs of the Problem'.",
+      "plan": "The production check reports 164.6 minutes, measured over the 25-run window, with the gh query that produced it.",
+      "evidence": "The Problem section gives 62.4 min (job wall), 35.5 min (last other job) and 63 min (runner wait) and no 188.4. Measured over runs 40989957145..41153438747 (25 ci.yaml push runs on main with a successful dispatch job, read 2026-10-31): median run-creation-to-job-end 9875 s = 164.6 min, p90 218.4 min.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A8's comparison figure becomes 164.6 minutes with its query, in place of the unsourced 188.4."
+        ]
+      }
+    },
+    {
+      "spec": "R4 and A2: 'Summed over every job that runs a step of today's dispatch job, the runner minutes of one run are at most 12, against 63 before.'",
+      "plan": "The pull request reports both: the dispatch job's own runner minutes against 63, and the pair with dispatch-browser-multiprocess against the measured 67. A2's limit is read as applying to the dispatch job, the only reading under which A1 (12 wall minutes for that job) and A2 can both hold.",
+      "evidence": "dispatch-browser-multiprocess (ci.yaml:2127) repeats checkout, setup-go, setup-bun, bun install, the contracts build and a Playwright install, and runs the same harness twice; its measured median is 4 runner minutes. Over the 25-run window the pair's median is 67 and the dispatch job's own is 63, so the spec's 'before' counts the dispatch job alone. ceil(12*60/60) = 12 leaves zero for any other job in the set.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A2's job set and its 'before' figure are made explicit: the dispatch job against 63, with the pair's 67 reported beside it. The architect decides whether the set is the pair, which would put A1's per-job limit at 8 minutes."
+        ]
+      }
+    },
+    {
+      "spec": "A5 and the Problem: the baseline is run 41085647285 (1461 tests, 56.4 minutes of test time, 446 rows of 2 seconds or more, 93 of 5 seconds or more).",
+      "plan": "Every 'before' figure comes from the merge-base run the work actually branches from, with the spec's own numbers quoted beside it. The plan's measured reference is run 41153438747, job 124417437513, head 8a72cf798a5fde4cccb1b898e648fec3fc1cc6a7, and T1 re-extracts the inventory from the real merge-base job once the base merge lands.",
+      "evidence": "That job logs 'Running 1463 tests using 1 worker', 1432 passed (58.8m) and 31 skipped; the parsed rows reconcile with zero residue at 3 487 674 ms = 58.13 min, 469 rows >= 2 s = 40.12 min, 994 rows < 2 s = 18.01 min. The issue branch is 376 commits behind main, so the merge-base moves again at T0.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A5's 'beside the 56.4 minutes of run 41085647285' and A3's merge-base comparison are read against the real merge-base run, whose id and job id the pull request names."
+        ]
+      }
+    }
+  ]
+}

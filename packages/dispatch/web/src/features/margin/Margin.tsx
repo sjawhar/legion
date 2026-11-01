@@ -13,22 +13,16 @@ import { routeHasMargin } from "../refs/routes";
 import { COMPACT_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { MarginSheet } from "./MarginSheet";
 import { useMargin } from "./margin-context";
+import {
+  clampMarginWidth,
+  DEFAULT_MARGIN_WIDTH,
+  MARGIN_WIDTH_STEP,
+  MIN_MARGIN_WIDTH,
+  maxMarginWidth,
+} from "./margin-width";
 import { useMarginSheet } from "./useMarginSheet";
 
-export const DEFAULT_MARGIN_WIDTH = 384;
-const MIN_MARGIN_WIDTH = 280;
-const MARGIN_WIDTH_STEP = 24;
-
-/** The widest the margin may be dragged: 60 % of the viewport, never below the minimum. */
-function maxMarginWidth(): number {
-  return Math.max(MIN_MARGIN_WIDTH, Math.floor(window.innerWidth * 0.6));
-}
-
-function clampMarginWidth(width: number): number {
-  return Math.min(Math.max(width, MIN_MARGIN_WIDTH), maxMarginWidth());
-}
-
-interface MarginProps {
+export interface MarginProps {
   collapsed?: boolean;
   onCollapsedChange?(collapsed: boolean): void;
   onWidthChange?(width: number): void;

@@ -1,11 +1,30 @@
 import { expect, test } from "@playwright/test";
 
+import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
 import { createIssue, createProject, getArtifactText, patchIssue } from "./api";
 import { connectedDot, documentEditor, documentTransport, typeAtEnd } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 const INITIAL = "# Offline edits\n\nOriginal paragraph.\n";
+
+/** Every fact this file polls for lands in milliseconds: Playwright's default 100/250/500/1000
+ *  ladder would first see it a quarter-second late. */
+const PROBE = { intervals: [50, 50, 100, 200, 500] };
+
+/** Spends the document socket's reconnect draw - a uniform [0, RECONNECT_SPREAD_MS) set at the
+ *  previous open (`web/src/features/doc/connection.ts`) - on the page's own clock. The close that
+ *  arms the draw may not have reached the page when the first jump lands, so the jump repeats
+ *  until the page is connected again. */
+async function reconnectNow(page: Parameters<typeof documentTransport>[0]): Promise<void> {
+  await expect
+    .poll(async () => {
+      await page.clock.fastForward(RECONNECT_SPREAD_MS);
+      return connectedDot(page).count();
+    }, PROBE)
+    .toBe(1);
+  await expect(connectedDot(page)).toHaveText("connected");
+}
 
 async function pendingEditCount(page: Parameters<typeof documentTransport>[0], artifactId: string) {
   return page.evaluate(async (id) => {
@@ -51,7 +70,9 @@ async function waitForPersistedTyping(
   artifactId: string,
   text: string
 ): Promise<void> {
-  await expect.poll(() => pendingEditCount(page, artifactId)).toBeGreaterThanOrEqual(text.length);
+  await expect
+    .poll(() => pendingEditCount(page, artifactId), PROBE)
+    .toBeGreaterThanOrEqual(text.length);
 }
 
 test.beforeEach(async () => {
@@ -78,7 +99,7 @@ test("an edit typed while the document transport is down survives a reload", asy
     await transport.release();
 
     await expect
-      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown, PROBE)
       .toContain(paragraph);
   } finally {
     await alice.close();
@@ -94,6 +115,8 @@ test("unsent edits are named, then cleared after acknowledgement and a connected
   try {
     const page = await alice.newPage();
     const transport = await documentTransport(page);
+    // The reconnect draw below is spent on the page's clock, not in real time.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/spec`);
     await expect(connectedDot(page)).toHaveText("connected");
 
@@ -103,19 +126,22 @@ test("unsent edits are named, then cleared after acknowledgement and a connected
     await expect(
       page.getByRole("status", { name: /edit(?:s)? saved in this browser, not sent yet/u })
     ).toBeVisible();
-    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id)).toBeGreaterThan(0);
+    await expect
+      .poll(() => pendingEditCount(page, issue.primary_artifact_id), PROBE)
+      .toBeGreaterThan(0);
 
     await transport.release();
-    await expect(connectedDot(page)).toHaveText("connected");
-    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
+    await reconnectNow(page);
+    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id), PROBE).toBe(0);
     await page.reload();
     await expect(connectedDot(page)).toHaveText("connected");
-    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
+    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id), PROBE).toBe(0);
   } finally {
     await alice.close();
   }
 });
 
+// SLOW(>=2s): four document loads across two tabs, each with a Yjs restore of its own.
 test("two disconnected tabs restore each browser-held edit once", async ({ browser }) => {
   const issue = await makeIssue();
   const alice = await asUser(browser, "alice");
@@ -147,12 +173,13 @@ test("two disconnected tabs restore each browser-held edit once", async ({ brows
     await Promise.all([firstPage.reload(), secondPage.reload()]);
     await Promise.all([firstTransport.release(), secondTransport.release()]);
 
+    // One read of the markdown for both tabs, which the count below reads once more.
     await expect
-      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
-      .toContain(first);
-    await expect
-      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
-      .toContain(second);
+      .poll(async () => {
+        const { markdown } = await getArtifactText(issue.primary_artifact_id);
+        return markdown.includes(first) && markdown.includes(second);
+      }, PROBE)
+      .toBe(true);
     const stored = (await getArtifactText(issue.primary_artifact_id)).markdown;
     expect(stored.match(new RegExp(first, "gu"))?.length).toBe(1);
     expect(stored.match(new RegExp(second, "gu"))?.length).toBe(1);
@@ -161,6 +188,7 @@ test("two disconnected tabs restore each browser-held edit once", async ({ brows
   }
 });
 
+// SLOW(>=2s): three document loads, two status writes and two admissions decided at socket open.
 test("read-only admission preserves edits until a later read-write reload", async ({ browser }) => {
   const issue = await makeIssue();
   const alice = await asUser(browser, "alice");
@@ -186,13 +214,14 @@ test("read-only admission preserves edits until a later read-write reload", asyn
     await patchIssue(issue.key, { status: "backlog" });
     await page.reload();
     await expect
-      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown, PROBE)
       .toContain(paragraph);
   } finally {
     await alice.close();
   }
 });
 
+// SLOW(>=2s): two document loads, a reopen, the reconnect's SyncStep2 and a restore.
 test("a reopened issue's page names no unsent edit before typing, and an edit typed after its reconnect survives a reload", async ({
   browser,
 }) => {
@@ -208,6 +237,8 @@ test("a reopened issue's page names no unsent edit before typing, and an edit ty
   try {
     const page = await alice.newPage();
     const transport = await documentTransport(page);
+    // The reconnect draw the reopen below arms is spent on the page's clock, not in real time.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/spec`);
     await expect(connectedDot(page)).toHaveText("connected");
     const editor = documentEditor(page);
@@ -216,14 +247,15 @@ test("a reopened issue's page names no unsent edit before typing, and an edit ty
     expect(await pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
 
     // The issue reopens while the page is open. The reopen drops the document's socket; the
-    // reconnect syncs and is then admitted writable, as the server orders it. The document socket's
-    // first reconnect is a uniform draw from [0, 2 s) (#2323), so a row must wait for the state the
-    // page settles in and never depend on which side of the draw a run lands.
+    // reconnect syncs and is then admitted writable, as the server orders it. The document
+    // socket's first reconnect is a uniform draw from [0, 2 s) (#2323), which `reconnectNow`
+    // spends on the page's clock: the row waits for the state the page settles in either way and
+    // never depends on which side of the draw a run lands.
     await patchIssue(issue.key, { status: "backlog" });
     await expect(page.getByText("This issue is closed. Its document is read-only.")).toBeHidden();
+    await reconnectNow(page);
     await expect(editor).toHaveAttribute("contenteditable", "true");
-    await expect(connectedDot(page)).toHaveText("connected");
-    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
+    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id), PROBE).toBe(0);
 
     // The connection is severed and its reconnect held. A page that is not connected names every
     // row this browser holds, so a row the reconnect left would show here.
@@ -242,9 +274,9 @@ test("a reopened issue's page names no unsent edit before typing, and an edit ty
     ).toBeVisible();
     await transport.release();
     await expect
-      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown, PROBE)
       .toContain(paragraph);
-    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
+    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id), PROBE).toBe(0);
   } finally {
     await alice.close();
   }
@@ -263,12 +295,14 @@ test("an edit applied before its acknowledgement clears its row on reload", asyn
     transport.holdServerFrames();
     await typeAtEnd(page, paragraph);
     await expect
-      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown, PROBE)
       .toContain(paragraph);
-    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id)).toBeGreaterThan(0);
+    await expect
+      .poll(() => pendingEditCount(page, issue.primary_artifact_id), PROBE)
+      .toBeGreaterThan(0);
 
     await page.reload();
-    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
+    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id), PROBE).toBe(0);
     await transport.releaseServerFrames();
     expect((await getArtifactText(issue.primary_artifact_id)).markdown).toContain(paragraph);
   } finally {

@@ -1,5 +1,9 @@
-import { expect, type Locator, test } from "@playwright/test";
+import { setTimeout as sleep } from "node:timers/promises";
 
+import { expect, type Locator, test, type WebSocket } from "@playwright/test";
+
+import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
+import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
 import {
   createAsk,
   createIssue,
@@ -22,6 +26,10 @@ import { asUser } from "./users";
 // only alice's browser needs to be real, since that is what proves the live update.
 const bob = { actor: { kind: "session" as const, id: "bob" }, as: "agent" as const };
 let renames = 0;
+
+// The reader's dwell on a conversation card before its read mark is written: `DWELL_MS`,
+// `web/src/features/shell/useDwell.ts`, which exports nothing a spec can import.
+const DWELL_MS = 1_000;
 
 /**
  * bob renames the open issue, again every 2 s, until its header shows the new name from a read
@@ -65,7 +73,10 @@ test("live: bob's ask updates alice's Inbox and project badges without reload @p
   await inboxPage.goto("/");
   await expect(inboxPage.getByText("Nothing needs you")).toBeVisible();
 
+  // The badge below is a second read of the Inbox and the project list, which the scheduler
+  // holds back for `MIN_REFETCH_INTERVAL_MS`: this page's clock fires it rather than waiting.
   const issuePage = await alice.newPage();
+  await issuePage.clock.install();
   await issuePage.goto(`/issues/${readingIssue.key}`);
   if (testInfo.project.name === "iphone") {
     await issuePage.getByRole("button", { name: "Open navigation" }).click();
@@ -80,6 +91,7 @@ test("live: bob's ask updates alice's Inbox and project badges without reload @p
     { options: [{ label: "Yes" }, { label: "No" }], question: "Ship it?" },
     bob
   );
+  await issuePage.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
 
   await expect(navigation.getByRole("link", { name: "Inbox" })).toContainText("1");
   await expect(navigation.locator('a[href="/projects/CORE"]')).toContainText("1");
@@ -103,6 +115,7 @@ test("live: bob's ask updates alice's Inbox and project badges without reload @p
   await alice.close();
 });
 
+// SLOW(>=2s): two pages, each paying its own first load, and a full-page phone screenshot.
 test("live: answering an ask updates the Inbox and project badges immediately @phone", async ({
   browser,
 }, testInfo) => {
@@ -118,7 +131,9 @@ test("live: answering an ask updates the Inbox and project badges immediately @p
   const alice = await asUser(browser, "alice");
   const inboxPage = await alice.newPage();
   await inboxPage.goto("/");
+  // As the row above: the badges' refetch is held back by `MIN_REFETCH_INTERVAL_MS`.
   const issuePage = await alice.newPage();
+  await issuePage.clock.install();
   await issuePage.goto(`/issues/${readingIssue.key}`);
   if (testInfo.project.name === "iphone") {
     await issuePage.getByRole("button", { name: "Open navigation" }).click();
@@ -130,6 +145,7 @@ test("live: answering an ask updates the Inbox and project badges immediately @p
   await inboxPage.getByTestId(`ask-${ask.id}`).getByRole("radio", { name: "Yes" }).check();
   await inboxPage.getByTestId(`ask-${ask.id}`).getByRole("button", { name: "Answer" }).click();
   await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
+  await issuePage.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
 
   // The answer happened on a different tab (inboxPage) than the one displaying the
   // sidebar (issuePage), so both badges changing proves the update came from the
@@ -169,6 +185,7 @@ test("live: a message on another issue reads neither the Inbox nor the pinned li
   });
 
   try {
+    await page.clock.install();
     await page.goto(`/issues/${viewedIssue.key}`);
     if (testInfo.project.name === "iphone") {
       // The pinned list lives in the drawer; open it so both projects measure the same queries.
@@ -180,7 +197,10 @@ test("live: a message on another issue reads neither the Inbox nor the pinned li
     const viewedHeader = page.getByTestId("issue-header").getByRole("heading", { level: 1 });
     // The first rename proves the feed is subscribed, so the message below reaches this page.
     await renameUntilShown(viewedHeader, viewedIssue.key, "Viewed issue", () => viewedReads);
-    await page.waitForTimeout(250);
+    // Anything the first rename scheduled fires on this clock, and is then cleared with the
+    // counters below; the margin is for the request reaching Playwright's counter.
+    await page.clock.runFor(MIN_REFETCH_INTERVAL_MS);
+    await sleep(100);
     inboxReads = 0;
     pinnedReads = 0;
 
@@ -189,8 +209,11 @@ test("live: a message on another issue reads neither the Inbox nor the pinned li
     // message's event has been handled too. A rename moves neither read: the issue has no pinned
     // row and no Inbox row.
     await renameUntilShown(viewedHeader, viewedIssue.key, "Viewed issue", () => viewedReads);
-    // The 100 ms batch and any straggling read settle here, so a late one still counts.
-    await page.waitForTimeout(1_200);
+    // The page's own timers: the 100 ms event batch and a refresh the scheduler holds back for
+    // `MIN_REFETCH_INTERVAL_MS` both fall due inside this jump, so a read either owed is sent and
+    // counted; the margin is for the request reaching Playwright's counter.
+    await page.clock.runFor(MIN_REFETCH_INTERVAL_MS + 100);
+    await sleep(100);
 
     expect([inboxReads, pinnedReads]).toEqual([0, 0]);
   } finally {
@@ -269,6 +292,8 @@ test("live: resolving an ask updates its pinned issue's open-ask count @phone", 
     }
   });
   try {
+    // The pinned refetch the resolve below asks for is held back by `MIN_REFETCH_INTERVAL_MS`.
+    await page.clock.install();
     await page.goto("/");
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Open navigation" }).click();
@@ -281,6 +306,7 @@ test("live: resolving an ask updates its pinned issue's open-ask count @phone", 
     pinnedReads = 0;
 
     await resolveAsk(ask.id, { kind: "retracted", reason: "No longer needed" }, bob);
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
 
     await expect.poll(() => pinnedReads).toBe(1);
     await expect(pinned).toHaveText(`${issue.key}Pinned ask`);
@@ -317,6 +343,7 @@ test("live: new events on the open issue appear in Conversation and mark it read
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
+  await page.clock.install();
   await page.goto(`/issues/${issue.key}/conversation`);
   await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
     "aria-selected",
@@ -326,13 +353,20 @@ test("live: new events on the open issue appear in Conversation and mark it read
   await createMessage(issue.key, { body: "Live message from bob" }, bob);
 
   await expect(page.getByText("Live message from bob")).toBeVisible();
+  // The mark is written once the reader has dwelt on the newest card (`DWELL_MS`), a page timer
+  // the page's own clock spends; the jump repeats because the timer is armed only once the
+  // observer has reported the card.
   await expect
-    .poll(() =>
-      page.evaluate(async (key) => {
-        const response = await fetch("/api/v1/me/state");
-        const state = (await response.json()) as Record<string, { last_read_seq: number }>;
-        return state[key]?.last_read_seq ?? 0;
-      }, issue.key)
+    .poll(
+      async () => {
+        await page.clock.runFor(DWELL_MS);
+        return page.evaluate(async (key) => {
+          const response = await fetch("/api/v1/me/state");
+          const state = (await response.json()) as Record<string, { last_read_seq: number }>;
+          return state[key]?.last_read_seq ?? 0;
+        }, issue.key);
+      },
+      { intervals: [50, 50, 100, 100, 250] }
     )
     .toBeGreaterThan(0);
 
@@ -371,9 +405,11 @@ test("live: the stream recovers after the connection drops", async ({ browser },
     { options: [{ label: "Yes" }, { label: "No" }], question: "Missed while offline?" },
     bob
   );
-  // The scenario calls for a real outage window; there is no event to await here
-  // because the point under test is that nothing arrives while genuinely offline.
-  await page.waitForTimeout(3_000);
+  // Nothing can arrive: the context is offline. The window is the margin a stray delivery would
+  // need, not an outage long enough to be worth waiting out - what the row proves is that the ask
+  // written during the outage arrives on the reconnect below.
+  await sleep(250);
+  await expect(page.getByText("Missed while offline?")).toHaveCount(0);
 
   await alice.setOffline(false);
 
@@ -386,6 +422,8 @@ test("live: the stream recovers after the connection drops", async ({ browser },
   await alice.close();
 });
 
+// SLOW(>=2s): two live sockets, each with its own subscribe and replay, and the two messages
+// written across the forced disconnect between them.
 test("live: a forced server disconnect resumes from the last event id", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Disconnect target" });
@@ -398,6 +436,7 @@ test("live: a forced server disconnect resumes from the last event id", async ({
   const sockets: {
     readonly events: string[];
     readonly resumes: (string | undefined)[];
+    readonly socket: WebSocket;
     readonly starts: (boolean | undefined)[];
   }[] = [];
   page.on("websocket", (socket) => {
@@ -405,6 +444,7 @@ test("live: a forced server disconnect resumes from the last event id", async ({
     const seen = {
       events: [] as string[],
       resumes: [] as (string | undefined)[],
+      socket,
       starts: [] as (boolean | undefined)[],
     };
     sockets.push(seen);
@@ -432,6 +472,8 @@ test("live: a forced server disconnect resumes from the last event id", async ({
     (response) => new URL(response.url()).pathname === "/auth/whoami" && response.ok()
   );
 
+  // The reconnect draw the disconnect below arms is spent on the page's clock.
+  await page.clock.install();
   await page.goto(`/issues/${issue.key}/conversation`);
   const head: string = (await (await whoami).json()).event_head;
   await expect(page.getByText("Before disconnect")).toBeVisible();
@@ -443,10 +485,14 @@ test("live: a forced server disconnect resumes from the last event id", async ({
   if (first === undefined) throw new Error("the page opened no live socket");
   expect(first.events.length).toBeGreaterThan(0);
 
-  // A 1012 restart opens the socket at once and resumes the event feed after the last event the
-  // closed socket carried, which Dispatch's log still holds: its start says the replay covers the
-  // gap, so the page refreshes nothing for it.
+  // A 1012 restart opens the socket after a draw from [0, RECONNECT_SPREAD_MS) and resumes the
+  // event feed after the last event the closed socket carried, which Dispatch's log still holds:
+  // its start says the replay covers the gap, so the page refreshes nothing for it. The draw is
+  // spent on the page's clock, which can only happen once the close has reached the page.
+  const closed = first.socket.waitForEvent("close");
   await disconnectLiveSockets();
+  await closed;
+  await page.clock.fastForward(RECONNECT_SPREAD_MS);
   await expect.poll(() => sockets[1]?.resumes.length ?? 0).toBe(1);
   expect(sockets).toHaveLength(2);
   const last = first.events.at(-1);
@@ -511,12 +557,25 @@ test("live: a change committed while the first live socket fails to open is show
       (response) => new URL(response.url()).pathname === "/auth/whoami" && response.ok()
     );
 
+    // The second socket waits a draw from [0, RECONNECT_SPREAD_MS) armed when the first
+    // handshake failed (`web/src/api/live-socket.ts`), which the page's own clock spends.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const head: string = (await (await whoami).json()).event_head;
     await expect(page.getByText("Before the failed handshake", { exact: true })).toBeVisible();
     await refused.promise;
     await patchIssue(issue.key, { title: "Committed while the socket was down" }, bob);
     committed.resolve();
+    // The jump repeats because the draw is armed only once the refusal has reached the page.
+    await expect
+      .poll(
+        async () => {
+          await page.clock.runFor(RECONNECT_SPREAD_MS);
+          return opens;
+        },
+        { intervals: [50, 50, 100, 200, 500] }
+      )
+      .toBe(2);
 
     await expect(
       page.getByText("Committed while the socket was down", { exact: true })
@@ -690,6 +749,7 @@ test("live: an event during a project list's first load fetches it again once th
       await route.fulfill({ body, contentType: "application/json", status: 200 });
     });
 
+    await page.clock.install();
     await page.goto("/projects/CORE");
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Open navigation" }).click();
@@ -721,7 +781,11 @@ test("live: an event during a project list's first load fetches it again once th
     // The held body predates the rename; the list is fetched again once it lands.
     await expect(page.getByLabel(`${issue.key} ${newTitle}`)).toBeVisible();
     await expect(page.getByLabel(`${issue.key} OLDTITLE`)).toHaveCount(0);
-    await page.waitForTimeout(1_500);
+    // The 100 ms event batch and the refresh the scheduler holds back for
+    // `MIN_REFETCH_INTERVAL_MS` fire inside this jump, so a third request would already be
+    // counted; the margin is for the request reaching Playwright's counter.
+    await page.clock.runFor(MIN_REFETCH_INTERVAL_MS + 100);
+    await sleep(100);
     expect([listRequests, mostInFlight]).toEqual([2, 1]);
   } finally {
     release();

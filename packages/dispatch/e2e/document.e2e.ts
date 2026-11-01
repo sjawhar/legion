@@ -10,6 +10,7 @@ import {
 import {
   barAction,
   connectedDot,
+  countDocumentSockets,
   documentEditor,
   markSpan,
   selectEditorText,
@@ -17,6 +18,7 @@ import {
 } from "./editor";
 import { askCard as inboxAskCard, inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { assertPageFits, assertWhole } from "./unclipped";
 import { asUser } from "./users";
 
@@ -40,6 +42,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): two browser contexts, two mounted editors on one live document, the reload the
+// row proves the text and the version picker survive, and a full-page screenshot.
 test("documentCollaborationLive", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const alice = await asUser(browser, "alice");
@@ -47,6 +51,7 @@ test("documentCollaborationLive", async ({ browser }, testInfo) => {
 
   try {
     const alicePage = await alice.newPage();
+    const aliceSockets = countDocumentSockets(alicePage);
     await alicePage.goto("/projects/CORE/documents");
     await alicePage.getByRole("button", { name: "New document" }).click();
     await alicePage.getByRole("textbox", { name: "Title" }).fill("Design notes");
@@ -64,14 +69,30 @@ test("documentCollaborationLive", async ({ browser }, testInfo) => {
     await typeAtEnd(alicePage, "Alice wrote this.");
     await expect(documentEditor(bobPage)).toContainText("Alice wrote this.");
     await alicePage.reload();
+    // The editor's textbox role is written at the very end of the reload's admission chain - the
+    // `/text` read, the transport chunk, the document socket, that socket's first sync, then the
+    // editor chunk (web ProofDocument's `admit` and its `onSynced`). One assertion on the
+    // editor's text spends a single expect budget on all of it and reports "element(s) not
+    // found" when any step of it is slow, so wait for the reload's own socket and for the editor
+    // that sync builds, each on its own budget.
+    await expect.poll(aliceSockets).toBe(2);
+    await expect(documentEditor(alicePage)).toBeAttached();
     await expect(documentEditor(alicePage)).toContainText("Alice wrote this.");
+    // The picker lists every settled version and the live document. A settlement landing between
+    // a read of the versions and a read of the options moves both, so one poll reads the pair and
+    // compares them against each other rather than against a count read before it.
     await expect
-      .poll(() => getArtifact(artifact.id).then((current) => current.versions.length))
-      .toBeGreaterThan(1);
-    const versionCount = await getArtifact(artifact.id).then((current) => current.versions.length);
-    await expect(
-      alicePage.getByRole("combobox", { name: "Version" }).locator("option")
-    ).toHaveCount(versionCount + 1);
+      .poll(async () => {
+        const [current, options] = await Promise.all([
+          getArtifact(artifact.id),
+          alicePage.getByRole("combobox", { name: "Version" }).locator("option").count(),
+        ]);
+        const versions = current.versions.length;
+        return versions > 1 && options === versions + 1
+          ? "one option per settled version, and one for the live document"
+          : `${options} options for ${versions} settled versions`;
+      })
+      .toBe("one option per settled version, and one for the live document");
     await alicePage.screenshot({
       path: testInfo.outputPath("project-document-live.png"),
       fullPage: true,
@@ -112,6 +133,9 @@ test("picking a file on the Documents tab uploads it at once and lists it", asyn
   }
 });
 
+// SLOW(>=2s): two browser contexts, two mounted editors on one live document, a comment, a
+// suggestion accepted into a named version, an ask answered from bob's Inbox, and a full-page
+// screenshot.
 test("comment, suggest, and ask anchor marks on a project document; accept edits the text; the ask flows through the Inbox @phone", async ({
   browser,
 }, testInfo) => {
@@ -190,7 +214,8 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     // A document has no assignee, so its question is in nobody's own list: the Inbox reaches it
     // under the Unassigned filter. The short row names the document the question belongs to,
     // and the card - which from 1280 px the reading pane draws (INFRA-575) - answers it.
-    await bobPage.goto("/?assignee=unassigned");
+    // Neither move is a cold load the row proves: bob is already signed in and on the page.
+    await navigateInApp(bobPage, "/?assignee=unassigned");
     const inboxDocumentRow = inboxRow(bobPage, askId);
     await expect(inboxDocumentRow.getByRole("link", { name: /CORE.*Design notes/ })).toBeVisible();
     const inboxAsk = await inboxAskCard(bobPage, askId);
@@ -202,7 +227,7 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
         ask: { answer: { text: "Yes, publish it.", user: "bob" }, state: "answered" },
       });
     await expect(inboxDocumentRow).toHaveCount(0);
-    await bobPage.goto(path);
+    await navigateInApp(bobPage, path);
     await setDocumentSheet(bobPage, testInfo.project.name, true);
     await expect(bobPage.getByText("Yes, publish it.")).toBeVisible();
     await bobPage.screenshot({

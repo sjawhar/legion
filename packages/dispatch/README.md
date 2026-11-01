@@ -66,8 +66,9 @@ requests at a broker the caller runs, as the secrets broker's docs rig
 (`docs/site/media/broker/rig.sh`) does with the token its local issuer
 (`packages/envoy/cmd/dev-oidc-issuer`) keeps.
 
-`DATABASE_URL` is required and must name an isolated loopback database:
-`e2e/seed.ts` truncates it before every scenario and never selects a shared
+`DATABASE_URL` is a one-lane run's input unless it names a Postgres of its own
+(lanes, below), and must name an isolated
+loopback database: `e2e/seed.ts` empties it before every row and never selects a shared
 default, and the dev sign-in flag refuses a non-loopback host. psql runs without
 `PGHOSTADDR` (`e2e/psql.ts`), which would otherwise send it somewhere the server
 never checked. The harness ports `DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`,
@@ -77,7 +78,7 @@ server serves on a port the OS chooses and holds until it serves: the Dispatch
 server on a socket `scripts/e2e/lib/held-port.py` hands it, each Bun listener by
 binding port 0. Each reports its port on its listening line, and `e2e/run.ts`
 exports them before Playwright starts, so no run shares a port with another and
-none truncates the database behind a server it did not start. Set, a port is
+none empties the database behind a server it did not start. Set, a port is
 used as given, and an occupied one fails with `address already in use`.
 Running `playwright test` without the wrapper refuses, naming `e2e/run.ts`,
 unless every port is set and `DISPATCH_E2E_REUSE_SERVERS=1` says they name a
@@ -105,6 +106,40 @@ Arguments after the config go to Playwright, as in
 `bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/broadcast.e2e.ts`
 (`bun run e2e` runs the same after the SPA build). `e2e/run.ts` stops the harness
 when Playwright exits and exits with Playwright's status.
+
+`DISPATCH_E2E_WORKERS` runs the suite in parallel: it is how many Playwright
+workers the run has, unset or empty being one, and `e2e/run.ts` starts one lane
+per worker before Playwright starts. A lane is a whole harness of its own — a
+Dispatch server, the three fakes, the plain-HTTP proxy, a file-store bucket and
+ports the OS chose — and a Postgres of its own, because `e2e/seed.ts` empties
+its lane's database before every row. A worker finds its lane by
+`TEST_PARALLEL_INDEX`, which Playwright gives it and a restarted worker keeps;
+`e2e/harness-ports.ts` resolves it for the ports and for psql's database alike.
+
+A lane's Postgres comes from one of two variables, and a run of more than one
+lane that sets neither is refused. On a machine with Docker and no Postgres
+binaries, `DISPATCH_E2E_PG_IMAGE` is a `docker run` of the image digest you
+name, which is what CI does. On a machine with a Postgres installation and no
+Docker, such as an issue pod, `DISPATCH_E2E_PG_BIN` is a directory holding
+`initdb` and `pg_ctl`. Each lane's data lives under the run's own temporary
+directory and goes with the run.
+
+```bash
+cd packages/dispatch
+DISPATCH_E2E_WORKERS=4 \
+DISPATCH_E2E_PG_BIN=/usr/lib/postgresql/18/bin \
+  bun run e2e
+```
+
+More than one worker refuses, before anything starts and naming the variable, a
+`DATABASE_URL`, `PLAYWRIGHT_BASE_URL`, `DISPATCH_E2E_PROCESSES=2`,
+`DISPATCH_E2E_REUSE_SERVERS` or harness port you set yourself: each names one
+database, one set of servers or one port that every lane would otherwise share,
+and a shared one is one lane emptying another's rows. A `--workers` or `-j` that
+differs from the lane count is refused too; set `DISPATCH_E2E_WORKERS` instead.
+Every other mode is one lane and one worker: the deployed run, two-process mode,
+a run against servers you started (`DISPATCH_E2E_REUSE_SERVERS=1`) and
+`bun run dispatch:local`. `AGENTS.md`'s end-to-end section has the whole model.
 
 `e2e/run-server.sh` on its own is the server for a shell caller: with
 `DATABASE_URL`, `FAKE_ENVOY_PORT`, `FAKE_GITHUB_PORT` and the broker switch's
@@ -181,7 +216,7 @@ step; the database's container stays.
 
 Its inputs are the harness's own. `DATABASE_URL`, when set, is used as given: it must be a single
 `postgres://` URL whose host (its `host` query parameter when it has one, as for libpq) is
-`127.0.0.1`, `localhost`, `[::1]` or a Unix socket directory, and it is truncated and reseeded on
+`127.0.0.1`, `localhost`, `[::1]` or a Unix socket directory, and it is emptied and reseeded on
 every start. Unset, the command runs `packages/envoy/scripts/dev-postgres.sh`, which creates,
 starts or reuses the `dispatch-pg` container, and creates database `dispatch_local` in it once.
 That script runs the container from its pinned image, pgvector on PostgreSQL 18, the version
@@ -313,7 +348,7 @@ cd ../envoy/deploy/compose
 docker rmi "ghcr.io/sjawhar/legion/envoy:${acceptance_image_tag}"
 ```
 
-`e2e/seed.ts` truncates its database before each scenario. Always set
+`e2e/seed.ts` empties its database before each scenario. Always set
 `PLAYWRIGHT_DATABASE_URL` to an isolated test database when using a deployed URL.
 The suite has seven projects. `chromium` runs every spec except the two plain-HTTP specs. `iphone`
 runs, from those same specs, only the tests tagged `@phone` (written at the end of the test's or

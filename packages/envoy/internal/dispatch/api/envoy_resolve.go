@@ -177,8 +177,8 @@ func deliveryErrorText(err error) string {
 // send made at its start still reaches the session once the successor answers; the two seconds
 // past that target leave room for the last backoff. A session that is really gone settles
 // "no live session" that much later than its first try. It is the window every deployment runs:
-// Deps.ListenerTakeoverWindow replaces it only when set, and neither routes.BuildAppContext nor
-// cmd/dispatch sets it; only this package's tests do.
+// Deps.ListenerTakeoverWindow replaces it only when set, which routes.BuildAppContext does only
+// for a cmd/dispatch process under the test hooks (DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW).
 const listenerTakeoverWindow = 12 * time.Second
 
 // takeoverFirstBackoff is the wait before a sender's first retry; each later wait doubles it,

@@ -442,6 +442,8 @@ const DECISION_SPEC = [
   "Closing paragraph after the last decision.\n",
 ].join("\n");
 
+// SLOW(>=2s): four cold loads of the issue document - two widths at two colour schemes - each
+// with its own screenshot, over a spec seeded with three decisions, an answer and a reply.
 test("decision blocks read as urgency-accented cards in the document and its version view", async ({
   browser,
 }, testInfo) => {

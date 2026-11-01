@@ -22,6 +22,7 @@ import {
   keptWrites,
   recordUploadAttempts,
   replayed,
+  runClockUntil,
   watchAnswers,
   watchWrites,
 } from "./keyed-writes";
@@ -52,6 +53,14 @@ test.beforeEach(async () => {
  *  (`PendingWritesIndicator`); gone while none is pending. */
 function pendingWrites(page: Page): Locator {
   return page.getByRole("region", { name: "Pending changes" });
+}
+
+/** How much of an upload's body the shell says has gone up (`Uploading… N%`,
+ *  `PendingWritesIndicator`), 0 while it names no upload: the page's own account of the progress
+ *  that keeps an attempt's deadline from running out. */
+async function uploadedPercent(page: Page): Promise<number> {
+  const shown = /Uploading… (\d+)%/u.exec((await pendingWrites(page).textContent()) ?? "");
+  return shown === null ? 0 : Number(shown[1]);
 }
 
 /** The events of `type` on `issue`. */
@@ -115,13 +124,16 @@ test("a comment whose answer is lost lands once, under one key @phone", async ({
     const posts = watchWrites(page, "POST", path);
     const first = dropFirstAnswer(page, `**${path}`, "POST");
     const landed = replayed(page, "POST", path);
+    // The replay waits `FIRST_BACKOFF_MS` after the lost answer; the page's own clock runs that
+    // wait out, so nothing here is spent on it.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const composer = page.getByRole("form", { name: "Comment composer" }).last();
     await composer.getByLabel("Comment").fill("Said once");
     await composer.getByRole("button", { exact: true, name: "Send" }).click();
 
     expect(await first).toBe(201);
-    const answer = await landed;
+    const answer = await runClockUntil(page, landed);
     expect(answer.status()).toBe(201);
     expect(posts).toHaveLength(2);
     expect(posts[0]).toEqual({
@@ -201,13 +213,16 @@ test("an ask answer whose answer is lost lands once, under one key @phone", asyn
     const posts = watchWrites(page, "POST", path);
     const first = dropFirstAnswer(page, `**${path}`, "POST");
     const landed = replayed(page, "POST", path);
+    // The replay waits `FIRST_BACKOFF_MS` after the lost answer; the page's own clock runs that
+    // wait out, so nothing here is spent on it.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const card = page.getByRole("region", { name: "Conversation" }).getByTestId(`ask-${ask.id}`);
     await card.getByRole("radio", { name: "Ship" }).check();
     await card.getByRole("button", { exact: true, name: "Answer" }).click();
 
     expect(await first).toBe(200);
-    expect((await landed).status()).toBe(200);
+    expect((await runClockUntil(page, landed)).status()).toBe(200);
     expect(posts).toHaveLength(2);
     expect(posts[0]).toEqual({
       input: expect.objectContaining({ selected: ["Ship"] }),
@@ -226,6 +241,10 @@ test("an ask answer whose answer is lost lands once, under one key @phone", asyn
 // `409 KEY_IN_FLIGHT` with `Retry-After: 1`, and the page asks again under the same key. The
 // first attempt is held in Dispatch by a transaction that holds the issue's row, so the 409 is
 // the real server's.
+// SLOW(>=2s): The first attempt waits inside Dispatch on a Postgres row lock, which is real time
+// no page clock can move. 3 s is the shortest hold that still has the key in flight when the
+// page's repeat arrives a second after the abort (`FIRST_BACKOFF_MS`), with room for the press
+// and the attempt's flight: 2 s left Firefox's press on the wrong side of it.
 test("a repeat while the first is still running is answered 409 KEY_IN_FLIGHT, and the page asks again until it lands once @phone", async ({
   browser,
 }) => {
@@ -239,17 +258,21 @@ test("a repeat while the first is still running is answered 409 KEY_IN_FLIGHT, a
     const answers = watchAnswers(page, "POST", path);
     await page.goto(`/issues/${issue.key}/conversation`);
 
-    // Hold the issue's row for four seconds, so the comment's first attempt waits in Dispatch.
+    // Everything the press needs is ready before the row is held, so the hold is spent on the
+    // attempt rather than on getting to it.
+    const composer = page.getByRole("form", { name: "Comment composer" }).last();
+    await composer.getByLabel("Comment").fill("Through a busy key");
+    // Hold the issue's row for three seconds, so the comment's first attempt waits in Dispatch.
     const holding = sql(
       "begin",
       `select 1 from issues where key = '${issue.key}' for update`,
-      "select pg_sleep(4)",
+      "select pg_sleep(3)",
       "commit"
     );
     await expect
       .poll(() =>
         sql(
-          "select count(*) from pg_stat_activity where state = 'active' and query like 'select pg_sleep(4)%'"
+          "select count(*) from pg_stat_activity where state = 'active' and query like 'select pg_sleep(3)%'"
         )
       )
       .toBe("1");
@@ -264,8 +287,6 @@ test("a repeat while the first is still running is answered 409 KEY_IN_FLIGHT, a
       return route.abort("failed");
     });
     const landed = replayed(page, "POST", path);
-    const composer = page.getByRole("form", { name: "Comment composer" }).last();
-    await composer.getByLabel("Comment").fill("Through a busy key");
     await composer.getByRole("button", { exact: true, name: "Send" }).click();
 
     await holding;
@@ -291,34 +312,47 @@ test("a repeat while the first is still running is answered 409 KEY_IN_FLIGHT, a
 });
 
 // A write Dispatch takes longer to finish than the page waits on a silent attempt. Dispatch is
-// slow on its own side here (the slow-write hook holds every run of the route 20 s once its key
-// is claimed), not held in the browser: the page's attempt goes silent, it gives up on it at 15 s
+// slow on its own side here (the slow-write hook holds every run of the route once its key is
+// claimed), not held in the browser: the page's attempt goes silent, it gives up on it at 15 s
 // and asks again under the same key, and the first run, which the page's leaving does not cancel,
 // still finishes. Every repeat while it runs is `409 KEY_IN_FLIGHT`; the one after is its answer.
-// A run that the leaving cancelled would never finish, since every run is held as long.
+// A run that the leaving cancelled would never finish, since every run is held as long. The two
+// waits are kept apart: the hold is 4 s of the server's own time, which no page clock can move,
+// and the 15 s the page waits on one silent attempt is its own clock's, driven here.
+// SLOW(>=2s): Dispatch's own delay is real time on the server (`writes/_test/slow`); only the
+// page's 15 s give-up is driven by `page.clock`. 4 s is the shortest hold that still has the key
+// claimed when the repeat arrives.
 test("a comment Dispatch takes 20 s to make lands once from the page, every repeat waiting on the first @phone", async ({
   browser,
 }) => {
-  test.setTimeout(120_000);
   await createProject({ key: "KW", name: "Keyed writes" });
   const issue = await createIssue({ project: "KW", title: "A slow comment" });
   const path = `/api/v1/issues/${issue.key}/comments`;
-  await slowWrites("POST", path, 20_000);
+  await slowWrites("POST", path, 4_000);
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
     const posts = watchWrites(page, "POST", path);
     const answers = watchAnswers(page, "POST", path);
     const landed = replayed(page, "POST", path);
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const composer = page.getByRole("form", { name: "Comment composer" }).last();
     await composer.getByLabel("Comment").fill("Slow on the server");
     const pressed = Date.now();
     await composer.getByRole("button", { exact: true, name: "Send" }).click();
 
+    // The give-up is fired only once the first attempt has gone out: the repeat that follows it
+    // is a second run rather than a wait on the first until Dispatch has claimed the key, and the
+    // repeat comes a real second later (`FIRST_BACKOFF_MS`, on a clock that runs at real speed
+    // once it has been jumped), which is far more than the attempt needs to reach Dispatch.
+    await expect.poll(() => posts.length).toBe(1);
+    await page.clock.fastForward(15_500);
     const answer = await landed;
     expect(answer.status()).toBe(201);
-    expect(Date.now() - pressed).toBeGreaterThanOrEqual(19_000);
+    // Every repeat waits its `Retry-After: 1` in real time, since what it waits on - the first
+    // run's hold - is the server's own.
+    expect(Date.now() - pressed).toBeGreaterThanOrEqual(3_500);
     await expect
       .poll(() => answers)
       .toContainEqual({
@@ -347,20 +381,25 @@ test("a comment Dispatch takes 20 s to make lands once from the page, every repe
 });
 
 // An attempt is cut off only after 15 s with no progress, and a body still going up is progress:
-// an upload over a link slow enough that sending it takes 30 s is one attempt, and lands once.
-// Chromium's DevTools protocol paces the page's own upload (`Network.emulateNetworkConditions`),
-// so the body goes up at the throttle's rate and the page sees its progress as it goes; no other
-// engine the suite runs can be throttled that way, so the row runs on Chromium's projects.
+// an upload the page sees take twice that long is one attempt, and lands once. Chromium's
+// DevTools protocol paces the page's own upload (`Network.emulateNetworkConditions`), so the body
+// goes up at the throttle's rate and the page sees its progress as it goes; no other engine the
+// suite runs can be throttled that way, so the row runs on Chromium's projects. The transfer is
+// real and the deadline is the page's own: the body is sized to four throttled seconds, and the
+// page's clock is jumped over the 15 s between two pieces of it, so the row proves the reset
+// without spending thirty seconds on it.
+// SLOW(>=2s): The upload must really keep moving while the page's clock crosses
+// `KEYED_SEND_ATTEMPT_MS`; a throttled 4 s transfer is the shortest one that still emits progress
+// across the fast-forwards.
 test("an upload throttled to take 30 s is one attempt and lands once @phone", async ({
   browser,
   browserName,
 }, testInfo) => {
   test.skip(browserName !== "chromium", "only Chromium's DevTools protocol paces a page's upload");
-  test.setTimeout(120_000);
   await createProject({ key: "KW", name: "Keyed writes" });
   const issue = await createIssue({ project: "KW", title: "A slow upload" });
   const path = `/api/v1/issues/${issue.key}/artifacts`;
-  const bytes = 4 * 1024 * 1024;
+  const bytes = 1024 * 1024;
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
@@ -372,6 +411,7 @@ test("an upload throttled to take 30 s is one attempt and lands once @phone", as
       }
     });
     const answers = watchAnswers(page, "POST", path);
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}`);
     if (testInfo.project.name === "iphone") {
       const reviewPanel = page.getByRole("button", { name: /review panel/i });
@@ -388,19 +428,30 @@ test("an upload throttled to take 30 s is one attempt and lands once @phone", as
       downloadThroughput: -1,
       latency: 0,
       offline: false,
-      uploadThroughput: Math.floor(bytes / 30),
+      uploadThroughput: Math.floor(bytes / 4),
     });
     const created = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
         new URL(response.url()).pathname === path &&
-        response.status() === 201,
-      { timeout: 100_000 }
+        response.status() === 201
     );
     const pressed = Date.now();
+    const pageStarted = await page.evaluate(() => Date.now());
     await page.getByRole("button", { exact: true, name: "Upload" }).click();
+    await expect(pendingWrites(page)).toContainText("Uploading…");
+    // Each jump is taken between two pieces of the body, which is why it is safe: every piece
+    // resets the attempt's deadline (`arrived`, `web/src/api/client.ts`), so the page's clock
+    // passes 15 s twice over while the attempt is never silent for 15 s of it. A page that
+    // stopped resetting the deadline cuts the attempt off at the first jump.
+    for (const gone of [25, 60]) {
+      await expect.poll(() => uploadedPercent(page)).toBeGreaterThanOrEqual(gone);
+      await page.clock.fastForward(14_000);
+    }
     await created;
-    expect(Date.now() - pressed).toBeGreaterThanOrEqual(25_000);
+    expect(Date.now() - pressed).toBeGreaterThanOrEqual(3_500);
+    // The page's own clock crossed the deadline twice while the body kept moving.
+    expect((await page.evaluate(() => Date.now())) - pageStarted).toBeGreaterThanOrEqual(28_000);
     await throttle.send("Network.emulateNetworkConditions", {
       downloadThroughput: -1,
       latency: 0,
@@ -421,25 +472,31 @@ test("an upload throttled to take 30 s is one attempt and lands once @phone", as
 // for a transport failure and back off from. WebKit and Firefox send the whole of
 // an upload before they read its answer: an answer Dispatch wrote with the body still coming reached
 // them as a reset connection, so Dispatch reads and discards the rest of the body first
-// (`drainBeforeAnswer`). The slow-write hook holds the first run 25 s once its key is claimed, so
-// the page gives up on the silent attempt at 15 s and asks again under its key, with the whole
-// 20 MB body each time, while that run still holds the key. On Chromium's projects the upload is
-// throttled to take 8 s; no other engine can be throttled from Playwright. The page's own
-// `XMLHttpRequest` is the witness of how each attempt ended.
+// (`drainBeforeAnswer`). The slow-write hook holds the first run 5 s once its key is claimed, and
+// the page's clock is jumped past the 15 s it waits on a silent attempt once the whole body is
+// up, so it asks again under its key, with the whole 20 MB body each time, while that run still
+// holds the key. On Chromium's projects the upload is throttled to take 2 s; no other engine can
+// be throttled from Playwright. The page's own `XMLHttpRequest` is the witness of how each
+// attempt ended.
+// SLOW(>=2s): The 20 MB body is the point - a smaller one fits in the socket buffers and
+// Dispatch's 409 would no longer be written while the body is still arriving, which is the drain
+// this row proves. Three real uploads of it, plus a 5 s server hold the page's give-up must
+// outlast, are the real time left.
 test("a 20 MB upload repeated while its first request runs is answered 409 KEY_IN_FLIGHT, never a failed connection, and lands once @phone", async ({
   browser,
   browserName,
 }, testInfo) => {
-  test.setTimeout(150_000);
+  test.setTimeout(60_000);
   await createProject({ key: "KW", name: "Keyed writes" });
   const issue = await createIssue({ project: "KW", title: "A repeated upload" });
   const path = `/api/v1/issues/${issue.key}/artifacts`;
   const bytes = 20 * 1024 * 1024;
-  await slowWrites("POST", path, 25_000);
+  await slowWrites("POST", path, 5_000);
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
     const attempts = await recordUploadAttempts(page, path);
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}`);
     if (testInfo.project.name === "iphone") {
       const reviewPanel = page.getByRole("button", { name: /review panel/i });
@@ -457,12 +514,28 @@ test("a 20 MB upload repeated while its first request runs is answered 409 KEY_I
         downloadThroughput: -1,
         latency: 0,
         offline: false,
-        uploadThroughput: Math.floor(bytes / 8),
+        uploadThroughput: Math.floor(bytes / 2),
       });
     }
     await page.getByRole("button", { exact: true, name: "Upload" }).click();
+    // The whole body is up and nothing is moving either way, so the page's clock can run the
+    // attempt's silence out at once; a jump taken while the body still moved would cross a
+    // deadline the next piece of it was about to reset.
+    await expect(pendingWrites(page)).toContainText("Uploading… 100%");
+    await page.clock.fastForward(15_500);
+    // Between two attempts the write waits on a page timer - the 409's `Retry-After: 1`, or the
+    // backoff after the give-up - and the page's own clock runs that out, so the uploads are the
+    // only real time left. The clock is driven only once the attempt before it has ended, never
+    // while a body is moving.
     await expect
-      .poll(async () => (await attempts()).at(-1), { timeout: 120_000 })
+      .poll(
+        async () => {
+          const sofar = await attempts();
+          if (sofar.at(-1)?.ended !== undefined) await page.clock.runFor(1_200);
+          return sofar.at(-1);
+        },
+        { intervals: [100, 100, 200, 500], timeout: 40_000 }
+      )
       .toMatchObject({ ended: "load", status: 201 });
 
     const [first, ...repeats] = await attempts();
@@ -506,6 +579,9 @@ test("a 20 MB upload repeated while its first request runs is answered 409 KEY_I
 // one before asking again. The `chromium-plain-http-sign-out` project runs it on a page that is no
 // secure context, whose browser has no `navigator.locks`: there the other tab's hold is the lease
 // the signing-out tab renews, not its lock.
+// SLOW(>=2s): Two tabs are the property - the discard has to reach the tab that did not sign out
+// - and each is a real page load with a status change held at the network and a label queued
+// behind it. That setup is what is left; the straggler window costs no real time.
 test("a sign-out confirmed with a write queued behind a held one sends nothing after the confirm, in either tab @phone", async ({
   browser,
 }, testInfo) => {
@@ -513,7 +589,6 @@ test("a sign-out confirmed with a write queued behind a held one sends nothing a
     testInfo.project.name.startsWith("chromium-plain-http") && httpsTarget,
     plainHttpSkipReason
   );
-  test.setTimeout(90_000);
   await createProject({ key: "KW", name: "Keyed writes" });
   const issues = [
     await createIssue({ project: "KW", title: "Tab one's change" }),
@@ -539,6 +614,7 @@ test("a sign-out confirmed with a write queued behind a held one sends nothing a
           writes.push({ at: Date.now(), body: request.postData() ?? "" });
         }
       });
+      await page.clock.install();
       await page.goto(`/issues/${issue.key}`);
       await expect(page.getByRole("button", { name: "Edit labels" })).toBeVisible();
       tabs.push(page);
@@ -562,8 +638,12 @@ test("a sign-out confirmed with a write queued behind a held one sends nothing a
       await expect(pendingWrites(page)).toHaveCount(0);
       await expect.poll(() => keptWrites(page)).toBe(0);
     }
-    // A write a drop started would have gone out at once; give a straggler time to show.
-    await signingOut.waitForTimeout(3_000);
+    // A write a drop started would have gone out at once; running each tab's own clock past
+    // `MAX_BACKOFF_MS` shows every straggler a timer of theirs could still have scheduled, which
+    // a few seconds of real time would not, and costs none. `runFor`, not `fastForward`: it
+    // fires each repeating timer - the signing-out tab's lease renewal where the browser has no
+    // `navigator.locks` - every period it covers.
+    for (const page of tabs) await page.clock.runFor(30_000);
 
     expect(writes.filter(({ at }) => at >= (confirmedAt ?? 0))).toEqual([]);
     const after = await Promise.all(issues.map((issue) => getIssue(issue.key, agent)));
@@ -595,7 +675,6 @@ for (const landed of [false, true]) {
       testInfo.project.name.startsWith("chromium-plain-http") && httpsTarget,
       plainHttpSkipReason
     );
-    test.setTimeout(90_000);
     await createProject({ key: "KW", name: "Keyed writes" });
     const issue = await createIssue({ project: "KW", title: "Held for a sign-out" });
     const before = await getIssue(issue.key);
@@ -617,6 +696,7 @@ for (const landed of [false, true]) {
         }
       });
       const network = await outage(holding, `**${path}`, "PATCH");
+      await holding.clock.install();
       await holding.goto(`/issues/${issue.key}`);
       const signingOut = await alice.newPage();
       signingOut.on("dialog", (dialog) => void dialog.accept());
@@ -652,17 +732,33 @@ for (const landed of [false, true]) {
       await signingOut.close();
 
       if (landed) {
-        await expect(pendingWrites(holding)).toHaveCount(0, { timeout: 30_000 });
+        // The hold ends when the signing-out tab's lock is released - or, where the browser has
+        // no `navigator.locks`, when the lease it renewed lapses - and the holding tab's own
+        // clock runs that wait out rather than this row.
+        await runClockUntil(
+          holding,
+          expect(pendingWrites(holding)).toHaveCount(0, { timeout: 30_000 }),
+          1_000
+        );
         await expect.poll(() => keptWrites(holding)).toBe(0);
-        // A write the discard started would go out at once; give a straggler time to show.
-        await holding.waitForTimeout(3_000);
+        // A write the discard started would go out at once; running the tab's clock past
+        // `MAX_BACKOFF_MS` shows every straggler a timer of its own could still have scheduled,
+        // which a few seconds of real time would not, and costs none.
+        await holding.clock.runFor(30_000);
         expect(writes.filter((at) => at >= closed)).toEqual([]);
         expect((await getIssue(issue.key, agent)).status).toBe(before.status);
         expect(await statusEvents(issue.key, "backlog")).toEqual([]);
       } else {
-        await expect
-          .poll(async () => (await getIssue(issue.key, agent)).status, { timeout: 30_000 })
-          .toBe("backlog");
+        // The hold lifts, the tab reads that alice is still signed in, and the change goes out on
+        // the write's next backoff tick (`pause`, `keyed-write.ts`): all three are page timers,
+        // which the tab's own clock runs out.
+        await runClockUntil(
+          holding,
+          expect
+            .poll(async () => (await getIssue(issue.key, agent)).status, { timeout: 30_000 })
+            .toBe("backlog"),
+          2_000
+        );
         await expect(pendingWrites(holding)).toHaveCount(0);
         await expect.poll(() => keptWrites(holding)).toBe(0);
         expect(await statusEvents(issue.key, "backlog")).toHaveLength(1);
@@ -681,10 +777,12 @@ for (const landed of [false, true]) {
 // of alice's writes are dropped, and nothing goes out after bob's sign-in: neither the label nor
 // another attempt of the held change. A page that advanced the line as it dropped it sent the
 // label under bob's cookie, which only Dispatch's `409 LOGIN_CHANGED` stopped.
+// SLOW(>=2s): Two real tabs are the property - alice's issue page, with a write queued behind a
+// held one, and the tab bob signs in from - and their two loads are what is left; the straggler
+// window costs no real time.
 test("alice's write queued behind her held one sends nothing once bob signs in from another tab @phone", async ({
   browser,
 }) => {
-  test.setTimeout(90_000);
   await createProject({ key: "KW", name: "Keyed writes" });
   const issue = await createIssue({ project: "KW", title: "Alice's line" });
   const before = await getIssue(issue.key);
@@ -698,6 +796,7 @@ test("alice's write queued behind her held one sends nothing once bob signs in f
         writes.push({ at: Date.now(), body: request.postData() ?? "" });
       }
     });
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}`);
     await expect(page.getByRole("button", { name: "Edit labels" })).toBeVisible();
     await queueBehindAHeldStatus(page, issue.key, "alice-only");
@@ -717,8 +816,11 @@ test("alice's write queued behind her held one sends nothing once bob signs in f
       .toBe("bob");
     await expect(pendingWrites(page)).toHaveCount(0);
     await expect.poll(() => keptWrites(page)).toBe(0);
-    // A write the drop started would go out at once; give a straggler time to show.
-    await page.waitForTimeout(3_000);
+    // A write the drop started would go out at once; running alice's tab past `MAX_BACKOFF_MS`
+    // on its own clock shows every straggler a timer of hers could still have scheduled, which a
+    // few seconds of real time would not, and costs none. Bob's tab needs no clock: the sign-in
+    // that drops her writes travels over the sign-in channel, not a timer.
+    await page.clock.runFor(30_000);
 
     expect(writes.filter(({ at }) => at >= bobSignedIn)).toEqual([]);
     const after = await getIssue(issue.key, agent);
@@ -810,7 +912,6 @@ test("the issue header's pin pressed during an outage survives a reload and land
 test("a write pending for alice is dropped when bob signs in from another tab, and nothing runs as bob @phone", async ({
   browser,
 }) => {
-  test.setTimeout(90_000);
   await createProject({ key: "KW", name: "Keyed writes" });
   const issue = await createIssue({ project: "KW", title: "Alice's change" });
   const before = (await getIssue(issue.key)).status;

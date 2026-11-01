@@ -16,6 +16,7 @@ import {
 } from "./api";
 import { inboxList, inboxPane, selectedRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 
 /**
@@ -221,41 +222,50 @@ async function seedInbox(): Promise<Seed> {
   );
   expect(atFour.version).toBe(4);
 
-  const firstApprovalIssue = await createIssue({
-    project: "PANE",
-    spec: "# Lease handover\n\nThe lease moves with the ledger, never with the mirror.\n",
-    title: "Lease handover",
-  });
-  await patchIssue(firstApprovalIssue.key, { priority: 2 });
-  const firstApproval = await requestApproval(
-    firstApprovalIssue.primary_artifact_id,
-    { summary: "The first handover draft." },
-    session
-  );
+  // The three questions left are each their own issue or document, and the Inbox orders them by a
+  // priority set here rather than by the order they were made, so they go out together. Only the
+  // two that share priority 3 stay in order, since that tie is broken by which was made first.
+  const [firstApproval, { anchored, plain }, documentDecision] = await Promise.all([
+    (async () => {
+      const issue = await createIssue({
+        project: "PANE",
+        spec: "# Lease handover\n\nThe lease moves with the ledger, never with the mirror.\n",
+        title: "Lease handover",
+      });
+      await patchIssue(issue.key, { priority: 2 });
+      return requestApproval(
+        issue.primary_artifact_id,
+        { summary: "The first handover draft." },
+        session
+      );
+    })(),
+    (async () => {
+      const anchoredIssue = await createIssue({
+        project: "PANE",
+        spec: "The mirror replays the ledger on a cold start.\n",
+        title: "Cold start",
+      });
+      await patchIssue(anchoredIssue.key, { priority: 3 });
+      const anchored = await createAsk(
+        anchoredIssue.key,
+        { anchor: { artifact: "spec", quote: ANCHOR_QUOTE }, question: ANCHORED_QUESTION },
+        session
+      );
+      const plainIssue = await createIssue({ project: "PANE", title: "Retry budget" });
+      await patchIssue(plainIssue.key, { priority: 3 });
+      const plain = await createAsk(
+        plainIssue.key,
+        { options: [{ label: "Yes" }, { label: "No" }], question: PLAIN_QUESTION },
+        session
+      );
+      return { anchored, plain };
+    })(),
+    (async () => {
+      await createProjectDocument("PANE", { content: documentContent, name: "mirror-runbook.md" });
+      return indexedRow((row) => row.block_id === DOCUMENT_BLOCK);
+    })(),
+  ]);
   expect(firstApproval.version).toBe(1);
-
-  const anchoredIssue = await createIssue({
-    project: "PANE",
-    spec: "The mirror replays the ledger on a cold start.\n",
-    title: "Cold start",
-  });
-  await patchIssue(anchoredIssue.key, { priority: 3 });
-  const anchored = await createAsk(
-    anchoredIssue.key,
-    { anchor: { artifact: "spec", quote: ANCHOR_QUOTE }, question: ANCHORED_QUESTION },
-    session
-  );
-
-  const plainIssue = await createIssue({ project: "PANE", title: "Retry budget" });
-  await patchIssue(plainIssue.key, { priority: 3 });
-  const plain = await createAsk(
-    plainIssue.key,
-    { options: [{ label: "Yes" }, { label: "No" }], question: PLAIN_QUESTION },
-    session
-  );
-
-  await createProjectDocument("PANE", { content: documentContent, name: "mirror-runbook.md" });
-  const documentDecision = await indexedRow((row) => row.block_id === DOCUMENT_BLOCK);
 
   return {
     anchoredAskId: anchored.id,
@@ -321,6 +331,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): the six-question seed every row of this file reads, and two loads of the Inbox -
+// one per width the two columns have to hold.
 test("the Inbox shows a decision block in the reading pane and answers it in two taps", async ({
   browser,
 }) => {
@@ -449,7 +461,9 @@ test("the reading pane approves a version and marks what changed since the last 
     );
 
     // A first request has no approval to compare against, so the column marks nothing.
-    await page.goto(inboxAt(seed.firstApprovalAskId));
+    // The reader moves to it in the list, as a tap does: this row proves what the column marks,
+    // not what a cold load of its address draws.
+    await navigateInApp(page, inboxAt(seed.firstApprovalAskId));
     await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", seed.firstApprovalAskId);
     await expect(pane.getByRole("region", { name: "Document version 1" })).toBeVisible();
     for (const mark of CHANGE_CLASSES) {
@@ -477,7 +491,8 @@ test("the reading pane shows an anchored question and a question in no document 
     await expect(anchoredCard).toContainText(ANCHOR_QUOTE);
     await expect(anchoredCard.locator("[data-ask-answer]")).toBeVisible();
 
-    await page.goto(inboxAt(seed.plainAskId));
+    // In-app again: the row proves the two shapes of card, not a load of either address.
+    await navigateInApp(page, inboxAt(seed.plainAskId));
     const plainCard = pane.getByTestId(`ask-${seed.plainAskId}`);
     await expect(plainCard).toContainText(PLAIN_QUESTION);
     await expect(plainCard.locator("[data-ask-answer]")).toBeVisible();
@@ -531,6 +546,8 @@ test("the arrow keys, j, k, Enter and ?item= drive the reading pane", async ({ b
   }
 });
 
+// SLOW(>=2s): the six-question seed every row of this file reads, and a load at each of the
+// three widths whose layout this row is about.
 test("the Inbox keeps today's card below 1280 px and in the drawer @phone", async ({ browser }) => {
   const seed = await seedInbox();
   const alice = await asUser(browser, "alice");

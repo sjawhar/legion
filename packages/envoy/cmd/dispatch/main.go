@@ -95,10 +95,22 @@ type bootConfig struct {
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
 	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
 	SettleDelay time.Duration
+	// MarkWait is how long a mark the browser says it wrote is waited for before the server
+	// answers that the document does not hold it, zero for the document service's own 1 s; only
+	// DISPATCH_TEST_MARK_WAIT, under the test hooks, sets it.
+	MarkWait time.Duration
+	// UnrecordedMarkTTL is how long a mark no row records is kept before the settlement sweep
+	// expires it, zero for the document service's own minute; only
+	// DISPATCH_TEST_UNRECORDED_MARK_TTL, under the test hooks, sets it.
+	UnrecordedMarkTTL time.Duration
 	// RouteRosterTTL is how long a stored listener answer serves issue reads' route_status, zero
 	// for the server's own five seconds; only DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks,
 	// sets it.
 	RouteRosterTTL time.Duration
+	// ListenerTakeoverWindow is how long a sender keeps trying a listener that is being replaced,
+	// zero for the server's own twelve seconds; only DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW, under
+	// the test hooks, sets it.
+	ListenerTakeoverWindow time.Duration
 	// EditNoticeQuiet is how long a document stays quiet after a person's last settled version
 	// before its edit notice goes, zero for the document service's own 30 s; only
 	// DISPATCH_TEST_EDIT_NOTICE_QUIET, under the test hooks, sets it.
@@ -107,6 +119,10 @@ type bootConfig struct {
 	// rather than share the process's five-second copy; only DISPATCH_TEST_ROSTER_UNCACHED=1, under
 	// the test hooks, sets it.
 	ListenerRosterUncached bool
+	// EmbedderOff builds no embedder, whatever DISPATCH_EMBEDDER and the AWS SDK's own variables
+	// would have built: meaning search answers keyword-only and the embedding queue does nothing.
+	// Only DISPATCH_TEST_EMBEDDER_OFF=1, under the test hooks, sets it.
+	EmbedderOff bool
 	// ReconcileAtStart makes the delivery reconcile run one pass as it starts rather than only after
 	// its jittered first tick; only DISPATCH_TEST_RECONCILE_AT_START=1, under the test hooks, sets
 	// it.
@@ -333,12 +349,14 @@ func main() {
 
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{
-		Store:           database,
-		Events:          broker,
-		Identity:        requestIdentity,
-		ServerURL:       serverURL,
-		Settle:          boot.SettleDelay,
-		EditNoticeQuiet: boot.EditNoticeQuiet,
+		Store:             database,
+		Events:            broker,
+		Identity:          requestIdentity,
+		ServerURL:         serverURL,
+		Settle:            boot.SettleDelay,
+		MarkWait:          boot.MarkWait,
+		UnrecordedMarkTTL: boot.UnrecordedMarkTTL,
+		EditNoticeQuiet:   boot.EditNoticeQuiet,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an
@@ -362,10 +380,18 @@ func main() {
 	// embedder is nil (meaning search off, search answers keyword-only and says so) when Bedrock,
 	// the default place, finds no AWS region/credentials at boot - a CI job or a devbox with no
 	// AWS_REGION set - which newEmbedder logs as a warning rather than a reason to refuse to boot.
-	embedder, err := newEmbedder(ctx, boot.Embedder)
-	if err != nil {
-		slog.Error("dispatch: build the embedder", "error", err)
-		os.Exit(1)
+	// DISPATCH_TEST_EMBEDDER_OFF=1 is the same nil without that check, for a test process that
+	// does have the variables and no model service to spend them on.
+	var embedder embed.Embedder
+	if boot.EmbedderOff {
+		slog.Warn("dispatch: meaning search unavailable", "error", "DISPATCH_TEST_EMBEDDER_OFF=1")
+	} else {
+		client, err := newEmbedder(ctx, boot.Embedder)
+		if err != nil {
+			slog.Error("dispatch: build the embedder", "error", err)
+			os.Exit(1)
+		}
+		embedder = client
 	}
 
 	built := routes.AppContextOptions{
@@ -865,7 +891,10 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		target *time.Duration
 	}{
 		{"DISPATCH_TEST_SETTLE_DELAY", &boot.SettleDelay},
+		{"DISPATCH_TEST_MARK_WAIT", &boot.MarkWait},
+		{"DISPATCH_TEST_UNRECORDED_MARK_TTL", &boot.UnrecordedMarkTTL},
 		{"DISPATCH_TEST_ROUTE_ROSTER_TTL", &boot.RouteRosterTTL},
+		{"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW", &boot.ListenerTakeoverWindow},
 		{"DISPATCH_TEST_EDIT_NOTICE_QUIET", &boot.EditNoticeQuiet},
 	} {
 		if err := testHookDuration(env, setting.name, boot.TestHooksEnabled, setting.target); err != nil {
@@ -877,6 +906,12 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_ROSTER_UNCACHED")
 		}
 		boot.ListenerRosterUncached = raw == "1"
+	}
+	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_EMBEDDER_OFF")); raw != "" {
+		if !boot.TestHooksEnabled {
+			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_EMBEDDER_OFF")
+		}
+		boot.EmbedderOff = raw == "1"
 	}
 	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_RECONCILE_AT_START")); raw != "" {
 		if !boot.TestHooksEnabled {
@@ -1249,6 +1284,7 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 	built.AgentSecretsTokenFile = boot.AgentSecretsTokenFile
 	built.TestHooksEnabled = boot.TestHooksEnabled
 	built.RouteRosterTTL = boot.RouteRosterTTL
+	built.ListenerTakeoverWindow = boot.ListenerTakeoverWindow
 	built.ListenerRosterUncached = boot.ListenerRosterUncached
 	built.DevSignIn = boot.DevSignIn
 	return built

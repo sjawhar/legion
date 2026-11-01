@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { type BrowserContext, expect, test } from "@playwright/test";
 
 import {
@@ -354,6 +355,7 @@ test("reloading mid-edit reopens the same content", async ({ browser }) => {
 
   try {
     const alicePage = await alice.newPage();
+    const aliceSockets = countDocumentSockets(alicePage);
     const bobPage = await bob.newPage();
     await Promise.all([
       alicePage.goto(`/issues/${issue.key}/spec`),
@@ -366,6 +368,11 @@ test("reloading mid-edit reopens the same content", async ({ browser }) => {
     await typeAtEnd(alicePage, "before reload");
     await expect(bobEditor).toContainText("before reload");
     await alicePage.reload();
+    // The twin of documentCollaborationLive's gate (document.e2e.ts): the editor's textbox role
+    // is written at the end of the reload's admission chain, so wait for the reload's own socket
+    // and for the editor that sync builds before reading the text back.
+    await expect.poll(aliceSockets).toBe(2);
+    await expect(documentEditor(alicePage)).toBeAttached();
     await expect(documentEditor(alicePage)).toContainText("Use SQLite");
     await expect(documentEditor(alicePage)).toContainText("before reload");
     await expect(alicePage.getByRole("combobox", { name: "Version" })).toContainText("Version 1");
@@ -416,6 +423,8 @@ test("tab round-trips keep one document connection, the typed text, and the Conv
   }
 });
 
+// SLOW(>=2s): three visits to two documents, each mounting an editor, which is what one
+// connection has to survive.
 test("moving between issue documents leaves one open document connection, not one per visit", async ({
   browser,
 }) => {
@@ -465,6 +474,8 @@ test("moving between issue documents leaves one open document connection, not on
 // The invariant `preserveConnection: false` must preserve: now that destroying a document really
 // closes its socket, a dropped transport must still bring the mounted editor back rather than
 // end its session.
+// SLOW(>=2s): two browser contexts and the provider's own reconnect after the drop, which no
+// page clock can bring forward: the socket it reopens is a real one.
 test("a dropped document transport reconnects the mounted editor and leaves one connection", async ({
   browser,
 }) => {
@@ -509,10 +520,28 @@ test("a dropped document transport reconnects the mounted editor and leaves one 
   }
 });
 
+/** How long a document socket that has delivered nothing is given before its provider closes it:
+ *  `messageReconnectTimeout`, the HocuspocusProviderWebsocket default the editor's connection
+ *  keeps (`web/src/features/doc/connection.ts`). */
+const DOCUMENT_RECEIVE_TIMEOUT_MS = 30_000;
+/** How far past that timeout the rows below take an idle document, so the provider has had every
+ *  chance to close its socket. */
+const PAST_THE_RECEIVE_TIMEOUT_MS = DOCUMENT_RECEIVE_TIMEOUT_MS + 12_000;
+/** How much of the page's clock one step of that wait spends. The provider's connection check and
+ *  the awareness renewal whose echo is the message it measures its silence against both run on a
+ *  tenth of the timeout, so a step that size fires each of them in turn rather than firing a
+ *  half-minute of them at once with no socket traffic in between. */
+const PROVIDER_TIMER_STEP_MS = DOCUMENT_RECEIVE_TIMEOUT_MS / 10;
+/** How long each step then leaves for what those timers sent to come back: the clock is the
+ *  page's, the round trip over the socket is not. */
+const PROVIDER_ECHO_MS = 100;
+
 for (const row of [
   { key: "IDLE", reader: "an editor", readOnly: false },
   { key: "VIEW", reader: "a read-only viewer", readOnly: true },
 ]) {
+  // SLOW(>=2s): fourteen clock steps through the provider's half-minute receive timeout, each
+  // leaving PROVIDER_ECHO_MS of real time for what those timers sent to come back.
   test(`an idle document provider stays on one connection past its receive timeout, as ${row.reader}`, async ({
     browser,
   }, testInfo) => {
@@ -520,7 +549,6 @@ for (const row of [
       testInfo.project.name !== "chromium",
       "one Hocuspocus provider proves the document socket stays connected"
     );
-    test.setTimeout(90_000);
     await createProject({ key: row.key, name: "Idle document" });
     const issue = await createIssue({
       project: row.key,
@@ -535,6 +563,9 @@ for (const row of [
     const alice = await asUser(browser, "alice");
     try {
       const page = await alice.newPage();
+      // The half-minute below is the provider's own, measured on the page's timers, so the page's
+      // clock spends it rather than the run (`artifacts.e2e.ts:478` drives the same connection).
+      await page.clock.install();
       const sockets = countDocumentSockets(page, issue.primary_artifact_id);
       await page.goto(`/issues/${issue.key}/spec`);
       await expect(documentEditor(page)).toContainText("It stays connected.");
@@ -546,8 +577,18 @@ for (const row of [
       await expect(connectedDot(page)).toHaveText("connected");
       await expect.poll(sockets).toBe(1);
 
-      // The provider closes a socket that has delivered nothing for 30 s.
-      await page.waitForTimeout(42_000);
+      // The provider closes a socket that has delivered nothing for DOCUMENT_RECEIVE_TIMEOUT_MS,
+      // and what keeps it open is what its own timers ask for, so the wait goes a step at a time
+      // with real time after each for the answer to land.
+      const started = await page.evaluate(() => Date.now());
+      for (let spent = 0; spent < PAST_THE_RECEIVE_TIMEOUT_MS; spent += PROVIDER_TIMER_STEP_MS) {
+        await page.clock.runFor(PROVIDER_TIMER_STEP_MS);
+        await sleep(PROVIDER_ECHO_MS);
+      }
+      // However little of the run that cost, the page itself has spent the whole timeout: a
+      // socket kept by a clock that never moved would prove nothing.
+      const spentOnThePage = (await page.evaluate(() => Date.now())) - started;
+      expect(spentOnThePage).toBeGreaterThanOrEqual(PAST_THE_RECEIVE_TIMEOUT_MS);
 
       await expect(connectedDot(page)).toHaveText("connected");
       expect(sockets()).toBe(1);
@@ -557,6 +598,8 @@ for (const row of [
   });
 }
 
+// SLOW(>=2s): three browser contexts - two of them desktop-sized, since the peer selection this
+// row reads is drawn only from 1280 px - already opened together.
 test("document marks and table alignment use classes rather than inline styles", async ({
   browser,
 }) => {
