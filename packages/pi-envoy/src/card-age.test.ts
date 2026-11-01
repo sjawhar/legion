@@ -405,6 +405,27 @@ describe("a card whose two clocks disagree", () => {
     );
   });
 
+  // Only the listener this session talks to is measured. A sending server whose clock runs ahead
+  // of it (Dispatch's, or a listener on the sender's machine) leaves the card dated after it was
+  // delivered even less the difference measured, and the card says which clock that leaves ahead.
+  test("delivered well before its send, less the difference measured, says the sending server's clock runs ahead", () => {
+    let clock = SENT;
+    const ages = new CardAges({ now: () => clock, clockOffset: () => 20 * 60_000 });
+    const early = card("evt-third-clock", SENT, SENT);
+    clock = SENT - 3 * 3_600_000;
+    ages.written(early, SESSION);
+
+    const text = textOf(
+      ages.annotate([early], () => [], SESSION),
+      "evt-third-clock"
+    );
+
+    expect(text).not.toContain("waited:");
+    expect(text).toContain(
+      "\n  clocks: \"this machine's clock runs 20 min ahead of the Envoy listener's, read from the listener's replies; delivered is still 3 h 20 min before at less that difference, so the sending server's clock runs at least 3 h 20 min ahead of the Envoy listener's; delivered is this machine's clock and at the sending server's\"\n"
+    );
+  });
+
   // The stated limit: a difference under the threshold is neither shown nor taken off the wait.
   test("by less than the threshold adds to the wait it states, and says nothing of the clocks", () => {
     let clock = SENT;

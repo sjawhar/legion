@@ -55,14 +55,14 @@ interface CardText {
  * The two times come from two clocks, and only two: `at:` is set by the server that accepted the
  * message (the Envoy listener the sender sent through, or Dispatch's server for a Dispatch event),
  * never by the agent that sent it, and `delivered:` is this machine's. Each card fixes how far this
- * machine's clock ran from the listener's (`CardAgesDeps.clockOffset`) with its delivery time. When
- * that is `MATERIAL_WAIT_MS` or more either way, the card says which way and by how much
- * (`clocks:`), and `waited:` is the gap less that difference, so a clock that runs ahead makes no
- * wait and one that runs behind hides none. With no material difference measured, a `delivered:`
- * that many minutes before `at:` still says the clocks disagree by at least that. A smaller
- * difference adds to or takes from the stated wait silently, and the difference measured is this
- * session's listener's: a sending server with another clock (Dispatch's, or a listener on the
- * sender's own machine) is taken to keep the listener's time.
+ * machine's clock ran from the listener's (`CardAgesDeps.clockOffset`) when its delivery time is
+ * first used. When that is `MATERIAL_WAIT_MS` or more either way, the card says which way and by
+ * how much (`clocks:`), and `waited:` is the gap less that difference, so a clock that runs ahead
+ * makes no wait and one that runs behind hides none. A `delivered:` still that many minutes or more
+ * before `at:`, less any difference measured, says which clock that leaves ahead: this machine's
+ * behind the sending server's by at least that, or, with a difference measured, the sending
+ * server's ahead of the listener's (Dispatch's, or a listener on the sender's own machine, whose
+ * clocks are not measured). A smaller difference is not shown and stays in the stated wait.
  *
  * The delivery time of a card is the time the host emitted its `message_end` in this process
  * (`written`). A card whose `message_end` this process did not see before its first request has
@@ -258,7 +258,7 @@ const DELIVERED_LINE = /^ {2}delivered: /;
  * A card's text with `delivered:`, and `waited:` and `clocks:` when material, after the line that
  * dates its send; undefined for a text with no such line, or one that already says when it was
  * delivered. `clockOffset` is how far this machine's clock ran ahead of the Envoy listener's
- * (negative: behind) when `delivered` was fixed, when known.
+ * (negative: behind) when the card's time was first used, when known.
  */
 export function withDelivery(
   text: string,
@@ -283,12 +283,23 @@ export function withDelivery(
       const less = skew === 0 ? "" : ", less the difference in clocks";
       fields.waited = `${duration(waitedMs)} between ${field} and delivered${less}; ${whose}, and ${field} is when it was sent, not the present time`;
     }
+    const said: string[] = [];
     if (skew !== 0) {
       const way = skew > 0 ? "ahead of" : "behind";
-      fields.clocks = `this machine's clock runs ${duration(Math.abs(skew))} ${way} the Envoy listener's, read from the listener's replies; ${whose}`;
-    } else if (gap <= -MATERIAL_WAIT_MS) {
-      fields.clocks = `delivered is ${duration(-gap)} before ${field}, so this machine's clock runs at least ${duration(-gap)} behind the sending server's; ${whose}`;
+      said.push(
+        `this machine's clock runs ${duration(Math.abs(skew))} ${way} the Envoy listener's, read from the listener's replies`
+      );
     }
+    // A card delivered before it was sent, by this machine's clock less any difference measured.
+    if (waitedMs <= -MATERIAL_WAIT_MS) {
+      const early = duration(-waitedMs);
+      said.push(
+        skew === 0
+          ? `delivered is ${early} before ${field}, so this machine's clock runs at least ${early} behind the sending server's`
+          : `delivered is still ${early} before ${field} less that difference, so the sending server's clock runs at least ${early} ahead of the Envoy listener's`
+      );
+    }
+    if (said.length > 0) fields.clocks = `${said.join("; ")}; ${whose}`;
   }
   const added = encode(fields)
     .split("\n")
