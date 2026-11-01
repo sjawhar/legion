@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-879",
+  "previousHandoff": "",
+  "plan": "dispatch://INFRA-879/artifact/plan-md (version 1). One pull request; tasks T1 (broker route, handler, dead ApproveURL field, tests and the account-powers row), T2 (Dispatch server route, handler, agentsecrets.Client.Record, the 147 to 146 pin, four test edits), T3 (agent-secrets waitingOn fallbacks, pendingRecordID, three call sites, doc comments, fixtures), T4 (CredentialRecordPage and record.ts deleted, app.tsx route to InboxPage, client.getCredentialRecord, the Inbox row's fallback link, doc comments), T5 (two-builds-routes.ts, the walk visit, the dead fake-broker plumbing and its banner), T6 (the two browser rows in inbox.e2e.ts), T7 (packages/dispatch/AGENTS.md, packages/envoy/AGENTS.md, the broker approve-a-request guide), T8 (the pull request and one packages/envoy changelog fragment).",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase's mechanics - the committed handoff, the push, the pull request with its Dispatch line, and the no-deferrals rule this multi-layer removal will tempt.",
+      "skill://legion-worker/references/cleanup-deletion.md: this change deletes a route, a page, a CLI branch set and their documents across four layers; that reference is the one on carrying a removal through every site rather than leaving a stub.",
+      "skill://legion-worker/references/pr-body.md: the pull-request body and what a proof must contain - every acceptance line in the plan's table owes one, with its negative control.",
+      "skill://legion-worker/references/tools.md: the pod has no Playwright browser and a shared Postgres whose DATABASE_URL the browser suite resets, and cmd/agent-secrets' Go tests do not all pass under gVisor; this change owes a browser row and an agent-secrets test.",
+      "skill://dispatch-first and skill://dispatch: searching before filing anything and the shape of any finding or ask raised while implementing.",
+      "skill://plain-words: decision D2 rewrites sentences a person reads - the Inbox row's state with no approve_url, three agent-secrets waiting lines, and the broker's approve-a-request guide."
+    ],
+    "test": [
+      "skill://legion-worker: the tester's place in the gate and the evidence a handoff carries.",
+      "skill://legion-worker/references/pr-body.md: the proof shape the tester's evidence must take (criterion, surface, command, observed, headSha, negativeControl).",
+      "skill://legion-worker/references/tools.md: the same browser and Postgres harness the implementer stood up, plus the list of what an issue pod cannot run, which the tester cites rather than reporting as a failure.",
+      "skill://legion-worker/references/findings.md: A1 runs against the production broker, so a defect found there has a route that is not an issue of its own."
+    ],
+    "review": [
+      "skill://legion-worker: the review round's mechanics and the prose-only fix the reviewer makes itself.",
+      "skill://legion-worker/references/merge-gate.md: the approval, the approved head by SHA, and what READY will compare against it.",
+      "skill://legion-worker/references/review-threads.md: replying to, judging and resolving threads, bots' findings included.",
+      "skill://legion-worker/references/cleanup-deletion.md: the reviewer's half of a deletion - that nothing dead was left behind and nothing live was cut, which is the main risk of this change.",
+      "skill://plain-words: D2's user-visible sentences and the rewritten guide."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "R1's gate was unmet when the analysis began: the production broker answered 404 at /signin/status and /approve/<hex>. After the architect's acceptance nothing below it can hold the merge, since the daemon merges on READY and these paths match no merge.by_hand rule.",
+        "answer": "The gate closed during planning. The plan's first section records three readings: 404 at 21:46:45Z, the page serving by 22:02:58Z, and at 22:08Z last_sign_in_at 2026-11-01T22:06:35.9372Z with last_decision_at 2026-11-01T22:06:41.978747Z, both after INFRA-878's apply (merge 21:35:42Z, client_checked_at 21:59:42Z). The INFRA-314 architect confirmed the same reading independently at 22:16:52Z. The plan still states, once, that only the tester's evidence and the architect's acceptance can hold this merge, so the mechanism is written down if it ever re-opens."
+      },
+      {
+        "finding": "A1's last sentence needs a person to decide on the broker page, and the Design's 24-hour fallback is INFRA-314's architect's step, not the tester's, so the tester could be left waiting.",
+        "answer": "Answered by the same readings: a person decided at 22:06:41.978747Z, so the fallback is not scheduled and nothing in this issue waits on a person. The plan gives the tester one command (curl /signin/status) and says last_decision_at only moves forward, so the re-read at the head cannot fail for timing."
+      },
+      {
+        "finding": "A5's grep forbids the literal string credentials/:recordId anywhere its pathspec covers, while R2 and the Design keep that path serving; app.tsx and two-builds-routes.ts are both inside the pathspec, so keeping the literal fails A5 and deleting the route fails R2.",
+        "answer": "Decision D1: route path=\"/credentials/*\" to InboxPage. React Router 6.30.6 ranks the static /credentials/machine above the splat in the same <Routes>, so the machine page still wins; no file then holds the forbidden string; and the plan records it as a departure in the Design's wording alone. Not <Navigate>: two-builds-routes.test.ts's regex matches only an element with no props, so a Navigate route would drop out of the comparison that two-builds-routes.ts states as an invariant."
+      },
+      {
+        "finding": "'Goes to the Inbox' has two readings - render the Inbox at that path, or redirect to / - which cost different work in the route table, the walk and its doc comment.",
+        "answer": "D1 settles it as rendering InboxPage at the path, and T4, T5 and T6 name the three consequent edits: the app.tsx route, the two-builds-routes.ts entry, and the walk visit at two-builds.multiprocess.e2e.ts:445-452 whose heading becomes Inbox."
+      },
+      {
+        "finding": "R4 does not say what the Inbox row and agent-secrets show when the broker names no approve_url, and the published guide (approve-a-request.md:28-31) describes a row reading 'Decided on the secrets broker.' that is in no source file and has never existed.",
+        "answer": "Decision D2, settled in the plan rather than escalated as a blocker, since it is wording rather than authority, taste or risk: the Inbox row renders the same summary unlinked; agent-secrets prints its three existing sentences with the URL dropped; the guide's sentence is rewritten to name what the row renders rather than inventing the string it quotes. The architect is told in the completion summary and may overrule. T4, T3 and T7 carry the three edits, and T3 keeps one fixture and one row so the three sentences stay pinned."
+      },
+      {
+        "finding": "A2's fail-before/pass-after names bun run e2e with no word on the harness: a pod has no Playwright browser, no root for --with-deps and no docker, the suite's DATABASE_URL resets what it is given, and bun run e2e does not run the multiprocess walk at all.",
+        "answer": "The plan's 'Running the browser suite here' section, measured in this pod: make a database of your own with createdb against LEGION_TEST_PG_DSN's server; bunx playwright install chromium only, with PLAYWRIGHT_BROWSERS_PATH left unset so the shared registry and its lock under XDG_CACHE_HOME are kept; no docker needed since the file store is optional; rebuild the SPA after every web/src edit; run the walk under e2e:multiprocess or cite CI's dispatch-browser-multiprocess job; and the CI fallback if chromium will not install. The acceptance row runs the head's spec against the base build rather than checking the base out whole, which would take the new test with it."
+      },
+      {
+        "finding": "A5's grep is -l over a pathspec excluding tests and misses most of the prose this change makes false: the 'nine human-auth proxy rows' count, the broker-side route name, the agent-secrets doc comments and the account-powers prose counts.",
+        "answer": "T7 names each document by file and line, and the acceptance table adds two greps of its own with their expected output: one over /v1/credential-requests/{id|record} across packages and docs, and one over the two counts. T5 adds the fake-broker banner the reviewer found that grep would still print."
+      },
+      {
+        "finding": "The changelog fragment is required by the root spec's acceptance and this spec never mentions it.",
+        "answer": "T8: one fragment for packages/envoy (the only changelog package this change touches), kind Removed, written with changie new --custom Issue=pr<number> after the pull request opens, since .changes/ does not exist in the tree."
+      },
+      {
+        "finding": "A1's 403 check needs a pending secret-request record that only a write creates, and the secret name the Design and INFRA-878's plan give is the store slug, which agent-secrets refuses.",
+        "answer": "Decision D3: follow INFRA-878's settled D4 - request, run the check, cancel at once - but with the uppercase name AGENT_SECRETS_LEGION_E2E_APPROVAL, since agent-secrets request takes NAME and policy.SlugToName (names.go:11,22) maps the slug to it; the slug itself is refused 'not an agent secret name'. The plan says so explicitly, because INFRA-878's D4 writes the slug and would not run."
+      },
+      {
+        "finding": "'The broker production check of the deployment instructions ends with all 5 assertions passed' has no source file in either repository, and it was unknown whether a Legion pod can run it.",
+        "answer": "Run from this pod at 22:09:50Z and recorded in the acceptance table with its exact command: it fetched legion/checks/broker-production-check.sh from agent-infra's contents API and ended 'all 5 assertions passed'. The row also says to judge the last line and never the exit status, since the command is a pipe."
+      },
+      {
+        "finding": "Four open pull requests in sjawhar/legion touch files this change edits, two of them in real collision: #2583 edits a file this change deletes, and #2612 owns inbox.e2e.ts and the browser suite's CI shape.",
+        "answer": "The plan's 'Ordering and conflicts' section names all four with their heads and overlaps, and sends #2583 and #2612 to the architect or the controller to order; #2519 and #2596 are ordinary rebases. Named again in the completion summary."
+      },
+      {
+        "finding": "Smaller gaps: A3 asks that a test 'shows the record-read route gone' while the only test naming it is the one being deleted; recordResponse.ApproveURL and buildRecordResponse's comment go dead with the handler; the e2e fake broker's record plumbing dies; nothing generated by broker-refgen is committed; and the broker media rig is already current.",
+        "answer": "Decision D5 and T1: replace the deleted test with a 404 assertion on a record the store holds, which answers 200 today (api_test.go:1247) and 404 from the mux after, so it is a real fail-before/pass-after rather than a deletion. T1 also removes the dead field and rewords the comments, T5 removes the fake-broker plumbing, and the plan states that no generated reference is committed and the media rig needs nothing, so nobody re-opens either."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Design: 'route `/credentials/:recordId` to the Inbox (keep `packages/dispatch/e2e/two-builds-routes.ts` equal to `app.tsx`)'.",
+      "plan": "Route `path=\"/credentials/*\"` to `InboxPage` in `packages/dispatch/web/src/app.tsx`, with the matching `{ page: \"InboxPage\", path: \"/credentials/*\" }` entry in `packages/dispatch/e2e/two-builds-routes.ts`.",
+      "evidence": "A5's grep covers `packages/dispatch` and excludes only `*_test.go`, `*.test.ts*` and `*.e2e.ts`, so `app.tsx:814` and `two-builds-routes.ts:30` are both inside it: keeping the literal `credentials/:recordId` makes A5 print two files, and deleting the route breaks R2. React Router 6.30.6 (bun.lock:2032) ranks a static segment above a splat in the same <Routes>, so `/credentials/machine` (app.tsx:815) still wins, and `e2e/__tests__/two-builds-routes.test.ts:28`'s regex parses the splat line, which `<Navigate replace to=\"/\" />` would not. Verified by the plan reviewer against the code.",
+      "outcome": { "kind": "unchanged" }
+    }
+  ]
+}
