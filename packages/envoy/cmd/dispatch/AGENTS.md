@@ -116,20 +116,24 @@ and its identity (`Identity`): `us.cohere.embed-v4:0` on Bedrock, `azure:<endpoi
 host>/<deployment>` on Azure. `embeddings.model` records the identity of the client that made
 each vector, `api/search.go` compares a query vector only with stored vectors of
 its own identity, and `embedqueue.Run` runs the coverage pass (`embedqueue/coverage.go`, `Cover`)
-at start and every 10 minutes: it embeds what no trigger enqueued, repairs a row whose text changed
-with the triggers off, settles a dead row with nothing to embed, and, once the configured embedder
-has answered, drops every vector another identity made and re-admits a row dead under another
+once at start: it embeds what no trigger enqueued, repairs a row whose text changed with the
+triggers off, settles a dead row with nothing to embed, and, once the configured embedder has
+answered, drops every vector another identity made and re-admits a row dead under another
 identity. Answered means an Embed by this process's queue has succeeded (`Deps.proven`, which
 `Run` shares between its two loops) or, when none has and such rows exist (one `exists` query, so a
 pass with none calls the embedder zero times), an `embedCanary` embed the pass sends succeeds; a
-failed or throttled canary leaves those rows in place for the next pass and logs one WARN with the
-identity, the error and the counts left. `coverageSources` there is the one list of what meaning
+failed or throttled canary leaves those rows in place and logs one WARN with the identity, the
+error and the counts left. After the boot pass only those identity steps run again
+(`runCoverage`): at once when the queue's first embed proves an embedder the pass's canary could
+not, and every `identityRecheckInterval` (10 minutes, jittered) while a run still finds another
+identity's rows, so a vector an old-configuration process commits during a roll is dropped; once a
+run finds none, the loop holds no timer. `coverageSources` there is the one list of what meaning
 search covers, read by the pass and by `GET /api/v1/search/coverage` (`embedqueue.Coverage`); its
 texts are the triggers' (0073-0077; an issue's, since 0140, its title and its spec, the latest
 version of its primary document, which a second trigger on `artifact_versions` re-queues on a spec
 edit) byte for byte, so a kind added to search changes both. There is no backfill subcommand: the
-pass is the only catch-up, and it takes no lease, so every process of a deployment takes the same
-embedder settings (README "Search").
+boot pass is the only catch-up, and it takes no lease, so every process of a deployment takes the
+same embedder settings (README "Search").
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
 with comma-separated `owner/repo=KEY` entries (`api.SeedRepoProjects`). Stored dashboard mappings are
@@ -203,19 +207,36 @@ drive a write Dispatch is slow to finish with it, slow on the server rather than
 browser. A context that ends during the wait answers `503 SLOW_WRITE_CUT_OFF` and the handler never
 runs, so a keyed handler cut off with its client would never land under it.
 
+The live-socket disconnect and rotate, the quiesce and the publish hooks act on every process
+serving the database, not only the one the call reached, so a browser suite against two processes
+reaches the page's process whichever one its request lands on: each process with the hooks on
+listens on `dispatch_test_hooks` on a connection of its own, holding a session-level advisory lock
+on it (namespace `HOOK`, keyed by that connection's backend pid); a call notifies every process,
+each acts on itself and acknowledges on `dispatch_test_hook_acks`, and the call answers once every
+process that held a lock when it was sent has acknowledged or lost its lock, with the first error
+any reported, or `504 TEST_HOOK_TIMEOUT` after ten seconds naming the keys that did not answer
+(`internal/dispatch/api/test_hooks_fanout.go`). `STREAM_UNAVAILABLE` is still judged on the
+process the publish reached, and the outside-schema and slow-write hooks act where their call
+lands. The flag costs one Postgres connection per process outside the shared pool
+(`store.sharedPoolSize`).
+
 With NATS configured and the GitHub App private key loaded, startup also runs the webhook
 redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redeliver.go`). Every
 `redeliver.Interval` it lists the App webhook's failed deliveries and redelivers them through
 GitHub's App API. Its cursor and per-delivery claims live in the `envoy_webhook_redelivery` KV
 bucket, which the sweeper opens on its first pass that finds NATS connected (`Sweeper.Open`), not
-at boot, since the server's NATS clients connect in the background (`serverBus`).
-`envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep once
-over a chosen window without moving the cursor. The README's "Webhook redelivery" section has
-the rules: every failed delivery, 4xx included, is asked for again on a backoff until GitHub
-records it `OK` or 72 hours after its first failed attempt, GitHub's rate limits, the log lines.
-Like `natstail`, it connects as the nkey user `NATS_NKEY_SEED_FILE` (or `NATS_NKEY_SEED`)
-names and runs no `!` command, so it never reads `envoy.natsSeed`: a run against a NATS that
-requires a user needs `NATS_NKEY_SEED_FILE`.
+at boot, since the server's NATS clients connect in the background (`serverBus`). Its rate-limit
+backoff lives in Postgres's `github_rate_limits` (scope `redelivery`, beside the App's `app` and
+each installation's `installation:<id>`, which every process's `githubapp.Client` obeys;
+`internal/dispatch/githubapp/ratelimit`), so the server hands the sweep its own store.
+`envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep once over a
+chosen window without moving the cursor; it opens the database `DATABASE_URL` names, as the
+server does, and refuses to run without it, but migrates nothing. The README's "Webhook
+redelivery" section has the rules: every failed delivery, 4xx included, is asked for again on a
+backoff until GitHub records it `OK` or 72 hours after its first failed attempt, GitHub's rate
+limits, the log lines. Like `natstail`, it connects as the nkey user `NATS_NKEY_SEED_FILE` (or
+`NATS_NKEY_SEED`) names and runs no `!` command, so it never reads `envoy.natsSeed`: a run
+against a NATS that requires a user needs `NATS_NKEY_SEED_FILE`.
 
 With `DISPATCH_FILE_STORE_BUCKET` set, uploaded files' bytes live in that bucket under
 `files/sha256/<hash>` (`internal/dispatch/files`; `main.go`'s `openFileStore` builds the store
@@ -533,7 +554,8 @@ evaluate for a pull request (only `push`, `pull_request`, `pull_request_review`,
 `pull_request_target`, `deployment` and `deployment_status` count). A workflow-runs answer of `200`
 is trimmed to `total_count` and, per run in GitHub's order, only `check_suite_id`, `event` and
 `name`, so a run's head commit (message, author), actor and repository never reach the browser; a
-body that does not decode is `502 GITHUB_UPSTREAM`, and any other status passes through unchanged.
+body that does not decode is `502 GITHUB_UPSTREAM`, and any other status but a rate limit passes
+through unchanged.
 GitHub's answer is read within 16 MiB rather than the proxy's usual 1 MiB, since each run carries
 its repository and head commit (about 12.8 KB a run) and a page of 100 passes 1 MiB before it is
 trimmed.
@@ -543,7 +565,9 @@ which can read far more of a repository than the web app shows, so the proxy for
 another method is `405 METHOD_NOT_ALLOWED`; another path, a workflow-runs read with any other
 query, or a path under it (`actions/runs/{id}`, its jobs or logs) `404 GITHUB_PATH_REFUSED`; and a
 repository the App is not installed on, or a deployment with no App key,
-`503 GITHUB_TOKEN_UNAVAILABLE`.
+`503 GITHUB_TOKEN_UNAVAILABLE`. A GitHub rate limit, answered to the token mint or the read, or
+recorded by any process in `github_rate_limits` (then GitHub is not asked), is
+`503 GITHUB_RATE_LIMITED` with `Retry-After`.
 
 ## Routes
 
@@ -622,11 +646,12 @@ attempt runs again; and a repeat whose first request committed a write but whose
 comment routes, the single-session send and the broadcast commit a recovery point with what they
 made, so their repeat answers `201` from a fresh read instead and resumes what delivery it owes,
 which the delivery sweep also finishes on its own. Keys belong to the caller's login and are kept
-24 hours (`request_keys`, migration `0137`, swept by the suggestion-outcome sweep's pass). A write
-without the header runs unkeyed, as before. `PUT` and `DELETE` take no key. Every write route,
-`PUT` and `DELETE` included, that names its presser in `Dispatch-Login` runs only as that person:
-another person, or any bearer, is `409 LOGIN_CHANGED` before anything runs, its key untouched; a
-caller that resolves to nobody keeps the route's own `401` (`refuseChangedLogin`, `api/server.go`).
+24 hours (`request_keys`, migration `0137`, swept by the maintenance sweep's pass once a minute).
+A write without the header runs unkeyed, as before. `PUT` and `DELETE` take no key. Every write
+route, `PUT` and `DELETE` included, that names its presser in `Dispatch-Login` runs only as that
+person: another person, or any bearer, is `409 LOGIN_CHANGED` before anything runs, its key
+untouched; a caller that resolves to nobody keeps the route's own `401` (`refuseChangedLogin`,
+`api/server.go`).
 
 | Path | Method | Access | Purpose |
 | --- | --- | --- | --- |
@@ -674,7 +699,7 @@ caller that resolves to nobody keeps the route's own `401` (`refuseChangedLogin`
 | `/api/v1/me/answers?limit=&offset=` | GET | human only | The caller's answers and replies on asks, newest first. Answer rows come from user-authored `ask.answered` events whose actor is the answer's user, with one row per ask and answer timestamp; a settlement that restores an answered block adds none. Each row carries the ask's question, kind, state, `edited_at`, issue or project-document owner, deep link and either `answer` plus `current` or `reply`. `limit` is 1–200 (default 50), `offset` is 0 or more, and an invalid value is `400 INVALID_QUERY`. |
 | `/api/v1/me/replies?limit=&offset=&issue=\|artifact=` | GET | human only | The threads the caller wrote in (an ask, a comment thread by its root, an issue message thread by its root) where someone else has written since the caller's read mark, newest reply first, less an open ask the Inbox lists, from `user_threads`. Each row carries `thread_id`, `kind`, `ref` (the thread's root), the issue or project-document owner, `subject` and the newest write by someone else as `reply`: its `id`, `kind` (`reply` for a comment or message, `answer` for an answer, whose `id` is the ask's and whose `first_line` is the chosen options and the answer's text), `author`, `first_line` and `created_at`. `issue` or `artifact` narrows to one owner and both is `400 INVALID_QUERY`; `limit` is 1–200 (default 50); `{rows, total, limit, offset}`. |
 | `/api/v1/me/threads/{id}/read` | PUT | human only | Move the caller's read mark on one thread forward to `{read_through}`, stored as `least(value, now())`; more than a minute ahead of the server is `400 INVALID_STATE`, a non-uuid id `400 THREAD_ID_INPUT`. A thread the caller never wrote in writes nothing; `204` either way. A move appends `user_thread_state.updated`, which never notifies. |
-| `/api/v1/agents` | GET | user or bearer | List live Envoy sessions with their `capabilities`, newest first, so a session can pick a target that advertises the delivery mode it wants. `api/agents.go` lists the process's roster copy (`rosterCache` in `api/issue_route_status.go`): the listener's session list read through `internal/dispatch/envoy`, at most 5 s old and shared with issue reads' `route_status`; a failed listener read is `503 ENVOY_UNAVAILABLE`, kept for up to 5 s without asking the listener again. |
+| `/api/v1/agents` | GET | user or bearer | List live Envoy sessions with their `capabilities`, newest first, so a session can pick a target that advertises the delivery mode it wants. `api/agents.go` lists the stored roster every process shares (the `route_roster` row, read through `rosterCache` in `api/issue_route_status.go`): the listener's session list read through `internal/dispatch/envoy`, at most 5 s old by the database's clock and shared with issue reads' `route_status`; a failed listener read is `503 ENVOY_UNAVAILABLE`, kept for up to 5 s without asking the listener again, and a failed read of the row is `500 INTERNAL`. |
 | `/api/v1/issues/{key}/asks` | POST | user or bearer | Create an ask. A quote anchor's mark carries the ask's id and who asked, which no rendering carries and every load of the document builds: the marks a document's comments, suggestions and asks hold on its text carry at most 1 MiB of ids and authors (`anchorWatch`), and an anchor that would leave them past it and carrying more is `413 CAP_EXCEEDED`, naming the bound and both sizes. |
 | `/api/v1/issues/{key}/asks?state=&thread=` | GET | user or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). Each row is the ask plus `last_reply`, the newest comment in its thread (null when nobody has replied). `thread=1` adds `thread`, the `replies`, `edits`, `answers` and `followers` an ask card renders, batched over the whole list, so a page of asks costs no fetch per card; without it the row carries no `thread` at all, so the readers that render the ask alone (the review margin, a document's decision blocks) do not download every reply body on an unpaged list. Any other `thread` value is `400 INVALID_ASK_THREAD`. |
 | `/api/v1/asks/{id}` | GET | user or bearer | Read an ask with its replies, edits, followers and `answers`: every user-authored answer, oldest first, with a settlement's restoration of an earlier answer collapsed. It carries `anchor_block`, where the anchor's block stands (its path, and in a table the row, column and header), when the live document holds it. When Dispatch cannot read the anchor's document the read still answers, without `anchor_block` and with `anchor_block_error`, the code the API answers that error with elsewhere: `DOC_SERVICE_UNAVAILABLE` (its room or store could not be reached), `DOC_SCHEMA` (its live tree is outside the schema), `DOCUMENT_UNLOADABLE` (its stored history cannot load; a rebuild restores it) or `INTERNAL`. |
@@ -729,11 +754,11 @@ caller that resolves to nobody keeps the route's own `401` (`refuseChangedLogin`
 | `/api/v1/me/issues/{key}/state` | PUT | identity | Update the user's issue UI state. |
 | `/api/v1/me/agents/state` | GET | identity | Read the user's per-agent conversation state: `{[session_id]: {cleared_before?, read_through?, unread_replies}}`, where `unread_replies` counts the session's replies to the user's direct messages newer than both the Clear and the read mark and not read by id. |
 | `/api/v1/me/agents/{session_id}/state` | PUT | identity | Clear an agent's conversation (`cleared_before`), mark it read (`read_through`, which only moves forward and covers every reply up to it), and/or mark some of its replies read by id (`read_replies`, messages the path's session wrote, covering those alone, each in any form `uuid.Parse` reads) for this user: at least one; 400 `INVALID_STATE` when none is given, a cutoff is malformed or more than a minute ahead of the server clock, or a `read_replies` id is not a uuid or not a message that session wrote (nothing is written then); an accepted cutoff is stored no later than the server's now. Appends `user_agent_state.updated` (`{login, session_id}`) for the viewer's other devices, except for a request naming only replies already read by id or passed by the read mark, which changes nothing (a reply the Clear hides but the read mark has not passed is neither: the first request naming it writes its row and appends the event), and answers the session's state. |
-| `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
-| `/api/v1/live/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/live` socket with 1012 (service restart); not mounted otherwise. |
-| `/api/v1/live/_test/rotate` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/live` socket with 4001 (`max age`); not mounted otherwise. |
-| `/api/v1/agents/{session_id}/stream/_test/publish` | POST | human only, `DISPATCH_TEST_HOOKS=1` only | Feed the in-memory agent relay: one frame, `?as=replay` what a new agent view is answered with, `?as=responder` whether anyone answers on the control subject, `?as=drop` ends every open agent view as `dropped`, so the page subscribes again and rebuilds from that replay; not mounted otherwise. |
-| `/api/v1/writes/_test/slow` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | `{method, path, delay_ms}`: every keyed run of that method and exact path waits `delay_ms` on its handler's context once its key is claimed (`503 SLOW_WRITE_CUT_OFF` when that context ends first); `delay_ms: 0` removes it; not mounted otherwise. |
+| `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document on every process and wait for the settlements in flight, answering once every process has; not mounted otherwise. |
+| `/api/v1/live/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/live` socket on every process with 1012 (service restart); not mounted otherwise. |
+| `/api/v1/live/_test/rotate` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/live` socket on every process with 4001 (`max age`); not mounted otherwise. |
+| `/api/v1/agents/{session_id}/stream/_test/publish` | POST | human only, `DISPATCH_TEST_HOOKS=1` only | Feed every process's in-memory agent relay: one frame, `?as=replay` what a new agent view is answered with, `?as=responder` whether anyone answers on the control subject, `?as=drop` ends every open agent view as `dropped`, so the page subscribes again and rebuilds from that replay; not mounted otherwise. |
+| `/api/v1/writes/_test/slow` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | `{method, path, delay_ms}`: every keyed run of that method and exact path waits `delay_ms` on its handler's context once its key is claimed (`503 SLOW_WRITE_CUT_OFF` when that context ends first); `delay_ms: 0` removes it; it arms the process the call reached, not every process; not mounted otherwise. |
 | `/ws/doc/{room}` | GET | user | Join the Hocuspocus document room. The room takes a signed-in person's cookie and no bearer at all (INFRA-264): the editor is the browser's, and nothing else connects. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/ws/live` does, and closes once they no longer resolve (a sign-out, a membership the sign-in issuer no longer confirms), so their editor stops receiving and sending the document's edits. ygo echoes a read-write peer's awareness renewal to its sender and gives a read-only peer a bounded empty awareness response, so an idle provider remains connected without Dispatch writing a keep-alive frame. |
 | `/ws/live` | GET | user or bearer | One live socket per browser tab. Each `subscribe` names a delivery, `events`, or human-only `agent` view; the socket replies on that subscription id with delivery snapshots/deltas/freshness, `events_start` and events, or agent responder/replay/frame data. An `events` resume is its decimal event id, and its `events_start` says `replay_complete: true` when that id is at or below the log's head, so every event after it is replayed before the subscription goes live, and `false` with no resume or one above the head; a delivery resume is its change and revisions; an agent view never resumes. Every quiet socket receives a `heartbeat` every `StreamHeartbeat` (15 s). It closes with 4001 (`max age`) at a random age in [30, 60) minutes, 1012 on restart, 1008 when the caller stops resolving, and 1013 when its hub queue fills. |
 
@@ -785,16 +810,17 @@ itself, so every package the server imports is in that filter; `packages/envoy/A
 conventions) says what keeps it current.
 
 The two-process tests (`multiprocess_test.go`, INFRA-66, INFRA-555) start two real Dispatch servers on one
-Postgres and one NATS and drive the properties a rolling release depends on — one pass per period
-across the leased maintenance loops, the delivery intake's standby and takeover, each outbox row
-published once, an event-feed subscription receiving another process's event, a document room
-closed when the other process writes it, a sign-in started on one process completed on the other,
-people kept signed in across a key rotation, a process whose key set a live peer does not share
-refused at boot, `server.started` published once per fleet-wide build, every dashboard asset of
-either of two builds served by both processes, and the builds `GET /api/v1/dashboard/builds` names
-as live. They build only under the `multiprocess` tag and run in their own CI job
-(`dispatch-multiprocess` in `.github/workflows/ci.yaml`), because two servers and
-their NATS take minutes rather than seconds:
+Postgres and one NATS and drive the properties a rolling release depends on — no two passes of a
+leased loop at once, one pass per period across a leased timer loop, a woken loop's held lease
+retried until each process has run its own pass, the delivery intake's standby and takeover, each
+outbox row published once, an event-feed subscription receiving another process's event, a
+document room closed when the other process writes it, a sign-in started on one process completed
+on the other, people kept signed in across a key rotation, a process whose key set a live peer
+does not share refused at boot, `server.started` published once per fleet-wide build, every
+dashboard asset of either of two builds served by both processes, and the builds
+`GET /api/v1/dashboard/builds` names as live. They build only under the `multiprocess` tag and run
+in their own CI job (`dispatch-multiprocess` in `.github/workflows/ci.yaml`), because two servers
+and their NATS take minutes rather than seconds:
 
 ```sh
 env DISPATCH_TEST_DATABASE_URL=… go test -tags multiprocess -count=1 -timeout 30m ./cmd/dispatch

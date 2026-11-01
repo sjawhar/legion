@@ -39,7 +39,6 @@ on:
       - 'packages/pi-envoy/package.json'
       - 'packages/pi-legion/package.json'
       - 'packages/pi-shared/package.json'
-      - 'packages/envoy-plugin/package.json'
       - 'packages/claude-envoy/package.json'
       - 'packages/proof-editor/package.json'
       - 'packages/dispatch/package.json'
@@ -118,6 +117,7 @@ on:
       - 'packages/daemon/internal/workflow/*'
       - 'packages/daemon/internal/workspace/*'
       - 'packages/envoy/listenfd/*'
+      - 'packages/envoy/migrationid/*'
       # ci.yaml's *dispatch_server, 42 patterns:
       - 'packages/envoy/cmd/dispatch/*'
       - 'packages/envoy/internal/bus/*'
@@ -142,6 +142,7 @@ on:
       - 'packages/envoy/internal/dispatch/files/*'
       - 'packages/envoy/internal/dispatch/githubapi/*'
       - 'packages/envoy/internal/dispatch/githubapp/*'
+      - 'packages/envoy/internal/dispatch/githubapp/ratelimit/*'
       - 'packages/envoy/internal/dispatch/identity/*'
       - 'packages/envoy/internal/dispatch/itemblocks/*'
       - 'packages/envoy/internal/dispatch/model/*'
@@ -173,6 +174,8 @@ on:
       - 'packages/envoy/cmd/broker/*'
       - 'packages/envoy/cmd/broker-refgen/*'
       - 'packages/envoy/internal/broker/api/*'
+      # The approval page's own files, its embedded templates and stylesheet included.
+      - 'packages/envoy/internal/broker/approval/**'
       - 'packages/envoy/internal/broker/config/*'
       - 'packages/envoy/internal/broker/enroll/*'
       - 'packages/envoy/internal/broker/exchange/*'

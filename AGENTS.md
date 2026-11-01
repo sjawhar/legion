@@ -85,7 +85,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   Type check one package against its own tsconfig.
   The root has no tsconfig.json, so a bare `bunx tsc --noEmit` there checks nothing: it prints tsc's help and exits 1.
   CI runs this command in each of these, in a job of ci.yaml that runs when a change touches a file it reads:
-  packages/contracts, envoy-client, envoy-plugin, claude-envoy, pi-shared, pi-envoy, pi-legion, proof-editor and dispatch, and docs/site
+  packages/contracts, envoy-client, claude-envoy, pi-shared, pi-envoy, pi-legion, proof-editor and dispatch, and docs/site
 
 - `bunx tsc --noEmit -p scripts/dispatch && bunx tsc --noEmit -p scripts/github-apps && bunx tsc --noEmit -p scripts/sessions`
 
@@ -536,8 +536,9 @@ Each item below names a task and where its code is, then notes on it.
 
 - **Changelog entries are fragment files**
   — a change that earns a changelog line adds a fragment to each package it changes that has a `.changie.yaml`:
-  the six packages `.github/workflows/changelog-fold.yaml` lists in `CHANGELOG_PACKAGES` (`pi-legion`, `pi-envoy`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`).
+  the six packages `.github/changelog-packages` lists (`pi-legion`, `pi-envoy`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`), the one list the fold and the check below both read.
   A package without one, such as `packages/daemon`, has no fold.
+  `ci.yaml`'s lint job (`release-push.sh fold-orphans`) fails a pull request that adds a file under the `.changes/` of a package that list does not name, and the fold on main warns about such a file and folds the rest.
   Write it with `go run github.com/miniscruff/changie@v1.26.0 new --kind <kind> --body '<text>' --custom Issue=pr<number>` from the package directory, `<number>` being this pull request's own number.
   Every `.changie.yaml` sets `fragmentFileFormat: '{{.Custom.Issue}}-{{.Kind}}-{{.Time.Format "20060102-150405"}}'`, so the file lands at `packages/<pkg>/.changes/unreleased/pr<number>-<Kind>-<YYYYMMDD-HHMMSS>.yaml`.
   The number exists only once the pull request is open, so open the pull request first and add the fragment in a later commit on the same branch.
@@ -659,6 +660,12 @@ a dedicated project hands its issues over the same way.
 Work reaches Legion by a person's decision or as a clear defect a Legion role reported:
 a human sets the label from the issue header in the Dispatch dashboard, or asks the controller to (a direct message, a Slack request, or the answer to a finding ask), and the controller sets it with `dispatch issue` or `dispatch
 issue-update`.
+A person's `legion` label on an unrecorded root in `triage` is queued by the daemon: the daemon writes the root's `todo` through its outbox (a `dispatch_status` row marked a person's handover), and no agent's write admits it.
+A session's label on such a root wakes the controller with `triage`, and the daemon writes nothing for it.
+A person's approval of the primary document of a parked (`backlog` or `icebox`) labelled root with no parent and no live tree is queued by the daemon the same way, which re-admits a root that ran before as a new generation.
+A carried approval (the review Dispatch writes in the person's name when their answer to a decision block was the whole change) queues nothing.
+Each such write holds only while the status it answered and the label still stand when it is delivered.
+A recorded root a person moved back to `triage` is never queued again.
 The controller starts no other work on its own:
 a free admission slot is no reason to label or admit an issue (`skills/legion-controller/SKILL.md`, "Free slots").
 No other Legion agent files an issue for a finding outside its own issue.

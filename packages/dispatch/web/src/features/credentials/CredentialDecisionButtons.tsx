@@ -15,12 +15,12 @@ import {
 } from "../../theme/classes";
 
 /**
- * The Approve/Deny button pair both `CredentialRecordPage` and `MachineLoginPage` render for a
- * pending record: each page builds its own `approve`/`deny` mutations (the POST
- * body differs - `MachineLoginPage`'s decisions carry the typed code, `CredentialRecordPage`'s
- * doesn't), then hands the mutations here for the shared disabled-guard, click-wiring, and
- * verbatim broker-error rendering. With no `approve`, only Deny shows: a record nobody may approve
- * any more, such as a service's machine login from before services logged in with their tokens.
+ * The Approve/Deny button pair `MachineLoginPage` renders for a pending machine login, and
+ * `CredentialRecordPage` for a pending record the broker names no page for: each page builds its
+ * own `approve`/`deny` mutations, whose POST bodies carry the typed code where the page has one,
+ * then hands them here for the shared disabled-guard, click-wiring, and verbatim broker-error
+ * rendering. With no `approve`, only Deny shows: a record nobody may approve any more, such as a
+ * service's machine login from before services logged in with their tokens.
  */
 export function CredentialDecisionButtons({
   approve,

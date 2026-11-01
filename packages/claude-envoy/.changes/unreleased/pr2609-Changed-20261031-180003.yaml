@@ -1,6 +1,0 @@
-kind: Changed
-body: |-
-  The channel instructions describe `urgency` as how soon the sender asks the reader to act, and say that it does not change when or in what order deliveries arrive.
-time: 2026-10-31T18:00:03.000000000Z
-custom:
-    Issue: pr2609

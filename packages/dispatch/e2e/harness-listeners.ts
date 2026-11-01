@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { usesFakeBroker } from "./harness-broker";
 import type { HarnessListenerKey } from "./harness-ports";
 import { harnessProcessCount } from "./harness-processes";
+import { usesRealBroker } from "./harness-real-broker";
 import { harnessSignIn, oidcSignIn } from "./harness-signin";
 
 /** One process the harness starts and how it reports its port. */
@@ -144,16 +145,56 @@ function signInIssuerListeners(): HarnessListener[] {
   ];
 }
 
+// The real secrets broker and the dev OIDC issuer it trusts (e2e/run-broker.sh), which
+// e2e/broker-approval.e2e.ts drives an approval on, started only by a run that can reach that
+// spec (e2e/harness-real-broker.ts). The issuer goes first: it is the broker's ServiceAccount
+// token issuer and the provider a person signs in to the broker at, and the broker discovers it
+// before it binds. The broker names it by DEV_OIDC_ISSUER_PORT, which e2e/harness-start.ts
+// exports from the issuer's report into the environment of every row after it, so no row here
+// has to carry an input of its own. Both follow the Dispatch server, whose own
+// DISPATCH_E2E_PORT the broker names in the machine-login link on its page; neither serves that
+// server, which keeps relaying the fake broker.
+// Each half reports on stderr, and each report is the line that follows its own bind: the issuer
+// writes `dev-oidc-issuer: issuer listening url=http://127.0.0.1:<port>`, as it does for
+// run-signin-issuer.sh, and cmd/broker writes `broker listening addr=127.0.0.1:<port>` through
+// slog's own default logger, which the Go `log` package prints as
+// `<date> <time> INFO broker listening addr=127.0.0.1:<port>` — no `msg=` key, unlike the
+// Dispatch server's, which installs a handler of its own.
+function realBrokerListeners(): HarnessListener[] {
+  if (!usesRealBroker) return [];
+  return [
+    {
+      argv: ["bash", script("run-broker.sh"), "issuer"],
+      bootMs: serverBootMs,
+      deployed: false,
+      id: "dev-oidc-issuer",
+      key: "devIssuer",
+      name: "the real broker's dev OIDC issuer",
+      report: /issuer listening url=http:\/\/127\.0\.0\.1:(\d+)$/,
+    },
+    {
+      argv: ["bash", script("run-broker.sh"), "broker"],
+      bootMs: serverBootMs,
+      deployed: false,
+      id: "real-broker",
+      key: "realBroker",
+      name: "the real secrets broker",
+      report: /\bINFO broker listening addr=127\.0\.0\.1:(\d+)(?:\s|$)/,
+    },
+  ];
+}
+
 // Every listener the harness can start, in the order e2e/harness-start.ts starts them: the fakes,
 // then under DISPATCH_E2E_SIGNIN=oidc the dev OIDC issuer, then the Dispatch server (in
 // two-process mode the round-robin proxy and the two servers behind it), whose environment names
-// the fakes' ports and the issuer's, then the plain-HTTP proxy, which forwards to the server's
-// origin. A deployed run starts only those marked `deployed`: its Dispatch server is already up,
-// and the fake GitHub serves only a server this run starts. The fake broker is
-// listed exactly when the harness switch points this run's server at it (e2e/harness-broker.ts),
-// never for a deployed run. e2e/harness-start.ts is the only starter: e2e/run.ts (Playwright),
-// `bun run dispatch:local` (e2e/local-instance.ts) and the docs media harness all start this
-// table through it.
+// the fakes' ports and the issuer's, then the real broker's dev issuer and the real broker, then
+// the plain-HTTP proxy, which forwards to the server's origin. A deployed run starts only those
+// marked `deployed`: its Dispatch server is already up, and the fake GitHub serves only a server
+// this run starts. The fake broker is listed exactly when the harness switch points this run's
+// server at it (e2e/harness-broker.ts), never for a deployed run, and the real broker and its
+// issuer exactly when a spec of this run can reach them (e2e/harness-real-broker.ts).
+// e2e/harness-start.ts is the only starter: e2e/run.ts (Playwright), `bun run dispatch:local`
+// (e2e/local-instance.ts) and the docs media harness all start this table through it.
 export const harnessListeners: readonly HarnessListener[] = [
   {
     argv: ["bun", script("fake-envoy.ts")],
@@ -188,6 +229,7 @@ export const harnessListeners: readonly HarnessListener[] = [
     : []),
   ...signInIssuerListeners(),
   ...dispatchListeners(),
+  ...realBrokerListeners(),
   {
     argv: ["bun", script("plain-http-proxy.ts")],
     bootMs: listenerBootMs,

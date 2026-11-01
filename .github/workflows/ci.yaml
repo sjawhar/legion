@@ -95,7 +95,7 @@ jobs:
       docs: ${{ github.event_name != 'push' && steps.filter.outputs.docs || 'false' }}
       worker_image: ${{ steps.filter.outputs.worker_image }}
       contracts: ${{ steps.filter.outputs.contracts }}
-      envoy_plugin: ${{ steps.filter.outputs.envoy_plugin }}
+      conflicts_script: ${{ steps.filter.outputs.conflicts_script }}
       envoy_client: ${{ steps.filter.outputs.envoy_client }}
       pi_shared: ${{ steps.filter.outputs.pi_shared }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
@@ -164,7 +164,6 @@ jobs:
               - 'packages/pi-envoy/package.json'
               - 'packages/pi-legion/package.json'
               - 'packages/pi-shared/package.json'
-              - 'packages/envoy-plugin/package.json'
               - 'packages/claude-envoy/package.json'
               - 'packages/proof-editor/package.json'
               - 'packages/dispatch/package.json'
@@ -193,7 +192,10 @@ jobs:
               - 'packages/envoy/brokertest/*'
               - 'packages/envoy/daemonpermissions/*'
               - 'packages/envoy/internal/broker/api/*'
+              # The approval page's own files, its embedded templates and stylesheet included.
+              - 'packages/envoy/internal/broker/approval/**'
               - 'packages/envoy/internal/broker/brokertest/*'
+              - 'packages/envoy/internal/broker/config/*'
               - 'packages/envoy/internal/broker/enroll/*'
               - 'packages/envoy/internal/broker/exchange/*'
               - 'packages/envoy/internal/broker/machine/*'
@@ -213,8 +215,10 @@ jobs:
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
+              - 'packages/envoy/internal/redact/*'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/listenfd/*'
+              - 'packages/envoy/migrationid/*'
               - 'packages/envoy/testnatsimages/*'
             # The Dispatch server, `go list -deps ./cmd/dispatch` in packages/envoy (its embedded
             # migrations and pmdoc schema included): what the daemon's outbox test builds
@@ -250,6 +254,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/files/*'
               - 'packages/envoy/internal/dispatch/githubapi/*'
               - 'packages/envoy/internal/dispatch/githubapp/*'
+              - 'packages/envoy/internal/dispatch/githubapp/ratelimit/*'
               - 'packages/envoy/internal/dispatch/identity/*'
               - 'packages/envoy/internal/dispatch/itemblocks/*'
               - 'packages/envoy/internal/dispatch/model/*'
@@ -339,6 +344,9 @@ jobs:
               - 'packages/daemon/internal/workflow/*'
               - 'packages/daemon/internal/workspace/*'
               - 'packages/envoy/listenfd/*'
+              # packages/envoy/migrationid is the identifier rule the daemon's embedded
+              # migrations are held to, in the envoy module so both sets keep one rule.
+              - 'packages/envoy/migrationid/*'
             # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy.
             listener_command: &listener_command
               - 'packages/envoy/cmd/listener/*'
@@ -518,8 +526,8 @@ jobs:
               # envoy's ./cmd/{dispatch,broker,agent-secrets,agent-secrets-helper,broker-refgen};
               # the screenshots' harness starts the Dispatch server (packages/dispatch/e2e/harness-start.ts,
               # which docs/site/media/harness.ts:21,97 imports).
-              # broker-refgen also parses broker/api, broker/config, broker/helper, cmd/broker and
-              # cmd/agent-secrets at run time (generators/broker-reference.sh:13-14).
+              # broker-refgen also parses broker/api, broker/approval, broker/config, broker/helper,
+              # cmd/broker and cmd/agent-secrets at run time (generators/broker-reference.sh:13-14).
               - *legion_command
               - *dispatch_server
               - 'packages/envoy/cmd/agent-secrets/*'
@@ -527,6 +535,8 @@ jobs:
               - 'packages/envoy/cmd/broker/*'
               - 'packages/envoy/cmd/broker-refgen/*'
               - 'packages/envoy/internal/broker/api/*'
+              # The approval page's own files, its embedded templates and stylesheet included.
+              - 'packages/envoy/internal/broker/approval/**'
               - 'packages/envoy/internal/broker/config/*'
               - 'packages/envoy/internal/broker/enroll/*'
               - 'packages/envoy/internal/broker/exchange/*'
@@ -579,21 +589,14 @@ jobs:
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-text-references.json'
               - 'packages/envoy/internal/contracts/generated.go'
               - 'packages/daemon/internal/dispatch/generated.go'
-            envoy_plugin:
+            # The conflict measurement script's lint, typecheck and tests: its own directory (tests
+            # and fixtures included; it imports nothing outside it), the Bun install and Bun it runs
+            # (the root manifest and lockfile pin its TypeScript and Bun types), and Biome.
+            conflicts_script:
               - '.github/workflows/ci.yaml'
               - *bun_install
               - *biome
-              - 'packages/envoy-plugin/**'
-              # Its tsconfig paths and bundle reach contracts' and envoy-client's sources, and its
-              # build and prepack (scripts/prepack.sh:14) build envoy-client's dispatch CLI.
-              - 'packages/contracts/src/**'
-              - 'packages/envoy-client/src/**'
-              - 'packages/envoy-client/bin/dispatch.ts'
-              - 'packages/envoy-client/scripts/build-dispatch-cli.sh'
-              # Its prepack writes dist/THIRD_PARTY_NOTICES (prepack.sh:15) and copies skills/
-              # (:17), which src/server.ts:25-28 also reads.
-              - 'scripts/third-party-notices.ts'
-              - 'skills/**'
+              - 'scripts/conflicts/**'
             envoy_client:
               - '.github/workflows/ci.yaml'
               - *bun_install
@@ -686,6 +689,8 @@ jobs:
               # packages/daemon/internal, and scripts/skill-scenarios/daemon-pane.ts:27 runs
               # daemon-pane.go inside the daemon module in workspace mode.
               - 'packages/daemon/internal/**'
+              # daemon-pane.go compiles the daemon module, which reaches that envoy package.
+              - 'packages/envoy/migrationid/*'
               - *go_workspace
               # The guides and docs the skills guard sweeps (src/skills-guard.test.ts:143-148).
               - 'AGENTS.md'
@@ -723,13 +728,19 @@ jobs:
               - 'packages/envoy/scripts/fixtures/shell-quote.json'
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt (web/vite.config.ts:11).
               - 'scripts/third-party-notices.ts'
-            # The browser suite's two-process mode (dispatch-browser-multiprocess): what the dispatch
-            # filter names, and the dev OIDC issuer its sign-in step signs the browser in at
-            # (e2e/run-signin-issuer.sh:34 builds it) with the packages it compiles beyond the
-            # Dispatch server's (`go list -deps ./cmd/dev-oidc-issuer` in packages/envoy).
-            dispatch_browser_multiprocess:
-              - *dispatch
+              # The real secrets broker e2e/broker-approval.e2e.ts approves a request on, the dev
+              # OIDC issuer it trusts, and the seeding step that logs its service in and enrols its
+              # pods: the packages `go list -deps ./cmd/broker ./cmd/dev-oidc-issuer
+              # ./internal/broker/brokertest/requestseed` lists in packages/envoy beyond the
+              # Dispatch server's, which e2e/run-broker.sh:95 builds in one go build.
+              - 'packages/envoy/cmd/broker/*'
               - 'packages/envoy/cmd/dev-oidc-issuer/*'
+              - 'packages/envoy/internal/broker/api/*'
+              # The approval page's own files, its embedded templates and stylesheet included.
+              - 'packages/envoy/internal/broker/approval/**'
+              - 'packages/envoy/internal/broker/brokertest/*'
+              - 'packages/envoy/internal/broker/brokertest/requestseed/*'
+              - 'packages/envoy/internal/broker/config/*'
               - 'packages/envoy/internal/broker/enroll/*'
               - 'packages/envoy/internal/broker/exchange/*'
               - 'packages/envoy/internal/broker/machine/*'
@@ -739,9 +750,19 @@ jobs:
               - 'packages/envoy/internal/broker/policy/**'
               - 'packages/envoy/internal/broker/proof/*'
               - 'packages/envoy/internal/broker/record/*'
+              - 'packages/envoy/internal/broker/requests/*'
+              - 'packages/envoy/internal/broker/reread/*'
               - 'packages/envoy/internal/broker/secrets/*'
               - 'packages/envoy/internal/broker/store/**'
+              - 'packages/envoy/internal/broker/wake/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
+              - 'packages/envoy/internal/ratelimit/*'
+            # The browser suite's two-process mode (dispatch-browser-multiprocess): what the
+            # dispatch filter names. The dev OIDC issuer its sign-in step signs the browser in at
+            # (e2e/run-signin-issuer.sh:34 builds it) compiles no package beyond the closure of the
+            # three commands e2e/run-broker.sh builds, which the dispatch filter above names.
+            dispatch_browser_multiprocess:
+              - *dispatch
             envoy_go:
               - '.github/workflows/ci.yaml'
               - *bun_install
@@ -924,6 +945,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/events/*'
               - 'packages/envoy/internal/dispatch/files/*'
               - 'packages/envoy/internal/dispatch/githubapp/*'
+              - 'packages/envoy/internal/dispatch/githubapp/ratelimit/*'
               - 'packages/envoy/internal/dispatch/identity/*'
               - 'packages/envoy/internal/dispatch/itemblocks/*'
               - 'packages/envoy/internal/dispatch/model/*'
@@ -957,6 +979,8 @@ jobs:
               # cmd/broker/main_test.go:220 (sslrootcert).
               - 'packages/envoy/docker/rds-global-bundle.pem'
               - 'packages/envoy/internal/broker/api/*'
+              # The approval page's own files, its embedded templates and stylesheet included.
+              - 'packages/envoy/internal/broker/approval/**'
               - 'packages/envoy/internal/broker/brokertest/*'
               - 'packages/envoy/internal/broker/config/*'
               - 'packages/envoy/internal/broker/enroll/*'
@@ -1008,7 +1032,6 @@ jobs:
               - 'packages/pi-envoy/package.json'
               - 'packages/pi-legion/package.json'
               - 'packages/pi-shared/package.json'
-              - 'packages/envoy-plugin/package.json'
               - 'packages/claude-envoy/package.json'
               - 'docs/site/package.json'
               - 'packages/contracts/**'
@@ -1102,7 +1125,6 @@ jobs:
               - 'package.json'
               - 'bun.lock'
               - 'patches/**'
-              - 'packages/envoy-plugin/package.json'
               - 'packages/claude-envoy/**'
               - 'packages/proof-editor/package.json'
               - 'packages/dispatch/package.json'
@@ -1126,6 +1148,7 @@ jobs:
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/loadtest/**'
+              - 'packages/envoy/migrationid/**'
               - 'packages/envoy/scripts/**'
               - 'packages/envoy/testnatsimages/**'
               - '.omp-pin'
@@ -1286,6 +1309,14 @@ jobs:
 
       - name: Check the release workflows keep credentials out of jobs that run dependency code
         run: .github/scripts/check-release-credentials.sh
+
+      # Every package the fold folds is a line of .github/changelog-packages, which the fold reads
+      # too: a fragment of any other package would stay on main unfolded, so it is refused here,
+      # on every pull request, rather than only warned about by the fold on main.
+      - name: Check every changelog fragment belongs to a package the fold folds
+        run: |
+          # shellcheck disable=SC2046 # the file is the spec list, split on purpose
+          .github/scripts/release-push.sh fold-orphans $(<.github/changelog-packages)
 
       # A pull request's title, body and commit messages reach main's squash commit, the
       # generated release notes and GitHub's pages, and its comments and reviews are public on its
@@ -1766,37 +1797,23 @@ jobs:
         run: bun run build
         working-directory: packages/contracts
 
-  envoy-plugin:
+  conflicts-script:
     needs: changes
-    if: needs.changes.outputs.envoy_plugin == 'true'
+    if: needs.changes.outputs.conflicts_script == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
-      - name: Lint envoy plugin
-        run: bun run lint
-        working-directory: packages/envoy-plugin
-      - name: Typecheck envoy plugin
-        run: bun run typecheck
-        working-directory: packages/envoy-plugin
-      - name: Test envoy plugin
-        run: bun run test
-        working-directory: packages/envoy-plugin
-      # prepack.sh writes dist/THIRD_PARTY_NOTICES, failing the pack on a bundled package whose
-      # license cannot be determined; the listing shows the tarball ships it.
-      - name: Pack envoy plugin
-        run: |
-          bun pm pack --destination ../../out/pr-artifacts
-          tar tzf ../../out/pr-artifacts/*.tgz | grep -x package/dist/THIRD_PARTY_NOTICES
-        working-directory: packages/envoy-plugin
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: opencode-legion-envoy-plugin-pr
-          path: out/pr-artifacts/*.tgz
+      - name: Lint the conflict measurement script
+        run: bunx biome check --error-on-warnings scripts/conflicts
+      # scripts/conflicts is no workspace; the root package pins its TypeScript and Bun types.
+      - name: Typecheck the conflict measurement script
+        run: bunx tsc --noEmit -p scripts/conflicts
+      - name: Test the conflict measurement script
+        run: bun test scripts/conflicts
 
   envoy-client:
     needs: changes
@@ -3151,7 +3168,7 @@ jobs:
       - test
       - docs
       - contracts
-      - envoy-plugin
+      - conflicts-script
       - envoy-client
       - pi-shared
       - pi-envoy
@@ -3192,7 +3209,7 @@ jobs:
               "test": "test",
               "docs": "docs",
               "contracts": "contracts",
-              "envoy-plugin": "envoy_plugin",
+              "conflicts-script": "conflicts_script",
               "envoy-client": "envoy_client",
               "pi-shared": "pi_shared",
               "pi-envoy": "pi_envoy",

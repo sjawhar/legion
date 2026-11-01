@@ -35,6 +35,10 @@ BROKER_DATABASE_URL='postgres://broker:<password>@db.internal.example:5432/broke
 BROKER_K8S_OIDC_ISSUER=https://<cluster issuer>
 BROKER_K8S_OIDC_AUDIENCE=legion-broker
 BROKER_API_ACCOUNTS=dispatch=system:serviceaccount:example-ns:example-dispatch
+BROKER_SIGNIN_ISSUER=https://accounts.google.com
+BROKER_SIGNIN_CLIENT_ID=<client id>.apps.googleusercontent.com
+BROKER_SIGNIN_CLIENT_SECRET_FILE=/var/run/secrets/broker-signin/client-secret
+BROKER_SIGNIN_DOMAIN=example.com
 BROKER_SECRETS_PREFIX=production/agent-secrets/
 BROKER_SECRETS_KMS_KEY_ARN=arn:aws:kms:<region>:<account>:key/<key id>
 AWS_REGION=<region>
@@ -45,7 +49,13 @@ as the caller `dispatch`, each by its own Kubernetes ServiceAccount: a caller pr
 token for `BROKER_K8S_OIDC_AUDIENCE`, which the broker verifies against `BROKER_K8S_OIDC_ISSUER`,
 so the list needs that pair. No secret is shared between the broker and Dispatch. A token that
 lives longer than an hour from its issue is refused, and an account the list does not name is
-answered `403 ACCOUNT_NOT_LISTED`.
+answered `403 ACCOUNT_NOT_LISTED`. Through those routes Dispatch lists what waits on a person and
+relays a person's machine-login decisions and revokes; it decides no secret request
+([Network and trust](#network-and-trust)).
+
+The four `BROKER_SIGNIN_*` settings are required, and a broker started without one of them exits
+naming the missing ones. They are the page where a person approves a secret request, signed in to
+the broker itself ([Approval sign-in](#approval-sign-in)).
 
 A caller's **name** decides which of those routes its account reaches, so listing an account is
 not one authority but a choice between them. The broker knows two names: `dispatch`, which reaches
@@ -163,6 +173,176 @@ A service login a person approved through a device code before this broker keeps
 it expires, at most `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (30 days by default) after its approval:
 nothing refreshes it.
 
+A Google Compute Engine VM logs in and enrolls itself with the identity token its metadata server
+signs for the VM's service account, so it holds no stored credential and no person approves it.
+Four settings turn this on, and the broker refuses to start with only some of them:
+
+- `BROKER_GOOGLE_OIDC_AUDIENCE`: the audience the VMs ask their metadata server for. The issuer is
+  always Google's, `https://accounts.google.com`, which the broker discovers at startup only when
+  this is set; it then logs one `google vm identity` line naming the issuer, the audience and the
+  VM services. Unset, the broker reads and logs nothing about Google, and refuses kind `vm` with
+  `400 INVALID_KIND`.
+- `BROKER_VM_SERVICES`: whitespace-separated `<service>=<service account email>` entries. Use a
+  dedicated user-managed account for each fleet: the broker refuses a project's default Compute
+  Engine or App Engine account, which every workload in the project runs as by default.
+- `BROKER_VM_PROJECTS`: `<service account email>=<project id>`, the one project the fleet's VMs run
+  in.
+- `BROKER_VM_INSTANCES`: `<service account email>=<instance-name glob>`, the names the fleet's VMs
+  have, in Go's `path.Match` syntax.
+
+One fleet's entry, `example-fleet`, whose VMs run as one account in `example-project` and are named
+`example-vm-...`:
+
+```sh
+BROKER_GOOGLE_OIDC_AUDIENCE=example-vm-audience
+BROKER_VM_SERVICES=example-fleet=example-fleet@example-project.iam.gserviceaccount.com
+BROKER_VM_PROJECTS=example-fleet@example-project.iam.gserviceaccount.com=example-project
+BROKER_VM_INSTANCES=example-fleet@example-project.iam.gserviceaccount.com=example-vm-*
+```
+
+A secret whose owner tag is `example-fleet` then goes to the fleet's VMs at once and to no one else.
+The broker refuses a VM's login (`POST /v1/launcher-credentials/token`) whose token is for another
+audience or does not verify, including one whose email is not verified or that has no
+`google.compute_engine` claims (`401 TOKEN_INVALID`); whose token has expired (`401
+TOKEN_EXPIRED`); and whose account is not listed, whose request names another service, whose
+project is another, or whose instance name the glob does not match (`403 ACCOUNT_NOT_LISTED`, each
+naming what did not match). Each VM holds a launcher credential and an enrollment of its own, keyed
+by `<account>@<project>/<zone>/<instance id>`, so one VM's login never moves another's credential,
+and ending one VM's enrollment leaves the others. A VM's credential expires with its token, an hour
+after the token was minted; its enrollment outlives it while it renews. Dispatch's machine-login
+page lists each VM's login, its host `<project>/<zone>/<instance name>` and no approver, and anyone
+signed in may revoke it, which ends that VM's enrollment; the VM logs in again at its next
+`enroll --vm`. A revoke ends the enrollment, not the VM's identity token: someone who copied that
+token off the VM logs in again with it within its hour, under a new machine login, enrolls a key of
+their own and reads what the VM may read. To end a copied token for certain, take the VM out of its
+fleet and wait out the hour, as [a copied VM token](#a-copied-vm-token) says. To stop a fleet
+logging in, remove its entries and redeploy the broker: each VM's
+credential stops authenticating at its next call, and its next login is refused. Narrowing a fleet,
+by changing its project or its instance-name glob, ends every VM it no longer allows at once: from
+its next call the VM has no session identity, so releasing a grant it holds, opening a request and
+renewing are all refused `401` (`ENROLLMENT_NOT_LIVE` for the renewal, on which `agent-secrets
+renew` stops, exit 76), its credential stops authenticating, a person's approval of a request it
+left pending ends that request denied with no grant, its launcher credential no longer
+authenticates, so a new enrollment under it is refused `401 LAUNCHER_INVALID`, and its next login is
+`403 ACCOUNT_NOT_LISTED`. A value the VM already read before the change stays with it: the broker
+cannot take back a secret it released, so rotate any it must no longer hold. Its enrollment row
+ends with its lease.
+
+Whoever can get an identity token for the fleet's account from a VM in that project with a matching
+name logs in as its service. Google Cloud IAM is that boundary: who may run a VM as the account
+(`iam.serviceAccounts.actAs` on it, with `compute.instances.create` in the project), and who may run
+code on a fleet VM, which can fetch the VM's token.
+
+A VM runs, with `AGENT_SECRETS_URL` naming the broker:
+
+```sh
+agent-secrets enroll --vm --service example-fleet --audience example-vm-audience --out /var/lib/agent-secrets
+AGENT_SECRETS_KEY_DIR=/var/lib/agent-secrets agent-secrets --reason "git fetch" GITHUB_TOKEN -- sh -c 'test -n "$GITHUB_TOKEN" && echo "GITHUB_TOKEN is set"'
+```
+
+`enroll --vm` reads the token from
+`http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=<audience>&format=full`
+(`format=full` is what gives the token the VM's project, zone and instance, which the broker
+requires), logs in, enrolls the VM, writes `key.pem` and `enrollment` under `--out`, and prints the
+enrollment id. The directory is the VM's one session identity: keep one per VM. Run again over the
+same directory, it keeps `key.pem`, gets the same live enrollment back and extends its lease, or
+enrolls anew once the old lease has lapsed. Keep the lease alive with `agent-secrets renew --vm`, or
+by running `enroll --vm` again within `BROKER_LEASE_SECONDS`. A new `key.pem` while the VM's
+enrollment is still live is refused `409 ALREADY_ENROLLED` until that lease lapses.
+
+## Approval sign-in
+
+A person approves or denies a secret request on the broker's own page,
+`<BROKER_PUBLIC_URL>/approve/<record>`, signed in to the broker with OpenID Connect through an
+OAuth client of the broker's own; Dispatch's Inbox only links there, and no route a service calls
+decides a secret request ([Concepts](/legion/broker/concepts/#approvals)). Four settings are the
+sign-in, and every one of them is required:
+
+| Setting | What it is |
+| --- | --- |
+| `BROKER_SIGNIN_ISSUER` | The provider's issuer, whose discovery document the broker reads at startup and every hour after, in a check of its own ([What the sign-in is doing](#what-the-sign-in-is-doing)), and for the page at the first sign-in each process serves, which it keeps once a read succeeds; until then a sign-in reads it again at most every 5 seconds. A read that fails stops neither the boot nor the machines the broker serves, so a provider outage never stops it serving them. `https://accounts.google.com` for Google. An absolute `https` URL, or `http` only to a loopback host, for a run on one machine. |
+| `BROKER_SIGNIN_CLIENT_ID` | The broker's own OAuth client at that provider. Not Dispatch's: a token or code made for Dispatch's client signs no one in to the broker. |
+| `BROKER_SIGNIN_CLIENT_SECRET_FILE` | A file holding that client's secret, read at startup and trimmed; mount it from a Kubernetes Secret. The broker refuses to start while `BROKER_SIGNIN_CLIENT_SECRET` is set, so the secret is never in its environment. |
+| `BROKER_SIGNIN_DOMAIN` | The Google Workspace domain a person must belong to: the ID token's `hd` claim must name it, and its email must be verified. A person's login is their lowercased email, the form a secret's `owner` tag names. |
+| `BROKER_SIGNIN_SESSION_SECONDS` | Optional. How long a sign-in lasts, counted from the moment it is made and never extended: 86400 (24 hours), the default, at most. Signing out ends it at once. A person whose Workspace account is suspended keeps approving until their session's expiry, which `broker end-sessions` ends sooner ([Ending a person's sessions](#ending-a-persons-sessions)). |
+
+A broker missing any of the four refuses to start, naming the ones it is missing: `broker: fatal
+error="the broker's approval page needs BROKER_SIGNIN_ISSUER, BROKER_SIGNIN_CLIENT_ID,
+BROKER_SIGNIN_CLIENT_SECRET_FILE, BROKER_SIGNIN_DOMAIN; missing BROKER_SIGNIN_DOMAIN"`. There is
+no broker that serves machines but approves nothing: a deployment either signs people in or does
+not run.
+
+On Google, create the client once, in the Google Cloud project whose OAuth consent screen is the
+Workspace's **Internal** one (APIs & Services → Credentials → Create credentials → OAuth client ID,
+application type **Web application**), with one authorized redirect URI:
+`<BROKER_PUBLIC_URL>/signin/callback`, for example `https://secrets.internal.example/signin/callback`.
+Its client id is `BROKER_SIGNIN_CLIENT_ID`, and its secret goes in the file
+`BROKER_SIGNIN_CLIENT_SECRET_FILE` names. The broker asks for `openid email profile` with PKCE,
+asks for no offline access and keeps no refresh token, and sends the request's approver as
+`login_hint`, so a person already signed in to Google is asked nothing.
+
+Deploy the broker with these settings before the Dispatch release whose Inbox links the page. In
+between, an open Dispatch tab's **Approve** on a secret request gets the broker's
+`403 DECIDE_ON_BROKER_PAGE` naming the page, and nothing is approved on Dispatch's word.
+
+### What the sign-in is doing
+
+`GET /signin/status` answers what this deployment's sign-in has done, read from Postgres on every
+call, so every pod answers the same thing. It takes no credential, and every word in it is one of
+two sets the broker itself chose: no provider's message, no login and no secret reaches it.
+
+```json
+{
+  "client_check": "ready",
+  "client_checked_at": "2026-03-04T09:00:11Z",
+  "last_sign_in_at": "2026-03-04T08:41:02Z",
+  "last_failed_sign_in_at": null,
+  "last_failed_sign_in_reason": null,
+  "last_decision_at": "2026-03-04T08:41:40Z"
+}
+```
+
+A fact that has never happened is `null`, so a deployment nobody has signed in to yet is not a
+deployment whose sign-in broke. What an operator reads from each field:
+
+- `client_check` and `client_checked_at`: what the broker's own client was found to be at the
+  provider, and when. Each pod checks it at startup and every hour after, by asking the token
+  endpoint to redeem an invalid code with the broker's client credentials. `ready` is the provider
+  accepting the client, `client_rejected` is the provider refusing it (nobody can sign in: the
+  client id, its secret or its registration is wrong), and `issuer_unreachable` is a provider that
+  could not be asked, which says nothing about the client. A check neither answers a person nor
+  stops the broker: it writes this row and, when it did not find `ready`, the log line `broker: the
+  sign-in client check`.
+- `last_sign_in_at`: when a person last finished signing in. Long silence on a deployment people
+  use is the signal, read beside `last_decision_at`.
+- `last_failed_sign_in_at` and `last_failed_sign_in_reason`: when a sign-in last failed at the code
+  exchange or at the ID-token check, and why, as one of `invalid_client`, `unauthorized_client`,
+  `redirect_uri_mismatch`, `invalid_grant`, `issuer_unreachable`, `bad_issuer`, `bad_audience`,
+  `bad_signature`, `bad_nonce`, `not_in_domain` and `email_not_verified`. The first three are the
+  client's registration, `not_in_domain` and `email_not_verified` are the person rather than the
+  deployment, and a failure none of the eleven names leaves the row alone and is logged instead.
+- `last_decision_at`: when a person last approved or denied a request on the page.
+
+### Ending a person's sessions
+
+A broker session lasts `BROKER_SIGNIN_SESSION_SECONDS` from the moment it was made and is never
+extended, so a person whose Workspace account is suspended can still approve until it expires. To
+end every browser session one login holds, wherever and whenever it was made, run the subcommand
+in a broker pod:
+
+```sh
+kubectl exec deploy/broker -- envoy-broker end-sessions ada@example.com
+end-sessions: ended 2 sessions of ada@example.com
+```
+
+It reads the same configuration the serving process does, so it reaches the same database and
+signs in to it the same way, binds no listener and applies no migration: an image older than the
+servers cannot migrate the database behind them on its way to ending a session. The person's next
+visit to a request's page signs them in again, if the provider still lets them; to stop that, take
+them out of the Workspace or out of `BROKER_SIGNIN_DOMAIN` first. It is the only subcommand the
+broker takes: anything else is refused with a usage line, and `envoy-broker` with no argument
+serves.
+
 ## Signing in to RDS by IAM token
 
 On Amazon RDS or Aurora the broker can sign in to its database with an
@@ -218,8 +398,10 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 | Google Cloud Secret Manager (`gcp-secret-manager`) | The broker calls Secret Manager under [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials): on GKE, Workload Identity Federation for the pod's Kubernetes ServiceAccount, with no key file and no Google service account; the boot log's `secret store … credentials=application-default` line says so. Its principal needs `secretmanager.secrets.list` on the project (the listing takes the project as its parent) and `secretmanager.secrets.get`, `secretmanager.versions.get` and `secretmanager.versions.access` on the namespace's secrets: `roles/secretmanager.viewer` on the project and `roles/secretmanager.secretAccessor` with an IAM condition `resource.name.startsWith("projects/<number>/secrets/<id prefix>")` cover them. The condition narrows only the accessor binding, so the broker reads values from the namespace alone; the viewer role reaches every secret's metadata in the project (its annotations, its versions' state and its IAM policy), never a value. A secret is served while its `versions/latest` is `ENABLED`, encrypted with the key `BROKER_SECRETS_KMS_KEY_NAME` names (`replication.automatic.customerManagedEncryption`; a secret on Google's default encryption is refused `not-on-agent-secrets-key`); one with an `expire_time` is scheduled for deletion and left out, as a Secrets Manager secret in its recovery window is, and a grant made before it no longer reads its value, though Secret Manager still would until that time. Every Secret Manager call but reading a value counts against the project's read quota, [600 a minute, shared by everything in the project](https://docs.cloud.google.com/secret-manager/quotas) (reading a value has its own 90,000). The broker's worst case against it is the sum of: a reload every five minutes, one listing plus one call per secret (a 200-secret namespace, about 40 a minute); the public reread route, two each, capped at one reread every 4 seconds across all callers of **each process** (at two processes that is the same 120 metadata reads a minute for the fleet, which is what the per-process figure is derived from — see [Running more than one pod](#running-more-than-one-pod)); each session's rereads for names it was not served, two each, at most one per session every ten seconds; and value releases, a kind secret's among them, one per distinct secret per 30 seconds (two for a secret whose latest version is disabled), since the broker trusts its last check of a secret, readable or not, for that long (so a delete made outside `agent-secrets secret` stops releases at most 30 seconds after Secret Manager's own metadata shows it, which Google documents as eventually consistent; `agent-secrets secret delete` rereads the name, and the broker then releases nothing more). A busy fleet of sessions requesting unknown names can still spend the quota, and other workloads in the same project draw on it too, so give the agent secrets a project of their own. On the metadata calls the broker retries an `UNAVAILABLE` answer and never a `RESOURCE_EXHAUSTED` one, which would only spend more of that quota; reading a value keeps the client library's own retry of both, against its separate quota. On Secret Manager the agent-secrets key gates no caller: Secret Manager's service agent makes the KMS calls, so writing a secret onto the key and reading it need no KMS permission, and being on the key is the namespace's convention, not a second permission check as it is on AWS. Secret Manager makes the KMS calls itself, so the broker needs no KMS permission; the Secret Manager service agent needs `roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key. |
 | Kind secrets | A `github-app` secret needs outbound HTTPS access to `api.github.com`, and a `github-owners` tag naming the GitHub accounts it mints for, which the deployment sets when it creates the secret. A `google-login` secret needs outbound HTTPS access to `oauth2.googleapis.com`. The broker reads the stored value for each release, as it reads any secret, and returns only the minted token. It needs no IAM permission to mint these values. A mint GitHub or Google refuses answers the session `502 MINT_FAILED`, naming their reason, and logs `broker: mint failed` (below). A narrowing the secret cannot serve, an account its tag does not list or one GitHub refuses, answers `403 NARROWING_OWNER_NOT_LISTED` or `422 NARROWING_REFUSED` instead and logs `broker: narrowing refused`. |
 | A local stand-in (development only) | `BROKER_FAKE_SECRETS_FILE` names a JSON file the broker reads in place of the store, in Secrets Manager's shape whatever `BROKER_SECRETS_STORE` says, each secret's `kms_key_id` naming the agent-secrets key as the selected store configures it (`BROKER_SECRETS_KMS_KEY_ARN`, or `BROKER_SECRETS_KMS_KEY_NAME` with the GCP store); the [configuration reference](/legion/broker/reference/config/#variables-the-broker-reads) gives its format. |
-| Dispatch | Dispatch's server calls the broker's approval routes as its own ServiceAccount. Set Dispatch's `DISPATCH_AGENT_SECRETS_URL` to the broker's URL and `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` to the path of its projected token for `BROKER_K8S_OIDC_AUDIENCE`, and list that account in the broker's `BROKER_API_ACCOUNTS`. Without the URL, Dispatch hides its credential pages. |
+| Dispatch | Dispatch's server calls the broker's account routes as its own ServiceAccount: it lists the requests and machine logins waiting on the signed-in person, each secret request with its page on the broker (`approve_url`), which its Inbox links to, and relays a person's machine-login decisions and revokes. Set Dispatch's `DISPATCH_AGENT_SECRETS_URL` to the broker's URL and `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` to the path of its projected token for `BROKER_K8S_OIDC_AUDIENCE`, and list that account in the broker's `BROKER_API_ACCOUNTS`. Without the URL, Dispatch hides its credential pages. Deploy a broker with the approval page before a Dispatch whose Inbox links it ([Approval sign-in](#approval-sign-in)). |
+| The sign-in provider | A person's browser signs in to the broker at the provider (Google, under the Workspace's internal consent screen), and the broker reaches its token endpoint and keys over HTTPS at a sign-in, and its discovery document at the first sign-in each process serves (kept once a read succeeds) and at the client check it takes at startup and every hour after. A discovery that could not be read answers the page `503` naming the issuer and logs `approval sign-in: reach the provider`; machines are served as before, and `GET /signin/status` reports `issuer_unreachable` ([What the sign-in is doing](#what-the-sign-in-is-doing)). |
 | Kubernetes (optional) | To enroll pods, and to let a service log in with its token (`BROKER_SERVICE_LOGINS`), `BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` name the cluster's service-account token issuer and the audience the pods' and the services' projected tokens carry. The broker fetches the issuer's discovery document at startup and refuses to start if it cannot. |
+| Google Cloud (optional) | To let Compute Engine VMs log in and enroll themselves, `BROKER_GOOGLE_OIDC_AUDIENCE` names the audience of their identity tokens, and `BROKER_VM_SERVICES`, `BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES` bind each fleet. The broker fetches Google's discovery document at startup and refuses to start if it cannot. |
 | Envoy (optional) | With `BROKER_ENVOY_URL`, the broker tells a waiting agent session, best effort, when its pending request expires. |
 
 ## Network and trust
@@ -232,11 +414,19 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   terminate TLS without setting `X-Forwarded-Proto`, and a client that sends those headers itself
   changes nothing. That holds for the machine login's token endpoint (`POST /v1/oauth/token`)
   too, whose DPoP proofs name `BROKER_PUBLIC_URL/v1/oauth/token`.
-- A caller listed as `dispatch` holds an approval credential: the broker records whichever
-  approver its caller names, so whoever holds that account's token can approve as anyone. List
-  Dispatch's own account under that name and nothing else, never one an agent's pod runs as. An
-  account listed as `listener` reads tokens back and decides nothing, which is the whole of what
-  that name carries.
+- A person approves a secret request in a browser at `BROKER_PUBLIC_URL`, which must therefore be
+  an `https` address people's browsers reach: the page's two cookies, `__Host-broker-session` and
+  `__Host-broker-signin`, are `Secure` and host-only. A decision is accepted only from a form on
+  the broker's own origin (`Origin`, or `Sec-Fetch-Site: same-origin`), bound to that browser's
+  sign-in and to the requests its page printed, so a page on another origin, Dispatch's included,
+  cannot make one even when both are under one parent domain. The page runs no script and cannot be
+  framed.
+- A caller listed as `dispatch` holds an approval credential: its ServiceAccount token can approve
+  a machine login and revoke grants and machine logins in any person's name, the broker recording
+  whichever approver that caller names, so whoever holds that account's token can decide those as
+  anyone. It cannot decide a secret request. List Dispatch's own account under that name and
+  nothing else, never one an agent's pod runs as. An account listed as `listener` reads tokens
+  back and decides nothing, which is the whole of what that name carries.
 - Behind a reverse proxy, set `BROKER_TRUSTED_PROXY_HEADER` so the machine-login, token-endpoint
   and secret-reread rate limiters see each caller's address rather than the proxy's. The token
   endpoint (`POST /v1/oauth/token`) has its own per-address bucket in each process, a burst of 60
@@ -385,6 +575,12 @@ The broker logs text lines to stderr. The ones worth alerting or searching on:
 | `broker stop budget drain=<drain> shutdown=60s total=<their sum>` | The first line of the run, before the database or the secret store is reached for: the whole budget a stop spends, `BROKER_DRAIN_SECONDS` and the 60 seconds in-flight requests get after it. `total` is what a deployment's `terminationGracePeriodSeconds` has to cover, and with the defaults the line reads `drain=5s shutdown=60s total=65s` ([Running more than one pod](#running-more-than-one-pod)). |
 | `database sign-in method=<method>` | At startup, before the broker reaches for AWS or its database: `rds-iam` when each connection signs in with an RDS IAM token the broker mints, `password` when it signs in as `BROKER_DATABASE_URL` and libpq's defaults say (a password in the URL, `PGPASSWORD`, a passfile, or none for a server that trusts it). |
 | `secret store store=<store> credentials=<source>` | At startup, once the store is built: `aws-secrets-manager` under the AWS SDK's credential chain (`aws-sdk`), `gcp-secret-manager` under Application Default Credentials (`application-default`), or either name over `BROKER_FAKE_SECRETS_FILE` (`fake secrets file`). |
+| `approval sign-in on issuer=<issuer> client_id=<client id> domain=<domain>` | At startup: the approval page signs people in through that client, holding each person to that Workspace domain ([Approval sign-in](#approval-sign-in)). The client's secret is never logged. |
+| `broker: the sign-in client check state=<state> issuer=<issuer> error=…` | At WARN, from the check each pod takes at startup and every hour after: the provider refused the broker's client (`state=client_rejected`, so nobody can sign in) or could not be asked (`state=issuer_unreachable`). A check that found the client ready logs nothing; every check writes its answer to `GET /signin/status`. |
+| `approval sign-in login=<email>` / `approval sign-out login=<email>` | A person signed in to, or out of, the approval page. |
+| `approval sign-in refused …` | At WARN: a sign-in made no session, the line saying why: the provider refused it, its state or return path was not the sign-in's, the code exchange or ID token failed, or the person is outside `BROKER_SIGNIN_DOMAIN` or unverified. |
+| `approval page decision login=<email> record=<record id> decision=<approve or deny> outcome=<outcome>` | A person decided a secret request on the page; `outcome` is what became of it (`granted`, for one). |
+| `approval sign-in: reach the provider issuer=<issuer> error=…` | At ERROR: the provider's discovery document could not be read at a sign-in, and the page answered `503` naming the issuer. |
 | `broker listening addr=<host:port>` | Startup finished: configuration, migrations and the first read of the namespace all succeeded, and the address is bound. |
 | `broker: fatal error=…` | Startup refused; the error names the variable or dependency. The process exits 1. |
 | `agent secret policy refused name=<secret name> reason=<reason>` | At ERROR, on every namespace read and each refused reread. Reasons include `owner-tag-missing`, `owner-tag-malformed`, `tier-tag-missing`, `tier-tag-malformed`, `name-malformed`, `service-owner-human-tier`, `not-on-agent-secrets-key`, `no-current-value`, `kind-unknown`, `github-owners-missing`, `github-owners-malformed` and `max-grant-malformed`. |
@@ -414,7 +610,9 @@ Each request is bounded to 45 seconds. Request bodies are JSON of at most 1 MiB.
 ## Running more than one pod
 
 Nothing in a broker process is private to it but its cache of the policy and its rate-limit
-buckets, so a deployment may run several identical pods behind one address. What it has to set,
+buckets, so a deployment may run several identical pods behind one address. A sign-in to the
+approval page is held in the browser's cookie until its callback and its session in Postgres, so
+any pod finishes any sign-in and honours any session. What it has to set,
 and what it gets:
 
 **The stop budget its grace period must cover.** On SIGTERM the broker drains for
@@ -623,6 +821,36 @@ hold:
 That release refuses every pod renewal without a token, so it also removes what only the ratchet
 needs: the pod-UID lookup in `Renew` (`podTokenRatcheted`) and its partial index
 `enrollments_pod_token_renewed`.
+
+## A copied VM token
+
+A Google VM's identity token logs in as that VM for up to an hour after it was minted, wherever it
+is presented. A copy's logins show in the audit record as `launcher_credential.token_login` rows
+for the VM's subject from more than one key:
+
+```sql
+select at, detail->>'credential_id' as credential_id, detail->>'key_thumbprint' as key,
+       detail->>'token_expires_at' as token_expires_at
+from audit
+where kind = 'launcher_credential.token_login'
+  and detail->>'subject' = '<account>@<project>/<zone>/<instance id>'
+order by at;
+```
+
+On the VM itself a copy shows as `enroll --vm` runs refused `401 LAUNCHER_INVALID` or `429
+RATE_LIMITED` while nothing else changed. A copy cannot end or take over the VM's live
+enrollment (no machine login ends a VM's enrollment, `403 VM_ENDS_BY_LOGIN_REVOKE`, and a second
+key for a live VM is `409 ALREADY_ENROLLED`), but it can enroll a key of its own while the VM holds
+none. Revoking the VM's login on Dispatch's machine-login page ends every enrollment that login
+made, the VM's and a copy's alike, but not the copied token: within its hour the copy logs in
+again under a new login and enrolls afresh. To end it for certain, take the VM out of the fleet's
+settings and redeploy the broker: change `BROKER_VM_INSTANCES` so the glob no longer matches the
+VM's name, or, for the whole fleet, remove the account's entries from `BROKER_VM_SERVICES`,
+`BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES`. From then every login and enrollment of that VM,
+the copy's included, is refused at its next call. Find and remove what copied the token before you
+put the VM back: the latest `token_expires_at` above says when the last copied token ends, at most
+an hour after it was minted. Rotate any secret the copy may have read; the broker cannot take back
+a value it released.
 
 ## The audit record
 
