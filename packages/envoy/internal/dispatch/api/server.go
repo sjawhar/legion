@@ -3,6 +3,7 @@ package api
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -36,6 +37,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/ratelimit"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -86,8 +88,9 @@ type Deps struct {
 	// GitHub reads; nil is the "no app credentials yet" state and answers ErrNoAppKey.
 	GitHub *githubapp.Client
 	// Architecture imports a project's architecture model from its configured
-	// source; the ticker, the Refresh route, and the sync tool share it so one
-	// project's syncs stay serialized.
+	// sources; the ticker, the Refresh route, and the sync tool share it, so this process never
+	// fetches one project twice at once. The source row, not this sharing, orders every process's
+	// writes (architecture.Importer).
 	Architecture *architecture.Importer
 	// OIDC verifies a JWT-shaped bearer as a Kubernetes pod's projected
 	// service-account token; nil is the unconfigured deployment, where a
@@ -115,6 +118,23 @@ type Deps struct {
 	// (whileCallerResolves), each closing once the caller no longer resolves, and a live socket
 	// pings its page and sends it a heartbeat frame.
 	StreamHeartbeat time.Duration
+	// RouteRosterTTL replaces how long a stored listener answer serves issue reads and agents
+	// lists (routeRosterTTL, issue_route_status.go). Zero keeps five seconds; only a test process
+	// sets another (cmd/dispatch: DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks), so a row
+	// that reads two processes inside one answer's life needs no timing window.
+	RouteRosterTTL time.Duration
+	// ListenerTakeoverWindow replaces how long a sender keeps trying a listener that is being
+	// replaced (listenerTakeoverWindow, envoy_resolve.go). Zero keeps twelve seconds; neither
+	// routes.BuildAppContext nor cmd/dispatch sets it, so every deployment runs twelve seconds.
+	// Only this package's tests set another, so a send to a session that is gone settles without
+	// sleeping the production window.
+	ListenerTakeoverWindow time.Duration
+	// TestHookTimeout replaces how long a test hook waits for every process's acknowledgement
+	// (testHookTimeout, test_hooks_fanout.go). Zero keeps ten seconds; neither
+	// routes.BuildAppContext nor cmd/dispatch sets it, so every deployment with the hooks on and
+	// the browser harness run ten seconds. Only this package's tests set another, so a test
+	// proving a silent process is named does not sleep the full timeout.
+	TestHookTimeout time.Duration
 	// LiveSocketAge is how long a GET /ws/live socket lives before it closes with 4001 (max age),
 	// drawn as it opens. Nil draws it uniformly from [contracts.LiveSocketMinAge,
 	// contracts.LiveSocketMaxAge), so the sockets a deploy opened together do not all end
@@ -122,8 +142,9 @@ type Deps struct {
 	LiveSocketAge func() time.Duration
 	// ListenerRosterUncached is for end-to-end test processes only: every read of the listener's
 	// session list (route_status on an issue read, GET /api/v1/agents) asks the listener rather
-	// than sharing the process's five-second copy, so a test that changes the listener's sessions
-	// sees the change at its next read. A deployment leaves it false.
+	// than reading the stored answer every process shares (the route_roster row), so a test that
+	// changes the listener's sessions sees the change at its next read. A deployment leaves it
+	// false.
 	ListenerRosterUncached bool
 	// DashboardEntry is the entry chunk (`/assets/index-*.js`) of the dashboard build this process
 	// serves, "" when it serves none; GET /api/v1/dashboard/builds answers it as serving.
@@ -174,6 +195,15 @@ type DepsInput struct {
 	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
 	// sets a short one.
 	StreamHeartbeat time.Duration
+	// RouteRosterTTL replaces the five seconds a stored listener answer serves issue reads and
+	// agents lists; see Deps.RouteRosterTTL.
+	RouteRosterTTL time.Duration
+	// ListenerTakeoverWindow replaces the twelve-second listener take-over window; see
+	// Deps.ListenerTakeoverWindow.
+	ListenerTakeoverWindow time.Duration
+	// TestHookTimeout replaces the ten-second test-hook acknowledgement timeout; see
+	// Deps.TestHookTimeout.
+	TestHookTimeout time.Duration
 	// ListenerRosterUncached is for end-to-end test processes only; see
 	// Deps.ListenerRosterUncached.
 	ListenerRosterUncached bool
@@ -206,7 +236,13 @@ func NewDeps(input DepsInput) (Deps, error) {
 		}
 		envoyClient = envoy.New(envoyURL, options...)
 	}
-	github, err := githubapp.New(input.App, input.GitHubAPIBase)
+	// The GitHub client obeys and records the rate limits every process shares (github_rate_limits):
+	// GitHub budgets the App and each installation, not this process.
+	var githubOptions []githubapp.Option
+	if input.Store != nil {
+		githubOptions = append(githubOptions, githubapp.WithLimits(ratelimit.New(input.Store.Pool)))
+	}
+	github, err := githubapp.New(input.App, input.GitHubAPIBase, githubOptions...)
 	if err != nil {
 		return Deps{}, err
 	}
@@ -237,6 +273,9 @@ func NewDeps(input DepsInput) (Deps, error) {
 		Files:                  input.Files,
 		TestHooksEnabled:       input.TestHooksEnabled,
 		StreamHeartbeat:        heartbeat,
+		RouteRosterTTL:         input.RouteRosterTTL,
+		ListenerTakeoverWindow: input.ListenerTakeoverWindow,
+		TestHookTimeout:        input.TestHookTimeout,
 		ListenerRosterUncached: input.ListenerRosterUncached,
 		DashboardEntry:         input.DashboardEntry,
 	}, nil
@@ -291,9 +330,9 @@ type server struct {
 	// Only a test sets it, so a budget that ends before every selected session is read is the
 	// test's choice rather than a race against five seconds of wall clock (INFRA-249).
 	broadcastResolveBudget time.Duration
-	// rosters is the process's copy of the listener's live-session list that issue reads judge
-	// routes against and the agents list lists (issue_route_status.go). Only register gives it
-	// non-zero TTLs.
+	// rosters is how this process reads and refreshes the stored listener answer every process's
+	// issue reads judge routes against and agents lists list (issue_route_status.go). Only
+	// register gives it non-zero TTLs.
 	rosters rosterCache
 	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); every server
 	// register mounts has one, and only a server a test builds directly (directServer) has none.
@@ -313,6 +352,10 @@ type server struct {
 	// on every server register mounts: it starts its listening connection on the first of them to
 	// subscribe and stops it with the last.
 	eventRelay *eventStreamRelay
+	// testHooks carries every test hook to every process serving the database
+	// (test_hooks_fanout.go); nil without Deps.TestHooksEnabled, and on a server with no Store,
+	// which shares nothing with another process and runs a hook on itself.
+	testHooks *testHookFanout
 	// eventHorizon is the server's one events.Horizon: the safe horizon every reader that pages
 	// the event log by a global id cursor reads up to, shared through horizon() so one
 	// observation in flight serves them all. horizonOnce builds it on first use rather than in
@@ -357,10 +400,11 @@ type server struct {
 	// TestHooksEnabled, which mounts no hook.
 	slowWrites sync.Map
 	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
-	// warned holds no production job or no configured apply step, so a read that judges a run again
-	// does not warn about it again. Nothing evicts an entry: the map holds one per configured job
-	// names and apply step that it has warned about, until the configuration is fixed or the process
-	// restarts.
+	// asked about - one with no production job or no configured apply step - so this process asks
+	// delivery_run_warnings, which decides which process logs the warning (firstToWarn), once per
+	// run and configuration rather than on every read. Nothing evicts an entry: the map holds one
+	// per configured job names and apply step it has asked about, until the configuration is fixed
+	// or the process restarts.
 	warnedUnmatchedRuns sync.Map
 	// termStats is the per-project term-statistics refreshes a related-item check started
 	// (ensureSearchTermStats), keyed by project, so a project's many checks start one.
@@ -410,14 +454,17 @@ type queryer interface {
 // event stream relay (INFRA-66), which every events subscription reads and which starts its own
 // listening connection on the first of them, also on lifetime. lifetime is the process's own
 // context, cancelled when the server is shutting down (server.lifetime says what else it ends).
-// The returned Background's Wait blocks until every keyed write's handler and every delivery a
-// handler detached from its request (a broadcast's recipients) has settled, and until the hub,
-// every live socket (and every subscription it ran) and the relay have ended. Call it only after
+// With Deps.TestHooksEnabled and a Store, the server also holds the test hooks' listening
+// connection (test_hooks_fanout.go), started here, also on lifetime. The returned Background's
+// Wait blocks until every keyed write's handler and every delivery a handler detached from its
+// request (a broadcast's recipients) has settled, and until the hub, every live socket (and every
+// subscription it ran), the relay and the test hooks' listener have ended. Call it only after
 // lifetime has been cancelled and before the database pool closes.
 //
-// Register panics when lifetime is nil: the hub and the relay would run on no context that ever
-// ends, so they would outlive the process's shutdown, or the test that built the server, and the
-// returned wait would block for ever once an events subscription had started the relay.
+// Register panics when lifetime is nil: the hub, the relay and the test hooks' listener would run
+// on no context that ever ends, so they would outlive the process's shutdown, or the test that
+// built the server, and the returned wait would block for ever once an events subscription had
+// started the relay, or at once under the test hooks.
 func Register(mux *http.ServeMux, lifetime context.Context, deps Deps) Background {
 	s := register(mux, lifetime, deps)
 	return Background{Wait: s.waitBackground, ResumeDeliveries: s.resumeOwedDeliveries, EventHead: s.eventFeedHead, EventHorizon: s.horizon}
@@ -446,16 +493,19 @@ type Background struct {
 
 // waitBackground waits for every keyed handler and every delivery a request left running past
 // its client, then for every live socket and the subscriptions it ran, then for the hub's
-// goroutines and the relay's. The detached work comes first because it is the only work lifetime
-// does not stop: a keyed handler is bounded by keyedHandlerLimit, a delivery by the listener
-// client's receipt timeout per recipient, and each reads and writes through the database pool this
-// wait is holding open for it.
+// goroutines, the relay's and the test hooks' listener. The detached work comes first because it
+// is the only work lifetime does not stop: a keyed handler is bounded by keyedHandlerLimit, a
+// delivery by the listener client's receipt timeout per recipient, and each reads and writes
+// through the database pool this wait is holding open for it.
 func (s *server) waitBackground() {
 	s.detached.wait()
 	s.liveSockets.wait()
 	s.deliveryHub.wait()
 	s.eventRelay.wait()
 	s.mentions.wait()
+	if s.testHooks != nil {
+		s.testHooks.wait()
+	}
 }
 
 // backgroundWork counts the work a server runs past its requests' clients, and waits for none to
@@ -513,12 +563,16 @@ func (b *backgroundWork) wait() {
 // TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap and must
 // not dial or read the nil Store: whatever reaches the database or the network starts later, from
 // a handler, the relay's first subscriber or the hub's, or on a goroutine of its own, as the event
-// log's boot mark does (takeBootMark), for a server that has a Store.
+// log's boot mark does (takeBootMark), for a server that has a Store. The test hooks' listener is
+// one of those: it needs Deps.TestHooksEnabled and a Store and dials on a goroutine of its own,
+// since a process has to be listening before another process calls a hook.
 func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 	if lifetime == nil {
 		panic("api.Register: the lifetime parameter is required: it is the context that ends the delivery hub, the event stream relay and every live socket (a test passes t.Context())")
 	}
-	s := &server{deps: deps, lifetime: lifetime, agentWatchInterval: agentStreamWatchInterval, rosters: rosterCache{ttl: routeRosterTTL, silenceTTL: routeRosterSilenceTTL}}
+	s := &server{deps: deps, lifetime: lifetime, agentWatchInterval: agentStreamWatchInterval, rosters: rosterCache{
+		ttl: cmp.Or(deps.RouteRosterTTL, routeRosterTTL), silenceTTL: routeRosterSilenceTTL,
+	}}
 	s.liveKinds = map[string]liveKind{
 		liveEventsView: {resumes: true, start: s.startEventsView},
 		liveAgentView:  {start: s.startAgentView},
@@ -527,6 +581,9 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 	s.takeBootMark()
 	s.mentions = s.startMentionSender()
 	s.deliveryHub = newDeliveryHub(s, lifetime, deliveryHubClock{})
+	if deps.TestHooksEnabled && deps.Store != nil {
+		s.testHooks = startTestHookFanout(s, lifetime)
+	}
 	routes := s.routes()
 	if undecidable := s.undecidableWrites(routes); len(undecidable) > 0 {
 		// A mutating row the project check cannot decide would serve a project-scoped caller a

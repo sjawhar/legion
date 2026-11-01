@@ -190,6 +190,7 @@ func (s *server) replayComment(w http.ResponseWriter, r *http.Request, point com
 		for _, mention := range owed {
 			item := mentionSend{
 				comment: comment, created: created, mention: mention, actor: comment.Author, attempt: 1,
+				takeover: s.newTakeoverRetry(),
 			}
 			claimed, mine, err := s.claimQueuedMention(sending, item.key())
 			if err != nil {
@@ -357,98 +358,172 @@ type commentRoute struct {
 	unanswered bool
 }
 
+// commentResolution is what the Envoy listener said about a comment before its transaction
+// opened: the session each mention names, and the owner's route with the session it names.
+// takeovers is each mention's take-over pacing (resolveThroughTakeover), which its sender carries
+// on in after the commit. decidesRoutes is set when the comment reaches sessions beyond its
+// mentions, so the mentions were resolved through a take-over and the comment's other routes are
+// decided on them; the comment.created event records it (mentions_decide_routes).
+type commentResolution struct {
+	mentions      []ResolvedMention
+	takeovers     []takeoverRetry
+	route         commentRoute
+	decidesRoutes bool
+}
+
 // commentWrite is the open comment transaction and what its locked owner said: the owner's
-// lifecycle status (nil for a project document) and the route resolution that row agreed with.
+// lifecycle status (nil for a project document) and the resolution that row agreed with.
 type commentWrite struct {
 	tx     pgx.Tx
 	status *string
-	route  commentRoute
+	commentResolution
 }
 
-// readCommentRoute reads the owner's delivery route from the pool, with no transaction open, so
-// its session can be looked up beside the comment's mentions. A comment with no mentions, or on
-// a project document, consults no route.
-func (s *server) readCommentRoute(ctx context.Context, owner owner, mentioned bool) (commentRoute, error) {
-	if owner.IssueKey == nil || !mentioned {
-		return commentRoute{}, nil
+// resolveCommentDeliveries makes every Envoy listener lookup a comment needs, with no transaction
+// open, so no listener call costs a pooled connection: each mention, and the owner's delivery route
+// when the comment mentions anyone. A route the comment already mentions is resolved by that
+// mention, so the ordinary mention comment makes no second listener call for it.
+//
+// The transaction decides from these which sessions the comment's other routes skip: the issue's
+// route when a mention resolved to its session (suppress_route), and every session route the
+// outbox publishes - the issue's claimant, the thread's sessions, the ask's followers, the
+// document's authors - for each session a mention resolved to (the payload's mentions). A comment
+// that has such a route - the issue's route is set, it replies to a thread, it is on a document,
+// or readCommentRoutes found a session route on its issue or ask - resolves each mention and the
+// route through a listener take-over (resolveThroughTakeover), because a mention that did not
+// resolve here leaves those routes on, and the same mention resolved by its sender after the
+// commit would reach a session those routes reach too: the session would hear the comment twice.
+// So the comment.created event records that its routes were decided on these resolutions
+// (mentions_decide_routes), and each mention's attempt 1 keeps its resolution for whichever sender
+// finishes it, the delivery sweep and a Retry included (deliverResolvedCommentMention). A comment
+// with no such route commits at once, and its mentions' senders wait out the take-over under the
+// attempts the commit made durable, resolving the mention again. Every lookup runs at once, so a
+// comment waits about one take-over window however many mentions it carries
+// (validateCommentMentions allows ten).
+// The lookups share the request's tracking mark because they call only the listener and never
+// take a pooled connection; one that read the database would need a mark of its own, as each
+// send on the mention sender's lanes takes (store.WithTransactionTracking in sendCommentMention).
+func (s *server) resolveCommentDeliveries(
+	ctx context.Context, owner owner, input commentInput, targets []string, delivery string,
+) (commentResolution, error) {
+	if len(targets) == 0 {
+		return commentResolution{}, nil
+	}
+	route, sessionRoutes, err := s.readCommentRoutes(ctx, owner, input.AskID)
+	if err != nil {
+		return commentResolution{}, err
+	}
+	wait := route.route != "" || sessionRoutes || input.ReplyTo != nil || input.Anchor != nil || owner.ArtifactID != nil
+	resolved := commentResolution{
+		mentions:      make([]ResolvedMention, len(targets)),
+		takeovers:     make([]takeoverRetry, len(targets)),
+		route:         route,
+		decidesRoutes: wait,
+	}
+	mentioned := slices.Index(targets, route.route)
+	var routeResolution ResolvedMention
+	var lookups sync.WaitGroup
+	for index, target := range targets {
+		lookups.Go(func() {
+			resolved.mentions[index], resolved.takeovers[index] = s.resolveThroughTakeover(ctx, target, delivery, wait)
+		})
+	}
+	if route.route != "" && mentioned < 0 {
+		lookups.Go(func() { routeResolution, _ = s.resolveThroughTakeover(ctx, route.route, "steer", wait) })
+	}
+	lookups.Wait()
+	switch {
+	case route.route == "":
+	case mentioned >= 0:
+		resolved.route.sessionID = resolved.mentions[mentioned].SessionID
+		resolved.route.unanswered = resolved.mentions[mentioned].unanswered
+	default:
+		// A route whose own lookup went unanswered still names its session when it is
+		// session:<id> (mentionedSession); one that named no session pins none.
+		if sessionID, named := routeResolution.mentionedSession(); named {
+			resolved.route.sessionID = &sessionID
+		}
+	}
+	return resolved, nil
+}
+
+// readCommentRoutes reads the owner's delivery route from the pool, locking nothing; the comment's
+// transaction re-reads it under the owner's lock (lockCommentOwner). sessionRoutes reports, from
+// the same read, whether the outbox reaches a session of the issue beyond the route and the
+// comment's mentions whatever the comment's thread or anchor: the issue's claimant is a session
+// (the outbox's publishClaimantRoute), the ask the comment replies to by askID has a follower
+// (publishFollowerRoutes), or the issue's primary document credits a session
+// (publishPrimaryDocumentAuthors, which reads the credits through the outbox's documentCreditsSQL
+// and sessionCreditSQL; the query below reads them the same way). Like the route, these are read
+// before the transaction and not rechecked under the lock: the outbox reads them again when it
+// publishes in any case.
+func (s *server) readCommentRoutes(ctx context.Context, owner owner, askID *string) (commentRoute, bool, error) {
+	if owner.IssueKey == nil {
+		return commentRoute{}, false, nil
 	}
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
-		return commentRoute{}, errorf(http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database unavailable")
+		return commentRoute{}, false, errorf(http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database unavailable")
+	}
+	// An ask id that is no uuid names no ask; the transaction refuses it (normalizeCommentThreadTarget).
+	var ask *string
+	if askID != nil {
+		if _, err := uuid.Parse(*askID); err == nil {
+			ask = askID
+		}
 	}
 	var stored *string
-	err := s.deps.Store.Pool.QueryRow(ctx, `select route from issues where key = $1`, *owner.IssueKey).Scan(&stored)
+	var sessionRoutes bool
+	err := s.deps.Store.Pool.QueryRow(ctx, `
+		select i.route,
+		       coalesce(i.claimed_by ->> 'kind' = 'session' and coalesce(i.claimed_by ->> 'id', '') <> '', false)
+		       or exists (select 1 from ask_followers f where f.ask_id = $2::uuid)
+		       or exists (
+		           select 1
+		           from artifacts a
+		           where a.issue_key = i.key and a.is_primary and a.kind = 'doc'
+		             and (a.created_by ->> 'kind' = 'session' and coalesce(a.created_by ->> 'id', '') <> ''
+		                  or exists (
+		                      select 1
+		                      from artifact_versions v
+		                      cross join lateral jsonb_array_elements(nullif(v.authors, 'null'::jsonb)) as credit(author)
+		                      where v.artifact_id = a.id
+		                        and credit.author ->> 'kind' = 'session' and coalesce(credit.author ->> 'id', '') <> ''
+		                  ))
+		       )
+		from issues i
+		where i.key = $1
+	`, *owner.IssueKey, ask).Scan(&stored, &sessionRoutes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// The transaction answers for an owner that does not exist; there is nothing to resolve.
-		return commentRoute{}, nil
+		return commentRoute{}, false, nil
 	}
 	if err != nil {
-		return commentRoute{}, err
+		return commentRoute{}, false, err
 	}
 	route := commentRoute{checked: true}
 	if stored != nil {
 		route.route = *stored
 	}
-	return route, nil
-}
-
-// resolveCommentLookups makes every Envoy listener lookup a comment needs, all at once and each
-// bounded by mentionLookupTimeout: each mention's, up to mentionLookupConcurrency at a time, and,
-// beside them, the route's session. A listener that answers none delays a comment with up to 8
-// mentions by one 250 ms timeout, and each further 8 mentions add one: ceil(k/8) timeouts for k
-// mentions. mentions, when non-nil, were resolved on an earlier pass whose route then moved, and
-// are kept; only the new route is resolved. A route the comment mentions is resolved by that
-// mention and makes no lookup of its own.
-func (s *server) resolveCommentLookups(
-	ctx context.Context, route commentRoute, targets []string, delivery string, mentions []ResolvedMention,
-) ([]ResolvedMention, commentRoute) {
-	lookUpRoute := route.route != "" && !slices.Contains(targets, route.route)
-	var routeLookup ResolvedMention
-	var lookups sync.WaitGroup
-	if lookUpRoute {
-		lookups.Go(func() {
-			routeLookup = s.resolveMentionTarget(ctx, route.route, "steer", mentionLookupTimeout)
-		})
-	}
-	if mentions == nil {
-		mentions = s.resolveMentionTargets(ctx, targets, delivery)
-	}
-	lookups.Wait()
-	if lookUpRoute {
-		if sessionID, named := routeLookup.mentionedSession(); named {
-			route.sessionID = &sessionID
-		}
-		return mentions, route
-	}
-	if route.route == "" {
-		return mentions, route
-	}
-	for index := range mentions {
-		if mentions[index].Target == route.route {
-			route.sessionID = mentions[index].SessionID
-			route.unanswered = mentions[index].unanswered
-			break
-		}
-	}
-	return mentions, route
+	return route, sessionRoutes, nil
 }
 
 // beginCommentWrite opens the comment's transaction, locks its owner, and verifies that the
 // route the listener resolved is still the one the locked issue row carries. A route that
 // moved in between leaves the resolution unusable, so the write is resolved once more rather
 // than suppressing the wrong session's fan-out.
-func (s *server) beginCommentWrite(ctx context.Context, owner owner, route commentRoute) (commentWrite, error) {
+func (s *server) beginCommentWrite(ctx context.Context, owner owner, resolved commentResolution) (commentWrite, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return commentWrite{}, err
 	}
 	// The transaction is the caller's on success only, so every refusal unwinds here: a later
 	// check that forgot its own rollback would hold a pooled connection for the process's life.
-	status, err := s.lockCommentOwner(ctx, tx, owner, route)
+	status, err := s.lockCommentOwner(ctx, tx, owner, resolved.route)
 	if err != nil {
 		_ = tx.Rollback(ctx)
 		return commentWrite{}, err
 	}
-	return commentWrite{tx: tx, status: status, route: route}, nil
+	return commentWrite{tx: tx, status: status, commentResolution: resolved}, nil
 }
 
 // lockCommentOwner takes the owner's lock inside an open comment transaction and returns its
@@ -503,28 +578,22 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		return
 	}
 
-	// Every Envoy listener lookup this comment needs happens in resolveCommentLookups, with no
-	// transaction and no pooled connection held. beginCommentWrite re-reads the route under the
-	// owner's lock and refuses a resolution the locked row no longer agrees with - and refuses,
-	// under that same lock, an owner this pooled read already found missing or closed, which is
-	// why a comment the write cannot accept pays for no lookup here.
+	// Every Envoy listener lookup this comment needs happens here, with no transaction and no
+	// pooled connection held (resolveCommentDeliveries). beginCommentWrite re-reads the issue's
+	// route under the owner's lock and refuses a resolution the locked row no longer agrees with -
+	// and refuses, under that same lock, an owner this pooled read already found missing or
+	// closed, which is why a comment the write cannot accept pays for no lookup here.
 	if len(mentionTargets) > 0 {
 		if err := s.refuseClosedOwnerBeforeResolving(r.Context(), owner); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 	}
-	var resolvedMentions []ResolvedMention
 	start, err := resolveThenLock(r.Context(),
-		func(ctx context.Context) (commentRoute, error) {
-			route, err := s.readCommentRoute(ctx, owner, len(mentionTargets) > 0)
-			if err != nil {
-				return commentRoute{}, err
-			}
-			resolvedMentions, route = s.resolveCommentLookups(ctx, route, mentionTargets, delivery, resolvedMentions)
-			return route, nil
+		func(ctx context.Context) (commentResolution, error) {
+			return s.resolveCommentDeliveries(ctx, owner, input, mentionTargets, delivery)
 		},
-		func(ctx context.Context, resolved commentRoute) (commentWrite, error) {
+		func(ctx context.Context, resolved commentResolution) (commentWrite, error) {
 			return s.beginCommentWrite(ctx, owner, resolved)
 		},
 		errorf(http.StatusConflict, "ROUTE_CHANGED",
@@ -534,6 +603,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, err)
 		return
 	}
+	tx, status, route, resolvedMentions := start.tx, start.status, start.route, start.mentions
 	// mentionedSessions are the sessions the comment's mentions deliver it to, as far as creation
 	// knows (mentionedSession): each pinned session, and the <id> of an unanswered session:<id>
 	// mention. Only a pinned session is stored on the mention, its attempt and comment_mentions;
@@ -548,7 +618,6 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			mentionedSessions[sessionID] = struct{}{}
 		}
 	}
-	tx, status, route := start.tx, start.status, start.route
 	defer tx.Rollback(r.Context())
 	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
 	defer ledger.Discard()
@@ -817,6 +886,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	payload.SuppressRoute = suppressRoute
 	payload.SuppressedRoute = suppressedRoute
 	payload.SuppressedRouteSessionID = suppressedRouteSessionID
+	payload.MentionsDecideRoutes = start.decidesRoutes
 	payload.ThreadLogins, err = commentThreadLogins(r.Context(), tx, comment)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -849,10 +919,16 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	s.publish(events...)
 	// On a context the client's going away does not cancel: a send this sender refuses gives its
 	// attempt's claim back, which must not be left undone because the caller hung up.
+	//
+	// Each send carries the take-over pacing its mention's resolution started
+	// (resolveCommentDeliveries), so a comment waits about one listener take-over window in all,
+	// here as it did when the request itself sent: a resolution that already waited that window
+	// out settles with its outcome on the lane's first try.
 	sending := context.WithoutCancel(r.Context())
 	for i, mention := range resolvedMentions {
 		s.mentions.enqueue(sending, mentionSend{
-			comment: comment, created: event, mention: mention, actor: actor, attempt: 1, claimed: claims[i],
+			comment: comment, created: event, mention: mention, actor: actor, attempt: 1,
+			claimed: claims[i], takeover: start.takeovers[i],
 		})
 	}
 	// The answer carries each attempt as it committed, pending: the mention sender settles it

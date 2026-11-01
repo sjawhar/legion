@@ -1028,10 +1028,11 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 		stallSessionReads(t, harness.sessions)
 		var forwards atomic.Int32
 		cfg := harness.config
-		cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {
+		cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
 			forwards.Add(1)
 			return nil
-		}
+		})
+		cfg = wireTestDeliveryWorkers(t, cfg)
 		item := listenerTestEnvelope(contracts.RoleTopicPrefix+"unread", "unread-holder-delivery")
 		probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
 		if err != nil {
@@ -1043,7 +1044,9 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 		}
 		started := time.Now()
 		coreNATSDeliveryHandler(cfg)(&nats.Msg{Data: marshalListenerEnvelope(t, item)})
-		if elapsed := time.Since(started); elapsed > bound || forwards.Load() != 0 {
+		elapsed := time.Since(started)
+		cfg.roleForwards.settled(t)
+		if elapsed > bound || forwards.Load() != 0 {
 			t.Fatalf("role delivery while the session bucket cannot be read took %s and forwarded %d times, want none within %s", elapsed, forwards.Load(), bound)
 		}
 		assertDeliveryException(t, probe, item, "delivery_failed")

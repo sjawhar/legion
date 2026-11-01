@@ -80,7 +80,8 @@
 # GOWORK=off GOTOOLCHAIN=local; a tree without cmd/dispatch/pprof.go gets zz_loadtest_pprof.go.txt as
 # cmd/dispatch/zz_loadtest_pprof.go, which serves pprof on LOADTEST_DISPATCH_PPROF_PORT. Every
 # Dispatch binary has a <binary>.json beside it: dispatch_commit, dispatch_tree, build_dirty, patch,
-# patch_sha256, dispatch_pprof_overlay, dispatch_binary_sha256, go_version, newest_migration.
+# patch_sha256, dispatch_pprof_overlay, dispatch_binary_sha256, go_version, newest_migration and
+# migrations (every version in that tree).
 #
 # Environment: LOADTEST_ROOT (default ${TMPDIR:-/tmp}/dispatch-loadtest); LOADTEST_SRC (default: the
 # checkout holding this script); LOADTEST_DISPATCH_SRC (default LOADTEST_SRC: the checkout
@@ -153,7 +154,8 @@ base_env=(
 
 # loadgen_env adds what loadgen needs: the root, the go toolchain for `loadgen tables`
 # (`go tool pprof`), this script's path and the run's lock token, for `loadgen run -restart-at`'s
-# `stack.sh restart-dispatch`.
+# `stack.sh restart-dispatch`, and LOADTEST_SESSION_DELIVERY and LOADTEST_NO_RESUME when they are
+# set (`loadgen run -session-delivery`).
 loadgen_env() {
   local gobin
   gobin=$(command -v go || true)
@@ -161,6 +163,8 @@ loadgen_env() {
   [ -n "$gobin" ] && path="$(dirname -- "$gobin"):$path"
   printf '%s\n' "${base_env[@]:1}" "PATH=$path" "LOADTEST_ROOT=$ROOT" "LOADTEST_STACK_SH=$here/stack.sh"
   [ -z "${LOADTEST_LOCK_TOKEN:-}" ] || printf '%s\n' "LOADTEST_LOCK_TOKEN=$LOADTEST_LOCK_TOKEN"
+  [ -z "${LOADTEST_SESSION_DELIVERY:-}" ] || printf '%s\n' "LOADTEST_SESSION_DELIVERY=$LOADTEST_SESSION_DELIVERY"
+  [ -z "${LOADTEST_NO_RESUME:-}" ] || printf '%s\n' "LOADTEST_NO_RESUME=$LOADTEST_NO_RESUME"
 }
 
 # loadgen runs the stack's loadgen binary under the stack's environment, from the root.
@@ -586,11 +590,22 @@ resolve_commit() {
     die "'$1' names no commit in $SRC"
 }
 
-# newest_migration ENVOY_DIR: the highest NNNN prefix of a migration file in that tree, an integer.
+# newest_migration ENVOY_DIR: the highest version prefix of a migration file in that tree, an
+# integer.
 newest_migration() {
   local file
   file=$(cd -- "$1/internal/dispatch/store/migrations" && printf '%s\n' [0-9]*.sql | sort -n | tail -n1)
   printf '%s\n' "$((10#${file%%_*}))"
+}
+
+# migration_versions ENVOY_DIR: every migration version in that tree, as a JSON array in ascending
+# order: the leading digits of each [0-9]*.up.sql name, as the runners read them.
+migration_versions() {
+  local file
+  for file in "$1"/internal/dispatch/store/migrations/[0-9]*.up.sql; do
+    file=${file##*/}
+    printf '%s\n' "$((10#${file%%_*}))"
+  done | sort -n | jq -s -c .
 }
 
 # write_build_json BINARY ENVOY_DIR COMMIT TREE DIRTY PATCH PATCH_SHA256 OVERLAY: BINARY.json, the
@@ -600,10 +615,12 @@ write_build_json() {
   jq -n --arg commit "$3" --arg tree "$4" --argjson dirty "$5" --arg patch "$6" --arg patch_sha "$7" \
     --argjson overlay "$8" --arg binary_sha "$(sha256_of "$binary")" \
     --arg go "$(go version "$binary" | awk '{ print $NF }')" --argjson migration "$(newest_migration "$dir")" \
+    --argjson migrations "$(migration_versions "$dir")" \
     'def orNull: if . == "" then null else . end;
      {dispatch_commit: $commit, dispatch_tree: ($tree | orNull), build_dirty: $dirty,
       patch: ($patch | orNull), patch_sha256: ($patch_sha | orNull), dispatch_pprof_overlay: $overlay,
-      dispatch_binary_sha256: $binary_sha, go_version: $go, newest_migration: $migration}' >"$binary.json"
+      dispatch_binary_sha256: $binary_sha, go_version: $go, newest_migration: $migration,
+      migrations: $migrations}' >"$binary.json"
 }
 
 # build_dispatch_at REV OUT [PATCH]: build cmd/dispatch of commit REV (PATCH applied) into OUT, and
@@ -906,18 +923,23 @@ cmd_seed() {
   note "installing the commit-time trigger (loadtest.event_commits)"
   loadgen trigger-sql | psql_db dispatch >/dev/null
 
-  local migration
+  # migrations is every version the seed has applied, and migration the highest of them. A build is
+  # compared against the set (common.sh, seed_migration_check): a migration whose version is below
+  # one the seed already holds leaves the highest version where it was.
+  local migration migrations
   migration=$(sql dispatch 'select max(version) from schema_migrations')
+  migrations=$(sql dispatch "select coalesce(json_agg(version order by version), '[]'::json) from schema_migrations")
   # The seed is made by the Dispatch in $BIN, which is the checkout's build only when setup ran
   # without LOADTEST_DISPATCH_COMMIT, so the record names both: build_commit is the Dispatch
   # checkout's, dispatch_commit and dispatch_build the binary's.
   [ -f "$BIN/envoy-dispatch.json" ] || die "no Dispatch build record at $BIN/envoy-dispatch.json; run stack.sh setup"
-  jq -n --argjson migration "$migration" --arg commit "$(build_commit)" --argjson dirty "$(build_dirty)" \
+  jq -n --argjson migration "$migration" --argjson migrations "$migrations" --arg commit "$(build_commit)" \
+    --argjson dirty "$(build_dirty)" \
     --argjson counts "$(seed_counts dispatch)" --arg at "$(date -u +%FT%TZ)" --arg pg "$("$PGBIN/postgres" --version)" \
     --argjson seconds "$((SECONDS - started))" --argjson extension "$extension" \
     --slurpfile build "$BIN/envoy-dispatch.json" \
     '$build[0] as $b |
-     {migration: $migration, build_commit: $commit, build_dirty: $dirty,
+     {migration: $migration, migrations: $migrations, build_commit: $commit, build_dirty: $dirty,
       dispatch_commit: $b.dispatch_commit, dispatch_binary_sha256: $b.dispatch_binary_sha256,
       dispatch_build: $b, created_at: $at,
       seed_seconds: $seconds, postgres_version: $pg, counts: $counts, event_extension: $extension}' >"$SEED_META"

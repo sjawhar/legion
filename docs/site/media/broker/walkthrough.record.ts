@@ -9,8 +9,8 @@
 //   t3-request.cast     the session asks for DEMO_API_KEY; the request waits for approval
 //   t4-ran.cast         recorded around b2: the waiting command receives the key as the request is
 //                       approved, and runs; then the request's status names who decided it
-//   b2-approve.webm     the request in the Inbox, its record, the approval
-//   b3-grants.webm      from the approved record to Settings, where the grant is listed
+//   b2-approve.webm     the request in the Inbox, its page on the secrets broker, the approval there
+//   b3-grants.webm      from the Inbox to Settings, where the grant is listed
 //
 // A take records every section, in this order: each depends on the one before it (the browser
 // types the code the terminal printed, the session needs the login the browser approved, the
@@ -39,7 +39,16 @@ import { fileURLToPath } from "node:url";
 import { type Browser, expect, type Locator, type Page, test } from "@playwright/test";
 
 import { signIn } from "../../../../packages/dispatch/e2e/users";
-import { agentHost, dispatch, machineLoginPath, operator, printed, reason, rigState } from "./flow";
+import {
+  agentHost,
+  broker,
+  dispatch,
+  machineLoginPath,
+  operator,
+  printed,
+  reason,
+  rigState,
+} from "./flow";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const rawDir = process.env.WALKTHROUGH_RAW_DIR ?? join(here, "walkthrough/raw");
@@ -63,9 +72,10 @@ const shell = "agent";
 
 interface Section {
   file: string;
-  /** A terminal section's span, or a browser page's whole life: from its creation to the end of
-   *  its context's close. Playwright records a page from its first frame to its close, so the
-   *  file is at most this long. */
+  /** A terminal section's span, from the recorder's start to the detach that ends it, or a
+   *  browser page's whole life: from its creation to the end of its context's close. Playwright
+   *  records a page from its first frame to its close, and a cast's last event is the farewell
+   *  the detach draws, so the file is at most this long. */
   wallSeconds: number;
   /** A browser section's scripted actions alone, which its file must at least cover. */
   actSeconds?: number;
@@ -148,7 +158,9 @@ function castEnd(cast: string): number {
 /** Records one terminal section: an asciinema cast of a client attached to the agent's shell
  *  while `act` runs, ended by detaching that client. The detached client's farewell line is the
  *  cast's last event, so the detach is where the cast's clock meets the wall clock: a mark lies
- *  as far before the cast's end as it did before the detach. */
+ *  as far before the cast's end as it did before the detach, and the section's wall clock ends
+ *  where that detach returned. What the recorder takes to exit afterwards is not part of the
+ *  recording, and a loaded machine stretches it well past the cast's own length. */
 async function terminalSection(file: string, act: (mark: Mark) => Promise<void>): Promise<void> {
   const cast = join(rawDir, file);
   const recorder = `rec-${file.replace(/\W/g, "-")}`;
@@ -183,13 +195,16 @@ async function terminalSection(file: string, act: (mark: Mark) => Promise<void>)
   await act(marks.mark);
   const detached = Date.now();
   tmux("detach-client", "-s", shell);
+  // The farewell the detach draws, the cast's last event, falls between those two instants, so
+  // the section's wall clock runs to this one and the cast is never longer than its section.
+  const ended = Date.now();
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline && hasSession(recorder)) await sleep(100);
   if (hasSession(recorder)) throw new Error(`${file}: the recorder never exited`);
   sections.push({
     file,
     marks: marks.seconds(detached - castEnd(cast) * 1000),
-    wallSeconds: (Date.now() - started) / 1000,
+    wallSeconds: (ended - started) / 1000,
   });
 }
 
@@ -520,21 +535,20 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
     // T3: the session asks for DEMO_API_KEY; the request waits on a person.
     tmux("send-keys", "-t", shell, "clear", "Enter");
     await sleep(500);
-    let recordId = "";
     let requestId = "";
     await terminalSection("t3-request.cast", async (mark) => {
       mark("typing");
       await type(`agent-secrets DEMO_API_KEY --reason "${reason}" -- ./check-demo-key.sh`);
       await enter();
       requestId = (await waitForScreen(printed.requestWaiting, "the pending request"))[1];
-      recordId = (await waitForScreen(printed.recordLink, "the record link"))[1];
+      await waitForScreen(printed.approvePage, "the request's page on the broker");
       mark("waiting");
       await sleep(3_000);
     });
 
     // T4, around B2: the terminal records while the operator finds the request in the Inbox, reads
-    // its record and approves it, so the cast shows the waiting command receive the key and run.
-    // Then the request's status names who decided it.
+    // it on the broker's page and approves it there, so the cast shows the waiting command receive
+    // the key and run. Then the request's status names who decided it.
     await terminalSection("t4-ran.cast", async (markTerminal) => {
       let keyShownAt = 0;
       const keyShown = waitForScreen(printed.keyReached, "the command's output", 180_000).then(
@@ -543,7 +557,9 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
           markTerminal("key");
         }
       );
-      // B2: the request in the Inbox, its record, and the approval.
+      // B2: the request in the Inbox, its page on the broker, and the approval there. The context
+      // holds no broker session yet, so the row's link passes through the rig issuer's sign-in,
+      // which signs the operator in with no page to fill in, and lands on the request's page.
       await browserSection(
         browser,
         "b2-approve.webm",
@@ -553,16 +569,18 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
           const row = dispatch.inboxRequest(page);
           await expect(row).toBeVisible();
           mark("inbox");
-          await sleep(2_500);
+          // Long enough to name the Inbox's link and the sign-in it passes through.
+          await sleep(3_500);
           await clickVisibly(page, row);
-          await expect(dispatch.requestReason(page)).toBeVisible();
+          await expect(broker.requestReason(page)).toBeVisible();
+          await expect(broker.signedIn(page)).toBeVisible();
           mark("record");
-          // Long enough to say what the page shows before the pointer moves to Approve.
-          await sleep(6_000);
-          await clickVisibly(page, dispatch.approve(page));
+          // Long enough to say what the broker's page shows before the pointer moves to Approve.
+          await sleep(9_000);
+          await clickVisibly(page, broker.approve(page));
           mark("approve");
           markTerminal("approve");
-          await hold(dispatch.requestApproved(page));
+          await hold(broker.requestGranted(page));
         }
       );
       await keyShown;
@@ -580,11 +598,11 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
       await sleep(3_500);
     });
 
-    // B3: from the approved record to Settings, where the grant is listed with its approver.
+    // B3: from the Inbox to Settings, where the grant is listed with its approver.
     await browserSection(browser, "b3-grants.webm", rig.dispatchUrl, async (page, hold, mark) => {
-      await page.goto(`/credentials/${recordId}`);
-      await expect(dispatch.requestApproved(page)).toBeVisible();
-      mark("record");
+      await page.goto("/");
+      await expect(dispatch.settings(page)).toBeVisible();
+      mark("inbox");
       await sleep(1_500);
       await clickVisibly(page, dispatch.settings(page));
       mark("settings");

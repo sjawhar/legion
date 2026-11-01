@@ -229,8 +229,11 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 	// it instead of holding the probe's one connection for the full bound.
 	ctx, cancel := context.WithTimeout(ctx, healthProbeTimeout)
 	defer cancel()
+	// The cast holds the result at bigint whichever type the column has: a connection that
+	// prepared this read while schema_migrations.version was an integer would otherwise fail it
+	// once after a boot widens the column ("cached plan must not change result type").
 	var version int
-	if err := health.QueryRow(ctx, "select coalesce(max(version), 0) from schema_migrations").Scan(&version); err != nil {
+	if err := health.QueryRow(ctx, "select coalesce(max(version), 0)::bigint from schema_migrations").Scan(&version); err != nil {
 		return 0, err
 	}
 	return version, nil
@@ -239,16 +242,19 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 // listenerPoolSize bounds the pool Listener takes its connections from. Four listeners dial
 // through it - the delivery hub, the event stream relay, the stale-room evictor and the shared
 // hub cmd/dispatch's woken background loops wait on (pglisten.Hub, one connection for all of their
-// channels) - and each connection is hijacked as soon as it is opened, so it leaves with its caller
-// and the pool holds none between dials: what one bounds is dials in flight, not connections
-// held. A listener redialling while another dials waits that dial out, which is what a loop that
-// dials and then waits for notifications for as long as it runs can afford.
+// channels) - and a fifth, the test hooks' (api/test_hooks_fanout.go), under DISPATCH_TEST_HOOKS
+// alone, which production never sets. Each connection is hijacked as soon as it is opened, so it
+// leaves with its caller and the pool holds none between dials: what one bounds is dials in
+// flight, not connections held. A listener redialling while another dials waits that dial out,
+// which is what a loop that dials and then waits for notifications for as long as it runs can
+// afford.
 const listenerPoolSize = 1
 
 // Listener returns one connection of its own for LISTEN, from a one-connection pool opened from the
 // shared pool's configuration and hijacked, so it holds no shared connection. The caller closes it.
 // The document rooms' stale-room evictor (docs/stale_room.go) and the background loops' shared
-// wake hub (cmd/dispatch) each hold one for the life of the process; the delivery hub
+// wake hub (cmd/dispatch) each hold one for the life of the process, as does the test hooks'
+// fan-out (api/test_hooks_fanout.go) under DISPATCH_TEST_HOOKS; the delivery hub
 // (api/delivery_live_hub.go) and the event stream relay (api/event_stream_relay.go) each hold one
 // while something subscribes to them, and close it when the last subscriber leaves. A connection
 // of the shared pool held that long would be one fewer for every request, and a LISTEN on a
@@ -308,12 +314,14 @@ const outboxPoolSize = 1
 // pools above, so it is counted here rather than by a method of Pool.
 const registryPoolSize = 1
 
-// listenerConnections is how many connections the listener pool dials and hands off at once: the
-// delivery hub's and the event stream relay's, each held only while something subscribes to them,
-// and the stale-room evictor's and the shared wake hub's (cmd/dispatch's woken background loops,
-// which main.go dials through database.Pool.Listener), held for the life of the process
-// (Listener). A process nobody streams from and no Delivery page is open on holds two of the
-// four; the count is what it may hold at once.
+// listenerConnections is how many connections the listener pool dials and hands off at once in
+// production: the delivery hub's and the event stream relay's, each held only while something
+// subscribes to them, and the stale-room evictor's and the shared wake hub's (cmd/dispatch's
+// woken background loops, which main.go dials through database.Pool.Listener), held for the life
+// of the process (Listener). A process nobody streams from and no Delivery page is open on holds
+// two of the four; the count is what it may hold at once. The test hooks' fan-out
+// (api/test_hooks_fanout.go) holds a fifth under DISPATCH_TEST_HOOKS alone, which production
+// never sets, so it is not counted here.
 const listenerConnections = 4
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres:

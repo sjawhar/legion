@@ -53,11 +53,12 @@ const (
 )
 
 // sampler takes a sample every 5 s: CPU and RSS of each stack process and of loadgen from /proc,
-// Postgres connections, Dispatch's goroutines and pool waiters, its heap every 15 s, and NATS
-// /varz. A failed Postgres, pprof or NATS read is marked in its sample (sample.FailedReads). At each
-// sample it also checks that every stack process is alive (checkAlive). It reads stack.json again
-// at each sample, so a process stack.sh restarted is followed to its new pid, and each process's
-// CPU ticks run on across its pids (cpuStitch).
+// Postgres connections, Dispatch's goroutines and pool waiters, its heap every 15 s, NATS /varz and
+// /jsz, and the pull-request counts of the pull spy. A failed Postgres, pprof or NATS /varz read is
+// marked in its sample (sample.FailedReads); a /jsz read that fails leaves its keys out of the
+// sample. At each sample it also checks that every stack process is alive (checkAlive). It reads
+// stack.json again at each sample, so a process stack.sh restarted is followed to its new pid, and
+// each process's CPU ticks run on across its pids (cpuStitch).
 type sampler struct {
 	pids      map[string]int // by name; "postgres" is the postmaster
 	stackPath string         // stack.json, read again at each sample; empty under -allow-foreign
@@ -66,9 +67,11 @@ type sampler struct {
 	pgURL     string
 	stitch    map[string]*cpuStitch // by name
 	kick      chan struct{}         // takes a sample at once (sampleNow)
-	mu        sync.Mutex
-	samples   []sample
-	exits     map[string]stackExit // by name, the stack processes found gone
+	// pulls counts the pull requests on the stream's consumers; nil when the spy did not start.
+	pulls   *pullSpy
+	mu      sync.Mutex
+	samples []sample
+	exits   map[string]stackExit // by name, the stack processes found gone
 	// restarting names the process stack.sh is restarting: its absence is not an exit.
 	restarting string
 }
@@ -436,6 +439,11 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.
 		} else {
 			sm.NATS = v
 		}
+		maps.Copy(sm.NATS, natsJsz(s.natsMon))
+		if s.pulls != nil {
+			sm.NATS["pull_requests"] = float64(s.pulls.total.Load())
+			sm.NATS["session_pull_requests"] = float64(s.pulls.sessions.Load())
+		}
 		s.mu.Lock()
 		// A sample whose reads ran once the step had ended keeps none of them, as poll keeps no
 		// read then: its failed reads would enter the statistics as zeros (a 0 connection count,
@@ -610,6 +618,30 @@ func natsVarz(mon string) (map[string]float64, error) {
 	return map[string]float64{"cpu_pct": v.CPU, "mem": v.Mem, "connections": v.Connections, "in_msgs": v.InMsgs, "out_msgs": v.OutMsgs, "slow_consumers": v.SlowCons, "subscriptions": v.Subs}, nil
 }
 
+// natsJsz reads NATS /jsz: the JetStream consumers, streams and messages, and the JetStream API
+// requests and errors; nil when the read fails.
+func natsJsz(mon string) map[string]float64 {
+	resp, err := shortClient.Get(mon + "/jsz")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var v struct {
+		Streams   float64 `json:"streams"`
+		Consumers float64 `json:"consumers"`
+		Messages  float64 `json:"messages"`
+		API       struct {
+			Total  float64 `json:"total"`
+			Errors float64 `json:"errors"`
+		} `json:"api"`
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if json.Unmarshal(b, &v) != nil {
+		return nil
+	}
+	return map[string]float64{"js_streams": v.Streams, "js_consumers": v.Consumers, "js_messages": v.Messages, "js_api_total": v.API.Total, "js_api_errors": v.API.Errors}
+}
+
 // xidRate reads the next transaction id to be assigned at from and at to, over one direct
 // Postgres connection, and returns the transaction ids assigned per second between the two reads.
 // When the connect or either read fails, or ctx ends first, it returns no rate and the error,
@@ -698,6 +730,20 @@ type resourcesSummary struct {
 	NATSOutMsgsPerS   *float64 `json:"nats_out_msgs_per_s"`
 	NATSInMsgsPerS    *float64 `json:"nats_in_msgs_per_s"`
 	NATSSlowConsumers *float64 `json:"nats_slow_consumers"`
+	// JSConsumersMax is the most JetStream consumers in a sample (/jsz consumers), JSConsumersLast
+	// the count at the window's last sample; JSAPIPerS the JetStream API requests per second. Null
+	// when no sample read /jsz.
+	JSConsumersMax  *float64 `json:"js_consumers_max"`
+	JSConsumersLast *float64 `json:"js_consumers_last"`
+	JSAPIPerS       *float64 `json:"js_api_per_s"`
+	// PullRequestsPerS is the pull requests per second on the stream's consumers (the pull spy),
+	// SessionPullRequestsPerS those on session consumers (s-<session id>). Null when the spy did
+	// not run.
+	PullRequestsPerS        *float64 `json:"pull_requests_per_s"`
+	SessionPullRequestsPerS *float64 `json:"session_pull_requests_per_s"`
+	// Trends is, per process, its CPU and RSS in the first and the last third of the window and its
+	// RSS slope: what shows an upward trend over the window.
+	Trends map[string]trend `json:"trends"`
 	// DispatchCPUSPerOp is Dispatch's CPU-seconds per committed event or sent request; null
 	// with no operations, no Dispatch pid, or when the commit rows were not read
 	// (events.commits_error), which leaves the committed events unknown.
@@ -798,11 +844,95 @@ func summarizeResources(ss []sample, ops int, durationS float64) *resourcesSumma
 			res.NATSOutMsgsPerS, res.NATSInMsgsPerS = &out, &in
 		}
 	}
+	rate := func(key string) *float64 {
+		x, okA := a.NATS[key]
+		y, okB := b.NATS[key]
+		if !okA || !okB {
+			return nil
+		}
+		v := (y - x) / dt
+		return &v
+	}
+	res.JSAPIPerS, res.PullRequestsPerS, res.SessionPullRequestsPerS = rate("js_api_total"), rate("pull_requests"), rate("session_pull_requests")
+	for _, s := range win {
+		if c, ok := s.NATS["js_consumers"]; ok {
+			if res.JSConsumersMax == nil || c > *res.JSConsumersMax {
+				res.JSConsumersMax = &c
+			}
+		}
+	}
+	if c, ok := b.NATS["js_consumers"]; ok {
+		res.JSConsumersLast = &c
+	}
+	res.Trends = trends(win)
 	if dc, ok := res.CPUCoresMean["dispatch"]; ok && ops > 0 && durationS > 0 {
 		v := dc / (float64(ops) / durationS)
 		res.DispatchCPUSPerOp = &v
 	}
 	return res
+}
+
+// trend is one process's CPU and memory early and late in the window: its cores over the first
+// and the last third of the window's samples, its mean RSS in each, and the least-squares slope of
+// its RSS over the whole window.
+type trend struct {
+	CoresFirstThird    float64 `json:"cores_first_third"`
+	CoresLastThird     float64 `json:"cores_last_third"`
+	RSSMiBFirstThird   float64 `json:"rss_mib_first_third"`
+	RSSMiBLastThird    float64 `json:"rss_mib_last_third"`
+	RSSSlopeMiBPerMin  float64 `json:"rss_slope_mib_per_min"`
+	SamplesInEachThird int     `json:"samples_in_each_third"`
+}
+
+// trends is the trend of each process every in-window sample measured; empty with fewer than six
+// samples, which give no thirds of two samples each.
+func trends(win []sample) map[string]trend {
+	out := map[string]trend{}
+	k := len(win) / 3
+	if k < 2 {
+		return out
+	}
+	first, last := win[:k], win[len(win)-k:]
+	cores := func(part []sample, name string) (float64, bool) {
+		a, b := part[0], part[len(part)-1]
+		ta, okA := a.CPUTicks[name]
+		tb, okB := b.CPUTicks[name]
+		dt := b.At.Sub(a.At).Seconds()
+		if !okA || !okB || dt <= 0 {
+			return 0, false
+		}
+		return (tb - ta) / clkTck / dt, true
+	}
+	meanRSS := func(part []sample, name string) float64 {
+		var sum float64
+		for _, s := range part {
+			sum += s.RSSKiB[name] / 1024
+		}
+		return sum / float64(len(part))
+	}
+	for name := range win[len(win)-1].CPUTicks {
+		c1, ok1 := cores(first, name)
+		c2, ok2 := cores(last, name)
+		if !ok1 || !ok2 {
+			continue
+		}
+		// The least-squares slope of RSS (MiB) over time (minutes from the first sample).
+		var n, sx, sy, sxx, sxy float64
+		for _, s := range win {
+			if _, ok := s.RSSKiB[name]; !ok {
+				continue
+			}
+			x, y := s.At.Sub(win[0].At).Minutes(), s.RSSKiB[name]/1024
+			n, sx, sy, sxx, sxy = n+1, sx+x, sy+y, sxx+x*x, sxy+x*y
+		}
+		var slope float64
+		if d := n*sxx - sx*sx; d > 0 {
+			slope = (n*sxy - sx*sy) / d
+		}
+		out[name] = trend{CoresFirstThird: c1, CoresLastThird: c2, RSSMiBFirstThird: meanRSS(first, name), RSSMiBLastThird: meanRSS(last, name),
+			RSSSlopeMiBPerMin: slope, SamplesInEachThird: k}
+	}
+	return out
 }
 
 func logSamplerStart(lg *log.Logger, ep endpoints) {

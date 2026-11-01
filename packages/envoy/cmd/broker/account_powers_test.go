@@ -29,6 +29,11 @@ const (
 	// answer this test reads is the authority's and not a decision's.
 	powersApprover = "ada@example.com"
 	unknownID      = "00000000-0000-4000-8000-000000000000"
+	// unknownRecord is that same id nothing has, in a record id's own shape: a lowercase-hex
+	// sha256 hash. The two decide routes authenticate their own caller after they have read the
+	// record's kind, so an id of any other shape is refused 400 before the authority this test
+	// reads is reached; every other route refuses the caller first and takes either shape.
+	unknownRecord = "0000000000000000000000000000000000000000000000000000000000000000"
 	// lacksPower is the refusal a listed caller gets on a route its name does not carry, as
 	// against ACCOUNT_NOT_LISTED for an account the broker does not list at all.
 	lacksPower = "ACCOUNT_LACKS_POWER"
@@ -77,9 +82,9 @@ func TestAListedAccountReachesOnlyItsOwnRoutes(t *testing.T) {
 			contentType: "application/x-www-form-urlencoded", body: "token=a-token-nobody-issued", relays: true},
 		{method: http.MethodGet, pattern: "/v1/pending", path: "/v1/pending?approver=" + powersApprover, relays: true},
 		{method: http.MethodGet, pattern: "/v1/credential-requests/{record}", path: "/v1/credential-requests/" + unknownID, relays: true},
-		{method: http.MethodPost, pattern: "/v1/credential-requests/{record}/approve", path: "/v1/credential-requests/" + unknownID + "/approve",
+		{method: http.MethodPost, pattern: "/v1/credential-requests/{record}/approve", path: "/v1/credential-requests/" + unknownRecord + "/approve",
 			contentType: "application/json", body: `{"approver":"` + powersApprover + `"}`, relays: true},
-		{method: http.MethodPost, pattern: "/v1/credential-requests/{record}/deny", path: "/v1/credential-requests/" + unknownID + "/deny",
+		{method: http.MethodPost, pattern: "/v1/credential-requests/{record}/deny", path: "/v1/credential-requests/" + unknownRecord + "/deny",
 			contentType: "application/json", body: `{"approver":"` + powersApprover + `"}`, relays: true},
 		{method: http.MethodPost, pattern: "/v1/machine-logins/lookup", path: "/v1/machine-logins/lookup",
 			contentType: "application/json", body: `{"code":"EXAM-PLE1"}`, relays: true},

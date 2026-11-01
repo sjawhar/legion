@@ -63,11 +63,14 @@ type runConfig struct {
 	mentions    int
 	// dashboard is the dashboard stream the build under test serves, probed once before the
 	// window (probeDashboard): dashboardLive or dashboardSSE.
-	dashboard   string
-	rngSeed     uint64
-	natsConns   int
-	buildCommit string
-	buildDirty  bool
+	dashboard string
+	rngSeed   uint64
+	natsConns int
+	// sessionDelivery is how the simulated sessions take their messages: sessionDeliveryCore
+	// (their core subscriptions) or sessionDeliveryConsumer (relay frames of their consumers).
+	sessionDelivery string
+	buildCommit     string
+	buildDirty      bool
 	// boxBusyBefore is the box's busy fraction read before Dispatch started (run-step.sh reads it
 	// with `loadgen box-busy` before its reset); negative means collectMeta reads it itself.
 	boxBusyBefore float64
@@ -113,6 +116,7 @@ func runLoad(args []string) error {
 	buildCommit := fs.String("build-commit", "", "commit Dispatch was built from, for meta.json")
 	buildDirty := fs.Bool("build-dirty", false, "the build's tree had uncommitted changes, for meta.json")
 	boxBusyBefore := fs.Float64("box-busy-before", -1, "the box's busy fraction read before Dispatch started (loadgen box-busy); default: read it now")
+	delivery := fs.String("session-delivery", envOr("LOADTEST_SESSION_DELIVERY", sessionDeliveryCore), "how the sessions take their messages: core (their core subscriptions) or consumer (the listener's relay of their consumers); default $LOADTEST_SESSION_DELIVERY, else core")
 	source := fs.String("source", sourceRequests, "request source: "+sourceRequests+" (the route mix) or "+sourceReplay+" (a replay bundle's logged writes, replay_plan.go)")
 	rf := registerReplayFlags(fs)
 	_ = fs.Parse(args)
@@ -165,6 +169,8 @@ func runLoad(args []string) error {
 		return fmt.Errorf("-nats-conns must be at least 1")
 	case *live < -1:
 		return fmt.Errorf("-live must be 0 or more")
+	case *delivery != sessionDeliveryCore && *delivery != sessionDeliveryConsumer:
+		return fmt.Errorf("-session-delivery must be %s or %s, not %q", sessionDeliveryCore, sessionDeliveryConsumer, *delivery)
 	case *boxBusyBefore > 1 || !finite(*boxBusyBefore):
 		return fmt.Errorf("-box-busy-before must be a fraction between 0 and 1")
 	case *restartAt < 0 || *restartAt >= *duration:
@@ -231,7 +237,7 @@ func runLoad(args []string) error {
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
 		human: *human, live: *live, liveResume: *liveResume, liveStale: *liveStale,
 		restartAt: *restartAt, stackSh: stackSh, mentionFrac: *mentionFrac, mentions: *mentions,
-		rngSeed: *rngSeed, natsConns: *natsConns,
+		rngSeed: *rngSeed, natsConns: *natsConns, sessionDelivery: *delivery,
 		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
 		replay: rs,
 	}, sf)
@@ -325,6 +331,9 @@ type summaryConfig struct {
 	NATSConns  int      `json:"nats_conns"`
 	LiveResume bool     `json:"live_resume"`
 	LiveStale  int      `json:"live_stale"`
+	// SessionDelivery is the delivery the sessions asked for (-session-delivery): core or
+	// consumer. sessions.delivery says how many got consumer delivery.
+	SessionDelivery string `json:"session_delivery"`
 	// RestartAtS is -restart-at in seconds; 0 for no restart.
 	RestartAtS  float64 `json:"restart_at_s"`
 	MentionFrac float64 `json:"mention_frac"`
@@ -342,6 +351,8 @@ type sessionsSummary struct {
 	HeartbeatErrors   int64 `json:"heartbeat_errors"`
 	NATSSubscriptions int   `json:"nats_subscriptions"`
 	NATSConnections   int   `json:"nats_connections"`
+	// Delivery is how the sessions' consumer delivery went; absent on the core path.
+	Delivery *sessionDeliverySummary `json:"delivery,omitempty"`
 }
 
 type summary struct {
@@ -418,9 +429,9 @@ func execute(cfg runConfig, sf seedFile) error {
 	defer logf.Close()
 	lg := log.New(io.MultiWriter(os.Stderr, logf), "", log.LstdFlags|log.Lmicroseconds)
 	nonce := newMarkerNonce()
-	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d live-resume=%t live-stale=%d restart-at=%s mention-frac=%.2f mentions=%d rng-seed=%d marker-nonce=%s",
+	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d live-resume=%t live-stale=%d restart-at=%s mention-frac=%.2f mentions=%d rng-seed=%d session-delivery=%s marker-nonce=%s",
 		cfg.name, cfg.sourceName(), cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human,
-		cfg.live, cfg.liveResume, cfg.liveStale, cfg.restartAt, cfg.mentionFrac, cfg.mentions, cfg.rngSeed, formatNonce(nonce))
+		cfg.live, cfg.liveResume, cfg.liveStale, cfg.restartAt, cfg.mentionFrac, cfg.mentions, cfg.rngSeed, cfg.sessionDelivery, formatNonce(nonce))
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
@@ -458,7 +469,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	if err != nil {
 		return err
 	}
-	reg := st.registerSessions(ctx)
+	reg := st.registerSessions(ctx, ns)
 	st.startHeartbeat(ctx, reg)
 
 	st.openWindow(time.Now())
@@ -475,7 +486,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	} else {
 		reqs, requestsDone = st.runRequests(ctx, a)
 	}
-	pr := st.startProbes(ctx)
+	pr := st.startProbes(ctx, ns.pulls)
 	if st.restart != nil {
 		go st.restart.run(ctx, pr.smp, lg)
 	}
@@ -493,12 +504,18 @@ func execute(cfg runConfig, sf seedFile) error {
 	}
 	ns.close()
 	ns.envelopes.write(cfg.out, lg)
+	if ns.relay != nil {
+		ns.relay.writeFrames(cfg.out, st.sessions, lg)
+	}
 
 	sum := st.buildSummary(ns, reg, writes, reqs, live, pr)
 	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, 0o644, lg)
 	meta.End = time.Now()
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
 	committed := fmt.Sprintf("committed %d, receipts %d of %d", sum.Events.Committed, sum.Events.IssueTopicReceipts, sum.Events.ExpectedIssueTopicReceipts)
+	if d := sum.Sessions.Delivery; d != nil {
+		committed += fmt.Sprintf(", sessions on consumer delivery %d of %d (core %d %v)", d.ConsumerSessions, cfg.sessions, d.CoreSessions, d.CoreReasons)
+	}
 	if sum.Events.commitsUnread() {
 		committed = "committed and receipts not read"
 	}
@@ -736,8 +753,10 @@ type probes struct {
 }
 
 // startProbes starts the probes. The two lock samplers run from 20 s into the window to its end.
-func (st *step) startProbes(ctx context.Context) *probes {
+// The sampler reads pulls' counts at each sample, when pulls is not nil.
+func (st *step) startProbes(ctx context.Context, pulls *pullSpy) *probes {
 	p := &probes{smp: newSampler(st.cfg.ep), smpDone: make(chan struct{}), lp: &lockProbe{}, ls: &lockSampler{}}
+	p.smp.pulls = pulls
 	go func() {
 		defer close(p.smpDone)
 		p.smp.loop(ctx, st.winStart, st.winEnd, st.lg)
@@ -830,7 +849,7 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 			EventMix:  cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
 			LiveResume: cfg.liveResume, LiveStale: cfg.liveStale, RestartAtS: cfg.restartAt.Seconds(),
-			MentionFrac: cfg.mentionFrac, Mentions: cfg.mentions,
+			MentionFrac: cfg.mentionFrac, Mentions: cfg.mentions, SessionDelivery: cfg.sessionDelivery,
 			MarkerNonce: formatNonce(st.nonce), Source: cfg.sourceName(),
 		},
 		Events:   joinDelivery(ws, commits, ns.receipts.snapshot(), watcherCount, durS),
@@ -855,6 +874,10 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 	}
 	if cfg.mentionFrac > 0 {
 		sum.CommentMentions = summarizeMentions(ws, cfg.mentionFrac, cfg.mentions, restartAt)
+	}
+	if ns.relay != nil {
+		d := ns.relay.summary()
+		sum.Sessions.Delivery = &d
 	}
 	if commitsErr != nil {
 		sum.Events.CommitsError = commitsErr.Error()

@@ -395,23 +395,8 @@ func resolveEndpoints(f endpointFlags, st *stackFile) (endpoints, error) {
 // production Dispatch hold other tokens, so a mistaken target fails here.
 func checkStack(ctx context.Context, e endpoints) error {
 	client := &http.Client{Timeout: 10 * time.Second}
-	if e.natsServerName != "" {
-		var varz struct {
-			ServerName string `json:"server_name"`
-		}
-		status, body, err := guardGet(ctx, client, e.natsMon+"/varz", "")
-		if err == nil && status != http.StatusOK {
-			err = fmt.Errorf("GET %s/varz answered %d", redactURL(e.natsMon), status)
-		}
-		if err == nil {
-			err = json.Unmarshal(body, &varz)
-		}
-		if err != nil {
-			return fmt.Errorf("guard: nats check failed: %w", err)
-		}
-		if varz.ServerName != e.natsServerName {
-			return fmt.Errorf("guard: nats check failed: %s/varz server_name is %q, want %q", redactURL(e.natsMon), varz.ServerName, e.natsServerName)
-		}
+	if err := checkNATSServerName(ctx, client, e.natsMon, e.natsServerName); err != nil {
+		return err
 	}
 	status, body, err := guardGet(ctx, client, e.dispatch+"/api/v1/projects", e.token)
 	if err != nil {
@@ -435,6 +420,32 @@ func checkStack(ctx context.Context, e endpoints) error {
 	}
 	if status/100 == 2 {
 		return fmt.Errorf("guard: listener check failed: %s/v1/sessions answers %d to a token that is not the stack's, so it does not hold the stack's token", redactURL(e.listener), status)
+	}
+	return nil
+}
+
+// checkNATSServerName confirms that the NATS server monitored at monURL names itself name, so a
+// command that publishes (a step, a backlog run) reaches the stack's own NATS and no other. An
+// empty name skips the check.
+func checkNATSServerName(ctx context.Context, client *http.Client, monURL, name string) error {
+	if name == "" {
+		return nil
+	}
+	var varz struct {
+		ServerName string `json:"server_name"`
+	}
+	status, body, err := guardGet(ctx, client, monURL+"/varz", "")
+	if err == nil && status != http.StatusOK {
+		err = fmt.Errorf("GET %s/varz answered %d", redactURL(monURL), status)
+	}
+	if err == nil {
+		err = json.Unmarshal(body, &varz)
+	}
+	if err != nil {
+		return fmt.Errorf("guard: nats check failed: %w", err)
+	}
+	if varz.ServerName != name {
+		return fmt.Errorf("guard: nats check failed: %s/varz server_name is %q, want %q", redactURL(monURL), varz.ServerName, name)
 	}
 	return nil
 }

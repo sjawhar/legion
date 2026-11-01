@@ -55,6 +55,11 @@ type mentionSend struct {
 	// sender refuses the send (enqueue), and taken over by the send itself when its lane starts
 	// it (claimCommentDeliveryAttempt).
 	claimed time.Time
+	// takeover paces this send's tries at a listener being replaced. The send its comment queues
+	// carries the pacing that comment's own resolution started (resolveThroughTakeover), so the
+	// resolution and the send share one window; a send a keyed repeat queues starts a window of
+	// its own, as its resolution is the sender's own (replayComment).
+	takeover takeoverRetry
 }
 
 // mentionKey names one attempt: its comment, its target and its number.
@@ -398,13 +403,14 @@ func (m *mentionSender) wait() {
 }
 
 // sendCommentMention is the mention sender's send: deliverResolvedCommentMention bound to the
-// attempt the send was queued for and to the claim this sender holds on it, so it takes that
-// attempt over rather than opening another. A failure is logged and leaves the attempt pending, as
-// deliverBroadcast's does, for the delivery sweep once the claim it took lapses.
+// attempt the send was queued for, to the claim this sender holds on it, so it takes that
+// attempt over rather than opening another, and to the take-over pacing the send carries. A
+// failure is logged and leaves the attempt pending, as deliverBroadcast's does, for the delivery
+// sweep once the claim it took lapses.
 func (s *server) sendCommentMention(ctx context.Context, item mentionSend) {
 	if _, err := s.deliverResolvedCommentMention(
 		store.WithTransactionTracking(ctx), item.comment, item.created, item.mention, item.actor,
-		attemptClaim{attempt: item.attempt, claimedAt: item.claimed},
+		attemptClaim{attempt: item.attempt, claimedAt: item.claimed}, item.takeover,
 	); err != nil {
 		slog.Error("dispatch: comment mention delivery",
 			"comment", item.comment.ID, "target", item.mention.Target, "error", err)

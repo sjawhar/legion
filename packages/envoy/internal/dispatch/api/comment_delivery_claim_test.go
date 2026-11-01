@@ -172,7 +172,7 @@ func TestConcurrentMentionRetryResolvesNewAttemptUnderLock(t *testing.T) {
 	second := make(chan deliveryResult, 1)
 	go func() {
 		attempt, err := direct.deliverResolvedCommentMention(
-			context.Background(), comment, event, stale, model.Actor{Kind: "user", ID: "alice"}, attemptClaim{},
+			context.Background(), comment, event, stale, model.Actor{Kind: "user", ID: "alice"}, attemptClaim{}, direct.newTakeoverRetry(),
 		)
 		first <- deliveryResult{attempt: attempt, err: err}
 	}()
@@ -182,7 +182,7 @@ func TestConcurrentMentionRetryResolvesNewAttemptUnderLock(t *testing.T) {
 	mu.Unlock()
 	go func() {
 		attempt, err := direct.deliverResolvedCommentMention(
-			context.Background(), comment, event, stale, model.Actor{Kind: "user", ID: "bob"}, attemptClaim{},
+			context.Background(), comment, event, stale, model.Actor{Kind: "user", ID: "bob"}, attemptClaim{}, direct.newTakeoverRetry(),
 		)
 		second <- deliveryResult{attempt: attempt, err: err}
 	}()

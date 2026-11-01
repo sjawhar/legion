@@ -145,6 +145,7 @@ func TestInitialMentionDeliveryDoesNotAppendAfterReplyConsumesPending(t *testing
 		ResolvedMention{Target: "session:s1", Delivery: "steer", SessionID: new("s1"), attemptSessionID: "s1"},
 		model.Actor{Kind: "user", ID: "alice"},
 		attemptClaim{attempt: 1},
+		direct.newTakeoverRetry(),
 	)
 	if err != nil {
 		t.Fatalf("complete initial mention after its answer: %v", err)
@@ -215,6 +216,7 @@ func TestInitialMentionDeliveryReturnsFailedAttemptAfterErrorReplyConsumesPendin
 		ResolvedMention{Target: "session:s1", Delivery: "steer", SessionID: new("s1"), attemptSessionID: "s1"},
 		model.Actor{Kind: "user", ID: "alice"},
 		attemptClaim{attempt: 1},
+		direct.newTakeoverRetry(),
 	)
 	if err != nil {
 		t.Fatalf("complete initial mention after an error reply: %v", err)
@@ -434,6 +436,9 @@ func TestReplyDuringAMentionRetrySendStillRecordsTheDeliveryReceipt(t *testing.T
 // send, so the answer is accepted whether or not the sender ever comes back. The attempt's own
 // receipt is owed by the sender that died and nobody else pays it, but the answer is not lost
 // and the reply is not refused for the life of the comment.
+//
+// A client that gives up no longer strands the attempt - a request's own send outlives its
+// connection - so the row a dead sender leaves is written here directly.
 func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T) {
 	var listenerState struct {
 		sync.Mutex
@@ -452,8 +457,7 @@ func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T
 			stall := listenerState.sends == 2
 			listenerState.Unlock()
 			if stall {
-				// The retry's client gives up while its send is still in flight, so that
-				// process never reaches its settle transaction.
+				// The retry's client gives up while its send is still in flight.
 				time.Sleep(1500 * time.Millisecond)
 			}
 			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
@@ -479,7 +483,7 @@ func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T
 		t.Fatalf("strand attempt 2: %v", err)
 	}
 	if stranded := commentAttemptRow(t, database, comment.ID, "session:s1", 2); stranded != "pending///s1" {
-		t.Fatalf("attempt 2 = %q, want it left pending by the sender that never returned", stranded)
+		t.Fatalf("attempt 2 = %q, want it left pending, naming the session its frame reached", stranded)
 	}
 
 	// The frame did reach the session, and it answers the attempt its sender abandoned.
