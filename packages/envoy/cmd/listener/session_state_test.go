@@ -276,6 +276,41 @@ func TestASendIsStoredForAStalledSessionAndRefusedForAGoneOne(t *testing.T) {
 	}
 }
 
+// A listener that restarted after its reaper deleted a session's record remembers no last
+// registration for it, so its refusal carries no `last_seen` at all. A sender then cannot tell a
+// session this listener watched reach the gone horizon from one it has never heard of, and the
+// two call for different acts: the first is dead, the second may be alive on another listener.
+// The refusal says in its own text that the listener cannot name that time (dispatch://INFRA-392,
+// A6). A session this rig holds no record and no remembered registration for is exactly the state
+// a restart leaves.
+func TestARefusalThatCannotNameTheLastRegistrationSaysSo(t *testing.T) {
+	d, _ := stalledSessionsRig(t)
+	const sessionID = "ses_reaped_before_the_restart"
+
+	recorder := httptest.NewRecorder()
+	body := fmt.Sprintf(`{"target_session":%q,"source":"agent","source_session":"ses_sender","message":"are you there?"}`, sessionID)
+	sendHandler(d, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(body)))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("send to a session the listener holds nothing for: status %d, body %s; want 404", recorder.Code, recorder.Body.String())
+	}
+	var refusal noLiveSessionRefusal
+	if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
+		t.Fatalf("decode the refusal %s: %v", recorder.Body.String(), err)
+	}
+	if !strings.HasPrefix(refusal.Error, "no live session "+sessionID) {
+		t.Fatalf("the refusal reads %q, want the kept prefix naming the session", refusal.Error)
+	}
+	if refusal.LastSeen != 0 {
+		t.Fatalf("the refusal names last_seen %d, so this listener can name the time; this test is about the refusal that cannot", refusal.LastSeen)
+	}
+	said := strings.ToLower(refusal.Error)
+	names := strings.Contains(said, "last seen") || strings.Contains(said, "last registration") || strings.Contains(said, "last registered")
+	unknown := strings.Contains(said, "unknown") || strings.Contains(said, "not know") || strings.Contains(said, "no record")
+	if !names || !unknown {
+		t.Fatalf("the refusal reads %q and says nothing about this listener not knowing when %s last registered", refusal.Error, sessionID)
+	}
+}
+
 // /healthz says which maximum age the session bucket is keeping records for, and says it again
 // after another process changed it: the registry settles the age on every reaper pass, so an
 // operator who raises it past the gone horizon can read, from a running listener and with no
