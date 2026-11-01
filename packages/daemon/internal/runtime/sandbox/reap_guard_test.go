@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -52,13 +53,15 @@ func TestReplacementRefusesToReapAVolumeWithALegacySession(t *testing.T) {
 func TestReplacementReapsOnlyDatabaseBackedOrEmptySessions(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
+		sql   bool
 		claim supervise.Claim
 	}{
 		{
-			name: "the session was registered in Postgres",
+			name: "the retiring Sandbox uses the session database",
+			sql:  true,
 			claim: supervise.Claim{
 				Token: rootToken, Project: testProject, Tree: testTree, Issue: testTree,
-				Session: "ses_imported", SessionFile: "/sessions/ses_imported.jsonl", SessionStore: "postgres",
+				Session: "ses_imported", SessionFile: "/sessions/ses_imported.jsonl",
 			},
 		},
 		{
@@ -71,6 +74,17 @@ func TestReplacementReapsOnlyDatabaseBackedOrEmptySessions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &claimsForReap{fakeStore: newFakeStore(), claims: []supervise.Claim{tc.claim}}
 			g := supersededIssue(t, withOptions(func(o *Options) { o.Store = store }))
+			if tc.sql {
+				s := g.sandbox(SandboxName(workerToken))
+				s.Spec.PodTemplate.Spec.Containers = append(s.Spec.PodTemplate.Spec.Containers, corev1.Container{Name: "roles", Env: []corev1.EnvVar{{Name: "OMP_SESSION_STORAGE", Value: "sql"}}})
+				object, err := encodeSandbox(*s)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := g.dyn.Tracker().Update(sandboxGVR, object, testNamespace); err != nil {
+					t.Fatal(err)
+				}
+			}
 
 			g.spawn(workerSpec(t))
 
