@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-156",
+  "previousHandoff": "8a7b8d869d7201ff19504cdcb411c7ba5aea6e51",
+  "completed": "2026-11-01T10:15:00Z",
+  "headTested": "3ea02d9d9673e92c8679e2b557a1453bd42036e1",
+  "previousHeadTested": "d0589f82c6aeb5c1ea4214b78a787c449f3ce21a",
+  "fingerprint": "86321b07e51fc08e",
+  "fingerprintCheck": "forward-merge re-check d0589f82 -> 3ea02d9d (code e9a044c0, main d86f8de8): the two branch diffs are line-for-line equal once 0151/0158 are blanked out (0 differing lines); migration renumber only, bare gates only.",
+  "provider": "Anthropic (anthropic/claude-opus-5-5), the model that answered this testing session",
+  "outcome": "Pass on the bare gates. CI run 41295057878 at 3ea02d9d queued when read; the previous code head's run 41281098295 failed in envoy-smoke (runner disk full) and one dispatch phone chart row, neither in this PR's files. GitHub: MERGEABLE.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Bare gates at 3ea02d9d on a database first migrated by main d86f8de8: t.py 80/80, which carries the implementer's A3 steps 1, 5 and 12 (https://github.com/sjawhar/legion/pull/2394#issuecomment-6556451124)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Migration 0158_block_pointer_links applies after main's 0151-0157 and keeps every existing edge",
+      "surface": "main's Dispatch server at d86f8de8, then the head's server on the same Postgres 17 + pgvector database",
+      "command": "bash $TMPDIR/infra156-tester/upgrade.sh <main d86f8de8 binary> <head binary> infra156_tester_up23 8795 (https://github.com/sjawhar/legion/pull/2394#issuecomment-6556451124)",
+      "observed": "schema_version 157 -> 158; schema_migrations 158,157,...,150; graph_edges holds block_ref_listed; existing block_refs rows kept, to_types null; the same four mentions edges (spec, document, comment, message blocks)",
+      "headSha": "3ea02d9d9673e92c8679e2b557a1453bd42036e1",
+      "negativeControl": "a block[] pointer to a callout on the upgraded database is refused 400 INVALID_MARKDOWN (t.py check 1f)"
+    },
+    {
+      "criterion": "A3 checks and CI filters still hold",
+      "surface": "t.py against the head's server on the upgraded database; check-ci-filters.sh in a scratch clone",
+      "command": "python3 t.py http://127.0.0.1:8795; uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh (https://github.com/sjawhar/legion/pull/2394#issuecomment-6556451124)",
+      "observed": "t.py 80/80; filters exit 0",
+      "headSha": "3ea02d9d9673e92c8679e2b557a1453bd42036e1",
+      "negativeControl": "serves naming a callout -> 400 INVALID_MARKDOWN (t.py check 1f)"
+    }
+  ]
+}
