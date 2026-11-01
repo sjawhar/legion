@@ -1,6 +1,0 @@
-kind: Fixed
-body: |-
-  `envoy_sessions`' `machine` filter finds a session by the listener it registered through as
-  well as by the machine its process runs on: it matched only the latter, so a filter by a hub's
-  machine id (`envoy-hub`, `gke`) listed nothing for the sessions registered through it
-  (INFRA-594).
