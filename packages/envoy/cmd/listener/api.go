@@ -72,6 +72,9 @@ type publishResponse struct {
 type subscribeResponse struct {
 	store.Interest
 	Warnings []string `json:"warnings,omitempty"`
+	// Delivery is the session's delivery (deliveryAnswer), present whenever the registration
+	// carried delivery or registered a serving port.
+	Delivery *deliveryAnswer `json:"delivery,omitempty"`
 }
 
 const unwiredRepositoryWarningTimeout = 750 * time.Millisecond
@@ -165,6 +168,15 @@ func frameDeliveryMode(payload *string) (mode string, err error) {
 		return "", fmt.Errorf("delivery.mode %q is not a delivery mode", mode)
 	}
 	return mode, nil
+}
+
+// envelopeDeliveryMode is frameDeliveryMode of item's payload, none when it has none.
+func envelopeDeliveryMode(item contracts.Envelope) (mode string, err error) {
+	var payload *string
+	if item.Payload != "" {
+		payload = &item.Payload
+	}
+	return frameDeliveryMode(payload)
 }
 
 // isDeliveryMode reports whether value is one of the three targeted-delivery modes. The list is
@@ -1044,8 +1056,9 @@ func interestRowFor(sessions *session.SessionRegistry, item store.Interest) inte
 // the 500 writeInterestRecordUnreadable writes, and a read that did not answer is the
 // bus-unavailable 503 with Retry-After: 1 (a key NATS refuses is still the 413 or 400
 // writeBusUnavailable gives it). DELETE removes within the same budget, and answers store work that
-// did not answer with that 503 too (writeStoreError).
-func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRegistry) http.HandlerFunc {
+// did not answer with that 503 too (writeStoreError). removed, when not nil, is called after a
+// DELETE removed a session's interests.
+func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRegistry, removed func(ctx context.Context, sessionID string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
 
@@ -1089,6 +1102,9 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 			if err := registry.Remove(ctx, sessionID, nil); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 				writeStoreError(ctx, w, err, http.StatusInternalServerError)
 				return
+			}
+			if removed != nil {
+				removed(r.Context(), sessionID)
 			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -1488,11 +1504,24 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
 			return
 		}
-		if body.Port > 0 || body.SelfSubscribed {
-			if err := d.sessions.PutWithin(ctx, body.SessionID, sessionEntryFromSubscribe(body, machineID)); err != nil {
+		// The session's consumer, when the registration asks for one, is created or has its filter
+		// set to the topics just stored before the registration answers, so a message published on
+		// a newly followed stored topic after the answer is the consumer's to deliver.
+		delivery := d.consumers.register(r.Context(), body, item.Topics)
+		if body.Port > 0 || body.SelfSubscribed || delivery.relayed() {
+			epochChanged := false
+			if delivery.relayed() {
+				previous, err := d.sessions.Get(body.SessionID)
+				epochChanged = err != nil || previous.Delivery != session.DeliveryConsumer || previous.Epoch != delivery.epoch
+			}
+			if err := d.sessions.PutWithin(ctx, body.SessionID, sessionEntryFromSubscribe(body, machineID, delivery)); err != nil {
 				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
 				writeStoreError(ctx, w, fmt.Errorf("session registry unavailable: %w", err), http.StatusServiceUnavailable)
 				return
+			}
+			if delivery.relayed() {
+				// The relay serves every registration answered consumer, so there is one to tell.
+				d.consumers.relay.registered(body.SessionID, epochChanged)
 			}
 		}
 		warningCtx, cancelWarnings := context.WithTimeout(ctx, unwiredRepositoryWarningTimeout)
@@ -1516,7 +1545,7 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 				warnings = append(warnings, warning)
 			}
 		}
-		writeJSON(w, http.StatusOK, subscribeResponse{Interest: item, Warnings: warnings})
+		writeJSON(w, http.StatusOK, subscribeResponse{Interest: item, Warnings: warnings, Delivery: delivery.answer})
 	}
 }
 
@@ -1551,6 +1580,8 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}
+		// A consumer-delivery session's consumer stops filtering on the topics just removed.
+		d.consumers.refollow(r.Context(), d, body.SessionID)
 		removed := body.Topics
 		if removed == nil {
 			removed = []string{}
@@ -1561,7 +1592,9 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 	v1.HandleFunc("/v1/roles/", roleGetHandler(d))
 	v1.HandleFunc("/v1/registry/", sessionEntryHandler(d))
 
-	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry, d.sessions))
+	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry, d.sessions, func(ctx context.Context, sessionID string) {
+		d.consumers.refollow(ctx, d, sessionID)
+	}))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))
 	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
 	v1.HandleFunc("/v1/messages/send", sendHandler(d, logger))

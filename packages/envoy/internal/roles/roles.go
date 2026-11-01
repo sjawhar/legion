@@ -115,6 +115,26 @@ func Fresh(entry session.SessionEntry, now time.Time) bool {
 	return entry.UpdatedAt > 0 && now.UnixMilli()-entry.UpdatedAt < session.ClaimStaleAfter.Milliseconds()
 }
 
+// readClaim reads role's claim for attempt of a resolution (ResolveHolderFrom, whose attempts are
+// numbered from 0). Attempt 0 of a resolution given a firstHolder reads it from there - the
+// listener's registry passes its watched copy of the role bucket
+// (store.Registry.CachedRoleHolder), which costs no round trip, so a role message the lane
+// forwards reads no bucket - and every later attempt from claims itself, since a retry after a
+// superseded release must see the claim that superseded it, which the copy can trail. A caller
+// that answers within its own deadline, a route among them, passes no firstHolder and reads the
+// claim store on every attempt. The copy names a holder, not a whole claim, and the resolution
+// reads nothing else from it.
+func readClaim(ctx context.Context, claims ClaimStore, firstHolder func(role string) (string, error), role string, attempt int) (store.RoleClaim, error) {
+	if attempt > 0 || firstHolder == nil {
+		return claims.RoleClaim(ctx, role)
+	}
+	holder, err := firstHolder(role)
+	if err != nil {
+		return store.RoleClaim{}, err
+	}
+	return store.RoleClaim{HolderSessionID: holder}, nil
+}
+
 // ResolveHolder resolves role's holder within ctx. It reads the role's claim (Unclaimed when there
 // is none), then the holder's session through sessions, which live judges (Live when it is there).
 // A holder that is gone, or that live refuses, has its claim released
@@ -126,12 +146,21 @@ func Fresh(entry session.SessionEntry, now time.Time) bool {
 // *ReadError naming its step, with the claim's holder in the Resolution when it was read. Every
 // read waits no longer than ctx, and no attempt starts once ctx has ended: that is ctx's error,
 // wrapped to name the role, and no *ReadError.
+//
+// It reads every claim from claims. A caller whose first read is a watched copy of the role
+// bucket resolves through ResolveHolderFrom instead.
 func ResolveHolder(ctx context.Context, claims ClaimStore, sessions SessionLookup, role string, live func(session.SessionEntry) bool) (Resolution, error) {
-	for range resolutionAttempts {
+	return ResolveHolderFrom(ctx, claims, nil, sessions, role, live)
+}
+
+// ResolveHolderFrom is ResolveHolder reading each attempt's claim through readClaim, so a
+// resolution given a firstHolder spends no claim-store round trip on its first attempt.
+func ResolveHolderFrom(ctx context.Context, claims ClaimStore, firstHolder func(role string) (string, error), sessions SessionLookup, role string, live func(session.SessionEntry) bool) (Resolution, error) {
+	for attempt := range resolutionAttempts {
 		if err := ctx.Err(); err != nil {
 			return Resolution{}, fmt.Errorf("resolve role %s's holder: %w", role, err)
 		}
-		claim, err := claims.RoleClaim(ctx, role)
+		claim, err := readClaim(ctx, claims, firstHolder, role, attempt)
 		if err != nil {
 			return Resolution{}, &ReadError{Step: ClaimRead, Err: err}
 		}

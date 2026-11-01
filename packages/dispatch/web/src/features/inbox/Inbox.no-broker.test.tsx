@@ -197,6 +197,7 @@ test("with no broker, a gap in the event feed asks the list again once, and a fo
       relisted.resolve({
         pending: [
           {
+            approve_url: "https://secrets.example.com/approve/record-1",
             identifiers: ["DEMO_API_KEY"],
             kind: "agent_secret",
             record_id: "record-1",

@@ -348,8 +348,18 @@ var errRoleHolderChanged = errors.New("role holder changed while resolving")
 // can name it. It unwraps to the read's own error: an ended ctx, wrapped naming the call that did
 // not answer, which a route answers as a bus that did not answer; store.ErrMalformedRoleClaim, a
 // claim record that cannot be read (writeRoleClaimUnreadable); or errRoleHolderChanged.
+//
+// It reads every claim from registry. Role delivery, whose first read is the registry's watched
+// copy of the role bucket, resolves through resolveRoleHolderFrom instead.
 func resolveRoleHolder(ctx context.Context, registry roles.ClaimStore, sessions *session.SessionRegistry, role string, live func(session.SessionEntry) bool) (roleHolderResult, error) {
-	resolution, err := roles.ResolveHolder(ctx, registry, roleHolderSessions{sessions}, role, live)
+	return resolveRoleHolderFrom(ctx, registry, nil, sessions, role, live)
+}
+
+// resolveRoleHolderFrom is resolveRoleHolder reading each attempt's claim through
+// roles.ResolveHolderFrom, so a resolution given a firstHolder spends no bucket round trip on its
+// first attempt.
+func resolveRoleHolderFrom(ctx context.Context, registry roles.ClaimStore, firstHolder func(role string) (string, error), sessions *session.SessionRegistry, role string, live func(session.SessionEntry) bool) (roleHolderResult, error) {
+	resolution, err := roles.ResolveHolderFrom(ctx, registry, firstHolder, roleHolderSessions{sessions}, role, live)
 	if err != nil {
 		// A resolution that failed before any read - its context ended - is no *roles.ReadError;
 		// it is still a claim read that did not happen, so it is reported as that step.

@@ -69,15 +69,17 @@ func TestARoleForwardIsStoredOnceOnlyWhenItsEnvelopeNamesItsEvent(t *testing.T) 
 				t.Cleanup(cfg.attemptCache.Stop)
 				var forwardErr error
 				forwards := 0
-				cfg.forwardRole = func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) error {
+				cfg.forwardRole = inlineForward(func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) error {
 					forwards++
 					forwardErr = harness.client.RequestCoreTo(subject, item, msgID, timeout)
 					return forwardErr
-				}
+				})
+				cfg = wireTestDeliveryWorkers(t, cfg)
 				item.Topic = contracts.RoleTopicPrefix + role
 				item.Payload = `{"type":"worker-queued"}`
 				item.IssuedAt = contracts.NowMillis()
 				coreNATSDeliveryHandler(cfg)(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+				cfg.roleForwards.settled(t)
 				if forwards != 1 || forwardErr != nil {
 					t.Fatalf("delivery %d forwarded %d times, the last returning %v; want one forward that returned nil", index+1, forwards, forwardErr)
 				}
