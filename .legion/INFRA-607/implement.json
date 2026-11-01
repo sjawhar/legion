@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-607",
-  "previousHandoff": "202e917332b1bff3eedd136e36c118a99102b5a0",
+  "previousHandoff": "1e4189f80a6fe3137f4de9dd57ba8159301046a0",
   "proof": [
+    {
+      "criterion": "ci-ok at the code head 57b0a928 is green; its red was main's pi-legion test, not this PR",
+      "surface": "GitHub Actions run 41266479256 (the pull_request CI of 57b0a928), re-run of its failed jobs",
+      "command": "gh run rerun 41266479256 --failed -R sjawhar/legion (at 2026-11-01T06:02:03Z), then gh run view 41266479256 --json attempt,conclusion,jobs",
+      "observed": "attempt 2 concluded success: pi-legion, lint, typecheck, test and ci-ok all success; GitHub still reports MERGEABLE. No code changed this round.",
+      "headSha": "57b0a9281b49af44d0ca577e24ac5041b26812dd",
+      "negativeControl": "attempt 1 failed pi-legion (job 124736219522) at packages/pi-legion/extensions/legion-background-subagent-omp.test.ts:477, expect(read.arrivedAt).toBeLessThan(releasedAt); this PR changes no file under packages/pi-legion"
+    },
     {
       "criterion": "Forward merge of main f93dd689 (no rebase): the runtime conflict in api/suggestion_outcomes.go keeps this PR's woken sweep and moves main's new DPoP-proof sweep onto the leased maintenance timer; migrations renumbered to 0151-0157",
       "surface": "go build/vet and go test on a real Postgres 16 at the merge head; per-file comparison of the PR's own diff against the approved head 0cc849d4",
