@@ -27,6 +27,8 @@ body: |-
   setting and the outbox's daily compaction are removed. A stored history that does not decode is
   refused naming ygo's reason once; with the pinned ygo, `v1.54.1-sami.3`, a truncated stored
   history is usually refused as `crdt: invalid update` without the decoder's reason, until the next
-  fork release.
+  fork release. `envoy-dispatch stored-order` counts the versions created inside the checked window
+  whose update a compaction has folded below the base (`versions_compacted`), compares nothing of
+  them, and reports a document whose window versions all sit below the base as unchecked.
 custom:
     Issue: pr2444

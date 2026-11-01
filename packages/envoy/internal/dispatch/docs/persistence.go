@@ -784,6 +784,13 @@ type connectionSource interface {
 
 // lockRoom runs fn holding a connection of source and the room's advisory lock. When wait is false
 // it takes neither lock another holder has, and returns errRoomLockBusy instead.
+//
+// A caller that waits takes the in-process lock first, so the callers of one room queue on it
+// rather than on the pool. A caller that does not waits for its connection first and tries the
+// in-process lock only once it holds one: a compaction's write waits there for one of the two
+// connections of the compaction pool, and holding the room's lock across that wait would leave
+// the room's writers (appendUpdate and AppendRoomFlush, through withRoomLock) queued behind a
+// compaction that is itself waiting - the opposite of what not waiting asks for.
 func (p *PgVersioned) lockRoom(ctx context.Context, room string, wait bool, source connectionSource, fn func(*pgxpool.Conn) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -792,16 +799,19 @@ func (p *PgVersioned) lockRoom(ctx context.Context, room string, wait bool, sour
 	defer p.releaseRoomLock(room, lock)
 	if wait {
 		lock.Lock()
-	} else if !lock.TryLock() {
-		return errRoomLockBusy
+		defer lock.Unlock()
 	}
-	defer lock.Unlock()
-
 	conn, err := source.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire document connection: %w", err)
 	}
 	defer conn.Release()
+	if !wait {
+		if !lock.TryLock() {
+			return errRoomLockBusy
+		}
+		defer lock.Unlock()
+	}
 	// The work below holds this connection and the room's advisory lock; anything it reads
 	// reads through them, never through a second pooled connection.
 	ctx, releaseMark := store.HoldsConnection(ctx)

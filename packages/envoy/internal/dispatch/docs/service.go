@@ -324,10 +324,7 @@ type Service struct {
 	reads *documentReads
 	// compactions is the queue of the documents this service compacts, whose worker New starts,
 	// Shutdown stops and Quiesce pauses (compactionQueue). Every committed append and every load
-	// notes its room there (noteStoredUpdates): an append on its own transaction (appendUpdate), a
-	// room's own flush (AppendRoomFlush), a joined write's appends and flushes at its ledger's commit
-	// (Ledger.commit), a settlement's and the block-id backfill's flushes and repairs once their
-	// transactions commit (commitSettlement), and a load once its read ends (PgVersioned.loadStored).
+	// notes its room there; noteStoredUpdates names them.
 	compactions *compactionQueue
 }
 

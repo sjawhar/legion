@@ -281,7 +281,7 @@ The gate removes the repair-close cycle, but not every worker exit passes it:
 a published live write is already durable and intentionally does not take the gate, so its room can still retire under its Apply.
 The worker's exit compaction (`servicePersistenceAdapter.Compact`), which runs the tail rule inline on the worker and folds with no document lock held, therefore does not wait for a busy document lock at its short write:
 it is housekeeping and leaves the room to a later compaction.
-A failed room's eviction is the exception and waits for the lock to write its compaction before recovery.
+A failed room's eviction is the exception and always waits for the document's lock before recovery, writing a compaction when rows stand older than the tail and otherwise taking the lock and letting it go, so a repair written into the failed room commits before the room reloads.
 `envoy-dispatch backfill-block-ids` runs the same stamp through `applySuppressed` across every document.
 Every write path that changes a document queues that closer once its transaction commits:
 a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation, so ask blocks written by any of them become asks without waiting for a later live change.
@@ -476,7 +476,7 @@ While a transaction's write to a document is open it holds that room's writer sl
 The docs layer takes a document's locks in one order, wherever a handler starts:
 the owner row (`lockArtifactOwner`), then the writer slot, then the advisory lock; a joined read takes the owner row before it waits for the slot.
 The slot is in memory, where Postgres cannot see a wait for it, so no transaction may wait for it while holding a lock its holder still needs.
-A failed room's eviction flushes and writes its compaction under the advisory lock, waiting for it, so no transaction waits for a failed room to recover either:
+A failed room's eviction flushes under the advisory lock and always waits for it, writing a compaction only when rows stand older than the tail and otherwise letting the lock go, so a repair written into the failed room commits before the room reloads and no transaction waits for a failed room to recover either:
 a document operation inside a transaction (a handler's, or settlement's own) that meets one fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`, whatever failed the room), the transaction rolls back, and the caller retries once the room has reloaded;
 so does a write whose room fails before its first append, since the reloaded room may lack it.
 A room's own load never waits for that recovery either - the eviction waits in ygo's `CloseRoom` for the load's ready barrier, so the two would hold each other - and refuses instead, which ends the eviction;
@@ -633,8 +633,8 @@ A helper that walks the room inside `Server.Apply` outside a transaction, as an 
 `TestThreeBrowsersAndTheAPIEditOneRoomAtOnce` has three websocket peers type while the API edits the document, until 50 of its edits have overlapped their typing.
 
 Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment (`internal/dispatch/docs/persistence.go`) states the rule and its reason, and every copy that replays stored or room updates is built by one constructor, `newCappedDocumentCopy`, at the cap of the instance it decodes for, with ygo's format cleanup off (below).
-`newCappedDocumentCopy` takes the cap of the instance the decode runs for - `PgVersioned.maxPendingItems` or `Service.maxPendingItems`, both `maxUpdateItems` in production and lowered only by a test (`shrinkPendingItems`): the store's fold of its stored rows and that fold's read-back (`stateThrough`, `readsBackOtherwise`), the document a load decodes its state into (`documentThrough`), the check of a history a rebuild makes and of the seed it stores (`validateUpdate`).
-`newDocumentCopy` is that constructor at `maxUpdateItems` itself: a copy of a resident document (`snapshotDocument`, a room's rendered replica), a read point's state (`stateTree`), the lost-write check's merge, the stored-order checker's fold of a document's rows (`foldStoredOrder`), a write's fork of the stored or the live document (`coldFork`, `buildFork`), the growth check's decode of a fork's own state (`refuseUndecodable`), a socket's admission decode of the stored history (`loadTree`) and the store's check of each update it appends (`appendUpdate`, `AppendUpdateTx`).
+`newCappedDocumentCopy` takes the cap of the instance the decode runs for - `PgVersioned.maxPendingItems` or `Service.maxPendingItems`, both `maxUpdateItems` in production and lowered only by a test (`shrinkPendingItems`) - while `newDocumentCopy` is that constructor at `maxUpdateItems` itself, for a decode that runs for no instance with a cap below it.
+Which decode uses which is in the code (`internal/dispatch/docs/tree.go`), not listed here.
 ygo builds the decoder for the service's rooms (`Server.MaxPendingItems`, set in `New` from `Service.maxPendingItems`).
 ygo's check of each update the service broadcasts (`Server.BroadcastUpdate`) takes no pending queue, since the room has already applied the update (reearth/ygo#268, in the pinned fork).
 In a room, which keeps what it parks across updates, the queue is also the most the room's peers can park, about ten times ygo's default.

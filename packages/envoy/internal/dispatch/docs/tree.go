@@ -319,26 +319,17 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 	return snapshot, nil
 }
 
-// newDocumentCopy is a document to decode a document's state into: a snapshot or a write's fork of
-// a room this server holds (snapshotDocument, buildFork), the room's rendered replica
-// (renderedReplica.start), a read point's state (stateTree) and the lost-write check's merge
-// (lostedit.go), the document's stored history (loadTree, coldFork) and the stored-order checker's
-// fold of its rows (foldStoredOrder), a fork's own state (refuseUndecodable), or one update the
-// store appends (appendUpdate, AppendUpdateTx), decoded alone. Its pending queue is maxUpdateItems
-// (see maxUpdateItems for the rule every decode of document bytes follows), and it is a
-// newCappedDocumentCopy, so it replays without the format cleanup as every copy does: the one rule
-// for a copy that replays stored or room updates is to be built by newCappedDocumentCopy, at the
-// cap of the instance it decodes for.
+// newDocumentCopy is newCappedDocumentCopy at maxUpdateItems, for a decode that runs for no
+// instance with a cap of its own below it.
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 	return newCappedDocumentCopy(maxUpdateItems, options...)
 }
 
-// newCappedDocumentCopy is newDocumentCopy with the pending queue of the instance the decode runs
-// for: the store's fold of its stored updates, that fold's read-back and the document the folded
-// state decodes into (stateThrough, readsBackOtherwise, documentThrough), each at
-// PgVersioned.maxPendingItems; the store's check of a rebuilt seed, at the same cap; and the check
-// of a history against the queue a service's rooms decode under (validateUpdate,
-// Service.maxPendingItems). See maxUpdateItems for what those caps hold.
+// newCappedDocumentCopy builds every copy that replays a document's stored or room updates, and
+// is the one place a copy is built: at the pending queue of the instance the decode runs for -
+// PgVersioned.maxPendingItems or Service.maxPendingItems, both maxUpdateItems in production and
+// lowered only by a test (shrinkPendingItems) - so a copy decodes what that instance decodes and
+// no more, and refuses what it would refuse. See maxUpdateItems for what those caps hold.
 //
 // Every copy replays without ygo's format cleanup (crdt.WithFormatCleanup), which follows each
 // remote apply that changes formatted text with a commit of its own: every update a copy applies

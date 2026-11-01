@@ -204,23 +204,21 @@ func (l *Ledger) commit(ctx context.Context) error {
 	return nil
 }
 
-// noteAppended notes to the compaction queue (noteStoredUpdates) the last version the committed
-// transaction appended for each document: its live writes' own appends and the room updates it
-// flushed ahead of them. A seed's row is its document's first, which leaves nothing to fold.
+// noteAppended notes to the compaction queue (noteStoredUpdates) the last version each append of
+// the committed transaction made durable: each live write's own appends, and the room updates it
+// flushed ahead of them. A document the transaction both wrote and flushed is noted once for
+// each, which asks the queue for the one check a single note would (compactionQueue.note). A
+// seed's row is its document's first, which leaves nothing to fold.
 func (l *Ledger) noteAppended() {
-	last := make(map[string]persistence.Version, len(l.order)+len(l.flushes))
 	for _, artifactID := range l.order {
 		if versions := l.live[artifactID].versions; len(versions) > 0 {
-			last[artifactID] = max(last[artifactID], versions[len(versions)-1])
+			l.service.noteStoredUpdates(artifactID, int64(versions[len(versions)-1]))
 		}
 	}
 	for _, flush := range l.flushes {
 		if appended := flush.appended(nil); len(appended) > 0 {
-			last[flush.room] = max(last[flush.room], appended[len(appended)-1])
+			l.service.noteStoredUpdates(flush.room, int64(appended[len(appended)-1]))
 		}
-	}
-	for artifactID, version := range last {
-		l.service.noteStoredUpdates(artifactID, int64(version))
 	}
 }
 

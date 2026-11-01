@@ -129,8 +129,8 @@ func (f compactFold) point() rowVersion {
 // for their fold point; a later compaction of the same fold point skips them without folding
 // (compactUnfoldable), and one after the rows changed folds them again.
 //
-// A compaction that waits for the lock and writes nothing - nothing to fold, or rows that do not
-// fold - still waits for the lock and lets it go (passRoomLock).
+// A compaction that waits for the lock and writes nothing - nothing to fold, rows that do not
+// fold, or a read or fold that failed - still waits for the lock and lets it go (passRoomLock).
 func (p *PgVersioned) compactRoom(ctx context.Context, room string, rule compactRule, wait bool) (compactResult, error) {
 	if err := ctx.Err(); err != nil {
 		return compactResult{}, err
@@ -141,6 +141,12 @@ func (p *PgVersioned) compactRoom(ctx context.Context, room string, rule compact
 	}
 	folded, ended, err := p.readCompaction(ctx, pool, room, rule)
 	if err != nil {
+		// The lock is passed on this path too: a failed room's eviction has to queue behind a
+		// repair holding it whether or not this compaction read anything (passRoomLock). The
+		// read's error is what the caller reads, with a failure to pass the lock joined to it.
+		if passed := p.passRoomLock(ctx, pool, room, wait); passed != nil {
+			err = errors.Join(err, passed)
+		}
 		return compactResult{}, err
 	}
 	if folded.rows == nil {
