@@ -1,7 +1,10 @@
 // What a heavy body costs a reader's own thread, in the surfaces that draw one: the Conversation,
 // the Inbox's ask card and a hover card. The same shapes written as documents through the API are
 // `heavy-document-writes.e2e.ts`, and both specs read the bodies from `heavy-bodies.ts`, so the
-// two measure the very same bytes (sjawhar/legion#2519).
+// two measure the very same bytes. The one surface where a body grows under a paint - the live
+// view, where a streaming turn arrives whole with every frame - is `heavy-streamed-turn.e2e.ts`,
+// which reads a drawn body through the same `heavy-bodies-page.ts` as the rows here
+// (sjawhar/legion#2519).
 import { type BrowserContext, expect, type Locator, type Page, test } from "@playwright/test";
 
 // `markdownWorkerThreshold` comes from the module that carries it and imports nothing: the
@@ -9,15 +12,7 @@ import { type BrowserContext, expect, type Locator, type Page, test } from "@pla
 // The two shortest rows below sit one character under it, so they prove the body the page parses
 // on its own thread stays inside the same bound as the ones the worker takes.
 import { markdownWorkerThreshold } from "../web/src/features/refs/markdown-worker-threshold";
-import { type FakeSession, setLiveSessions } from "./agents";
-import {
-  createAsk,
-  createComment,
-  createIssue,
-  createMessage,
-  createProject,
-  publishAgentStreamFrame,
-} from "./api";
+import { createAsk, createComment, createIssue, createMessage, createProject } from "./api";
 import {
   bracketRun,
   calloutBracketRun,
@@ -28,6 +23,7 @@ import {
   padTo,
   plainList,
 } from "./heavy-bodies";
+import { expectSettled, markdownBody } from "./heavy-bodies-page";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -42,11 +38,6 @@ declare global {
     /** How far the reader's own scroll moved the page, once `scrollOnTheFirstBatch` has run it;
      *  0 until then. */
     __heavyBodiesReaderScrolled?: number;
-    /** Every sample the streamed turn's recorder has taken, in order. */
-    __heavyBodiesStreamSamples?: StreamSample[];
-    /** Told by the row that the turn's last frame is about to go out, so every sample after it
-     *  is recorded with the turn over. */
-    __heavyBodiesTurnEnded?: () => void;
   }
 }
 
@@ -78,15 +69,6 @@ const subThresholdItems = Math.ceil((markdownWorkerThreshold - 1) / "- x\n".leng
  *  the text it is. */
 const deepestListLevels = 50;
 
-/**
- * The element a surface renders a body into (`markdownClassName` in `markdown-engine.ts`), which
- * is also the element that carries `data-markdown-pending` while the worker owes its formatting
- * and `data-markdown-fallback` when the parser itself refused the body.
- */
-function markdownBody(card: Locator): Locator {
-  return card.locator(".dispatch-markdown").first();
-}
-
 /** The deepest chain of `selector` elements inside `element`: 1 for a flat list, 50 for a list
  *  nested 50 deep. */
 function deepestNesting(element: Locator, selector: string): Promise<number> {
@@ -112,28 +94,6 @@ function deepestNesting(element: Locator, selector: string): Promise<number> {
  *  without shipping 30,000 characters into an assertion message. */
 function textLength(element: Locator): Promise<number> {
   return element.evaluate((node) => node.textContent?.length ?? 0);
-}
-
-/** The characters standing in `element` itself rather than inside a block a paint attached:
- *  a body's own literal text, which a reader is shown while the worker owes its formatting and
- *  which a paint replaces rather than stands behind. */
-function looseTextLength(element: Locator): Promise<number> {
-  return element.evaluate((node) => {
-    let loose = 0;
-    for (const child of node.childNodes) {
-      if (child.nodeType === Node.TEXT_NODE) {
-        loose += child.textContent?.length ?? 0;
-      }
-    }
-    return loose;
-  });
-}
-
-/** The card ends with its body formatted: nothing is still waiting on the worker, and the parser
- *  refused nothing. */
-async function expectSettled(card: Locator): Promise<void> {
-  await expect(card.locator("[data-markdown-pending]")).toHaveCount(0);
-  await expect(card.locator("[data-markdown-fallback]")).toHaveCount(0);
 }
 
 interface Measured {
@@ -827,232 +787,6 @@ test("a comment of 8,000 list items still ends formatted when the parse worker's
       asked,
       "the page never asked for a markdown-parse.worker chunk, so none was refused"
     ).toBe(true);
-  } finally {
-    await alice.close();
-  }
-});
-
-// The one surface where a body grows under a paint: the live session view, where a streaming
-// turn arrives whole with every frame. A reader who opens it mid-turn gets a first render that
-// is the turn's own text, pending on the worker; the answer to it is painted in batches across
-// tasks, and the next frame lands while that paint is still attaching them. The element belongs
-// to that paint until it ends - nothing but the paint that replaces it, or the unmount, stops
-// one - so the arriving frame writes nothing into it. Written there, its text would stand in
-// front of the blocks still arriving behind it, and that is what the reader would read until
-// that frame's own answer and its whole paint had landed: the regression this change has now
-// repeated twice (sjawhar/legion#2519, `useRenderedMarkdown`).
-//
-// A poll cannot see it. The state lasts one paint batch, so a 60 ms poll lands between them and
-// finds a body that looks whole. The page records it instead, from a `MutationObserver`
-// installed before the page's own scripts: on every mutation, the characters of the newest
-// assistant turn's own text nodes and the blocks beside them. Neither number alone is the
-// defect - a pending body is all text and no blocks, a painted one is all blocks and no text -
-// so what the row counts is the samples holding both.
-//
-// The shape is the whole trick, and a row that shrinks it proves nothing. At 4,000 paragraphs
-// and 80 ms a frame, this row reds in all three engines at the code before the fix - 36 of 142
-// recorded samples held both in Chromium, 27 of 96 in WebKit, 17 of 156 in Firefox, the widest
-// standing 63,864 characters in front of 250 blocks. At 900 paragraphs with 150 ms frames the
-// pull request measured it green at both heads: that paint is two batches and no frame lands
-// inside one.
-
-/** The paragraphs the turn already holds when the reader opens it. Each frame after that is the
- *  whole turn again, one paragraph longer. */
-const streamedParagraphs = 4_000;
-/** Frames the session publishes while the reader watches, and the gap between them. */
-const streamedFrames = 60;
-const streamedFrameGapMs = 80;
-/** The turn's last frame, the one that ends it, adds one paragraph like the frames before it. */
-const wholeTurnParagraphs = streamedParagraphs + streamedFrames + 1;
-
-/** Loose text shorter than this is not a frame standing in front of a body: a paint attaches
- *  blocks, never prose, so what this passes over is whitespace and nothing a reader reads. The
- *  text of one of these frames is some 60,000 characters. */
-const looseTextIsAFrame = 100;
-
-/** The session the turn streams from. Seeded with no `last_seen`, so the fake Envoy answers
- *  every read of it with the current time and the row never meets an aged-out session. */
-const streamingSession: FakeSession = {
-  capabilities: ["steer"],
-  dir: "/workspaces/streaming",
-  machine_id: "streaming-host",
-  roles: [],
-  session_id: "019a1c07-6d4b-7e80-bf39-4a1b5c8d9e07",
-  title: "A session mid-turn",
-};
-
-/** What the recorder took of the newest assistant turn's body on one mutation of the page. */
-interface StreamSample {
-  /** The `p` and `li` under it: the blocks a paint has attached so far. */
-  readonly blocks: number;
-  /** The characters in the text nodes directly under it, which is where a frame's own text
-   *  would stand. */
-  readonly raw: number;
-  /** Whether the turn was still streaming when this was taken. */
-  readonly streaming: boolean;
-}
-
-/** `count` paragraphs, `paragraph 0` to `paragraph <count - 1>`, joined by blank lines. */
-function streamedBody(count: number): string {
-  return Array.from({ length: count }, (_, index) => `paragraph ${index}`).join("\n\n");
-}
-
-/** One snapshot of the one turn: every frame carries the same message id, so each replaces the
- *  turn's whole text, and `seq` orders the snapshots. */
-function turnFrame(seq: number, paragraphs: number, streaming: boolean): object {
-  return {
-    kind: "message",
-    message: {
-      at: 1_000,
-      id: "a-turn-a-reader-opened-while-it-streamed",
-      parts: [{ text: streamedBody(paragraphs), type: "text" }],
-      role: "assistant",
-      streaming,
-    },
-    seq,
-    v: 1,
-  };
-}
-
-/**
- * Installs the recorder before the page's own scripts, so nothing of the first render happens
- * unwatched. It watches the document rather than its element, which a script running this early
- * can still find nothing of, and reads the newest assistant turn's body on every mutation
- * anywhere in the page: the body itself is not in the document yet when this runs.
- */
-async function recordTheStreamedTurn(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    const samples: StreamSample[] = [];
-    let streaming = true;
-    window.__heavyBodiesStreamSamples = samples;
-    window.__heavyBodiesTurnEnded = () => {
-      streaming = false;
-    };
-    const take = (): void => {
-      const turns = document.querySelectorAll('[data-testid="agent-message-assistant"]');
-      const body = turns[turns.length - 1]?.querySelector(".dispatch-markdown") ?? null;
-      if (body === null) {
-        return;
-      }
-      let raw = 0;
-      for (const child of body.childNodes) {
-        if (child.nodeType === Node.TEXT_NODE) {
-          raw += child.textContent?.length ?? 0;
-        }
-      }
-      samples.push({ blocks: body.querySelectorAll("p, li").length, raw, streaming });
-    };
-    new MutationObserver(take).observe(document, {
-      characterData: true,
-      childList: true,
-      subtree: true,
-    });
-  });
-}
-
-/** Waits until `at`, so the frames keep their cadence whatever each publish costs: a publish
- *  that overran its slot is followed at once by the next rather than pushing every one after
- *  it back. */
-function sleepUntil(at: number): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, Math.max(0, at - Date.now()));
-  return promise;
-}
-
-test("a reader who opens the live view while a long turn streams is never shown a frame's text in front of the body", async ({
-  browser,
-}) => {
-  const session = streamingSession.session_id;
-  await setLiveSessions([streamingSession]);
-  await publishAgentStreamFrame(
-    session,
-    { frames: [turnFrame(1, streamedParagraphs, true)], session_id: session, v: 1 },
-    "replay"
-  );
-
-  const alice = await asUser(browser, "alice");
-  try {
-    const page = await alice.newPage();
-    await recordTheStreamedTurn(page);
-    await page.goto(`/agents/${session}/live`);
-    const turns = page.getByTestId("agent-message-assistant");
-    // The replay in the page is the viewer attached: a frame published before that reaches
-    // nobody. The turn is the reader's own text here, with its paint still to come.
-    await expect(turns).toHaveCount(1);
-    const turn = turns.last();
-
-    const firstFrameAt = Date.now();
-    for (let frame = 0; frame < streamedFrames; frame += 1) {
-      await sleepUntil(firstFrameAt + frame * streamedFrameGapMs);
-      await publishAgentStreamFrame(
-        session,
-        turnFrame(frame + 2, streamedParagraphs + frame + 1, true)
-      );
-    }
-    // Every sample after this is the turn over, so the guard below reads only what the
-    // streaming window left.
-    await page.evaluate(() => window.__heavyBodiesTurnEnded?.());
-    await publishAgentStreamFrame(
-      session,
-      turnFrame(streamedFrames + 2, wholeTurnParagraphs, false)
-    );
-
-    const body = markdownBody(turn);
-    await expect(body.locator("p")).toHaveCount(wholeTurnParagraphs);
-    await expectSettled(turn);
-    expect(
-      await looseTextLength(body),
-      "the turn ended with text of its own standing beside the body's blocks"
-    ).toBe(0);
-
-    const samples = await page.evaluate(() => window.__heavyBodiesStreamSamples ?? []);
-    const inFront = samples.filter((sample) => sample.blocks > 0 && sample.raw > looseTextIsAFrame);
-    // A body under construction: blocks in it, and not yet the turn's own. A sample holding the
-    // whole turn is a paint that has landed, which says nothing about the window.
-    const partBuilt = samples.filter(
-      (sample) => sample.streaming && sample.blocks > 0 && sample.blocks < wholeTurnParagraphs
-    );
-    const sawAFrameText = samples.filter((sample) => sample.raw > looseTextIsAFrame);
-    // Both counts are the run's evidence, kept on the result even when it passes: a runner too
-    // fast or too slow to reach the window is read here rather than as a silently empty green.
-    test.info().annotations.push({
-      description:
-        `${samples.length} samples, ${partBuilt.length} of them a part-built body mid-stream, ` +
-        `${sawAFrameText.length} holding a frame's text`,
-      type: "recorded while the turn streamed",
-    });
-    const worst = inFront.reduce((held, sample) => (sample.raw > held.raw ? sample : held), {
-      blocks: 0,
-      raw: 0,
-      streaming: false,
-    } satisfies StreamSample);
-    expect(
-      inFront.length,
-      `the reader saw the frame's raw text in front of a body already holding blocks: ` +
-        `${inFront.length} of ${samples.length} recorded samples held both, the widest ` +
-        `${worst.raw} characters in front of ${worst.blocks} blocks`
-    ).toBe(0);
-    // The window the row is about was driven at all, which is two things and not one: the
-    // reader saw a body under construction, and the reader saw a frame's text. A green run
-    // means neither of them stood in front of the other; a run that measured neither is no
-    // evidence of that, and on a node faster than this pod - one that paints 4,000 paragraphs
-    // in two batches, where no frame can land inside one - this row would otherwise stay green
-    // for as long as it is in the suite while proving nothing (the pull request measured
-    // exactly that at 900 paragraphs and 150 ms frames, green at both heads). Either guard
-    // failing names the shape as outgrown by the node, not the change as broken: raise the
-    // paragraph count. One sample is as loose as each asks for; three runs of each engine on a
-    // two-core pod left 19 to 102 part-built samples.
-    expect(
-      partBuilt.length,
-      `nothing painted while the turn streamed, so this row measured none of the window it is ` +
-        `about: no part-built body in ${samples.length} recorded samples`
-    ).toBeGreaterThan(0);
-    expect(
-      sawAFrameText.length,
-      `no frame's text ever reached the element, so this row measured none of the window it is ` +
-        `about: no sample over ${looseTextIsAFrame} characters in ${samples.length} recorded ` +
-        `samples`
-    ).toBeGreaterThan(0);
   } finally {
     await alice.close();
   }

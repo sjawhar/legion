@@ -1,7 +1,11 @@
 // What a heavy body costs the server when it is written as a document: the API answers every one
 // of these shapes in under a second, stored or refused, and the cost grows with the body rather
 // than faster than it. The same shapes drawn in a browser are `heavy-bodies.e2e.ts`, and both
-// specs read them from one module, so the two measure the very same bytes (sjawhar/legion#2519).
+// specs read them from one module, so the two measure the very same bytes. This one drives no
+// browser, so it runs in one Playwright project and nowhere else: every project of a run shares
+// the one server process, so a second project would time these writes against a server that
+// already holds what each shape touches, and what the row says below about a first write of its
+// shape in a fresh server process would be false there (sjawhar/legion#2519).
 import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { expect, test } from "@playwright/test";
 import { createIssue, createIssueArtifact, createProject } from "./api";

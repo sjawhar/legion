@@ -1,5 +1,5 @@
 kind: Fixed
-body: 'A one-word edit of a document at the 1 MiB cap allocates about a third less: the splice cuts the text it keeps out of the text itself rather than encoding the whole textblock to UTF-16 and decoding the cut back, and the two checks of each document-level block a replace or an accepted suggestion changed share one rendering and parse of that block. What an edit stores, and every refusal it answers, are unchanged.'
+body: 'A one-word edit of a 1 MiB document written as one paragraph allocates 53 MiB where it allocated 98: the splice cuts the text it keeps out of the text itself rather than encoding the whole textblock to UTF-16 and decoding the cut back, and the two checks of each document-level block a replace or an accepted suggestion changed share one rendering and parse of that block. Both cuts are the size of the block the edit lands in, so the same mebibyte in ordinary paragraphs allocates what it did. What an edit stores, and every refusal it answers, are unchanged.'
 time: 2026-10-30T23:08:35.883890722Z
 custom:
     Issue: INFRA-625

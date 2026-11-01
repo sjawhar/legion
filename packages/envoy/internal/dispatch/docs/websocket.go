@@ -73,9 +73,30 @@ type servicePersistenceAdapter struct {
 //
 // It hands ygo no bytes: the state goes on the record, and the room's load applies it
 // (applyLoadedState), because ygo's own apply runs the format cleanup a remote apply runs and the
-// room's stored history already holds every cleanup the room made.
-func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
+// room's stored history already holds every cleanup the room made. So nothing of ygo's own runs
+// between this read and the hook it calls next: there is no decode of what this returns
+// (sjawhar/ygo v1.54.1-sami.3, provider/websocket/server.go:1913-1918), and the only way a load
+// fails with nothing of this service still to run on its goroutine is a panic out of this read.
+//
+// Every way the read ends short is therefore failed here, on the load's own goroutine and before
+// ygo closes the room's barrier: the store's refusal, a stored history whose header declares more
+// items than one update may hold (loadableHistory), and a panic out of any of it, recovered here
+// as the hook recovers its own (applyLoadedState, foldDocument). ygo recovers such a panic too
+// and hands every waiter the load's error (server.go:1904-1923), but it does so with the record
+// this load began still standing under the room's name and the room healthy, which left the
+// failure to whichever caller's Apply met it - a caller that cannot tell the load it waited on
+// from the load that began after it, since ygo removes the room before any waiter wakes
+// (server.go:1932-1941). Recovered here, a load's failure is the load's own (sjawhar/legion#2519).
+func (a *servicePersistenceAdapter) LoadDoc(room string) (_ []byte, err error) {
 	load := a.service.beginRoomLoad(room)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("loading room %q: panic: %v", room, recovered)
+		}
+		if err != nil {
+			a.service.failRoomLoad(room, load, err)
+		}
+	}()
 	if loaded, ok := a.service.takePreload(room); ok {
 		load.read(loaded.Version, loaded.Update)
 		return nil, nil
@@ -85,7 +106,6 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 		err = loadableHistory(result.Update)
 	}
 	if err != nil {
-		a.service.failRoomLoad(room, load, err)
 		return nil, err
 	}
 	load.read(result.Version, result.Update)
@@ -148,112 +168,6 @@ func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) er
 	return err
 }
 
-// applyRoom is ygo's Apply on room, with the failure handling of a load ygo failed on its own.
-// Every failure this service answers for is answered on the load's own goroutine: the store's
-// refusal of the read, and a stored history whose header declares more items than one update may
-// hold, by that read itself (LoadDoc, loadableHistory); the hook ygo calls next on the same
-// goroutine answers its own refusals, and the stored history it applies to the room's document
-// (onLoadDocument, applyLoadedState). Each of those fails what it has to fail and drops the
-// record its load began where the refusal is made. What is left for this caller is a load that
-// failed with nothing of this service still to run on its goroutine: a panic ygo recovered out of
-// the adapter's read (sjawhar/ygo v1.54.1-sami.3, provider/websocket/server.go:1904-1923), whose
-// record stands under the room's name with no instance that will ever take it. Every load this
-// service starts goes through an Apply, so this is where such a load's failure is met, and the
-// room is failed from here so the next access reloads the document (sjawhar/legion#2519).
-//
-// What this answers for is one load, not the room: the record the room's name holds when the
-// Apply begins, and the count of loads begun when it ends, name the load it waited on, and a
-// load begun after that one is left to its own caller (failUnfinishedLoad). A mutate that ran is
-// a room that loaded, so a refusal of what that mutate left - nothing to apply (ErrNoChanges),
-// an update too large, a merge ygo could not make - is no load's failure and is not answered for
-// here.
-func (s *Service) applyRoom(ctx context.Context, room string, mutate func(*crdt.Doc, func(func(*crdt.Transaction)))) error {
-	found := s.roomLoadNumber(room)
-	var reached bool
-	err := s.srv.Apply(ctx, room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		reached = true
-		mutate(doc, transact)
-	})
-	if err == nil || reached {
-		return err
-	}
-	begun := s.loadsBegun.Load()
-	if s.beforeFailUnfinishedLoad != nil {
-		s.beforeFailUnfinishedLoad(room)
-	}
-	s.failUnfinishedLoad(ctx, room, roomLoadWaitedOn{after: found, through: begun}, err)
-	return err
-}
-
-// roomLoadWaitedOn names the load an Apply that never reached the room waited on: the load that
-// began on the record the room's name held when that Apply began (after), numbered no later than
-// the loads begun when it ended (through). ygo removes a room and closes its barrier before any
-// waiter wakes (sjawhar/ygo v1.54.1-sami.3, provider/websocket/server.go:1932-1941), so a later
-// load of the same room can have begun - and its record stand under the name - by the time the
-// caller answers for the one that failed. Such a load began on the record of the load that
-// failed rather than on the one the caller found, and neither its room nor its record is this
-// caller's to take.
-type roomLoadWaitedOn struct {
-	after   uint64
-	through uint64
-}
-
-// names reports whether load is the one this caller waited on.
-func (waited roomLoadWaitedOn) names(load *roomLoad) bool {
-	return load.after == waited.after && load.number <= waited.through
-}
-
-// roomLoadNumber is the number of the load whose record room's name holds, zero where it holds
-// none (beginRoomLoad).
-func (s *Service) roomLoadNumber(room string) uint64 {
-	if value, ok := s.roomLoads.Load(room); ok {
-		return value.(*roomLoad).number
-	}
-	return 0
-}
-
-// failUnfinishedLoad fails room when err is ygo's refusal of the load waited names. Apply makes
-// four refusals of its own before it reaches the room - a caller's context that ended, a server
-// shut down, a room name it will not take, and this service's own gate (ErrInjectRefused:
-// allowInject) - and the room lookup after them one more, a server already holding as many rooms
-// as it may (sjawhar/ygo v1.54.1-sami.3, provider/websocket/inject.go:308-331,
-// server.go:1736-1738). Every other refusal met before the room is that load's, since ygo answers
-// each caller waiting on a room's barrier with the load's own error (server.go:1680-1686). The
-// record that load began (beginRoomLoad) says what became of it: an instance stands in its place
-// once the load has gone through onLoadDocument, and a load the read or the hook refused has
-// dropped its own record where that refusal was made (LoadDoc, onLoadDocument), so what is left
-// unfinished is a load ygo failed with nothing of this service still to run on its goroutine - a
-// panic it recovered out of the adapter's read (server.go:1904-1923).
-func (s *Service) failUnfinishedLoad(ctx context.Context, room string, waited roomLoadWaitedOn, err error) {
-	if ctx.Err() != nil ||
-		errors.Is(err, websocket.ErrInjectRefused) ||
-		errors.Is(err, websocket.ErrServerShutdown) ||
-		errors.Is(err, websocket.ErrInvalidRoomName) ||
-		errors.Is(err, websocket.ErrTooManyRooms) {
-		return
-	}
-	value, ok := s.roomLoads.Load(room)
-	if !ok {
-		return
-	}
-	load := value.(*roomLoad)
-	if !waited.names(load) || !load.unfinished() {
-		return
-	}
-	s.failRoomLoad(room, load, err)
-}
-
-// unfinished reports a load that left no instance behind. Its caller has already found this
-// record still under the room's name (failUnfinishedLoad), and the read that began the load and
-// the hook that would start the instance each drop their own record where they refuse one
-// (LoadDoc, onLoadDocument), so a record still there holding no instance is a load ygo failed on
-// its own.
-func (load *roomLoad) unfinished() bool {
-	load.mu.Lock()
-	defer load.mu.Unlock()
-	return load.instance == nil
-}
-
 // failRoomLoad is one room load's failure: the room fails, so the next access to it reloads the
 // document rather than meeting the half-loaded one (failRoom), and the record the load began goes
 // with it. No instance will take that record (keepInstance), and nothing else takes it out: it is
@@ -282,21 +196,16 @@ type roomLoad struct {
 	// when it does (start). instance is that instance, which took advances directly from then on.
 	appended []int64
 	instance *roomInstance
-	// number is this load's place in the loads this service has begun, and after the number of
-	// the record it replaced, zero where the room's name held none: set before the record is
-	// stored, read unlocked, and what names one load to its caller (roomLoadWaitedOn).
-	number, after uint64
 }
 
 // beginRoomLoad records that room is loading, before the load reads the store: every version
 // appended from here on is one the instance this load leaves behind takes in. It replaces the
 // record of the room's last load, which ygo has finished with - one room loads at a time
-// (getOrCreateRoom), which is why the number it takes can be read off that record unlocked - so
-// the records never outnumber the documents this process has loaded. A record goes when the
-// document of the load that left it is collected (keepInstance), or, for a load that left none,
-// where the failure that ended it was met (LoadDoc, onLoadDocument, failUnfinishedLoad).
+// (getOrCreateRoom) - so the records never outnumber the documents this process has loaded. A
+// record goes when the document of the load that left it is collected (keepInstance), or, for a
+// load that left none, where the failure that ended it was met (LoadDoc, onLoadDocument).
 func (s *Service) beginRoomLoad(room string) *roomLoad {
-	load := &roomLoad{number: s.loadsBegun.Add(1), after: s.roomLoadNumber(room)}
+	load := &roomLoad{}
 	s.roomLoads.Store(room, load)
 	return load
 }
@@ -651,12 +560,12 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// A refusal of this hook is, but for one, this service's own answer to the load - the
 	// document is being rebuilt, the room has already failed, the store did not answer - and not
 	// one to fail the room for a second time. The load it refuses is failed here, where that
-	// refusal is made, by dropping the record the load began: no instance will take it, and the
-	// caller that meets the refusal finds the room's name holding nothing of this load
-	// (failUnfinishedLoad). The one that is not ours is the stored history this load read, which
-	// is applied here (applyLoadedState): a history the room's document cannot take is the
-	// load's own failure, and it fails the room so the next access reloads rather than meeting a
-	// half-loaded document. ygo loads one room at a time under a name - the goroutine that
+	// refusal is made, by dropping the record the load began: no instance will take it, and ygo
+	// removes the room and answers every caller with this error, so the room's name is left
+	// holding nothing of this load. The one that is not ours is the stored history this load
+	// read, which is applied here (applyLoadedState): a history the room's document cannot take is
+	// the load's own failure, and it fails the room so the next access reloads rather than meeting
+	// a half-loaded document. ygo loads one room at a time under a name - the goroutine that
 	// created the placeholder owns the load and every other caller for that name waits on its
 	// ready barrier (sjawhar/ygo v1.54.1-sami.3, provider/websocket/server.go:1655-1675) - and
 	// this runs on that load's own goroutine, so the record read here is this load's own

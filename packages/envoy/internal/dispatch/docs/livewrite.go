@@ -439,7 +439,7 @@ func (s *Service) warmFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	var incremental bool
 	var replica *renderedReplica
 	var read forkReadMark
-	err := s.applyRoom(ctx, write.artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err := s.srv.Apply(ctx, write.artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		room = doc
 		incremental = write.fork != nil && doc == write.forkedFrom.Value()
 		// The counters before the encode, never after it: read after, they would count a foreign
@@ -750,7 +750,7 @@ func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, 
 	}
 	var tree *pmdoc.Node
 	var treeErr error
-	err = s.applyRoom(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err = s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		tree, treeErr = s.liveTree(artifactID, doc)
 	})
 	if treeErr != nil {

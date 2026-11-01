@@ -167,7 +167,7 @@ func (e *staleRoomEvictor) run(ctx context.Context) {
 // notifies nobody again. service.roomLoads is every room this process has loaded, and nothing
 // here takes an entry out of it: an entry goes when its document is collected (keepInstance),
 // or, for a load that left no document, with the failure that ended that load, where that failure
-// was met (LoadDoc, onLoadDocument, failUnfinishedLoad), so this ranges over every room loaded
+// was met (LoadDoc, onLoadDocument), so this ranges over every room loaded
 // since the last collection. An entry whose room has gone costs the interval's lookup and the
 // server's (mayEvict, srv.GetDoc) and no database read, since the head is read only for a room
 // that is still resident.

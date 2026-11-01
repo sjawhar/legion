@@ -153,7 +153,7 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error) {
 	updates := make(chan struct{}, 1)
 	var unsubscribe func()
-	err := s.applyRoom(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		if s.afterReadWarm != nil {
 			s.afterReadWarm(artifactID)
 		}
@@ -967,7 +967,7 @@ func forgetMarkAuthorDeparture(state *roomState, actor model.Actor) {
 // unmarkExpired removes from room's live document each of expired that it still holds.
 func (s *Service) unmarkExpired(room string, expired []pmdoc.MarkRef) error {
 	var sweepErr error
-	err := s.applyRoom(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+	err := s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		transact, release := s.serviceTransact(transact)
 		defer release()
 		fragment := doc.GetXmlFragment(fragmentName)
