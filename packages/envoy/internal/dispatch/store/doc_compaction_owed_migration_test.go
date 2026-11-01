@@ -8,13 +8,14 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// beforeDocCompactionOwed is the last migration before 0160_doc_compaction_owed.
-const beforeDocCompactionOwed = 159
+// beforeDocCompactionOwed is the last migration before 20261028195714_doc_compaction_owed: the
+// last of the numbered series.
+const beforeDocCompactionOwed = 157
 
-// 0160 names in doc_compaction_owed every document stored before it with more than one
-// doc_updates row, and no other: a document of one row, or of none, has nothing a compaction could
-// fold.
-func TestMigrate0160NamesEveryDocumentOfMoreThanOneRow(t *testing.T) {
+// 20261028195714_doc_compaction_owed names in doc_compaction_owed every document stored before it
+// with more than one doc_updates row, and no other: a document of one row, or of none, has nothing
+// a compaction could fold.
+func TestTheCompactionOwedMigrationNamesEveryDocumentOfMoreThanOneRow(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, beforeDocCompactionOwed)
@@ -25,7 +26,7 @@ func TestMigrate0160NamesEveryDocumentOfMoreThanOneRow(t *testing.T) {
 		insert into issues (key, project_key, number, title, created_by, rank)
 			values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"user","id":"alice"}', 'U');
 	`); err != nil {
-		t.Fatalf("seed the issue at 0159: %v", err)
+		t.Fatalf("seed the issue at 0157: %v", err)
 	}
 	for slug, rows := range documents {
 		var id string
@@ -40,27 +41,27 @@ func TestMigrate0160NamesEveryDocumentOfMoreThanOneRow(t *testing.T) {
 			)
 			select id::text from a
 		`, slug, rows).Scan(&id); err != nil {
-			t.Fatalf("seed the document of %d rows at 0159: %v", rows, err)
+			t.Fatalf("seed the document of %d rows at 0157: %v", rows, err)
 		}
 		ids[slug] = id
 	}
 
 	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate through 0160: %v", err)
+		t.Fatalf("migrate through doc_compaction_owed: %v", err)
 	}
 
 	rows, err := store.Pool.Query(ctx, `select artifact_id::text from doc_compaction_owed`)
 	if err != nil {
-		t.Fatalf("read doc_compaction_owed after 0160: %v", err)
+		t.Fatalf("read doc_compaction_owed after doc_compaction_owed: %v", err)
 	}
 	owed, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
-		t.Fatalf("read doc_compaction_owed after 0160: %v", err)
+		t.Fatalf("read doc_compaction_owed after doc_compaction_owed: %v", err)
 	}
 	slices.Sort(owed)
 	want := []string{ids["two"], ids["three"]}
 	slices.Sort(want)
 	if !slices.Equal(owed, want) {
-		t.Fatalf("doc_compaction_owed names %v after 0160, want the documents of two and three rows %v", owed, want)
+		t.Fatalf("doc_compaction_owed names %v after doc_compaction_owed, want the documents of two and three rows %v", owed, want)
 	}
 }

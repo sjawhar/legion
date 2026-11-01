@@ -1,4 +1,4 @@
--- 0160_doc_compaction_owed.up.sql
+-- 20261028195714_doc_compaction_owed.up.sql
 -- INFRA-593: the documents with rows a compaction could fold, one row each, so the hourly
 -- compaction sweep (docs.Service.compactionSweepPass) reads only them. Listing them from
 -- doc_updates itself reads at least one entry per document every hour, by its heap or its primary
