@@ -2,21 +2,14 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-177",
-  "headReviewed": "663dbc2b7f8716993a5bfa0f2e4cc0fa30f3eeb9 (code head fe131b940; 2905c0c4 and 663dbc2b add only .legion/INFRA-177/)",
-  "round": 17,
-  "decision": "changes_requested",
+  "headReviewed": "aa59bad7a967a9d32ea41cd1b8af31a678d873f1 (code head fad8b67a8; 77ac89f1 and aa59bad7 add only .legion/INFRA-177/)",
+  "round": 18,
+  "scope": "Set by the INFRA-138 architect: the six round-17 findings at code fad8b67a.",
+  "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 6,
-  "verified": "Merges f4a8e6f7, 9e3fe863 (#2585), 91ab50e0 (#2411) and fe131b94 keep both sides; dropped code is handoff-only carry or main's own removed quiesce. No handoff-only push path. #2585 applied to prompts, skill, rig, scorer, fixtures. Daemon migration 20261101144900_handoff_records (main ends at numbered 0067, no timestamped daemon migration), recordsSchema >= reads every main release as old, the one misread case documented in docs/kubernetes.md; Dispatch 20261101144901_handoffs after main's 20261101144855; main's migration tests pass in scratch. Contract 45 vs main's 44 everywhere, main's 44 note intact. 398ea7b8 adds assertions, removes none.",
-  "ci": "Required set is now ci-ok and pr-title. At CI head fe131b94 the runs were still in progress when read.",
-  "keyFindings": [
-    {"severity": "minor", "file": "docs/kubernetes.md", "description": ":1830 says a stale record would start the implementer on a red without waiting for the tester's turn; main's phaseEnded waits for no turn. The remaining effect is an implementing issue moving to testing on its next pull request event before the implementer completes."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/store/migrations/20261101144901_handoffs.up.sql", "description": ":27-28 says every migration after 0149_event_horizon is timestamped; the numbered series runs to 0161 (migrationid's closings). Do not repeat the number."},
-    {"severity": "minor", "file": "packages/daemon/internal/api/handoff.go", "description": "staleAssignment (:347, :350) says 'never this completion's commit or verdict'; a planner, tester or reviewer completion carries a record, and the tool description already says 'record'. Name the handoff record too."},
-    {"severity": "minor", "file": "packages/pi-legion/scripts/skill-scenarios/score.ts", "description": ":123-125 and score.test.ts say the base label's prompt asks for completed; since #2585 main's asks for previousHandoff. Fix the comment and add a case with previousHandoff and no completed."},
-    {"severity": "minor", "file": "packages/daemon/internal/daemon/handoff_records_live_test.go", "description": "firstLineOf (:734-739) sits beside main's firstLine with different behaviour; inline its one call."},
-    {"severity": "minor", "file": "packages/pi-legion/extensions/legion-phase-stall-omp.test.ts", "description": "1_400 at :480 and :489 both derive from LEGION_STALL_WAITING_MS 1500 at :464; one constant."}
-  ],
-  "forRetro": "Six docs/solutions notes #2585 added with status active still teach the committed handoff and previousHandoff; per the architect's ruling the census before READY is retro's."
+  "minor": 0,
+  "verified": "1 docs/kubernetes.md:1830 names the effect that remains; 2 the handoffs migration comment names no number and points at migrationid; 3 both staleAssignment refusals read 'never this completion's record, commit or verdict'; 4 score.ts and score.test.ts comments corrected and a previousHandoff case added with its negative control; 5 firstLineOf gone, call inlined; 6 one waitMs constant and one waitedAtLeastMs bound. fad8b67a changes only those seven files.",
+  "ci": "At CI head fad8b67a (compare to aa59bad7: handoffsOnly true): required ci-ok (CI run 41349022205) and pr-title (run 41349158350) completed success.",
+  "keyFindings": []
 }
