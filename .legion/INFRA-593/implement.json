@@ -2,53 +2,34 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-593",
-  "previousHandoff": "0f8cd916a7ed25e08902272b654878f8600443fd",
+  "previousHandoff": "923c7fc137246e894548ac8137b42cb2553f4159",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2444",
-  "round": "Review round 15: one important finding, six minor ones, and the forward merge of main through 0642a37a (#2633). The merge (13f952a8) had no conflict and left the file set and the fingerprint unchanged. Two fix commits follow it (b3a91c12, 95ef7808), pushed in one code push. A full round.",
+  "round": "Review round 16: two regression tests for round 15's lock fixes, and a merge of main for #2640 (8d1eb630; README conflict only, resolved with main's line breaks and this PR's wording). One code push, fccd461a. No runtime file changed.",
   "proof": [
     {
-      "criterion": "Important: the stored-order check never reports clean over versions a compaction folded below the base",
-      "surface": "go test of the docs and cmd/dispatch packages, and the real envoy-dispatch stored-order command over a document the real server compacted",
-      "command": "go test ./internal/dispatch/docs -run '^TestStoredOrder' -args -stored-order-rounds=200; go test ./cmd/dispatch -run StoredOrder; DATABASE_URL=<e2e database> ./envoy-dispatch stored-order --artifact <document> (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt v24)",
-      "observed": "All 15 TestStoredOrder* tests pass, including the two new subtests of TestStoredOrderChecker and the second document of TestStoredOrderSubcommandExitCodes. The soak logs rounds=200 mismatching_rounds=0 mismatches=0. On the compacted e2e document the command prints versions_checked=1 versions_compacted=31 with compacted=\"31 versions record updates below the compaction base 38 and were not compared\", clean on the one version it compared (exit 0). On a copy with that version deleted it prints clean=0 unchecked=1 and exits 1.",
-      "headSha": "95ef78087492a3b5090986869215f31cad567838",
-      "negativeControl": "With the old bucketing and Checked() restored, the new subtests and the CLI case fail: both documents report clean, and the command exits 0 with clean=1 unchecked=0 for a document whose only version is below its base."
+      "criterion": "A compaction that does not wait holds no room lock while it waits for a compaction-pool connection; a waiting compaction whose read fails still waits for the room's lock",
+      "surface": "go test of the docs package on a local Postgres 16.2 (GOMAXPROCS=4, GOMEMLIMIT=12GiB)",
+      "command": "go test -p 1 -count=10 -timeout 20m ./internal/dispatch/docs -run '^(TestACompactionThatDoesNotWaitHoldsNoRoomLockWhileItWaitsForAConnection|TestAWaitingCompactionWhoseReadFailedStillWaitsForTheRoomsLock)$', and the same with CGO_ENABLED=1 -race",
+      "observed": "Both tests pass 10 of 10 runs, and 10 of 10 under -race. The compaction, sweep, failed-room and stored-order tests of the docs package pass, and so does cmd/dispatch's stored-order test.",
+      "headSha": "fccd461afa15311f91a9419defaaebd842e61924",
+      "negativeControl": "With the passRoomLock call removed from compactRoom's read-error path, TestAWaitingCompactionWhoseReadFailedStillWaitsForTheRoomsLock fails: 'the compaction whose read failed returned ... without waiting for the document's lock' (run by me). With lockRoom's old order restored (TryLock before Acquire), TestACompactionThatDoesNotWaitHoldsNoRoomLockWhileItWaitsForAConnection fails: 'the append never landed while the compaction waited for a compaction-pool connection' (run by the worker; the output is in the diff-check comment)."
     },
     {
-      "criterion": "The minors and the merge leave compaction, format, refusal, peer and failed-room behaviour intact",
-      "surface": "go test -race of the docs package on a local Postgres 16.2 (GOMAXPROCS=4, GOMEMLIMIT=12GiB, CGO_ENABLED=1)",
-      "command": "go test -race -p 1 -parallel 4 -timeout 70m ./internal/dispatch/docs -count=300 -run '^(TestACompactionStoresTheRoomsFormattedStateAsTheRoomHoldsIt|TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce|TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt|TestAStoredLogThatDoesNotFoldIsRefusedNamingItsReasonOnce|TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown|TestARoomLoadsItsStoredHistoryAsItWasStored|TestTheStoredRowsOfARoomFoldToItsDocumentWhenAPeerUpdateParks|TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt)$'",
-      "observed": "2,400 of 2,400 pass, with 0 data races.",
-      "headSha": "95ef78087492a3b5090986869215f31cad567838",
-      "negativeControl": "Without passRoomLock (measured last round, at 7f9adf8f), TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt failed with 'the failed room's eviction never queued on the document's advisory lock'."
-    },
-    {
-      "criterion": "The suites pass at the head with main's numbering fix merged, and the real process compacts as before",
-      "surface": "go test of docs, api, cmd/dispatch, store, duty, outbox and pgmigrate on a fresh local database; real envoy-dispatch with NATS off",
-      "command": "go test -p 1 -parallel 4 -count=1 -timeout 80m ./internal/dispatch/docs ./internal/dispatch/api ./cmd/dispatch ./internal/dispatch/store/... ./internal/dispatch/duty/... ./internal/dispatch/outbox/... ./internal/pgmigrate/...; bash $TMPDIR/infra593/e2e.sh",
-      "observed": "Every package passes, store included (TestMigrationSetTakesNumbersThenTimestamps passes after 0642a37a). Sampled peak 12.20 of 19 GiB over 1,884 samples; the leftover-sampler check printed 0 lines. The e2e run: 41 rows; the restarted process's first sweep logged candidates=1 compacted=1 rows_deleted=37, leaving 4 rows; the 3 young rows are unchanged; the text sha256 is identical; a 31st upload reads back.",
-      "headSha": "95ef78087492a3b5090986869215f31cad567838",
-      "negativeControl": "At f533f33c, before this merge, the same store suite failed TestMigrationSetTakesNumbersThenTimestamps on main's 0158-0161."
+      "criterion": "The merge keeps the PR's file set, and the real process compacts as before",
+      "surface": "jj diff of the PR against its base before and after; real envoy-dispatch with NATS off and its stored-order command",
+      "command": "jj diff --from fork_point(main@origin|<head>) --to <head> --name-only (693a2c44, 8d1eb630, fccd461a); bash $TMPDIR/infra593/e2e.sh; envoy-dispatch stored-order --artifact <document> (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt v25)",
+      "observed": "The same 81 paths before, after the merge and at the head; the only changelog fragment is pr2444-document-load-and-compaction.yaml. The e2e run: 41 rows; the restarted process's sweep logged candidates=1 compacted=1 rows_deleted=37, leaving 4 rows; the 3 young rows are unchanged; the text is identical. stored-order: versions_checked=1 versions_compacted=31, clean=1. bun scripts/semantic-line-breaks.ts reports nothing for cmd/dispatch/README.md.",
+      "headSha": "fccd461afa15311f91a9419defaaebd842e61924",
+      "negativeControl": "Before the merge GitHub reported the pull request CONFLICTING (review round 16); at fccd461a it reports MERGEABLE."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/docs/storedorder.go",
-    "packages/envoy/internal/dispatch/docs/storedorder_test.go",
-    "packages/envoy/cmd/dispatch/storedorder.go",
-    "packages/envoy/cmd/dispatch/storedorder_test.go",
-    "packages/envoy/cmd/dispatch/README.md",
-    "packages/envoy/internal/dispatch/docs/compaction.go",
-    "packages/envoy/internal/dispatch/docs/persistence.go",
-    "packages/envoy/internal/dispatch/docs/ledger.go",
-    "packages/envoy/internal/dispatch/docs/compaction_queue.go",
-    "packages/envoy/internal/dispatch/docs/service.go",
-    "packages/envoy/internal/dispatch/docs/tree.go",
-    "packages/envoy/AGENTS.md",
-    "packages/envoy/.changes/unreleased/pr2444-document-load-and-compaction.yaml"
+    "packages/envoy/internal/dispatch/docs/compaction_test.go",
+    "packages/envoy/cmd/dispatch/README.md"
   ],
   "deviations": [
-    "The checker keeps a version that records update 0 (a document's first, before any row was stored) under versions_skipped rather than versions_compacted: no fold ever reaches it, and counting it would mark every ordinary document as compacted.",
-    "The README's stored-order section keeps that section's existing 100-column wrapping, which is main's layout there, rather than one sentence per line.",
+    "The fail-before runs revert each fix in the current code, not at f533f33c. The fixes being pinned are exactly those two edits, so the negative control is the same.",
+    "Not run this round: the full suites and the 300-run -race tests. No runtime file changed since 95ef7808, where they all passed; the merge brought only main's #2620 (daemon) and #2640 (README).",
     "Retro removed .legion/INFRA-593/, and this handoff writes it again; the next retro must remove it again."
   ]
 }
