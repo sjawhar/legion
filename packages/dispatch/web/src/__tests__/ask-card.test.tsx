@@ -2389,6 +2389,50 @@ test("AskCard compact variant keeps an open note visible when a real option is p
   }
 });
 
+test("AskCard compact variant keeps the Other box open while Other stays ticked on a multiple-answer ask", async () => {
+  const input = ask({ multiple: true, options: [{ label: "Docs" }, { label: "Tests" }] });
+  const { view } = renderCard(
+    <AskCard ask={input} getAskThread={emptyThread(input)} variant="compact" />
+  );
+
+  try {
+    const card = view.getByTestId("ask-ask-1");
+    const other = await within(card).findByRole("checkbox", { name: "Other" });
+    fireEvent.click(other);
+    expect(within(card).getByLabelText("Your answer")).toBeTruthy();
+
+    // Ticking and unticking a real option leaves Other ticked, so the empty box it opened stays.
+    fireEvent.click(within(card).getByRole("checkbox", { name: "Docs" }));
+    expect((other as HTMLInputElement).checked).toBe(true);
+    expect(within(card).getByLabelText("Your answer")).toBeTruthy();
+    fireEvent.click(within(card).getByRole("checkbox", { name: "Docs" }));
+    expect((other as HTMLInputElement).checked).toBe(true);
+    expect(within(card).getByLabelText("Your answer")).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard compact variant closes the empty Other box when a single-answer ask's real option replaces Other", async () => {
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const { view } = renderCard(
+    <AskCard ask={input} getAskThread={emptyThread(input)} variant="compact" />
+  );
+
+  try {
+    const card = view.getByTestId("ask-ask-1");
+    const other = await within(card).findByRole("radio", { name: "Other" });
+    fireEvent.click(other);
+    expect(within(card).getByLabelText("Your answer")).toBeTruthy();
+
+    fireEvent.click(within(card).getByRole("radio", { name: "Ship" }));
+    expect((other as HTMLInputElement).checked).toBe(false);
+    expect(within(card).queryByLabelText("Your answer")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
 test("AskCard compact variant hands focus to the row when Answer disables under it", async () => {
   const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
   let release: (value: Ask) => void = () => {};

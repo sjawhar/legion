@@ -690,8 +690,14 @@ export function AskCard({
                 name={`ask-${displayedAsk.id}`}
                 onChange={() => {
                   selectRealOption(option.label);
+                  // A multiple-answer ask keeps Other ticked through this change, and Other
+                  // needs its words, so its box stays open; a single answer unticks Other.
                   if (isCompact)
-                    setOwnWordsOpen(requiresReason(option.label) || trimmedAnswer !== "");
+                    setOwnWordsOpen(
+                      requiresReason(option.label) ||
+                        trimmedAnswer !== "" ||
+                        (displayedAsk.multiple && otherSelected)
+                    );
                 }}
                 option={option}
               />
