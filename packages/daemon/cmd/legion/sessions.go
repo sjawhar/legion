@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 )
@@ -192,11 +193,15 @@ func importClaimSession(ctx context.Context, conn *pgx.Conn, c importedClaim, tr
 	if c.Session == "" {
 		return importedSession{}, "", nil
 	}
-	source, err := sessionFileForID(c.Session, treeVolume)
+	volume := treeVolume
+	if volume == "" {
+		volume = sandbox.TreeRoot
+	}
+	source, err := sessionFileForID(c.Session, volume)
 	if err != nil {
 		return importedSession{}, "session " + c.Session, err
 	}
-	outcome, err := importSession(ctx, conn, source, "")
+	outcome, err := importSession(ctx, conn, source, volume)
 	return outcome, source, err
 }
 
@@ -204,8 +209,8 @@ func importClaimSession(ctx context.Context, conn *pgx.Conn, c importedClaim, tr
 // tree volume or the default legacy volume root. Oh My Pi writes one session
 // file per working-directory folder as `<timestamp>_<session>.jsonl`.
 func sessionFileForID(session, treeVolume string) (string, error) {
-	if strings.ContainsAny(session, `*?[\`) {
-		return "", fmt.Errorf("recorded session %q has a glob character", session)
+	if !claudelaunch.IsSessionID(session) {
+		return "", fmt.Errorf("recorded session %q is not a UUID", session)
 	}
 	root := treeVolume
 	if root == "" {
@@ -216,11 +221,19 @@ func sessionFileForID(session, treeVolume string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("find recorded session %s: %w", session, err)
 	}
+	for i, file := range files {
+		cleaned := filepath.Clean(file)
+		relative, err := filepath.Rel(sessions, cleaned)
+		if err != nil || !filepath.IsLocal(relative) {
+			return "", fmt.Errorf("found recorded session %s outside %s", session, sessions)
+		}
+		files[i] = cleaned
+	}
 	switch len(files) {
 	case 0:
 		return "", fmt.Errorf("recorded session %s was not found under %s", session, sessions)
 	case 1:
-		return files[0], nil
+		return sandbox.SessionFromVolume(files[0], root)
 	default:
 		return "", &sessionFileAmbiguityError{session: session, files: files}
 	}
