@@ -1,4 +1,5 @@
 import { afterAll, afterEach, describe, expect, jest, mock, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
@@ -4525,6 +4526,46 @@ describe("the literal grammar, widened to forms with no expansion", () => {
       "rg -n dispatch src",
     ])
       expect(core.nonLiteralCause(command)).toBeUndefined();
+  });
+
+  // A body written as `--body "$(cat <<'EOF' … EOF)"` is a command
+  // substitution, so every flag's value was an expansion the gate could not read and the write
+  // posted unreviewed with a warning the writer can miss. The text is written out in the command,
+  // so the gate reads it and reviews the write. The flag was never the discriminator: a literal
+  // `--body hi` was always read, and an unquoted delimiter still expands and still is not.
+  describe("a quoted here-document in a command substitution", () => {
+    const BODY = "Done.\nSee the note.\n\n- one\n- two";
+    const quoted = (flag: string, text: string) =>
+      `dispatch comment --issue X-1 ${flag} "$(cat <<'EOF'\n${text}\nEOF\n)"`;
+    test("gives the CLI what bash gives it, for every flag that carries a body", () => {
+      for (const flag of ["--body", "--body-file", "--question", "--reason"]) {
+        const command = quoted(flag, BODY);
+        const printed = execFileSync(
+          "bash",
+          ["-c", command.replace(/^dispatch/, "printf '%s\\0'")],
+          { encoding: "utf8" }
+        );
+        expect(core.commandArgv(command)).toEqual(printed.split("\0").filter((w) => w !== ""));
+      }
+    });
+    test("is in the literal grammar, so the write is reviewed", () => {
+      expect(core.scopedCommand(quoted("--body", BODY))).toBeDefined();
+      expect(core.nonLiteralCause(quoted("--body", BODY))).toBeUndefined();
+    });
+    test("an unquoted delimiter expands in the body, so it stays outside", () => {
+      const command = `dispatch comment --issue X-1 --body "$(cat <<EOF\nhi $USER\nEOF\n)"`;
+      expect(core.scopedCommand(command)).toBeUndefined();
+      // The value holds `$` over several lines, which is named before an expansion in a value.
+      expect(core.nonLiteralCause(command)?.cause).toBe("lines-expansion");
+    });
+    test("a command after the body is no here-document, and stays outside", () => {
+      const command = `dispatch comment --issue X-1 --body "$(cat <<'EOF'\nhi\nEOF\nid)"`;
+      expect(core.scopedCommand(command)).toBeUndefined();
+    });
+    test("a second operand reads a file, and stays outside", () => {
+      const command = `dispatch comment --issue X-1 --body "$(cat q.md <<'EOF'\nhi\nEOF\n)"`;
+      expect(core.scopedCommand(command)).toBeUndefined();
+    });
   });
 
   /** What the CLI prints for a gated write with no marker, built on consumeMarker's own reason. */

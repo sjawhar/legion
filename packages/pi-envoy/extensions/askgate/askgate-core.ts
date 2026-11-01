@@ -758,6 +758,48 @@ type ShellToken =
   | { kind: "redirect"; fd: string; op: string; target?: string; start: number; end: number }
   | { kind: "comment"; start: number; end: number };
 
+/**
+ * The literal text of a `$(cat <<'EOF' … EOF)` at `from`, or undefined. A command substitution
+ * is an expansion the gate cannot read, but this one is already written out: `cat` with no
+ * operand and one here-document whose delimiter is quoted takes no input of its own and expands
+ * nothing, so its output is the body as it stands in the command. Reading it keeps a write whose
+ * body is a here-document inside the literal grammar, where it is reviewed, rather than posting
+ * it unreviewed with a warning the writer can miss (dispatch://INFRA-157).
+ *
+ * Only this shape: `cat`, optional `-`, `<<` or `<<-` (whose body has leading tabs stripped), a
+ * delimiter in single or double quotes, and nothing after the body's closing delimiter. An
+ * unquoted delimiter expands inside the body, a second operand reads a file, and another command
+ * is another program: each stays the expansion it was.
+ */
+function heredocSubstitution(
+  text: string,
+  from: number
+): { end: number; value: string } | undefined {
+  if (!text.startsWith("$(", from)) return undefined;
+  const end = expansionEnd(text, from);
+  if (text[end - 1] !== ")") return undefined;
+  const inner = text.slice(from + 2, end - 1);
+  const opener = /^\s*cat\s+(?:-\s+)?<<(-?)\s*(?:'([^']*)'|"([^"]*)")[^\S\n]*\n/.exec(inner);
+  if (opener === null) return undefined;
+  const delimiter = opener[2] ?? opener[3] ?? "";
+  if (delimiter === "") return undefined;
+  const strip = opener[1] === "-";
+  const lines = inner.slice(opener[0].length).split("\n");
+  const body: string[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index] ?? "";
+    if ((strip ? line.replace(/^\t+/, "") : line) === delimiter) {
+      // Nothing may follow the body but blanks: `$(cat <<'EOF' … EOF; rm -rf /)` runs a command.
+      if (lines.slice(index + 1).some((rest) => rest.trim() !== "")) return undefined;
+      // Command substitution strips the trailing newlines of what it captures.
+      return { end, value: body.join("\n").replace(/\n+$/, "") };
+    }
+    body.push(strip ? line.replace(/^\t+/, "") : line);
+  }
+  // No closing delimiter: bash would read on past the command, so this is no literal.
+  return undefined;
+}
+
 /** Where a `$(…)`, `${…}` or backtick expansion that starts at `from` ends, quotes and nesting
  * followed roughly: a mistake here can only move a cause, since any `$` or backtick is unread. */
 function expansionEnd(text: string, from: number): number {
@@ -832,6 +874,13 @@ function readWord(text: string, from: number): WordToken {
       while (index < text.length && text[index] !== '"') {
         const inner = text[index];
         if (REFUSED_DOUBLE_QUOTED.includes(inner)) {
+          // A `$(cat <<'EOF' … EOF)` is written out in the command: take its text as literal.
+          const here = inner === "$" ? heredocSubstitution(text, index) : undefined;
+          if (here !== undefined) {
+            value += here.value;
+            index = here.end;
+            continue;
+          }
           unread.push(inner);
           refused = true;
           if (inner === "\\") {
@@ -851,6 +900,12 @@ function readWord(text: string, from: number): WordToken {
       if (refused && part.includes("\n")) linesExpansion ??= part.split("\n")[0];
       index++;
     } else if (char === "$" || char === "`") {
+      const here = char === "$" ? heredocSubstitution(text, index) : undefined;
+      if (here !== undefined) {
+        value += here.value;
+        index = here.end;
+        continue;
+      }
       unread.push(char);
       const end = Math.max(expansionEnd(text, index), index + 1);
       expand(index, end);
