@@ -185,8 +185,9 @@ func TestADeliveryRewriteDoesNotTakeARowAnotherTreeHolds(t *testing.T) {
 }
 
 // A row is claimed or held, never both. A catch-up of the tree a decision's issue moved into
-// claims it over the old tree's void hold and clears that hold; the old delivery's retirement then
-// releases nothing it does not own, so the new claim still counts and a later hand-over finds it.
+// claims it over the old tree's void hold and clears that hold; and a hold's release clears only
+// the hold, so even a row that carried both would keep the claim that counts, and a later
+// hand-over finds it.
 func TestAHoldReleaseLeavesAClaimThatCounts(t *testing.T) {
 	r := newKeptRig(t)
 	const old, moved, ref = "LEGION-320", "LEGION-321", "dispatch://LEGION-321/ask/ask-1"
@@ -211,12 +212,17 @@ func TestAHoldReleaseLeavesAClaimThatCounts(t *testing.T) {
 		t.Fatalf("%s after the new tree's claim: claimed by %d, held by %q; want claimed by %d and no hold: a row is claimed or held, never both",
 			ref, claimedBy, heldBy, catchUp)
 	}
+	// The release's own rule, apart from the claim's: put the old hold back beside the new claim,
+	// as no writer does any more, so the retirement has a hold to release on a row a claim counts
+	// on. It releases the hold and leaves the claim.
+	r.exec(`update parked_decisions set held_by_claim = $2, held_by_delivery = $3 where ref = $1`,
+		ref, string(oldArchitect.Token), oldTask.ID)
 	if err := r.store.RetireDelivery(r.ctx, oldArchitect, oldTask.ID); err != nil {
 		t.Fatalf("retire the old tree's task: %v", err)
 	}
-	if _, claimedBy, _, _ := r.row(ref); claimedBy != catchUp {
-		t.Fatalf("%s is claimed by %d after the old task's retirement, want %d: a hold release must not clear a claim that counts",
-			ref, claimedBy, catchUp)
+	if _, claimedBy, heldBy, _ := r.row(ref); claimedBy != catchUp || heldBy != "" {
+		t.Fatalf("%s is claimed by %d and held by %q after the old task's retirement, want claimed by %d and no hold: "+
+			"a hold release clears the hold and must not clear a claim that counts", ref, claimedBy, heldBy, catchUp)
 	}
 }
 
@@ -269,6 +275,7 @@ func TestTwoComposersNeverBothNameOneKeptDecision(t *testing.T) {
 	}
 
 	read := make(chan struct{})
+	backend := make(chan int32, 1)
 	type composed struct {
 		named []string
 		err   error
@@ -277,6 +284,11 @@ func TestTwoComposersNeverBothNameOneKeptDecision(t *testing.T) {
 	go func() {
 		var named []string
 		err := pgx.BeginFunc(r.ctx, r.store.Pool(), func(tx pgx.Tx) error {
+			var pid int32
+			if err := tx.QueryRow(r.ctx, `select pg_backend_pid()`).Scan(&pid); err != nil {
+				return err
+			}
+			backend <- pid
 			var err error
 			named, err = r.compose(tx, tree)
 			return err
@@ -284,8 +296,14 @@ func TestTwoComposersNeverBothNameOneKeptDecision(t *testing.T) {
 		close(read)
 		second <- composed{named, err}
 	}()
-	// The first commits once the second has either composed or is waiting on a lock the first
-	// holds, so the second's read is made while the first's claim is not yet committed.
+	// The first commits once the second has either composed or is waiting on a lock, read on the
+	// second's own backend so no other session's lock wait counts, so the second's read is made
+	// while the first's claim is not yet committed.
+	var pid int32
+	select {
+	case pid = <-backend:
+	case <-read:
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for waiting := false; !waiting; {
 		select {
@@ -294,7 +312,7 @@ func TestTwoComposersNeverBothNameOneKeptDecision(t *testing.T) {
 			continue
 		default:
 		}
-		if err := r.store.Pool().QueryRow(r.ctx, `select exists (select 1 from pg_locks where not granted)`).Scan(&waiting); err != nil {
+		if err := r.store.Pool().QueryRow(r.ctx, `select exists (select 1 from pg_locks where pid = $1 and not granted)`, pid).Scan(&waiting); err != nil {
 			t.Fatal(err)
 		}
 		if time.Now().After(deadline) {

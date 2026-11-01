@@ -773,10 +773,13 @@ func keptMarks(kept KeptDecisions) ([]string, []time.Time) {
 // is one keptNameable found void (its holder serves another tree than the row's issue now), and
 // the claim clears it, so no later release of that hold can touch this claim.
 //
-// A row names only what it claims: what it names was read by UnclaimedKept in this transaction,
-// under the lock that read took, so each is still there to claim. A decision or an approval the
-// row names and cannot claim is an error, which rolls the composer back rather than let it publish
-// a decision another telling owns.
+// What stops a second composer from naming a decision another telling claims is UnclaimedKept's
+// lock, which the composer takes before it reads what it names: each row it names is still there
+// to claim when this runs. The count check below is defensive and does not catch that race on its
+// own: without the lock, a second composer's UPDATE waits on the first's row lock and then
+// re-checks the row, but keptNameable's subquery reads the statement's old snapshot, which does
+// not see the first composer's outbox row, so it claims anyway and the count matches. The check
+// catches a caller that names what it did not read under the lock, and rolls it back.
 func (s *Postgres) ClaimKeptDecisions(ctx context.Context, tx pgx.Tx, tree string, kept KeptDecisions, row int64) error {
 	if len(kept.Decisions) > 0 {
 		refs, at := keptMarks(kept)

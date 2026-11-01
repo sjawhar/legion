@@ -33,12 +33,19 @@ import (
 // this delivery names of its own tree that nothing else has taken). A row another start, catch-up
 // or delivery owns now — the tree a moved issue stands in has claimed or held it — stays theirs.
 //
-// A row the delivery names that no longer stands, though its issue still stands in the claim's
-// tree, is one this delivery's own confirmation told: the machine took the confirmation back (a
-// prompt refused busy after a turn of the agent's own confirmed it, a late refusal), so the
-// architect never read it. It is put back, held by this delivery, so the resend names it again: a
-// second telling is the worst case, never a loss. A newer decision on the same reference keeps its
-// row. A delivery that names nothing holds nothing.
+// The insert below puts a row back. It runs on every unconfirmed write of the delivery —
+// its queue, its mark as sent, a take-back, a write-back — and inserts, held by this delivery,
+// each decision the delivery names that has no (issue, ref) row and whose issue stands in the
+// claim's tree. Only one case reaches it: the delivery's own confirmation told the row and the
+// machine then took that confirmation back (a prompt refused busy after a turn of the agent's own
+// confirmed it, a late refusal), so the architect never read it and the resend names it again; a
+// second telling is the worst case, never a loss. No other case leaves a named row missing while
+// the delivery is unconfirmed: no start or catch-up names a row a delivery holds, so nothing else
+// tells it; a newer decision on the same reference replaces the row rather than deleting it, and
+// keeps it, since the insert does nothing on conflict; and a mark whose row the delivery no longer
+// holds is dropped from the task before any send (the daemon's rootTask), so a later write carries
+// no such mark. An issue that left the claim's tree is never put back. A delivery that names
+// nothing holds nothing.
 func holdKeptDecisions(ctx context.Context, db execer, token claim.Token, delivery string, kept []byte) error {
 	if len(kept) == 0 {
 		return nil

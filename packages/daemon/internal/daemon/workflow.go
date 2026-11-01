@@ -515,9 +515,11 @@ func (w *workflowRuntime) rootTask(ctx context.Context, c supervise.Claim, d sup
 				// earlier send released it to the tree its issue moved to, or that tree's start or
 				// catch-up claimed or told it once its issue left (this delivery's hold is void
 				// there). Either way something else answers the person, and this task names it no
-				// longer. (A row this delivery's own confirmation told is put back when that
-				// confirmation is taken back, so it is held again here; no other delivery takes a
-				// row this one holds.)
+				// longer. Dropping the mark here, before any send, is also what keeps the claim
+				// store's put-back (holdKeptDecisions) to its one case: every unconfirmed write of
+				// the delivery puts back a named decision whose row is missing in this tree, and
+				// the only such row is one this delivery's own confirmation told before the
+				// machine took that confirmation back.
 				continue
 			}
 			issue, err := w.records.Issue(scoped, tx, mark.Issue)

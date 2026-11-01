@@ -356,3 +356,59 @@ func TestACatchUpWhoseReholdsAreSpentHandsOverWhatItNamed(t *testing.T) {
 		t.Fatalf("kept after the spent catch-up = %s, want the decision claimed by the fresh catch-up", keptRefs(left))
 	}
 }
+
+// An earlier listener reports the spent copy's failed forward after the row has finished: its
+// deletion released what it claimed, and no row is left to hand over from (spentKept's claims of
+// 0). What the tree is owed and nothing claims is named by a fresh catch-up while the root has an
+// architect to hear it, and waits KEPT, with nothing written, while it has none — a lingering
+// root's next start or ready names it.
+func TestALateReportOfASpentCatchUpNamesWhatItsRowReleased(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		lingers bool
+		want    int
+	}{
+		{name: "the root hears", lingers: false, want: 1},
+		{name: "the root lingers", lingers: true, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			noticeTree(t, pool, records, tc.lingers)
+			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+			token := architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
+			ask := "dispatch://LEGION-1/ask/ask-2"
+			now := time.Now()
+			keepDecision(t, pool, records, "LEGION-1", ask, time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC))
+			keptCatchUp(t, pool, records, "LEGION-1", 1, now)
+			leased, payload := leaseCatchUp(t, pool, records, "LEGION-1", now)
+			// The row's last copy finished on the listener's 202, and its deletion released what it
+			// claimed; the listener reports the failed forward only after that.
+			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+				return records.FinishOutbox(ctx, tx, leased.ID, leased.LeaseToken)
+			}); err != nil {
+				t.Fatalf("finish the spent catch-up: %v", err)
+			}
+			payload.Resends = len(noticeReholdDelays)
+			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records,
+				notices: &hookPublisher{}, supervisor: sup, project: "legion", now: func() time.Time { return now }}
+			reported := reportedNotice{issue: "LEGION-1", notice: payload, row: leased.ID, architect: token}
+			if err := runner.reholdNotice(ctx, reported, notify.ReasonReceiptTimeout, "ses-architect"); err != nil {
+				t.Fatalf("answer the late report of the spent copy: %v", err)
+			}
+
+			naming := catchUpsNaming(t, pool, "LEGION-1", leased.ID, ask)
+			if named := namingRef(naming); named != tc.want {
+				t.Fatalf("the catch-ups after the late report name %s %d times: %v, want %d", ask, named, naming, tc.want)
+			}
+			left := keptDecisions(t, pool, records, "LEGION-1")
+			if len(left) != 1 {
+				t.Fatalf("kept after the late report = %s, want the decision kept", keptRefs(left))
+			}
+			if claimed := left[0].ClaimedBy != 0; claimed != (tc.want == 1) {
+				t.Fatalf("kept after the late report = %s, want it claimed only by a fresh catch-up of a root that hears", keptRefs(left))
+			}
+		})
+	}
+}

@@ -53,10 +53,11 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 // A catch-up an earlier launch never had delivered is dropped first (DropCatchUps, at the caller's
 // now, which is the clock a lane's lease is written from), so the agent is given one catch-up,
 // computed now, which names again the decisions the dropped one named — the drop releases them in
-// this transaction — with any kept since. A catch-up that carries kept decisions and is being
-// published under a live lease is not dropped: it settles what it named itself, and this one names
-// only what nobody claims. The notice goes through the outbox like any other, so it is routed, held
-// and re-held as they are.
+// this transaction — with any kept since. A catch-up that carries kept decisions is not dropped
+// while any row of its telling — itself, the row it copies, or a re-held copy of either — is under
+// a live lease: that row may be publishing now, and the decisions the catch-up claims are that
+// telling's to settle, so this one names only what nobody claims. The notice goes through the
+// outbox like any other, so it is routed, held and re-held as they are.
 func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, root record.Issue, launch uint64, now time.Time) error {
 	catchUp, awaiting, err := treeCatchUp(ctx, tx, store, gate, root)
 	if err != nil {

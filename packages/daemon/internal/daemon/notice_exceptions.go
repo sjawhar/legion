@@ -183,9 +183,11 @@ func (r *outbox) reholdNotice(ctx context.Context, reported reportedNotice, reas
 	if notice.Resends >= len(noticeReholdDelays) {
 		r.log.Warn("outbox notice not re-held again: it was queued again the most times a notice is",
 			"issue", issue, "kind", notice.Kind, "topic", topic, "key", key, "reason", reason, "resends", notice.Resends)
-		// No copy carries a catch-up's claims on now, so what it named is handed to a fresh
-		// catch-up of the architect's launch rather than left to the row's deletion (spentKept):
-		// the decisions wait in the outbox, never in the table alone.
+		// No copy carries a catch-up's claims on now, so what it named is handed over rather than
+		// left to the row's deletion (spentKept): while the root has an architect to hear it, a
+		// fresh catch-up of that architect's launch claims and names it; while it has none
+		// (lingering, out of the workflow, waiting for its slot), nothing is written and the
+		// decisions wait KEPT for the root's next start or ready to name (CatchUpTheTreesOwed).
 		if notice.CatchUp != nil && notice.CatchUp.Kept != nil {
 			return r.spentKept(ctx, issue, reported.claims, key)
 		}
