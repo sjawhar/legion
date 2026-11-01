@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-644",
+  "previousHandoff": "3b282aed7dfb2c38f43b0f196562fb486ef15279",
+  "proof": [
+    {
+      "criterion": "Round 2 (review of 39eb0986): the no-origin credit rule lives in creditContentChange alone and its test asserts what the pinned ygo does; a margin publish records no rendering; the replica and every copy still hold the room, including under the room's own formatting writes",
+      "surface": "docs package live rooms against the pod's own test Postgres (render-reuse harness, real ygo websocket rooms, browser peers, cold reads over the stored updates)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 ./internal/dispatch/docs/ and CGO_ENABLED=1 go test -race -count=1 -run 'TestRenderReuseARandomisedEditStorm|Format|NilOrigin' ./internal/dispatch/docs/",
+      "observed": "every docs test passes at 073590ff (no --- FAIL; the package's FAIL line is storetest's teardown alone, 'permission denied to terminate process', 5 drops); the race subset passes; testADeleteThatDanglesABoldRun sees two logged updates, the second nil-origin and classified changed=false; TestRenderReuseAnAnchoredCommentRendersNothingTwice still counts observerMarginOnly: 1",
+      "headSha": "073590ff72029c345ead5b1c159f98aa7c41f584",
+      "negativeControl": "without crdt.WithFormatCleanup(false) in newDocumentCopy, TestAColdReadReplaysAChurnOfFormattingToTheRoomsMarkdown fails in all 3 seeds ('the cold read differs from what the room held at byte 70 of 1417'); with testADeleteThatDanglesABoldRun's classification check inverted, it fails at that line"
+    },
+    {
+      "criterion": "Copies of a room replay its commits exactly at ygo v1.54.1-sami.3 (#2496's review): the replica equals the room in state vector, delete set, every text's ToDelta and state bytes after local Server.Apply formatting, browser formatting and API writes",
+      "surface": "docs package live room against Postgres (render-reuse harness, real ygo websocket room, browser peer)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 ./internal/dispatch/docs/ (TestRenderReuseAReplicaReplaysTheRoomsFormattingExactly among them); logs dispatch://INFRA-644/artifact/infra644-final-suites-tar-gz",
+      "observed": "every docs test passed at a3f98f2e (the package's FAIL line is storetest's teardown on the pod's test Postgres alone: permission denied to terminate process); the format replay test's fixed case and 4 seeds x 160 steps hold the replica equal to the room after every step",
+      "headSha": "a3f98f2efc0ac810cf0c117337575e91ae2d7bd0",
+      "negativeControl": "with crdt.WithFormatCleanup(false) removed from newDocumentCopy, the fixed case fails at its delete ('the replica tombstones what the room does not') and seeds 2 and 3 fail at local deletes"
+    },
+    {
+      "criterion": "Not slower on LINUX's write window, the same end state (INFRA-512's merge rule), at ygo v1.54.1-sami.3",
+      "surface": "INFRA-639's replay of LINUX's write window: Dispatch, Postgres, NATS and the listener built from each tree on one 2-vCPU pod (3354b744), base and head alternating",
+      "command": "run-step.sh r5-replay-<side>-<n> --replay --rate 0.15 --gomaxprocs 2 --uploads 0.25 --rng-seed 1 --dispatch-commit <rev>, base main efed4e4d, head c28aead3; steps dispatch://INFRA-644/artifact/infra644-r5-replay-*-tar-gz, tables dispatch://INFRA-644/artifact/infra644-r5r6-tables-tar-gz",
+      "observed": "Dispatch CPU-s base 1005.8/1016.8/1015.0, head 1004.9/987.5/981.2: every head run below every base run (medians -2.7%); all six end in state 973d289e; observe cum-s 26.1-27.5 at the base, 15.5-16.0 at the head",
+      "headSha": "c28aead36f35b4526ef97b1149c03fbe26493722",
+      "negativeControl": "the base side is the control for the cost: no per-block path or load hand-over, observe 26.1-27.5 cum-s against 15.5-16.0"
+    },
+    {
+      "criterion": "Render CPU and REST 2xx before and after on INFRA-589's editor load test (spec), at ygo v1.54.1-sami.3",
+      "surface": "INFRA-589's editor load test (INFRA-605's #2445 harness on both sides): 20 or 200 browser editors on the real document websocket beside REST sessions",
+      "command": "run-step.sh r5-ed1x-<side>-<n> --events 4 --sessions 400 --requests 60 --editors 20 --editor-rate 2 --editor-docs 10 and r5-ed10x-<side>-<n> --events 1 --sessions 100 --requests 15 --editors 200 --editor-docs 100; base ecbaee7d, head bdf27ffb; steps dispatch://INFRA-644/artifact/infra644-r5-ed*-tar-gz",
+      "observed": "1x: Dispatch CPU-s 72.01/51.71 base, 42.92/37.38 head, observe 19.24/8.27 vs 0.59/0.23, REST 2xx 31.1/18.2% vs 23.2/17.8% (falling with run order on both sides; Postgres at 0.80-0.92 cores bounds it); editors-10x: Dispatch cores 0.493/0.558 vs 0.486/0.454, observe 39.2/46.2 vs 3.4/3.0, REST 2xx 72.6/81.4% vs 100/100%, acked 22081/29470 vs 69471/67055",
+      "headSha": "bdf27ffbac7de16548ef3ee60dce4b7866a83a06",
+      "negativeControl": "the base side is the control: whole render per keystroke, observe 8-46 cum-s and relay p50 83-719 ms against 28-56 ms"
+    },
+    {
+      "criterion": "The pairs still hold at the merged head, whose merge of #2522 changed a write's render (documentRenderingValidWithLayout); a validated tree's RenderWithLayout is the validating render",
+      "surface": "the replay and the 1x editor step at the merged head on one pod (37bf5b88), and the pmdoc differential over 32 real LINUX documents",
+      "command": "confirm-all.sh: replay base main d09b46d7 vs a3f98f2e, ed1x ed-base2 13666dd2 vs ed-head2 7983a59f (dispatch://INFRA-644/artifact/infra644-round6-trees-tar-gz, steps infra644-r6-*); DISPATCH_RENDER_CORPUS=<32 docs> go test -run 'TestIncrementalRenderCorpus|TestValidDocumentRenderWithLayoutIsTheValidatingRender' -v ./internal/dispatch/pmdoc/",
+      "observed": "replay 1071.1 vs 1055.4 Dispatch CPU-s, both end in 973d289e; ed1x 48.85 vs 40.44 CPU-s, observe 7.38 vs 0.41; corpus: 17,381 of 18,805 edits spliced byte-identical, 5,084/5,084 text edits; 307 documents render identically through the validated and the validating render",
+      "headSha": "a3f98f2efc0ac810cf0c117337575e91ae2d7bd0",
+      "negativeControl": "with the validated render recording no layout, TestValidDocumentRenderWithLayoutIsTheValidatingRender fails on every fixture ('the validated render's layout is not the validating render's')"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/docs/websocket.go: observeAskBlocksForUpdate back to its base signature",
+    "packages/envoy/internal/dispatch/docs/mutation.go, livewrite.go, replica.go: a margin publish records no rendering; replicaRendering has no layout-less carve-out; ygo citations and spliceTouched's declines",
+    "packages/envoy/.changes/unreleased/pr2485-observer-renders-touched-blocks.yaml, packages/envoy/AGENTS.md: the no-origin credit rule; spliceTouched's declines",
+    "packages/envoy/internal/dispatch/docs/*_test.go: one renderOfRoom, replicaHoldsTheRoom, xmlTextWithPrefix, writeInRoom and forceRecover; raceEnabled; storm_race/norace and cold_formatting deleted; the cold churn case moved to format_replay_test.go"
+  ],
+  "trickyParts": [
+    "Round 2's only production change on a measured path is the margin publish: a publish the margin-only path does not answer (a room other than the one its fork was built from, or a replica holding no rendering) is now measured by the observer instead of compared against the write's markdown. The round 5 and 6 pairs were not re-run for it."
+  ],
+  "deviations": [
+    "cold_formatting_test.go was the tester's file (fdf027f0), not a red test; the review asked to fold or drop it. Its C1 case duplicated render_formatting_test.go's fixed case and was dropped; its churn case, which passed with and without WithFormatCleanup(false) because every churn commit reached the room as a remote apply, moved to format_replay_test.go and now also interleaves the room's own writes and checks the reload, so it fails without the option."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Sent to the controller: Ledger.fail fails every room a write touched when a client cancels the write during its commit (r6-ed1x-head-1: four rooms failed, 693 editor updates unsent).",
+    "Sent to the controller: TestAnUploadHoldsNoIssueLockWhileTheStoreWrites is flaky on main's code.",
+    "Sent to the controller and the merge lane: the pod's test Postgres role lacks pg_signal_backend, so storetest's teardown fails."
+  ]
+}

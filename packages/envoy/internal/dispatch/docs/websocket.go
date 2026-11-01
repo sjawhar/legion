@@ -455,7 +455,7 @@ func (s *Service) applyLoadedState(room string, doc *crdt.Doc, state []byte) (er
 }
 
 func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc) error {
-	loaded := s.takeLoadedState(room)
+	stored := s.takeLoadedState(room)
 	// A load never waits for its own room's recovery. That recovery's eviction waits in ygo's
 	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.51.3-sami.1,
 	// provider/websocket/inject.go:517-525) and closes the channel awaitRoomRecovery waits on
@@ -472,7 +472,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err := s.roomFailure(room); err != nil {
 		return err
 	}
-	if err := s.applyLoadedState(room, doc, loaded); err != nil {
+	if err := s.applyLoadedState(room, doc, stored); err != nil {
 		return err
 	}
 	// Everything this load needs comes from the pool that owns loads. A writer holding a
@@ -498,10 +498,19 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
 	// returns (sjawhar/ygo v1.51.3-sami.1, provider/websocket/server.go:1749-1837: loadRoom closes
-	// the room's ready barrier after it), so nothing writes the tree while this walks it.
+	// the room's ready barrier after it), so nothing writes the tree while this walks it. Its
+	// rendering, with the layout recorded with it, goes to the room's replica (keepReplica, below),
+	// whose first run takes it as its base's: nothing from here to OpenUpdateLog hands the document
+	// to anything, so the state rendered here is the one the log opens on
+	// (renderedReplica.start). This load holds it only until it hands it over.
+	var loaded *replicaRendering
 	tree, err := treeOf(doc)
 	if err == nil {
-		_, err = documentMarkdown(tree)
+		rendering := &replicaRendering{}
+		rendering.markdown, _, rendering.layout, err = documentRenderingWithLayout(tree)
+		if err == nil {
+			loaded = rendering
+		}
 	}
 	var askBlocks map[string]struct{}
 	switch {
@@ -552,9 +561,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	s.unlockState(room, state)
 	// The log is opened before the observer is registered and before ygo hands the room to anyone
 	// (above), so it holds every transaction the room commits from here on, in commit order.
-	replica := s.keepReplica(doc, doc.OpenUpdateLog())
+	replica := s.keepReplica(doc, doc.OpenUpdateLog(), loaded)
 	instance := s.keepInstance(room, doc)
-	replica.classify = func(logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks *observedAsks) (bool, bool) {
+	replica.classify = func(logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks func() map[string]struct{}) (bool, bool) {
 		return s.classifyDrained(room, instance, logged, seq, contentChanged, asks)
 	}
 	doc.OnUpdate(func(update []byte, origin any) {
@@ -590,14 +599,14 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 
 // classifyDrained records the class of logged, the update room's log handed over at commit
 // position seq in instance, given whether it changed the room's rendered markdown and the ask
-// blocks it left when it did (renderedReplica, observedAsks). It is the room's drainClassifier,
-// which runs holding the replica's lock. It reports whether a settlement follows the update, which
+// blocks it left when it did (renderedReplica). It is the room's drainClassifier, which runs
+// holding the replica's lock. It reports whether a settlement follows the update, which
 // is every update but a repair's, and whether it changed the content.
 //
 // The cursor is the instance's, taken here rather than looked up when the update reaches the
 // store: a room evicted and reloaded in between is a different instance, which did not take this
 // update and must not be recorded as holding the version it is stored at.
-func (s *Service) classifyDrained(room string, instance *roomInstance, logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks *observedAsks) (settles, changed bool) {
+func (s *Service) classifyDrained(room string, instance *roomInstance, logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks func() map[string]struct{}) (settles, changed bool) {
 	class := documentUpdateClass{seq: seq, contentChanged: contentChanged, cursor: &instance.cursor}
 	if _, identityRepair := logged.Origin.(*identityClosureOrigin); identityRepair {
 		// A repair's writer appends its update in its own transaction, under the document's
@@ -610,7 +619,7 @@ func (s *Service) classifyDrained(room string, instance *roomInstance, logged cr
 		return false, false
 	}
 	if asks != nil {
-		s.observeAskBlocksForUpdate(room, asks.askBlocks())
+		s.observeAskBlocksForUpdate(room, asks())
 	}
 	class.durable = true
 	origin, published := logged.Origin.(*liveWriteOrigin)
@@ -650,10 +659,19 @@ func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, am
 // and attributes each one not already recorded (observeAskBlocks), in the same critical section
 // the update observer classifies the update in (renderedReplica.observe): the observer classifies
 // each update in the order the replica took them, so the room's record of its ask blocks moves
-// forward only. The tree walk that lists those ask blocks (observedAsks.askBlocks) runs only once
-// the cheap markdown comparison inside observe already showed a real change, so the no-op path,
-// the common one, pays for neither.
+// forward only. The walk that lists those ask blocks (the asks function renderedReplica.observe
+// hands its classify) runs only once the cheap markdown comparison inside observe already showed a
+// real change, so the no-op path, the common one, pays for neither. A nil askBlocks is that
+// walk's answer when it could not read the document, never a document holding no ask block
+// (askBlockIDs): the room's record is left as it is.
 func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]struct{}) {
+	if askBlocks == nil {
+		// The walk could not read the document it had to walk, and logged that
+		// (renderedReplica.spliceTouched): the room keeps the ask blocks and the authors it
+		// recorded, as it does for an update whose own render failed, which is handed no asks
+		// at all.
+		return
+	}
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	var author *model.Actor
@@ -668,16 +686,31 @@ func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]st
 // creditContentChange credits an observed content change to its authors. A service repair (origin
 // registered by serviceTransact) is credited to no one; a browser that was only connected while it
 // happened is not credited either. A committed transaction's live write, which Ledger.Commit
-// applies, was credited when the transaction committed and is not credited again. Any other update
-// is a browser edit by one of the peers, which ygo applies while that peer's connection is
-// registered. ygo does not say which connection sent it, so every connected peer is credited with
-// it: when exactly one is connected it is the latest edit source and replaces `lastActor`, and
-// otherwise the edit cannot be pinned on a single peer and no older actor may stand in for it.
+// applies, was credited when the transaction committed and is not credited again. An update with
+// no origin at all is credited to no one either: every commit a loaded room makes names an origin
+// - a browser's update names the peer ygo applied it for (its *peer, ygo's provider/websocket
+// peer_update.go), a service mutation names the sentinel ygo's Server.Apply makes for the call
+// (applyOriginSentinel), which serviceTransact registers as a service origin, a repair names its
+// own *identityClosureOrigin (applySuppressed) and a published live write its *liveWriteOrigin.
+// The room's own load decodes the stored history with no origin, before OnLoadDocument opens the
+// update log and registers this observer (ygo's loadRoomDoc), so no observer ever sees it. A nil
+// origin here can therefore only be ygo's own cleanup transaction, which a document commits for
+// itself after a remote delete leaves a text's formatting markers covering no text (reearth/ygo
+// #284): nobody typed it, and on the replica's recover path, where every update it could not
+// place counts as a content change, crediting it would hand every connected browser an edit none
+// of them made (INFRA-644). Any other update is a browser edit by one of the peers, which ygo
+// applies while that peer's connection is registered. ygo does not say which connection
+// sent it, so every connected peer is credited with it: when exactly one is connected it is the
+// latest edit source and replaces `lastActor`, and otherwise the edit cannot be pinned on a single
+// peer and no older actor may stand in for it.
 //
 // The credit goes to F, the room's in-flight credits, until the edit's append lands it
 // (AppendUpdateWithCredit): the returned UpdateCredit is how that append reaches it. This takes
 // no advisory lock and touches no database: nothing reads F without holding state.mu.
 func (s *Service) creditContentChange(room string, origin any, hold *roomHold) *UpdateCredit {
+	if origin == nil {
+		return nil
+	}
 	if _, published := origin.(*liveWriteOrigin); published {
 		return nil
 	}

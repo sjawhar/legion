@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-644",
+  "previousHandoff": "39eb0986210c5187a0ba5d808b49fd516234316e",
+  "completed": "2026-11-01T21:05:00Z",
+  "round": 3,
+  "testedHead": "073590ff72029c345ead5b1c159f98aa7c41f584",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Round 3's own entry was re-driven, not read. Its negative control is the claim that the cold-read churn case, moved into format_replay_test.go and rewritten to interleave the room's own writes, now fails without crdt.WithFormatCleanup(false): I took the option out of newDocumentCopy and the case failed in all three seeds ('the cold read differs from what the room held at byte 70 of 1417' and two more), where the version of it this role wrote in round 2 passed either way. So the fold the review asked for kept the coverage and strengthened it, and dropping this role's duplicate C1 case lost nothing. TestARoomLoadsItsStoredHistoryAsItWasStored passes with and without the option, so it is not the discriminating case; the churn one is. The older entries (the replay and editor pairs at a3f98f2e and earlier) were verified in round 2 and are unchanged; this round re-ran the replay at the new head because round 3 changes a measured path."
+  },
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "CI green at the head, read on GitHub (the merge gate's static evidence: lint, typecheck, test and the race lanes the base branch requires)",
+      "evidence": "There is no CI at this head at all, green or red. gh pr view 2485 --json statusCheckRollup answers an empty list at the pull request's head ed340353, and repos/sjawhar/legion/commits/<sha>/check-runs answers nothing for ed340353, for the code head 073590ff and for ac4cff72. The newest CI run on legion/INFRA-644 is 41273220019 at a3f98f2e, round 2's head; every run after it is PR Title on e6c7ced2. [INFERENCE] The cause fits the push's shape: round 3's code commits (ac4cff72, 073590ff) were pushed under the handoff commit ed340353, whose message ends 'skip-checks: true', and GitHub starts no workflow run for a push whose head carries that line - the stall skill://legion-worker names, where the daemon classifies the push by its paths and carries no verdict to it. The remedy is one code push whose head carries no trailer; the INFRA-512 architect has already asked the implementer to merge main in its next code push (main was red on TestMigrationSetTakesNumbersThenTimestamps until 0642a37a and is green again), and that push starts the run. Nothing in the change itself is implicated: every check this role could run locally passed, and they are recorded as proof below."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "Not slower on LINUX's write window with the same end state (INFRA-512 spec v25), at the round-3 head",
+      "surface": "INFRA-639's replay of LINUX's 2026-10-26 write window: Dispatch, Postgres, a latency proxy, NATS and the Envoy listener built from each revision on this 2-vCPU issue pod, against the restored replay seed and bundle",
+      "command": "LOADTEST_REPLAY_ISSUE=INFRA-639 bash packages/envoy/loadtest/run-step.sh t2-replay-<side>-<n> --replay --rate 0.15 --gomaxprocs 2 --uploads 0.25 --rng-seed 1 --dispatch-commit <rev>; two adjacent pairs, base d09b46d7 then head 073590ff each time, back to back on pod legion-infra-infra-644 (boot id ba611b10-6c17-4d28-80d9-19827e83ca17), 17:36Z-21:00Z, neither pair split by a restart; runs in dispatch://INFRA-644/artifact/infra644-tester-r3-replay-pairs-tar-gz",
+      "observed": "Dispatch CPU-s: base 1130.41 and 1139.31, head 1105.64 and 1139.60. The median head run is below the highest base run, which is the rule; pair 1 is -2.2% and pair 2 is a tie (+0.29 CPU-s, +0.03%). All four runs end in state 973d289e…, none saturated, each sent 708 of 708 writes with none failed. The mechanism moves the same way in every run: docs.(*renderedReplica).observe 29.67 and 29.91 at the base against 17.59 and 18.02 at the head, renderedReplica.start 29.49 and 29.71 against 17.41 and 17.78. Read with care: this pod's spread is of the same size as the effect here - the same base binary measured 1293.67 CPU-s in this role's round-2 pair and 1130.41 in pair 1 - and the replay drives no browser editor, so the only part of this change it exercises is the replica's catch-up. The editor workload, where the per-keystroke render is removed, is the implementer's own evidence.",
+      "headSha": "073590ff72029c345ead5b1c159f98aa7c41f584",
+      "negativeControl": "The base side is the control and carries the cost this change removes: the whole-document render per committed update and the base decode-and-render at each replica start, 29.7-29.9 and 29.5-29.7 cum-s against 17.6-18.0 and 17.4-17.8."
+    },
+    {
+      "criterion": "Every copy that replays a room's commits holds the formatting the room held, the fold of the stored updates a cold read renders included (round 3 moved and rewrote this role's round-2 case)",
+      "surface": "A live Dispatch room in the docs package's real-process harness against the pod's test Postgres, with the room then evicted and the document read cold over its stored updates",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 -run 'TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown|TestARoomLoadsItsStoredHistoryAsItWasStored|TestAColdReadReplaysAChurnOfFormattingToTheRoomsMarkdown' -v ./internal/dispatch/docs/",
+      "observed": "All three pass at this head. The churn case now interleaves the room's own writes with the browser's and checks the reload, which is what gives it teeth on the stored path.",
+      "headSha": "073590ff72029c345ead5b1c159f98aa7c41f584",
+      "negativeControl": "With crdt.WithFormatCleanup(false) taken out of newDocumentCopy, TestAColdReadReplaysAChurnOfFormattingToTheRoomsMarkdown fails in all three seeds (byte 70 of 1417, byte 233 of 1480, byte 172 of 1433) and TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown fails too; TestARoomLoadsItsStoredHistoryAsItWasStored passes either way, so it is not the discriminating case. tree.go was restored byte for byte afterwards."
+    },
+    {
+      "criterion": "Equivalence of the observer's output: the replica's markdown and each update's content_changed are what a whole render of the same state gives, with the touched blocks found by the replica's own change finder",
+      "surface": "A live Dispatch room in the docs package's real-process harness, two connected browser peers on one document (roomPeer), the shadow rendering an independent copy after every commit",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 -run TestRenderReuseARandomisedEditStorm ./internal/dispatch/docs/",
+      "observed": "ok in 75.9 s at this head: 8 seeds, 2,775 commits, the replica's markdown equal to the shadow's independent whole render after every one and every update's recorded content_changed equal to what the shadow measured.",
+      "headSha": "073590ff72029c345ead5b1c159f98aa7c41f584",
+      "negativeControl": "Unchanged from round 1 and still the discriminating one for the finder: a line in noteChangedTypes that records no block makes the storm fail at commit 1 of seed 1."
+    },
+    {
+      "criterion": "The per-block splice equals the whole render byte for byte on real documents, and a validated tree's RenderWithLayout is the validating render",
+      "surface": "pmdoc's splice differential over a corpus of 90 real LINUX specs this role fetched itself, and the validated-render equivalence over the package's fixtures and corpus",
+      "command": "cd packages/envoy && DISPATCH_RENDER_CORPUS=/legion/scratch/tmp/infra644r/corpus go test -count=1 -run 'TestIncrementalRenderCorpus|TestValidDocumentRenderWithLayoutIsTheValidatingRender' -v ./internal/dispatch/pmdoc/",
+      "observed": "PASS. Corpus: 90 documents, 0 unparsed, 5,405 trials, 4,913 spliced (90.9%) each byte-identical to RenderWithLayout of the edited document with an equal layout; paragraph, heading and list text edits 1,257 of 1,259. Validated render: 365 documents through both paths, each identical.",
+      "headSha": "073590ff72029c345ead5b1c159f98aa7c41f584",
+      "negativeControl": "The finder break above is the discriminating control for the splice; a declined splice is the fallback the design rests on, and 492 of the 5,405 trials took it."
+    }
+  ],
+  "suites": {
+    "note": "Run here because this pod can run them; no CI lane was re-run and none was waited for.",
+    "docs": "go test -count=1 ./internal/dispatch/docs/ - 1737.16 s, no test failed. The package's FAIL line is storetest's teardown alone ('permission denied to terminate process'), the pod's test Postgres role lacking pg_signal_backend, already reported by the implementer.",
+    "pmdoc": "go test -count=1 ./internal/dispatch/pmdoc/ - ok, 1127.88 s"
+  },
+  "observationsNotFailures": [
+    "Round 3 takes the nil-origin rule out of observeAskBlocksForUpdate and leaves it in creditContentChange alone (websocket.go). The two rules are not the same: creditContentChange decides who a content change is credited to, and the ask walk decides who an ask block newly seen on an update is attributed to. After this round, an ask block first seen on ygo's own cleanup transaction would be attributed to the sole connected browser rather than to nobody. I could not construct a reachable case - a cleanup transaction deletes redundant format markers and adds no block, so it cannot make an ask id newly visible, and in every path I tried the ask was already recorded by the update before it - so this is an observation, not a failure. It is recorded because nothing now pins it.",
+    "The replay's margin-publish change is the only production change of round 3 on a measured path, and the pairs above cover it: both pairs ran at 073590ff."
+  ]
+}

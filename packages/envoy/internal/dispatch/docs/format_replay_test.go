@@ -4,12 +4,18 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"maps"
+	"math/rand/v2"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/reearth/ygo/crdt"
 	ygws "github.com/reearth/ygo/provider/websocket"
 
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
@@ -194,6 +200,220 @@ func TestARoomLoadsItsStoredHistoryAsItWasStored(t *testing.T) {
 	if got := encodedRoom(t, service, artifactID); !bytes.Equal(got, want) {
 		t.Fatalf("the loaded room holds a state of %d bytes, want its stored history's %d bytes", len(got), len(want))
 	}
+}
+
+// The shapes a room's own commits leave are not only the crafted ones. A browser marks and
+// unmarks runs that overlap each other; the service writes in the room between its updates
+// (writeInRoom), marking, unmarking and deleting whole marked runs; an agent rewrites a paragraph
+// through the document API; and the browser types. The room's own writes have the last word, as
+// a repair or a sweep does: ygo runs no cleanup after a local transaction of the room's, so the
+// markers they leave are the room's, and the fold of the stored updates a cold read renders must
+// hold them. With crdt.WithFormatCleanup(false) taken out of newDocumentCopy the fold deletes
+// markers of those gaps, and the cold read renders a marked run where the room rendered a plain
+// one.
+func TestAColdReadReplaysAChurnOfFormattingToTheRoomsMarkdown(t *testing.T) {
+	for _, seed := range []uint64{1, 2, 3} {
+		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) { formattingChurnRound(t, seed) })
+	}
+}
+
+func formattingChurnRound(t *testing.T, seed uint64) {
+	t.Helper()
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, formattingChurnDocument())
+	peer := newRoomPeer(t, service, artifactID, 1, reuseBob, nil)
+	rng := rand.New(rand.NewPCG(644, seed))
+	kinds := map[string]int{}
+	// roomWrite is one of the service's own writes in the room, on the text node at index among
+	// the markable ones: a whole marked run deleted, which strands the markers that opened and
+	// closed it in one gap, or a short run marked or unmarked.
+	roomWrite := func(index int) {
+		writeInRoom(t, service, artifactID, "the churn's local write", serviceWrite, func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
+			written := textsUnder(fragment, true)
+			if len(written) == 0 {
+				return nil
+			}
+			target := written[index%len(written)]
+			if marked, run, ok := markedRunOf(rng, target); ok && run < target.Len() && rng.IntN(2) == 0 {
+				kinds["local delete"]++
+				return func(txn *crdt.Transaction) { target.Delete(txn, marked, run) }
+			}
+			if target.Len() < 6 {
+				return nil
+			}
+			at, run := rng.IntN(target.Len()-5), 1+rng.IntN(5)
+			mark := formattingMarks[rng.IntN(len(formattingMarks))]
+			var value any = markOn
+			if _, held := marksAt(target, at)[mark]; held {
+				value = nil
+			}
+			kinds["local format"]++
+			return func(txn *crdt.Transaction) { target.Format(txn, at, run, crdt.Attributes{mark: value}) }
+		})
+	}
+
+	for round := range 40 {
+		texts := peer.markableTexts()
+		if len(texts) == 0 {
+			t.Fatal("the document holds no markable text")
+		}
+		text := texts[rng.IntN(len(texts))]
+		if text.Len() < 6 {
+			continue
+		}
+		at, length := rng.IntN(text.Len()-5), 1+rng.IntN(5)
+		mark := formattingMarks[rng.IntN(len(formattingMarks))]
+		var value any = markOn
+		if rng.IntN(2) == 0 {
+			value = nil
+		}
+		peer.send(func(txn *crdt.Transaction) { text.Format(txn, at, length, crdt.Attributes{mark: value}) })
+		kinds["browser format"]++
+		if round%3 == 2 {
+			roomWrite(rng.IntN(len(texts)))
+			peer.sync()
+		}
+		if round%7 == 6 {
+			find := fmt.Sprintf("Churn paragraph %d holds", round/7)
+			// The churn's own deletes can take the words the replace looks for, which is no
+			// failure of the room's: the round writes nothing then.
+			if strings.Count(roomMarkdown(t, service, artifactID), find) == 1 {
+				if err := joinedWrite(service, applyOps(service, artifactID, reuseAgent, model.EditOp{
+					Op:   "replace",
+					Find: find,
+					With: fmt.Sprintf("Churn paragraph %d now holds", round/7),
+				})); err != nil {
+					t.Fatalf("the agent's write: %v", err)
+				}
+				kinds["api replace"]++
+			}
+			peer.sync()
+		}
+		if round%11 == 10 {
+			texts = peer.markableTexts()
+			target := texts[rng.IntN(len(texts))]
+			peer.send(func(txn *crdt.Transaction) { target.Insert(txn, rng.IntN(target.Len()+1), "typed", nil) })
+			kinds["browser type"]++
+		}
+	}
+
+	// The room's own writes close the churn, at the marked runs the browser left: a character
+	// typed at a run's head carrying that run's own mark with a marker of its own, the run's
+	// first character deleted after it, and that position unmarked - the editing that leaves two
+	// markers of one key in one gap and a plain run behind them, which is where a cleanup calls
+	// the first marker redundant. A browser update to the same text afterwards would have the
+	// room clean the gap up and store the cleanup, which leaves the fold nothing to disagree
+	// about, so the room's own writes come last.
+	peer.sync()
+	for range 6 {
+		index, closingAt, typed := 0, 0, false
+		writeInRoom(t, service, artifactID, "a marked character the room types", serviceWrite, func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
+			written := textsUnder(fragment, true)
+			for _, candidate := range rng.Perm(len(written)) {
+				target := written[candidate]
+				at, _, ok := markedRunOf(rng, target)
+				if !ok || target.Len() < at+2 {
+					continue
+				}
+				// A mark the run carries with a marker of its own, which the seeded markdown
+				// wrote: the write marks the character it types with that key and no marker, so
+				// the two markers differ and ygo writes the write's own rather than letting the
+				// run's stand for it.
+				mark := markWithAMarker(marksAt(target, at))
+				if mark == "" {
+					continue
+				}
+				index, closingAt, typed = candidate, at, true
+				return func(txn *crdt.Transaction) {
+					target.Insert(txn, closingAt, "z", crdt.Attributes{mark: markOn})
+				}
+			}
+			return nil
+		})
+		if !typed {
+			continue
+		}
+		writeInRoom(t, service, artifactID, "the character after it deleted", serviceWrite, func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
+			written := textsUnder(fragment, true)
+			target := written[index%len(written)]
+			if target.Len() < closingAt+2 {
+				return nil
+			}
+			return func(txn *crdt.Transaction) { target.Delete(txn, closingAt+1, 1) }
+		})
+		writeInRoom(t, service, artifactID, "the character after it unmarked", serviceWrite, func(fragment *crdt.YXmlFragment) func(*crdt.Transaction) {
+			written := textsUnder(fragment, true)
+			target := written[index%len(written)]
+			if target.Len() < closingAt+2 {
+				return nil
+			}
+			cleared := crdt.Attributes{}
+			for _, mark := range formattingMarks {
+				cleared[mark] = nil
+			}
+			return func(txn *crdt.Transaction) { target.Format(txn, closingAt+1, 1, cleared) }
+		})
+		kinds["local closing shape"]++
+	}
+
+	waitForLandedAppends(t, service, artifactID)
+	t.Logf("seed %d: %v", seed, kinds)
+	if kinds["local delete"] == 0 || kinds["api replace"] == 0 || kinds["local closing shape"] == 0 {
+		t.Errorf("seed %d left the room no local delete, no agent write or no closing shape (%v): the round proved nothing", seed, kinds)
+	}
+	want, state := roomMarkdown(t, service, artifactID), encodedRoom(t, service, artifactID)
+	if err := service.Evict(context.Background(), artifactID); err != nil {
+		t.Fatalf("evict the room: %v", err)
+	}
+	cold := readCold(t, service, artifactID).markdown
+	if cold != want {
+		at := 0
+		for at < len(cold) && at < len(want) && cold[at] == want[at] {
+			at++
+		}
+		t.Errorf("the cold read differs from what the room held at byte %d of %d:\n  cold: %q\n  room: %q",
+			at, len(want), excerptAround(cold, at), excerptAround(want, at))
+	}
+	if reloaded := encodedRoom(t, service, artifactID); !bytes.Equal(reloaded, state) {
+		t.Errorf("the room reloaded from its stored history holds a state of %d bytes, want the %d bytes it held: the fold of its updates is not what it stored",
+			len(reloaded), len(state))
+	}
+}
+
+func excerptAround(text string, at int) string {
+	return text[max(0, at-80):min(len(text), at+80)]
+}
+
+// markWithAMarker is the first of marks, in name order, whose value carries attributes of its
+// own - the marker the seeded markdown wrote the mark with - or "" where no mark does. A mark
+// written with another value is a marker of its own, where a mark written with the value held
+// restates what the text carries and writes none.
+func markWithAMarker(marks crdt.Attributes) string {
+	for _, mark := range slices.Sorted(maps.Keys(marks)) {
+		switch value := marks[mark].(type) {
+		case crdt.Attributes:
+			if len(value) > 0 {
+				return mark
+			}
+		case map[string]any:
+			if len(value) > 0 {
+				return mark
+			}
+		}
+	}
+	return ""
+}
+
+// formattingChurnDocument is a document of marked and plain runs a browser can mark over, with
+// paragraphs an agent rewrites.
+func formattingChurnDocument() string {
+	source := "# Formatting churn\n\n"
+	for section := range 6 {
+		source += fmt.Sprintf("Churn paragraph %d holds **bold words** and _italic words_ and plain words a browser marks over and over again.\n\n", section)
+		source += fmt.Sprintf("- Churn bullet %d with **marked** and plain text\n  - Churn nested %d with _marked_ and plain text\n\n", section, section)
+	}
+	return source
 }
 
 // writeItalicLeavingMarkers makes, as four commits, emphasised text whose last two commits leave

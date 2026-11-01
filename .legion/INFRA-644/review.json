@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-644",
+  "previousHandoff": "957395193e7df9fd15df0833b3b332237a18ce48",
+  "completed": "2026-11-01T14:29:47Z",
+  "round": 2,
+  "headReviewed": "39eb0986210c5187a0ba5d808b49fd516234316e",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 6,
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/websocket.go:645-662", "description": "observeAskBlocksForUpdate gains an origin parameter and a nil-origin branch that no caller reaches: it runs only when asks != nil, recover classifies every unplaced update with nil asks (replica.go:518-520), and on the pinned ygo the cleanup commit is classified as no change, so it gets nil asks too. No test runs the branch. Revert the signature, or decide the author once at the classify site with a test that reaches it."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/nil_origin_credit_test.go:381-508", "description": "testADeleteThatDanglesABoldRun passes with or without creditContentChange's nil check: the cleanup commit is classified changed=false, and creditContentChange runs only for a content change (websocket.go:583-584), so the credit loop checks something that cannot happen; it also asserts no cleanup was logged at all. Assert what it really holds (two logged updates, the cleanup classified as no change) or delete it; the recover subtest is the one that proves the fix."},
+    {"severity": "important", "file": "packages/envoy/.changes/unreleased/pr2485-observer-renders-touched-blocks.yaml:7-9", "description": "The changelog says whom each ask is attributed to is unchanged, and AGENTS.md's credit rule (408, 618) names only a service repair as credited to no one; the diff now credits a nil-origin commit to no one (websocket.go:691-693). Record the rule in both, worded to match how finding 1 is resolved; the PR body's Change bullet on WithFormatCleanup also describes code main already carries (#2604)."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/storm_race_test.go:7", "description": "stormRaceEnabled duplicates the package's raceEnabled (race_enabled_test.go:6, race_disabled_test.go:9); delete both new files and use raceEnabled."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/nil_origin_credit_test.go:241-364", "description": "Copied test helpers: copiedRoomMarkdown = renderOfRoom (render_reuse_test.go:1405) and cold_formatting_test.go:110-121; three replica-equals-room assertions (expectReplicaHoldsTheRoom, replicaHoldsTheRoom, replicaReplaysTheRoom); xmlTextWithPrefix = roomPeer.text; writeInRoom ~ commitWithNoOrigin; the forced-recover snippet five times, each leaving fragment set."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/cold_formatting_test.go:24-58", "description": "Tests WithFormatCleanup(false), which main already carries and covers in format_replay_test.go; C1 copies render_formatting_test.go's F1 line for line. Fold what is new into format_replay_test.go with its helpers, or drop it."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/mutation.go:468", "description": "A margin publish builds a replicaRendering with no layout, which the type's own doc has to carve out; only askBlocks being nil keeps changedBy from adopting it, after which spliceTouched's r.rendering.layout.Blocks() (replica.go:687) would panic. Give the margin publish no rendering."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/render_reuse_test.go:1662", "description": "Asserts the text of a log message; the ask record assertions above it are the behaviour. Delete the log assertion."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/replica.go:456", "description": "Stale prose: cites sjawhar/ygo v1.51.3-sami.4 (pin is v1.54.1-sami.3); 'finder' wording at render_reuse_test.go:1638 and render_storm_test.go:68 names the deleted interface; AGENTS.md:690 and replica.go:633-635 omit spliceTouched's own declines (child count differs from the layout, a non-element child)."}
+  ],
+  "previousThreads": "All 10 threads from round 1 checked at 39eb0986 and accepted: pin equals main's v1.54.1-sami.3; ask read failure records nothing; one pmdoc.WalkAskBlocks; one replicaRendering; touched reset after classification; finder interface gone; replica.go split; one roomPeer; changelog and AGENTS.md prose fixed.",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. Code head a3f98f2e: run 41273220019 success. Head 39eb0986 carries the tester's test commit fdf027f0: run 41315162500 queued at review time; a request for changes does not wait on it.",
+  "thermonuclear": "deep-review at 39eb0986: APPROVE, no Medium/High; nil-origin claim holds (every live commit path enumerated in ygo v1.54.1-sami.3 and docs/), WithFormatCleanup(false) already on main, Parked applied in ygo's documented order under one classification, splice exactness re-checked against main's new read-backs. code-quality at 39eb0986: CHANGES, findings folded above."
+}
