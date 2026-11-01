@@ -15,7 +15,7 @@ body: |-
     route or author copy skipped for it is published to it then. The comment's own event waits on a
     mention for at most a minute after the comment committed, however long the recipient's lane is
     held and whether or not a Retry overtook the attempt: past that the outbox records the copy it
-    skipped (migration `0150`,
+    skipped (migration `0151`,
     `comment_fallback_copies`), publishes the event to every other destination, and publishes that
     copy to its one destination only if every send of that mention - the sweep's resend, the
     queued send the lane comes to, a Retry that overtook it - failed; a copy whose publish fails is

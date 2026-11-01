@@ -33,6 +33,9 @@ A new script's section, and its item in the index list below, go next to the scr
 
 Every `docker run` in these scripts sets a CPU and a memory limit inline, and its container is removed when the run ends (an `EXIT` trap's `docker rm -f -v`, or `--rm`):
 the proofs run on a shared devbox, where an unbounded container takes cores and memory from every other run there.
+A container is named for the pid of the driver that started it, and the kernel hands a pid out again, so Stage 4b's teardown removes by label rather than by name:
+every container it starts carries that run's own id as the docker label `legion.dev/e2e-run`, and the teardown removes a name only while the container at it carries that id (`remove_run_container`, `lib/stage4b-run-containers.test.ts`).
+What an earlier run left stays for [`lib/leftovers.sh`](#libleftoverssh) to name to the operator.
 Every scratch Postgres keeps its data directory on `tmpfs`, so no run leaves a volume behind, and tmpfs is charged to the container's memory.
 Every scratch Postgres gets `--cpus 2 --memory 2g`, except the session databases of Stage 4a and Stage 4b, which get `--cpus 2 --memory 4g`:
 they hold every pod's Oh My Pi session for the whole run, hours for Stage 4b.
@@ -185,6 +188,14 @@ Each item below names a script, then what it proves.
   a failed check on a base that requires nothing leaves no `checksVerdict` key on `GET /legion/v1/state`, the issue in `testing` and no `checks-red`;
   the same failure once that base requires the check is `red`, sends the work to `implementing` and tells one `checks-red` naming it;
   a passing required check is `green`; and at an exhausted fix-attempt count a code push onto the held head once its base requires nothing leaves the counted attempt, `fixAttempts` unchanged, so the new head's red once the base requires the check again sends the work back with a `checks-red` rather than being held
+
+- `ci-red-no-takeover.sh`
+
+  a CI red takes no role's turn over, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own, with CI's settlements, the pushes and the synchronizes as GitHub envelopes and each role's registration, turns and completions over the daemon's own HTTP routes and worker stream:
+  the red starts the implementer at once, while the tester is still working the turn its own assignment began and nothing at all is sent to the tester's connection;
+  the tester is told its phase ended by one message on its own role topic;
+  a completion it reports from that old turn is refused `409 HANDOFF_STALE_ASSIGNMENT` while the completion of the handoff the new assignment's own task calls for, at a commit of its own, is taken;
+  and a phase-ended message to a role topic no live session holds finishes its outbox row rather than retrying, with the start still acting
 
 - `TestRealGitHubCredentialSurface`
 
@@ -789,6 +800,15 @@ The checks:
 - `claude-implementer-handoff`: told through Dispatch to make the spec's one-file change, write and push its handoff, and call the `legion` tool's `handoff_complete`, it does:
   the daemon records the completion's commit, which the implement App authored and committed, which is on `sjawhar/legion-smoke` and which changes `.legion/<issue>/`, and the transcript holds the `mcp__legion__legion` call with a result that is not an error.
   No pull request is opened.
+
+- `claude-background-tasks`: the implementer's Claude Code carries no `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` and keeps `CLAUDE_CODE_DISABLE_CRON=1`, read once from `/proc/<pid>/environ` (the runtime never sets the first,
+  so an operator who wants background tasks off sets it itself).
+  Told to start a background `Bash` job (`run_in_background`) and a background `Task` subagent, each sleeping 90 s behind a marker of the run's own, and to end its turn at once, it does:
+  the two calls are read from the transcript's tool calls rather than from its prose, the claim goes idle with the job's file still unwritten, and the daemon then has the claim working on no delivery of its own
+  — the turn Claude Code starts when a background result lands, which the bridge reports as `agent_start`…`agent_end`.
+  Each result is read in the turn it starts:
+  the reply naming it is written past the offset the first turn ended at, so neither line can be that turn's own prose, and the bash job's file carries its marker.
+  The implementer's phase is complete by here, so these turns are its own and no `Stop` hook reminder rides on them.
 
 - `kill-resumes-the-same-claude-session`:
   its pane killed, the claim relaunches one generation on, registers the same session id and transcript path, runs `claude --resume <that id>`, and the transcript's bytes from before the kill are unchanged.
@@ -1480,7 +1500,7 @@ Each item below names a check, then what it does and what it requires.
 
 - `pod-baseline`
 
-  the stub agent the root's shim started (read from `/proc/<pid>/environ`) has `PI_CONFIG_FILES` = the pod baseline's turn-scoping overlay on the state volume, then the operator's;
+  the stub agent the root's shim started (read from `/proc/<pid>/environ`) has `PI_CONFIG_FILES` = the operator's overlays alone, exactly as the pod carries them, since Legion writes no overlay of its own;
   `PI_CONFIG_DIR=.omp`, `OMP_SESSION_STORAGE=sql` with `OMP_SESSION_SQL_DSN_FILE` naming the session database's URL file (no pod keeps a session on its disk, which dies with it), `XDG_STATE_HOME=/legion/scratch/state/architect` (the root claim's role:
   the state home is the one directory of the issue's scratch a role has to itself, so Oh My Pi's browser broker lock, an abstract unix socket named from a path under the state root, is one name per container of the pod rather than one across it), `TMPDIR=/legion/scratch/tmp` (the issue's own temporary directory, the one every role of the pod is told:
   the runtime names it, so an agent falling back to the image's `/tmp` is the regression this value catches), and the operator's other variables;
@@ -1490,7 +1510,7 @@ Each item below names a check, then what it does and what it requires.
   `/legion/scratch/tmp`, the agent's `TMPDIR`, is a directory in the root's container too, made by the shim before Oh My Pi started, since nothing else creates the temporary directory a role is told;
   the shim itself (the agent's parent `legion worker-shim`;
   the container's PID 1 is its `legion launcher`) has the operator's `PI_CONFIG_FILES` alone;
-  the overlay is mode `444`; and the image's `omp config get`, run under the agent's environment in a repository whose `.omp/config.yml` sets both, reads `compaction.remoteEndpoint` as the repository set it and `bash.autoBackground.enabled` as `false`, and with an operator overlay setting the endpoint named after the agent's overlays reads the operator's endpoint
+  and the image's `omp config get`, run under the agent's environment in a repository whose `.omp/config.yml` sets it, reads `compaction.remoteEndpoint` as the repository set it, and with an operator overlay setting the endpoint named after the agent's overlays reads the operator's endpoint
 
 - `setup-ran`
 
@@ -1846,6 +1866,7 @@ The App inputs ([`lib/github-apps.sh`](#libgithub-appssh), optional) name anothe
 The daemon's `github_apps` is the block it proved.
 
 `STAGE4B_UNTIL` must name a checkpoint below; any other value is refused.
+Every development switch here is refused above `ensure_project`, the run's first write anywhere, so a mistyped one costs production Dispatch nothing.
 `STAGE4B_SKIP_CONTROLLER=1`, refused without `STAGE4B_UNTIL`, runs none of the checks of `controller`, `full-agent-negative` or `controller-walk` and only takes tree 3 out, printing `CHECK <checkpoint>: SKIPPED (…)` for each of the three, so a development run can reach a later checkpoint while a defect of the controller's own is unfixed;
 it also skips the GitHub credential check in `controller` and the one in `daemon-controller-liveness`'s phase 1, so a run with it proves neither controller's gh.
 `STAGE4B_EVIDENCE_DIR` keeps the evidence (default:
@@ -1882,6 +1903,7 @@ A wait with no subject, a starved pod outside the subject, any other timeout, an
 A failed teardown check outranks every reason the run stopped:
 it prints its own `CHECK <name>: FAIL` line (the audit's names the run's writes and subscriptions outside LEGSMOKE, as the `production-audit` checkpoint does), and the verdict is `stage 4b e2e: FAIL (check <teardown check>, in the teardown after check <check>)` whenever the checkpoint that stopped the run did not fail itself:
 a `STAGE4B_UNTIL` run's last checkpoint, a blocked checkpoint, a signal.
+A signal (`SIGHUP`, `SIGINT`, `SIGTERM`) also puts a line of its own above that verdict, `stage 4b e2e: <signal> stopped the run (exit <status>) while check <check> was running: …`, since the verdict alone would read as that checkpoint's own failure; a command of the run that exits 129, 130 or 143 by itself is the failure it always was, and gets no such line.
 `done` cleans the smoke `main` after tree 1's merge, which closed it, while the implementer works its production check's first look (`clean_smoke_main`, [stage 3's cleanup](#stage3-devbox-workflowsh), with its bounded wait).
 That cleanup is the fixture's teardown, not the workflow under test.
 It stays inside `done`, so a `STAGE4B_UNTIL=done` run still cleans the smoke `main`, and the driver marks it (`smoke_main_cleaning`) for the `EXIT` trap.
@@ -2258,17 +2280,20 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
   `legion claims resume` then relaunches it with no `suspendedBy`, the held notice arrives in its session, and the daemon logged exactly two `api: operator request` lines for the architect, the suspend's route and then the resume's.
   With real agents throughout; the tester's adoption leaves a new empty change and keeps the implementer's author
 
-- `ci-red-takeover`
+- `ci-red-no-takeover`
 
-  CI settling red while tree 1's tester is in a turn takes the phase back without its completion, and interrupts that turn before the implementer starts.
-  The control: the tester runs `/usr/bin/sleep 20 && date … > /tmp/stage4b-takeover-control`, which nothing interrupts, and the file is written.
-  The witness: the tester runs the same chain with `/usr/bin/sleep 1207` into `/tmp/stage4b-takeover-witness`, its claim `working` and the sleep in its pod's process list;
+  CI settling red while tree 1's tester is in a turn takes the phase back without its completion and takes nothing else:
+  the implementer's start acts at once, and the tester keeps its turn, its background job, its process and its session.
+  The control: the tester runs `/usr/bin/sleep 20 && date … > /tmp/stage4b-ci-red-control`, and the file is written.
+  The witness: the tester runs the same chain with `/usr/bin/sleep 600` into `/tmp/stage4b-ci-red-witness`
+  — a bash call Oh My Pi backgrounds once it outruns its own threshold, since nothing of Legion's turns `bash.autoBackground.enabled` off, so the tester waits on it with the `wait` tool — its claim `working` and the sleep in its pod's process list;
   the proof human commits `.fail-me` to the pull request's branch, the smoke repository's `fail-on-demand` check fails on it, and tree 1 returns to `implementing`.
-  The tester then goes idle on its first session in its first pod, its sleep gone and the witness never written.
-  The daemon log's lines of the takeover (kept as `ci-red-takeover-log.jsonl`) hold the tester's turn over, the start going on only after it, and the implementer's CI-red task reaching its session after it too;
-  the tester's turn interrupted, which the log can carry or not (`takeover_interrupted` is optional since 829b4f94), must come no later than it being over when the line exists.
-  A control that puts the task at the row's own interrupt time, or, with none logged, at the timestamp taken just before the `.fail-me` commit (edb4eb62, 80d0c82b), must fail.
-  The implementer, told to, deletes `.fail-me`, tree 1 returns to `testing`, and the tester, handed testing again on its first session in its first pod, has still written no witness
+  The daemon then has the implementer in a turn of the red's task
+  — its claim `working` on a confirmed `implementing` delivery, the task in its session — while that sleep is still in the tester's process list and the witness file is absent;
+  the tester's session (kept as `ci-red-tester-session.jsonl`) holds no aborted turn, its claim is the one it first registered with, and it receives the phase-ended message on its own role topic (`CI went red, so your testing phase has ended`), which is what ends the `wait` it is in.
+  A control over a copy of that session with one aborted assistant turn appended must be refused.
+  Its witness job then runs on and writes the witness file.
+  The implementer, told to, deletes `.fail-me`, tree 1 returns to `testing`, and the tester is handed testing again on its first session in its first pod
 
 - `tree-reviewed`
 
@@ -3621,6 +3646,51 @@ The records are seeded through the store, as every daemon test seeds its fixture
 The configuration, the store and its migrations, the HTTP API, `openWorkflow` and its required-checks pass, the JetStream consumers and the outbox lanes are the real ones.
 `NO_REQUIRED_CHECKS_EVIDENCE_DIR` (default a fresh directory under `TMPDIR`, kept and printed) keeps the transcript, the `nats-server`'s log and the daemon's own, which the driver writes through `LEGION_E2E_DAEMON_LOG`.
 
+## ci-red-no-takeover.sh
+
+```sh
+LEGION_TEST_PG_DSN=postgres://<user>@<host>:<port>/<database>?sslmode=disable \
+  [LEGION_E2E_NATS_BIN=<nats-server>] bash scripts/e2e/ci-red-no-takeover.sh     # → "ci red no takeover e2e: PASS in <n>s", exit 0
+```
+
+Runs on any Linux host with `go` — no Docker, no cluster, no agent — so a Legion pod, CI and a devbox all run it.
+`LEGION_TEST_PG_DSN` is required and names the PostgreSQL the daemon migrates and runs on;
+the script starts none.
+The broker is the run's own: the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.10.22` the script installs with `go install` into a GOBIN of its own, started with JetStream on a port the kernel picks for it (`-p -1`, read back from its log) and stopped on any exit.
+A run takes about a minute.
+The four checks below are [`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'s, the run `merged-root-waits.sh` and `no-required-checks.sh` make too.
+
+| check | what it holds |
+| :--- | :--- |
+| `prerequisites` | `LEGION_TEST_PG_DSN` is set (the DSN itself is not printed), `go` and `awk` are on PATH, and a `nats-server` is named or installed |
+| `broker` | that `nats-server`, with JetStream, listening on 127.0.0.1 and ready |
+| `driver` | a test binary of `TestACIRedStartsTheNextRoleAtOnceAndTakesNoTurnOverLive` (`internal/daemon/ci_red_no_takeover_live_test.go`, `-tags e2e`) |
+| `proof` | the five steps below, each printing what it drove and what it read back between its own `== <name>` and `ok <name>` |
+
+The driver boots the whole daemon through `run`, the function `legion start` calls, over that PostgreSQL and that broker, and seeds one root implementing on an open pull request whose base requires `ci`, holding its tree's slot, with its implementer's claim mid-launch, serving run 1, which the boot relaunches.
+Facts enter only as production's do:
+CI settlements, the pushes and the synchronizes as `notifications.github.…` envelopes on the `ENVOY_NOTIFICATIONS` stream;
+the daemon's own HTTP routes for each role's registration, readiness, grants and completions;
+and the daemon's worker stream for each role's turns, which the driver speaks as `legion worker-shim` does (`shimwire` frames: the prompt's response, `agent_start`, `agent_end` and the `prompt_result` behind it).
+The daemon's RPC has no abort frame, so the proof holds the stronger fact that leaves:
+the role's connection is sent nothing at all while the start acts, read by reading that connection for three seconds and finding it silent.
+
+| step | driven by | read back as |
+| :--- | :--- | :--- |
+| `step1-the-tester-works-the-assignment-its-phase-handed-it` | the seeded implementer's `handoff_complete` at `h1`, then the tester's registration, readiness and turn on the task it is prompted | the issue in `testing`, and the tester's claim `working` on a confirmed delivery of its testing task |
+| `step2-the-red-starts-the-implementer-while-the-testers-turn-runs-on` | CI's settlement of `h1` with `ci` failed, while that turn runs | the implementer prompted its fix task at once, named with the red; the issue in `implementing`; the tester still `working` the delivery it confirmed before the red; its connection sent nothing at all over three seconds; and the runtime asked to suspend nothing |
+| `step3-the-tester-is-told-its-phase-ended-on-its-own-role-topic` | nothing: the red's own `phase_ended` row, on the outbox's role-message lane | exactly one message on `notifications.role.<the tester's claim>`, the sentence `record.PhaseEnded` writes, printed in full, with the red behind its `Reason:` label; and the architect's one `checks-red` on its own topic beside it — a different message to a different role |
+| `step4-the-old-turns-completion-is-refused-and-the-new-assignments-is-taken` | the implementer's push of `h2`, GitHub's synchronize and its completion there, which hands testing out again; then the tester's completion from the turn it began in step 1, at its first handoff `t1`, and, once that turn has ended and the new assignment's task has reached it, the completion of the handoff `t2` that task's work wrote | the first refused `409 HANDOFF_STALE_ASSIGNMENT` with the issue left in `testing`, the second taken, with the issue in `reviewing` |
+| `step5-a-phase-ended-message-no-session-holds-finishes-and-the-start-still-acts` | the reviewer's role topic answered `404 unclaimed`, as the listener answers for a role no live session holds; then the push of `h3`, its synchronize and CI's settlement of `h3` with `ci` failed | the implementer prompted its fix task again and the issue in `implementing`, one refused publish on that topic and no retry over three seconds, no `phase_ended` row left in the outbox, and nothing delivered on the topic |
+
+What the proof stands in for lies outside the rule:
+the broker is a native `nats-server`, GitHub is a REST stand-in for the one pull request (its base requiring `ci`, the base branch's rulesets, its reviews and the repository a launch reads, with a GraphQL root that knows no pull request), Dispatch is the board the whole-daemon drivers share (`liveDispatch`, in `internal/daemon/live_proof_test.go`), Envoy's listener is the package's `noticeListener` with the listener's own no-holder refusal added for the topic step 5 names, the two Apps' tokens are placeholders, and no agent runs:
+every claim is launched by the package's fake runtime, which provisions its own workspace so the daemon clones nothing, and each role the proof acts as is driven over the daemon's own worker stream and HTTP routes.
+The issue, its pull request, its slot and the implementer's claim are seeded through the store, as every daemon test seeds its fixture.
+The configuration, the store and its migrations, the HTTP API, the claim supervision and its worker stream, `openWorkflow`, the JetStream consumers and the outbox lanes — the phase-ended lane among them — are the real ones.
+The store is read for one thing no route shows: whether step 5's `phase_ended` row is still in the outbox.
+`CI_RED_NO_TAKEOVER_EVIDENCE_DIR` (default a fresh directory under `TMPDIR`, kept and printed) keeps the transcript, the `nats-server`'s log and the daemon's own, which the driver writes through `LEGION_E2E_DAEMON_LOG`.
+
 ## lib/held-port.py
 
 Starts a server on a TCP port the kernel chose, and holds that port from the choice until the server serves on it, so nothing else can take it in between.
@@ -4285,7 +4355,9 @@ Each item below names a function, then what it does.
 
 - `run_processes`
 
-  prints every pid whose working directory or command line names `$work`
+  prints every pid whose working directory or command line names `$work`.
+  It reads `/proc` in one `find` pass and runs no command for each entry: a devbox holds thousands of them, and a `readlink` and a `grep` apiece cost a teardown, and every sweep a checkpoint makes, seconds.
+  A process whose working directory this user cannot read is another user's, so it is none of the run's
 
 - `real_bin_path DEST NAME…`
 
@@ -4298,6 +4370,9 @@ Each item below names a function, then what it does.
   Stage 3 prepends `real_bin_path "$work/realbin" gh jj tmux` to the daemon's own PATH (`start_daemon`), which every pane inherits (`paneEnvAllowList`);
   Stage 1 prepends `real_bin_path "$work/realbin" tmux` to its daemon's PATH when its first tmux is a script or mise itself, and keeps a real tmux binary, such as CI's apt tmux, otherwise;
   Stage 2, the 4b.13b acceptance and the Claude Code backend proof, which do not call it, put a link to `mise which tmux` on their daemons' PATH the same way
+
+`lib/run-processes.test.ts` (`bun test scripts/e2e/lib`) runs `run_processes` over the devbox's own `/proc`, under an `ERR` trap that prints, with a `readlink` and a `grep` on `PATH` that record every call and answer nothing:
+it names the process working in the run's directory and the one naming it in its command line, leaves a process of neither kind alone, calls neither command, and trips no trap.
 
 ## lib/omp-home.sh
 
@@ -4415,7 +4490,7 @@ Stage 4b's `prerequisites` calls it first, before the lock, and `read_bearers` c
 `dispatch_human METHOD PATH [BODY]` is every proof-human write, over `dispatch-human-header`;
 `dispatch_agent METHOD PATH BODY` is a write in an agent's name over `dispatch-auth-header`, the agents' bearer, whose body gains the stand-in session `stage3-architect-stand-in` as its `actor` (a bearer caller must name one;
 the stand-in holds no claim), for a proof step whose author must be a session, such as the decision block Stage 3 inserts into the spec as its architect would.
-`lib/ensure-project.test.ts` drives `write_dispatch_header`, `ensure_project` and `dispatch_agent` against a fake `curl`.
+`lib/ensure-project.test.ts` drives `write_dispatch_header`, `ensure_project` and `dispatch_agent` against a fake `curl`, and holds Stage 4b's refusal of each development switch above the `ensure_project` call that makes that first write.
 
 `require_proof_human` is the proof human's precondition, which every stage proof that writes to GitHub as the proof human runs in `prerequisites` before its first `gh` call.
 It asks the devbox `gh` which account it acts as, through GraphQL's `viewer` with `GH_REPO` naming `repo` (the owner the dotfiles shim routes by):
@@ -4719,7 +4794,7 @@ Each item below names a function, then what it does.
 ## lib/live-daemon-proof.sh
 
 The run a whole-daemon live proof makes around its driver.
-`merged-root-waits.sh`, `no-required-checks.sh` and `child-adoption.sh` differ only in what their driver proves, so each sets its own values and makes this run.
+`merged-root-waits.sh`, `no-required-checks.sh`, `child-adoption.sh` and `ci-red-no-takeover.sh` differ only in what their driver proves, so each sets its own values and makes this run.
 
 ```sh
 . "$root/scripts/e2e/lib/live-daemon-proof.sh"     # sourced, never run
@@ -4736,9 +4811,9 @@ On any exit it stops the `nats-server`, removes the work directory and prints `L
 | `LABEL` | the run's name in its last line: `merged root waits`, `no required checks`, `child adoption` |
 | `SLUG` | the name of the run's own files under `TMPDIR` (or `/tmp` when it is unset): the work directory `legion-e2e-SLUG.<pid>.*`, which holds the broker's store and the driver binary `SLUG.test`, and the evidence directory `legion-e2e-SLUG-evidence.*` when `EVIDENCE` is empty |
 | `TEST` | the one test the driver runs (`-test.run '^TEST$'`); `proof` fails unless the driver reports `--- PASS: TEST`, so a driver that skipped, or a pattern that matched nothing, is no pass |
-| `EVIDENCE` | the evidence directory the script's own variable names (`MERGED_ROOT_WAITS_EVIDENCE_DIR`, `NO_REQUIRED_CHECKS_EVIDENCE_DIR`, `CHILD_ADOPTION_EVIDENCE_DIR`), or empty for a fresh one; kept and printed, it holds `transcript.log`, the broker's `nats.log`, the daemon's own `daemon.log`, which the driver writes through `LEGION_E2E_DAEMON_LOG`, and the driver's `proof.log` |
+| `EVIDENCE` | the evidence directory the script's own variable names (`MERGED_ROOT_WAITS_EVIDENCE_DIR`, `NO_REQUIRED_CHECKS_EVIDENCE_DIR`, `CHILD_ADOPTION_EVIDENCE_DIR`, `CI_RED_NO_TAKEOVER_EVIDENCE_DIR`), or empty for a fresh one; kept and printed, it holds `transcript.log`, the broker's `nats.log`, the daemon's own `daemon.log`, which the driver writes through `LEGION_E2E_DAEMON_LOG`, and the driver's `proof.log` |
 
-The three drivers share their Go harness the same way:
+The four drivers share their Go harness the same way:
 `internal/daemon/live_proof_test.go` (`-tags e2e`) holds the broker and log variables (`LEGION_E2E_NATS_URL`, `LEGION_E2E_DAEMON_LOG`);
 the configuration the daemon boots with (`newLiveProof` reads `LEGION_E2E_NATS_URL`, skips when it is unset, and builds the workflow configuration around it);
 the stream the daemon's intake consumes;

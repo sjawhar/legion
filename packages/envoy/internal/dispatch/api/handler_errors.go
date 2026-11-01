@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/jackc/pgx/v5"
 
@@ -56,6 +57,10 @@ func documentErrorCode(err error) string {
 func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	var apiErr *apiError
 	if errors.As(err, &apiErr) {
+		if apiErr.retryAfter > 0 {
+			// Before the body: writeError writes the status and the headers go with it.
+			w.Header().Set("Retry-After", strconv.Itoa(apiErr.retryAfter))
+		}
 		writeError(w, apiErr.code, apiErr.status, apiErr.message)
 		// A 500 the handler named is a server fault like any other, so the operator's log shows it.
 		if apiErr.status == http.StatusInternalServerError {

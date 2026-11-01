@@ -1,11 +1,16 @@
 // account_limit_test.go drives the bucket every accountAuth route shares (api.AccountLimit) on the
 // same real broker api_test.go mounts: it is spent before the caller's ServiceAccount token is
 // verified, so a flood of forged tokens past it never reaches the verifier or the issuer's keys,
-// and a listed caller's ordinary traffic across the class fits inside it.
+// and a listed caller's ordinary traffic across the class fits inside it. That bucket is keyed on
+// one address, so the file also drives what bounds a flood spread over many addresses, which every
+// address's own bucket admits in full: the key cache the verifier reads through
+// (internal/oidc.Keys), whose MinRefresh costs the issuer one read of its key set per window
+// however many tokens naming keys it never published arrive.
 package api_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -16,8 +21,9 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
-	"github.com/sjawhar/envoy/internal/broker/ratelimit"
+	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
+	"github.com/sjawhar/envoy/internal/ratelimit"
 )
 
 // countingAccountTokens is the test server's own account verifier, counting every token it is
@@ -141,5 +147,134 @@ func TestAListedCallersOrdinaryTrafficIsNotRefused(t *testing.T) {
 	}
 	if got := counting.verified.Load(); got != int64(sent) {
 		t.Fatalf("verifications = %d, want %d: one for every request", got, sent)
+	}
+}
+
+// floodTokens is how many forged tokens a flood below sends, one from each source address. It is
+// well past the burst any one address's bucket holds at the tight size the per-address test uses,
+// and past floodKeys, so neither the bucket nor a single key id can be what bounds the reads
+// counted; sixty loopback requests take a small fraction of oidc.DefaultKeysMinRefresh.
+const floodTokens = 60
+
+// floodKeys is how many distinct key ids a flood's tokens name, none of them ever published. More
+// than one, so what the count below proves is the refresh window the key cache opens once for the
+// whole set rather than anything remembered per key id.
+const floodKeys = 4
+
+// floodAddress is the source address the i-th token of a flood arrives from, through the trusted
+// proxy header: one address per token, so every one has a bucket of its own and reaches the
+// verifier. They are documentation addresses (RFC 5737), as the rest of this file's are.
+func floodAddress(i int) string { return fmt.Sprintf("198.51.100.%d", i+1) }
+
+// listedAddress is where the listed caller's own request arrives from, outside the range
+// floodAddress hands out, so the flood spends nothing of that caller's bucket.
+const listedAddress = "198.51.100.200"
+
+// forgedFlood mints count tokens that name the listed account, the issuer and the audience but
+// that the issuer never signed: each is signed by one of floodKeys keys it never published and
+// carries a jti of its own, so the verifier meets a stream of distinct tokens naming several
+// unpublished key ids rather than one token replayed.
+func forgedFlood(t *testing.T, issuer *oidctest.Issuer, count int) []string {
+	t.Helper()
+	keys := make([]*oidctest.Key, floodKeys)
+	for i := range keys {
+		keys[i] = oidctest.NewKey(t, fmt.Sprintf("never-published-%d", i))
+	}
+	flood := make([]string, count)
+	for i := range flood {
+		claims := issuer.Claims(dispatchAccount, podAudience)
+		claims["jti"] = fmt.Sprintf("forgery-%d", i)
+		flood[i] = issuer.Mint(t, keys[i%len(keys)], claims)
+	}
+	return flood
+}
+
+// TestAForgedAccountTokenFloodFromManyAddressesCostsOneFetchPerMinute: the bucket above bounds one
+// address, and a flood spread over many defeats it — each address gets its own burst, so every
+// forgery passes the limit and is verified. What bounds the issuer's cost then is the key cache
+// the account verifier reads through (internal/oidc.Keys): sixty tokens signed by keys the issuer
+// never published, every one from a different address through the trusted proxy header, are each
+// refused 401 ACCOUNT_TOKEN_INVALID — so the flood really did reach the verification this counts —
+// and together cost the issuer one read of its key set, not one per request.
+func TestAForgedAccountTokenFloodFromManyAddressesCostsOneFetchPerMinute(t *testing.T) {
+	var counting *countingAccountTokens
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.TrustedProxyHeader = "X-Forwarded-For"
+		counting = countVerifications(d)
+	})
+	// The listed caller's own valid token first: it leaves the issuer's key set cached and fresh
+	// and no miss window open, so every read counted after it is one the flood itself cost.
+	if status, _, body := accountCall(t, ts, false, ts.uiToken, listedAddress); status != http.StatusOK {
+		t.Fatalf("the listed caller's GET /v1/pending = %d %s, want 200: the key set has to be cached before the flood", status, body)
+	}
+	verifiedBefore, fetchesBefore := counting.verified.Load(), ts.podIssuer.JWKSFetches()
+
+	flood := forgedFlood(t, ts.podIssuer, floodTokens)
+	started := time.Now()
+	for i, forged := range flood {
+		if status, _, body := accountCall(t, ts, i%2 == 1, forged, floodAddress(i)); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "ACCOUNT_TOKEN_INVALID" {
+			t.Fatalf("forged token %d from %s = %d %s, want 401 ACCOUNT_TOKEN_INVALID", i, floodAddress(i), status, body)
+		}
+	}
+	elapsed := time.Since(started)
+
+	if got := counting.verified.Load() - verifiedBefore; got != floodTokens {
+		t.Fatalf("verifications for the flood = %d, want %d: one address per token, so every address's own bucket admits its one request and every forgery reaches the verifier", got, floodTokens)
+	}
+	// One read, and the arithmetic is this. The set the request above cached is younger than
+	// oidc.DefaultKeysLifetime (fifteen minutes), so no verification here re-reads the issuer for
+	// staleness. Each forgery names a key id that set does not hold, which is a miss, and
+	// oidc.DefaultKeysMinRefresh (a minute) lets a miss prompt a read once per minute: the first
+	// forgery opens that window and costs the one read, and the other floodTokens-1 arrive inside
+	// the same window — sixty loopback requests take milliseconds, and the elapsed time is in the
+	// failure below if it ever does not — and cost nothing. 1 + 0 = 1. Without the window it would
+	// be floodTokens, which is what the sibling test below measures.
+	if got := ts.podIssuer.JWKSFetches() - fetchesBefore; got != 1 {
+		t.Fatalf("the issuer's key set was read %d times for %d forged tokens from %d addresses in %s, want exactly 1: oidc.DefaultKeysMinRefresh is %s, so the first miss costs one read and the rest fall inside its window", got, floodTokens, floodTokens, elapsed, oidc.DefaultKeysMinRefresh)
+	}
+}
+
+// TestAForgedAccountTokenFloodCostsAFetchEachWithoutTheKeyCachesMinimumRefresh is the negative
+// control for the bound above, on the same routes and the same flood: a broker whose account
+// verifier reads through a key cache with no minimum refresh (MinRefresh 0, every miss free to
+// read again, which is what go-oidc's own RemoteKeySet does) pays the issuer one key-set read for
+// every forged token. The one read the test above counts is that bound working, not an issuer
+// nobody asked.
+func TestAForgedAccountTokenFloodCostsAFetchEachWithoutTheKeyCachesMinimumRefresh(t *testing.T) {
+	issuer := oidctest.New(t)
+	published := issuer.PublishKey(t, "signing-key")
+	keys, err := oidc.NewKeys(context.Background(), issuer.URL())
+	if err != nil {
+		t.Fatalf("oidc.NewKeys: %v", err)
+	}
+	keys.MinRefresh = 0
+
+	var counting *countingAccountTokens
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.TrustedProxyHeader = "X-Forwarded-For"
+		d.AccountTokens = enroll.K8sPodVerifier{Verifier: oidc.NewWithKeys(issuer.URL(), podAudience, keys)}
+		counting = countVerifications(d)
+	})
+
+	// A valid token of this issuer first, as above: it caches the set, so the reads counted below
+	// are the misses' own and not a cold cache's.
+	now := time.Now()
+	valid := issuer.Claims(dispatchAccount, podAudience)
+	valid["iat"], valid["exp"] = now.Add(-5*time.Second).Unix(), now.Add(time.Hour).Unix()
+	if status, _, body := accountCall(t, ts, false, issuer.Mint(t, published, valid), listedAddress); status != http.StatusOK {
+		t.Fatalf("the listed caller's GET /v1/pending = %d %s, want 200: the key set has to be cached before the flood", status, body)
+	}
+	verifiedBefore, fetchesBefore := counting.verified.Load(), issuer.JWKSFetches()
+
+	for i, forged := range forgedFlood(t, issuer, floodTokens) {
+		if status, _, body := accountCall(t, ts, i%2 == 1, forged, floodAddress(i)); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "ACCOUNT_TOKEN_INVALID" {
+			t.Fatalf("forged token %d from %s = %d %s, want 401 ACCOUNT_TOKEN_INVALID", i, floodAddress(i), status, body)
+		}
+	}
+	if got := counting.verified.Load() - verifiedBefore; got != floodTokens {
+		t.Fatalf("verifications for the flood = %d, want %d: every forgery has to reach the verifier for its reads to be counted", got, floodTokens)
+	}
+	if got := issuer.JWKSFetches() - fetchesBefore; got != floodTokens {
+		t.Fatalf("the issuer's key set was read %d times for %d forged tokens against a cache with no minimum refresh, want %d: one for every token, since every miss reopens the window at once", got, floodTokens, floodTokens)
 	}
 }

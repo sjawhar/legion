@@ -50,7 +50,7 @@ func (t handoffTokens) ReadToken(ctx context.Context, role appauth.AppRole, owne
 // handoffFile is a handoff of phase word as a worker stamps it for issue: READY reads only whether
 // the head still carries the directory, never what a file holds.
 func handoffFile(word, issue string) string {
-	return fmt.Sprintf(`{"schemaVersion":1,"phase":%q,"issue":%q,"completed":"2026-10-09T08:00:00Z"}`, word, issue)
+	return fmt.Sprintf(`{"schemaVersion":1,"phase":%q,"issue":%q}`, word, issue)
 }
 
 // handoffGitHub is GitHub's REST API for one repository, acme/widgets unless a test names another

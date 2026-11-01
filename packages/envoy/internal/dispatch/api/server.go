@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/agentsecrets"
@@ -94,6 +95,10 @@ type Deps struct {
 	// verifier stays non-nil while its issuer is undiscovered, so such a bearer
 	// is answered 503 then, never taken for a personal token.
 	OIDC ServiceTokenVerifier
+	// BrokerTokens decides a caller presenting an access token the secrets broker issued, under
+	// the DPoP scheme (brokerTokenActor); nil is a deployment with no broker, which has no such
+	// credential kind and answers a DPoP presentation exactly as it always has.
+	BrokerTokens *brokertoken.Verifier
 	// AgentStream relays a live session's own conversation to a human watching it; nil is a
 	// deployment with no NATS, where an agent view is refused STREAM_UNAVAILABLE.
 	AgentStream agentstream.Source
@@ -152,6 +157,9 @@ type DepsInput struct {
 	App           *auth.AppConfig
 	GitHubAPIBase string
 	OIDC          ServiceTokenVerifier
+	// BrokerTokens decides a broker-issued DPoP token; nil where no broker is configured. See
+	// Deps.BrokerTokens; cmd/dispatch builds it (brokerTokenVerifier).
+	BrokerTokens *brokertoken.Verifier
 	// AgentStream is the live agent conversation relay; nil where the deployment has no NATS.
 	AgentStream agentstream.Source
 	// AgentSecretsURL is the secrets broker's API base URL (DISPATCH_AGENT_SECRETS_URL); empty
@@ -184,11 +192,10 @@ func NewDeps(input DepsInput) (Deps, error) {
 	}
 	if input.Docs == nil {
 		input.Docs = docs.New(docs.Deps{
-			Store:       input.Store,
-			Events:      input.Events,
-			Identity:    input.Identity,
-			AgentTokens: input.AgentTokens,
-			ServerURL:   input.ServerURL,
+			Store:     input.Store,
+			Events:    input.Events,
+			Identity:  input.Identity,
+			ServerURL: input.ServerURL,
 		})
 	}
 	var envoyClient *envoy.Client
@@ -224,6 +231,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		GitHub:                 github,
 		Architecture:           architecture.NewImporter(input.Store, github, input.Events),
 		OIDC:                   input.OIDC,
+		BrokerTokens:           input.BrokerTokens,
 		AgentStream:            input.AgentStream,
 		AgentSecrets:           agentSecretsClient,
 		Files:                  input.Files,
@@ -388,8 +396,7 @@ type queryer interface {
 // production.
 //
 // Every route refuses a path or query parameter holding U+0000 or a byte that is not UTF-8 before
-// its handler runs (refuseUnstorableParameters), as decodeJSON refuses a U+0000 in a body, and the
-// document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
+// its handler runs (refuseUnstorableParameters), as decodeJSON refuses a U+0000 in a body.
 //
 // Every POST and PATCH route takes an Idempotency-Key, and a repeat under one is answered from the
 // key rather than run again (keyedWrites, request_keys.go). Every write route - a POST, PATCH, PUT
@@ -398,14 +405,15 @@ type queryer interface {
 //
 // The server holds the delivery hub (LEGION-690), which starts its goroutines on the first
 // subscription and runs them until lifetime ends, and mounts GET /ws/live beside the document
-// websocket, under the same wrappers. It also holds the event stream relay (INFRA-66), which every
-// events subscription reads and which starts its own listening connection on the first of them,
-// also on lifetime. lifetime is the process's own context, cancelled when the server is shutting
-// down (server.lifetime says what else it ends). The returned Background's Wait blocks until every
-// keyed write's handler and every delivery a handler detached from its request (a broadcast's
-// recipients) has settled, and until the hub, every live socket (and every subscription it ran)
-// and the relay have ended. Call it only after lifetime has been cancelled and before the database
-// pool closes.
+// websocket. The live socket takes a bearer as well as a cookie, so it runs under
+// decideBrokerToken; the document websocket takes a cookie alone and does not. It also holds the
+// event stream relay (INFRA-66), which every events subscription reads and which starts its own
+// listening connection on the first of them, also on lifetime. lifetime is the process's own
+// context, cancelled when the server is shutting down (server.lifetime says what else it ends).
+// The returned Background's Wait blocks until every keyed write's handler and every delivery a
+// handler detached from its request (a broadcast's recipients) has settled, and until the hub,
+// every live socket (and every subscription it ran) and the relay have ended. Call it only after
+// lifetime has been cancelled and before the database pool closes.
 //
 // Register panics when lifetime is nil: the hub and the relay would run on no context that ever
 // ends, so they would outlive the process's shutdown, or the test that built the server, and the
@@ -513,6 +521,11 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 	s.mentions = s.startMentionSender()
 	s.deliveryHub = newDeliveryHub(s, lifetime, deliveryHubClock{})
 	routes := s.routes()
+	if undecidable := s.undecidableWrites(routes); len(undecidable) > 0 {
+		// A mutating row the project check cannot decide would serve a project-scoped caller a
+		// write nothing judged, so the table is refused rather than mounted (project_scope.go).
+		panic("api.Register: the route table holds a mutating row the project-scope check cannot decide: " + strings.Join(undecidable, "; "))
+	}
 	s.routeIndex = routeIndexEntries(routes)
 	replays := s.keyedReplays()
 	for _, route := range routes {
@@ -524,6 +537,11 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 			handler = s.refuseUploadToAClosedIssue(handler)
 		}
 		if route.Method != http.MethodGet {
+			// Outside the keyed layer and the upload's spool, so a write to another project's
+			// object, or into another session's own rows, claims no idempotency key and costs
+			// no body (withinProjectScope, withinSessionScope).
+			handler = s.withinProjectScope(route, handler)
+			handler = s.withinSessionScope(route, handler)
 			handler = s.refuseChangedLogin(handler)
 		}
 		handler = s.refuseUnstorableParameters(route.Pattern, handler)
@@ -546,16 +564,16 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 		// The access-log line is outermost, so it records what every layer answered - a keyed
 		// replay, a refused login, an early answer the drain held - and the caller the first of
 		// them resolved.
-		mux.HandleFunc(route.Method+" "+route.Pattern, accesslog.HandlerFunc(route.Pattern, trackTransactions(handler)))
+		mux.HandleFunc(route.Method+" "+route.Pattern, accesslog.HandlerFunc(route.Pattern, s.decideBrokerToken(trackTransactions(handler))))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
 	}); ok {
 		const pattern = "/ws/doc/{room}"
-		mux.Handle("GET "+pattern, accesslog.Handler(pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP))))))
+		mux.Handle("GET "+pattern, accesslog.Handler(pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, websocket.ServeHTTP)))))
 	}
 	const livePattern = "/ws/live"
-	mux.Handle("GET "+livePattern, accesslog.Handler(livePattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(livePattern, s.serveLiveSocket)))))
+	mux.Handle("GET "+livePattern, accesslog.Handler(livePattern, s.whileCallerResolves(s.decideBrokerToken(trackTransactions(s.refuseUnstorableParameters(livePattern, s.serveLiveSocket))))))
 	return s
 }
 
@@ -586,7 +604,12 @@ func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc 
 				case <-ctx.Done():
 					return
 				case <-heartbeat.C:
-					if _, _, err := s.optionalActor(check); err != nil {
+					// The check resolves the credential the request was admitted with, from a
+					// detached copy of that request, which for a broker-issued token asks the
+					// broker's answer alone rather than the proof the upgrade already spent
+					// (callerStillResolves). Every other credential is resolved exactly as it
+					// is on a request.
+					if err := s.callerStillResolves(check); err != nil {
 						closeConnection()
 						return
 					}
@@ -601,6 +624,10 @@ type apiError struct {
 	status  int
 	code    string
 	message string
+	// retryAfter is the Retry-After the answer carries, in whole seconds, and 0 for an answer
+	// that carries none. Only a refusal that knows when the caller may come back sets it
+	// (brokerTokenActor's 429); writeHandlerError writes the header.
+	retryAfter int
 }
 
 func (e *apiError) Error() string { return e.message }
@@ -660,14 +687,22 @@ func (s *server) refuseChangedLogin(handler http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// optionalActor resolves the request's caller. Each branch names that caller on the request's
+// optionalActor resolves the request's caller. The authentication scheme decides the credential
+// before anything reads a token: RFC 9449 Section 7.2 refuses a DPoP-bound token presented under
+// any other scheme, so a broker-issued token reaches Dispatch under DPoP alone and a DPoP
+// presentation is never retried as another kind. Each branch names that caller on the request's
 // access-log line (accesslog.Note), which costs the line what the authentication already
 // resolved and never a lookup of its own.
 func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
-	// A keyed write resolved its caller before its handler ran (keyedWrites); a bearer is verified
-	// once a request, and the line named the caller at that resolution.
+	// The caller may already be decided: a keyed write resolves before its handler
+	// (keyedWrites), and a DPoP presentation is decided once a request however many layers
+	// resolve it (decideBrokerToken), which is why a refusal rides along — a proof spent on
+	// the first resolution cannot answer the second.
 	if caller, ok := r.Context().Value(resolvedCallerKey{}).(resolvedCaller); ok {
-		return caller.actor, caller.human, nil
+		return caller.actor, caller.human, caller.err
+	}
+	if _, presented := brokertoken.Presented(r); presented {
+		return s.brokerTokenActor(r)
 	}
 	if token, present := auth.BearerToken(r); present {
 		if token == "" {
@@ -744,7 +779,30 @@ func (s *server) actorFrom(r *http.Request, supplied *model.Actor) (model.Actor,
 // service token's verified subject — stays attached for attribution. Neither is ever taken from
 // the body, which a caller controls. The session is the caller the access-log line names, since
 // it is the one a reader of the log is looking for; the token's own proof is already noted.
+//
+// A credential that proved a session of its own — a broker-issued token, which the broker binds
+// to one session — decides it instead, so such a caller need not name itself at all. A body
+// actor is then only an agreement: one that names the same session is taken, for its Origin,
+// which nothing else carries; one that names any other writer is 403 ACTOR_SESSION_MISMATCH,
+// naming the session the credential proved, rather than silently recording the write as a
+// session the caller merely asked for. Every credential that proves no session — a cookie, a
+// personal token, a Kubernetes service-account token — keeps the rule above exactly.
 func bearerSessionActor(r *http.Request, authenticated model.Actor, supplied *model.Actor) (model.Actor, error) {
+	if authenticated.Kind == "session" && authenticated.ID != "" {
+		// A body that names no writer at all leaves the session to the credential; one that names
+		// anything else than that same session is the mismatch.
+		named := supplied != nil && (strings.TrimSpace(supplied.ID) != "" || strings.TrimSpace(supplied.Kind) != "")
+		if named && (supplied.Kind != "session" || strings.TrimSpace(supplied.ID) != authenticated.ID) {
+			return model.Actor{}, errorf(http.StatusForbidden, "ACTOR_SESSION_MISMATCH",
+				"this request's credential acts for session %s; its actor names another writer", authenticated.ID)
+		}
+		actor := authenticated
+		if supplied != nil {
+			actor.Origin = supplied.Origin
+		}
+		accesslog.Note(r.Context(), accesslog.KindSession, actor.ID)
+		return actor, nil
+	}
 	if supplied == nil || supplied.Kind != "session" || strings.TrimSpace(supplied.ID) == "" {
 		return model.Actor{}, errorf(http.StatusBadRequest, "ACTOR_KIND", "bearer callers require actor.kind session")
 	}

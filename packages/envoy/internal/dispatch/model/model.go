@@ -15,13 +15,17 @@ import (
 // Actor identifies the user or agent session that caused a change. Service is
 // the verified Kubernetes subject of the projected service-account token a
 // session authenticated with ("system:serviceaccount:<namespace>:<name>"), set
-// by the server from the token and never from a request body.
+// by the server from the token and never from a request body. Project is the
+// one project key a broker-issued access token lets its session write, set by
+// the server from that token and never from a request body; it is nil for
+// every other credential and for a token whose scope names no single project.
 type Actor struct {
 	Kind    string       `json:"kind"`
 	ID      string       `json:"id"`
 	Origin  *ActorOrigin `json:"origin,omitempty"`
 	Owner   *string      `json:"owner,omitempty"`
 	Service *string      `json:"service,omitempty"`
+	Project *string      `json:"project,omitempty"`
 }
 
 // SameAs reports whether two actors are the same writer: one session id, or one human login.

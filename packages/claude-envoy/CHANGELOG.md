@@ -1,5 +1,11 @@
 # Changelog
 
+## [main@f699b1316430] - 2026-10-31
+
+### Changed
+
+- The channel server mints a client instance id when the process starts and sends it on every registration and on each deregistration. A `/clear` handoff therefore removes the registry entry of the old session id only while that entry still belongs to this process, and the soft reclaim that follows takes the role only when the named predecessor has no live registration, when its live registration carries the same instance id, or when either side carries no instance id. A refusal that names the predecessor itself now keeps the role record of that session, which belongs to the live holder; a refusal naming any other session removes it.
+
 ## [main@1d3e69553791] - 2026-10-31
 
 ### Fixed
