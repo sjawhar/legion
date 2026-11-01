@@ -1,0 +1,28 @@
+kind: Added
+body: |-
+    Dispatch takes a fifth credential: an access token the secrets broker issued, presented under
+    RFC 9449's DPoP scheme (`Authorization: DPoP <token>` with a `DPoP:` proof header). The server
+    decides a request by its authentication scheme before it reads any token, so such a
+    presentation is never retried as a bearer and the bearer credentials are untouched. Dispatch
+    asks the broker what the token is and holds the caller to the key it is bound to, and the
+    caller writes as the session that token names, acting for the person it names: a body with no
+    `actor` is accepted, one naming that same session is accepted and its `origin` kept, and one
+    naming any other writer is `403 ACTOR_SESSION_MISMATCH` naming the session the token carries.
+    A token scoped to one project carries that project on every actor it writes, set from the
+    token and never from a request body; one scoped to its person carries none. Each refusal has
+    its own code and none repeats the token: `401 BROKER_TOKEN_NOT_ACTIVE`,
+    `401 BROKER_TOKEN_PROOF_INVALID`, `401 BROKER_TOKEN_KEY_MISMATCH`,
+    `401 BROKER_TOKEN_NOT_A_SESSION` for a live token that is no session's credential — one the
+    broker names no session or person for, or that it issued to a client other than the exchange,
+    which a machine login's own access token is — so a request body can never name the session a
+    credential does not prove, `429 BROKER_TOKEN_RATE_LIMITED` with the wait in `Retry-After`,
+    and `503 BROKER_UNAVAILABLE` for
+    a broker that answered nothing, so a caller comes back rather than reading its token as
+    refused. The verifier is built from settings Dispatch already has —
+    `DISPATCH_AGENT_SECRETS_URL`, `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` and
+    `DISPATCH_SERVER_URL` — and adds none; a deployment with no broker has no such credential,
+    and a DPoP presentation there is the `401 UNAUTHORIZED` any Authorization header that is not
+    a bearer has always been.
+time: 2026-10-29T00:00:00.000000000Z
+custom:
+    Issue: INFRA-264

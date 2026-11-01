@@ -128,8 +128,8 @@ type Options struct {
 	Pod Pod
 	// RoleConfigFiles is the operator's `role_config_files`: absolute paths of Oh My Pi settings
 	// overlays a role alone names in PI_CONFIG_FILES, by role, after the operator's own (Pod.Env's
-	// PI_CONFIG_FILES), so each outranks those (mainEnvironment, roleOperatorEnv); the shim then
-	// names the turn-scoping overlay ahead of all of them (podsafety.Apply). The files are the
+	// PI_CONFIG_FILES), so each outranks those (mainEnvironment, roleOperatorEnv), and the shim
+	// hands that value to Oh My Pi untouched (podsafety.Apply). The files are the
 	// operator's mounts', which every pod and the image probe's carry, and the image probe reads
 	// every role's (probeManifest). Nil is none.
 	RoleConfigFiles map[claim.Role][]string
