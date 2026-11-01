@@ -5,7 +5,8 @@ package supervise
 // machine does with the round's two events: a round that opens once and asks once, a phase task
 // the round never displaces, a suspended claim revived for the task, a claim asked again after
 // PodUpdateRetask, a claim below the contract answering by its turn's end, the next task held back
-// from the moment the worker answers, and the round's end — which releases that task for a pod's
+// from the moment the worker answers and confirmed by no turn after a daemon restart, and the
+// round's end — which releases that task for a pod's
 // round, relaunches the process for a claim's own plugin round, and tells the worker of a pod
 // round nothing of the daemon's own, since the pod that round was opened over is gone and the
 // launch into its replacement is what starts that worker. The round the answer names
@@ -368,6 +369,63 @@ func TestPodUpdateHoldsTheNextTaskUntilTheRoundEnds(t *testing.T) {
 		t.Errorf("claim after the round ended = %+v, want every update field cleared", c)
 	}
 	h.wantCalls("Resume", 0)
+}
+
+// A task the open round holds is no turn's task, after a daemon restart too. The restored machine
+// marks a pending, unconfirmed task askFirst — an earlier daemon may already have sent it, so the
+// agent is asked before it is sent again — and the first turn of any kind is then taken as that
+// task's turn: confirmed, its run served, and retired by that turn's end. Nobody ever sent a task
+// the round holds, so the mark would destroy it and the worker would never read it at all.
+//
+// The notice's turn takes the worker's answer back on its way in (takeBackSignal), which is what
+// lifts the hold and lets the task go, and the open round asks the worker again. What this pins is
+// that the task is still there to be given.
+func TestPodUpdateARestartLeavesTheHeldTaskToNoTurnButItsOwn(t *testing.T) {
+	const task = "review the pull request"
+	h := updateHarness(t, PodUpdateContract)
+	h.reach(StateReady)
+	h.openUpdate(testRound, testReasons)
+	h.wantPrompts(1)
+	h.must(StreamTurnStart{Claim: h.token})
+	h.signalUpdate("c0ffee")
+	h.must(StreamTurnEnd{Claim: h.token})
+	h.must(RequestDeliver{Claim: h.token, Task: task, Generation: 7})
+	h.wantPrompts(1) // held: this worker has answered and waits to be replaced
+
+	h.restart()
+
+	// An Envoy notice reaches the worker: a turn the daemon sent nothing for, whose start names no
+	// delivery, as no agent_start of a live turn does.
+	h.must(StreamTurnStart{Claim: h.token})
+
+	p := h.claim().Pending
+	if p == nil || p.Task != task {
+		t.Fatalf("pending during the notice's turn = %+v, want the held task %q", p, task)
+	}
+	if !p.ConfirmedAt.IsZero() {
+		t.Fatalf("the notice's turn was taken as the held task's: %+v; no daemon ever sent that task", p)
+	}
+	if run := h.claim().ServingRun(); run != 0 {
+		t.Fatalf("during the notice's turn the claim serves run %d, want none: its worker was given no task", run)
+	}
+
+	h.must(StreamTurnEnd{Claim: h.token})
+
+	p = h.claim().Pending
+	if p == nil || p.Task != task {
+		t.Fatalf("pending after the notice's turn = %+v, want the held task %q, which that turn never had", p, task)
+	}
+	if !p.ConfirmedAt.IsZero() {
+		t.Fatalf("the held task is confirmed after a turn that was not its own: %+v", p)
+	}
+
+	h.must(PodUpdateEnded{Claim: h.token, Round: h.claim().UpdateRound})
+
+	h.wantRound("")
+	sent := h.prompts()
+	if len(sent) != 2 || sent[1].Message != task {
+		t.Fatalf("prompts = %+v, want the round's ask and then the held task, once", sent)
+	}
 }
 
 // A claim's own plugin round ends in the relaunch it was opened for: the process is replaced now,

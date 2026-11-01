@@ -603,7 +603,8 @@ type armed struct {
 // NewMachine builds the machine for one claim: a new one the spawn route just stored, or one the
 // daemon read back at boot. A restored claim that was booting, or registered and not yet ready, is
 // watched again from now, and a restored delivery that may already have been sent is sent again
-// only after asking the agent. ctx bounds the machine's own work — its timers and its sends.
+// only after asking the agent — except the one a restored claim's open update round holds, which
+// no daemon has sent. ctx bounds the machine's own work — its timers and its sends.
 func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 	if err := deps.check(); err != nil {
 		return nil, err
@@ -626,7 +627,16 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 	case StateRegistered:
 		m.armRegistration()
 	case StateReady, StateIdle:
-		m.askFirst = c.Pending != nil && c.Pending.ConfirmedAt.IsZero()
+		// A task the claim's open update round holds gets no such mark (openRoundHoldsTask).
+		// askFirst is the statement that the agent may already hold the task, and of this one it
+		// is false rather than merely needless: sendPending held it back from the moment the
+		// worker answered the round, and holds it while the round is open, so no daemon ever sent
+		// it. Marked, the first turn of any kind — an Envoy notice reaching the worker, a
+		// person's steer — would be taken as this task's turn (turnStarted reads askFirst as a
+		// delivery in flight), its run marked served, and the turn's end would retire it: a task
+		// destroyed without ever reaching the worker. It stays pending and unconfirmed instead,
+		// and goes when the hold lifts, as it would have had this daemon never restarted.
+		m.askFirst = c.Pending != nil && c.Pending.ConfirmedAt.IsZero() && !c.openRoundHoldsTask()
 	case StateWorking:
 		m.askFirst = true
 	}
