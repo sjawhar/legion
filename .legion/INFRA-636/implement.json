@@ -87,7 +87,7 @@
    "criterion": "The send-back on red ci-ok at 6a993949: dispatch-memory's TestAWriteCannotGrowADocumentPastWhatOneUploadMayHold/a_thousand_table_rows held 268 MiB above idle on a refused insert, over the 256 MiB bound. Does this change make a refused insert hold more?",
    "surface": "The memory test under -tags memory, with the real Dispatch binary each tree builds, against Postgres 18 on the pod; base dbdf9318c059 (main as last merged into the head) and head 6a993949, exported with git archive, run alternately (5 base, 5 head, 5 base, 5 head), nothing else running",
    "command": "GOWORK=off go test -tags memory -count=5 -timeout 60m -v ./cmd/dispatch -run 'TestAWriteCannotGrowADocumentPastWhatOneUploadMayHold/a_thousand_table_rows' in each export, twice per side",
-   "observed": "Held above idle on the cold refused insert, 10 runs per side: base min 137, median 141.5, max 150 MiB; head min 133, median 141, max 147 MiB. Every run answered 413 CAP_EXCEEDED and passed. The two sides match, so the CI value (268 MiB, beside the runner's timing-out health probes) is not this change's. The failed jobs of run 41267081301 were re-run once.",
+   "observed": "Held above idle on the cold refused insert, 10 runs per side: base min 137, median 141.5, max 150 MiB; head min 133, median 141, max 147 MiB. Every run answered 413 CAP_EXCEEDED and passed. The two sides match, so the CI value (268 MiB, beside the runner's timing-out health probes) is not this change's. The failed jobs of run 41267081301 were re-run once. The re-run, attempt 2 of run 41267081301, passed: dispatch-memory job 124771759009 succeeded at 2026-11-01T07:11:37Z, and ci-ok job 124780881877 succeeded at 2026-11-01T07:43:42Z, on code head 6a993949. GitHub reports the PR MERGEABLE.",
    "headSha": "6a9939499a53777d72f7e9b07c65e3255baf4f0c",
    "negativeControl": "gVisor offers neither /proc/<pid>/clear_refs nor VmHWM, so the repository harness fails here with 'open /proc/<pid>/clear_refs: permission denied' on both sides. Both throwaway exports replaced only peakAboveIdle with a 1 ms VmRSS sampler; the repository's test is unchanged. The numbers are therefore gVisor resident memory, about half of CI's, and are used only to compare the two sides."
   }
@@ -265,5 +265,5 @@
   "Every forward merge of main moved code this PR splits into read and write halves (item-block index, reply blocks, keyed-request recovery, close/reopen ask withdrawal, superseded-approval advice); each was brought into the batch or the read phase in the merge, with the fingerprint comment on the PR.",
   "Owner-lock inventory and row-lock audit: dispatch://INFRA-636/artifact/owner-lock-audit-md."
  ],
- "previousHandoff": "4041161811c4fd5c0196273f0f297ed2a082a597"
+ "previousHandoff": "7882f4fe605db189f6a3191b5f6c0610e587a1d2"
 }
