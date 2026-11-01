@@ -362,38 +362,57 @@ func withoutFirstTopLevelBlock(tree *pmdoc.Node) *pmdoc.Node {
 	return &pmdoc.Node{Type: tree.Type, Attrs: tree.Attrs, Children: slices.Clone(tree.Children[1:])}
 }
 
-// A cold write's kept fork is brought up to the stored head once its transaction holds the
-// document's lock: task B's browser stored an edit between the write's read of the store and its
-// first append, and the version the write renders holds both.
-func TestAColdWritesVersionHoldsWhatTheOtherProcessStoredBeforeItsLock(t *testing.T) {
+// A cold write's fork is read under the document's advisory lock, which its transaction takes with
+// the head (readFork) and holds until it ends, so the other process cannot store an edit between
+// that read and the write's appends: task B's browser edit, made while the write is open, waits on
+// that lock, and the version the write renders holds the agent's edit and nothing of bob's. Once
+// the write commits, bob's append lands on top of it and the stored document holds both. Read
+// without that lock, the write's fork could miss an edit the other process stored under it, and
+// the version recorded a cursor over text it did not hold.
+func TestAColdWritesVersionIsNotRacedByTheOtherProcessesAppend(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
 	taskA, _ := newTestServiceInstance(t, database)
 	taskB, _ := newTestServiceInstance(t, storetest.SecondProcess(t, database))
 	seedServiceText(t, taskA, artifactID, lostEditDocument)
-	var once sync.Once
-	taskA.afterForkRead = func(string) {
-		once.Do(func() {
-			editAsBrowserPeer(t, taskB, artifactID, 1, model.Actor{Kind: "user", ID: "bob"}, replaceRun("Bravo paragraph.", "Bravo paragraph, by bob."))
-			waitForLandedAppends(t, taskB, artifactID)
-		})
+	if err := taskB.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load task B's room: %v", err)
 	}
+	waitForLandedAppends(t, taskB, artifactID)
 	if taskA.roomHeld(artifactID) {
 		t.Fatal("task A holds a room, so the write would not be cold")
 	}
+
 	edit := startEditInFlight(t, taskA, artifactID, model.EditOp{Op: "replace", Find: "Alpha paragraph.", With: "Alpha paragraph, by the agent."})
+	// Bob types on task B while the write is open: his room takes the edit at once, and its
+	// append queues on the document's lock the write holds.
+	taskB.addConnection(artifactID, 1, model.Actor{Kind: "user", ID: "bob"})
+	if err := browserStyleWrite(taskB, artifactID, replaceRun("Bravo paragraph.", "Bravo paragraph, by bob."), make(chan struct{})); err != nil {
+		t.Fatalf("bob's edit on task B: %v", err)
+	}
+	waitFor(t, roomWait(t), "bob's append to queue on the document's advisory lock", func() bool {
+		return waitingAdvisoryLocks(t, database) > 0
+	})
+	if stored := storedMarkdown(t, database, artifactID); strings.Contains(stored, "by bob") {
+		t.Fatalf("bob's edit was stored while the write held the document's lock: %q", stored)
+	}
+
 	if _, err := taskA.NamedVersion(edit.ctx, artifactID, "both", lostEditAgent); err != nil {
 		t.Fatalf("the agent's version: %v", err)
 	}
 	if err := edit.ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit the agent's write: %v", err)
 	}
-	markdown, cursor := latestVersionOf(t, database, artifactID)
-	if !strings.Contains(markdown, "by the agent") || !strings.Contains(markdown, "by bob") {
-		t.Fatalf("the cold write's version reads %q; want the agent's edit and bob's, stored before the write's lock", markdown)
+	markdown, _ := latestVersionOf(t, database, artifactID)
+	if !strings.Contains(markdown, "by the agent") || strings.Contains(markdown, "by bob") {
+		t.Fatalf("the cold write's version reads %q; want the agent's edit alone, bob's append being queued behind its lock", markdown)
 	}
-	if head := storedHead(t, database, artifactID); cursor != head {
-		t.Fatalf("the version records update %d, the stored head is %d", cursor, head)
+	waitForLandedAppends(t, taskB, artifactID)
+	waitFor(t, roomWait(t), "bob's edit to be stored once the write let go of the lock", func() bool {
+		return strings.Contains(storedMarkdown(t, database, artifactID), "by bob")
+	})
+	if stored := storedMarkdown(t, database, artifactID); !strings.Contains(stored, "by the agent") {
+		t.Fatalf("the stored document reads %q; want the agent's edit and bob's", stored)
 	}
 }
 

@@ -20,13 +20,13 @@ import (
 )
 
 // Closing or reopening an issue changes every process's rooms of its documents (plan
-// D5). The trigger migration 0158 puts on issues.closed_at notifies dispatch_issue_open_changed
-// from the transaction that wrote it, whichever process wrote it; each process's room sync reads
-// the issue and closes its rooms of the issue's documents (issueOpenChanged), so their browsers
-// reconnect with the scope the issue now allows, which ygo fixes when a browser connects. A
-// browser's append on a closed issue is refused by the append gate, which reads the issue itself,
-// whether the notification reached the room's process or not, unless the room took the update no
-// later than closeMargin after the close committed.
+// D5). The trigger migration 20261101181500 puts on issues.closed_at notifies
+// dispatch_issue_open_changed from the transaction that wrote it, whichever process wrote it; each
+// process's room sync reads the issue and closes its rooms of the issue's documents
+// (issueOpenChanged), so their browsers reconnect with the scope the issue now allows, which ygo
+// fixes when a browser connects. A browser's append on a closed issue is refused by the append
+// gate, which reads the issue itself, whether the notification reached the room's process or not,
+// unless the room took the update no later than closeMargin after the close committed.
 
 // writeIssueClosed sets issueKey's closed_at in database as PATCH /api/v1/issues/{key} does when it
 // closes or reopens the issue: a commit whose notification reaches every process listening.

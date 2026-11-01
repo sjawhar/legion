@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,53 +11,43 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// holdUnstoredUpdate makes room hold one update its persistence has not taken, as a browser's
-// edit does between reaching the room and being stored, and returns its release: the update
-// landing. A settlement that meets it stops short (settleRoomWithin).
-func holdUnstoredUpdate(service *Service, room string) (release func()) {
-	state := service.lockState(room)
-	state.pendingUpdates++
-	service.unlockState(room, state)
-	return func() {
-		state := service.lockState(room)
-		state.pendingUpdates--
-		service.unlockState(room, state)
+// stopSettlementShort makes each settlement of room that writes a version stop short before its
+// commit, while stop answers true: its transaction rolls back having written nothing into the
+// room, so the document still owes the settlement (settleRoomWithin).
+func stopSettlementShort(service *Service, room string, stop func() bool) {
+	service.afterSettleVersionWrite = func(settled string) error {
+		if settled == room && stop() {
+			return errors.New("injected settlement stop")
+		}
+		return nil
 	}
 }
 
-// A settlement that meets updates its room's persistence has not stored yet stops short, and
-// SettleIssueDocuments runs it again once they have landed: the block written within the settle
-// delay is an ask, credited to its writer, when it returns, for the close that called it to
+// A settlement that stops short is run again by SettleIssueDocuments: the block written within the
+// settle delay is an ask, credited to its writer, when it returns, for the close that called it to
 // withdraw. Settled once and given up on, the block would be no ask when the close committed.
-func TestSettlingAnIssuesDocumentsRetriesASettlementThatMetUnstoredUpdates(t *testing.T) {
+func TestSettlingAnIssuesDocumentsRetriesASettlementThatStoppedShort(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
 	actor := model.Actor{Kind: "session", ID: "retried-asking-session"}
 	writeThroughLedger(t, service, artifactID, actor, freshBlock, withoutVersion)
 
-	// The first attempt meets the update once it holds the document's lock; the update has landed
-	// by the time the next attempt has warmed the room.
+	// The first attempt stops short before its commit; the next commits.
 	var attempts atomic.Int32
-	var release func()
-	service.afterSettleLock = func(room string) {
-		if room == artifactID && release == nil {
-			release = holdUnstoredUpdate(service, room)
-		}
-	}
 	service.afterSettleWarm = func(room string) {
-		if room == artifactID && attempts.Add(1) > 1 && release != nil {
-			release()
-			release = func() {}
+		if room == artifactID {
+			attempts.Add(1)
 		}
 	}
+	stopSettlementShort(service, artifactID, func() bool { return attempts.Load() == 1 })
 	err := service.SettleIssueDocuments(store.WithTransactionTracking(context.Background()), "DOC-1")
-	service.afterSettleLock, service.afterSettleWarm = nil, nil
+	service.afterSettleVersionWrite, service.afterSettleWarm = nil, nil
 	if err != nil {
 		t.Fatalf("settle the issue's documents: %v", err)
 	}
 	if got := attempts.Load(); got != 2 {
-		t.Fatalf("the document's settlement ran %d times, want 2: the one that met the update and the one after it landed", got)
+		t.Fatalf("the document's settlement ran %d times, want 2: the one that stopped short and the one after it", got)
 	}
 	ask := blockAskOn(t, service, artifactID, "fresh")
 	if ask.State != "open" || ask.Author != actor {
@@ -74,29 +65,19 @@ func TestSettlingAnIssuesDocumentsGivesUpOnASettlementThatNeverLands(t *testing.
 	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
 	writeThroughLedger(t, service, artifactID, model.Actor{Kind: "session", ID: "stalled-session"}, freshBlock, withoutVersion)
 
-	// The update the first attempt meets never lands while SettleIssueDocuments runs, so every
-	// later attempt's wait for it ends short too.
 	var attempts atomic.Int32
-	var release func()
-	service.afterSettleLock = func(room string) {
-		if room == artifactID && release == nil {
-			release = holdUnstoredUpdate(service, room)
-		}
-	}
 	service.afterSettleWarm = func(room string) {
 		if room == artifactID {
 			attempts.Add(1)
 		}
 	}
+	stopSettlementShort(service, artifactID, func() bool { return true })
 	started := time.Now()
 	err := service.SettleIssueDocuments(store.WithTransactionTracking(context.Background()), "DOC-1")
 	elapsed := time.Since(started)
-	service.afterSettleLock, service.afterSettleWarm = nil, nil
-	if release != nil {
-		release()
-	}
+	service.afterSettleVersionWrite, service.afterSettleWarm = nil, nil
 	if err == nil {
-		t.Fatal("settling a document whose update never lands succeeded")
+		t.Fatal("settling a document whose settlement never lands succeeded")
 	}
 	if got := attempts.Load(); got != issueSettleAttempts {
 		t.Fatalf("the document's settlement ran %d times, want %d", got, issueSettleAttempts)

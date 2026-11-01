@@ -2,13 +2,14 @@
 // learns of another process's commits from the database runs. Two envoy-dispatch processes serve
 // one Postgres (INFRA-66), and the secrets broker now runs two pods over one database of its own,
 // so what one process commits reaches the others only through the database, and a connection
-// waiting for a notification must outlive every failure between it and the server. Its three
-// Dispatch users are the delivery hub and the event stream relay (internal/dispatch/api) and the
-// process's shared listener hub (Hub), on which the document rooms' room sync is registered
-// (internal/dispatch/docs) and every change-driven background loop of the server takes its wake
-// (cmd/dispatch); the fourth is the broker's cross-pod secret-reread fan-out
-// (internal/broker/reread). Serving two programs is why the package sits here rather than under
-// internal/dispatch, as internal/pgmigrate does for the two migration runners.
+// waiting for a notification must outlive every failure between it and the server. Its Dispatch
+// users are the delivery hub, the event stream relay and, under DISPATCH_TEST_HOOKS alone, the
+// test hooks' fan-out to every process (internal/dispatch/api), and the process's shared listener
+// hub (Hub), on which the document rooms' room sync is registered (internal/dispatch/docs) and
+// every change-driven background loop of the server takes its wake (cmd/dispatch); the other is
+// the broker's cross-pod secret-reread fan-out (internal/broker/reread). Serving two programs is
+// why the package sits here rather than under internal/dispatch, as internal/pgmigrate does for
+// the two migration runners.
 package pglisten
 
 import (

@@ -181,12 +181,12 @@ func (s *server) restoreIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey str
 }
 
 // sweepClosedIssueAsks is the close's last pass over its issue's documents, run once the close
-// has committed. The commit's notification (migration 0158's trigger) closes the issue's rooms on
-// every process, so a room stops taking a browser's ask block within moments of it; the sweep
-// catches the blocks written before then. In a transaction of its own, holding the issue's row, it
-// writes the blocks of withdrawn - the asks the close withdrew - and of every other resolved block
-// ask of the issue, and their copies, again, from their rows as they now stand, writes the copies
-// of every answered block ask of the issue from its row with the answer left out
+// has committed. The commit's notification (migration 20261101181500's trigger) closes the issue's
+// rooms on every process, so a room stops taking a browser's ask block within moments of it; the
+// sweep catches the blocks written before then. In a transaction of its own, holding the issue's
+// row, it writes the blocks of withdrawn - the asks the close withdrew - and of every other
+// resolved block ask of the issue, and their copies, again, from their rows as they now stand,
+// writes the copies of every answered block ask of the issue from its row with the answer left out
 // (docs.WriteIssueAskStates), and writes resolved every readable ask block no settlement has
 // indexed: one a browser wrote into the room after the close forked it, or one whose settlement
 // failed before the close. Each such block is logged. An issue reopened in the meantime is left

@@ -113,26 +113,30 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 	return a.StoreUpdateContext(context.Background(), room, update)
 }
 
-// StoreUpdateContext appends a room's update with the in-flight credit its update observer
-// recorded (AppendUpdateWithCredit), and with that observer's record of which room instance the
-// update was made in (documentUpdateClass.cursor), when it took the update
-// (documentUpdateClass.observed) and where a live write of this process may have stored it
-// already (documentUpdateClass.ahead), which the append takes as one argument of its own
-// (BrowserAppend): the append is a browser's (appendBrowser), so the gate admits it
-// from a room behind the head with its history intact - it lands at the head, and the instance's
-// cursor folds it in once catch-up fills the gap (appendUpdate) - and refuses it only when the
-// room's stored history was replaced under it, or when the document's issue is closed and the room
-// took the update later than closeMargin after the close. A history a compaction folded past the
-// room's cursor is no replacement for the update when it still holds every item the update builds
-// on (storedHistoryHolds): it is stored, and the room, which cannot catch up to that history, is
-// closed and reloaded at the head once it is (closeRoomOnReplacedHistory): this append asks for
-// that itself, so it needs no room-sync lane and waits on no later notification. An update the
-// room took before the close and whose append reaches the gate after it - queued behind the room's
-// earlier appends, waiting on the document's lock behind a settlement or a compaction, or handed
-// here by the close of the room itself (setRoomIssueOpen) - is stored, and settled once the issue
-// reopens, a compaction's fold of the history meanwhile included: a room closing for its issue
-// takes in no catch-up while its close waits for this append (holdOpen), and that close is the
-// reload a folded history needs.
+// StoreUpdateContext stores a room's update: it appends, in one transaction under the document's
+// advisory lock, every update of the same room instance its update observer recorded before this
+// one and no writer has stored yet, then this one, in the room's commit order, each with the
+// in-flight credit and the class its observer recorded (AppendRoomFlush, flushThrough). So the
+// order ygo's persistence hands updates on in never decides the order they are stored in, and an
+// update another writer stored first is skipped.
+//
+// Each append carries what the observer recorded with its update: the room instance it was made
+// in (documentUpdateClass.cursor) and when the room took it (documentUpdateClass.observed), which
+// the store passes to the gate as a browser's append (BrowserAppend, appendBrowser). So the gate
+// admits it from a room behind the head with its history intact - it lands at the head, and the
+// instance's cursor folds it in once catch-up fills the gap (appendUpdate) - and refuses it only
+// when the room's stored history was replaced under it, or when the document's issue is closed and
+// the room took the update later than closeMargin after the close. A history a compaction folded
+// past the room's cursor is no replacement for the update when it still holds every item the
+// update builds on (storedHistoryHolds): it is stored, and the room, which cannot catch up to that
+// history, is closed and reloaded at the head once it is (closeRoomOnReplacedHistory): this append
+// asks for that itself, so it needs no room-sync lane and waits on no later notification. An
+// update the room took before the close and whose append reaches the gate after it - queued behind
+// the room's earlier appends, waiting on the document's lock behind a settlement or a compaction,
+// or handed here by the close of the room itself (setRoomIssueOpen) - is stored, and settled once
+// the issue reopens, a compaction's fold of the history meanwhile included: a room closing for its
+// issue takes in no catch-up while its close waits for this append (holdOpen), and that close is
+// the reload a folded history needs.
 // A replaced history fails the room, as any failed append does: the room reloads from the store,
 // which is the close-and-reload a replaced history needs (plan D3.3), and the browser resends the
 // update to the reloaded room. A refused update on a closed issue is dropped and closes the room
@@ -141,10 +145,8 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 // no room-sync lane to run.
 // An update that never reaches the store - its room failed, or a live write, a settlement or a
 // catch-up already made it durable - lands its credit here instead: the room drops it with the
-// update, which the browser resends. An update a live write of this process stored ahead of its own
-// row (storeRoomUpdatesAhead) is found there by its append, which stores nothing and writes no
-// credit, since the write's transaction wrote both (PgVersioned.appendUpdate). Whichever way the
-// append ends, the update leaves its instance's unstored updates once it has.
+// update, which the browser resends. Whichever way the append ends, the update leaves its
+// instance's unstored updates once it has.
 func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
 	if a.service.roomFailed(room) {
 		// The failed room's update is dropped and its browser resends it to the room that
@@ -155,25 +157,53 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		// settlement would retry without end, and the record would never be released
 		// (unusedLocked).
 		class, counted, found := a.service.consumeUpdateClass(room, update)
-		if found && class.durable {
-			a.service.finishDurableAppend(room, counted)
+		if found {
+			a.service.finishUpdateClass(room, counted, class)
 		}
 		class.instance.unlistUnstored(class)
 		class.credit.landed()
 		return nil
 	}
 	class, counted, found := a.service.consumeUpdateClass(room, update)
-	if found && class.durable {
-		defer a.service.finishDurableAppend(room, counted)
+	if found {
+		defer a.service.finishUpdateClass(room, counted, class)
 	}
 	defer class.instance.unlistUnstored(class)
 	defer class.credit.landed()
-	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
+	// The update's suppression slot is consumed whatever its class says, since slots are taken in
+	// order. The class decides when the observer recorded one: a published write's and a
+	// repair's are queued stored, and a browser update whose bytes match a repair's - a deletion
+	// leaves an update that carries no struct, only the room's delete set, which is what a repair
+	// that wrote nothing leaves as well - takes that repair's slot while its own class is not
+	// stored, and is stored all the same; the repair's own update then finds its class stored.
+	suppressed := a.service.consumeSuppressedPersistence(room, update)
+	if class.stored.Load() || (suppressed && !found) || a.service.roomFailed(room) {
 		return nil
 	}
 	a.service.hooks.awaitPersistenceHold(ctx, room)
-	browser := &BrowserAppend{cursor: class.cursor, observed: class.observed, ahead: class.ahead}
-	if _, err := a.store.AppendUpdateWithCredit(ctx, room, update, class.contentChanged, class.credit, browser); err != nil {
+	if !found {
+		// An update no class was recorded for is stored on its own: the room's queue holds
+		// nothing to flush it with, and the gate reads the cursor it carries.
+		browser := &BrowserAppend{cursor: class.cursor, observed: class.observed}
+		if _, err := a.store.AppendUpdateWithCredit(withRoomCursor(ctx, class.cursor), room, update, class.contentChanged, class.credit, browser); err != nil {
+			if errors.Is(err, ErrIssueClosed) {
+				a.service.refuseClosedIssueAppend(room)
+				return nil
+			}
+			a.service.failRoom(room, err)
+			return err
+		}
+		return nil
+	}
+	// The update must read back into a fresh copy before anything of the room's is stored, as a
+	// single append checks (PgVersioned.appendUpdate): one the room took but a copy cannot decode
+	// fails the room, which reloads the document from the store.
+	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
+		a.service.failRoom(room, err)
+		return err
+	}
+	flush := &RoomFlush{service: a.service, room: room, cursor: class.cursor}
+	if _, err := a.store.AppendRoomFlush(ctx, room, flush, class.seq, class.credit); err != nil {
 		if errors.Is(err, ErrIssueClosed) {
 			a.service.refuseClosedIssueAppend(room)
 			return nil
@@ -181,7 +211,7 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		a.service.failRoom(room, err)
 		return err
 	}
-	if found && class.durable && class.contentChanged {
+	if flush.storedContentChange() {
 		a.service.scheduleSettleAfterAppend(room)
 	}
 	if class.cursor.takeReplaced() {
@@ -664,6 +694,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// (above), so it holds every transaction the room commits from here on, in commit order.
 	replica := s.keepReplica(doc, doc.OpenUpdateLog())
 	instance := s.keepInstance(room, doc)
+	replica.classify = func(logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks *observedAsks) (bool, bool, bool) {
+		return s.classifyDrained(room, instance, logged, seq, contentChanged, asks)
+	}
 	doc.OnUpdate(func(update []byte, origin any) {
 		// A published write's update is already durable, and so is a catch-up's batch of another
 		// process's rows (remoteUpdateOrigin). Its suppression slot is finished here, before ygo's
@@ -679,136 +712,119 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		case *remoteUpdateOrigin:
 			s.finishSuppressedPersistence(durable.slot, update)
 		}
-		repair, identityRepair := origin.(*identityClosureOrigin)
-		if identityRepair {
+		if repair, identityRepair := origin.(*identityClosureOrigin); identityRepair {
 			s.recordSuppressedCommit(repair.slot, update)
-			// A repair's update is not classified or credited - its writer appends it in its own
-			// transaction - but it names this instance all the same: one that reaches the room's
-			// persistence outside its suppression slot, which another writer's update can take
-			// first (consumeSuppressedPersistence), is stored as any other update, and the room
-			// it was made in has to take that version in or stand behind the head for good. The
-			// class counts for nothing else: it is not durable work the room's state waits on.
-			s.recordUpdateClass(room, update, &documentUpdateClass{contentChanged: true, cursor: &instance.cursor})
+			// A repair's update is classified like any other, and its class names the room
+			// instance it was made in: one that reaches the room's persistence outside its
+			// suppression slot, which another writer's update can take first
+			// (consumeSuppressedPersistence), is stored as any other update, and the room it was
+			// made in has to take that version in or stand behind the head for good.
 		} else if s.beforeObserveUpdate != nil {
 			s.beforeObserveUpdate(room)
 		}
-		// This observer's own update is in the log - ygo appended it under the document's lock at
-		// its commit - so its class is recorded before ygo's persistence observer, which runs after
-		// this one on this goroutine, hands it on.
-		observed := s.observeRoomLog(room, instance, replica, update)
-		if observed.changed && s.afterCreditUpdate != nil {
+		// Every observer drains the room's update log, a repair's too, and each committed update
+		// is classified once, by whichever drainer reaches it first - an observer, or an exact
+		// read (readPoint) - against the room as the commit before it left it
+		// (renderedReplica). This observer's own update is in the log - ygo appended it under the
+		// document's lock at its commit - so its class is recorded, in the drain and in commit
+		// order, before ygo's persistence observer, which runs after this one on this goroutine,
+		// hands it on.
+		settles, changed, local := replica.observe(room)
+		if changed && s.afterCreditUpdate != nil {
 			s.afterCreditUpdate(room)
 		}
-		if observed.own != nil {
-			s.recordUpdateClass(room, update, observed.own)
+		switch {
+		case local:
+			s.scheduleSettle(room)
+		case settles && changed:
+			// A content change another process made, which a catch-up applied, only re-arms a
+			// settlement already armed here and arms none where none is (rearmSettle): the
+			// process whose peer made it armed its own when that peer's update reached its room,
+			// so editors on two processes typing in turn make one burst, which settles once, a
+			// settle delay after the last keystroke on either.
+			s.rearmSettle(room)
 		}
-		s.settleAfterObserving(room, observed)
 	})
 	return nil
 }
 
-// roomObservation is what one drain of a room's update log classified (observeRoomLog): own, the
-// class of the update the draining observer was handed, which that observer records itself; local,
-// whether it classified an update this process made - a peer's, a service repair's, a published
-// live write's; remote, whether it classified a content change another process made, which a
-// catch-up applied; and changed, whether it classified any content change at all.
-type roomObservation struct {
-	own                    *documentUpdateClass
-	local, remote, changed bool
-}
-
-// observeRoomLog drains the update log of instance, room's resident instance, through its replica
-// (renderedReplica.observe), classifying each committed update once against the room as the
-// commit before it left it: whichever observer reaches the log first classifies every update
-// committed by then, and a live write about to store the room's updates ahead of its own row
-// drains it too (observeRoomUpdates), with own nil. Another observer's update is recorded while
-// the replica is held: that observer can be waiting for the replica, and runs its persistence
-// observer as soon as it has it. own, the update the draining observer was handed, is returned
-// for it to record.
+// classifyDrained records the class of logged, the update room's log handed over at commit
+// position seq in instance, given whether it changed the room's rendered markdown and the ask
+// blocks it left when it did (renderedReplica, observedAsks). It is the room's drainClassifier,
+// which runs holding the replica's lock. It reports whether a settlement follows the update, which
+// is every update but a repair's, whether it changed the content, and whether this process made
+// it - a peer's update or a published live write's, rather than another process's append a
+// catch-up applied.
 //
-// An update only the room holds is listed on the instance as unstored (roomInstance.unstored) here,
-// as it is classified, so a live write that drains the log after it forked the room finds every
-// update its fork can hold, the draining observer's own included, whose class that observer
-// records only later.
-func (s *Service) observeRoomLog(room string, instance *roomInstance, replica *renderedReplica, own []byte) roomObservation {
-	var observed roomObservation
-	replica.observe(room, func(logged crdt.LoggedUpdate, contentChanged bool, asks *observedAsks) {
-		if _, identityRepair := logged.Origin.(*identityClosureOrigin); identityRepair {
-			// Its own observer records its class (onLoadDocument). The replica takes it all the
-			// same, so the update after it is measured against the room the repair left.
-			return
-		}
-		var attributed map[string]model.Actor
-		if asks != nil {
-			attributed = s.observeAskBlocksForUpdate(room, asks.askBlocks(), logged.Origin)
-		}
-		// The cursor is this instance's, taken here rather than looked up when the update
-		// reaches the store: a room evicted and reloaded in between is a different instance,
-		// which did not take this update and must not be recorded as holding the version it
-		// is stored at.
-		class := &documentUpdateClass{update: append([]byte(nil), logged.Update...), contentChanged: contentChanged, durable: true, cursor: &instance.cursor, observed: time.Now()}
-		if contentChanged {
-			// The authors of the ask blocks this render first showed go with the credit to the
-			// update's append, which records them durably (recordAskAuthors): a tree is rendered
-			// only for a content change, so a browser's update that names an author always carries
-			// a credit. A published live write carries none; its commit recorded its blocks'
-			// authors (Ledger.recordSettlementCredit).
-			class.credit = s.creditContentChange(room, logged.Origin, &instance.hold, attributed)
-			observed.changed = true
-		}
-		switch logged.Origin.(type) {
-		case *remoteUpdateOrigin:
-			observed.remote = observed.remote || contentChanged
-		case *liveWriteOrigin:
-			observed.local = true
-		default:
-			observed.local = true
-			class.instance, class.ahead = instance, &storedAhead{}
-			instance.listUnstored(class)
-		}
-		if own != nil && sameUpdate(logged.Update, own) {
-			observed.own = class
-			return
-		}
-		s.recordUpdateClass(room, logged.Update, class)
-	})
-	return observed
+// The cursor is the instance's, taken here rather than looked up when the update reaches the
+// store: a room evicted and reloaded in between is a different instance, which did not take this
+// update and must not be recorded as holding the version it is stored at. An update only the room
+// holds is listed on the instance as unstored (roomInstance.unstored) as it is classified, so a
+// room query of another process can answer with it (unstoredShare).
+func (s *Service) classifyDrained(room string, instance *roomInstance, logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks *observedAsks) (settles, changed, local bool) {
+	class := documentUpdateClass{seq: seq, contentChanged: contentChanged, cursor: &instance.cursor, observed: time.Now()}
+	if _, identityRepair := logged.Origin.(*identityClosureOrigin); identityRepair {
+		// A repair's writer appends its update in its own transaction, under the document's
+		// advisory lock it holds while the room takes the update, so the class is queued stored:
+		// no durable writer of the room stores it again, and it is no work the room's state
+		// waits on. It is queued all the same, so the room's persistence, which ygo hands it as
+		// any other update, finds it stored when it falls outside its suppression slot
+		// (consumeSuppressedPersistence).
+		s.queueUpdateClass(room, logged.Update, class, true)
+		return false, false, false
+	}
+	var attributed map[string]model.Actor
+	if asks != nil {
+		attributed = s.observeAskBlocksForUpdate(room, asks.askBlocks(), logged.Origin)
+	}
+	class.durable = true
+	origin, published := logged.Origin.(*liveWriteOrigin)
+	_, remote := logged.Origin.(*remoteUpdateOrigin)
+	if contentChanged {
+		// The authors of the ask blocks this render first showed go with the credit to the
+		// update's append, which records them durably (recordAskAuthors): a tree is rendered
+		// only for a content change, so a browser's update that names an author always carries
+		// a credit. A published live write carries none; its commit recorded its blocks'
+		// authors (Ledger.recordSettlementCredit).
+		class.credit = s.creditContentChange(room, logged.Origin, &instance.hold, attributed)
+	} else if !published {
+		class.roomCredit = s.unchangedCredit(room, logged.Origin, &instance.hold)
+	}
+	// A published write's update was stored by the transaction that wrote it, before the room
+	// took it, and a catch-up's is the stored row itself. Every other update only the room holds,
+	// so it names its instance and is listed there until its append has returned.
+	if !published && !remote {
+		class.instance = instance
+	}
+	queued := s.queueUpdateClass(room, logged.Update, class, published || remote)
+	if class.instance != nil {
+		instance.listUnstored(queued)
+	}
+	// A published write's last update closes the window of the shadow its commit left
+	// (reachShadow), before any update after it is queued.
+	if published && origin.shadow != nil {
+		s.reachShadow(room, origin.shadow, &instance.cursor, seq)
+	}
+	return true, contentChanged, !remote
 }
 
-// observeRoomUpdates drains live's update log for a caller that is not one of its observers
-// (observeRoomLog), and arms the settlement what it classified asks for, as the observer it
-// stood in for would have. A document this process lists no replica or no instance for - one no
-// room of its loaded, or whose room's document has been collected - has nothing to drain.
+// observeRoomUpdates drains live's update log for a caller that is not one of its observers, so
+// every update committed to the room by now is classified (classifyDrained), and arms the
+// settlement what it classified asks for, as the observer it stood in for would have. A document
+// this process lists no replica for - one no room of its loaded, or whose room's document has
+// been collected - has nothing to drain.
 func (s *Service) observeRoomUpdates(room string, live *crdt.Doc) {
-	instance := s.instanceOf(live)
 	replica := s.replicaOf(live)
-	if instance == nil || replica == nil {
+	if replica == nil {
 		return
 	}
-	s.settleAfterObserving(room, s.observeRoomLog(room, instance, replica, nil))
-}
-
-// settleAfterObserving arms room's settlement for what a drain of its update log classified: any
-// update this process made arms it a settle delay from now, re-arming one already armed, as
-// always. A content change another process made only re-arms a settlement already armed here and
-// arms none where none is (rearmSettle): the process whose peer made it armed its own when that
-// peer's update reached its room, so editors on two processes typing in turn make one burst, which
-// settles once, a settle delay after the last keystroke on either.
-func (s *Service) settleAfterObserving(room string, observed roomObservation) {
+	settles, changed, local := replica.observe(room)
 	switch {
-	case observed.local:
+	case local:
 		s.scheduleSettle(room)
-	case observed.remote:
+	case settles && changed:
 		s.rearmSettle(room)
 	}
-}
-
-// sameUpdate reports whether logged, an update the room's update log handed over, is update, the
-// one an observer was called with: ygo hands both the very slice it encoded at the commit
-// (crdt.LoggedUpdate), so the same backing array is the same commit, where equal bytes need not be
-// - two commits that change nothing encode alike.
-func sameUpdate(logged, update []byte) bool {
-	return len(logged) > 0 && len(logged) == len(update) && &logged[0] == &update[0]
 }
 
 // soleConnectedActor is the one actor connected to a room, and whether more than one distinct
@@ -881,15 +897,42 @@ func (s *Service) creditContentChange(room string, origin any, hold *roomHold, a
 	}
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
-	record := &inflightCredit{seq: state.creditSeq.Add(1), authors: make(map[string]model.Actor, len(state.connected))}
-	for _, actor := range state.connected {
-		record.authors[actorKey(actor)] = actor
-	}
-	record.lastActor, _ = soleConnectedActor(state.connected)
+	record := connectedCreditLocked(state)
+	record.seq = state.creditSeq.Add(1)
 	state.inflight[record.seq] = record
 	state.lastActor = record.lastActor
 	state.unsettled = true
 	return &UpdateCredit{service: s, room: room, state: state, record: record, hold: hold, askAuthors: askAuthors}
+}
+
+// unchangedCredit is the credit a browser update the room's update observer measured as no change
+// carries for the room's shadow (documentUpdateClass.roomCredit): the peers connected as the room
+// took it, as creditContentChange would credit them, recorded only while a live write is open,
+// whose shadow may measure the update a change once the write is stored before it. It is not in F
+// and takes no credit sequence: no version lists an update recorded as no change, and its append
+// writes these authors only when it stores the update as a change. Nil for a service repair, and
+// while no write is open.
+func (s *Service) unchangedCredit(room string, origin any, hold *roomHold) *UpdateCredit {
+	if _, service := s.serviceOrigins.Load(origin); service {
+		return nil
+	}
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
+	if state.liveWriter == nil {
+		return nil
+	}
+	return &UpdateCredit{service: s, room: room, state: state, record: connectedCreditLocked(state), hold: hold}
+}
+
+// connectedCreditLocked is a credit record naming the peers connected to state, and the one of
+// them it pins the edit on, if one. The caller holds state.mu.
+func connectedCreditLocked(state *roomState) *inflightCredit {
+	record := &inflightCredit{authors: make(map[string]model.Actor, len(state.connected))}
+	for _, actor := range state.connected {
+		record.authors[actorKey(actor)] = actor
+	}
+	record.lastActor, _ = soleConnectedActor(state.connected)
+	return record
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits

@@ -295,10 +295,10 @@ func (sources askBlockSources) author(id string, fallback model.Actor) (model.Ac
 	return fallback, true
 }
 
-// The durable ask authors (doc_ask_block_authors, migration 0159) are the authors of the ask blocks
-// no settlement has indexed yet, one row per block, outliving the room and the process that saw the
-// write: a browser's block is recorded by the append of the update whose render first showed it
-// (appendUpdateTxClass), a joined write's or a seed's by the transaction that commits it
+// The durable ask authors (doc_ask_block_authors, migration 20261101181501) are the authors of the
+// ask blocks no settlement has indexed yet, one row per block, outliving the room and the process
+// that saw the write: a browser's block is recorded by the append of the update whose render first
+// showed it (appendUpdateTxClass), a joined write's or a seed's by the transaction that commits it
 // (Ledger.recordSettlementCredit), and a block a stamp renamed by the transaction that stores the
 // stamp (recordStampedAskAuthors). The first registration wins. A settlement deletes the rows of the
 // blocks it indexed or found indexed and of the blocks its tree no longer holds

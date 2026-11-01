@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
@@ -156,9 +157,11 @@ type copiedSource struct {
 // hashtext.
 const projectCopiesLock = `select pg_advisory_xact_lock($1, hashtext($2))`
 
-// copiedAsksLockNamespace is the first key of every copy lock ("COPY"). The one other lock of this
-// module taken in the two-key form is a conditional edit's admission, under
-// conditionalEditQueueLockNamespace.
+// copiedAsksLockNamespace is the first key of every copy lock ("COPY"). The server's other two-key
+// namespaces are the loop leases' (duty.leaseNamespace, "LOOP"), the test hooks' (the api package's
+// testHookLockNamespace, "HOOK"), a conditional edit's admission's
+// (conditionalEditQueueLockNamespace) and the issue dependencies' (api's
+// lockProjectIssueDependencies), each a first key of its own.
 const copiedAsksLockNamespace int32 = 0x434F5059
 
 // lockProjectCopies serialises, for a project document, its project's copy bookkeeping: a
@@ -177,12 +180,13 @@ const copiedAsksLockNamespace int32 = 0x434F5059
 // other advisory lock here - a document's room (lockDocumentRoom), a project's rank allocation, an
 // agent's artifacts, the migration runner's - is a single key, so a copy lock never waits on one of
 // those, whatever the project's name hashes to. Within the two-key space only the copy locks take
-// copiedAsksLockNamespace: the other namespaces of it in the server are internal/dispatch/duty's
+// copiedAsksLockNamespace: the server's other namespaces of it are internal/dispatch/duty's
 // (duty.leaseNamespace), under which a background loop holds the lease that keeps one process at a
-// time running its periodic pass, a conditional edit's admission's
-// (conditionalEditQueueLockNamespace) and the issue dependencies' (api's
-// lockProjectIssueDependencies, hashtext('dispatch-issue-dependencies')), so a copy lock cannot
-// collide with one of those either. hashtext is 32 bits wide, so two projects can still share the
+// time running its periodic pass, the test hooks' (the api package's testHookLockNamespace, under
+// DISPATCH_TEST_HOOKS alone), under which each process marks itself as one a hook call must reach,
+// a conditional edit's admission's (conditionalEditQueueLockNamespace) and the issue dependencies'
+// (api's lockProjectIssueDependencies, hashtext('dispatch-issue-dependencies')), so a copy lock
+// cannot collide with one of those. hashtext is 32 bits wide, so two projects can still share the
 // second key. They then take turns on their copy bookkeeping and on nothing else, and cannot
 // deadlock: a holder takes the copy lock before any doc_settlements_pending row and before any
 // event append (TestCopyLockComesBeforeEveryPendingRowAndEvent), and an append locks only its event
@@ -295,7 +299,8 @@ func owedCopiesOf(ctx context.Context, tx pgx.Tx, documents ...documentAsks) ([]
 // cycle, and returns, sorted and once each, every other document of each document's owner whose
 // latest version holds the block of one of that document's asks with no ask of its own under that
 // block's id (copiesOf). A document's latest version is read for the block's opener
-// (`:::ask{#<id> …}`), so one that quotes the opener elsewhere, in code, is settled for nothing.
+// (`:::ask{<id> …}`, the id as pmdoc.TypedBlockIDAttribute writes it), so one that quotes the
+// opener elsewhere, in code, is settled for nothing.
 // The caller has taken no pending row and appended no event. A copy's settlement waits on the row
 // this marks holding its own owner row and room lock, which the caller never takes, and deletes its
 // own row before it appends an event, so the two can wait on each other in only one direction.
@@ -332,9 +337,9 @@ func copiesOf(ctx context.Context, tx pgx.Tx, document documentAsks) ([]string, 
 		if ask.BlockID == nil {
 			continue
 		}
-		id := likeLiteral(*ask.BlockID)
+		opener := `%ask{` + likeLiteral(pmdoc.TypedBlockIDAttribute(*ask.BlockID))
 		blockIDs = append(blockIDs, *ask.BlockID, *ask.BlockID)
-		patterns = append(patterns, `%ask{#`+id+` %`, `%ask{#`+id+`}%`)
+		patterns = append(patterns, opener+` %`, opener+`}%`)
 	}
 	if len(blockIDs) == 0 {
 		return nil, nil

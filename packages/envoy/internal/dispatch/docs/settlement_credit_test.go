@@ -345,12 +345,14 @@ func TestAVersionedAuthorIsNotCreditedAgainAfterACrashRestart(t *testing.T) {
 	waitForAskAuthor(t, restarted, artifactID, asking)
 }
 
-// A browser edit the room observes while an API edit's own version is still open is listed only
-// once. The version reads carol's in-flight credit (the room holds it from the moment it observes
-// her edit, before her own durable append runs) and marks it consumed as it commits; carol's own
-// durable append - queued behind the version's transaction, which holds the document's advisory
-// lock for its whole duration - then finds it consumed and records nothing. Without that, the
-// reopened document's next version would list carol again alongside delta.
+// A browser edit the room observes while an API edit's transaction holds the document, and before
+// that edit reads it, is listed only once. The edit's read takes carol's update in, its transaction
+// stores the update ahead of its own (Ledger.flushThrough), and its version reads carol's in-flight
+// credit (the room holds it from the moment it observes her edit, before her own durable append
+// runs) and marks it consumed, and her update stored, as it commits; carol's own durable append -
+// queued behind the transaction, which holds the document's advisory lock for its whole duration -
+// then finds her update stored and records nothing. Without that, the reopened document's next
+// version would list carol again alongside delta.
 func TestABrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReopen(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour // no settlement runs between the edits
@@ -362,8 +364,8 @@ func TestABrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReopen(t *
 	agent := model.Actor{Kind: "session", ID: "agent-session"}
 	delta := model.Actor{Kind: "session", ID: "delta-session"}
 
-	// Hold the document's advisory lock for the whole agent transaction, as ApplyOps does for a
-	// joined write (lockDocumentRoom), so carol's durable append queues behind it.
+	// Hold the document's locks, in their order, for the whole agent transaction, from before
+	// carol edits, so her durable append queues behind it.
 	tx, err := service.store.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin the agent's transaction: %v", err)
@@ -371,11 +373,14 @@ func TestABrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReopen(t *
 	defer tx.Rollback(ctx)
 	joined, ledger := service.Join(ctx, tx)
 	defer ledger.Discard()
-	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "insert", After: "end", Markdown: "Agent's paragraph.\n"}}, agent, nil); err != nil {
-		t.Fatalf("apply the agent's edit: %v", err)
+	if _, _, err := lockArtifactOwner(ctx, tx, artifactID); err != nil {
+		t.Fatalf("lock the document's owner: %v", err)
+	}
+	if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
+		t.Fatalf("lock the document: %v", err)
 	}
 
-	// Carol, a connected browser, edits while the agent's transaction still holds the document's
+	// Carol, a connected browser, edits while the agent's transaction holds the document's
 	// advisory lock, so her durable append - which the room's persistence worker drives
 	// asynchronously - queues behind it. She stays connected until the issue's close ends her
 	// connection, so no last-browser settlement runs before delta's version.
@@ -383,6 +388,9 @@ func TestABrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReopen(t *
 	editAsBrowser(t, service, artifactID, carol, "# Decision\n\nContext.\n\nCarol's paragraph.\n")
 	if !service.hasDurableAppend(artifactID) {
 		t.Fatal("carol's durable append finished before the agent's transaction released the document lock")
+	}
+	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "insert", After: "end", Markdown: "Agent's paragraph.\n"}}, agent, nil); err != nil {
+		t.Fatalf("apply the agent's edit: %v", err)
 	}
 
 	result, err := service.SnapshotVersion(joined, artifactID, agent)
@@ -434,7 +442,7 @@ func connectBrowser(t *testing.T, serverURL, artifactID, login string) *docstest
 // update, under the copy's own lock, which the browser's reader applies the room's updates under.
 // ygo applies the update to the room in its own transaction, under the room's lock - the path every
 // browser edit takes. It returns once the room's update observer has run for that update -
-// creditContentChange credited it and recordUpdateClass counted its durable append - whether or not
+// creditContentChange credited it and queueUpdateClass counted its durable append - whether or not
 // the append has reached storage. The signal is an observer this helper registers on the room after
 // the service's own: ygo fires a transaction's update observers in the order they were registered
 // (reearth/ygo crdt/doc.go, the onUpdate snapshot loop), so this one runs after the service's has
@@ -903,16 +911,19 @@ func TestConcurrentBrowserAndVersionedWritesListEveryAuthorOnceAfterEveryRound(t
 	}
 }
 
-// A browser's edit is credited when another transaction's update observer reaches the room first.
+// A browser's edit is credited when another drainer of the room's update log reaches it first.
 // ygo runs a transaction's update observers after it has released the document's lock, so the
 // observers of a browser's edit and of an agent's write published beside it run in either order.
-// Here the browser's observer is held before it classifies anything, and the published write's
-// observer runs first. It used to catch the room's rendered replica up past both commits, count the
-// browser's change in its own, and credit no one, as a published write is credited when it
-// commits; the browser's own observer then found the rendering unchanged and credited no one
-// either. The browser was on no version and in no pending row, which is how the concurrent rounds
-// above lost round1-browser once in CI. The room's update log now hands the first
-// observer both commits in commit order, each measured against the room the commit before it left.
+// Here the browser's observer is held before it classifies anything. A published write's observer
+// running first used to catch the room's rendered replica up past both commits, count the browser's
+// change in its own, and credit no one, as a published write is credited when it commits; the
+// browser's own observer then found the rendering unchanged and credited no one either. The browser
+// was on no version and in no pending row, which is how the concurrent rounds above lost
+// round1-browser once in CI. The room's update log now hands the first drainer every commit in
+// commit order, each measured against the room the commit before it left: the agent's write's own
+// read when the browser's edit came before it, which stores the edit ahead of the write's own
+// update and lists its author on the write's version, and the published write's observer when the
+// edit came after the write committed.
 //
 // Each row is one shape of the browser's edit: a paragraph added before the agent's write forks
 // the room, one added after the write commits and before it is published (the agent's version
@@ -986,13 +997,11 @@ func TestABrowserEditAnotherTransactionsObserverReachesFirstIsCreditedExactly(t 
 				t.Fatal("bob's edit never reached the room, so nothing here is tested")
 			}
 			// Bob's own observer is still held, and so is the append his update's persistence
-			// makes after it: whatever credits him by now is another drain of the room's update
-			// log that reached it first - the published write's observer, or, for an edit the
-			// write's fork holds, the write's own drain before it stored his update ahead of its
-			// row (storeRoomUpdatesAhead), whose version then lists him.
-			credited := slices.Contains(pendingAuthors(t, service, artifactID), bob) || countVersionAuthor(t, service.store, artifactID, bob) > 0
+			// makes after it: whatever credits him by now - a version, or a pending credit - is
+			// the drainer that reached the room's update log first.
+			credited := countVersionAuthor(t, service.store, artifactID, bob) > 0 || slices.Contains(pendingAuthors(t, service, artifactID), bob)
 			if credited != (test.places == 1) {
-				t.Fatalf("with bob's own observer held, bob is credited = %t, want %t: another observer classifies his edit", credited, test.places == 1)
+				t.Fatalf("with bob's own observer held, bob is credited = %t, want %t: the drainer that reached the room's update log first classifies his edit", credited, test.places == 1)
 			}
 			release()
 			waitForLandedAppends(t, service, artifactID)
@@ -1158,7 +1167,7 @@ func TestAVersionsCreditIsConsumedExactlyWhenItsCommitLands(t *testing.T) {
 	state := service.lockState(artifactID)
 	record := &inflightCredit{seq: state.creditSeq.Add(1), authors: map[string]model.Actor{actorKey(bob): bob}}
 	state.inflight[record.seq] = record
-	capture := captureAuthors(state, nil, nil, nil, nil)
+	capture := captureAuthors(state, nil, nil, nil, nil, everyCredit)
 	service.unlockState(artifactID, state)
 	t.Cleanup(func() {
 		state.mu.Lock()

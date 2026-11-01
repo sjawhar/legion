@@ -68,9 +68,10 @@ func runDocumentRoomSync(t *testing.T, database *store.Store, documentService *d
 }
 
 // Closing an issue is durable the moment its transaction commits, and the commit itself tells
-// every process's document rooms (migration 0158's trigger, docs.Service.issueOpenChanged): the
-// route makes no call of its own after it, so nothing about the request - a client that has hung
-// up included - can keep a room taking edits from the browsers connected to it.
+// every process's document rooms (migration 20261101181500's trigger,
+// docs.Service.issueOpenChanged): the route makes no call of its own after it, so nothing about
+// the request - a client that has hung up included - can keep a room taking edits from the
+// browsers connected to it.
 func TestClosingAnIssueClosesItsRoomsFromItsCommit(t *testing.T) {
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {

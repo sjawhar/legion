@@ -465,7 +465,7 @@ func (s *Service) connectedActors(room string) []model.Actor {
 // unstoredSnapshot is every update live, room's resident instance, applied that has not left its
 // unstored updates yet (roomInstance.unstored), after draining the room's update log
 // (observeRoomUpdates) so every update committed to the room by now is classified, and listed.
-func (s *Service) unstoredSnapshot(room string, live *crdt.Doc) []*documentUpdateClass {
+func (s *Service) unstoredSnapshot(room string, live *crdt.Doc) []*queuedClass {
 	s.observeRoomUpdates(room, live)
 	instance := s.instanceOf(live)
 	if instance == nil {
@@ -491,7 +491,7 @@ func (s *Service) unstoredShare(room string, live *crdt.Doc) ([]byte, error) {
 // awaitStored returns once none of classes is among instance's unstored updates any more: each
 // was appended, or dropped with a room that failed (StoreUpdateContext). It looks every
 // roomFlushPoll until ctx ends.
-func awaitStored(ctx context.Context, instance *roomInstance, classes []*documentUpdateClass) error {
+func awaitStored(ctx context.Context, instance *roomInstance, classes []*queuedClass) error {
 	if instance == nil || len(classes) == 0 {
 		return nil
 	}
@@ -499,7 +499,7 @@ func awaitStored(ctx context.Context, instance *roomInstance, classes []*documen
 	defer ticker.Stop()
 	for {
 		listed := instance.unstoredUpdates()
-		if !slices.ContainsFunc(classes, func(class *documentUpdateClass) bool { return slices.Contains(listed, class) }) {
+		if !slices.ContainsFunc(classes, func(class *queuedClass) bool { return slices.Contains(listed, class) }) {
 			return nil
 		}
 		select {

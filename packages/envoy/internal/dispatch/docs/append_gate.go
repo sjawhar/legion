@@ -55,20 +55,19 @@ const (
 	appendDerived
 )
 
-// BrowserAppend is what a room's own append of a browser's update carries to the store across
-// VersionedStore (AppendUpdateWithCredit): cursor, the room instance the update was made in,
-// which the gate reads (appendBrowser) and the append advances once it has committed; observed,
-// when the room's update observer took the update (documentUpdateClass.observed), which tells an
-// update the room took before its issue closed from one taken after (observedBeforeClose); and
-// ahead, where a live write of this process may have stored that update already
-// (storeRoomUpdatesAhead). Its fields are unexported, so a store in another package can only pass
-// it on. A nil BrowserAppend, or one with no cursor, is an append no browser's room gates: a
+// BrowserAppend is what a room's own append of one of its updates carries to the store across
+// VersionedStore (AppendUpdateWithCredit, AppendRoomUpdateTx): cursor, the room instance the
+// update was made in, which the gate reads (appendBrowser) and the append advances once it has
+// committed, set only by a single append, since a flush's appends are gated on the flush itself
+// (appendingCursor); and observed, when the room's update observer took the update
+// (documentUpdateClass.observed), which tells an update the room took before its issue closed
+// from one taken after (observedBeforeClose). Its fields are unexported, so a store in another
+// package can only pass it on. A nil BrowserAppend is an append no browser's room gates: a
 // derived write is gated on the cursor of its own transaction's write or of the room that marked
 // its context (appendingCursor).
 type BrowserAppend struct {
 	cursor   *roomCursor
 	observed time.Time
-	ahead    *storedAhead
 }
 
 // closeMargin is how long after an issue's close committed a browser update the room observed is
@@ -240,8 +239,10 @@ type roomCursorContextKey struct{}
 // withRoomCursor marks ctx with cursor for the gate in appendUpdateTxClass, as a derived append
 // (appendDerived). The appends made from a room outside any live write mark their own context,
 // since no ledger of theirs names the document they were made on: settlement's repairs
-// (settleRoomWithin) and the block-id backfill's stamp (backfillBlockIDs). A room's own browser
-// append hands its cursor to the store with the update instead (BrowserAppend).
+// (settleRoomWithin), the block-id backfill's stamp (backfillBlockIDs) and the room's own append
+// of an update its observer recorded no class for (servicePersistenceAdapter.StoreUpdateContext).
+// A room's own browser append hands its cursor to the store with the update instead
+// (BrowserAppend).
 func withRoomCursor(ctx context.Context, cursor *roomCursor) context.Context {
 	if cursor == nil {
 		return ctx
@@ -255,11 +256,26 @@ func roomCursorFrom(ctx context.Context) *roomCursor {
 	return cursor
 }
 
-// appendingCursor is the cursor the gate reads for a derived append to room (appendDerived): the
-// calling transaction's own write to room when it has one, whose fork is what the write was made
-// on, otherwise the cursor its caller marked the context with (withRoomCursor). A nil cursor is an
-// append no cursor gates. A browser's append is gated on the cursor it carries itself
+// appendingCursor is the cursor the gate reads for an append to room: the calling transaction's
+// own write to room when it has one, whose fork is what the write was made on; otherwise, for one
+// of a flush's own appends, flush, the room instance its updates were made in with the versions
+// the flush has appended folded in (RoomFlush); otherwise the cursor its caller marked the context
+// with (withRoomCursor), with the versions the caller's transaction has appended for that instance
+// folded in when it flushed the room (a settlement's repairs, storeRepair). A nil cursor is an
+// append no cursor gates. A browser's own append carries its cursor to the store with the update
 // (BrowserAppend), which no context marks.
+//
+// flush is passed by the appends of a flush alone (AppendRoomUpdateTx), and is the only way the
+// room's own persistence worker reaches its flush here: its transaction has no ledger, so the
+// cursor its context carries is the instance's alone, one version behind the head from the flush's
+// second append on. A joined transaction's flush appends pass it too (Service.flushThrough passes
+// flush to every append it makes), but the write branch comes first: a live write's own flush
+// (Ledger.flushThrough, from recordLiveOperation) is decided by the write, whose heldThrough folds
+// the flushed versions in (withOwnAppends). The flush branch decides the flush appends of a
+// transaction that holds no write of the room: a settlement's, a version's, the block-id
+// backfill's. What the ledger lookup in the room-cursor branch is for is the transaction's other
+// appends of that instance, the repairs storeRepair stores through AppendUpdateTx, which the
+// flush's versions gate.
 //
 // A transaction's write decides for itself: a cold write, whose fork came from the store because
 // no room of this process held the document or its room was behind (coldFork), carries no cursor
@@ -267,14 +283,23 @@ func roomCursorFrom(ctx context.Context) *roomCursor {
 // write renders from the store instead - it holds no room, its update commutes with whatever
 // landed since its read, and the room that loads after its publish reads the store, which holds
 // both by then.
-func appendingCursor(ctx context.Context, room string) documentCursor {
+func appendingCursor(ctx context.Context, room string, flush *RoomFlush) documentCursor {
 	if write := ledgerFrom(ctx).liveWriteFor(room); write != nil {
-		if write.forkCursor == nil {
+		if write.point.cursor == nil {
 			return nil
 		}
 		return write
 	}
+	if flush != nil && flush.room == room {
+		if flush.cursor == nil {
+			return nil
+		}
+		return flush
+	}
 	if cursor := roomCursorFrom(ctx); cursor != nil {
+		if flush := ledgerFrom(ctx).flushFor(room); flush != nil && flush.cursor == cursor {
+			return flush
+		}
 		return cursor
 	}
 	return nil

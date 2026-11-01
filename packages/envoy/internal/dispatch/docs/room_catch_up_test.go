@@ -483,6 +483,69 @@ func TestACatchUpInsideThisProcessesOwnCommitWindowClosesNothing(t *testing.T) {
 	}
 }
 
+// The same window, driven by a real settlement rather than a crafted transaction: a settlement of
+// a room at the head that writes a repair is not closed between the repair's cursor and its
+// commit. Its repair is in the room and appended, and the room's cursor holds it once the
+// settlement is about to commit (commitSettlement), but the store's head does not until the
+// settlement commits: a catch-up reading through the pool in that window finds the room past the
+// head, which reads as a replaced history. Its confirmation under the document's lock waits for
+// the settlement, which holds that lock until its commit, and then finds the room at the head;
+// closed instead, the room would lose its readers over this process's own repair.
+func TestACatchUpInsideARepairingSettlementsCommitWindowClosesNothing(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	service, _ := newTestServiceInstance(t, database)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	seedServiceText(t, service, artifactID, "First.\n")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	editAsConnectedPeer(t, service, artifactID, 1, alice,
+		appendBlocks(t, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n"))
+	waitForLandedAppends(t, service, artifactID)
+	settleCurrentGeneration(t, service, artifactID)
+	answerBlockAsk(t, service, artifactID)
+	if roomBehind(t, service, artifactID) {
+		t.Fatal("the room stands behind the head before its settlement, so nothing here is tested")
+	}
+	before := latestVersionNumber(t, service, artifactID)
+	room := service.srv.GetDoc(artifactID)
+
+	// The settlement's repair is appended and on the room's cursor, and its transaction, which
+	// holds the document's lock, has not committed. The catch-up reads the head through the pool
+	// there, finds it below the cursor, and confirms the verdict under that lock.
+	caught := make(chan struct{})
+	service.beforeSettleCommit = func(settling string) {
+		if settling != artifactID {
+			return
+		}
+		service.beforeSettleCommit = nil
+		go func() {
+			defer close(caught)
+			service.catchUps.catchUp(context.Background(), artifactID)
+		}()
+		waitFor(t, roomWait(t), "the catch-up to confirm its verdict under the document's lock", func() bool {
+			return waitingAdvisoryLocks(t, database) > 0
+		})
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	select {
+	case <-caught:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the catch-up never finished once the settlement committed")
+	}
+	if service.srv.GetDoc(artifactID) != room {
+		t.Fatal("the room was closed under this process's own repairing settlement")
+	}
+	if roomBehind(t, service, artifactID) {
+		t.Fatal("the room stands behind the head after its own settlement's repair")
+	}
+	if latest := latestVersionNumber(t, service, artifactID); latest != before+1 {
+		t.Fatalf("latest version = %d, want %d, the repair's", latest, before+1)
+	}
+	requireRoomStillWrites(t, service, artifactID, 2)
+}
+
 // waitingAdvisoryLocks is how many advisory locks of this test's own database are waited for.
 func waitingAdvisoryLocks(t *testing.T, database *store.Store) int {
 	t.Helper()

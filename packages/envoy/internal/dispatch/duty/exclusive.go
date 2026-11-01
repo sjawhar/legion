@@ -24,10 +24,11 @@ type Leases interface {
 // artifacts and the migration runner are each a single key (the enumeration in docs/copied_asks.go,
 // at lockProjectCopies) - so a lease can never collide with one of those, whatever its name hashes
 // to. Within the two-key space the other namespaces are the copy locks'
-// (docs.copiedAsksLockNamespace), a conditional edit's admission's
-// (docs.conditionalEditQueueLockNamespace) and the issue dependencies' (api's
-// lockProjectIssueDependencies), so a lease's second key, its name's hashtext, separates the leases
-// from each other and from nothing else.
+// (docs.copiedAsksLockNamespace, "COPY"), the test hooks' (the api package's
+// testHookLockNamespace, "HOOK", taken only under DISPATCH_TEST_HOOKS), a conditional edit's
+// admission's (docs.conditionalEditQueueLockNamespace) and the issue dependencies' (api's
+// lockProjectIssueDependencies), each a first key of its own, so a lease's second key, its name's
+// hashtext, separates the leases from each other and from nothing else.
 const leaseNamespace int32 = 0x4C4F4F50
 
 // takeLease tries for a lease without queueing behind its holder, and freeLease gives it back. Both

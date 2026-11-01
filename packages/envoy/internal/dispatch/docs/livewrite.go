@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"weak"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
@@ -31,8 +30,8 @@ import (
 // Locks. A transaction takes a live document's locks in one order and holds each until it
 // commits, the slot until it publishes: the document's owner row (lockArtifactOwner: its
 // issue's row, or a project document's own artifact row), then the writer slot, then the
-// document's advisory lock (lockDocumentRoom; AppendUpdateTx takes it, and so does a fork whose
-// first read finds its room's cursor away from the head, roomBehindHead). A joined read,
+// document's advisory lock (lockDocumentRoom, which the transaction's one read of the document
+// takes with the head, forkLive). A joined read,
 // which waits for the slot but writes nothing, takes the owner row alone. Postgres cannot see a
 // wait for the slot, which is in memory. Every transaction that waits for or holds it holds the
 // owner row first, so a transaction waiting for the slot waits only for a committed write's
@@ -45,61 +44,44 @@ import (
 // A failed room. Its eviction flushes and compacts the document under the advisory lock, so a
 // transaction never waits for it (awaitRoomRecovery): an operation that meets a failed room
 // fails with ErrServiceUnavailable, and the transaction rolls back. A write whose room fails
-// after it opened fails at its next append, the point from which its advisory lock holds off
-// any eviction until it ends (recordLiveOperation): its slot is on the failed room, which neither
-// the reloaded room's settlement nor its next writer sees.
+// after it opened fails at its next append; its advisory lock, held from its read, holds off any
+// eviction until it ends (recordLiveOperation): its slot is on the failed room, which neither the
+// reloaded room's settlement nor its next writer sees.
 //
 // The write's actor, who made its content changes, is credited to the room once the transaction
 // commits (Ledger.Commit), never while it may still roll back.
 type liveWrite struct {
 	artifactID string
 	state      *roomState
-	// clientID authors every item the transaction writes, on fork: the room's state with the
-	// transaction's updates applied, brought up to date before each operation (forkLive).
+	// clientID authors every item the transaction writes, on fork: the document as the
+	// transaction's one read of it found it, with the transaction's updates applied (forkLive).
 	clientID crdt.ClientID
 	fork     *crdt.Doc
-	// forkedFrom is the room document fork was last brought up to date from, held weakly: a
-	// write open across a room's eviction must not be what keeps its document resident past it.
-	// forkSeq is the room's credit sequence just before it was read for that: each in-flight
-	// credit observed by then is for a change the room held, which the fork took in. forkHold is
-	// which durable updates that room instance held (roomHold). An upload's version takes out both
-	// (uploadCapture). forkCursor is the durable version the fork's basis stands at: that room
-	// instance's live cursor, so an append of a peer of the same room that lands while this write
-	// runs counts (heldThrough). It is nil for a cold fork, which has no room behind it and whose
-	// appends no cursor gates (coldFork, appendingCursor).
-	// cold says fork was built from the stored document while no room held it (coldFork), so it
-	// has no room to have been brought up to date from. forkInstance is the room instance a warm
-	// fork was last brought up to date from, whose updates only the room holds the write stores
-	// ahead of its own rows (storeRoomUpdatesAhead); nil for a cold fork.
-	forkedFrom   weak.Pointer[crdt.Doc]
-	forkSeq      uint64
-	forkHold     *roomHold
-	forkCursor   *roomCursor
-	forkInstance *roomInstance
-	cold         bool
-	updates      [][]byte
+	// point is the room the transaction's read of the document found, at an exact commit position
+	// (Service.readPoint): its cursor, the durable version the fork's basis stands at, which
+	// gates each append of the write (heldThrough), and seq, the room's updates the fork holds,
+	// which the write stores ahead of its own (Ledger.flushThrough). The fork never takes in what the
+	// room commits after that read (forkLive). A cold fork has the zero point: no room behind it,
+	// no update to store, and no cursor to gate its appends (coldFork, appendingCursor).
+	// forkedFrom is the room document that read found, held weakly: a write open across a room's
+	// eviction must not be what keeps its document resident past it. forkSeq
+	// is the room's credit sequence just before the read: each in-flight credit observed by then
+	// is for a change the fork holds. forkHold is which durable updates that room instance held
+	// (roomHold). A version of the write takes out the credits through forkSeq (captureAuthors),
+	// an upload's both (uploadCapture). cold says fork was built from the stored document
+	// (coldFork).
+	point      roomPoint
+	forkedFrom weak.Pointer[crdt.Doc]
+	forkSeq    uint64
+	forkHold   *roomHold
+	cold       bool
+	updates    [][]byte
 	// renderings are, one for each of updates and index for index, what the room's update
 	// observer may take in place of rendering the room after that update (publishedRendering):
 	// the operation's own rendering of the fork it left, for an operation whose fork was read warm,
 	// and the zero value, which vouches for nothing, for one read cold. They go with updates
 	// (finishLiveWrite).
 	renderings []publishedRendering
-	// versions are the doc_updates versions updates were appended at, one each.
-	versions []persistence.Version
-	// copies are the versions this transaction stored its room's unstored updates at, ahead of its
-	// own rows (storeRoomUpdatesAhead), and heldCopies those of them whose in-flight credit the
-	// fork's last read of the room took in (forkSeq), whose pending-author rows an upload's version
-	// takes out (uploadCapture). appended is every version the transaction appended, the copies
-	// and its own, in the order it appended them (withOwnAppends).
-	copies     []persistence.Version
-	heldCopies []int64
-	appended   []persistence.Version
-	// storeAhead stores the room's unstored updates ahead of the row an append of this write is
-	// about to store (storeRoomUpdatesAhead); every append of the write's calls it first, under the
-	// document's advisory lock (appendUpdateTxClass). storingAhead is set while it runs, so the
-	// appends it makes store nothing ahead of themselves.
-	storeAhead   func(ctx context.Context, tx pgx.Tx) error
-	storingAhead bool
 	// marginRooms names, for each of updates, the room document a margin write's fork was
 	// warm-built from (applyMargin), held weakly as forkedFrom is: its publish tags the update
 	// margin-only when it reaches that same room instance (liveWriteOrigin.marginOnly). It is the
@@ -107,27 +89,38 @@ type liveWrite struct {
 	// room was behind. recordLiveOperation appends it beside the update, so the two never fall
 	// out of step.
 	marginRooms []weak.Pointer[crdt.Doc]
+	// versions are the doc_updates versions updates were appended at, one each. flushed is the
+	// room updates the write's transaction stored ahead of its own appends (Ledger.flushThrough),
+	// nil while it has stored none: the room holds them already, so they are never published, but
+	// they are this transaction's appends all the same (withOwnAppends).
+	versions []persistence.Version
+	flushed  *RoomFlush
+	// shadow is the shadow the write's commit left its room (newShadow), until its publish ends:
+	// the publish of its last update names it, so the drain that hands that update over closes
+	// its window (reachShadow).
+	shadow *roomShadow
 	// tree and markdown are the document as this transaction's latest operation left it,
 	// rendered once for the version its transaction may write - by applyLive, or by a margin
 	// write (applyMargin) that found none kept - and offsets each identified block's byte range
 	// in markdown from that same render. A later margin write, which leaves the fragment they
-	// describe as it was, reuses them rather than rendering again. forkLive drops them whenever
-	// the fork they describe moves, so while tree is set markdown is also the rendering of the
-	// fork as the transaction's next operation finds it: that operation takes it as its rendering
-	// before it applies, known without rendering the fork again (applyLive).
+	// describe as it was, reuses them rather than rendering again. They go with the fork when an
+	// operation that changed it fails (applyLive), so while tree is set markdown is also the
+	// rendering of the fork as the transaction's next operation finds it: that operation takes it
+	// as its rendering before it applies, known without rendering the fork again (applyLive).
 	tree     *pmdoc.Node
 	markdown string
 	offsets  []pmdoc.BlockOffset
-	// forkMarkdown is the fork's rendering as forkLive left it, known without rendering it: the
-	// room replica's rendering of the very state the fork was read from (warmFork says when that
-	// is exact), nil when nothing vouches for it. Every forkLive clears it before it reads, so
-	// no fork read inherits an earlier read's; dropRendering clears it with the rest of the
-	// rendering, and applyLive takes it, once, before its operation moves the fork. It shares
-	// the replica's string, so it holds no copy of the document of its own.
+	// forkMarkdown is the fork's rendering as the transaction's read of the document left it,
+	// known without rendering it: the room replica's rendering of the very state that read copied
+	// (warmFork says when that is exact), nil when nothing vouches for it - a cold fork's, and a
+	// fork rebuilt with the transaction's own writes (rebuildFork). releaseFork clears it with the
+	// rest of the rendering, and applyLive takes it, once, before its operation moves the fork. It
+	// shares the replica's string, so it holds no copy of the document of its own.
 	forkMarkdown *string
-	// forkRead is the room replica's epoch and foreign count as the latest fork read found them
-	// just before it encoded the room (warmFork), zero for a fork no replica stood behind: a cold
-	// fork, which no room's state went into. forkLive clears it with forkMarkdown.
+	// forkRead is the room replica's epoch and foreign count at the position the transaction's
+	// read of the document holds (warmFork), zero for a fork no replica stood behind: a cold fork,
+	// which no room's state went into. It stays as that read left it, since the fork is never read
+	// again (forkLive).
 	forkRead forkReadMark
 	// anchorsTree is the tree the transaction's anchors were last refreshed against, so the
 	// version write does not refresh the same tree's anchors a second time.
@@ -230,6 +223,9 @@ type liveWriteOrigin struct {
 	// It is set inside the publish's Apply, against the document the update reaches, beside
 	// inRoom (publishLiveUpdate).
 	marginOnly bool
+	// shadow is the write's shadow on the publish of its last update, nil on the others
+	// (reachShadow).
+	shadow *roomShadow
 }
 
 // publishedRendering is one operation's rendering of the fork it left, kept for the room's update
@@ -292,7 +288,6 @@ func (s *Service) joinLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 // and the one the write arms then finds nothing new.
 func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID string) (*liveWrite, error) {
 	write := &liveWrite{artifactID: artifactID, clientID: crdt.NewClientID(), done: make(chan struct{})}
-	write.storeAhead = func(ctx context.Context, tx pgx.Tx) error { return s.storeRoomUpdatesAhead(ctx, write, tx) }
 	for {
 		state := s.lockState(artifactID)
 		if state.reloading {
@@ -345,13 +340,14 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 	}
 }
 
-// forkLive returns the document a transaction's operation on write's room sees: the room's
-// current state with the transaction's own writes applied. The fork is kept on write, and each
-// call brings it up to date with only what the room gained since, so an operation does not
-// re-encode the whole room. A room that was reloaded in between is a different document, which
-// may lack state the kept fork still holds (a browser update whose append failed), so the fork is
-// then rebuilt from the reloaded room and the transaction's writes. A document no room holds is
-// forked from the store instead (coldFork).
+// forkLive returns the document a transaction's operations on write's room see: the document as
+// the transaction's read of it found it (readFork), with the transaction's own writes applied.
+// Every later call returns that fork as the transaction's operations left it, and takes in nothing
+// the room commits after the read, so each operation of the transaction, and the version it
+// writes, is made on exactly the state its appends follow in the store: the room's updates through
+// the read, which the write stores ahead of its own (Ledger.flushThrough), then its own. A browser
+// edit the room commits after the read reaches the write at its publish, and a version at the
+// settlement that follows.
 //
 // A room behind the durable head is forked from the store too, by the same cold path. The other
 // envoy-dispatch process appended what this room's catch-up has not taken in yet, so a write made
@@ -363,22 +359,22 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 // Uploads and conditional edits hold that lock from before this read until they commit
 // (ReplaceText, ApplyOps), so for them the head this compares against is the head their append
 // meets from the first read on.
+//
+// A fork an operation abandoned (applyLive) is built again for the transaction's next operation:
+// read afresh while the transaction has appended nothing of its own, since nothing it stores then
+// was made on the abandoned read; otherwise rebuilt on that read exactly (rebuildFork).
 func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
-	write.forkMarkdown, write.forkRead = nil, forkReadMark{}
-	// A document no room holds, or whose room stands behind the durable head, is forked cold.
-	live := s.srv.GetDoc(write.artifactID)
-	cold := live == nil
-	var err error
-	if !cold {
-		if cold, err = s.roomBehindHead(ctx, write, live); err != nil {
-			return nil, err
-		}
-	}
 	var fork *crdt.Doc
-	if cold {
-		fork, err = s.coldFork(ctx, write)
-	} else {
-		fork, err = s.warmFork(ctx, write)
+	var err error
+	switch {
+	case write.fork != nil:
+		fork = write.fork
+	case write.finished:
+		return nil, errForkReleased
+	case len(write.updates) == 0:
+		fork, err = s.readFork(ctx, write)
+	default:
+		fork, err = s.rebuildFork(ctx, write)
 	}
 	if err != nil {
 		return nil, err
@@ -389,115 +385,170 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	return fork, nil
 }
 
-// warmFork is forkLive's fork of a document a room holds, brought up to date from that room.
+// errForkReleased refuses a write to a document whose transaction's fork is gone and cannot be
+// built again: the write has ended, or an operation abandoned the fork after the transaction had
+// appended and the room has committed since the transaction read it, so the state its appends were
+// made on is no longer anywhere to be read. It is ErrServiceUnavailable, which is what it is for a
+// caller - this transaction cannot serve the write, and the retry that follows reads the room
+// afresh - rather than the 500 an error that maps to no status becomes (SetBlockAttributes
+// retries in the same transaction, and reaches this when the room has committed since its read).
+var errForkReleased = fmt.Errorf("%w: the transaction can no longer write this document: the write has ended, or an operation failed after it changed the document and the document has changed since", ErrServiceUnavailable)
+
+// rebuildFork builds write's fork again, after an operation abandoned it (applyLive), on the state
+// the transaction's read found and with the transaction's own writes applied: the store's for a
+// cold fork, which the advisory lock the transaction holds keeps where that read found it, and the
+// room's for a warm one, only while the room still stands at the read point (errForkReleased
+// otherwise).
 //
-// It records on write the room replica's epoch and foreign count as it finds them just before it
-// encodes the room's state (forkRead), and, for the transaction's first write (no update of its
-// own yet), takes the replica's rendering as the fork's (forkMarkdown) when the replica, once it
-// holds every logged commit (renderedReplica.hold), still stands at both. That is exact: the
-// counters were read before the encode, so a replica found at both under hold has consumed, since
-// that read, only published live writes' commits; under the writer slot those can only be this
-// write's own published updates, and it has none before its first operation's publish
-// (publishLiveWrite runs after the commit, and finishLiveWrite releases the slot only after it).
-// The replica therefore holds what the room held at the encode, which is the fork: the room's
-// state, and no write of the transaction's. A foreign commit the replica consumes after the read
-// moves the count, the safe way; recover draws a fresh epoch, and epochs are unique in the
-// process, so a replica of another room instance never matches. A replica that is busy, behind
-// the room, or outside the schema (a nil markdown) vouches for nothing, and applyLive renders the
-// fork. No pointer to the replica outlives this call.
-func (s *Service) warmFork(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
-	seq := write.state.creditSeq.Load()
-	var gained []byte
-	var room *crdt.Doc
-	var incremental bool
-	var replica *renderedReplica
-	var read forkReadMark
-	err := s.srv.Apply(ctx, write.artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		room = doc
-		incremental = write.fork != nil && doc == write.forkedFrom.Value()
-		// The counters before the encode, never after it: read after, they would count a foreign
-		// commit landing between the two, which the replica holds and the fork does not.
-		if replica = s.replicaOf(doc); replica != nil {
-			read = replica.mark()
+// The read point's own mark stays as the fork read left it (warmFork): the room has committed
+// nothing since that read, so a replica standing at the mark has consumed only this write's
+// published updates, which the rebuilt fork holds too. The replica's rendering does not survive,
+// since the fork holds those updates and the replica does not yet.
+func (s *Service) rebuildFork(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
+	var state []byte
+	if write.cold {
+		loaded, err := s.persistence.Load(ctx, write.artifactID)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
 		}
-		var since crdt.StateVector
-		if incremental {
-			since = write.fork.StateVector()
+		state = loaded.Update
+	} else {
+		live := s.srv.GetDoc(write.artifactID)
+		if live == nil {
+			return nil, errForkReleased
 		}
-		gained = crdt.EncodeStateAsUpdateV1(doc, since)
-	})
-	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-		return nil, err
+		read, point, _, err := s.readPoint(write.artifactID, live)
+		if err != nil {
+			return nil, err
+		}
+		if point != write.point {
+			return nil, errForkReleased
+		}
+		state = read
 	}
-	if !incremental {
-		// The fork being replaced goes before its replacement is built, so the two are never
-		// held at once.
-		write.releaseFork()
-	}
-	fork, err := buildFork(write, incremental, gained)
+	fork, err := buildFork(write.clientID, state)
 	if err != nil {
-		// A fork an update failed to reach is in an unknown state, and so is the rendering taken
-		// from it: the next operation rebuilds both.
-		write.releaseFork()
+		return nil, fmt.Errorf("fork live document: %w", err)
+	}
+	for _, update := range write.updates {
+		if err := crdt.ApplyUpdateV1(fork, update, nil); err != nil {
+			return nil, fmt.Errorf("fork live document with transaction writes: %w", err)
+		}
+	}
+	write.fork, write.forkMarkdown = fork, nil
+	return fork, nil
+}
+
+// readFork is a transaction's one read of write's document. It first takes the document's
+// advisory lock with the head (lockedHead), which the transaction then holds until it ends, as
+// every durable writer of the document takes it before it appends: no append of this process or
+// another lands between this read and the transaction's commit, so the head read here is the one
+// every append of the transaction meets, and the room's cursor beside it is exact - a writer of
+// this process advances it inside that lock, after the commit that raised the head. The lock
+// assigns the transaction no transaction id (pg_advisory_xact_lock). Only the room's own durable
+// writers wait for it - its persistence, a settlement - never a browser's keystroke, which the
+// room applies without it.
+//
+// A document no room holds is forked from the store (coldFork). So is one whose room stands behind
+// the head: the other envoy-dispatch process appended what this room's catch-up has not taken in
+// yet, so a write made on the room's document would be refused at its append (the gate's derived
+// rule, gateAppend) and the agent's edit would answer 503, while the stored document holds every
+// update. Otherwise the room is read at an exact commit position (warmFork).
+func (s *Service) readFork(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
+	tx, _ := txFromContext(ctx)
+	// What the room's Apply checks before it serves an injection: the document is not shutting
+	// down or being rebuilt, its room has not failed, and its issue is open.
+	if err := s.allowInject(ctx, websocket.InjectInfo{Room: write.artifactID, Op: websocket.OpApply}); err != nil {
+		return nil, fmt.Errorf("%w: %w", websocket.ErrInjectRefused, err)
+	}
+	head, err := lockedHead(ctx, tx, write.artifactID)
+	if err != nil {
 		return nil, err
+	}
+	if live := s.srv.GetDoc(write.artifactID); live != nil && !s.roomBehindHead(live, head) {
+		return s.warmFork(write, live)
+	}
+	return s.coldFork(ctx, write, head)
+}
+
+// roomBehindHead reports whether live, the room resident for a document, stands behind head, the
+// document's durable head read under its advisory lock (lockedHead): an update the other process
+// appended that this room's catch-up has not taken in yet. Under that lock no write of this
+// process sits between its commit and its cursor advance, so a difference is the answer, not a
+// reader landing in that window. A room that kept no cursor is not judged behind: nothing says it
+// is.
+//
+// Why a false verdict would matter. It sends the write down the cold path, which reads the stored
+// document - and the store of a room still writing is behind the room by whatever its persistence
+// worker has not appended yet. A version prefix of that need not be a state the document ever held:
+// an update whose deletes landed without the inserts they replaced leaves a tree with no block in
+// it at all, which every write starting from it refuses (ErrDocOutsideSchema). A room truly behind
+// the head forks from that same store, which its own browsers' appends still reach (the gate
+// admits them, appendBrowser), so the cold path costs it the same exposure for the moment until
+// its catch-up lands; a warm fork from a room missing the other process's rows would instead be
+// refused at its append.
+func (s *Service) roomBehindHead(live *crdt.Doc, head int64) bool {
+	cursor := s.cursorOf(live)
+	return cursor != nil && cursor.heldThrough() != head
+}
+
+// warmFork is readFork's fork of live, the room resident for write's document: the room as of an
+// exact commit position (readPoint), every update through which the write stores ahead of its own.
+//
+// It records on write what that read found of the room replica (replicaRead): the replica's epoch
+// and foreign count at the position it copied (forkRead), and the replica's rendering of that very
+// state as the fork's (forkMarkdown), nil when the replica rendered none - it is outside the
+// schema, or it holds no state at all and the copy was taken from the room itself. Both are read
+// under the replica's lock, with the copy and after the drain that brought the replica to the
+// position, so the rendering is the fork's: the fork is that copy, the read is the transaction's
+// first (forkLive), and no write of the transaction has moved it. A replica that still stands at
+// the epoch and the foreign count has consumed, since the read, only published live writes'
+// commits (renderedReplica.standsAt), which under the writer slot are this write's own published
+// updates, so the room's update observer may take this write's operations' renderings in place of
+// rendering the room after them (publishedRendering, renderedReplica.changedBy). A foreign commit
+// the replica consumes moves the count, the safe way; recover draws a fresh epoch, and epochs are
+// unique in the process, so a replica of another room instance never matches. No pointer to the
+// replica outlives the read.
+func (s *Service) warmFork(write *liveWrite, live *crdt.Doc) (*crdt.Doc, error) {
+	seq := write.state.creditSeq.Load()
+	state, point, read, err := s.readPoint(write.artifactID, live)
+	if err != nil {
+		return nil, err
+	}
+	fork, err := buildFork(write.clientID, state)
+	if err != nil {
+		return nil, fmt.Errorf("fork live document: %w", err)
 	}
 	// The instance once, rather than its hold and its cursor looked up one after the other: the
-	// two are halves of one *roomInstance, and a room evicted between the lookups would leave
-	// the write a hold from the gone instance beside a nil cursor, a split the gate is not
-	// written for. A write whose room is gone keeps neither.
-	instance := s.instanceOf(room)
+	// two are halves of one *roomInstance, and a room evicted between the lookups would leave the
+	// write a hold from the gone instance beside a nil cursor, a split the gate is not written
+	// for. A write whose room is gone keeps neither, and stores none of its updates.
 	var hold *roomHold
-	var cursor *roomCursor
-	if instance != nil {
-		hold, cursor = &instance.hold, &instance.cursor
+	point.cursor = nil
+	if instance := s.instanceOf(live); instance != nil {
+		hold, point.cursor = &instance.hold, &instance.cursor
 	}
-	write.fork, write.forkedFrom, write.forkSeq, write.cold = fork, weak.Make(room), seq, false
-	write.forkHold, write.forkCursor, write.forkInstance, write.forkRead = hold, cursor, instance, read
-	if len(write.updates) == 0 && replica != nil {
-		if doc := replica.hold(); doc != nil {
-			if replica.standsAt(read) && replica.markdown != nil {
-				write.forkMarkdown = replica.markdown
-			}
-			replica.mu.Unlock()
-		}
-	}
+	write.fork, write.point, write.forkSeq, write.forkHold, write.cold = fork, point, seq, hold, false
+	write.forkedFrom, write.forkRead, write.forkMarkdown = weak.Make(live), read.mark, read.markdown
 	if s.afterForkRead != nil {
 		s.afterForkRead(write.artifactID)
 	}
 	return fork, nil
 }
 
-// coldFork returns the fork of a write to a document no room holds: the stored document, which is
-// all of it then, with the transaction's writes applied. It loads no room, which would hold a
-// second copy of the document for as long as the write runs, and neither does the
-// write's publish (publishLiveWrite): the next access loads the room from the store, which by then
-// holds the write. A fork it built is kept for the transaction's next operation while no room has
-// loaded since: on this process the transaction's writer slot holds off every other writer and
-// settlement, and a browser's edits reach a room. Another process can append between this read and
-// the write's first append, which takes the document's advisory lock, so a kept fork is brought up
-// to the stored head first (followStoredHead). A browser's room load takes no lock the write
-// holds (onLoadDocument), so a room can load while this reads the store: a room found once the
-// read is done is forked from instead (warmFork), and the copy read from the store is dropped
-// undecoded, so the document is never held both in a room and in a fork read from the store. A
-// room that loads after that is forked from at the write's next operation (forkLive).
+// coldFork returns the fork of a write to a document no room holds, or whose room stands behind
+// head (readFork): the stored document, which is all of it then. It loads no room, which would hold
+// a second copy of the document for as long as the write runs; the room loads when the
+// write is published, from the store, which by then holds the write. A browser's room load takes no
+// lock the write holds (onLoadDocument), so a room can load while this reads the store: a room
+// found once the read is done, and not behind head, is forked from instead (warmFork), and the copy
+// read from the store is dropped undecoded, so the document is never held both in a room and in a
+// fork read from the store. A room that loads after that meets the write at its publish.
 //
 // What an upload's version takes out (uploadCapture) is what this read held: the stored updates
 // through the head it loaded (forkHold), and no in-flight credit (forkSeq 0), since a credit no
 // room holds is a browser edit whose append may not have reached the store this read loaded.
-func (s *Service) coldFork(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
-	if write.fork != nil && write.cold {
-		if err := s.followStoredHead(ctx, write); err != nil {
-			return nil, err
-		}
-		return write.fork, nil
-	}
-	// What the room's Apply checks before it would load the room: the document is not shutting
-	// down, its room has not failed, and its issue is open.
-	if err := s.allowInject(ctx, websocket.InjectInfo{Room: write.artifactID, Op: websocket.OpApply}); err != nil {
-		return nil, fmt.Errorf("%w: %w", websocket.ErrInjectRefused, err)
-	}
-	// A fork kept from a room that has since been evicted goes before the new one is built.
-	write.releaseFork()
+func (s *Service) coldFork(ctx context.Context, write *liveWrite, head int64) (*crdt.Doc, error) {
 	loaded, err := s.persistence.Load(ctx, write.artifactID)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -506,106 +557,55 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 		s.failRoom(write.artifactID, err)
 		return nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
 	}
-	// A room that loaded during the read holds the document; forking it rather than the store
-	// keeps one copy beside it, and its browser's edits in the fork. One behind the durable head
-	// does not: it is why this write took the cold path, and it holds less of the document than
-	// the read just made (forkLive).
-	if live := s.srv.GetDoc(write.artifactID); live != nil {
-		behind, err := s.roomBehindHead(ctx, write, live)
-		if err != nil {
-			return nil, err
-		}
-		if !behind {
-			loaded.Update = nil
-			return s.warmFork(ctx, write)
-		}
+	if live := s.srv.GetDoc(write.artifactID); live != nil && !s.roomBehindHead(live, head) {
+		loaded.Update = nil
+		return s.warmFork(write, live)
 	}
-	fork := newDocumentCopy(crdt.WithClientID(write.clientID))
-	if len(loaded.Update) > 0 {
-		if err := crdt.ApplyUpdateV1(fork, loaded.Update, nil); err != nil {
-			// A room's load of the same history would fail it, as loadTree does.
-			s.failRoom(write.artifactID, fmt.Errorf("decode live document: %w", err))
-			return nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
-		}
-	}
+	fork, err := buildFork(write.clientID, loaded.Update)
 	loaded.Update = nil
-	if err := applyTransactionWrites(fork, write.updates); err != nil {
-		return nil, err
+	if err != nil {
+		// A room's load of the same history would fail it, as loadTree does.
+		s.failRoom(write.artifactID, fmt.Errorf("decode live document: %w", err))
+		return nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
 	}
-	write.fork, write.cold, write.forkSeq = fork, true, 0
-	write.forkHold = &roomHold{loaded: int64(loaded.Version)}
-	// No cursor, so no gate: the gate is about a room (gateAppend), and this write
-	// holds none. Its update is a Yjs update, which commutes with whatever landed between this
-	// read and its append, and the room that loads after its commit reads the store, which by
-	// then holds both. A private cursor at the head this read loaded would refuse the write for
-	// an append that is no concern of its own - a browser opening the document behind this read
-	// and typing into it (TestABrowserOpeningADocumentMidColdWriteKeepsBothEdits) - and the
+	// The zero point: no cursor, so no gate. The gate is about a room (refuseRoomBehindHead), and
+	// this write holds none. Its update is a Yjs update, which commutes with whatever its room
+	// takes before the publish, and the room that loads after its publish reads the store, which
+	// by then holds both. A private cursor at the head this read loaded would refuse the write
+	// for an append that is no concern of its own - a browser opening the document behind this
+	// read and typing into it (TestABrowserOpeningADocumentMidColdWriteKeepsBothEdits) - and the
 	// agent's edit would answer 503 for a conflict Yjs resolves.
-	write.forkCursor, write.forkInstance = nil, nil
+	write.fork, write.point, write.forkSeq, write.cold = fork, roomPoint{}, 0, true
+	// A cold fork was read from the store, with no room behind it, so nothing vouches for its
+	// rendering and no replica's state went into it: a margin write on it names no room
+	// (applyMargin) and its operations' renderings are never published (publishedRendering).
+	write.forkedFrom, write.forkRead, write.forkMarkdown = weak.Pointer[crdt.Doc]{}, forkReadMark{}, nil
+	write.forkHold = &roomHold{loaded: int64(loaded.Version)}
 	if s.afterForkRead != nil {
 		s.afterForkRead(write.artifactID)
 	}
 	return fork, nil
 }
 
-// buildFork brings write's kept fork up to date with gained, what its room gained since the fork
-// was last brought up to date, or, when the fork cannot be kept, builds a new one from gained,
-// the room's whole state, and the transaction's writes. Either way it drops a rendering the
-// fork has moved past.
-func buildFork(write *liveWrite, incremental bool, gained []byte) (*crdt.Doc, error) {
-	if incremental {
-		// Content the room gained moves the fork, so the rendering taken from it no longer
-		// describes the document. What says the fork moved is the fork itself, read on either
-		// side of this one apply: nothing else can be trusted. Two reads of the room are two
-		// snapshots - Server.Apply holds no lock across its callback - so an update landing
-		// between them is in one and not the other, and the fork would keep a rendering it
-		// has already moved past. The fork's own state vector and delete set together are the
-		// whole answer, because a deletion creates no struct and so advances no clock, while
-		// the update and every observer fire even for an update that integrates nothing.
-		var wasClocks crdt.StateVector
-		var wasDeletes *crdt.IDSet
-		if write.tree != nil {
-			wasClocks, wasDeletes = write.fork.StateVector(), crdt.DeleteSetFromDoc(write.fork)
-		}
-		if err := crdt.ApplyUpdateV1(write.fork, gained, nil); err != nil {
-			return nil, fmt.Errorf("bring live document fork up to date: %w", err)
-		}
-		if write.tree != nil && !forkHeld(wasClocks, wasDeletes, write.fork) {
-			write.dropRendering()
-		}
-		return write.fork, nil
+// buildFork is a write's fork of state, an encoded document state, whose items client authors.
+func buildFork(client crdt.ClientID, state []byte) (*crdt.Doc, error) {
+	fork := newDocumentCopy(crdt.WithClientID(client))
+	if len(state) == 0 {
+		return fork, nil
 	}
-	fork := newDocumentCopy(crdt.WithClientID(write.clientID))
-	if err := crdt.ApplyUpdateV1(fork, gained, nil); err != nil {
-		return nil, fmt.Errorf("fork live document: %w", err)
-	}
-	if err := applyTransactionWrites(fork, write.updates); err != nil {
+	if err := crdt.ApplyUpdateV1(fork, state, nil); err != nil {
 		return nil, err
 	}
-	// A rebuilt fork is a different document from the one the rendering was taken from.
-	write.dropRendering()
 	return fork, nil
 }
 
-// applyTransactionWrites applies updates, the writes a transaction has made so far, to fork, a copy
-// of the document built without them.
-func applyTransactionWrites(fork *crdt.Doc, updates [][]byte) error {
-	for _, update := range updates {
-		if err := crdt.ApplyUpdateV1(fork, update, nil); err != nil {
-			return fmt.Errorf("fork live document with transaction writes: %w", err)
-		}
-	}
-	return nil
-}
-
 // heldThrough is the durable version the document this write's operations run on holds every
-// update through, which gates each of its appends (gateAppend, appendDerived): its fork's basis, read
-// now so that a peer's append into the same room, which the fork takes in at its next read,
-// counts, with the versions this transaction has appended itself folded in (withOwnAppends). It
-// is the cursor of a write whose fork came from a room, and only appendingCursor reads it, which
-// hands the gate no cursor at all for a cold write (coldFork).
+// update through, which gates each of its appends (gateAppend, appendDerived): the cursor of the
+// room instance its fork was read from, with the versions this transaction has appended itself
+// folded in (withOwnAppends). Only appendingCursor reads it, which hands the gate no cursor at
+// all for a cold write (coldFork).
 func (w *liveWrite) heldThrough() int64 {
-	return w.withOwnAppends(w.forkCursor.heldThrough())
+	return w.withOwnAppends(w.point.cursor.heldThrough())
 }
 
 // withOwnAppends folds into base, the version the document a write is made on stands at, the
@@ -613,32 +613,21 @@ func (w *liveWrite) heldThrough() int64 {
 // ahead of them (storeRoomUpdatesAhead): they are in its fork, and in no room's cursor until the
 // write commits, so every head read inside its transaction counts them and no cursor does. An
 // accept writes its text change and its margin projection as two appends of one transaction, so
-// without this the second would find the head one past the fork and be refused.
+// without this the second would find the head one past the fork and be refused. The room updates
+// the transaction flushed are its appends too, interleaved with its own by version
+// (RoomFlush.appended).
 func (w *liveWrite) withOwnAppends(base int64) int64 {
-	for _, version := range w.appended {
-		if int64(version) == base+1 {
-			base++
-		}
-	}
-	return base
-}
-
-// dropRendering forgets the rendering and the anchor refresh taken from a fork that has moved,
-// and the rendering forkLive found for it (forkMarkdown). What makes each reuse of a rendering
-// exact (applyLive) is that it describes the fork as it stands, so a fork that moves keeps none:
-// the next operation renders, or takes a rendering vouched for afresh.
-func (w *liveWrite) dropRendering() {
-	w.tree, w.markdown, w.offsets, w.anchorsTree, w.forkMarkdown = nil, "", nil, nil, nil
+	return foldAppended(base, w.flushed.appended(w.versions))
 }
 
 // rendering is the write's rendering of fork - its tree, markdown and offsets - and whether it has
-// one: exactly when it holds a rendering and fork is the write's own fork. forkLive drops the
-// rendering whenever the fork moves (buildFork, releaseFork), and an operation that moves it
-// records the rendering of what it left or abandons both (applyLive, applyMargin), so while the
-// rendering is set it describes the fork as it stands, and a margin write (applyMargin) or a read
-// joined to the write's transaction takes it in place of reading and rendering the fork again. The
-// tree is the write's own, which the transaction's next operation and its version still use, so a
-// caller only reads it.
+// one: exactly when it holds a rendering and fork is the write's own fork. The fork goes with its
+// rendering whenever an operation that changed it fails (abandon, releaseFork), and an operation
+// that changes the fork records the rendering of what it left or abandons both (applyLive,
+// applyMargin), so while the rendering is set it describes the fork as it stands, and a margin
+// write (applyMargin) or a read joined to the write's transaction takes it in place of reading and
+// rendering the fork again. The tree is the write's own, which the transaction's next operation
+// and its version still use, so a caller only reads it.
 func (w *liveWrite) rendering(fork *crdt.Doc) (renderedTree, bool) {
 	if w.tree == nil || w.fork != fork {
 		return renderedTree{}, false
@@ -646,14 +635,17 @@ func (w *liveWrite) rendering(fork *crdt.Doc) (renderedTree, bool) {
 	return renderedTree{tree: w.tree, markdown: w.markdown, offsets: w.offsets}, true
 }
 
-// releaseFork drops write's fork and the rendering taken from it, which serve the transaction's
-// operations alone. A write can outlive its transaction by a long way: whatever holds the
+// releaseFork drops write's fork and the renderings taken from it - the operation's and the one
+// forkLive found for the fork itself (forkMarkdown) - which serve the transaction's operations
+// alone. What makes each reuse of a rendering exact (applyLive) is that it describes the fork as
+// it stands, so a fork that goes keeps none: the next operation renders, or takes a rendering
+// vouched for afresh. A write can outlive its transaction by a long way: whatever holds the
 // transaction's context holds its ledger and so the write, and a pooled pgx connection keeps the
 // context of the queries it last served. Kept, a heavy document's fork and tree stayed resident
 // after the edit that built them had answered, beside the document's room.
 func (w *liveWrite) releaseFork() {
-	w.fork, w.forkedFrom, w.cold = nil, weak.Pointer[crdt.Doc]{}, false
-	w.dropRendering()
+	w.fork = nil
+	w.tree, w.markdown, w.offsets, w.anchorsTree, w.forkMarkdown = nil, "", nil, nil, nil
 }
 
 // forkHeld reports whether fork still carries exactly the content clocks and deletes describe.
@@ -730,7 +722,7 @@ func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, 
 		if rendering, reused := s.reuseRendering(joinedLiveWrite(ctx, artifactID), fork, "docTree"); reused {
 			return rendering.tree, nil
 		}
-		valid, err := s.readFork(fork)
+		valid, err := s.readForkTree(fork)
 		return valid.Node(), err
 	}
 	head, err := s.readStoredHead(ctx, artifactID)
@@ -759,9 +751,10 @@ func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, 
 	return tree, nil
 }
 
-// readFork reads the tree of fork, a write transaction's fork, for that write's operation
-// (applyLive, applyMargin) or a read joined to its transaction (docTree, heldTree,
-// captureLiveTextAndAuthors), and counts the read (forkTreeCounts.read).
+// readForkTree reads the tree of fork, a write transaction's fork, for that write's operation
+// (applyLive, applyMargin) or a read joined to its transaction (docTree, heldTree, captureWrite),
+// and counts the read (forkTreeCounts.read). The fork itself is read once per transaction
+// (readFork); this is a read of the tree the fork holds.
 //
 // Every one of those reads runs on the request goroutine that holds the fork, and the fork's own
 // writes run there too (forkLive, applyLive's mutate, recordLiveOperation), so nothing else reads
@@ -770,7 +763,7 @@ func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, 
 // the renders and reads that follow do not validate it again; its Node is the very tree the reader
 // made, which this transaction's write may keep (liveWrite.tree, anchorsTree), and a tree outside
 // the Proof schema is the document's own refusal, as treeOf makes it.
-func (s *Service) readFork(fork *crdt.Doc) (pmdoc.ValidDocument, error) {
+func (s *Service) readForkTree(fork *crdt.Doc) (pmdoc.ValidDocument, error) {
 	s.forkTrees.read.Add(1)
 	return treeOfUnshared(fork)
 }
@@ -844,7 +837,10 @@ func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 func (s *Service) publishLiveWrite(write *liveWrite) {
 	defer s.finishLiveWrite(write)
 	s.hooks.parkLiveWrite(write.artifactID, PauseAfterCommit)
-	// Committed, the write has no more use for its fork, so the fork goes before the publish.
+	defer s.closeShadow(write)
+	// Committed, the write has no more use for its fork, so the fork goes before the publish,
+	// which loads the room when no room holds the document (coldFork). The room's shadow keeps it
+	// (newShadow).
 	if s.checkRendering != nil {
 		s.checkRendering("publish", write)
 	}
@@ -853,21 +849,26 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 		if len(write.updates) > 0 {
 			s.scheduleSettle(write.artifactID)
 		}
-	} else {
-		for index, update := range write.updates {
-			err := s.publishLiveUpdate(write.artifactID, update, write.versions[index], write.renderings[index], write.marginRooms[index])
-			if err == nil {
-				continue
-			}
-			slog.Error("dispatch: publish committed live document write", "room", write.artifactID, "error", err)
-			if s.afterPublishRefused != nil {
-				s.afterPublishRefused(write.artifactID)
-			}
-			if !errors.Is(err, ErrServiceUnavailable) {
-				s.failRoom(write.artifactID, err)
-			}
-			return
+		s.recordPublishedLoss(write)
+		return
+	}
+	for index, update := range write.updates {
+		var shadow *roomShadow
+		if index == len(write.updates)-1 {
+			shadow = write.shadow
 		}
+		err := s.publishLiveUpdate(write.artifactID, update, write.versions[index], write.renderings[index], write.marginRooms[index], shadow)
+		if err == nil {
+			continue
+		}
+		slog.Error("dispatch: publish committed live document write", "room", write.artifactID, "error", err)
+		if s.afterPublishRefused != nil {
+			s.afterPublishRefused(write.artifactID)
+		}
+		if !errors.Is(err, ErrServiceUnavailable) {
+			s.failRoom(write.artifactID, err)
+		}
+		return
 	}
 	s.recordPublishedLoss(write)
 }
@@ -890,11 +891,12 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 // observer classifies the update by either when it can (renderedReplica.changedBy). marginRoom is
 // the room document a margin write's fork was warm-built from, or the zero pointer
 // (liveWrite.marginRooms): the update is tagged margin-only when the document it reaches is that
-// one (liveWriteOrigin.marginOnly).
-func (s *Service) publishLiveUpdate(room string, update []byte, version persistence.Version, rendering publishedRendering, marginRoom weak.Pointer[crdt.Doc]) error {
+// one (liveWriteOrigin.marginOnly). shadow, on the write's last update, is the shadow whose window
+// the update's drain closes.
+func (s *Service) publishLiveUpdate(room string, update []byte, version persistence.Version, rendering publishedRendering, marginRoom weak.Pointer[crdt.Doc], shadow *roomShadow) error {
 	ctx := withOwnerVerified(context.Background())
 	slot := s.prepareSuppressedPersistence(room)
-	origin := &liveWriteOrigin{slot: slot, rendering: rendering}
+	origin := &liveWriteOrigin{slot: slot, rendering: rendering, shadow: shadow}
 	recorded, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
 		instance := s.instanceOf(doc)
 		origin.inRoom = instance != nil && int64(version) <= instance.loadedHead
@@ -947,6 +949,7 @@ func (s *Service) finishLiveWrite(write *liveWrite) {
 	write.finished = true
 	write.releaseFork()
 	write.updates, write.renderings, write.marginRooms = nil, nil, nil
+	write.shadow = nil
 	state := write.state
 	state.mu.Lock()
 	state.liveWriter = nil

@@ -145,10 +145,12 @@ func latestVersionEventActor(t *testing.T, database *store.Store, artifactID str
 	return actor
 }
 
-// gatedAppends holds a room's own appends (AppendUpdateWithCredit) at a gate the test closes and
-// opens, so a browser's update the room applied and broadcast stays unstored for as long as the
-// test needs: taken off the room's recorded updates and waiting to append, with the room's later
-// updates queued behind it.
+// gatedAppends holds a room's own appends at a gate the test closes and opens, so a browser's
+// update the room applied and broadcast stays unstored for as long as the test needs: taken off
+// the room's recorded updates and waiting to append, with the room's later updates queued behind
+// it. Both of the store's appends of a room's own update pass it: the flush its persistence worker
+// runs for a classified update (AppendRoomFlush) and the bare append of one no class was recorded
+// for (AppendUpdateWithCredit).
 type gatedAppends struct {
 	VersionedStore
 	mu      sync.Mutex
@@ -162,13 +164,23 @@ func newGatedAppends(database *store.Store) *gatedAppends {
 	return &gatedAppends{VersionedStore: NewPgVersioned(database), gate: gate}
 }
 
-func (g *gatedAppends) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
+// wait holds the caller at the gate, counted in waiting while it does.
+func (g *gatedAppends) wait() {
 	g.mu.Lock()
 	gate := g.gate
 	g.mu.Unlock()
 	g.waiting.Add(1)
 	<-gate
 	g.waiting.Add(-1)
+}
+
+func (g *gatedAppends) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
+	g.wait()
+	return g.VersionedStore.AppendRoomFlush(ctx, room, flush, through, credit)
+}
+
+func (g *gatedAppends) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
+	g.wait()
 	return g.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit, browser)
 }
 

@@ -6,9 +6,11 @@ package docstest
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"testing"
@@ -102,9 +104,25 @@ type authReply struct {
 // ends.
 func Dial(t testing.TB, url string, header http.Header, artifactID string, doc *crdt.Doc) *Peer {
 	t.Helper()
-	connection, response, err := gws.DefaultDialer.Dial(url, header)
+	peer, err := DialContext(context.Background(), url, header, artifactID, doc)
 	if err != nil {
-		t.Fatalf("connect a peer to document %s: response=%#v err=%v", artifactID, response, err)
+		t.Fatal(err)
+	}
+	t.Cleanup(peer.Close)
+	return peer
+}
+
+// DialContext is Dial for a caller that is not a test, such as a load driver: ctx bounds the
+// connection's opening, a failure is returned, and the caller closes the peer.
+func DialContext(ctx context.Context, url string, header http.Header, artifactID string, doc *crdt.Doc) (*Peer, error) {
+	connection, response, err := gws.DefaultDialer.DialContext(ctx, url, header)
+	if err != nil {
+		if response != nil {
+			// A refused handshake's response carries the server's reason in its status and body.
+			body, _ := io.ReadAll(io.LimitReader(response.Body, 512))
+			return nil, fmt.Errorf("connect a peer to document %s: %s %q: %w", artifactID, response.Status, bytes.TrimSpace(body), err)
+		}
+		return nil, fmt.Errorf("connect a peer to document %s: %w", artifactID, err)
 	}
 	answers, awareness, ended := make(chan []byte, 16), make(chan []AwarenessEntry, 64), make(chan struct{})
 	peer := &Peer{
@@ -112,13 +130,12 @@ func Dial(t testing.TB, url string, header http.Header, artifactID string, doc *
 		artifactID: artifactID, connection: connection, auth: make(chan authReply, 4),
 		awareness: make(map[uint64]AwarenessEntry), awarenessChanged: make(chan struct{}), clocks: make(map[uint64]uint64),
 	}
-	t.Cleanup(peer.Close)
 	go func() {
 		peer.read(answers, awareness)
 		peer.endedAt = time.Now()
 		close(ended)
 	}()
-	return peer
+	return peer, nil
 }
 
 // Write sends syncMessage to the room as Hocuspocus carries it: the document's name, then the sync

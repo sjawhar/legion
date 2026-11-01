@@ -13,10 +13,11 @@ import (
 )
 
 // The cap on a document's queued conditional edits holds across envoy-dispatch processes (plan D9,
-// migration 0160): each process writes how many it has admitted to doc_conditional_edit_queue,
-// and an admission sums the counts of the member processes under the document's queue lock. The
-// tests here run two services on one database, each on a pool of its own and each with its room
-// sync running, so each is a member, as two envoy-dispatch processes are.
+// migration 20261101181502): each process writes how many it has admitted to
+// doc_conditional_edit_queue, and an admission sums the counts of the member processes under the
+// document's queue lock. The tests here run two services on one database, each on a pool of its
+// own and each with its room sync running, so each is a member, as two envoy-dispatch processes
+// are.
 
 // queuedAcrossProcesses is the sum of every process's row of artifactID's queue.
 func queuedAcrossProcesses(t *testing.T, database *store.Store, artifactID string) (queued, rows int) {
