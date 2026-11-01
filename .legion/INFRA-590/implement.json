@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-11-01T10:36:20Z",
+  "completed": "2026-11-01T14:54:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "827ab32f07783d01d398c2f6c86f21c311cb3acf",
-  "round": "30 (head conflicting after main's #2391 merged at 09:21:49Z, 225f2beae: migrations 0151-0157, a shared pglisten.Hub per process, duty woken loops, shutdown waits for intakes). Forward merge of main 225f2beae; nine conflicts resolved keeping both sides (pool.go, infra/gcp/dispatch.go, pglisten/listener.go, docs/edit_notices.go, cmd/dispatch/main.go, shutdown.go, shutdown_test.go, running-dispatch.md, cmd/dispatch/README.md). Migrations renumbered 0151_duty_holds -> 0158_duty_holds, 0152_outbox_claim -> 0159_outbox_claim (next free on main) with every reference. Connections re-summed: 64+4+1+13+2+1+2+5 listeners = 92 (main 90, branch 91); ConnectionsPerProcess and dispatchConnectionsPerPod 92. Shutdown order: documents, background, intakes, idle, outbox stop, deregister, pool close. Per-file own-diff: 23 files differ, all renumbering, the count or conflict files. Fingerprint b6c793a1 -> 9a20b211. Diff-check comment 6556800947. The conflict resolution was written by a deep-worker subagent and verified by me (diff read, build/vet, numbering and connection tests, multiprocess suite). Restored from 67ac7a4d since retro removed .legion/INFRA-590/. Sampled memory peak 5.92 GiB of 19, 599 samples; leftover check listed nothing.",
+  "head": "2175cdbaac717bb8cbc8df7f662829cdeaca455b",
+  "round": "31 (the architect's direction and the reviewer's review 5728665099 after main's #2411, 4644a0727, closed the numbered migration series at 0157): forward merge of main 4644a0727 on the reviewer's handoff b5d9f1ff, no text conflict. Migrations named by UTC timestamp, taken with date -u at the rename, duty_holds first: 0158_duty_holds -> 20261101143201_duty_holds, 0159_outbox_claim -> 20261101143203_outbox_claim (forward and census), with every reference (README, AGENTS.md, changelog fragment, dispatch-outbox.md, batch.go, the outbox_claim SQL comment, the hot-table lesson, the PR body). This PR's numbering lesson removed: #2411 makes its rule wrong, and main's docs/solutions/envoy/two-pull-requests-take-the-same-migration-number.md states the current rule. Per-file own-diff: 15 files differ, all the rename. Release order per #2411's README: this deploys in a release after #2411's. Fingerprint e856da31 -> 0ea88439. Diff-check comment 6559569371. First store run failed seven tests on 'relation \"duty_holds\" already exists' because the shared local dispatch_test database had recorded 0158/0159 from round 30; on a recreated database store passes. Sampled memory peak 3.22 GiB of 19, 469 samples; leftover check listed nothing.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -286,6 +286,14 @@
       "observed": "store ok 254.3 s (TestMigrationSetIsNumberedOneToN passes), duty ok, pglisten ok, outbox ok 277.5 s, cmd/dispatch ok 320.6 s, multiprocess ok 978.6 s, infra/gcp connections test ok; zero '--- FAIL' lines; GitHub MERGEABLE at 827ab32f.",
       "headSha": "827ab32f07783d01d398c2f6c86f21c311cb3acf",
       "negativeControl": "Before the merge, git merge-tree of 0d26a56b with main reported 'CONFLICT (content)' in nine files including store/pool.go and cmd/dispatch/shutdown.go, GitHub showed the head CONFLICTING, and main held 0151_embeddings_notify beside this PR's 0151_duty_holds."
+    },
+    {
+      "criterion": "Under #2411's naming, this PR's migrations are accepted as timestamped versions after the closed numbered series, apply on a fresh database, and the outbox still publishes under its hold with them.",
+      "surface": "internal/dispatch/store (every migration applied to a fresh database, #2411's naming, embedding and out-of-order tests), migrationid, pgmigrate, duty and the outbox package on a superuser Postgres 17",
+      "command": "cd packages/envoy && export GOMAXPROCS=4 GOMEMLIMIT=12GiB DISPATCH_TEST_DATABASE_URL=<superuser Postgres 17, fresh dispatch_test>; go build ./... && go vet ./internal/dispatch/... ./cmd/dispatch/ ./migrationid/ && go test -p 1 -count=1 ./internal/dispatch/store/ && go test -p 1 -count=1 ./migrationid/ ./internal/pgmigrate/... ./internal/dispatch/duty/ && go test -p 1 -parallel 4 -count=1 ./internal/dispatch/outbox/",
+      "observed": "store ok 261.8 s with TestMigrationSetTakesNumbersThenTimestamps, TestEveryMigrationFileIsEmbedded and TestMigrateAppliesAMigrationThatArrivedBelowOneAlreadyApplied passing; migrationid, pgmigrate, pgmigratetest and duty ok; outbox ok 286.8 s; GitHub MERGEABLE at 2175cdba.",
+      "headSha": "2175cdbaac717bb8cbc8df7f662829cdeaca455b",
+      "negativeControl": "main's migrationid.Check refuses a set holding a number above 0157, so the pre-merge names 0158_duty_holds/0159_outbox_claim would fail TestMigrationSetTakesNumbersThenTimestamps on the merged set (packages/envoy/cmd/dispatch/README.md 'Database migrations')."
     }
   ],
   "filesChanged": [
@@ -337,5 +345,5 @@
   "discoveredComplexity": [
     "Ordering per (owner, destination) costs one NATS round trip per event per destination of one owner: with NATS behind 150 ms, a burst of 100 events on one issue drains in 16 s (THROUGHPUT.md)."
   ],
-  "previousHandoff": "0d26a56b1d39ecf7ec5fca3597c1cf51c962f057"
+  "previousHandoff": "4953e1bbbd54cd11b6c342bbeddba25acaf1a740"
 }
