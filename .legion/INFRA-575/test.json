@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-575",
+  "previousHandoff": "007466b0565747049a44b365b2e73feceb24c56f",
+  "completed": "2026-11-01T00:20:00Z",
+  "round": 11,
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "This round is a forward merge after READY was refused READY_HEAD_CONFLICTS, so the fingerprint decides whether it is a re-check or a full round, and it says full: at my last tested head 74199f0d and at the retro head 007466b0 the pull request's own lines hash alike, c7cd1a30ae05530c02fd00735ba7d9b95e038a022b03a2913e76900780656837 - retro's five learnings and its removal of .legion/ moved no product line - while the merge head 5a069c7e hashes 4e4c98207e7cedd2e7ace39bdf68d4164e516bbb7541ae3d9d31933a72995eb6, which is the two conflict resolutions. Those are exactly the two files the implementer names: `git diff main@origin 5a069c7e -- packages/proof-editor/src/lib.ts` shows this branch's change-decoration import, its `ChangeDecorations` export, the `setChangeDecorations` member and the plugin, with main's `remarkRecordMark`/`retypeMark` imports intact beside them, and the same shape holds in features/doc/ProofDocument.tsx. Its own proof then re-runs here: the whole chromium project at this head is 953 passed, 25 skipped, 0 failed (1.4h), the same counts it reported, and CI is green at the merge code head."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "The reading pane, the change view and every other page of Dispatch behave at the forward-merge head as they did at the head the reviewer approved (the rule for a forward merge: build and run the proof again at the merge head, even with no text conflict - and here there were two).",
+      "surface": "The built Dispatch SPA served by the real Go server against a real PostgreSQL in this issue pod, driven in a real Chromium: the whole Chromium project of packages/dispatch/e2e.",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- --project=chromium",
+      "observed": "978 rows: 953 passed, 25 skipped, 0 failed (1.4h) at e0204719 (code head 5a069c7e). Green inside it: the nine rows of e2e/inbox-reading-pane.e2e.ts - A1's five, the two for the architect's ruling, the refusal row and the Enter-focus row - and 103 rows across the document, approval, margin and references specs, which are where a wrong resolution of these two files would show, since both conflicts are in the document's own editor path.",
+      "headSha": "e02047193435935ee8168d777125fea4aa8bd3c2",
+      "negativeControl": "My own run at the pre-merge head is the control for what the merge changed: 936 passed, 25 skipped, 0 failed at 74199f0d. The 17 extra rows here are main's own, brought in by the merge; nothing of this branch's was dropped, and no row that passed before fails now. Round 1's control for the feature itself stands unchanged: the whole reading-pane spec on the base commit 14d907b6fdd3 was 7 failed, 0 passed, which is A1's and A3's 'fails on the commit before the change'."
+    },
+    {
+      "criterion": "The two textual conflicts are resolved so that both sides stand: main's remark work and this branch's change decorations.",
+      "surface": "The merge head's own text, read against main, and the browser rows that drive each side.",
+      "command": "git diff origin/main 5a069c7e -- packages/proof-editor/src/lib.ts packages/dispatch/web/src/features/doc/ProofDocument.tsx; the project run above",
+      "observed": "Against main, those two files differ only by this branch's own additions - the change-decoration plugin, its types, the `setChangeDecorations` member of ProofEditorHandle and the `page` gate - while main's `remarkRecordMark`, `retypeMark` and their types sit untouched beside them. Both sides are driven in the run above: this branch's by the pane's approval row, which asserts the marked blocks, the word marks and the struck-through removed block, and main's remark and record-mark work by its own comment and document rows, all green.",
+      "headSha": "e02047193435935ee8168d777125fea4aa8bd3c2",
+      "negativeControl": "The fingerprint pair is the control that the resolution is the only product change in this round: 007466b0 and 74199f0d hash alike, and the merge head differs - so what moved is these two files, and nothing else of the pull request's own lines."
+    },
+    {
+      "criterion": "Everything static is green at the head the merger will carry, read on GitHub and re-run by nobody.",
+      "surface": "GitHub Actions, run 41236717371 at the merge code head 5a069c7e.",
+      "command": "gh api --paginate 'repos/sjawhar/legion/actions/runs/41236717371/jobs?filter=latest&per_page=100'",
+      "observed": "Green: `lint`, `test`, `changes`, `contracts`, `dispatch`, `docs / build`, `dispatch-browser-multiprocess`, `claude-envoy`, `envoy-client`, `envoy-go`, `envoy-go-race-pmdoc`, `envoy-plugin`, `envoy-smoke`, `pi-envoy`, `pi-legion`, `pi-shared`. `ci-ok`, which only condenses them, was still queued when I read it last and is recorded as running; nothing it condenses is red. GitHub reads the head MERGEABLE again, where it read the retro head 007466b0 conflicting - which is what the merge was for.",
+      "headSha": "5a069c7e170784f50081f152b486d8070ad2f2f4",
+      "negativeControl": "The READY refusal is the control in the other direction: READY_HEAD_CONFLICTS at 007466b0, six paths changed on both sides, is what a head that cannot merge looks like, and this head does not."
+    }
+  ],
+  "notes": [
+    "A2, the production check of the Inbox page (`dispatch-production-check.sh --page /`), is the implementer's after the merge and is the only acceptance line left unrun.",
+    "This handoff's `previousHandoff` is retro's removal of `.legion/INFRA-575/` (007466b0), as the rule for a round after a retro says, since that removal is the newest commit on this branch that changed test.json."
+  ],
+  "environment": "The issue pod, replaced since my last round: the harness is the image's own PostgreSQL 18 with pgvector on 127.0.0.1:55432 (no Debian unpack any more) with a database per role lane, Playwright's chromium on the issue volume, 2 CPUs, one Playwright worker. Nothing of mine is unpushed and the workspace is clean but for this handoff."
+}
