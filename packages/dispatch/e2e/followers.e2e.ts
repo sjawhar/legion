@@ -88,7 +88,7 @@ test("the ask card lists every session that wrote to the ask and a human can unf
       payload: { ask_id: ask.id, session_id: replier.id },
     });
 
-    // The replier rejoins over the API; the open card picks it up live over SSE.
+    // The replier rejoins over the API; the open card picks it up from the live event feed.
     await followAsk(ask.id, replier.id, replier);
     await expect(followers).toContainText("Reaches 2");
     await expect(followers.locator(`[title='${replier.id}']`)).toHaveCount(1);

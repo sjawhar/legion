@@ -131,8 +131,13 @@ func (m *Mocks) Run(program pulumi.RunFunc) error {
 // Construct serves the envoy-infra plugin in process with m behind it and constructs the
 // component of type typ named name, in project "p" and stack "s", from inputs with providers, as
 // a consumer's program does. It returns Construct's response and error.
+//
+// dependsOn is the ConstructRequest's Dependencies, the resources a consumer's pulumi.DependsOn
+// on the component itself names. It is variadic and last so that every caller that sends none
+// stays as it was written: an extra required parameter would touch each of them to say "nothing"
+// twice over, and a second function beside this one would duplicate the whole body for one field.
 func Construct(t testing.TB, m *Mocks, typ, name string, inputs map[string]property.Value, dryRun bool,
-	providers map[tokens.Package]p.ProviderReference,
+	providers map[tokens.Package]p.ProviderReference, dependsOn ...resource.URN,
 ) (p.ConstructResponse, error) {
 	t.Helper()
 	prov, err := provider.New()
@@ -145,10 +150,11 @@ func Construct(t testing.TB, m *Mocks, typ, name string, inputs map[string]prope
 		t.Fatalf("serve the plugin: %v", err)
 	}
 	return server.Construct(p.ConstructRequest{
-		Urn:       resource.NewURN("s", "p", "", tokens.Type(typ), name),
-		DryRun:    dryRun,
-		Inputs:    property.NewMap(inputs),
-		Providers: providers,
+		Urn:          resource.NewURN("s", "p", "", tokens.Type(typ), name),
+		DryRun:       dryRun,
+		Inputs:       property.NewMap(inputs),
+		Providers:    providers,
+		Dependencies: dependsOn,
 	})
 }
 

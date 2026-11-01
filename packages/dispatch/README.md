@@ -10,8 +10,8 @@ suggestions, artifacts, and durable event history. The Go server in
 `AuthGate` requests `GET /auth/whoami` and sends unauthenticated visitors to the
 Google sign-in flow. All application requests are same-origin. React Router serves
 the Inbox at `/`, an issue workspace at `/issues/:key/*`, and the human-only
-repository-to-project settings page at `/settings`; TanStack Query and SSE keep
-the issue, Inbox, documents, and sidebar current.
+repository-to-project settings page at `/settings`; TanStack Query and the live socket's events
+feed keep the issue, Inbox, documents, and sidebar current.
 
 The desktop shell has a sidebar, issue content, and review margin. Issue content has Spec,
 Conversation, Children, Artifacts, and Activity tabs; the Conversation lists one card per
@@ -51,7 +51,8 @@ SIGTERM to the pid it hands its caller stops the server. It pins every server
 setting: cookie identity, the production mode, with `alice` and `bob` signed in through the
 server's dev sign-in route (`DISPATCH_DEV_SIGNIN=1`, fenced to a loopback
 origin, listener and database, with a signing key the server generates for its
-process), `DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
+process, or one key per run in two-process mode, below),
+`DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
 key, a loopback listen host and the suite's dashboard origin. Address the
 harness as `127.0.0.1:<port>`, never `localhost`: under that flag the router
 refuses any other `Host`. The server process has no caller Home or XDG
@@ -116,6 +117,46 @@ names it in the broker's settings) starts `scripts/e2e/lib/held-port.py keep`
 first and sets `DISPATCH_E2E_LISTEN_FROM` to the keeper's unix socket: the
 server serves on the keeper's port.
 
+Two-process mode runs two Dispatch servers against the one database, behind a round-robin proxy,
+the way a rolling release serves a browser from two builds at once:
+
+```bash
+cd packages/dispatch
+DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslmode=disable' \
+  bun run e2e:multiprocess
+```
+
+It builds the dashboard twice (`web/dist`, and `web/dist-b` under another build id), then runs
+Playwright through `e2e/run.ts` with `DISPATCH_E2E_PROCESSES=2`: Dispatch A on
+`DISPATCH_E2E_PORT_A` serving `web/dist`, Dispatch B on `DISPATCH_E2E_PORT_B` serving
+`DISPATCH_E2E_WEB_DIST_B` (here `web/dist-b`; default A's), and `e2e/round-robin-proxy.ts` on
+`DISPATCH_E2E_PORT`, which alternates requests and websockets between them. As every harness
+port, each is used as given when set and chosen by the OS when unset; the proxy starts before
+the servers, since both serve its origin, so A's and B's ports are held first (a
+`held-port.py keep` each) and each server serves on its keeper's port. Both servers sign
+cookies with one key the run generates, so a person stays signed in whichever answers. It runs
+the `*.multiprocess.e2e.ts` specs but the sign-in spec below, in Chromium, which the default run
+leaves out; arguments after `--` reach Playwright
+(`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). A spec
+pins a request to one process with the `X-Dispatch-E2E-Process: a|b` header or a whole browser
+context with the `dispatch-e2e-process` cookie, and reads which process served what from the
+proxy's `/_proxy/requests` and `/_proxy/sockets`; `AGENTS.md`'s end-to-end section has the whole
+contract. Any `DISPATCH_E2E_PROCESSES` other than `1`, `2` or unset is refused.
+
+`DISPATCH_E2E_SIGNIN=oidc` signs people in as a deployment does instead of through dev sign-in:
+the harness also starts `packages/envoy/cmd/dev-oidc-issuer` (`e2e/run-signin-issuer.sh`), and
+both servers take it as their sign-in issuer, under one `DISPATCH_SIGNING_KEY` per run. Only
+`e2e/signin.multiprocess.e2e.ts` runs then, which starts a sign-in at `/auth/start` on Dispatch A
+and completes it at `/auth/callback` on B:
+
+```bash
+DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslmode=disable' \
+  DISPATCH_E2E_SIGNIN=oidc bun run e2e:multiprocess
+```
+
+It needs `DISPATCH_E2E_PROCESSES=2`, which `e2e:multiprocess` sets; any value other than `oidc`
+or unset is refused.
+
 ## Local instance
 
 `bun run dispatch:local`, from the repository root or from this package, brings up a seeded
@@ -172,9 +213,17 @@ block's changed version, every block `part_of` its document, a link in a list it
 every node carries (`made_by`, `made_at`, `changed_by`, `changed_at`, `parent`, `parent_version`)
 for an issue, a document, a file, a picture, a block, a removed pinned block, an ask, a comment, a
 message, a session and a component, read by its own reference, as an edge's other end and on the
-`Node:` line of `dispatch read`, and the older `GET /api/v1/artifacts/{id}/references` route. Each
-passing check prints `PASS: <section> <what>`; the first failure prints
-`FAIL: <section> <what>: <observed>` and exits 1. Its inputs:
+`Node:` line of `dispatch read`, and the older `GET /api/v1/artifacts/{id}/references` route. It
+also covers the blocks of comments and messages: a mention in a comment starts at the comment's
+block holding it, a node of kind `block`, id `comment/<uuid>#b<n>`, whose `parent` is the comment
+(A10);
+a comment or message reply that names a block (`--reply-to <comment>#b-b2`,
+`--in-reply-to <message>#b-b2`) is a `replies_to` edge to that block, and `dispatch read` quotes it
+(A7); the facts of a comment's and a message's block (A11); a block's id kept through a person's
+move, reword, split, deletion and restore over `PATCH /api/v1/comments/{id}` with carried ids, and
+a body holding block HTML read back byte for byte (A13); and a link pinned to a comment's block that
+reads `changed`, then `removed` (A15). Each passing check prints `PASS: <section> <what>`; the first
+failure prints `FAIL: <section> <what>: <observed>` and exits 1. Its inputs:
 
 - `DISPATCH_URL`, the server;
 - `DISPATCH_TOKEN`, an agent bearer, or `DISPATCH_TOKEN_FILE`, a file holding one, which the script
@@ -193,16 +242,23 @@ passing check prints `PASS: <section> <what>`; the first failure prints
   - `none` proves `GET /api/v1/settings/architecture-sources` is `[]` and prints
     `PASS: R12 component: this server has no architecture source, so it holds no component node`;
     a source present is a `FAIL` naming `COMPONENT_SOURCE=existing`.
+- `DEV_SIGNIN_LOGIN`, optional, a login the server's dev sign-in route (`/auth/_dev/signin`) signs
+  in: `bun run dispatch:local` has the route, a deployed server does not. Editing a comment is a
+  person's write, by its author alone, so the A13 and A15 comment sections sign that person in with a
+  cookie jar, write the comments that person edits, and send each edit with the dashboard's origin.
+  Unset, each of those two sections prints one
+  `SKIP: … PATCH /api/v1/comments/{id} is human-only and this server has no dev sign-in: DEV_SIGNIN_LOGIN is unset; …`
+  line, and every other section runs.
 
-It writes two issues in `PROJECT`: the first holds the spec, comments and the documents `cites.md`,
-`decisions.md`, `changes.md` and `list.md`; the second is its child, retitled, holding an ask the
-script rewords, a comment on a quote of its spec and a reply, a message and a reply, and the
+It writes two issues in `PROJECT`: the first holds the spec, comments, messages and the documents
+`cites.md`, `decisions.md`, `changes.md` and `list.md`; the second is its child, retitled, holding an
+ask the script rewords, a comment on a quote of its spec and a reply, a message and a reply, and the
 uploads `notes.txt` and `pixel.png`. It resolves the ask and closes both issues, also when a check
 fails. Against `bun run dispatch:local`:
 
 ```bash
 DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE \
-  COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 \
+  COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 DEV_SIGNIN_LOGIN=alice \
   bash packages/dispatch/e2e/acceptance/block-graph.sh
 ```
 
@@ -282,7 +338,10 @@ local proxy), a plain-HTTP origin that is not loopback and so not a secure conte
 forwards to the dev sign-in server at its loopback origin. The project proves a document takes a
 new paragraph and a comment renders formatted there, where `crypto.randomUUID` does not exist, and
 that the proxy refuses any other `Host` as the server's own fence does and keeps no request open
-upstream once a page has closed.
+upstream once a page has closed. `chromium-plain-http-sign-out` runs the sign-out rows of
+`e2e/keyed-writes.e2e.ts` on that same origin, where the browser has no `navigator.locks`, so a
+tab holds the person's writes for another tab's sign-out on a renewed lease rather than on that
+tab's lock.
 `bun run e2e:install` installs all three browsers.
 
 ## Phone check

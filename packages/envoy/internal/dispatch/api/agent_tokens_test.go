@@ -1,10 +1,14 @@
 package api
 
 import (
+	"context"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 type agentTokenResponse struct {
@@ -167,5 +171,59 @@ func TestAgentTokensArePrivateRevocableAndAttributeSessionWrites(t *testing.T) {
 	}, minted.Token)
 	if denied.Code != http.StatusUnauthorized || !strings.Contains(denied.Body.String(), `"code":"TOKEN_REVOKED"`) {
 		t.Fatalf("revoked token write: status=%d body=%s", denied.Code, denied.Body.String())
+	}
+}
+
+// INFRA-258. A token's plaintext is shown once, in the mint's answer, and agent_tokens holds only
+// its hash, so an Idempotency-Key never keeps that answer: request_keys holds no copy of the token.
+// The mint is still made once: a repeat under the key, its answer lost or not, is 409
+// KEY_COMMITTED - the token was made and is not shown again - and no second token is minted.
+func TestAKeyedTokenMintKeepsNoPlaintextAndMintsOnce(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	mint := func() *httptest.ResponseRecorder {
+		t.Helper()
+		return keyedRequest(t, handler, http.MethodPost, "/api/v1/me/agent-tokens", map[string]string{"name": "laptop"}, "alice", "mint-1")
+	}
+	first := mint()
+	if first.Code != http.StatusCreated {
+		t.Fatalf("mint: status=%d body=%s", first.Code, first.Body.String())
+	}
+	token := decodeBody[agentTokenResponse](t, first).Token
+	if !strings.HasPrefix(token, "dsp_") {
+		t.Fatalf("the mint answered no token: %s", first.Body.String())
+	}
+	var held int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from request_keys
+		where position(convert_to($1, 'UTF8') in coalesce(response, ''::bytea)) > 0
+		   or position($1 in coalesce(recovery::text, '')) > 0
+	`, token).Scan(&held); err != nil {
+		t.Fatalf("search the keys for the token: %v", err)
+	}
+	if held != 0 {
+		t.Fatal("request_keys holds the minted token's plaintext")
+	}
+
+	for _, repeat := range []string{"at once", "after the lease"} {
+		if repeat == "after the lease" {
+			if _, err := database.Pool.Exec(context.Background(),
+				`update request_keys set leased_at = now() - interval '2 minutes' where idempotency_key = 'mint-1'`); err != nil {
+				t.Fatal(err)
+			}
+		}
+		again := mint()
+		if code := decodeBody[struct {
+			Code string `json:"code"`
+		}](t, again).Code; again.Code != http.StatusConflict || code != contracts.IdempotencyKeyCommitted ||
+			strings.Contains(again.Body.String(), token) {
+			t.Fatalf("a repeat %s: status=%d body=%s, want 409 %s without the token", repeat, again.Code, again.Body.String(), contracts.IdempotencyKeyCommitted)
+		}
+	}
+	var tokens int
+	if err := database.Pool.QueryRow(context.Background(), `select count(*) from agent_tokens where name = 'laptop'`).Scan(&tokens); err != nil {
+		t.Fatal(err)
+	}
+	if tokens != 1 {
+		t.Fatalf("%d tokens minted, want one", tokens)
 	}
 }

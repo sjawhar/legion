@@ -14,10 +14,8 @@ import (
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
-	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -57,6 +55,85 @@ func TestIssueCloseClosesOpenDocumentConnection(t *testing.T) {
 	}
 	if err := service.srv.Apply(context.Background(), artifactID, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {}); !errors.Is(err, ErrIssueClosed) {
 		t.Fatalf("server write after issue close = %v, want ErrIssueClosed", err)
+	}
+}
+
+// A browser that connects while its issue is closed is admitted read-only, and a connection keeps
+// the admission it was authorized with. So a reopen closes the issue's rooms as a close does: the
+// browser reconnects and is admitted writable, rather than staying read-only until the person
+// reloads, whichever side of the reopen its reconnect after the close happened to land. It does so
+// whatever the room's state says: a state a connection's own registration (addConnection) or a
+// load after the reopen committed makes holds the default flag, open, while a browser on it was
+// admitted read-only.
+func TestIssueReopenClosesADocumentConnectionAdmittedWhileClosed(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		// recreated gives the room's state the flag a recreated state starts with.
+		recreated bool
+	}{
+		{name: "the state the close flagged closed"},
+		{name: "a recreated state's default open flag", recreated: true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			seedServiceText(t, service, artifactID, "before")
+			httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+			t.Cleanup(httpServer.Close)
+			setIssueClosed := func(closed bool) {
+				t.Helper()
+				if _, err := service.store.Pool.Exec(context.Background(),
+					`update issues set closed_at = case when $1::boolean then now() end where key = 'DOC-1'`, closed); err != nil {
+					t.Fatalf("set the document issue's closed_at: %v", err)
+				}
+				service.SetIssueClosed(context.Background(), "DOC-1", closed)
+			}
+			setIssueClosed(true)
+			reader := connectPeer(t, httpServer.URL, artifactID, "alice")
+			waitForPeerDocument(t, reader, "before\n")
+
+			// The premise: the room admitted the reader read-only, so it drops what the reader
+			// types and keeps the connection. The room handles one connection's frames in order, so
+			// once it answers the request the reader sends after its keystroke, it has handled the
+			// keystroke.
+			typeOver(t, reader, "before", "refused")
+			for len(reader.Answers) > 0 {
+				<-reader.Answers
+			}
+			if err := reader.AskForDocument(); err != nil {
+				t.Fatalf("ask the room for the document after the reader's keystroke: %v", err)
+			}
+			select {
+			case <-reader.Answers:
+			case <-reader.Ended:
+				t.Fatal("the room closed the read-only reader's connection over its keystroke")
+			case <-time.After(10 * time.Second):
+				t.Fatal("the room did not answer the reader after its keystroke")
+			}
+			if text := documentText(t, service, artifactID); text != "before\n" {
+				t.Fatalf("the room took the read-only reader's keystroke: it holds %q, want %q", text, "before\n")
+			}
+			if row.recreated {
+				state := service.room(artifactID)
+				state.mu.Lock()
+				state.closed = false
+				state.mu.Unlock()
+			}
+
+			setIssueClosed(false)
+			// The regression check: the reopen ends the connection admitted read-only, which the
+			// browser's provider answers by reconnecting.
+			select {
+			case <-reader.Ended:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the connection admitted while the issue was closed was still open 5s after the reopen")
+			}
+			// The room a connection now loads takes edits. It loads from the store, so its copy
+			// also shows the read-only reader's keystroke never reached the store.
+			editor := connectPeer(t, httpServer.URL, artifactID, "alice")
+			waitForPeerDocument(t, editor, "before\n")
+			typeOver(t, editor, "before", "after")
+			waitForPersistedProofText(t, service.store, artifactID, "after\n")
+		})
 	}
 }
 
@@ -251,10 +328,25 @@ func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
 		return loaded.Update
 	}
 
+	// The load hands ygo nothing and keeps the state on its record for the room's load to apply
+	// (applyLoadedState).
+	loadedState := func(t *testing.T) []byte {
+		t.Helper()
+		served, err := adapter.LoadDoc(artifactID)
+		if err != nil || len(served) != 0 {
+			t.Fatalf("LoadDoc handed ygo %d bytes (%v), want none", len(served), err)
+		}
+		record, ok := service.roomLoads.Load(artifactID)
+		if !ok {
+			t.Fatal("LoadDoc recorded no load")
+		}
+		return record.(*roomLoad).takeState()
+	}
+
 	held := preload(t)
-	served, err := adapter.LoadDoc(artifactID)
-	if err != nil || &served[0] != &held[0] {
-		t.Fatalf("load with a current preload served %d bytes (%v), want the preloaded history itself", len(served), err)
+	served := loadedState(t)
+	if len(served) == 0 || &served[0] != &held[0] {
+		t.Fatalf("load with a current preload served %d bytes, want the preloaded history itself", len(served))
 	}
 	if _, kept := service.preloads.Load(artifactID); kept {
 		t.Fatal("a served preload stayed behind for a later load")
@@ -270,10 +362,7 @@ func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
 	if _, err := service.persistence.AppendUpdate(context.Background(), artifactID, moved); err != nil {
 		t.Fatalf("append update after the check: %v", err)
 	}
-	served, err = adapter.LoadDoc(artifactID)
-	if err != nil {
-		t.Fatalf("load after the history moved: %v", err)
-	}
+	served = loadedState(t)
 	doc := crdt.New()
 	if err := crdt.ApplyUpdateV1(doc, served, nil); err != nil {
 		t.Fatalf("decode the loaded history: %v", err)
@@ -489,110 +578,6 @@ func TestFailedRoomEvictsAndReloadsOnNextAccess(t *testing.T) {
 		t.Fatalf("reloaded room access: response=%#v err=%v", response, err)
 	}
 	_ = connection.Close()
-}
-
-// TestDocumentBearerCannotForgeVerifiedServiceSubject: Actor.Service means "the
-// server verified this Kubernetes subject from a projected token", and both
-// renderers show it as that. The document websocket takes its actor from a
-// caller-supplied header, so a shared-token holder must not be able to put one
-// there — nor an owner, which seeds the default assignee.
-func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
-	database := storetest.Open(t)
-	artifactID := createDocument(t, database, "# First")
-	service := New(Deps{
-		Store:       database,
-		Events:      events.NewBroker(),
-		Identity:    headerIdentity(database),
-		AgentTokens: sharedAgentTokens(t, "doc-agent-token"),
-		ServerURL:   "https://dispatch.example",
-		Settle:      20 * time.Millisecond,
-	})
-	t.Cleanup(func() {
-		if err := service.Shutdown(context.Background()); err != nil {
-			t.Errorf("shutdown document service: %v", err)
-		}
-	})
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, "before")
-
-	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
-	t.Cleanup(httpServer.Close)
-	headers := http.Header{
-		"Authorization": []string{"Bearer doc-agent-token"},
-		"X-Dispatch-Actor": []string{`{"kind":"session","id":"session-0123456789abcdef",` +
-			`"origin":{"host":"forge"},` +
-			`"service":"system:serviceaccount:legion:legion-worker","owner":"mallory"}`},
-	}
-	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
-	connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
-	if err != nil {
-		t.Fatalf("connect as document bearer: response=%#v err=%v", response, err)
-	}
-	t.Cleanup(func() { _ = connection.Close() })
-	// A connection is credited with the browser edits made while it is open, and a raw room edit is
-	// one, so this change puts the connection's actor on the next version, as the server persists it.
-	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
-
-	named, err := namedVersion(t, service, artifactID,
-		"checkpoint", model.Actor{Kind: "user", ID: "alice"})
-	if err != nil {
-		t.Fatalf("name document version: %v", err)
-	}
-	version := named.Version
-	var session *model.Actor
-	for index, author := range version.Authors {
-		if author.Kind == "session" {
-			session = &version.Authors[index]
-		}
-	}
-	if session == nil {
-		t.Fatalf("version authors = %#v, want the bearer connection's session actor among them", version.Authors)
-	}
-	if session.Service != nil {
-		t.Fatalf("the header's service reached the persisted author: %q", *session.Service)
-	}
-	if session.Owner != nil {
-		t.Fatalf("the header's owner reached the persisted author: %q", *session.Owner)
-	}
-	if session.ID != "session-0123456789abcdef" {
-		t.Fatalf("author id = %q, want the header's session id", session.ID)
-	}
-	if session.Origin == nil || session.Origin.Host != "forge" {
-		t.Fatalf("author origin = %#v, want the header's origin preserved", session.Origin)
-	}
-}
-
-// sharedAgentTokens is a DISPATCH_AGENT_TOKEN setting parsed as the server parses it at boot.
-func sharedAgentTokens(t *testing.T, setting string) *auth.SharedAgentTokens {
-	t.Helper()
-	tokens, err := auth.ParseSharedAgentTokens(setting)
-	if err != nil {
-		t.Fatalf("ParseSharedAgentTokens(%q): %v", setting, err)
-	}
-	return tokens
-}
-
-// The document websocket takes a bearer's session actor only when the bearer is one of the shared
-// agent token's values; one byte off, or a value the setting does not list, the same actor is
-// refused.
-func TestDocumentBearerMustBeTheSharedToken(t *testing.T) {
-	service := &Service{agentTokens: sharedAgentTokens(t, "doc-agent-token old-doc-token")}
-	for _, test := range []struct {
-		authorization string
-		admitted      bool
-	}{
-		{authorization: "Bearer doc-agent-token", admitted: true},
-		{authorization: "Bearer old-doc-token", admitted: true},
-		{authorization: "Bearer doc-agent-tokem", admitted: false},
-		{authorization: "Bearer other-doc-token", admitted: false},
-	} {
-		request := httptest.NewRequest(http.MethodGet, "/ws/doc/room", nil)
-		request.Header.Set("Authorization", test.authorization)
-		request.Header.Set("X-Dispatch-Actor", `{"kind":"session","id":"session-0123456789abcdef"}`)
-		if _, err := service.requestActor(request); (err == nil) != test.admitted {
-			t.Errorf("requestActor(Authorization %q) err = %v, want admitted %t", test.authorization, err, test.admitted)
-		}
-	}
 }
 
 func TestWebsocketRejectsUnauthenticatedConnection(t *testing.T) {

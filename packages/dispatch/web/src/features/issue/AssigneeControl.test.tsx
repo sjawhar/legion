@@ -2,7 +2,8 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssuePatches } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import type { InboxRow, Issue, IssueDetails, IssueSummary } from "../../api/types";
 import { AssigneeControl } from "./AssigneeControl";
@@ -170,14 +171,14 @@ test("AssigneeControl reads who has signed in only once the reader reaches for i
 
 test("AssigneeControl reassigns optimistically on every surface and merges the server's answer", async () => {
   const save = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => save.promise);
+  const patchIssue = answerIssuePatches().mockImplementation(() => save.promise);
   const { queryClient, unmount } = renderControl();
   try {
     fireEvent.pointerEnter(select());
     await waitFor(() => expect(select().options.length).toBe(3));
     fireEvent.change(select(), { target: { value: "bob" } });
     await waitFor(() => expect(select().value).toBe("bob"));
-    expect(patchIssue).toHaveBeenCalledWith("CORE-1", { assignee: "bob" });
+    expect(patchIssue).toHaveBeenCalledWith("CORE-1", { assignee: "bob" }, keyedAttempt);
     expect(queryClient.getQueryData<IssueSummary[]>(listKey)?.[0]?.assignee).toBe("bob");
     expect(queryClient.getQueryData<InboxRow[]>(inboxKey)?.[0]?.issue?.assignee).toBe("bob");
 
@@ -194,13 +195,15 @@ test("AssigneeControl reassigns optimistically on every surface and merges the s
 });
 
 test("AssigneeControl sends null for Unassigned", async () => {
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({ ...issue, assignee: null });
+  const patchIssue = answerIssuePatches().mockResolvedValue({ ...issue, assignee: null });
   const { unmount } = renderControl();
   try {
     fireEvent.focus(select());
     await waitFor(() => expect(select().options.length).toBe(3));
     fireEvent.change(select(), { target: { value: "" } });
-    await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-1", { assignee: null }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { assignee: null }, keyedAttempt)
+    );
     await waitFor(() => expect(select().value).toBe(""));
     expect(screen.getByText("Unassigned", { selector: "span" })).toBeTruthy();
   } finally {
@@ -210,7 +213,7 @@ test("AssigneeControl sends null for Unassigned", async () => {
 });
 
 test("AssigneeControl rolls back and shows the server's refusal when the person has not signed in", async () => {
-  const patchIssue = spyOn(api, "patchIssue").mockRejectedValue(
+  const patchIssue = answerIssuePatches().mockRejectedValue(
     new ApiError(400, {
       code: "ASSIGNEE_NOT_ALLOWED",
       error: '"bob" has not signed in to Dispatch',
@@ -235,7 +238,7 @@ test("AssigneeControl rolls back and shows the server's refusal when the person 
 test("AssigneeControl keeps focus while a save is in flight and saves a pick made meanwhile after it", async () => {
   const first = Promise.withResolvers<Issue>();
   const second = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue")
+  const patchIssue = answerIssuePatches()
     .mockImplementationOnce(() => first.promise)
     .mockImplementationOnce(() => second.promise);
   const { queryClient, unmount } = renderControl();
@@ -243,7 +246,9 @@ test("AssigneeControl keeps focus while a save is in flight and saves a pick mad
     select().focus();
     await waitFor(() => expect(select().options.length).toBe(3));
     fireEvent.change(select(), { target: { value: "bob" } });
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { assignee: "bob" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { assignee: "bob" }, keyedAttempt)
+    );
     // A disabled control drops focus and leaves the tab order for the length of the save.
     expect(select().disabled).toBe(false);
     expect(document.activeElement).toBe(select());
@@ -256,7 +261,7 @@ test("AssigneeControl keeps focus while a save is in flight and saves a pick mad
       await first.promise;
     });
     await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(2));
-    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { assignee: null });
+    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { assignee: null }, keyedAttempt);
     expect(select().value).toBe("");
     await act(async () => {
       second.resolve({ ...issue, assignee: null });

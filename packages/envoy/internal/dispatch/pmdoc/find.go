@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -23,6 +24,63 @@ type Range struct {
 // resolve, so it names no internal package.
 var ErrTargetNotFound = errors.New("target not found")
 var ErrTargetSpansBlocks = errors.New("target spans textblocks")
+
+// ErrMarkNotAllowed is the refusal of a mark on text that stands where the schema allows no mark of
+// its type: an ask's in a code block, or any anchor's in front matter. The refusal is a
+// *MarkNotAllowedError, which is ErrSchema too, so a caller that only knows ErrSchema still sees
+// it, and one that wrote the text itself can tell it apart from a fault of the document or the
+// server.
+var ErrMarkNotAllowed = errors.New("mark not allowed on this text")
+
+// MarkNotAllowedError is MarkRange's refusal of Mark on text in Textblock, the textblock holding the
+// text: "code_block", or "" for text no paragraph, heading or code block holds.
+type MarkNotAllowedError struct {
+	Mark      string
+	Textblock string
+	// At is where the text run holding the refused text begins in the document - its block's whole
+	// text, not where the refused range starts. A code block or the front matter holds its text as
+	// one run, so two refusals with the same Textblock and At are one place, and two with different
+	// At are two places of one kind.
+	At int
+}
+
+func (e *MarkNotAllowedError) Error() string {
+	return fmt.Sprintf("%s: mark %q is not allowed in %s", ErrSchema, e.Mark, e.Place())
+}
+
+// Is reports err as ErrMarkNotAllowed and as ErrSchema.
+func (e *MarkNotAllowedError) Is(target error) bool {
+	return target == ErrMarkNotAllowed || target == ErrSchema
+}
+
+// Place names, for a person, where the refused text stands: "a code block", or "the front matter"
+// for text no textblock holds, since in a document inside the schema only front matter holds text
+// outside a paragraph, heading or code block.
+func (e *MarkNotAllowedError) Place() string {
+	singular, _ := e.place()
+	return singular
+}
+
+// PlacePlural names several places of the kind the refused text stands in, for a count to stand
+// before: "code blocks". It is empty where a document inside the schema holds one place of the
+// kind at most - the front matter - so a caller counting the places a quote landed in names that
+// one as Place names it however often the quote landed there.
+func (e *MarkNotAllowedError) PlacePlural() string {
+	_, plural := e.place()
+	return plural
+}
+
+// place is where the refused text stands, as a person says it of one such place and of several,
+// held as one mapping so the singular and the plural never name different things.
+func (e *MarkNotAllowedError) place() (singular, plural string) {
+	switch e.Textblock {
+	case "":
+		return "the front matter", ""
+	case "code_block":
+		return "a code block", "code blocks"
+	}
+	return e.Textblock, e.Textblock + "s"
+}
 
 // ErrQuoteNotFound reports a quote miss with up to three closest rendered textblocks, in
 // document order among equals, and how many places the quote did match — nonzero only when an
@@ -100,19 +158,44 @@ func (e *ErrTargetAmbiguous) Error() string {
 // range. occurrence is zero-based. When several exact matches exist, near
 // chooses the range whose start is nearest the ProseMirror position hint.
 func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, error) {
-	if doc == nil {
-		return Range{}, fmt.Errorf("%w: FindQuote wants a document", ErrSchema)
-	}
-	if err := doc.Validate(); err != nil {
+	return NewQuoteFinder(doc).Find(quote, occurrence, near)
+}
+
+// QuoteFinder answers FindQuote for many quotes over one document. It flattens the document's
+// text once, at its first match (Find or NearestFirst), and every later match reuses that text and
+// the forms derived from it, so a write that resolves many quotes against one tree walks it once
+// rather than once a quote. A finder from NewQuoteFinder validates the document there too, at that
+// first match; one from ValidDocument.QuoteFinder holds a tree validated already and never
+// validates it again. The document must not change while the finder is in use.
+type QuoteFinder struct {
+	doc *Node
+	// valid says the document was validated before the finder was made (ValidDocument.QuoteFinder),
+	// so the first match of a quote flattens its text without validating it again.
+	valid    bool
+	prepared bool
+	err      error
+	text     flattenedText
+}
+
+// NewQuoteFinder returns a finder over doc. It reads nothing of doc until its first Find.
+func NewQuoteFinder(doc *Node) *QuoteFinder {
+	return &QuoteFinder{doc: doc}
+}
+
+// QuoteFinder is a finder over d's tree whose first match does not validate it again; every answer
+// is NewQuoteFinder's for the same tree. The zero ValidDocument holds no tree, so its finder
+// answers FindQuote's error for a nil document.
+func (d ValidDocument) QuoteFinder() *QuoteFinder {
+	return &QuoteFinder{doc: d.doc, valid: true}
+}
+
+// Find is FindQuote(doc, quote, occurrence, near): the same range or the same error.
+func (f *QuoteFinder) Find(quote string, occurrence, near *int) (Range, error) {
+	matches, err := f.matches(quote)
+	if err != nil {
 		return Range{}, err
 	}
-	text := buildFlattenedText(doc)
-	var matches []quoteMatch
-	if marker := atxHeadingMarker.FindString(quote); marker != "" && marker != quote {
-		matches = headingQuoteMatches(doc, text, quote[len(marker):])
-	} else {
-		matches = quoteMatches(text, quote)
-	}
+	doc, text := f.doc, f.text
 	if len(matches) == 0 {
 		return Range{}, quoteNotFound(doc, quote)
 	}
@@ -131,16 +214,9 @@ func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, erro
 		return matches[0].Range, nil
 	}
 	if near != nil {
-		best := matches[0]
-		bestDistance := distance(best.From, *near)
-		for _, match := range matches[1:] {
-			candidateDistance := distance(match.From, *near)
-			if candidateDistance < bestDistance || (candidateDistance == bestDistance && match.From < best.From) {
-				best = match
-				bestDistance = candidateDistance
-			}
-		}
-		return best.Range, nil
+		// MinFunc returns the first least match, which nearerFirst's earlier-of-two-as-near tie
+		// makes the first NearestFirst lists.
+		return slices.MinFunc(matches, nearerFirst(*near)).Range, nil
 	}
 
 	candidates := make([]Candidate, 0, len(matches))
@@ -151,6 +227,64 @@ func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, erro
 		})
 	}
 	return Range{}, &ErrTargetAmbiguous{Target: quote, Candidates: candidates}
+}
+
+// NearestFirst is every range quote matches, as Find matches it, ordered as Find with near chooses
+// among them: the nearest to near first, and of two as near, the earlier. Find with near returns
+// its first. A quote that matches nothing is ErrTargetNotFound itself, without ranking the
+// document's blocks for the nearest ones the way Find's miss does, which costs another walk of the
+// document: a caller that drops the miss pays nothing to describe it. A caller whose first choice
+// cannot carry what it writes there takes the next.
+func (f *QuoteFinder) NearestFirst(quote string, near int) ([]Range, error) {
+	matches, err := f.matches(quote)
+	if err != nil {
+		return nil, err
+	}
+	if len(matches) == 0 {
+		return nil, ErrTargetNotFound
+	}
+	slices.SortFunc(matches, nearerFirst(near))
+	ranges := make([]Range, len(matches))
+	for index, match := range matches {
+		ranges[index] = match.Range
+	}
+	return ranges, nil
+}
+
+// nearerFirst orders two matches of one quote as Find with near chooses between them: the nearer to
+// near first, and of two as near, the earlier. NearestFirst sorts by it and Find takes its least,
+// so the range Find chooses and the first NearestFirst lists are one rule, held in one place.
+func nearerFirst(near int) func(left, right quoteMatch) int {
+	return func(left, right quoteMatch) int {
+		if byDistance := distance(left.From, near) - distance(right.From, near); byDistance != 0 {
+			return byDistance
+		}
+		return left.From - right.From
+	}
+}
+
+// matches is every match of quote in the finder's document, preparing the document at the first
+// call: a heading quote's headings, otherwise the plain matcher cascade's.
+func (f *QuoteFinder) matches(quote string) ([]quoteMatch, error) {
+	if f.doc == nil {
+		return nil, fmt.Errorf("%w: FindQuote wants a document", ErrSchema)
+	}
+	if !f.prepared {
+		f.prepared = true
+		if !f.valid {
+			f.err = f.doc.Validate()
+		}
+		if f.err == nil {
+			f.text = buildFlattenedText(f.doc)
+		}
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	if marker := atxHeadingMarker.FindString(quote); marker != "" && marker != quote {
+		return headingQuoteMatches(f.doc, f.text, quote[len(marker):]), nil
+	}
+	return quoteMatches(f.text, quote), nil
 }
 
 // TargetSpansBlocks reports whether r is not wholly contained by one
@@ -249,7 +383,8 @@ const (
 // flattenedText is a document's inline text in one string, with each UTF-16 unit's
 // ProseMirror position and inline markup. forms caches the whole-text derived views the
 // quote matchers read, so one FindQuote computes each at most once however far it falls
-// through the exact -> normalized -> markdown chain.
+// through the exact -> normalized -> markdown chain, and a QuoteFinder at most once for all
+// the quotes it answers.
 type flattenedText struct {
 	value     string
 	positions []int
@@ -260,7 +395,7 @@ type flattenedText struct {
 type textForms struct {
 	units          []uint16
 	unitsDone      bool
-	normalized     string
+	normalized     []rune
 	spans          []range16
 	normalizedDone bool
 }
@@ -274,8 +409,9 @@ func (t flattenedText) units16() []uint16 {
 	return t.forms.units
 }
 
-// normalizedForm is normalizedRanges(value), computed on first use.
-func (t flattenedText) normalizedForm() (string, []range16) {
+// normalizedForm is normalizedRanges(value), computed on first use. The matchers compare runes,
+// so the normalized text is kept as runes: a finder answering many quotes converts it once.
+func (t flattenedText) normalizedForm() ([]rune, []range16) {
 	if !t.forms.normalizedDone {
 		t.forms.normalized, t.forms.spans = normalizedRanges(t.value)
 		t.forms.normalizedDone = true
@@ -283,10 +419,48 @@ func (t flattenedText) normalizedForm() (string, []range16) {
 	return t.forms.normalized, t.forms.spans
 }
 
+// flattenedTextSize is how much buildFlattenedText's second pass appends over doc: units is how
+// many UTF-16 units it writes, which is one positions entry and one marks entry each, and bytes is
+// how many bytes the builder holds. It walks the document once more (Walk), measuring no node and
+// allocating nothing, which costs less than the doubling the appends pay for without it.
+//
+// Per text node the count is exact. nulAsReplacement writes each U+0000 as U+FFFD, three bytes in
+// place of one but one UTF-16 unit either way, so only the byte count moves for it; len16 counts
+// the units of the text as it stands, replaced or not.
+//
+// The gaps are counted high: the second pass writes a space, one position and one mark only
+// between two text nodes whose ProseMirror ranges do not touch, and this counts one gap for every
+// text node after the first.
+//
+// The count sets capacity alone (Grow, make with a capacity), so it decides how often the build
+// grows a buffer and nothing about what the build writes: a count that comes out low costs a
+// regrowth, and one that comes out high leaves capacity unused. Low is possible for a text holding
+// invalid UTF-8, where len counts a stray byte once and the build writes the U+FFFD that ranging
+// over it yields, three bytes.
+func flattenedTextSize(doc *Node) (units, bytes int) {
+	texts := 0
+	Walk(doc, func(node *Node) bool {
+		if node.Type != "text" {
+			return true
+		}
+		texts++
+		units += len16(node.Text)
+		bytes += len(node.Text) + 2*strings.Count(node.Text, "\x00")
+		return true
+	})
+	if texts > 0 {
+		units += texts - 1
+		bytes += texts - 1
+	}
+	return units, bytes
+}
+
 func buildFlattenedText(doc *Node) flattenedText {
+	units, bytes := flattenedTextSize(doc)
 	var out strings.Builder
-	var positions []int
-	var marks []inlineMarkup
+	out.Grow(bytes)
+	positions := make([]int, 0, units)
+	marks := make([]inlineMarkup, 0, units)
 	lastEnd := -1
 	walk(doc, func(node *Node, _ []int, pos, end int) bool {
 		if node.Type != "text" {
@@ -377,14 +551,13 @@ type range16 struct {
 
 func normalizedQuoteMatches(text flattenedText, quote string) []quoteMatch {
 	normalizedText, textSpans := text.normalizedForm()
-	normalizedQuote, quoteSpans := normalizedRanges(quote)
-	if normalizedQuote == "" || len(textSpans) == 0 || len(quoteSpans) == 0 {
+	needle, quoteSpans := normalizedRanges(quote)
+	if len(needle) == 0 || len(textSpans) == 0 || len(quoteSpans) == 0 {
 		return nil
 	}
 
-	needle := []rune(normalizedQuote)
 	var matches []quoteMatch
-	for _, offset := range findAllRunes([]rune(normalizedText), needle) {
+	for _, offset := range findAllRunes(normalizedText, needle) {
 		from := textSpans[offset].from
 		to := textSpans[offset+len(needle)-1].to
 		matches = append(matches, quoteMatch{
@@ -435,14 +608,13 @@ func hasInlineMarkup(marks []inlineMarkup) bool {
 
 func normalizedMarkdownQuoteMatches(text, quote flattenedText) []quoteMatch {
 	normalizedText, textSpans := text.normalizedForm()
-	normalizedQuote, quoteSpans := quote.normalizedForm()
-	if normalizedQuote == "" || len(textSpans) == 0 || len(quoteSpans) == 0 {
+	needle, quoteSpans := quote.normalizedForm()
+	if len(needle) == 0 || len(textSpans) == 0 || len(quoteSpans) == 0 {
 		return nil
 	}
 
-	needle := []rune(normalizedQuote)
 	var matches []quoteMatch
-	for _, offset := range findAllRunes([]rune(normalizedText), needle) {
+	for _, offset := range findAllRunes(normalizedText, needle) {
 		if !matchingInlineMarkup(text, quote, textSpans[offset:offset+len(needle)], quoteSpans) {
 			continue
 		}
@@ -622,7 +794,9 @@ func findAllRunes(haystack, needle []rune) []int {
 	return matches
 }
 
-func normalizedRanges(value string) (string, []range16) {
+// normalizedRanges is value with each whitespace run read as one space and leading and trailing
+// whitespace dropped, as runes, with the UTF-16 span of value each rune stands for.
+func normalizedRanges(value string) ([]rune, []range16) {
 	out := make([]rune, 0, len(value))
 	spans := make([]range16, 0, len(value))
 	unitOffset := 0
@@ -649,7 +823,7 @@ func normalizedRanges(value string) (string, []range16) {
 		spans = append(spans, range16{from: unitOffset, to: unitOffset + width})
 		unitOffset += width
 	}
-	return string(out), spans
+	return out, spans
 }
 
 func distance(left, right int) int {
@@ -688,30 +862,149 @@ func MarkSpans(doc *Node, markType, id string) []Range {
 // FindMark finds the first document-contiguous range covered by a mark identity, the first of
 // its MarkSpans, and its text, the runs joined with a space where a block boundary lies between,
 // each U+0000 written as U+FFFD (nulAsReplacement): the text is what an anchor row stores as its
-// quote.
+// quote. It is FindMarks asked for the one identity, so one walk holds the rule for both.
 func FindMark(doc *Node, markType, id string) (Range, string, bool) {
-	spans := MarkSpans(doc, markType, id)
-	if len(spans) == 0 {
-		return Range{}, "", false
+	key := MarkRef{Type: markType, ID: id}
+	f, ok := FindMarks(doc, []MarkRef{key})[key]
+	return f.Range, f.Quote, ok
+}
+
+// MarkFound is what FindMark and MarkAttrs read for one mark identity. Attrs is the attributes
+// map of the identity's first mark in the tree itself, not a copy: callers read it and must not
+// modify it.
+type MarkFound struct {
+	Range Range
+	Quote string
+	Attrs Attrs
+}
+
+// FindMarks is FindMark and MarkAttrs for many mark identities in one walk: each key it finds maps
+// to the range and quote FindMark returns and the attributes MarkAttrs reads, uncopied, and a key it
+// does not find is absent. A write refreshes every open anchor's range and quote, and a walk per
+// anchor would make that refresh quadratic in a document carrying many of them; here a run costs
+// only its own marks and the identities open at it.
+func FindMarks(doc *Node, keys []MarkRef) map[MarkRef]MarkFound {
+	if len(keys) == 0 {
+		return map[MarkRef]MarkFound{}
 	}
-	marked := spans[0]
-	var quote strings.Builder
-	last := -1
-	walk(doc, func(node *Node, _ []int, pos, end int) bool {
-		if pos >= marked.To {
-			return false
+	wanted := make(map[MarkRef]*markSearch, len(keys))
+	for _, key := range keys {
+		if _, ok := wanted[key]; !ok {
+			wanted[key] = &markSearch{last: -1}
 		}
-		if node.Type != "text" || pos < marked.From {
+	}
+	unfinished := len(wanted)
+	var open []*markSearch
+	run := 0
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		// Non-text nodes neither carry a mark nor end a span (MarkSpans).
+		if node.Type != "text" {
 			return true
 		}
-		if last >= 0 && pos != last {
-			quote.WriteByte(' ')
+		run++
+		for _, mark := range node.Marks {
+			id, ok := mark.Attrs["id"].(string)
+			if !ok {
+				continue
+			}
+			search := wanted[MarkRef{Type: mark.Type, ID: id}]
+			// A run carrying one identity twice counts once, and MarkAttrs reads the first of them.
+			if search == nil || search.run == run || search.state == markClosed {
+				continue
+			}
+			search.run = run
+			if search.state == markUnseen {
+				search.state = markOpen
+				search.found = MarkFound{Range: Range{From: pos, To: pos}, Attrs: mark.Attrs}
+				open = append(open, search)
+			}
+			search.add(node.Text, pos, end)
 		}
-		quote.WriteString(node.Text)
-		last = end
-		return true
+		// A text run without an open identity ends its first span, and only the first counts.
+		kept := open[:0]
+		for _, search := range open {
+			if search.run == run {
+				kept = append(kept, search)
+				continue
+			}
+			search.close()
+			unfinished--
+		}
+		clear(open[len(kept):])
+		open = kept
+		return unfinished > 0
 	})
-	return marked, nulAsReplacement(quote.String()), true
+	for _, search := range open {
+		search.close()
+	}
+	found := make(map[MarkRef]MarkFound, len(wanted))
+	for key, search := range wanted {
+		if search.state != markUnseen {
+			found[key] = search.found
+		}
+	}
+	return found
+}
+
+type markSearchState uint8
+
+const (
+	markUnseen markSearchState = iota
+	markOpen
+	markClosed
+)
+
+// markSearch is one identity's progress through FindMarks' walk: unseen, then open over its first
+// span, then closed for good.
+type markSearch struct {
+	state markSearchState
+	found MarkFound
+	// run is the text run that last carried the identity, so a run's sweep tells the identities it
+	// carries from the open ones it ends.
+	run   int
+	quote strings.Builder
+	// last is the end of the last run written to quote, or -1 before the first: a run starting
+	// anywhere else is parted from it by a space.
+	last int
+	// pending holds the positions of empty runs in the span that are not yet written. The quote
+	// takes a run only when its position lies before the span's end, so an empty run belongs to the
+	// quote, writing a separator where it lies apart from the run before it, only once a later run
+	// carries the span past it.
+	pending []int
+}
+
+// add extends the open span over the run at pos..end and writes to the quote what the quote takes
+// for it and for the empty runs that the span now passes.
+func (s *markSearch) add(text string, pos, end int) {
+	s.found.Range.To = end
+	flushed := 0
+	for flushed < len(s.pending) && s.pending[flushed] < end {
+		s.write("", s.pending[flushed], s.pending[flushed])
+		flushed++
+	}
+	s.pending = slices.Delete(s.pending, 0, flushed)
+	if pos == end {
+		s.pending = append(s.pending, pos)
+		return
+	}
+	s.write(text, pos, end)
+}
+
+func (s *markSearch) write(text string, pos, end int) {
+	if s.last >= 0 && pos != s.last {
+		s.quote.WriteByte(' ')
+	}
+	s.quote.WriteString(text)
+	s.last = end
+}
+
+// close ends the span: empty runs still pending lie at or past its end, which the quote never
+// reaches.
+func (s *markSearch) close() {
+	s.state = markClosed
+	s.found.Quote = nulAsReplacement(s.quote.String())
+	s.quote = strings.Builder{}
+	s.pending = nil
 }
 
 // anchorMarkTypes are the marks an ask or comment row anchors to: its quote is the text they
@@ -788,12 +1081,20 @@ type MarkRef struct {
 	ID   string
 }
 
+// Marked is a mark identity in the tree with the `by` attribute its first run carries, empty
+// when it has none.
+type Marked struct {
+	MarkRef
+	By string
+}
+
 // ListMarks returns each distinct Proof or Dispatch mark identity in document
-// order.
-func ListMarks(doc *Node) []MarkRef {
+// order, with the author its first run names. doc must be a tree Validate accepts: the walk
+// descends into every node's children and computes no positions.
+func ListMarks(doc *Node) []Marked {
 	seen := make(map[MarkRef]struct{})
-	var refs []MarkRef
-	walk(doc, func(node *Node, _ []int, _, _ int) bool {
+	var marked []Marked
+	Walk(doc, func(node *Node) bool {
 		if node.Type != "text" {
 			return true
 		}
@@ -810,31 +1111,20 @@ func ListMarks(doc *Node) []MarkRef {
 				continue
 			}
 			seen[ref] = struct{}{}
-			refs = append(refs, ref)
+			by, _ := mark.Attrs["by"].(string)
+			marked = append(marked, Marked{MarkRef: ref, By: by})
 		}
 		return true
 	})
-	return refs
+	return marked
 }
 
-// MarkAttrs returns a copy of the attributes on the first matching mark run.
+// MarkAttrs returns a copy of the attributes on the first matching mark run: FindMarks' Attrs,
+// copied so the caller may change them without changing the tree.
 func MarkAttrs(doc *Node, markType, id string) (Attrs, bool) {
-	var attrs Attrs
-	found := false
-	walk(doc, func(node *Node, _ []int, _, _ int) bool {
-		if node.Type != "text" {
-			return true
-		}
-		for _, mark := range node.Marks {
-			if markHasID(mark, markType, id) {
-				attrs = cloneAttrs(mark.Attrs)
-				found = true
-				return false
-			}
-		}
-		return true
-	})
-	return attrs, found
+	key := MarkRef{Type: markType, ID: id}
+	f, ok := FindMarks(doc, []MarkRef{key})[key]
+	return cloneAttrs(f.Attrs), ok
 }
 
 // nodeHasMarkID reports whether node carries a markType mark whose id is id. A record mark's type
@@ -860,7 +1150,30 @@ func markHasID(mark Mark, markType, id string) bool {
 // MarkRange adds mark to every selected text run. A mark may cross textblocks
 // when the target schema allows it in each textblock.
 func MarkRange(txn *crdt.Transaction, frag *crdt.YXmlFragment, r Range, mark Mark) error {
-	if txn == nil || frag == nil || r.From >= r.To {
+	return NewMarkWriter(frag).Mark(txn, r, mark)
+}
+
+// MarkWriter is MarkRange for many marks written to one fragment. It reads the fragment's text
+// ranges once, at the first mark it writes, and reuses them for every later one: writing a mark
+// formats Yjs texts, which changes neither a text's length nor the elements holding it, so the
+// ranges stay those of the fragment. Nothing but its own marks may change the fragment while the
+// writer is in use.
+type MarkWriter struct {
+	frag     *crdt.YXmlFragment
+	prepared bool
+	spans    []yTextRange
+	err      error
+}
+
+// NewMarkWriter returns a writer over frag. It reads nothing of frag until its first mark.
+func NewMarkWriter(frag *crdt.YXmlFragment) *MarkWriter {
+	return &MarkWriter{frag: frag}
+}
+
+// Mark is MarkRange(txn, frag, r, mark): the same checks in the same order, the same Format calls
+// and the same error. A fragment whose text ranges are refused refuses every mark.
+func (w *MarkWriter) Mark(txn *crdt.Transaction, r Range, mark Mark) error {
+	if txn == nil || w.frag == nil || r.From >= r.To {
 		return fmt.Errorf("%w: invalid mark range", ErrSchema)
 	}
 	if !markTypes[mark.Type] {
@@ -870,25 +1183,29 @@ func MarkRange(txn *crdt.Transaction, frag *crdt.YXmlFragment, r Range, mark Mar
 		return err
 	}
 
-	spans, err := yTextRanges(frag)
-	if err != nil {
-		return err
+	if !w.prepared {
+		w.prepared = true
+		w.spans, w.err = yTextRanges(w.frag)
 	}
-	var affected []yTextRange
-	for _, span := range spans {
-		if span.From < r.To && r.From < span.To {
-			if !markAllowedInTextblock(mark.Type, span.textblock) {
-				return fmt.Errorf("%w: mark %q is not allowed in %s", ErrSchema, mark.Type, span.textblock)
-			}
-			affected = append(affected, span)
+	if w.err != nil {
+		return w.err
+	}
+	// The ranges are in document order and disjoint, so the texts r overlaps are one run of them,
+	// starting at the first that ends past r.From.
+	spans := w.spans
+	first := sort.Search(len(spans), func(index int) bool { return spans[index].To > r.From })
+	last := first
+	for ; last < len(spans) && spans[last].From < r.To; last++ {
+		if !markAllowedInTextblock(mark.Type, spans[last].textblock) {
+			return &MarkNotAllowedError{Mark: mark.Type, Textblock: spans[last].textblock, At: spans[last].From}
 		}
 	}
-	if len(affected) == 0 {
+	if first == last {
 		return ErrTargetNotFound
 	}
 
 	attributes := crdt.Attributes{markAttributeKey(mark): markAttributeValue(mark)}
-	for _, span := range affected {
+	for _, span := range spans[first:last] {
 		from := max(r.From, span.From) - span.From
 		to := min(r.To, span.To) - span.From
 		span.text.Format(txn, from, to-from, attributes)
@@ -932,20 +1249,15 @@ type textLocation struct {
 	end int
 }
 
+// yTextRanges is the ProseMirror range of each non-empty Yjs text in frag, with the textblock
+// holding it, in document order. MarkRange and Unmark call it on every anchored write, so it reads
+// the fragment once and finds each text run's position as it goes.
 func yTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
 	var texts []yTextNode
-	children, err := yFragmentShapeChildren(frag, "", 1, &texts)
-	if err != nil {
+	var locations []textLocation
+	if _, err := yFragmentLocations(frag, "", 1, 0, &texts, &locations); err != nil {
 		return nil, err
 	}
-	doc := &Node{Type: "doc", Children: children}
-	var locations []textLocation
-	walk(doc, func(node *Node, _ []int, pos, end int) bool {
-		if node.Type == "text" {
-			locations = append(locations, textLocation{pos: pos, end: end})
-		}
-		return true
-	})
 
 	ranges := make([]yTextRange, 0, len(texts))
 	location := 0
@@ -982,51 +1294,77 @@ func yTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
 	return ranges, nil
 }
 
-// yFragmentShapeChildren is the shape of frag's children, which stand depth levels below the
-// document, and appends each Yjs text among them to texts with the textblock holding it. It
-// refuses a node past MaxTreeDepth as Read does: an element, or a text holding anything, which Read
-// makes a text node of.
-func yFragmentShapeChildren(frag *crdt.YXmlFragment, textblock string, depth int, texts *[]yTextNode) ([]*Node, error) {
-	var children []*Node
+// yFragmentLocations appends each Yjs text among frag's children, which stand depth levels below
+// the document, to texts with the textblock holding it. When locations is not nil, it also appends
+// the range of each text node walk would visit among them in the Node shape the fragment reads as,
+// with each text's delta operations as text nodes and each element as a node of its name and no
+// text, where the children start at ProseMirror position pos, and returns their size as nodeSize
+// counts it. It sizes and enters elements by walk's own rules (isOpaqueNodeType, opaqueNodeSize,
+// boundaryTokens): an element named text is a text run of no width, and no Yjs text inside it or
+// a leaf-named element is located. It refuses a node past MaxTreeDepth as Read does: an element,
+// or a text holding anything, which Read makes a text node of. Its refusals, met in document order
+// during the one traversal, precede any refusal from aligning texts with locations.
+func yFragmentLocations(frag *crdt.YXmlFragment, textblock string, depth, pos int, texts *[]yTextNode, locations *[]textLocation) (int, error) {
+	start := pos
 	for _, child := range frag.Children() {
 		switch current := child.(type) {
 		case *crdt.YXmlText:
 			if current.Len() > 0 {
 				if err := treeDepthError(depth); err != nil {
-					return nil, err
+					return 0, err
 				}
 			}
 			*texts = append(*texts, yTextNode{text: current, textblock: textblock})
 			delta, err := yTextDeltaInTransaction(current)
 			if err != nil {
-				return nil, err
+				return 0, err
 			}
 			for _, operation := range delta {
 				value, ok := operation.Insert.(string)
 				if !ok {
-					return nil, fmt.Errorf("%w: unsupported Yjs text embed %T", ErrSchema, operation.Insert)
+					return 0, fmt.Errorf("%w: unsupported Yjs text embed %T", ErrSchema, operation.Insert)
 				}
-				children = append(children, &Node{Type: "text", Text: value})
+				// Outside located children no position is read, so their widths go uncounted.
+				if locations != nil {
+					width := len16(value)
+					*locations = append(*locations, textLocation{pos: pos, end: pos + width})
+					pos += width
+				}
 			}
 		case *crdt.YXmlElement:
 			if err := treeDepthError(depth); err != nil {
-				return nil, err
+				return 0, err
 			}
-			inner := textblock
-			switch current.NodeName {
+			name := current.NodeName
+			innerBlock := textblock
+			switch name {
 			case "paragraph", "heading", "code_block":
-				inner = current.NodeName
+				innerBlock = name
 			}
-			grandchildren, err := yFragmentShapeChildren(&current.YXmlFragment, inner, depth+1, texts)
+			opaque := isOpaqueNodeType(name)
+			// walk visits an element named text as a text node holding no text, so it locates one of
+			// no width, and enters it no more than a leaf.
+			if name == "text" && locations != nil {
+				*locations = append(*locations, textLocation{pos: pos, end: pos})
+			}
+			innerLocations := locations
+			if opaque {
+				innerLocations = nil
+			}
+			size, err := yFragmentLocations(&current.YXmlFragment, innerBlock, depth+1, pos+boundaryTokens(name)/2, texts, innerLocations)
 			if err != nil {
-				return nil, err
+				return 0, err
 			}
-			children = append(children, &Node{Type: current.NodeName, Children: grandchildren})
+			if opaque {
+				pos += opaqueNodeSize(name, "")
+			} else {
+				pos += size + boundaryTokens(name)
+			}
 		default:
-			return nil, fmt.Errorf("%w: unexpected Yjs child %T", ErrSchema, child)
+			return 0, fmt.Errorf("%w: unexpected Yjs child %T", ErrSchema, child)
 		}
 	}
-	return children, nil
+	return pos - start, nil
 }
 
 // Unmark removes every markType mark whose id attribute equals id.

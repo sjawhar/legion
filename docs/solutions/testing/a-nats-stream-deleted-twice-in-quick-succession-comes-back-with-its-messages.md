@@ -82,11 +82,19 @@ the key is there. Without it, the recreated bucket is empty. Against a host `nat
 <store>` built from the module cache, the three session tests then fail five runs out of five with
 CI's message. Loading the machine only widens the window.
 
-On a devbox the `go` on `PATH` is a mise shim that sets `GOBIN` to the shared toolchain's `bin`, so
+On a devbox, the `go` on `PATH` is a mise shim, and it can replace a caller's `GOBIN` with the
+shared toolchain's `bin`. It does so when `go.set_gobin` is true (`MISE_GO_SET_GOBIN=true`, or the
+setting), and, on mise before 2026.9.0, in any shell `mise activate` set up: those versions rebuild
+the shell's original environment from `__MISE_DIFF` without checking whether the caller changed
+`GOBIN` since, so mise's own value comes back. From 2026.9.0 the caller's `GOBIN` holds unless the
+setting is on; `mise --version` says which case a machine is in. When it is replaced,
 `GOBIN=/tmp/x go install github.com/nats-io/nats-server/v2@v2.10.29` puts the binary where every
-session using that toolchain finds it. Call the real binary instead, which `mise which go` prints
-and which honours `GOBIN`:
-`GOBIN=/tmp/x "$(mise which go)" install github.com/nats-io/nats-server/v2@v2.10.29`.
+session using that toolchain finds it. Call a real binary instead, which honours `GOBIN` either
+way: the toolchain the checkout selects, under its own `GOROOT`, as the repository's scripts do
+(`goroot=$(go env GOROOT); GOBIN=/tmp/x GOROOT=$goroot "$goroot/bin/go" install …`), or mise's own
+binary outside a checkout (`GOBIN=/tmp/x "$(mise which go)" install …`). The `GOROOT` matters
+inside a checkout whose `go.work` selects a newer toolchain: the activated shell exports mise's
+Go's `GOROOT`, and the newer `go` refuses that older compiler.
 
 ## Fix
 

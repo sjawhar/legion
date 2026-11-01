@@ -1,5 +1,156 @@
 # Changelog
 
+## [main@d7e1daaaaf70] - 2026-10-31
+
+### Added
+
+- `WriteAdvice.superseded_approval` (`{approved_version, version, approved_by}`): the approval a
+  document write superseded, set only on the write whose version replaced the approved one.
+
+## [main@e65900f4438b] - 2026-10-30
+
+### Added
+
+- `dispatch_answers` (`dispatch answers`), with no arguments: every answer and comment a person
+  wrote to this session in the last 72 hours, newest first, in full, the command the per-request
+  list names when it leaves older items out.
+- `SessionAnswer` and `SessionAnswersResponse`, the body of
+  `GET /api/v1/agents/{session_id}/answers` (`{session_id, since, total, items}`): each item is an
+  ask's current answer, a comment or a message a person wrote that Dispatch delivered to the
+  session, with its `relation` (one of `SESSION_ANSWER_RELATIONS`), time, author, full text, an
+  answer's choices and whether it replaced an earlier one, the ask it answers, its owner, its
+  `dispatch://` reference and its deep link; mirrored in Go as `model.SessionAnswer` and
+  `model.SessionAnswersResponse`.
+- `PublishedDispatchEvent` declares the event as Dispatch's outbox publishes it to NATS: the
+  event the API serves, plus the optional `quiet` the payload now carries. `quiet` is whether the
+  event carries nothing for a reader following its owner topic - a delivery receipt, an anchor
+  refresh, settings or per-viewer bookkeeping, a targeted message its session already had, an ask
+  edit that only moved a version, or a version nobody named - and it is what such a reader skips
+  on. `notify`, beside it, answers whether to wake the issue's route, claimant and authors, so an
+  agent's own event is not a wake. It is optional because a frame published before Dispatch
+  stated the field carries none, and a reader judges that frame by `notify` instead. The API's
+  own event shape is unchanged and carries no `quiet`.
+
+### Changed
+
+- `GithubPushSubject` cuts a ref segment that would make the subject longer than 4,032 bytes
+  (`SUBJECT_MAX_BYTES`, the bus's limit) and ends it in `~` and 16 hex digits of the whole ref's
+  SHA-256, so NATS stores a push whatever its ref's length and two refs keep two subjects. The
+  daemon API state schema (contract 43) gains `consumers` and `repositories.withoutWebhookApp`.
+
+## [main@49e23926228d] - 2026-10-30
+
+### Added
+
+- The Dispatch types carry comment and message blocks: `ReplyBlock` and `reply_block` on `Comment` and `Message` and their event payloads, `reply_to_block` and `in_reply_to_block` on the reply inputs, `blocks` and `base_revision` on `EditCommentInput`, `ItemBlocks`, and the shared reference tables' comment and message block forms.
+
+### Changed
+
+- `relatedCheckFormOf` judges which of the related-item check's three forms a `Suggestions`
+  holds, and `relatedCheckModeWords` and `relatedCheckSearchWords` give the words each form
+  names. The CLI's lines and the Dispatch dashboard's new-issue dialog both read this one
+  answer and only word it, so a later change to the outcome enum, the search modes or the
+  branch order reaches both surfaces at once.
+
+## [main@1f5b08286a6d] - 2026-10-29
+
+### Added
+
+- The related-item check's result. `Suggestions` gains `outcome`
+  (`RelatedCheckOutcome`: `found` | `none` | `not_made`), `search` (`RelatedCheckSearch`:
+  `meaning_and_keywords` | `keywords_only`), `search_note`, `search_query` and `title_matches`
+  (`DuplicateCandidate[]`, a forced issue create's title overlaps), each optional so an older
+  server's shape still reads; `missing` stays, set whenever the check was not made.
+  `SearchResult` and `WriteSuggestion` gain `ask?: SearchAsk`, where an ask hit stands
+  (`{state: "open"}`, `{state: "answered", answer}` or `{state: "resolved", resolution, answer?}`).
+  `WriteAdvice` gains `decision_block_checks?: DecisionBlockCheck[]` (`{block_id, question,
+  suggestions}`) for a document edit's new decision blocks. `RelatedCheckInput` is the body of
+  `POST /api/v1/projects/{key}/related`, and `RelatedChecksReport` / `RelatedCheckTiming` the
+  answer of `GET /api/v1/related-checks`. `dispatchToolSpecs` gains `dispatch_related` (the check
+  on a `title` and `text` of a `project`, with `exclude_issue` and `keywords_only`, writing
+  nothing), and `dispatch_issue`, `dispatch_ask` and `dispatch_doc_edit` say the result names what
+  the check found, that it found nothing, or that it was not made and why, after at most five
+  seconds.
+
+## [main@c4cea404651d] - 2026-10-29
+
+### Added
+
+- One WebSocket per browser tab at `GET /ws/live` (INFRA-258), with the common `Live*` frames and `LiveView`: a `DeliveryLiveView`, the Dispatch event-feed `EventsLiveView`, or one session's `AgentLiveView`. Delivery views resume with `DeliveryLiveResume` (`seq`, `revs`); events views resume with `EventsLiveResume` (`since`) and begin with `LiveEventsStart`, whose `replay_complete` says whether the subscription replays every event after the resume (a resume at or below the feed's head), so a page owes no refresh for the gap; agent views begin from the session replay. `LiveEventFrame`, `LiveAgentFrame`, and `LiveEnded` complete the new frame family; a `LiveAgentFrame`'s `data` is an `AgentStreamResponder` for its `responder` event and `unknown` for `replay` and `frame`, the session's own JSON, which Dispatch relays unparsed and a page checks before it renders it. `LIVE_SOCKET_MAX_AGE_CLOSE` (4001) rotates a socket at a random age in [`LIVE_SOCKET_MIN_AGE_MS`, `LIVE_SOCKET_MAX_AGE_MS`) (30 to 60 minutes), and `LIVE_SOCKET_MAX_SUBSCRIPTIONS` is 64.
+
+  `AuthenticatedUser.event_head`, the decimal id of the newest event when `GET /auth/whoami` answered (INFRA-292). It is required: a page of this release subscribes the event feed on `GET /ws/live`, which only a server that answers the head serves, and the feed starts its first subscription there, so every read the page makes after the sign-in check is covered by a resume.
+
+### Changed
+
+- **Breaking:** a write names its intent by the `Idempotency-Key` request header (`IDEMPOTENCY_KEY_HEADER`) on every `POST` and `PATCH` route, not by a body field (INFRA-258): `CreateBroadcastInput.idempotency_key` is gone, and a body that still carries it is `400 INVALID_JSON`. The key is optional; a repeat under it is answered with the first answer and `IDEMPOTENCY_REPLAYED_HEADER`, a different request under it is `422 KEY_REUSED` (`IDEMPOTENCY_KEY_REUSED`), and a repeat while the first still runs is `409 KEY_IN_FLIGHT` (`IDEMPOTENCY_KEY_IN_FLIGHT`) with `Retry-After: 1`; a 5xx, 401, 408 or 429 is not kept, so the next attempt runs again, unless the first attempt had committed its write, which makes the next attempt `409 KEY_COMMITTED` (`IDEMPOTENCY_KEY_COMMITTED`): the write landed, Dispatch has no answer to replay, and a client treats it as landed. Added `IDEMPOTENCY_KEY_MAX`, `IDEMPOTENCY_KEY_PATTERN`, `IDEMPOTENCY_KEY_INVALID`, `IDEMPOTENCY_ANSWER_NOT_KEPT`, `IDEMPOTENCY_KEY_TTL_MS`, `IDEMPOTENCY_LEASE_MS`, `retriesUnderKey`, `answerNotKept`, `IdempotencyLandedCode`, `DISPATCH_LOGIN_HEADER`, and `DISPATCH_LOGIN_CHANGED`.
+
+  **Breaking:** the frames every live view shares are renamed (INFRA-258): `DeliveryLiveSubscribe`, `DeliveryLiveUnsubscribe`, `DeliveryLiveClientFrame`, `DeliveryLiveError`, `DeliveryLiveHeartbeat` and `DeliveryLiveServerFrame` are `LiveSubscribe`, `LiveUnsubscribe`, `LiveClientFrame`, `LiveError`, `LiveHeartbeat` and `LiveServerFrame`. `LiveSubscribe` is a union by view kind: a `DeliveryLiveView` resumes with a `DeliveryLiveResume`, an `EventsLiveView` with an `EventsLiveResume`, and an `AgentLiveView` with none, which are the only pairings Dispatch accepts. `LiveServerFrame` adds the events and agent views' frames. The frame fixtures move with them: `fixtures/delivery-live/` is now `fixtures/live/`.
+
+## [main@a09a2f257406] - 2026-10-29
+
+### Added
+
+- `AskReach`, the reach every ask read carries, shared by `AskThread` and `AskRead`: `claimant`
+  (the session holding the claim on the ask's issue), `route` (the issue's route, `session:<id>` or
+  `role:<name>`), whom a person's answer and replies on the ask reach beside its followers, and,
+  since it extends `IssueRouteReach`, `route_status` (`live`, `no_holder` or `unknown`) and
+  `route_holder` (the live session that route reaches), resolved per read as on the issue reads, so
+  a reader counts each session once and tells a route nobody holds from one Dispatch could not
+  judge; each is null when absent and on a project document's ask.
+- `withdrawn`, a third `AskResolution.kind` beside `retracted` and `resolved`, which the ask event
+  payload schema (`AskEventPayloadSchema`) now parses: Dispatch writes it alone, on each open ask
+  an issue's close withdraws, and reopening the issue opens those asks again. `dispatch_resolve_ask`
+  still takes only `retracted` and `resolved`, so no caller can write one.
+- `IssueReferenceSummary` and `IssueReferenceSummaryDocument`, the body of
+  `GET /api/v1/issues/{key}/summary`, and `DocumentReferenceSummary`, the body of
+  `GET /api/v1/projects/{key}/artifacts/{slug}/summary`: what a reference to an issue or a
+  document shows, without the full read. `IssueReferenceSummaryDocument.primary` marks the
+  issue's spec, the document a reference to a block of the spec names. The event payloads gain
+  optional fields saying what a write moved: `IssueEventChanges` (`changed`, `ancestors`,
+  `thread_logins`) on `IssueEventPayload`, `ThreadLoginsPayload` (`thread_logins`) on
+  `AskEventPayload`, `CommentEventPayload` and `MessageEventPayload`,
+  `UserStateUpdatedEventPayload.changed` (which names `snoozed` for a snooze or an un-snooze, whose
+  event carries only `login` and `changed`, so `UserStateUpdatedEventPayload.state` is now
+  optional); `IssueEventPayloadSchema` and the ask, comment and message event schemas carry the
+  same optional fields. `ReferenceChangesPayload` gains `references_changed_truncated_kinds`, the
+  kinds a write cut from `references_changed` past the server's cap of 100 targets of each kind,
+  beside the still-named targets of every other kind and `references_changed_truncated: true`.
+  `ChangedReference` gains `kind: "artifact"`, a cited document or file named by its uuid, the
+  optional `ref`, its `dispatch://` address, and `kind: "block"`, a block of a document named by
+  its node id, its `ref` and its document's uuid as `artifact_id`, named when a write moves its
+  citations or its text. Each is absent from an event written before Dispatch sent it, which a
+  reader takes as "anything may have moved".
+
+### Changed
+
+- `dispatch_claim`'s description, which is also `dispatch claim --help`, says that while a session
+  holds the claim a person's answers, comments and messages on the issue reach it directly, a new
+  comment that mentions it arrives once, as the mention, when the mention reached it, and still
+  reaches it directly when the mention's send fails (a mention whose receipt timed out can arrive
+  twice, and the second copy is the same comment), and that an agent's events and every other
+  change on the issue still need a subscription to it, except in an ask you follow: anyone else's
+  answer, hand-back, resolution or edit of it (other than a quiet edit), and every reply there
+  (new, edited, resolved or reopened), reach you as its follower.
+- The `dispatch_doc_read` description says a read prints every open thread anchored on the
+  document in full after the markdown, an open ask's replies included, and no resolved thread or
+  closed ask (#2366).
+- `DISPATCH_SERVER_STARTED_SUBJECT` and `DispatchServerStartedPayloadSchema` mean the build every
+  live Dispatch server process serves, announced once each time that build changes, rather than one
+  process's start: a rolling update is announced once its last process of the earlier build has
+  gone, a restart on the announced build is not announced, and a rollback is announced again.
+  `started_at` is the database's time of the announcement, and the event id is
+  `dispatch-server-started-<commit>-<seq>`. The subject and the payload's two fields are unchanged,
+  so the schema still parses every envelope; a shared fixture
+  (`packages/daemon/internal/intake/testdata/dispatch/server-started.json`) holds the Dispatch
+  writer, the daemon's intake and this schema to one envelope.
+- `shortSessionId` reads the Legion daemon's write identity, a session id beginning
+  `legion-daemon:`, whole rather than as `session:` and its first 8 characters, which name nobody,
+  so the shared actor label names the daemon that closed an issue. `dispatch_issue_update`'s
+  description says closing an issue withdraws its open asks and reopening it brings them back, and
+  `dispatch_resolve_ask`'s says a closed issue's asks were withdrawn by its close, that only
+  Dispatch writes `withdrawn`, and that an ask on a closed issue is `409 ISSUE_CLOSED` until the
+  issue reopens.
+
 ## Before changelog fragments
 
 ### Added

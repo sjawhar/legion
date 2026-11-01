@@ -14,13 +14,24 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>Dispatch</title>
     <!--
-      A script of this build that fails to download (the entry chunk, or one it imports) reloads
-      the page once: a rolling deploy can serve this page from one server and its assets from
-      another that never built them, and no app code runs to recover. A script of another origin
-      (a browser extension's) is never this build's, whatever its path. It shares the lazy-chunk
-      recovery's once-per-session budget (its sessionStorage key, in
-      src/features/shell/DeploymentResilience.tsx) and offline rule, and skips a page being left,
-      from beforeunload or pagehide (iOS Safari fires no beforeunload) until pageshow.
+      A script, module preload or stylesheet of this build that fails to download (the entry
+      chunk, one it imports, the main stylesheet linked after this script, or a lazy chunk's
+      preload) reloads the page: a rolling deploy can serve this page from one server and its
+      assets from another that never built them, and before the entry runs no app code can
+      recover. A file of another origin (a browser extension's) is never this build's, whatever
+      its path. The budget is the lazy-chunk recovery's, kept by the same rule on the same
+      sessionStorage key as spendChunkReload in src/features/shell/DeploymentResilience.tsx: a
+      JSON array of the times of this tab's recovery reloads, and a failure reloads only while
+      fewer than 3 of them fall in the last 5 minutes (a value that does not parse reads as none).
+      It keeps that file's offline rule, and skips a page being left, from beforeunload or
+      pagehide until pageshow. iOS Safari fires no beforeunload, and once the app runs a lazy
+      chunk's preload can be cancelled by a link the reader follows before pagehide, so a
+      navigation to another document that is not a download marks the page as left too. This
+      script never clears that before pageshow, unlike the bundle's finer rule: a failure of a
+      preload or stylesheet Vite inserted also reaches the bundle's own handler, which judges it.
+      A reload fires beforeunload itself, so that handler does not spend the budget again for the
+      same failure. Storage that cannot be read or written reloads nothing, since nothing would
+      bound the reloads.
       Dispatch sends no Content-Security-Policy; one would have to allow this script by its hash.
     -->
     <script>
@@ -34,24 +45,50 @@
         window.addEventListener("pageshow", () => {
           leaving = false;
         });
+        if (window.navigation) {
+          window.navigation.addEventListener("navigate", (event) => {
+            if (!event.destination.sameDocument && event.downloadRequest === null) {
+              leaving = true;
+            }
+          });
+        }
         window.addEventListener(
           "error",
           (event) => {
-            var script = event.target;
-            if (!(script instanceof HTMLScriptElement)) {
+            var element = event.target;
+            var url;
+            if (element instanceof HTMLScriptElement) {
+              url = element.src;
+            } else if (
+              element instanceof HTMLLinkElement &&
+              (element.rel === "stylesheet" || element.rel === "modulepreload")
+            ) {
+              url = element.href;
+            } else {
               return;
             }
-            if (script.src.indexOf(`${window.location.origin}/assets/`) !== 0) {
+            if (url.indexOf(`${window.location.origin}/assets/`) !== 0) {
               return;
             }
             if (leaving || !navigator.onLine) {
               return;
             }
+            var now = Date.now();
+            var stored;
             try {
-              if (window.sessionStorage.getItem("dispatch.reloaded-for-chunk") === "true") {
-                return;
-              }
-              window.sessionStorage.setItem("dispatch.reloaded-for-chunk", "true");
+              stored = JSON.parse(window.sessionStorage.getItem("dispatch.chunk-reloads") || "[]");
+            } catch {
+              stored = [];
+            }
+            var recent = (Array.isArray(stored) ? stored : []).filter(
+              (time) => typeof time === "number" && now - time < 5 * 60 * 1000
+            );
+            if (recent.length >= 3) {
+              return;
+            }
+            recent.push(now);
+            try {
+              window.sessionStorage.setItem("dispatch.chunk-reloads", JSON.stringify(recent));
             } catch {
               return;
             }

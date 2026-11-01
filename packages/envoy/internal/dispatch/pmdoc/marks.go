@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"slices"
 )
 
 // The mark vocabulary the reader and the writer share: which marks a text is written under, in
@@ -102,14 +103,27 @@ func markDelimiter(mark Mark) byte {
 	return 0
 }
 
+// visibleMarks is the rendered marks of marks in writing order: nil when there are none, else a
+// fresh slice the caller may filter in place (withoutMark) without touching marks.
 func visibleMarks(marks []Mark) []Mark {
-	out := make([]Mark, 0, len(marks))
-	for _, mark := range marks {
-		if renderedMarkTypes[mark.Type] {
-			out = append(out, mark)
-		}
+	out, kept := renderedMarks(marks)
+	if len(out) == 0 {
+		return nil
 	}
-	sortMarks(out)
+	if kept {
+		out = slices.Clone(out)
+	}
+	if len(out) > 1 {
+		slices.SortFunc(out, func(left, right Mark) int {
+			switch {
+			case markLess(left, right):
+				return -1
+			case markLess(right, left):
+				return 1
+			}
+			return 0
+		})
+	}
 	for i := range out {
 		for j := i + 1; j < len(out); j++ {
 			if renderMarkRank(out[j].Type) < renderMarkRank(out[i].Type) {

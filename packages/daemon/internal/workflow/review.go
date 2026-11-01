@@ -27,10 +27,12 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	// that stands for the head can be of the code head it replaced, arriving after it. A
 	// settlement is for the commit it names, never the head by default. While a head run is open
 	// the settlement is recorded in it whether it stands or not (classify.ApplyCheckSettlement).
+	// The listener's duplicate of a settlement the pass built gives the record its fence and
+	// decides nothing: no run and no outcome changed.
 	candidate := classify.SettlementCandidate{Head: fact.HeadSHA, CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Failing: fact.Failing, Cancelled: fact.Cancelled}
-	settled, applied := classify.ApplyCheckSettlement(*pr, candidate)
+	settled, applied, adopted := classify.ApplyCheckSettlement(*pr, candidate)
 	if !applied {
-		if pr.Run == nil {
+		if pr.Run == nil && !adopted {
 			return intake.Result{}, nil
 		}
 		return intake.Result{}, e.store.PutPullRequest(ctx, tx, settled)
@@ -100,16 +102,16 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 // base branch requires (requiredRead), and decides, with the issue's phase in hand, what it moves.
 // CI is the daemon's own rule, read beside the review round and never by it (standingRed): in
 // testing, reviewing, retro and merging a red that stands for the head sends the work back to
-// implementing, whatever the tester has found, the round holds or the merger is doing, and takes
-// the phase from a role still at work in it (takenOver). The reviewer's approval of the head ends
-// its round on its own (reviewRound), as the reviewer reads the code commit's checks on GitHub
-// before it approves. In awaiting_merge, the head's own red withdraws the READY
-// (classify.RedWithdrawsReady), and the transition tells the merge queue role so (withdrawReady). A
-// red the tester planned - its own failing tests, pushed for the implementer to make pass - sends
-// nothing back (PlannedRed), and neither does a red in implementing, where the implementer is
-// already at work. The implementer's task and the architect's checks-red notice name the red
-// required checks and workflows, and the implementer's next push is a counted fix attempt, as any
-// new head on a red verdict is (classify.AdvancePullRequestHead).
+// implementing, whatever the tester has found, the round holds or the merger is doing, and tells
+// the role it leaves with no phase so on that role's own topic (phaseEnded). The reviewer's
+// approval of the head ends its round on its own (reviewRound), as the reviewer reads the code
+// commit's checks on GitHub before it approves. In awaiting_merge, the head's own red withdraws
+// the READY (classify.RedWithdrawsReady), and the transition tells the merge queue role so
+// (withdrawReady). A red the tester planned - its own failing tests, pushed for the implementer
+// to make pass - sends nothing back (PlannedRed), and neither does a red in implementing, where
+// the implementer is already at work. The implementer's task and the architect's checks-red
+// notice name the red required checks and workflows, and the implementer's next push is a counted
+// fix attempt, as any new head on a red verdict is (classify.AdvancePullRequestHead).
 //
 // At an exhausted fix-attempt count, a red within the attempt the count last counted - the counted
 // head, or a head pushed on top of it until a push lands on a green verdict or on a settled head
@@ -440,10 +442,11 @@ func (r round) stuckAs(other round) bool {
 // reads no CI verdict: CI is the daemon's separate rule, which sends a red head back to implementing
 // from reviewing as from any phase before READY, on the fact that makes the red stand (decideChecks,
 // standingRed), and the reviewer reads the code commit's checks on GitHub before it approves. A
-// round whose reviewer never completes is not ended by the decision alone: the reviewer's pane gets
-// a follow-up turn when a turn ends with its phase open (pi-legion's phase-stall check, at most two
-// a stall), and past that the issue stays in reviewing, as a tester's that never completes stays
-// in testing. A completed round that nothing on its way would end is stuck, its reason naming the
+// round whose reviewer never completes is not ended by the decision alone: the reviewer's worker
+// gets a reminder at the end of every turn that ends with its phase open (the phase reminder in
+// @legion/pi-shared, driven by each harness's own hooks), and past that the issue stays in
+// reviewing, as a tester's that never completes stays in testing. A completed round that nothing
+// on its way would end is stuck, its reason naming the
 // head, since the decision it needs is of the head: no review decided it (stuckUndecided), or its
 // approval is of other code than the head's (stuckApprovedOtherCode). An approval of the head a
 // push that may change code is still on its way from (classify.CodeOnItsWay) keeps the round open:
@@ -600,14 +603,15 @@ func (e *Engine) stampRun(pr *record.PullRequest) {
 }
 
 // implementationReady moves issue from implementing to testing on the implementer's completion of
-// the round that row records, once the pull request pr is known (TriggerImplementationReady), and
-// then applies the CI rule to the head it hands on (standingRed). A red in implementing sends
-// nothing back, since the implementer is at work there, so a required check that settled red after
-// the implementer's push and before its completion stands for the head with nothing acted on it:
-// the implementer pushes and completes without waiting for CI, and the settlement does not come
-// again. The completion is the fact that lets that red stand in testing, so the work goes back to
-// implementing at once, as a settlement arriving in testing would send it, rather than through a
-// tester round on code CI has already found broken.
+// the round that row records, once the pull request pr is recorded open or merged
+// (TriggerImplementationReady: a record closed without merging, or none, moves nothing), and then
+// applies the CI rule to the head it hands on
+// (standingRed). A red in implementing sends nothing back, since the implementer is at work there,
+// so a required check that settled red after the implementer's push and before its completion
+// stands for the head with nothing acted on it: the implementer pushes and completes without
+// waiting for CI, and the settlement does not come again. The completion is the fact that lets that
+// red stand in testing, so the work goes back to implementing at once, as a settlement arriving in
+// testing would send it, rather than through a tester round on code CI has already found broken.
 //
 // The rule is applied only when the record's head is the commit the completion reports
 // (row.HandoffCommit). The completion waits on no

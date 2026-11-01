@@ -1,5 +1,274 @@
 # Changelog
 
+## [main@f699b1316430] - 2026-10-31
+
+### Changed
+
+- `subscribe()` sends the host client instance id as `client_instance_id` on every registration, and `unregisterSession` now takes `{sessionID, clientInstanceID?}` in place of a bare session id and sends that id as a query parameter, so a departing client instance never deletes the registration a later instance made under the same session id. A `setRole` soft claim naming `previousSessionID` takes the role from that predecessor only when the predecessor has no live registration, when its live registration carries the same instance id, or when either side carries no instance id; any other live holder is answered `{claimed: false, holder}`.
+
+## [main@1d3e69553791] - 2026-10-31
+
+### Fixed
+
+- With `DISPATCH_TOKEN_FILE` set and nothing naming the server, `dispatchSettings` and the start notice of `sessionSettings` say `DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for` (`lostDispatchUrlNotice`). They said `no envoy.json at <path>: Dispatch is off` or `<file> names no Dispatch server, …`. Legion sets the variable only beside `DISPATCH_URL`, and a Legion pod has no envoy.json, so an agent whose shell had run `unset DISPATCH_URL` looked for a lost file. When the chosen file is missing, its dangling link and the unread OpenCode-era user file still follow, the old file last. `DISPATCH_TOKEN` alone, a file that turns Dispatch off and a file that cannot be read keep their own notice or error.
+
+## [main@d7e1daaaaf70] - 2026-10-31
+
+### Added
+
+- A `dispatch doc-edit` or `dispatch artifact` whose version superseded a person's approval ends
+  its result with what that write did: the version it stored, the approved version it replaced
+  and who approved it, that the approval is stale until someone approves the new version and no
+  undo restores it, and that a Legion design gate on the document is closed meanwhile, so every
+  READY in its tree is refused. It names both ways on: request approval for the new version, or
+  tell the tree's architect and keep the next correction in a comment or in the plan. A write
+  that superseded no approval prints nothing.
+
+### Changed
+
+- The write advice at six session writes with no human response states the duty at the end it already named: "Stop posting here until a human replies. Their reply ends this: post then what you held back." The old text named the end and no duty there, so a session whose questions were answered acted on the answers and wrote none of it back into the threads.
+
+## [main@e65900f4438b] - 2026-10-30
+
+### Added
+
+- `dispatch answers` prints every item people wrote to the session in the last 72 hours, newest
+  first, in the same item format with no cap; against a Dispatch older than the route it prints
+  `This Dispatch (<url>) has no answers route yet: its build is older than the answers route.` and exits 1.
+- `fileValue`, `fileBearer`, `dispatchSettings` and `sessionDispatchSettings` take
+  `commands: "kept"`, which never runs a `!` token command: it takes the outcome another call
+  already kept in the process, and with none Dispatch reads as off with an error saying the
+  command has not run. Every existing caller keeps running the command as before.
+  `dispatchUrl(env, config)` and `sessionDispatchUrl(file, env, { cwd })` return the URL alone,
+  resolved as `dispatchSettings` resolves it but without reading the token, so no `!` command runs:
+  undefined when Dispatch is off before its token is read.
+- `session-answers.ts` (`@legion/envoy-client/session-answers`), the one module pi-envoy,
+  claude-envoy and the CLI use for what people wrote to a session in the last 72 hours. `renderSessionAnswers(items, {now, total?, cached?, withoutCommand?})` renders the
+  per-request message: the marker line `[Dispatch: what people wrote to this session in the last
+  72 hours, newest first, word for word. Reference, not a new request.]` (a cached list adds
+  `As read at <time>; this read failed: <reason>.` on the next line, from `cached: {readAt,
+  reason}`), then each item's time,
+  person, relation, `dispatch://` reference and owner, an ask's question cut to 200 characters,
+  `Selected:` on an answer and the words in full, newest first as a strict prefix under 8,000
+  characters (at most 7,999 UTF-16 units, the whole message), an item over the cap left out whole, and the line
+  ``<N> older items left out to stay under 8,000 characters: run `dispatch answers` to read every
+  one in full.`` when any is left out (with `withoutCommand`, ``<N> older items left out to stay
+  under 8,000 characters.``); items past 72 hours at `now` are dropped at render.
+  `readSessionAnswers({session, dispatch, env, …})` reads it for one model request
+  and never throws: one read in flight per session and Dispatch URL for the whole process (a
+  `globalThis` map, `Symbol.for("legion.pi-envoy.session-answers.v3")`), an 800 ms wait, a read
+  already waited out is not waited on again, a late answer fills the cache, the cache kept in
+  memory per session and Dispatch URL and in `sessions/<id>/answers.json` under
+  `sessionDirectory(env, session)` (written atomically, with the `dispatch_url` it was read from;
+  a session id that is no plain path segment keeps it in memory only), a list read from one
+  Dispatch never carried for another, the failure line ``[Dispatch: people's answers from the last
+  72 hours could not be read (<reason>); run `dispatch answers`.]`` when no cached list renders
+  (none read, an empty list, or every item past 72 hours), no text (`source: "unavailable"`)
+  then instead, with a `notice` naming the URL once per session and URL, when Dispatch answers
+  its own `404 NOT_FOUND` "no route for …" (`this Dispatch build has no answers route`), which
+  also keeps that URL from being asked for 5 minutes and makes a cached list's left-out line name
+  no command. With Dispatch off with an
+  error, which names no URL, only a list read from the URL the caller names as `dispatchUrl` (the
+  configured one, `sessionDispatchUrl`) stands in, and with none named the failure line does: a list
+  another Dispatch answered is never carried.
+  `sessionAnswersSettled(session)` lets a short-lived host wait for a
+  late read to write the disk cache. `DispatchClient.sessionAnswers(session, {since?, maxChars?,
+  signal?})` reads `GET /api/v1/agents/{session_id}/answers`.
+- `dispatch-execute` exports `readDocumentBlocks(client, target, context)`, with the types
+  `DocumentTarget`, `DocumentTargetContext`, `DocumentBlocks` and `DocumentBlock`. It reads the
+  blocks of the live document that `dispatch doc-edit` would edit for the same arguments. It
+  gives the document's own name, as Dispatch stores it, and each block's markdown, cut from the
+  UTF-8 byte range Dispatch reports. It finds the owner from the target, its ref or
+  `LEGION_ISSUE`, against `context`, and the document by id, slug, filename, the ref's slug, or
+  `spec` for an issue's primary document. Dispatch finds the document an upload replaces by its
+  exact name, so a caller that reads for an upload compares that name with the returned `name`.
+  It reads the text, then the blocks, then the text again, and refuses a document that changed
+  between the two text reads. A target that names no document of its owner gives `"not-found"`,
+  and every other failure throws. Each request carries the client's signal, so a stop ends the
+  read. AskGate in `@sjawhar/pi-envoy` reads a retyped block's text and an upload's current block
+  ids with it (dispatch://INFRA-168). The executor finds its owner and documents through the same
+  internal helper, and `dispatch doc-read --blocks` through the same read, with no change in
+  behaviour.
+- `@legion/envoy-client/askgate-new-asks` exports `newAsks(toolName, input)` and the `NewAsk`
+  type: the asks for a person that one Dispatch write opens, read from the write's own arguments
+  as the Dispatch server reads markdown. It sits beside `askgate-marker` because the `dispatch`
+  CLI reads it too, and AskGate in `@sjawhar/pi-envoy` imports it from here. On a gated write that
+  carries no AskGate marker — one sent outside the literal form the gate reads — the CLI counts
+  those asks, from an upload's own bytes where it read them, and writes the count into the
+  session's ledger line as `askgate.asksCarried`, in both `block` and `warn` mode. The line still
+  carries no ask text and no arguments. pi-envoy turns that one number into a Dispatch decision
+  record, so a session that holds a Dispatch token and nothing else sees the asks that went out,
+  or were refused, with no review behind them.
+- `DispatchClient.projectArtifact(project, input, key?)` and `docEdit(id, input, key?)` take the
+  caller's own `Idempotency-Key` for that write, used in place of the one the client mints per
+  call and sent on every attempt of it, so a caller whose intent outlives one call — AskGate's
+  decision document, created once per session whatever process reaches for it, and each of its
+  records appended once (dispatch://INFRA-168) — has Dispatch run that intent once and replay it
+  rather than write a second time. The key must match `IDEMPOTENCY_KEY_PATTERN`; every other
+  write still mints its own, and a call that passes none is unchanged.
+
+### Changed
+
+- **Breaking:** `sessionStateRoot(env)` and `sessionDirectory(env, sessionId)` move from
+  `@legion/envoy-client/dispatch-session-state` to the new leaf module
+  `@legion/envoy-client/dispatch-session-directory`, which also exports `writeAtomically(path,
+  text)`: an owner-only write through a temporary file and `rename` that removes its temporary
+  file when it fails. `dispatch-session-state` and `session-answers` both write through it.
+
+### Fixed
+
+- `renderInbound` now skips a Dispatch frame on a `notifications.dispatch.*` topic by the
+  event's `quiet` flag rather than by `notify`. `notify` answers whether to wake the owner's
+  route and is false for every event an agent wrote, so a session that subscribed to an issue's
+  topic was shown nothing any agent did on it, and the skip recorded nothing while the replay
+  cursor moved past it. A frame carrying no `quiet` was published before Dispatch stated it and
+  is still judged by `notify`, so a replay of the 72 hours the stream holds shows no delivery
+  receipts or autosaves.
+- `readSessionAnswers` returns no text, with the new `source: "unavailable"` and the reason
+  `this Dispatch build has no answers route`, when Dispatch answers its own `404 NOT_FOUND` "no
+  route for …" (or a request falls in the 5 minutes that URL is then not asked again) and no list
+  read before from that URL renders. Before, it returned the failure line, which sends the agent
+  to `dispatch answers`, a command that fails against that same Dispatch. A list read before from
+  that URL is still carried, its header naming why this read failed and its left-out line,
+  when the cap leaves items out, naming no command. The first such read for a session and URL,
+  and the first again after a read of it answered with a list, sets the new `notice`, naming the
+  URL, for the host to report. `isNoAnswersRoute` is now only that answer of Dispatch's own
+  (`isNoRoute`, which `dispatch-http` now exports), so a proxy's 404 page or an empty 404 is a
+  failed read with the failure line naming it, starts no back-off, and makes `dispatch answers`
+  report that page rather than an old Dispatch build. Every other failure, a 200 that is no
+  answers list and a 503 included, still returns the failure line. `renderSessionAnswers` takes
+  `withoutCommand`, which ends a list that left items out with
+  `<N> older items left out to stay under 8,000 characters.`
+
+## [main@49e23926228d] - 2026-10-30
+
+### Added
+
+- `dispatch comment --reply-to` and `dispatch message --in-reply-to` take a block reference to answer one block, `dispatch read` prints the block a reply answers (`Re: block b2: …`) and reads a block of a comment or message by its reference, and `commentBlocks` and `messageBlocks` read an item's blocks.
+
+### Changed
+
+- The `envoy_publish` description says when a publish errs: a role message errs when its holder
+  did not confirm it within the listener's window, and a team or other ad-hoc topic, which the
+  listener now confirms with each other session that holds its own NATS connection and registered
+  the topic, errs naming each session that did not confirm. A session that stopped without
+  unregistering stays registered for up to 5 minutes and is named in that time, and a named
+  session is not a failed delivery to the other sessions. A session on a serve port is not
+  confirmed.
+- `dispatch read` asks for each referenced document's latest version only (`GET /api/v1/issues/{key}/references?versions=latest`), so Dispatch builds a fraction of the answer; the printed `References:` section is unchanged, also against a Dispatch that does not know the parameter.
+- The related-item check's lines take which form an answer holds from `@legion/contracts`'
+  `relatedCheckFormOf` rather than judging it here, and word that form exactly as before. For
+  every answer a Dispatch server sends, no line a reader sees changes; an answer whose `related`
+  is not an array, which the contract does not allow, now prints the not-made line naming why.
+
+## [main@1f5b08286a6d] - 2026-10-29
+
+### Added
+
+- `dispatch related --project <KEY> [--title <title>] [--text <text>] [--exclude-issue <KEY>]
+  [--keywords-only]` runs the related-item check a new issue or ask gets, through
+  `POST /api/v1/projects/{key}/related` (`DispatchClient.related`), writes nothing, and prints the
+  check's form as `dispatch issue` does. Use it to check a draft before filing it.
+
+### Changed
+
+- `dispatch issue`, `dispatch ask` and `dispatch doc-edit` print the related-item check their
+  write got right under the line naming what was written, in exactly one of three forms, so a
+  check that never ran cannot read as one that found nothing: `Related items (searched
+  by meaning and keywords):` (or `keywords only: <why>`) with one line per item, an ask item
+  followed by the lines `dispatch search` prints under an ask hit (`Open: no answer yet.`,
+  `Answered by <who> at <when> · options chosen: <options>` and its `Answer text:`, `Closed with
+  no answer: …` or `Closed after an answer: …` and its `Last answer by …`, or `Answer state not
+  reported by this Dispatch; open the link to read the ask.` from a server that sends none);
+  `Related-item check searched (<mode>) and found nothing.`; or `No related-item check was made:
+  <reason>. Search before you rely on this being new: dispatch search --project <KEY> --query
+  '<words>'`, the words the server's `search_query` or else the first three words of four or
+  more letters of the text it checked. A past decision, followed by the same lines for its ask,
+  and, for a forced create, `Title overlaps you forced past: <KEY> [<status>] <title> → <link>`
+  follow the form. A
+  `dispatch doc-edit` that adds decision blocks prints `Decision block <id>:` and that block's
+  form for each, in document order. These replace `Possibly related, found by search:` and
+  `Related-item search was skipped: <reason>.`. A server that sends no check result, or the
+  older shapes (`missing` alone, items with no `outcome`, nothing with no `outcome`, a count of
+  new decision blocks with no checks), maps to one of the forms, the not-made one when it says
+  nothing; a result this client cannot read prints the not-made form, and advice that fails to
+  render prints `Other advice could not be shown: <error>` in place of the rest, keeping the
+  `Created` line and the form. `dispatch issue` on an external issue Dispatch already holds says
+  it already holds it and that nothing was created (`Dispatch already holds <KEY>: <title> →
+  <link>; nothing was created`), instead of `Created`, and prints no related-item check
+  (`DispatchClient.issue` answers `created`, true only for Dispatch's 201).
+
+## [main@c4cea404651d] - 2026-10-29
+
+### Added
+
+- Every Dispatch write a `dispatch` command makes carries one `Idempotency-Key` (INFRA-258): `DispatchClient.#send` mints a UUID per `POST` and `PATCH` call, sends it on every attempt of that call, and encodes the body once, so Dispatch runs the write once however many attempts reach it. A transport failure, any 5xx, a 408, a 429 and Dispatch's `409 KEY_IN_FLIGHT` are asked again under the key: at most five attempts, 1, 2, 4 and 8 s apart, a longer `Retry-After` waited instead, none starting more than 30 s after the first, all inside the call's 60 s deadline. An attempt that goes 20 s without progress before its answer begins is cut off and asked again the same way. A `GET`, `PUT` or `DELETE` carries no key and is sent once. A write is resent only against a Dispatch this process has seen run the keyed layer within the last five minutes: an answer echoing the key, or a `GET /healthz` answering `idempotency_keys: true` when no echo could arrive. Against a Dispatch without the layer nothing is resent, and the write is reported as one that may or may not have taken effect.
+
+  `DispatchClient.deliveryReply` sends a session's reply to a delivery attempt (`POST /api/v1/{messages,comments}/{id}/reply`), which `postDeliveryReply` used to send as a bare `fetch`: it is now keyed, retried and bounded by the client's 60 s deadline, and its refusals are `DispatchServiceError`s like every other call's.
+
+## [main@a09a2f257406] - 2026-10-29
+
+### Added
+
+- `@legion/envoy-client/nats-connection`: `natsConnectionOptions({ servers, name, seed })`, the
+  nats.js `connect` options every session plugin dials with: its credential, reconnecting forever
+  2 s apart, and a ping every 10 s (`NATS_PING_INTERVAL_MS`) with the connection dropped after
+  two unanswered pings (`NATS_MAX_PINGS_OUT`), so a path that freezes without closing is left
+  within 30 s, where nats.js's default 120 s interval left it for up to 6 minutes. Bun-only test
+  helpers in `test/`, exported as `@legion/envoy-client/test/stall-proxy` (a TCP proxy whose
+  `freeze()` stops forwarding and reading without closing either side, recording when each
+  connection was accepted, first subscribed and closed), `@legion/envoy-client/test/envoy-stack`
+  (a real natsd and listener each stack builds with `go build` from `packages/envoy` into its own
+  scratch directory, for tests gated on `LEGION_E2E_ENVOY_STACK=1`) and
+  `@legion/envoy-client/test/stall-scenario` (`runFreezeScenario`, the freeze both plugins' stall
+  tests run), back `src/__tests__/nats-stall.test.ts` and the plugins' stall tests. `replay`
+  exports `REPLAYED_SUFFIX`, the words a replayed frame's text ends with.
+
+### Changed
+
+- `dispatch claim`'s answer says what the claim now delivers: `A person's answers, comments and
+  messages on <KEY> now reach you directly.`, after the status advice and before the note that the
+  session is not subscribed to the issue, which still names the subscription every other event on
+  it needs.
+- `dispatch doc-read` prints every open thread anchored on the document in full, after the
+  document token and approval lines, under `Open anchored threads:`: an open ask as
+  `ask <id> · <author> · <time>`, its quote and `Question: <question>`; a comment thread as
+  `comment <id> · <author> · <time>`, its quote and `Body: <text>`. Under either, each reply
+  follows as `reply <id> · <author> · <time>` and `Body: <text>`, oldest first, none cut: an ask's
+  replies are the comments whose `ask_id` names it. It replaces the
+  `Open anchored asks/comments: ask <id>, comment <id>` line, which named a thread a person had
+  reopened by replying by its root's id alone and never showed the reply. A resolved thread, and
+  an ask that is answered or resolved, is not printed, nor are its replies. The threads come from
+  one read of the issue's comments without the `artifact` filter (a reply carries no anchor, so
+  the filter dropped every reply), or of a project document's own
+  `GET /api/v1/artifacts/{id}/comments`, grouped by ask or root; `DispatchClient.getComments`
+  loses its `artifact` argument (#2366).
+- **Breaking:** `subscribe()` takes a required `plugin: { name, version }` and sends it on every
+  registration as `plugin` and `plugin_version`, so the listener's session list names the plugin
+  and build each session runs. `SessionWireSchema` (and so `listSessions` and `envoy_sessions`)
+  keeps both as optional strings, so a row from an older listener or plugin still parses.
+- **Breaking:** `@legion/envoy-client/nats-auth` is no longer a package export: `src/nats-auth.ts`
+  stays the module `natsConnectionOptions` builds its credential with, so a session dials NATS
+  only with those options and their ping settings. No package imported it.
+
+### Fixed
+
+- A delivered `ask.resolved` whose record is the `withdrawn` kind an issue's close writes now
+  parses through the contracts' ask payload schema, which refused the kind before, so the
+  delivery carries its resolution (`withdrawn: Withdrawn by the close of <KEY>.`) like any other;
+  `dispatch read --ref dispatch://<KEY>/ask/<id>` prints `Kind: withdrawn`, the closer and the
+  reason.
+- A NATS redial that hangs (its TCP connect, or a server that never sends `INFO`) no longer keeps
+  its socket open after nats.js gives up on it at its 20 s dial timeout: nats.js 2.29.3 closed
+  only a transport that had finished connecting, so the abandoned socket held the process alive.
+  `patches/nats@2.29.3.patch`, which bun applies at install, makes nats.js's `NodeTransport` keep
+  the socket from the moment it dials and destroy it when a transport that never connected is
+  closed. The patch also makes nats.js close a stale connection (two unanswered pings) without
+  flushing it first: behind data the dead path never acknowledged that flush never completed, so
+  the transport never closed and a session that had published since the path froze never
+  redialed. `src/__tests__/nats-stall.test.ts` checks the hung redial is closed, and that a client
+  that wrote 32 MiB the frozen path never read reconnects within 60 s.
+
 ## Before changelog fragments
 
 ### Changed

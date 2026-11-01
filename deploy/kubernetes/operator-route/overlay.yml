@@ -3,17 +3,15 @@
 # applies both with apply.sh; to change the model a role uses, edit its line under modelRoles and
 # run apply.sh again (README.md beside this file).
 #
-# Every model turn runs on the anthropic provider models.yml routes through the gateway, a retry on
-# another model included (retry below). Oh My Pi falls back from a failing provider without a word,
-# so enabledModels holds every session's own model, and any it falls back to, to anthropic, and each
-# provider a pod could reach without the gateway is disabled: Bedrock twice (a node's instance role
-# is its key), Google and the local servers Oh My Pi uses with no key, as
-# scripts/e2e/lib/install-model-gateway.sh does for the tmux proofs, and OpenAI. enabledModels names
-# the standard models one by one rather than by a pattern, so no new session starts on one of
-# the -legion aliases models.yml keeps until the gateway retires them. Records merge key by key
-# across settings layers, so every role Legion's prompts reach is named: the shipped review, oracle
-# and deep-worker agents' @review, @oracle and @deep (the planner's plan-reviewer and
-# plan-gap-analyst run on @review and @oracle), and the bundled scout's @smol and reviewer's @slow.
+# Every model turn runs on the anthropic provider models.yml routes through the gateway, including a
+# retry on another model (retry below). Oh My Pi falls back from a failing provider without a word,
+# so enabledModels holds every configured role model and any model it falls back to. Each provider a
+# pod could reach without the gateway is disabled: Bedrock twice (a node's instance role is its key),
+# Google and the local servers Oh My Pi uses with no key, as scripts/e2e/lib/install-model-gateway.sh
+# does for the tmux proofs, and OpenAI. Records merge key by key across settings layers, so every
+# role Legion's prompts reach is named: the shipped review, oracle and deep-worker agents' @review,
+# @oracle and @deep (the planner's plan-reviewer and plan-gap-analyst run on @review and @oracle),
+# and the bundled scout's @smol and reviewer's @slow.
 enabledModels:
   - anthropic/claude-fable-5
   - anthropic/claude-fable-5-1
@@ -57,7 +55,9 @@ retry:
   modelFallback: true
 extensionHandlers:
   # AskGate (pi-envoy, in every pod) reviews each Dispatch write inside one tool_call handler, and
-  # holds its deadline 5 s under this limit. At Oh My Pi's 30 s default the deadline is 25 s, a review
-  # of a long session often times out, and a write whose review times out posts unreviewed
+  # holds its deadline 5,000 ms under this limit. At Oh My Pi's 30 s default the deadline is
+  # 25,000 ms, a review of a long session can still time out, and a write whose review times out
+  # posts unreviewed. A limit under 15,000 ms leaves no room for a verdict, so the gate does not
+  # bind and refuses every write it would have reviewed
   # (packages/pi-envoy/README.md, "The time limit"; docs/kubernetes.md, "AskGate's time limit").
   toolCallTimeoutMs: 120000

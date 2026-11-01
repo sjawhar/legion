@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -491,6 +492,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.checkLook(ctx, row, value)
 	case record.CheckBound:
 		return r.checkBound(ctx, row)
+	case record.PhaseEnded:
+		return r.phaseEnded(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -629,15 +632,26 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // lingers or has closed — the row finishes undelivered with one log line. So does a row whose
 // architect cannot be resolved from the record (errNoticeUnroutable), which holds back no later
 // notice either, and, before any publish, a row whose architect stopped with its finished tree
-// (stoppedWithTree). A publish the listener accepts but then cannot forward, to a session that is
-// registered but no longer running, comes back as a role-lane exception and is queued again
-// (rehold, notice_exceptions.go) unless its architect stopped with its finished tree. The runner
-// executes a row it leased from memory, so a row deleted under its lease since (a catch-up a newer
-// ready dropped) is found gone in the tree's snapshot and finishes without a publish, and so does a
-// catch-up a newer one superseded (catchUpSuperseded, read against the snapshot's root and the
-// claim as it runs now): the re-hold reads the claim from memory and writes its copy outside
-// ApplyFact's lock, so it can lose the race to a ready and commit an older copy after the fresh
-// catch-up.
+// (stoppedWithTree). A listener that confirms a role message before it answers says when the
+// architect's session did not take the notice (notify.ErrNotDelivered): when the last forward
+// reached the NATS server and drew no receipt (`receipt_timeout`) — a session that is registered
+// but no longer running, or one whose connection is moving to another server — the notice is
+// queued again from the answer by the re-hold policy (reholdNotice, notice_exceptions.go) and the
+// row finishes; when the listener could not forward it at all (`delivery_failed`), as when the hub
+// is down, the row retries on its backoff as any failed publish does, so an outage drops nothing.
+// A holder that does not advertise the notice's delivery mode (notify.ErrRefusedByHolder) refuses
+// every attempt until another session holds the role, and a forward the listener's own NATS grant
+// denies (notify.ErrPublishDenied) is denied on every attempt until an operator changes the grant,
+// so either row finishes undelivered with one log line naming the reason rather than hold every
+// later notice to the architect behind the fence. A listener of an earlier release answers 200 and
+// reports a forward that then fails as a role-lane exception, which is queued again by the same
+// policy (rehold). Neither re-hold queues a copy when its architect stopped with its finished
+// tree. The runner executes a row it leased from memory, so a row deleted under its lease since (a
+// catch-up a newer ready dropped) is found gone in the tree's snapshot and finishes without a
+// publish, and so does a catch-up a newer one superseded (catchUpSuperseded, read against the
+// snapshot's root and the claim as it runs now): the re-hold reads the claim from memory and
+// writes its copy outside ApplyFact's lock, so it can lose the race to a ready and commit an older
+// copy after the fresh catch-up.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
@@ -682,8 +696,27 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	}
 	notice, key := payload.Published(row.ID)
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
+	var notDelivered notify.ErrNotDelivered
+	var refused notify.ErrRefusedByHolder
+	var denied notify.ErrPublishDenied
 	switch {
 	case published == nil:
+		return nil
+	case errors.As(published, &notDelivered) && notDelivered.Reason == notify.ReasonReceiptTimeout:
+		// The notice went out under the key of the row it copies, or of this row (Notice.Published).
+		source := cmp.Or(payload.ResendOf, row.ID)
+		reported := reportedNotice{issue: row.Issue, notice: notice, row: source, architect: architect}
+		if err := r.reholdNotice(ctx, reported, notDelivered.Reason, notDelivered.Holder); err != nil {
+			return fmt.Errorf("re-hold the notice for %s that its architect %s did not take: %w", row.Issue, architect, err)
+		}
+		return nil
+	case errors.As(published, &refused):
+		r.log.Warn("outbox notice finished undelivered: its architect's session does not advertise the delivery mode",
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "holder", refused.Holder, "error", published)
+		return nil
+	case errors.As(published, &denied):
+		r.log.Warn("outbox notice finished undelivered: the listener's NATS grant denied the forward to its architect",
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "reason", denied.Message)
 		return nil
 	case !errors.Is(published, notify.ErrNoHolder):
 		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
@@ -698,10 +731,16 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 
 // mergeQueue publishes the merger's READY packet, or the daemon's withdrawal of it, to the
 // project's merge queue role, keyed by the row so a retried row is one delivery. A role with no
-// live holder refuses every attempt until someone claims it, so waiting would retry forever; the
+// live holder refuses every attempt until someone claims it, so does a holder that does not
+// advertise the packet's delivery mode (notify.ErrRefusedByHolder) until another session holds the
+// role, and so does the listener's own NATS grant when it denies the forward
+// (notify.ErrPublishDenied) until an operator changes it, so waiting would retry forever; the
 // Dispatch message the same READY posted already carries the packet, and the issue's status shows
-// a withdrawal, so the issue is told the role had no holder, as the merger's prompt says the
-// daemon does (internal/prompts/go/merger.md), and the row is done.
+// a withdrawal, so the issue is told the role had no holder (as the merger's prompt,
+// internal/prompts/go/merger.md, says the daemon does), that its holder refused the packet, or that
+// the listener was denied the forward, and the row is done. A holder that did not confirm the packet
+// in time (notify.ErrNotDelivered) is retried on the row's backoff as any failed publish is: the
+// holder, or the session that next claims the role, can take it.
 func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload record.MergeQueuePublish) error {
 	if r.notices == nil {
 		return errors.New("merge queue executor has no Envoy publisher")
@@ -710,8 +749,57 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 	if errors.Is(err, notify.ErrNoHolder) {
 		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})
 	}
+	var refused notify.ErrRefusedByHolder
+	if errors.As(err, &refused) {
+		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s refused the packet: its holder %s does not advertise the delivery mode, at %s",
+			payload.Role, refused.Holder, r.now().UTC().Format(time.RFC3339))})
+	}
+	var denied notify.ErrPublishDenied
+	if errors.As(err, &denied) {
+		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s: the listener's NATS grant denied the forward (%s), at %s",
+			payload.Role, denied.Message, r.now().UTC().Format(time.RFC3339))})
+	}
 	if err != nil {
 		return fmt.Errorf("publish %s's READY packet or its withdrawal to merge queue role %s: %w", row.Issue, payload.Role, err)
+	}
+	return nil
+}
+
+// phaseEnded publishes the message of a phase-ended row (record.PhaseEnded) to the Envoy topic of
+// the role whose phase a CI-red transition ended, the claim of that role on the row's issue, and to
+// nothing else. It is no architect notice: it carries one sentence of the daemon's own rather than
+// a Notice, waits behind no other row of its issue (its own lane, record.LaneRoleMessage), and its
+// recipient is the role the workflow named rather than whichever architect owns the issue. The
+// message stops nothing it reaches: pi-envoy hands it to an Oh My Pi session at its next model turn
+// and ends a running wait, the Claude Code bridge puts it in that session's inbox, and the role's
+// turn, jobs and process run on.
+//
+// A topic with no live holder (notify.ErrNoHolder) ends the row with one log line rather than
+// holding it as an architect's notice is held: the role's next task from the daemon names its phase
+// anyway, so a message nobody is there to read is worth nothing later, and a role that never claims
+// its topic — a session that has not registered, or one that failed — would hold the row for ever.
+// The three answers of the confirmed publish route are different failures and keep the ordinary
+// retry: a holder that did not confirm in time (notify.ErrNotDelivered) can take it on the next
+// attempt, a holder that does not advertise the delivery mode (notify.ErrRefusedByHolder) can be
+// replaced by another session on the role, and a forward the listener's own NATS grant denies
+// (notify.ErrPublishDenied) goes through once an operator changes that grant.
+func (r *outbox) phaseEnded(ctx context.Context, row record.OutboxRow, payload record.PhaseEnded) error {
+	if r.notices == nil {
+		return errors.New("phase-ended executor has no Envoy publisher")
+	}
+	token, err := claim.NewToken(r.project, row.Issue, payload.Role)
+	if err != nil {
+		return fmt.Errorf("the %s of %s: %w", payload.Role, row.Issue, err)
+	}
+	message := payload.Message(row.Issue)
+	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(token), message, message, record.OutboxKey(row.ID))
+	if errors.Is(published, notify.ErrNoHolder) {
+		r.log.Info("outbox phase-ended message finished undelivered: no live session holds the role",
+			"row", row.ID, "issue", row.Issue, "role", payload.Role, "from", payload.From, "to", payload.To)
+		return nil
+	}
+	if published != nil {
+		return fmt.Errorf("publish the end of %s's %s phase to its %s: %w", row.Issue, payload.From, payload.Role, published)
 	}
 	return nil
 }
@@ -809,27 +897,15 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return err
 			}
 		}
-		// An operator's suspension holds its claim until the operator resumes
-		// it: the start, and the task it gives, wait on the row's backoff, before a quiesce
-		// interrupts the role whose phase it would take over. StartedBy refuses the same in the
-		// claim's own decision. A check start does not wait: its look cannot run, and ends
-		// (checkLookHeld).
+		// An operator's suspension holds its claim until the operator resumes it: the start, and the
+		// task it gives, wait on the row's backoff. StartedBy refuses the same in the claim's own
+		// decision. A check start does not wait: its look cannot run, and ends (checkLookHeld).
 		if found {
 			if held := machine.Claim(); held.RuleHolds() {
 				if payload.CheckLook > 0 {
 					return r.checkLookHeld(ctx, row, payload, *check)
 				}
 				return fmt.Errorf("start %s of %s: %w", payload.Role, issue.Key, held.RuleHoldError())
-			}
-		}
-		// A start that takes the phase over from a role still at work in it (CI settled red before
-		// that role completed) does nothing — no claim, no working-copy adoption, no task — until
-		// that role's turn is over (supervise.Machine.Quiesce), so the two never write the shared
-		// workspace together. A retry of a start that has already run against its claim (the claim's
-		// newest start, which StartedBy persists) is past that wait.
-		if payload.Quiesce != "" && (!found || machine.Claim().LastStartRow < row.ID) {
-			if err := r.quiesce(ctx, row, issue.Key, payload.Quiesce); err != nil {
-				return err
 			}
 		}
 		if !found {
@@ -923,9 +999,11 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		}
 		if payload.Task != "" {
 			// The row's phase, already held to the issue's above, travels with the delivery: it is
-			// what says the task is still the work to do once the delivery has outlived its id.
+			// what says the task is still the work to do once the delivery has outlived its id. The
+			// row's assignment travels with it too, the one the start's own transaction wrote on the
+			// role's phases row: it is what the completion this task's turn reports is held to.
 			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, Phase: payload.Phase, Generation: payload.Generation,
-				ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID)}); err != nil {
+				Assignment: payload.Assignment, ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID)}); err != nil {
 				return fmt.Errorf("deliver to claim %s: %w", token, err)
 			}
 		}
@@ -1117,27 +1195,6 @@ func (r *outbox) stopWithoutMachine(ctx context.Context, row record.OutboxRow, t
 	}
 	if pending {
 		return wait.Errorf("stop claim %s: waiting for its stored claim's supervising machine", token)
-	}
-	return nil
-}
-
-// quiesce asks the claim of role on issue, whose phase the start row takes over, to be out of its
-// turn (supervise.Machine.Quiesce): nil once it is, supervise.ErrQuiesceHeld while it is not, which
-// the runner retries on its backoff. A role with no claim runs nothing.
-func (r *outbox) quiesce(ctx context.Context, row record.OutboxRow, issue string, role claim.Role) error {
-	token, err := claim.NewToken(r.project, issue, role)
-	if err != nil {
-		return fmt.Errorf("derive the claim outbox row %d takes over from: %w", row.ID, err)
-	}
-	outgoing, found := r.supervisor.Machine(token)
-	if !found {
-		return nil
-	}
-	if err := outgoing.Quiesce(ctx, row.ID); err != nil {
-		return err
-	}
-	if row.Attempts > 0 {
-		r.log.Info("outbox start goes on: the claim it takes the phase from is out of its turn", "row", row.ID, "issue", issue, "role", role)
 	}
 	return nil
 }

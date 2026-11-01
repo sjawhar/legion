@@ -38,7 +38,13 @@ test("a failed pin shows a retryable error, never lies to the sidebar, and recov
     }
     putAttempts += 1;
     if (putAttempts === 1) {
-      await route.abort();
+      // Dispatch's own verdict: a dropped request, a 5xx or a 429 is tried again under the
+      // write's key rather than handed back as a refusal, so only this ends the write.
+      await route.fulfill({
+        body: JSON.stringify({ code: "STATE_INPUT", error: "Dispatch refused the pin" }),
+        contentType: "application/json",
+        status: 400,
+      });
       return;
     }
     retryRequests += 1;

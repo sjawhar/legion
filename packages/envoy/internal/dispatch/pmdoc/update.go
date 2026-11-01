@@ -5,24 +5,44 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"sync"
 	"unsafe"
 
 	"github.com/reearth/ygo/crdt"
 )
 
 // Update writes want into frag with the same element and rich-text layout that
-// y-prosemirror's updateYFragment produces. Unchanged Yjs types are retained.
+// y-prosemirror's updateYFragment produces. Unchanged Yjs types are retained. It validates want
+// first.
 func Update(txn *crdt.Transaction, frag *crdt.YXmlFragment, want *Node) error {
+	if err := updateShape(txn, frag, want); err != nil {
+		return err
+	}
+	if err := want.Validate(); err != nil {
+		return err
+	}
+	return updateChildren(txn, frag, want.Children)
+}
+
+// UpdateDocument is Update of want, a tree its holder has already validated, without validating
+// it again. The zero ValidDocument is Update's error for a nil document.
+func UpdateDocument(txn *crdt.Transaction, frag *crdt.YXmlFragment, want ValidDocument) error {
+	if err := updateShape(txn, frag, want.doc); err != nil {
+		return err
+	}
+	return updateChildren(txn, frag, want.doc.Children)
+}
+
+// updateShape refuses a write with nothing to write into or no document to write, the check both
+// writers run before the tree is validated.
+func updateShape(txn *crdt.Transaction, frag *crdt.YXmlFragment, want *Node) error {
 	if txn == nil || frag == nil || want == nil {
 		return fmt.Errorf("%w: Update requires transaction, fragment, and document", ErrSchema)
 	}
 	if want.Type != "doc" {
 		return fmt.Errorf("%w: Update wants a doc, got %q", ErrSchema, want.Type)
 	}
-	if err := want.Validate(); err != nil {
-		return err
-	}
-	return updateChildren(txn, frag, want.Children)
+	return nil
 }
 
 type normalizedChild struct {
@@ -308,41 +328,88 @@ func equalYChildPChild(ychild any, pchild normalizedChild) bool {
 	}
 }
 
+// equalYElementPNode reports whether element already holds what node says, attributes and whole
+// subtree. It is the predicate that decides what every write rewrites, so it runs over every block
+// a write leaves alone: it groups node's children into the runs normalizePNodeContent would make
+// as it walks them, rather than building that slice at each level of the tree, and allocates
+// nothing of its own.
 func equalYElementPNode(element *crdt.YXmlElement, node *Node) bool {
 	if element.NodeName != node.Type || !attrsEqual(treeAttrs(element.NodeName, element.GetAttributeValues()), node.Attrs) {
 		return false
 	}
-	children := element.Children()
-	normalized := normalizePNodeContent(node.Children)
-	if len(children) != len(normalized) {
-		return false
-	}
-	for index, child := range children {
-		if !equalYChildPChild(child, normalized[index]) {
+	ychildren := element.Children()
+	child := 0
+	for index := 0; index < len(node.Children); child++ {
+		if child >= len(ychildren) {
 			return false
 		}
+		if node.Children[index].Type != "text" {
+			inner, ok := ychildren[child].(*crdt.YXmlElement)
+			if !ok || !equalYElementPNode(inner, node.Children[index]) {
+				return false
+			}
+			index++
+			continue
+		}
+		run := index
+		for run < len(node.Children) && node.Children[run].Type == "text" {
+			run++
+		}
+		text, ok := ychildren[child].(*crdt.YXmlText)
+		if !ok || !equalYTextPText(text, node.Children[index:run]) {
+			return false
+		}
+		index = run
 	}
-	return true
+	return child == len(ychildren)
 }
 
+// equalYTextPText reports whether the delta text would hand back is nodes: it is
+// yTextDeltaInTransaction's loop with the same merge rule, comparing each run against the node it
+// must equal as the run grows, so it builds no delta and joins no run's text. A run that ends
+// short of its node's text, a run with no node left to match, an embed and any other content are
+// each a difference, as the delta's own comparison makes them.
 func equalYTextPText(text *crdt.YXmlText, nodes []*Node) bool {
-	delta, err := yTextDeltaInTransaction(text)
-	if err != nil {
-		return false
-	}
-	if len(delta) != len(nodes) {
-		return false
-	}
-	for index, operation := range delta {
-		if operation.Op != crdt.DeltaOpInsert {
+	current := make(crdt.Attributes)
+	var runAttrs crdt.Attributes
+	run := -1
+	matched := 0
+	for item := yTextStart(text); item != nil; item = item.Right {
+		if item.Deleted {
+			continue
+		}
+		switch content := item.Content.(type) {
+		case *crdt.ContentString:
+			if run < 0 || !attrsEqual(Attrs(runAttrs), Attrs(current)) {
+				if run >= 0 && matched != len(nodes[run].Text) {
+					return false
+				}
+				run++
+				if run >= len(nodes) || !equalYMarks(current, nodes[run].Marks) {
+					return false
+				}
+				runAttrs = cloneYAttributes(current)
+				matched = 0
+			}
+			want := nodes[run].Text
+			if matched+len(content.Str) > len(want) || want[matched:matched+len(content.Str)] != content.Str {
+				return false
+			}
+			matched += len(content.Str)
+		case *crdt.ContentFormat:
+			if content.Val == nil {
+				delete(current, content.Key)
+			} else {
+				current[content.Key] = content.Val
+			}
+		default:
 			return false
 		}
-		value, ok := operation.Insert.(string)
-		if !ok || value != nodes[index].Text || !equalYMarks(operation.Attributes, nodes[index].Marks) {
-			return false
-		}
 	}
-	return true
+	if run < 0 {
+		return len(nodes) == 0
+	}
+	return run == len(nodes)-1 && matched == len(nodes[run].Text)
 }
 
 func equalYMarks(attributes crdt.Attributes, marks []Mark) bool {
@@ -535,12 +602,41 @@ func cloneYAttributes(attrs crdt.Attributes) crdt.Attributes {
 	return copy
 }
 
+// yTextStart is the head of text's item list, ygo's private YText.abstractType.start, which every
+// walk of a text's items (yTextDeltaInTransaction, readUnsharedText, AuthoredTextRuns) starts
+// from. ygo exports the items but not their head.
 func yTextStart(text *crdt.YXmlText) *crdt.Item {
-	yText := reflect.ValueOf(text).Elem().FieldByName("YText")
-	abstractType := yText.FieldByName("abstractType")
-	start := abstractType.FieldByName("start")
-	return reflect.NewAt(start.Type(), unsafe.Pointer(start.UnsafeAddr())).Elem().Interface().(*crdt.Item)
+	return *yTextStartField(text)
 }
+
+// yTextStartField is the address of text's item-list head (yTextStart).
+func yTextStartField(text *crdt.YXmlText) **crdt.Item {
+	return (**crdt.Item)(unsafe.Add(unsafe.Pointer(text), yTextStartOffset()))
+}
+
+// yTextStartOffset is the offset of the item-list head in a crdt.YXmlText, found by name once. A
+// ygo whose YXmlText holds no field start of type *crdt.Item, or holds it behind a pointer, panics
+// at the first read of a text, naming the field, rather than read a wrong pointer.
+var yTextStartOffset = sync.OnceValue(func() uintptr {
+	textType := reflect.TypeFor[crdt.YXmlText]()
+	field, ok := textType.FieldByName("start")
+	if !ok || field.Type != reflect.TypeFor[*crdt.Item]() {
+		panic("pmdoc: ygo's crdt.YXmlText has no field start of type *crdt.Item, the head of a text's item list")
+	}
+	// A field's Offset is within the struct declaring it, here an embedded one: the field's
+	// offset in YXmlText adds the offsets of the structs embedded along its index path.
+	var offset uintptr
+	holder := textType
+	for _, index := range field.Index {
+		if holder.Kind() != reflect.Struct {
+			panic("pmdoc: ygo's crdt.YXmlText reaches its field start through a pointer, not an embedded struct")
+		}
+		step := holder.Field(index)
+		offset += step.Offset
+		holder = step.Type
+	}
+	return offset
+})
 
 // simpleDiff is the characters current and want do not share, between their common prefix and
 // suffix: current's from index, remove long, are replaced by insert. index and remove are in UTF-16

@@ -123,12 +123,11 @@ type Options struct {
 	// name, and every variable runtime.PaneVariableRefusal refuses. Nil is none.
 	PaneEnv map[string]string
 	// PiConfigFiles is the operator's `runtime.tmux.pi_config_files`: absolute paths of Oh My Pi
-	// settings overlays every pane names in PI_CONFIG_FILES ahead of the turn-scoping overlay, which
-	// stays last so its keys outrank theirs. Nil is none.
+	// settings overlays every pane names first in PI_CONFIG_FILES. Nil is none.
 	PiConfigFiles []string
 	// RoleConfigFiles is the operator's `role_config_files`: absolute paths of Oh My Pi settings
-	// overlays a pane of that role alone names in PI_CONFIG_FILES, after PiConfigFiles and ahead of
-	// the turn-scoping overlay, by role, the controller's pane included. Nil is none.
+	// overlays a pane of that role alone names in PI_CONFIG_FILES, after PiConfigFiles, so each
+	// outranks those, by role, the controller's pane included. Nil is none.
 	RoleConfigFiles map[claim.Role][]string
 	// TakeOver is the operator's `runtime.tmux.take_over`: TakeOverKubernetes to take over the
 	// claims a daemon running the project under runtime kubernetes left in the store (foreign), ""
@@ -194,7 +193,8 @@ type Runtime struct {
 	readProc func(path string) ([]byte, error)
 
 	// launchMu serializes everything that decides which window a pane lands in and every change
-	// to the private server's set of panes the runtime must not race: session creation, window
+	// to the private server's set of panes the runtime must not race: session creation, a launch's
+	// refusal of a claim whose process still runs and the files it then writes for the claim, window
 	// choice, the pane's opening and recording, orphan reaping, and the scrub.
 	launchMu sync.Mutex
 

@@ -1,6 +1,10 @@
 package main
 
-import "github.com/sjawhar/envoy/internal/session"
+import (
+	"strings"
+
+	"github.com/sjawhar/envoy/internal/session"
+)
 
 // subscribeBody is the POST /v1/interests/subscribe payload sent by each
 // agent session's envoy extension, on subscribe and on every heartbeat.
@@ -30,17 +34,33 @@ type subscribeBody struct {
 	// this field; its owning listener then falls back to host.docker.internal when the session
 	// registered through it, else to the machine id of the listener it registered through.
 	Host string `json:"host"`
+	// Plugin and PluginVersion name the plugin the session registers through (its npm package
+	// name) and that plugin's build, so the session list shows which build each session runs.
+	// Empty for a session whose plugin predates the fields.
+	Plugin        string `json:"plugin"`
+	PluginVersion string `json:"plugin_version"`
+	// ClientInstanceID is the id the client instance mints at its own start (one Oh My Pi Envoy
+	// extension instance, one Claude Code channel-server process) and sends on every
+	// registration, so a soft claim naming a predecessor session can tell that predecessor's
+	// own instance from another instance's live session (session.InstanceMatches). Empty for a
+	// client whose plugin predates the field, which keeps the old rule; absent here it is
+	// written empty, clearing any id a previous registration stored, since the entry is built
+	// fresh from this body.
+	ClientInstanceID string `json:"client_instance_id"`
 }
 
 func sessionEntryFromSubscribe(body subscribeBody, machineID string) session.SessionEntry {
 	return session.SessionEntry{
-		Port:           body.Port,
-		MachineID:      machineID,
-		Dir:            body.Dir,
-		Title:          body.Title,
-		Capabilities:   append([]string{}, body.Capabilities...),
-		Driving:        body.Driving,
-		SelfSubscribed: body.SelfSubscribed,
-		Host:           body.Host,
+		Port:             body.Port,
+		MachineID:        machineID,
+		Dir:              body.Dir,
+		Title:            body.Title,
+		Capabilities:     append([]string{}, body.Capabilities...),
+		Driving:          body.Driving,
+		SelfSubscribed:   body.SelfSubscribed,
+		Host:             body.Host,
+		Plugin:           strings.TrimSpace(body.Plugin),
+		PluginVersion:    strings.TrimSpace(body.PluginVersion),
+		ClientInstanceID: strings.TrimSpace(body.ClientInstanceID),
 	}
 }

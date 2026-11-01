@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // randomBlockID is a block id of length incompressible random hex characters, so no Postgres
@@ -218,9 +219,7 @@ func TestARebuildFromMarkdownHoldingABlockIDPastTheBoundIsWritten(t *testing.T) 
 // (SQLSTATE 54000).
 func TestASuggestionWritingABlockIDPastTheBoundIsAccepted(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 	_, handler, database := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Suggested long block id", "Context paragraph.\n\nOther paragraph.\n")
 	long := randomBlockID(t, 3200)
@@ -441,9 +440,7 @@ func TestALongNamedDocumentIsReadByItsOwnReference(t *testing.T) {
 // write fails on an index key past its limit (SQLSTATE 54000).
 func TestAnAnchorInsideABlockWhoseIDIsPastTheBoundIsWritten(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 	documentService, handler, _ := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Anchored in a long-id block", "Context paragraph.\n")
 	long := randomBlockID(t, 3200)

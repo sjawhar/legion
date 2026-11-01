@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ompdirs"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
@@ -134,6 +135,14 @@ type pluginGate struct {
 	// through discovery alone.
 	pluginRoot      string
 	envoyPluginRoot string
+	// claudeRoot is the claude-envoy package root the image carries, which a phase worker on the
+	// `claude` backend loads as Claude Code's plugin directory, and claudeCodePin the directory of
+	// the Claude Code pin a pod installs that worker's Claude Code from at launch (`legion
+	// probe-image --claude-root` and `--claude-code-pin`; packages/daemon/internal/claudelaunch,
+	// internal/runtime/sandbox's claudeCodeBlock). Empty everywhere else: only the image runs the
+	// Claude lane (verifyClaude), as only the image runs the session-storage probe.
+	claudeRoot    string
+	claudeCodePin string
 	// roleReferences are the task agents and skills the role prompts the probed Oh My Pi is handed
 	// name (prompts.RoleReferences), resolved beside the plugin's own. The zero Names resolves the
 	// plugin's alone.
@@ -394,57 +403,75 @@ type pluginManifest struct {
 	skills  []string
 }
 
-// readPluginManifest reads the manifest once and is the contract probe: the manifest's
-// `legion.daemonApiVersion` must be contract. A manifest that is missing,
-// unreadable, or without the field is the same refusal, never a fallback — the load probe would
-// call such a plugin merely "not loaded" and send the operator to `omp plugin list` when the fix
-// is a reinstall. installInto names where the refusal says to install the release.
-func readPluginManifest(manifest, installInto string, contract int) (pluginManifest, error) {
-	install := fmt.Sprintf("Install the %s release built from this daemon's commit into %s.", pluginPackage, installInto)
+// readDeclaredContract reads a plugin manifest once and is the contract probe, which both lanes
+// that have a manifest run: its `legion.daemonApiVersion` must be contract. A manifest that is
+// missing, unreadable, or without the field is the same refusal, never a fallback — the load
+// probe would call such a plugin merely "not loaded" and send the operator to `omp plugin list`
+// when the fix is a reinstall. name is how the refusal spells the plugin ("pi-legion",
+// "claude-envoy") and remedy the sentence that ends it, which is the lane's: a pane installs a
+// release, an image is rebuilt. It answers the manifest's own record, which pi-legion's read
+// takes its version and skills from.
+func readDeclaredContract(manifest, name string, contract int, remedy string) (map[string]any, error) {
 	raw, err := os.ReadFile(manifest)
 	var parsed any
 	if err == nil {
 		err = json.Unmarshal(raw, &parsed)
 	}
 	if err != nil {
-		return pluginManifest{}, fmt.Errorf("pi-legion manifest at %s could not be read (%v); this daemon requires a plugin speaking daemon API contract %d. %s",
-			manifest, err, contract, install)
+		return nil, fmt.Errorf("%s manifest at %s could not be read (%v); this daemon requires a plugin speaking daemon API contract %d. %s",
+			name, manifest, err, contract, remedy)
 	}
 	record, _ := parsed.(map[string]any)
-	version, ok := record["version"].(string)
-	if !ok {
-		version = "unknown"
-	}
 	legion, _ := record["legion"].(map[string]any)
 	declared, present := legion["daemonApiVersion"]
 	if number, ok := declared.(float64); ok && number == float64(contract) {
-		plugin := pluginManifest{version: version}
-		// `omp` and `omp.skills` may be absent or null; any other shape is a manifest the gate
-		// cannot read the shipped skills from, and every agent they dispatch would go unchecked.
-		omp, isObject := record["omp"].(map[string]any)
-		if value := record["omp"]; value != nil && !isObject {
-			return pluginManifest{}, fmt.Errorf("pi-legion manifest at %s has an `omp` that is not an object (%v). %s", manifest, value, install)
-		}
-		listed, isList := omp["skills"].([]any)
-		if value := omp["skills"]; value != nil && !isList {
-			return pluginManifest{}, fmt.Errorf("pi-legion manifest at %s has an `omp.skills` that is not a list of directories (%v). %s", manifest, value, install)
-		}
-		for _, entry := range listed {
-			dir, ok := entry.(string)
-			if !ok {
-				return pluginManifest{}, fmt.Errorf("pi-legion manifest at %s lists a skills entry %v that is not a directory name. %s", manifest, entry, install)
-			}
-			plugin.skills = append(plugin.skills, dir)
-		}
-		return plugin, nil
+		return record, nil
+	}
+	version, ok := record["version"].(string)
+	if !ok {
+		version = "unknown"
 	}
 	spoken := "none"
 	if present {
 		encoded, _ := json.Marshal(declared)
 		spoken = string(encoded)
 	}
-	return pluginManifest{}, fmt.Errorf("pi-legion at %s (package %s) speaks daemon API contract %s; this daemon requires %d. %s",
-		manifest, version, spoken, contract, install)
+	return nil, fmt.Errorf("%s at %s (package %s) speaks daemon API contract %s; this daemon requires %d. %s",
+		name, manifest, version, spoken, contract, remedy)
+}
+
+// readPluginManifest is the pod and pane lanes' contract probe on pi-legion (readDeclaredContract),
+// and the skills its manifest ships beside it. installInto names where the refusal says to install
+// the release.
+func readPluginManifest(manifest, installInto string, contract int) (pluginManifest, error) {
+	install := fmt.Sprintf("Install the %s release built from this daemon's commit into %s.", pluginPackage, installInto)
+	record, err := readDeclaredContract(manifest, "pi-legion", contract, install)
+	if err != nil {
+		return pluginManifest{}, err
+	}
+	version, ok := record["version"].(string)
+	if !ok {
+		version = "unknown"
+	}
+	plugin := pluginManifest{version: version}
+	// `omp` and `omp.skills` may be absent or null; any other shape is a manifest the gate
+	// cannot read the shipped skills from, and every agent they dispatch would go unchecked.
+	omp, isObject := record["omp"].(map[string]any)
+	if value := record["omp"]; value != nil && !isObject {
+		return pluginManifest{}, fmt.Errorf("pi-legion manifest at %s has an `omp` that is not an object (%v). %s", manifest, value, install)
+	}
+	listed, isList := omp["skills"].([]any)
+	if value := omp["skills"]; value != nil && !isList {
+		return pluginManifest{}, fmt.Errorf("pi-legion manifest at %s has an `omp.skills` that is not a list of directories (%v). %s", manifest, value, install)
+	}
+	for _, entry := range listed {
+		dir, ok := entry.(string)
+		if !ok {
+			return pluginManifest{}, fmt.Errorf("pi-legion manifest at %s lists a skills entry %v that is not a directory name. %s", manifest, entry, install)
+		}
+		plugin.skills = append(plugin.skills, dir)
+	}
+	return plugin, nil
 }
 
 // loaded is what a passed load probe reports: where pi-legion loaded from (its `legion.ts`, a
@@ -758,6 +785,66 @@ func (g pluginGate) verifySessionStorage(ctx context.Context) error {
 	})
 }
 
+// verifyClaude is the Claude lane, which only the image runs and only when it is given the
+// claude-envoy root and the Claude Code pin (`legion probe-image --claude-root --claude-code-pin`).
+// The image carries no Claude Code — its licence grants no redistribution, and the worker image is
+// public — so the lane proves the two facts a phase worker on the `claude` backend needs of it
+// instead. First, the image carries the plugin that worker loads: the root holds the two files
+// Claude Code loads, each a regular file (capabilities.CheckClaudePlugin; a directory at either
+// path is no file a worker could load), and the root's manifest declares this gate's contract,
+// held exactly as the pod lane holds pi-legion's (readDeclaredContract) — claude-envoy ships in the
+// image alone, so the remedy is always a rebuilt image, never an install. Second, a pod can fetch
+// and verify the binary: the pin is readable, names one exact version, and locks that release and
+// its linux-x64 package, the one whose binary the install runs, with the sha512 integrity `npm ci`
+// holds each tarball to (capabilities.ReadClaudeCodePin) — the pin a Claude role's start script
+// installs from and then holds the installed binary's --version to (claudeCodeBlock,
+// internal/runtime/sandbox/plugins.go).
+//
+// The lane reads the pin and does not perform the install. Performing it once would prove the
+// fetch end to end, but it would make the image's publish and every boot probe of the image — this
+// lane runs in the daemon's probe pod as well as the build — depend on the npm registry, put a
+// download of Claude Code's native binary in front of every boot, and need cleaning up within the
+// same step so no layer of a public image kept a binary the image may not redistribute. And it would
+// prove less than it seems: a registry that answered the build is no promise that it answers a pod
+// days later. So the image proves it is self-consistent — what a pod installs from is here, exact
+// and checksummed — and the fetch itself is proved where it happens: every Claude launch's start
+// script installs and verifies it and fails that launch loudly when it cannot, and the pod e2e
+// (scripts/e2e/claude-backend-sandbox.sh) watches a worker run the binary that fetch installed.
+//
+// None of the checks is retried, unlike the probes above: they read the image's own filesystem
+// and no network, so a failure is the image's and no further attempt answers differently.
+func (g pluginGate) verifyClaude(ctx context.Context) error {
+	if g.claudeRoot == "" {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	root, err := filepath.Abs(g.claudeRoot)
+	if err != nil {
+		return fmt.Errorf("%s: resolve the claude-envoy root %s: %w", g.label(), g.claudeRoot, err)
+	}
+	pin, err := filepath.Abs(g.claudeCodePin)
+	if err != nil {
+		return fmt.Errorf("%s: resolve the Claude Code pin %s: %w", g.label(), g.claudeCodePin, err)
+	}
+	rebuild := "build the worker image from this daemon's commit"
+	if err := capabilities.CheckClaudePlugin(root); err != nil {
+		return fmt.Errorf("%w; %s", err, rebuild)
+	}
+	manifest := filepath.Join(root, "package.json")
+	if _, err := readDeclaredContract(manifest, "claude-envoy", g.contract, "Build the worker image from this daemon's commit."); err != nil {
+		return err
+	}
+	version, err := capabilities.ReadClaudeCodePin(pin)
+	if err != nil {
+		return fmt.Errorf("%w: a pod on the `claude` backend installs Claude Code from that pin at launch and verifies what it installed against it, so none could start; %s", err, rebuild)
+	}
+	g.log.Info("boot gate: the claude-envoy root speaks this daemon's contract and the Claude Code pin is one a pod can install and verify",
+		"root", root, "manifest", manifest, "daemonApiVersion", g.contract, "pin", pin, "claudeCodeVersion", version)
+	return nil
+}
+
 // writeProbe writes an extension probe into a directory of its own, which the caller removes.
 func (g pluginGate) writeProbe(pattern string, source []byte) (string, string, error) {
 	dir, err := os.MkdirTemp("", pattern)
@@ -868,6 +955,14 @@ type ImageProbe struct {
 	// a pod uses. A relative root is resolved against this process's working directory.
 	PluginRoot      string
 	EnvoyPluginRoot string
+	// ClaudeRoot is the claude-envoy package root the image carries and ClaudeCodePin the
+	// directory of the Claude Code pin a pod installs Claude Code from at launch, which the Claude
+	// lane checks together (verifyClaude): the root holds its built channel server and its generated
+	// Legion plugin and its manifest declares Contract, and the pin is one a pod can install and
+	// verify. Both empty runs no Claude lane; one without the other is refused. `legion
+	// probe-image` always passes both, the image's own paths unless told others.
+	ClaudeRoot    string
+	ClaudeCodePin string
 	// RoleReferences are the task agents and skills the role prompts a pod is handed name
 	// (prompts.RoleReferences), and are required: the daemon's own, which it inlines into every
 	// Sandbox pod, or the image's when the command is given none.
@@ -884,11 +979,11 @@ const defaultProbeTimeout = 300 * time.Second
 
 // ProbeImage runs the image's launch probes: pi.agents; then the daemon's own gate — pi-legion
 // held to Contract, then loaded with pi-envoy, from the manifest it was held by; then the
-// session-storage setting, which only the image runs (the launch probes' comment atop
-// boot-probes.ts). The contract comes before the load, as in the daemon's gate, so a plugin of
-// another contract is refused as a reinstall rather than sent to `omp plugin list`. Each attempt
-// is bounded by defaultProbeTimeout and retried under bootprobe.Image: an image build has no
-// supervisor and must finish.
+// session-storage setting, and the Claude lane, which only the image runs (the launch probes'
+// comment atop boot-probes.ts). The contract comes before the load, as in the daemon's gate, so a
+// plugin of another contract is refused as a reinstall rather than sent to `omp plugin list`. Each
+// attempt is bounded by defaultProbeTimeout and retried under bootprobe.Image: an image build has
+// no supervisor and must finish.
 func ProbeImage(ctx context.Context, p ImageProbe) error {
 	if p.PluginRoot == "" {
 		return errors.New("image probe: ImageProbe.PluginRoot is required: the Legion plugin directory a pod loads as an explicit extension")
@@ -899,10 +994,13 @@ func ProbeImage(ctx context.Context, p ImageProbe) error {
 	if p.RoleReferences.Zero() {
 		return errors.New("image probe: ImageProbe.RoleReferences is required: the references of the role prompts a pod is handed")
 	}
+	if (p.ClaudeRoot == "") != (p.ClaudeCodePin == "") {
+		return errors.New("image probe: ImageProbe.ClaudeRoot and ImageProbe.ClaudeCodePin go together: the Claude lane checks the claude-envoy plugin and the Claude Code pin a worker on the `claude` backend needs both of")
+	}
 	return pluginGate{
 		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, timeout: defaultProbeTimeout,
 		retry: bootprobe.Image, contract: p.Contract,
-		pluginRoot: p.PluginRoot, envoyPluginRoot: p.EnvoyPluginRoot,
+		pluginRoot: p.PluginRoot, envoyPluginRoot: p.EnvoyPluginRoot, claudeRoot: p.ClaudeRoot, claudeCodePin: p.ClaudeCodePin,
 		roleReferences: p.RoleReferences, skipAgentModels: p.SkipAgentModels,
 		log: p.Log,
 	}.verifyImage(ctx)
@@ -916,7 +1014,10 @@ func (g pluginGate) verifyImage(ctx context.Context) error {
 	if err := g.verify(ctx); err != nil {
 		return err
 	}
-	return g.verifySessionStorage(ctx)
+	if err := g.verifySessionStorage(ctx); err != nil {
+		return err
+	}
+	return g.verifyClaude(ctx)
 }
 
 // ControllerProbe is `legion controller start`'s gate on the operator's Oh My Pi, run before the

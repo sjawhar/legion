@@ -362,10 +362,12 @@ export function parseCommand(
       // more likely a flag's unquoted value spilling over (`--body hi SHA-256`), so it is refused.
       if (ISSUE_KEY.test(token) && surface.flags.has("--issue")) {
         if (index === 0) {
+          // biome-ignore lint/complexity/useLiteralKeys: claude-envoy's tsconfig refuses dot access on an index signature.
           if (claim("issue", `the issue key ${token}`, false)) args["issue"] = token;
         } else {
           // Advising `--issue` when a flag already set it would only lead to a second refusal.
           const earlier = setBy.get("issue");
+          // biome-ignore lint/complexity/useLiteralKeys: claude-envoy's tsconfig refuses dot access on an index signature.
           const current = quoteWord(String(args["issue"]));
           let reason = `a bare issue key is the --issue only as the first argument; otherwise write --issue ${quoteWord(token)}`;
           if (earlier === "--issue") reason = `--issue is already ${current}`;

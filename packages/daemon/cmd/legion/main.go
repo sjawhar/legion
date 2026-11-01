@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/registry"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 const (
@@ -79,7 +80,7 @@ var commands = map[string]commandEntry{
 	"version":        {runVersion, "print the version and the commit the binary was built from"},
 	"start":          {runStart, "run the Legion daemon from legion.yaml in the foreground; --check-config validates the file and exits"},
 	"stop":           {runStop, "stop the daemon registered for legion.yaml's project"},
-	"state":          {runState, "print the daemon's state: admission, issues, pending Dispatch status writes, claims nothing will wake (--json for all of it)"},
+	"state":          {runState, "print the daemon's state: admission, issues, pending Dispatch status writes, claims nothing will wake, served repositories without Dispatch's webhook App, the durable consumers' lag (--json for all of it)"},
 	"legions":        {runLegions, "list the daemons registered on this machine"},
 	"status":         {runStatus, "say whether a team's daemon is running, or set an issue's Dispatch status"},
 	"restart":        {runRestart, "stop a registered daemon and start it again from the configuration it recorded"},
@@ -227,6 +228,34 @@ func pluginsSourceWords(source string) string {
 	return source
 }
 
+// pluginsLine is `--check-config`'s plugins line: the pair this daemon would install for a
+// stale-plugin relaunch and where it came from (pluginsSourceWords), or the gap when it knows
+// none. When worker_backends runs any role on Claude Code, the line gains one sentence naming
+// those roles: their plugin is the worker image's claude-envoy, which no relaunch installs (the
+// daemon package's stalePluginInstall refuses such a claim), so a plugin-contract change for one
+// of them is answered by a new image.
+func pluginsLine(cfg config.Config) string {
+	line := "plugins: none — set runtime.kubernetes.plugins or run a release build; a daemon that knows none relaunches no process on another plugin contract"
+	if pair, source := daemon.ResolvedPlugins(cfg); pair != nil {
+		line = fmt.Sprintf("plugins: @sjawhar/pi-legion %s @sjawhar/pi-envoy %s (from %s)",
+			pair.PiLegion, pair.PiEnvoy, pluginsSourceWords(source))
+	}
+	// The roles Claude Code may run at all (runtime.Backends), in the order the workflow reaches
+	// them: a role worker_backends puts on it is always one of them, since the loader refuses any
+	// other.
+	var claude []string
+	for _, role := range runtime.Backends[runtime.BackendClaude].Roles {
+		if cfg.BackendFor(role) == runtime.BackendClaude {
+			claude = append(claude, string(role))
+		}
+	}
+	if len(claude) == 0 {
+		return line
+	}
+	return line + fmt.Sprintf(". Claude Code runs %s, whose plugin is the worker image's: a plugin-contract change for such a role is answered by a new image, not by an install.",
+		strings.Join(claude, ", "))
+}
+
 // checkStartConfig is `legion start --check-config`: every refusal the configuration's read at
 // boot makes, through the loader that runs neither GitHub App's private_key_command nor any
 // secretsd read, then every refusal boot makes from the configuration, the environment and the
@@ -243,9 +272,11 @@ func pluginsSourceWords(source string) string {
 // plain line names the derived bound and why; then one names the repository cache every mapped
 // repository gets, as the file settles it;
 // then a last plain line names the plugin pair this daemon would install for a stale-plugin
-// relaunch — the file's or the binary's — or, with neither, the gap; it is its own line rather
-// than a capability row, since it would otherwise be open on every unreleased build. All of them
-// run only under kubernetes, since the probe and the caches run only there.
+// relaunch — the file's or the binary's — or, with neither, the gap, and, when worker_backends
+// runs any role on Claude Code, one sentence more saying that such a role's plugin is the image's
+// (pluginsLine); it is its own line rather than a capability row, since it would otherwise be
+// open on every unreleased build. All of them run only under kubernetes, since the probe and the
+// caches run only there.
 func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 	cfg, err := config.LoadForValidation(configPath, nil)
 	if err == nil {
@@ -282,11 +313,7 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "repository cache: a %s volume per mapped repository, fetched from GitHub every %d minutes, kept %d hours after its repository leaves the mapping; its container reserves cpu %s, memory %s, ephemeral storage %s under %s\n",
 			cache.Volume, cache.RefreshMinutes, cache.RetainHours, reservedUnder(cache.Resources.CPURequest, cache.Resources.CPU),
 			reservedUnder(cache.Resources.MemoryRequest, cache.Resources.Memory), cache.Resources.EphemeralStorageRequest, cache.Resources.EphemeralStorage)
-		if pair, source := daemon.ResolvedPlugins(cfg); pair != nil {
-			fmt.Fprintf(stdout, "plugins: @sjawhar/pi-legion %s @sjawhar/pi-envoy %s (from %s)\n", pair.PiLegion, pair.PiEnvoy, pluginsSourceWords(source))
-		} else {
-			fmt.Fprintln(stdout, "plugins: none — set runtime.kubernetes.plugins or run a release build; a daemon that knows none relaunches no process on another plugin contract")
-		}
+		fmt.Fprintln(stdout, pluginsLine(cfg))
 	}
 	return 0
 }
@@ -519,6 +546,12 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
 	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims))
+	for _, line := range webhookAppLines(state.Repositories.WithoutWebhookApp) {
+		fmt.Fprintln(stdout, line)
+	}
+	for _, line := range consumerLines(state.Consumers, state.Daemon.StartedAt, time.Now()) {
+		fmt.Fprintln(stdout, line)
+	}
 	// In a pane, the issue record is what a relaunched worker re-reads.
 	if key := os.Getenv("LEGION_ISSUE"); key != "" {
 		issue, ok := state.Issues[key]
@@ -686,6 +719,64 @@ func strandedSummary(stranded []api.StrandedClaim) string {
 		}
 	}
 	return fmt.Sprintf("claims nothing will wake: %d — %s", len(stranded), strings.Join(groups, "; "))
+}
+
+// webhookAppLines are the lines an operator reads for the served repositories Dispatch's GitHub App
+// is not known to be installed on (api.RepositoriesView.WithoutWebhookApp): GitHub sends Legion no
+// event of such a repository. One line per repository with why, in the state's order; with none
+// the one line says so.
+func webhookAppLines(gaps []api.WebhookAppGapView) []string {
+	if len(gaps) == 0 {
+		return []string{"webhook App missing: none"}
+	}
+	lines := make([]string, len(gaps))
+	for i, gap := range gaps {
+		lines[i] = "webhook App missing on " + gap.Repo + ": " + gap.Reason
+	}
+	return lines
+}
+
+// consumerLines are the lines an operator reads for the daemon's durable consumers
+// (api.ConsumerLagView), one per consumer in the state's order: how many messages wait for it and
+// how old the oldest is (unknown when NATS did not give it), and, when it is stalled, how long it
+// has handled none as of now, since its last handled message or, before the first, since the daemon
+// started at startedAt; then what NATS did not answer, alone on the line when the consumer's info
+// itself could not be read, since nothing else is known then. With no consumers (a daemon with no
+// workflow) the one line says so.
+func consumerLines(consumers []api.ConsumerLagView, startedAt, now time.Time) []string {
+	if len(consumers) == 0 {
+		return []string{"durable consumers: none"}
+	}
+	lines := make([]string, len(consumers))
+	for i, consumer := range consumers {
+		line := "consumer " + consumer.Name + ": "
+		if consumer.Unavailable != "" && consumer.Waiting == 0 {
+			lines[i] = line + "unavailable: " + consumer.Unavailable
+			continue
+		}
+		switch {
+		case consumer.Waiting == 0:
+			line += "0 waiting"
+		case consumer.OldestAgeSeconds != nil:
+			line += fmt.Sprintf("%d waiting, oldest %s", consumer.Waiting, time.Duration(*consumer.OldestAgeSeconds)*time.Second)
+		default:
+			line += fmt.Sprintf("%d waiting, oldest unknown", consumer.Waiting)
+		}
+		if consumer.Stalled {
+			if consumer.LastHandledAt != nil {
+				line += fmt.Sprintf("; STALLED: none handled for %s, the last at %s",
+					now.Sub(*consumer.LastHandledAt).Truncate(time.Second), consumer.LastHandledAt.UTC().Format(time.RFC3339))
+			} else {
+				line += fmt.Sprintf("; STALLED: none handled for %s, none since the daemon started at %s",
+					now.Sub(startedAt).Truncate(time.Second), startedAt.UTC().Format(time.RFC3339))
+			}
+		}
+		if consumer.Unavailable != "" {
+			line += "; unavailable: " + consumer.Unavailable
+		}
+		lines[i] = line
+	}
+	return lines
 }
 
 // stateAddress is where a daemon answers: the configured bind and port, with --port overriding

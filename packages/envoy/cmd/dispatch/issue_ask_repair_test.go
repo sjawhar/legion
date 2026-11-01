@@ -13,6 +13,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // The boot's repair withdraws the open ask a close by an older release left on a closed issue,
@@ -59,9 +60,7 @@ func TestRepairIssueAsksAtBootWithdrawsAndLogsItsCounts(t *testing.T) {
 	documents := docs.New(docs.Deps{Store: database, Events: broker})
 	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
 	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 
 	repairIssueAsks(ctx, api.Deps{Store: database, Docs: documents, Events: broker}, issueAskRepairBootTimeout)
 

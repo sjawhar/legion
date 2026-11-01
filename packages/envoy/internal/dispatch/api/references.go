@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -29,12 +32,41 @@ func (s *server) replaceReferences(
 	return refs.ReplaceCounted(ctx, tx, fromKind, fromID, body, s.deps.ServerURL)
 }
 
+// replaceEditedReferences is refs.ReplaceCountedEdit bound to this server's URL: an edit of an
+// ask's question from previous to body. A comment's edit goes through refs.ReplaceCountedItemEdit,
+// which indexes its blocks as well.
+func (s *server) replaceEditedReferences(
+	ctx context.Context,
+	tx pgx.Tx,
+	fromKind, fromID, previous, body string,
+) (model.ReferenceChanges, error) {
+	return refs.ReplaceCountedEdit(ctx, tx, fromKind, fromID, previous, body, s.deps.ServerURL)
+}
+
+// referencesSinceWait bounds how long a since read waits for the safe horizon to pass every event
+// committed before the read (events.Horizon.Await). Only a transaction held open on the Postgres
+// instance keeps the horizon back that long, and a poller would rather have the mentions at or
+// below the horizon now, and the rest on its next read, than an answer that waits on someone
+// else's transaction for as long as it stays open.
+const referencesSinceWait = time.Second
+
 // getReferences reads one node's edges in the reference graph: ?to= lists every edge pointing
 // at the node (backlinks), ?from= every edge it writes; exactly one is required. ?kind= narrows
 // edge types and ?since= keeps mentions introduced after an events.id, which excludes
 // structural edges. Cross-project by design: no project filter. A block reference names a
-// block node carrying its whole current text; one pinned to a version also reads the block as
-// that version recorded it (blockReferenceNode).
+// block node carrying its whole current text; one pinned to a version of its document, or a
+// revision of its comment, also reads the block as that version or revision recorded it
+// (blockReferenceNode, itemBlockReferenceNode).
+//
+// A since read keeps only mentions whose event is at or below the safe horizon
+// (events.Horizon), at or below which every event is final. A poller passes the highest
+// source_seq it was shown as its next since, and event ids are not commit order: a mention whose
+// event drew a lower id and committed after a higher one was read would otherwise fall below
+// that since and never be shown. The read caps at the horizon sinceHorizon answers, which is at
+// or above every event committed before the read unless an open transaction holds the horizon
+// back past referencesSinceWait: so a since read answers every mention committed before it, the
+// caller's own included, and one held back answers the mentions at or below the horizon and
+// leaves the rest to a later read.
 func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -46,7 +78,11 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 	}
 	var node model.GraphNode
 	if ref.Kind == "block" {
-		node, err = s.blockReferenceNode(r.Context(), query, ref)
+		if ref.Item != "" {
+			node, err = s.itemBlockReferenceNode(r.Context(), query, ref)
+		} else {
+			node, err = s.blockReferenceNode(r.Context(), query, ref)
+		}
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -78,6 +114,14 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if query.Since != nil {
+		safe, err := s.sinceHorizon(r.Context())
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		query.Through = &safe
+	}
 	edges, err := refs.Edges(r.Context(), s.deps.Store.Pool, query)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -90,6 +134,26 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	WriteJSON(w, http.StatusOK, model.GraphReferences{Node: node, Edges: edges})
+}
+
+// sinceHorizon is the horizon a since read caps at: H once an observation taken after the call is
+// proven safe (Horizon.Await), so H is at or above every event committed before the read. Safe
+// alone would not do: an observation is proven only by a later one, so on a process where
+// nothing else observes (no event stream has started the relay, no Delivery page the hub) the
+// first read after boot or a Reset would answer H = 0, and each later read stop at the previous
+// read's observation, however old. Await takes longer than an observation or two only while a
+// transaction that holds a transaction id on the instance holds the horizon back; past
+// referencesSinceWait, with the request still live, the read takes the horizon as an observation
+// started after that finds it (Horizon.Safe), and a mention above it waits for a later read. A
+// request that ends first answers Await's error.
+func (s *server) sinceHorizon(ctx context.Context) (int64, error) {
+	wait, cancel := context.WithTimeout(ctx, referencesSinceWait)
+	safe, err := s.horizon().Await(wait)
+	cancel()
+	if err == nil || ctx.Err() != nil {
+		return safe, err
+	}
+	return s.horizon().Safe(ctx)
 }
 
 // blockReferenceNode is the block node ref names (query addresses it), with its whole current
@@ -157,8 +221,88 @@ func (s *server) blockReferenceNode(ctx context.Context, query refs.Query, ref t
 	return node, nil
 }
 
+// itemBlockReferenceNode is the block node ref, a block of a comment or a message, names (query
+// addresses it), with its whole current text (refs.CurrentItemBlockText). A block no current
+// revision of its item holds answers 404, as a document's does, unless ref is pinned to a revision
+// N of its comment that held it: the node then carries what N recorded (model.BlockPin, its
+// Version the revision), "unchanged" or "changed" by comparing the current text with N's, or
+// "removed" with the revision that removed it (RemovedVersion), as a node with no text or changed
+// revision whose facts are a removed block's (refs.RemovedCommentBlockNode). A pin past the
+// comment's current revision, or to one that did not hold the block, answers 404, each saying
+// which. A message never changes, so no reference pins a message's block (parseReferencesQuery
+// refuses one).
+func (s *server) itemBlockReferenceNode(ctx context.Context, query refs.Query, ref text.Ref) (model.GraphNode, error) {
+	pool := s.deps.Store.Pool
+	item, found, err := refs.Node(ctx, pool, ref.Item, ref.ID, true)
+	if err != nil {
+		return model.GraphNode{}, err
+	}
+	if !found {
+		return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no %s %s", ref.Item, ref.ID)
+	}
+	node, current, err := refs.Node(ctx, pool, query.Kind, query.ID, true)
+	if err != nil {
+		return model.GraphNode{}, err
+	}
+	if current {
+		if node.Text, err = refs.CurrentItemBlockText(ctx, pool, refs.ItemKind(ref.Item), query.ID); err != nil {
+			return model.GraphNode{}, err
+		}
+	}
+	if ref.Pin == 0 {
+		if !current {
+			return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no block %q in %s %s", ref.Block, ref.Item, item.ID)
+		}
+		return node, nil
+	}
+	at, err := refs.CommentBlockAt(ctx, pool, item.ID, ref.Block, ref.Pin)
+	if err != nil {
+		return model.GraphNode{}, err
+	}
+	switch {
+	case ref.Pin > at.Current:
+		return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no revision %d of comment %s; its current revision is %d", ref.Pin, item.ID, at.Current)
+	case at.Text == nil:
+		return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no block %q in comment %s at revision %d", ref.Block, item.ID, ref.Pin)
+	}
+	pin := &model.BlockPin{Version: ref.Pin, Ref: refs.BlockRef(item.Ref, ref.Block) + "@v" + strconv.Itoa(ref.Pin), Text: *at.Text}
+	if !current {
+		removed, found, err := refs.RemovedCommentBlockNode(ctx, pool, query.ID, at.RemovedRevision)
+		if err != nil {
+			return model.GraphNode{}, err
+		}
+		if !found {
+			return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no block %q in comment %s", ref.Block, item.ID)
+		}
+		pin.State, pin.RemovedVersion = "removed", at.RemovedRevision
+		removed.Pin = pin
+		return removed, nil
+	}
+	pin.State = "unchanged"
+	if node.Text != pin.Text {
+		pin.State = "changed"
+	}
+	node.Pin = pin
+	return node, nil
+}
+
+// blockPin is a trailing `@v<N>` pin, as a block reference writes one.
+var blockPin = regexp.MustCompile(`@v[0-9]+$`)
+
+// pinsAMessageBlock reports whether raw, a reference text.ParseRef refused, is a block of a
+// message pinned to a revision: the grammar reads none, since a message never changes.
+func pinsAMessageBlock(raw, serverURL string) bool {
+	unpinned := blockPin.ReplaceAllString(raw, "")
+	if unpinned == raw {
+		return false
+	}
+	ref, ok := text.ParseRef(unpinned, serverURL)
+	return ok && ref.Kind == "block" && ref.Item == "message"
+}
+
 // parseReferencesQuery turns ?to=|?from=, ?kind=, and ?since= into an edge query addressed the
-// way graph_edges stores the node: text.TargetID for the to side (ref_key for artifacts), the
+// way graph_edges stores the node (refs.TargetOf): text.TargetID for the to side (ref_key for
+// artifacts; a comment's or message's block under its storage kind), the
 // item id for the from side (the caller swaps an artifact's ref_key for its uuid). The reference
 // is read by text.ParseRef, so a node is read whatever the length of its name: the target bound
 // decides only what text indexes, and a node no index holds an edge to simply has fewer edges.
@@ -174,9 +318,14 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 	}
 	ref, ok := text.ParseRef(raw, serverURL)
 	if !ok {
+		if pinsAMessageBlock(raw, serverURL) {
+			return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "%q pins a block of a message, which never changes; name the block without @v<N>", raw)
+		}
 		return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "%q is not a dispatch:// reference to an issue, document, block, ask, comment, message, or component", raw)
 	}
-	query := refs.Query{Direction: direction, Kind: ref.Kind, ID: text.TargetID(ref)}
+	// The node as graph_edges stores it: a block of a comment or message under its storage kind.
+	target, _ := refs.TargetOf(ref)
+	query := refs.Query{Direction: direction, Kind: target.Kind, ID: target.ID}
 	if kinds := strings.TrimSpace(values.Get("kind")); kinds != "" {
 		for _, kind := range strings.Split(kinds, ",") {
 			kind = strings.TrimSpace(kind)
@@ -192,9 +341,9 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 	if direction == "in" && ref.Kind == "ask" && len(query.Kinds) == 0 {
 		query.ExcludeKinds = refs.AskBacklinkExclusions
 	}
-	// A document's blocks are each part_of it; its links are what a document's read means, so
-	// those edges are listed only when asked for by kind.
-	if ref.Kind == "artifact" && len(query.Kinds) == 0 {
+	// A document's, comment's or message's blocks are each part_of it; its links are what its
+	// read means, so those edges are listed only when asked for by kind.
+	if (ref.Kind == "artifact" || ref.Kind == "comment" || ref.Kind == "message") && len(query.Kinds) == 0 {
 		query.ExcludeKinds = []string{"part_of"}
 	}
 	if since := strings.TrimSpace(values.Get("since")); since != "" {
@@ -231,9 +380,28 @@ func (s *server) documentMentionExcerpts(ctx context.Context, query refs.Query, 
 	return nil
 }
 
+// getIssueReferences answers an issue's reference closure. ?versions=latest leaves each member's
+// artifact.versions holding only its latest version, under its own ETag; absent, empty or all is
+// the full answer. A repeated versions is refused rather than read by its first value.
 func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
+	}
+	versionsValues := r.URL.Query()["versions"]
+	if len(versionsValues) > 1 {
+		s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_QUERY", "versions must be given once, as all or latest"))
+		return
+	}
+	var latestOnly bool
+	if len(versionsValues) == 1 {
+		switch versionsValues[0] {
+		case "", "all":
+		case "latest":
+			latestOnly = true
+		default:
+			s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_QUERY", "versions must be all or latest"))
+			return
+		}
 	}
 	issue, err := s.loadIssue(r.Context(), s.deps.Store.Pool, r.PathValue("key"))
 	if err != nil {
@@ -249,7 +417,7 @@ func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 	for index, member := range closure {
 		refKeys[index] = member.RefKey
 	}
-	artifacts, err := s.loadArtifactsByRefKey(r.Context(), s.deps.Store.Pool, refKeys)
+	artifacts, err := s.loadArtifactsByRefKey(r.Context(), s.deps.Store.Pool, refKeys, latestOnly)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -262,12 +430,12 @@ func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		members = append(members, model.ReferenceMember{
-			Artifact: artifact,
+			Artifact: *artifact,
 			Depth:    closureMember.Depth,
 			Via:      closureMember.Via,
 		})
 	}
-	etag := referencesETag(issue.LastSeq, members, truncated)
+	etag := referencesETag(issue.LastSeq, members, truncated, latestOnly)
 	w.Header().Set("ETag", etag)
 	if r.Header.Get("If-None-Match") == etag {
 		w.WriteHeader(http.StatusNotModified)
@@ -298,26 +466,40 @@ func (s *server) getArtifactReferences(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, model.ArtifactReferences{Outgoing: outgoing, ReferencedBy: referencedBy})
 }
 
-func referencesETag(lastSeq int, members []model.ReferenceMember, truncated bool) string {
+// referencesETag hashes what an issue references answer depends on. The trimmed answer
+// (latestOnly) hashes one more line naming its variant, so the full and trimmed answers of one
+// issue never share an ETag; the full answer hashes no such line.
+func referencesETag(lastSeq int, members []model.ReferenceMember, truncated, latestOnly bool) string {
 	hash := sha256.New()
 	_, _ = fmt.Fprintf(hash, "%d\n%t\n", lastSeq, truncated)
+	if latestOnly {
+		_, _ = io.WriteString(hash, "versions=latest\n")
+	}
 	for _, member := range members {
 		_, _ = fmt.Fprintf(hash, "%s@%d\n", member.Artifact.ID, member.Artifact.Versions[len(member.Artifact.Versions)-1].Number)
 	}
 	return `"` + hex.EncodeToString(hash.Sum(nil)) + `"`
 }
 
-func (s *server) loadArtifactsByRefKey(ctx context.Context, q queryer, refKeys []string) (map[string]model.Artifact, error) {
-	artifacts := make(map[string]model.Artifact, len(refKeys))
+// loadArtifactsByRefKey reads the documents refKeys name, each with every version in number
+// order, or with latestOnly only its latest version. A document with no version is absent.
+func (s *server) loadArtifactsByRefKey(ctx context.Context, q queryer, refKeys []string, latestOnly bool) (map[string]*model.Artifact, error) {
+	artifacts := make(map[string]*model.Artifact, len(refKeys))
 	if len(refKeys) == 0 {
 		return artifacts, nil
+	}
+	versions := `join artifact_versions v on v.artifact_id = a.id`
+	if latestOnly {
+		versions = `join lateral (
+			select * from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1
+		) v on true`
 	}
 	rows, err := q.Query(ctx, `
 		select a.id::text, a.issue_key, coalesce(a.project_key, ''), a.session_id, a.ref_key, a.slug, a.name, a.kind, a.is_primary,
 		       a.created_by, a.created_at,
 		       `+versionColumns+`
 		from artifacts a
-		join artifact_versions v on v.artifact_id = a.id
+		`+versions+`
 		where a.ref_key = any($1)
 		order by a.ref_key, v.number
 	`, refKeys)
@@ -361,7 +543,8 @@ func (s *server) loadArtifactsByRefKey(ctx context.Context, q queryer, refKeys [
 			if err := json.Unmarshal(createdBy, &artifact.CreatedBy); err != nil {
 				return nil, fmt.Errorf("decode artifact author: %w", err)
 			}
-			current = artifact
+			current = &artifact
+			artifacts[artifact.RefKey] = current
 		}
 		decoded, ok := authorsByJSON[string(authors)]
 		if !ok {
@@ -373,7 +556,6 @@ func (s *server) loadArtifactsByRefKey(ctx context.Context, q queryer, refKeys [
 		}
 		version.Authors = decoded
 		current.Versions = append(current.Versions, version)
-		artifacts[artifact.RefKey] = current
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

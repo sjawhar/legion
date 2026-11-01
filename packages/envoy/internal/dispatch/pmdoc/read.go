@@ -2,6 +2,8 @@ package pmdoc
 
 import (
 	"fmt"
+	"reflect"
+	"strings"
 
 	"github.com/reearth/ygo/crdt"
 )
@@ -9,7 +11,7 @@ import (
 // Read converts the live Yjs tree the browser editor writes into a Node tree. The tree is the
 // caller's own: it shares no map or slice with the document it was read from (ownedValue).
 func Read(frag *crdt.YXmlFragment) (*Node, error) {
-	return readDocument(frag, yTextDeltaLive, true)
+	return readDocument(frag, readLiveText, true)
 }
 
 // ReadForRendering is Read without ownedValue's copy: for a caller that renders the tree and
@@ -17,12 +19,23 @@ func Read(frag *crdt.YXmlFragment) (*Node, error) {
 // nothing retains the tree afterward to alias a later reader or a write that lands once the lock
 // is released.
 func ReadForRendering(frag *crdt.YXmlFragment) (*Node, error) {
-	return readDocument(frag, yTextDeltaLive, false)
+	return readDocument(frag, readLiveText, false)
 }
 
-// yTextDeltaLive is text's delta outside any transaction, as Read and ReadForRendering walk it.
-func yTextDeltaLive(text *crdt.YXmlText) ([]crdt.Delta, error) {
-	return text.ToDelta(), nil
+// ReadUnshared is Read for a document no other goroutine reads or writes while the call runs: the
+// read cache's fold of a history it has just decoded, which drops the document afterwards, and a
+// write transaction's read of the fork only the goroutine holding it touches, which keeps the
+// tree it hands back. The tree is the caller's own, as Read's is (ownedValue). It reads each text
+// by walking its items directly (readUnsharedText) rather than through ygo's ToDelta, which takes
+// the document's read lock and builds a delta the walk would only turn into nodes, and it returns
+// the tree validated once, with the Validate and so the errors Read gives, so its holder never
+// validates it again.
+func ReadUnshared(frag *crdt.YXmlFragment) (ValidDocument, error) {
+	doc, err := readDocument(frag, readUnsharedText, true)
+	if err != nil {
+		return ValidDocument{}, err
+	}
+	return ValidDocument{doc: doc}, nil
 }
 
 // ReadInTransaction reads a live tree while the caller's Yjs transaction holds
@@ -31,13 +44,32 @@ func ReadInTransaction(txn *crdt.Transaction, frag *crdt.YXmlFragment) (*Node, e
 	if txn == nil {
 		return nil, fmt.Errorf("%w: ReadInTransaction requires transaction", ErrSchema)
 	}
-	return readDocument(frag, yTextDeltaInTransaction, true)
+	return readDocument(frag, readTextInTransaction, true)
 }
 
-type textDeltaReader func(*crdt.YXmlText) ([]crdt.Delta, error)
+// textReader expands one Y.XmlText into ProseMirror text nodes: one per run of identical marks,
+// exactly as y-prosemirror's createTypeFromTextNodes stores them. copyAttrs copies each mark's
+// attributes (ownedValue).
+type textReader func(text *crdt.YXmlText, copyAttrs bool) ([]*Node, error)
 
-func readDocument(frag *crdt.YXmlFragment, readDelta textDeltaReader, copyAttrs bool) (*Node, error) {
-	children, err := readChildren(frag, readDelta, 1, copyAttrs)
+// readLiveText reads text through its delta outside any transaction, as Read and ReadForRendering
+// walk it.
+func readLiveText(text *crdt.YXmlText, copyAttrs bool) ([]*Node, error) {
+	return textNodesOfDelta(text.ToDelta(), copyAttrs)
+}
+
+// readTextInTransaction reads text through the lock-free delta walk Update makes inside the
+// transaction holding the document's lock.
+func readTextInTransaction(text *crdt.YXmlText, copyAttrs bool) ([]*Node, error) {
+	delta, err := yTextDeltaInTransaction(text)
+	if err != nil {
+		return nil, err
+	}
+	return textNodesOfDelta(delta, copyAttrs)
+}
+
+func readDocument(frag *crdt.YXmlFragment, readText textReader, copyAttrs bool) (*Node, error) {
+	children, err := readChildren(frag, readText, 1, copyAttrs)
 	if err != nil {
 		return nil, err
 	}
@@ -48,18 +80,18 @@ func readDocument(frag *crdt.YXmlFragment, readDelta textDeltaReader, copyAttrs 
 	return doc, nil
 }
 
-func readChildren(frag *crdt.YXmlFragment, readDelta textDeltaReader, depth int, copyAttrs bool) ([]*Node, error) {
+func readChildren(frag *crdt.YXmlFragment, readText textReader, depth int, copyAttrs bool) ([]*Node, error) {
 	var out []*Node
 	for _, child := range frag.Children() {
 		switch c := child.(type) {
 		case *crdt.YXmlElement:
-			n, err := readElement(c, readDelta, depth, copyAttrs)
+			n, err := readElement(c, readText, depth, copyAttrs)
 			if err != nil {
 				return nil, err
 			}
 			out = append(out, n)
 		case *crdt.YXmlText:
-			nodes, err := readText(c, readDelta, copyAttrs)
+			nodes, err := readText(c, copyAttrs)
 			if err != nil {
 				return nil, err
 			}
@@ -71,7 +103,7 @@ func readChildren(frag *crdt.YXmlFragment, readDelta textDeltaReader, depth int,
 	return out, nil
 }
 
-func readElement(e *crdt.YXmlElement, readDelta textDeltaReader, depth int, copyAttrs bool) (*Node, error) {
+func readElement(e *crdt.YXmlElement, readText textReader, depth int, copyAttrs bool) (*Node, error) {
 	if err := treeDepthError(depth); err != nil {
 		return nil, err
 	}
@@ -85,7 +117,7 @@ func readElement(e *crdt.YXmlElement, readDelta textDeltaReader, depth int, copy
 		}
 		n.Attrs = treeAttrs(e.NodeName, attrs)
 	}
-	children, err := readChildren(&e.YXmlFragment, readDelta, depth+1, copyAttrs)
+	children, err := readChildren(&e.YXmlFragment, readText, depth+1, copyAttrs)
 	if err != nil {
 		return nil, err
 	}
@@ -93,35 +125,135 @@ func readElement(e *crdt.YXmlElement, readDelta textDeltaReader, depth int, copy
 	return n, nil
 }
 
-// readText expands one Y.XmlText into ProseMirror text nodes: one per run of
-// identical marks, exactly as y-prosemirror's createTypeFromTextNodes stores them.
-func readText(t *crdt.YXmlText, readDelta textDeltaReader, copyAttrs bool) ([]*Node, error) {
-	delta, err := readDelta(t)
-	if err != nil {
-		return nil, err
-	}
+// textNodesOfDelta is the text node of each insert in delta (deltaTextNode).
+func textNodesOfDelta(delta []crdt.Delta, copyAttrs bool) ([]*Node, error) {
 	var out []*Node
 	for _, d := range delta {
 		if d.Op != crdt.DeltaOpInsert {
 			return nil, fmt.Errorf("%w: unexpected yjs text delta operation %d", ErrSchema, d.Op)
 		}
-		s, ok := d.Insert.(string)
-		if !ok {
-			return nil, fmt.Errorf("%w: unsupported yjs text embed %T", ErrSchema, d.Insert)
+		n, err := deltaTextNode(d.Insert, d.Attributes, copyAttrs)
+		if err != nil {
+			return nil, err
 		}
-		n := &Node{Type: "text", Text: s}
-		for name, raw := range d.Attributes {
-			if copyAttrs {
-				raw = ownedValue(raw)
-			}
-			attrs, err := attrsFromY(raw)
-			if err != nil {
-				return nil, fmt.Errorf("%w: mark %q attributes: %v", ErrSchema, name, err)
-			}
-			n.Marks = append(n.Marks, Mark{Type: yattrToMarkName(name), Attrs: attrs})
-		}
-		sortMarks(n.Marks)
 		out = append(out, n)
+	}
+	return out, nil
+}
+
+// deltaTextNode is the text node of insert, a text delta's insert, carrying a mark for each of
+// attributes, the formatting it is inserted under; a node without marks has nil Marks. Only a
+// string makes a text node: any other embed is outside the schema.
+func deltaTextNode(insert any, attributes crdt.Attributes, copyAttrs bool) (*Node, error) {
+	s, ok := insert.(string)
+	if !ok {
+		return nil, fmt.Errorf("%w: unsupported yjs text embed %T", ErrSchema, insert)
+	}
+	n := &Node{Type: "text", Text: s}
+	for name, raw := range attributes {
+		if copyAttrs {
+			raw = ownedValue(raw)
+		}
+		attrs, err := attrsFromY(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%w: mark %q attributes: %v", ErrSchema, name, err)
+		}
+		n.Marks = append(n.Marks, Mark{Type: yattrToMarkName(name), Attrs: attrs})
+	}
+	sortMarks(n.Marks)
+	return n, nil
+}
+
+// readUnsharedText is text's nodes as readLiveText reads them, without ygo's ToDelta: it is
+// ToDelta's loop (crdt/ytext.go, YText.ToDelta, sjawhar/ygo v1.51.3-sami.4) with its state, the
+// buffered run's text and attribute snapshot, attrsDirty and the live attribute set, emitting each
+// delta ToDelta would emit as its node (deltaTextNode) instead, in the same order, so the first
+// node refused is the one readLiveText refuses. It takes no lock: its caller holds the only
+// reference to the document (ReadUnshared). The rules it keeps from ToDelta:
+//
+//   - A deleted item is skipped. A format sets its key in the live set, and an untyped nil value
+//     deletes the key (crdt's updateAttr); a typed nil sets it.
+//   - A string starts a run when none is buffered, the run taking a snapshot of the live set (nil
+//     when it is empty). It ends the run and starts another only when a format arrived since the
+//     last string and the live set differs from the run's snapshot, comparing each value with
+//     reflect.DeepEqual, so a NaN never matches. Every string, an empty one too, clears that a
+//     format arrived. A run with no text makes no node, so an empty string never makes one.
+//   - An embed ends the run. A string embed is its own node, never joined to a neighbour, carrying
+//     the live set rather than a run's snapshot, and an empty node when the string is empty; any
+//     other embed is refused, as deltaTextNode refuses it.
+//   - Any other content in a text (a type, Any, JSON, binary, deleted content) is ignored.
+//
+// A run's text is a string of its own, never a string item's Str, which can be a slice of a longer
+// string an item split left behind.
+func readUnsharedText(text *crdt.YXmlText, copyAttrs bool) ([]*Node, error) {
+	var out []*Node
+	current := make(crdt.Attributes)
+	var run strings.Builder
+	var runAttrs crdt.Attributes // the buffered run's attributes; nil when it is unformatted
+	attrsDirty := false
+
+	sameAsRun := func() bool {
+		if len(current) != len(runAttrs) {
+			return false
+		}
+		for key, value := range current {
+			if runValue, ok := runAttrs[key]; !ok || !reflect.DeepEqual(value, runValue) {
+				return false
+			}
+		}
+		return true
+	}
+	flush := func() error {
+		if run.Len() == 0 {
+			return nil
+		}
+		n, err := deltaTextNode(run.String(), runAttrs, copyAttrs)
+		if err != nil {
+			return err
+		}
+		out = append(out, n)
+		run.Reset()
+		runAttrs = nil
+		return nil
+	}
+
+	for item := yTextStart(text); item != nil; item = item.Right {
+		if item.Deleted {
+			continue
+		}
+		switch content := item.Content.(type) {
+		case *crdt.ContentString:
+			switch {
+			case run.Len() == 0:
+				runAttrs = cloneYAttributes(current)
+			case attrsDirty && !sameAsRun():
+				if err := flush(); err != nil {
+					return nil, err
+				}
+				runAttrs = cloneYAttributes(current)
+			}
+			attrsDirty = false
+			run.WriteString(content.Str)
+		case *crdt.ContentEmbed:
+			if err := flush(); err != nil {
+				return nil, err
+			}
+			n, err := deltaTextNode(content.Val, current, copyAttrs)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, n)
+		case *crdt.ContentFormat:
+			if content.Val == nil {
+				delete(current, content.Key)
+			} else {
+				current[content.Key] = content.Val
+			}
+			attrsDirty = true
+		}
+	}
+	if err := flush(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

@@ -5,12 +5,13 @@ on:
     branches: [main]
     # Every file packages/envoy/docker/Dockerfile builds from: the Go module and the Dockerfile
     # (packages/envoy/**), the web stage's frozen install (the root manifest, lockfile, patches and
-    # every root workspace's package.json), the sources it builds the SPA and the Go contracts from,
-    # the context's .dockerignore, and this workflow. A commit touching only one of them would
-    # otherwise publish no image, so no pin could name it. .github/scripts/check-image-trigger-paths.sh
-    # fails the build when this list misses a file the image build reads. The envoy-infra plugin's
-    # module (packages/envoy/infra) is no input of the image or of this release's binaries, and
-    # release-envoy-infra.yaml releases it.
+    # every root workspace's package.json), the Bun pin that stage holds its own Bun to, the
+    # sources it builds the SPA and the Go contracts from, the context's .dockerignore, and this
+    # workflow. A commit touching only one of them would otherwise publish no image, so no pin
+    # could name it. .github/scripts/check-image-trigger-paths.sh fails the build when this list
+    # misses a file the image build reads. The envoy-infra plugin's module (packages/envoy/infra)
+    # is no input of the image or of this release's binaries, and release-envoy-infra.yaml
+    # releases it.
     paths:
       - "packages/envoy/**"
       - "!packages/envoy/infra/**"
@@ -24,10 +25,10 @@ on:
       - "packages/pi-envoy/package.json"
       - "packages/pi-legion/package.json"
       - "packages/pi-shared/package.json"
-      - "packages/envoy-plugin/package.json"
       - "packages/claude-envoy/package.json"
       - "docs/site/package.json"
       - ".dockerignore"
+      - ".bun-version"
       - ".github/workflows/release-envoy-listener.yaml"
       # The image's and the binaries' third-party notices, and the archives' target list.
       - "scripts/third-party-notices.ts"
@@ -76,6 +77,14 @@ env:
     .github/go-release-targets.json .github/agent-secrets-client-targets.json
 
 
+  # A `|` between proxy entries makes a go command fall through to the next source after ANY error,
+  # where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
+  # proxy.golang.org reset a download mid-stream and turned a Go lane red on a module whose hash
+  # go.sum already holds (sjawhar/legion#2512); with `|direct` the command fetches the same bytes
+  # straight from the source and checks them against go.sum, so this is a second path, not a weaker
+  # check.
+  GOPROXY: https://proxy.golang.org|direct
+
 jobs:
 
   # The architectures the archives are built for: .github/go-release-targets.json, the list the
@@ -85,6 +94,7 @@ jobs:
   # be the inconsistency.
   targets:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
@@ -99,6 +109,7 @@ jobs:
   build:
     needs: targets
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # Checks out and uploads; nothing here writes to the repository or a registry.
     permissions:
       contents: read
@@ -152,6 +163,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 80
     # Builds and pushes images to ghcr.io; nothing here writes to the repository.
     permissions:
       contents: read
@@ -173,10 +185,11 @@ jobs:
           # $GITHUB_EVENT_PATH's full JSON into any provenance predicate a build below computes,
           # attached to the pushed image or not. false here keeps every build this builder runs —
           # smoke and publish alike — free of that, regardless of each build's own provenance
-          # setting. image= is the driver's own default BuildKit image, through the mirror.
+          # setting. image= is the driver's own default BuildKit image: ghcr.io/sjawhar/legion/ci,
+          # the copy of moby/buildkit:buildx-stable-1 (.github/ci-images.yaml).
           driver-opts: |
             provenance-add-gha=false
-            image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+            image=ghcr.io/sjawhar/legion/ci@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
@@ -247,12 +260,13 @@ jobs:
           DOCKER_BUILD_SUMMARY: "false"
         # No BuildKit layer cache is kept across runs. The Dockerfile passes LEGION_COMMIT (this
         # run's github.sha) into the build stage's `go build -ldflags` step, so every new commit
-        # runs the build stage, and the web stage it copies from, again: an exported cache would
-        # serve only a re-run at the same commit, while each main run would add about 137 MB of
-        # Actions-cache entries (`mode=min`; `mode=max` added about 1.6 GB) to a cache already past
-        # GitHub's 10 GB limit. Not a registry cache either: any run holding `packages: write` can
-        # write a tag main's attested build would read (GHSA-f2v9-hprr-32q3). Uncached, each leg
-        # takes about 4.2-6.9 minutes.
+        # runs the build stage, and the web stage it copies from, again: a `mode=min` cache, which
+        # exports the final stage's layers alone, would serve only a re-run at the same commit,
+        # while each main run would add about 137 MB of Actions-cache entries (`mode=max` added
+        # about 1.6 GB) to a cache already past GitHub's 10 GB limit. Not a registry cache either:
+        # any run holding `packages: write` can write a tag main's attested build would read
+        # (GHSA-f2v9-hprr-32q3). Uncached, each leg takes 4.2-5.3 minutes
+        # (docs/solutions/github/measure-a-build-cache-by-what-a-new-commit-invalidates-and-a-hit-by-same-run-job-reruns-pr2297.md).
         with:
           context: .
           file: packages/envoy/docker/Dockerfile
@@ -296,6 +310,7 @@ jobs:
   image_index:
     needs: docker
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # Pushes the index and its tag to ghcr.io; nothing here writes to the repository.
     permissions:
       packages: write
@@ -365,6 +380,7 @@ jobs:
   attest:
     needs: image_index
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # id-token: write is the OIDC token Sigstore issues the signing certificate for; attestations:
     # write stores the attestation with GitHub. The attestation stays with GitHub, not the
     # registry, so this job needs no packages scope.
@@ -402,6 +418,7 @@ jobs:
   release_build:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
@@ -526,6 +543,7 @@ jobs:
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # packages: write moves the `latest` tag to the newest already-published image (`docker
     # buildx imagetools create`, below); contents: write creates and uploads the GitHub release
     # (`release-push.sh release`); id-token and attestations: write are for the agent-secrets

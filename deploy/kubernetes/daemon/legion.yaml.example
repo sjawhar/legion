@@ -8,8 +8,8 @@
 # LEGION_POSTGRES_DSN (or postgres_dsn below) names a Postgres.
 # Every example.com host is a documentation domain (RFC 2606) and legion-daemon-widgets.legion.svc
 # the Service name this example's convention gives (below); the App ids are made up; the image
-# digest is all zeros, where yours is the one a Worker Image workflow run or a legion-v<version>
-# release publishes.
+# digest is all zeros, where yours is the one a worker-image.yaml build on main (its run summary)
+# or a legion-v<version> release publishes.
 
 project: WIDGETS                       # the Dispatch project key this daemon runs; also a key of projects
 state_dir: ./state                     # the daemon's local state
@@ -59,12 +59,16 @@ github_apps:
   review:
     app_id: "100002"
     private_key_command: cat ./review-app.pem
-# worker_backends:                     # runtime: tmux only: a phase worker's role (planner, implementer,
-#   implementer: claude                # tester, reviewer, merger) on omp, the default, or claude: Claude Code
-#                                      # in its pane under `legion claude-bridge`, which needs LEGION_CLAUDE_PLUGIN_DIR
-#                                      # (and LEGION_CLAUDE_PATH, LEGION_BUN_PATH, else PATH) in the daemon's
-#                                      # environment. Under runtime: kubernetes, as in this file, the loader
-#                                      # refuses claude: the worker image carries no Claude Code.
+# worker_backends:                     # a phase worker's role (planner, implementer, tester, reviewer,
+#   implementer: claude                # merger) on omp, the default, or claude: Claude Code under
+#                                      # `legion claude-bridge`, which runs under either runtime. In a pod,
+#                                      # as in this file, it runs out of the worker image, which carries
+#                                      # Claude Code and the claude-envoy plugin; under runtime: tmux it
+#                                      # needs LEGION_CLAUDE_PLUGIN_DIR (and LEGION_CLAUDE_PATH,
+#                                      # LEGION_BUN_PATH, else PATH) in the daemon's environment. Legion
+#                                      # holds no model route for it either: put ANTHROPIC_API_KEY in
+#                                      # provider_keys (pod.env refuses a credential-shaped name) and
+#                                      # ANTHROPIC_BASE_URL and ANTHROPIC_MODEL in runtime.kubernetes.pod.env.
 # role_config_files:                   # Oh My Pi overlays one role names and no other: here a model
 #   implementer: [/etc/legion-operator-roles/fallback.yml] # fallback chain (retry.modelFallback and
 #   tester: [/etc/legion-operator-roles/fallback.yml]      # retry.fallbackChains) for the roles whose
@@ -89,8 +93,8 @@ github_apps:
 #                                      # key or its _FILE pointer, a credential-shaped name, and a URL
 #                                      # value with a password (a secret reaches a pane as a file,
 #                                      # never as a value on tmux's command line)
-#     pi_config_files: [./overlay.yml] # Oh My Pi overlays every pane names in PI_CONFIG_FILES, in order,
-#                                      # before the runtime's own turn-scope overlay, which stays last
+#     pi_config_files: [./overlay.yml] # Oh My Pi overlays every pane names in PI_CONFIG_FILES, in order;
+#                                      # Legion adds none of its own, so these and role_config_files are all
 #     take_over: kubernetes            # only while moving a project from runtime kubernetes onto this
 #                                      # host: take over the claims its pods held (docs/deployment.md,
 #                                      # "Moving a project onto tmux")
@@ -164,6 +168,10 @@ runtime:
           projected:
             sources:
               - service_account_token: {audience: "model-gateway.example.com", expiration_seconds: 3600, path: token}
+        # A Secret of your own, each file at mode 0440 rather than Kubernetes' default 0644,
+        # which every user in the pod can read (docs/kubernetes.md, Configuration):
+        # - name: operator-key
+        #   secret: {name: legion-operator-key, items: [{key: KEY, path: key}], default_mode: 0440}
         # An existing network share, mounted into every pod (docs/kubernetes.md, Operator
         # configuration): a PersistentVolumeClaim you made in this namespace, bound to the share
         # (a Filestore instance, an NFS export), or an NFS export the nodes reach. An inline csi
@@ -178,6 +186,7 @@ runtime:
         - {volume: operator-route, mount_path: /home/legion/.omp/profiles/legion/agent/models.yml, sub_path: models.yml}
         - {volume: operator-route, mount_path: /etc/legion-operator/overlay.yml, sub_path: overlay.yml}
         - {volume: operator-token, mount_path: /var/run/operator}
+        # - {volume: operator-key, mount_path: /var/run/operator-key}
         # - {volume: team-share, mount_path: /mnt/team}                    # read-only by default
         # - {volume: nas, mount_path: /mnt/nas, read_only: false}          # writable
         # - {volume: operator-roles, mount_path: /etc/legion-operator-roles} # role_config_files' overlays

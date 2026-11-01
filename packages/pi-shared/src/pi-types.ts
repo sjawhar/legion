@@ -62,6 +62,12 @@ export interface SessionContext {
   /** The host's managed one-shot timer: a throw or rejection is contained, cleared on shutdown. */
   readonly setTimeout: (callback: () => void | Promise<void>, delayMs: number) => void;
   /**
+   * The host's `ctx.mode` (`ExtensionMode`): how the process was launched, an RPC host (every
+   * Legion pane), a terminal, or a one-shot `-p` run printing text or JSON. Absent on a host that
+   * predates it.
+   */
+  readonly mode?: "tui" | "rpc" | "json" | "print";
+  /**
    * Oh My Pi 18.3 on: one side turn on the session's model over a snapshot of its conversation,
    * never added to the transcript. The host sends `promptText` as given. A context kept from
    * `session_start` may call it from later callbacks (upstream `docs/extensions.md`, "Ephemeral
@@ -72,9 +78,11 @@ export interface SessionContext {
     readonly signal?: AbortSignal;
   }) => Promise<{ readonly replyText: string }>;
   /**
-   * Whether the host runs no turn now (`!session.isStreaming`). Measured on Oh My Pi 18.8.9: true
-   * already in the `agent_end` of an aborted run; `pi.sendMessage` returns while it still reads
-   * true for an idle card, before the host starts the card's run.
+   * The host's `ctx.isIdle()`: whether it runs no turn now (`!session.isStreaming`), false while a
+   * turn runs and while a prompt is set up or recovered, read live from a context kept since
+   * `session_start`. Measured on Oh My Pi 18.8.9: true already in the `agent_end` of an aborted
+   * run; `pi.sendMessage` returns while it still reads true for an idle card, before the host
+   * starts the card's run.
    */
   readonly isIdle?: () => boolean;
   /**
@@ -86,6 +94,12 @@ export interface SessionContext {
   readonly hasPendingMessages?: () => boolean;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
+    /**
+     * The host's extension widget (`ExtensionUIContext.setWidget`): `lines` shown above the editor
+     * under `key`, in place of what that key showed, until set again; `undefined` removes it.
+     * Oh My Pi keeps it across `/new`'s transcript reset. Absent where the host has none.
+     */
+    readonly setWidget?: (key: string, lines: string[] | undefined) => void;
   };
 }
 
@@ -160,6 +174,20 @@ export interface RetryFallbackAppliedEvent {
   readonly to: string;
   readonly role: string;
   readonly reason?: string;
+}
+
+/** Post-run auto-compaction ended (`shared-events.ts` in the host); `aborted` is an interrupt
+ * during it, which leaves no aborted assistant message behind. Only the field read is typed. */
+export interface AutoCompactionEndEvent {
+  readonly aborted: boolean;
+}
+
+/** A retry saga ended (`shared-events.ts` in the host); an abort during its backoff or credential
+ * wait ends it with `success: false` and `finalError` "Retry cancelled". Only the fields read are
+ * typed. */
+export interface AutoRetryEndEvent {
+  readonly success: boolean;
+  readonly finalError?: string;
 }
 
 /** A message entering the session: a user prompt (the daemon's RPC `prompt` among them), a custom
@@ -272,6 +300,16 @@ export interface PiEventContract {
     readonly event: RetryFallbackAppliedEvent;
     readonly result: undefined;
   };
+  /** A compaction committed, automatic, manual or an extension's; it carries nothing an extension
+   *  reads here. */
+  readonly session_compact: { readonly event: unknown; readonly result: undefined };
+  /** Post-run auto-compaction ended, finished, skipped or interrupted. */
+  readonly auto_compaction_end: {
+    readonly event: AutoCompactionEndEvent;
+    readonly result: undefined;
+  };
+  /** A retry saga ended, succeeded, exhausted or cancelled. */
+  readonly auto_retry_end: { readonly event: AutoRetryEndEvent; readonly result: undefined };
   /** Every provider request the session's agent loop sends, each turn and each tool round. */
   readonly context: { readonly event: ContextEvent; readonly result: ContextEventResult };
   /** Every input before it runs: the host's typed-input ingress, `sendUserInput` included. */
@@ -299,6 +337,8 @@ export interface CommandContext {
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
   };
+  /** The host's `ctx.isIdle()`: false while a turn runs. */
+  readonly isIdle: () => boolean;
 }
 
 /** The host's text block (`TextContent` in `@oh-my-pi/pi-ai`), as far as this package writes it. */
@@ -439,16 +479,20 @@ export interface PiApi {
           readonly details?: Readonly<Record<string, unknown>>;
         }
       | { readonly type: string },
-    options?: { readonly deliverAs: "steer" | "aside"; readonly triggerTurn: boolean }
+    options?: {
+      readonly deliverAs: "steer" | "aside" | "nextTurn" | "followUp";
+      readonly triggerTurn: boolean;
+    }
   ) => void;
   /**
    * Sends a user prompt, exactly as Enter at the terminal does: idle, it starts a turn; streaming,
    * it steers. `deliverAs: "aside"` lands it at the next step without interrupting the running
-   * tool batch. The host queues the send, so the prompt's `message_start` comes after this returns.
+   * tool batch; `deliverAs: "followUp"` queues it behind the running turn without starting one.
+   * The host queues the send, so the prompt's `message_start` comes after this returns.
    */
   readonly sendUserMessage: (
     content: string | readonly ContentBlock[],
-    options?: { readonly deliverAs: "aside" }
+    options?: { readonly deliverAs: "aside" | "followUp" }
   ) => void;
   /**
    * Runs text as if typed at the session's own terminal: a built-in its host can run headless, an

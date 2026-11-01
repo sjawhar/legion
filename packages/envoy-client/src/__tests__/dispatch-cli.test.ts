@@ -331,6 +331,13 @@ const server = Bun.serve({
       });
     }
     if (pathname === "/v1/interests/ses-1") return interests();
+    // A Dispatch build older than the answers route, which it therefore lacks.
+    if (pathname.endsWith("/answers")) {
+      return Response.json(
+        { code: "NOT_FOUND", error: `no route for ${request.method} ${pathname}` },
+        { status: 404 }
+      );
+    }
     return Response.json({ error: `unexpected ${request.method} ${pathname}` }, { status: 500 });
   },
 });
@@ -421,12 +428,21 @@ describe("the dispatch CLI", () => {
 
   test("an empty session id counts as unset", async () => {
     const { code, stdout } = await run(["message", "--issue", "DSP-1", "--body", "x"], {
-      DISPATCH_HOST: "opencode",
+      DISPATCH_HOST: "omp",
       DISPATCH_SESSION_ID: "",
     });
     expect(code).toBe(2);
     expect(stdout).toContain("DISPATCH_SESSION_ID");
     expect(requests).toEqual([]);
+  });
+
+  test("answers against a Dispatch without the route says its build is older than the answers route, exit 1", async () => {
+    const { code, stdout } = await run(["answers"], omp);
+    expect(code).toBe(1);
+    expect(stdout).toBe(
+      `This Dispatch (http://127.0.0.1:${server.port}) has no answers route yet: its build is older than the answers route.\n`
+    );
+    expect(requests.map((request) => request.path)).toEqual(["/api/v1/agents/ses-1/answers"]);
   });
 
   test("an unknown flag is refused in command syntax, with an example", async () => {
@@ -1054,19 +1070,10 @@ describe("the dispatch CLI's envoy.json", () => {
       ENVOY_CONFIG_FILE: handed,
     });
     expect(namedClaude.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
-    // OpenCode likewise.
-    const opencode = await run(["projects"], {
-      ...fromFile,
-      DISPATCH_HOST: "opencode",
-      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
-      ENVOY_CONFIG_FILE: handed,
-    });
-    expect(opencode.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
   });
 
   test("with DISPATCH_HOST set and no ENVOY_CONFIG_FILE, each host takes its own harness's directory and no other's, else the neutral file", async () => {
     const claude = { DISPATCH_HOST: "claude", CLAUDE_CODE_SESSION_ID: "ses-1" };
-    const opencode = { DISPATCH_HOST: "opencode", DISPATCH_SESSION_ID: "ses-1" };
     const profile = join(stateDir, "profile");
     serverConfig(profile);
     const ompRun = await run(["projects"], {
@@ -1074,7 +1081,6 @@ describe("the dispatch CLI's envoy.json", () => {
       OMP_PROFILE: "work",
       PI_CODING_AGENT_DIR: profile,
       CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
-      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
     });
     expect(ompRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
 
@@ -1099,21 +1105,10 @@ describe("the dispatch CLI's envoy.json", () => {
     });
     expect(emptyHanded.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
 
-    const own = join(stateDir, "opencode");
-    serverConfig(own);
-    const ownRun = await run(["projects"], {
-      ...fromFile,
-      ...opencode,
-      OPENCODE_CONFIG_DIR: own,
-      CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
-    });
-    expect(ownRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
-
     serverConfig(join(stateDir, ".config", "legion"));
     const neutral = await run(["projects"], {
       ...fromFile,
       CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
-      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
     });
     expect(neutral.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
   });
@@ -1305,6 +1300,29 @@ describe("the dispatch CLI's envoy.json", () => {
     }
     expect(requests).toEqual([]);
   });
+
+  // A Legion pod has no envoy.json: its Dispatch is DISPATCH_URL with DISPATCH_TOKEN_FILE, which
+  // the session's one long-lived shell keeps until a command unsets or empties DISPATCH_URL.
+  test("DISPATCH_TOKEN_FILE with no DISPATCH_URL says the shell lost it, not that envoy.json is missing, and exits 2, sending nothing", async () => {
+    const tokenFile = join(stateDir, "DISPATCH_TOKEN");
+    writeFileSync(tokenFile, "test-token\n");
+    const chosen = join(stateDir, "profile", "envoy.json");
+    for (const variables of [
+      { DISPATCH_TOKEN_FILE: tokenFile },
+      { DISPATCH_TOKEN_FILE: tokenFile, DISPATCH_URL: "" },
+    ]) {
+      const { code, stdout } = await run(["whoami"], {
+        ...fromFile,
+        ENVOY_CONFIG_FILE: chosen,
+        ...variables,
+      });
+      expect(stdout).toBe(
+        "dispatch: DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for\n"
+      );
+      expect(code).toBe(2);
+    }
+    expect(requests).toEqual([]);
+  });
 });
 
 describe("the dispatch CLI's subscription note", () => {
@@ -1397,6 +1415,41 @@ describe("the dispatch CLI's subscription note", () => {
     expect(requests.some((request) => request.path === "/api/v1/issues/DSP-1/messages")).toBe(true);
   });
 
+  // A write that landed before its answer was lost (409 KEY_COMMITTED) is done: the call succeeds,
+  // and its one line says the write was made and to read it back, since there is nothing to print.
+  test("a write answered KEY_COMMITTED exits 0 with one line saying to read it back", async () => {
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/api/v1/issues/DSP-1/messages")) {
+        return Response.json(
+          { code: "KEY_COMMITTED", error: "the write landed and its answer was lost" },
+          { status: 409 }
+        );
+      }
+      return fetch(input, init);
+    }) as typeof fetch;
+    let stdout = "";
+    const code = await runDispatchCli(
+      ["message", "--issue", "DSP-1", "--body", "hello"],
+      environment(withListener),
+      {
+        stdout: (text) => {
+          stdout += text;
+        },
+        stderr: () => {},
+        readText: () => "",
+        cwd: stateDir,
+        fetchImpl,
+      }
+    );
+
+    expect(code).toBe(0);
+    expect(stdout.trim().split("\n")).toEqual([
+      expect.stringMatching(
+        /^POST http:\/\/127\.0\.0\.1:\d+\/api\/v1\/issues\/DSP-1\/messages was made, but its answer was lost on the way back \(KEY_COMMITTED\), so this command cannot print what it made: read it back with `dispatch read`, or with the matching list for something it created\.$/
+      ),
+    ]);
+  });
+
   test("a read asks no listener", async () => {
     interests = listed([]);
     const { code } = await run(["projects"], withListener);
@@ -1450,6 +1503,20 @@ describe("cliRefusals", () => {
       expect(stdout, name).toStartWith("dispatch: ");
       expect(cliRefusals(stdout), name).toEqual(refusal(stdout, null));
     }
+    expect(requests).toEqual([]);
+  });
+
+  // The whole line is pinned, not its `dispatch: ` prefix: `opencode` was an accepted host until
+  // it was removed, so the refusal naming it, and naming omp and claude as the ones left, is the
+  // user-visible behaviour that removal produces. A prefix-only assertion passes again the moment
+  // the host comes back, or the message stops naming the hosts it accepts.
+  test("a host the command does not accept is refused by name, with the two it accepts", async () => {
+    const { code, stdout } = await run(["projects"], {
+      DISPATCH_HOST: "opencode",
+      DISPATCH_SESSION_ID: "ses-1",
+    });
+    expect(code).toBe(2);
+    expect(stdout).toBe('dispatch: DISPATCH_HOST is "opencode", not omp or claude.\n');
     expect(requests).toEqual([]);
   });
 

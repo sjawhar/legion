@@ -33,15 +33,17 @@ import (
 // issues, so it can name a repository that lacks one of Legion's Apps; leaving it out costs only its
 // issues' admission. unverified is each served repository a later read of the mapping could not
 // read the installation of: it stays served on its last answer, and is read again
-// (refreshOnMappingChange). Readers take the read lock; the readers of the mapping swap it whole
-// under the write lock.
+// (refreshOnMappingChange). withoutWebhookApp is each served repository Dispatch's GitHub App is
+// not known to be installed on (checkWebhookApp), for legion state alone: it is served all the
+// same. Readers take the read lock; the readers of the mapping swap it whole under the write lock.
 type repositories struct {
 	project string
 
-	mu         sync.RWMutex
-	accepted   map[string]mappedRepository
-	refused    map[string]refusedRepository
-	unverified []string
+	mu                sync.RWMutex
+	accepted          map[string]mappedRepository
+	refused           map[string]refusedRepository
+	unverified        []string
+	withoutWebhookApp []webhookAppGap
 }
 
 // mappedRepository is a repository Legion serves, as GitHub names it, and whether it is the
@@ -61,6 +63,13 @@ type refusedRepository struct {
 	Reason        string
 	readErr       error
 	mappedDefault bool
+}
+
+// webhookAppGap is a mapped repository, as Dispatch maps it, that Dispatch's GitHub App is not
+// known to be installed on, and why (checkWebhookApp).
+type webhookAppGap struct {
+	Repo   string
+	Reason string
 }
 
 func newRepositories(project string) *repositories {
@@ -177,6 +186,24 @@ func (r *repositories) kept(repo string) bool {
 	return slices.ContainsFunc(r.unverified, func(name string) bool { return strings.EqualFold(name, repo) })
 }
 
+// setWithoutWebhookApp records the served repositories the last read of the mapping found
+// Dispatch's GitHub App not known to be installed on.
+func (r *repositories) setWithoutWebhookApp(gaps []webhookAppGap) {
+	sorted := slices.Clone(gaps)
+	slices.SortFunc(sorted, func(a, b webhookAppGap) int { return strings.Compare(a.Repo, b.Repo) })
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.withoutWebhookApp = sorted
+}
+
+// WithoutWebhookApp is every served repository Dispatch's GitHub App is not known to be installed
+// on, with why, sorted by name.
+func (r *repositories) WithoutWebhookApp() []webhookAppGap {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return slices.Clone(r.withoutWebhookApp)
+}
+
 // awaitingRead is every repository a failed installation read left as it stands, by reason: each
 // left out for its failed read, and each served one kept on its last answer. While any is, the
 // mapping is read again of the daemon's own (refreshOnMappingChange).
@@ -211,6 +238,9 @@ func (r *repositories) view(caches []sandbox.CacheStatus) api.RepositoriesView {
 	for _, refused := range r.Refused() {
 		view.Refused = append(view.Refused, api.RefusedRepositoryView{Repo: refused.Repo, Reason: refused.Reason})
 	}
+	for _, gap := range r.WithoutWebhookApp() {
+		view.WithoutWebhookApp = append(view.WithoutWebhookApp, api.WebhookAppGapView{Repo: gap.Repo, Reason: gap.Reason})
+	}
 	for _, cache := range caches {
 		if _, unmapped := byRepo[strings.ToLower(cache.Repo.String())]; unmapped {
 			view.Caches = append(view.Caches, cacheView(cache))
@@ -232,13 +262,13 @@ func cacheView(cache sandbox.CacheStatus) api.CacheView {
 }
 
 // readMapping reads Dispatch's repository mapping (listMapping) and checks it for project against
-// both GitHub Apps' installations (checkMapping).
-func readMapping(ctx context.Context, client dispatch.Client, project string, installs appauth.Installations) ([]mappedRepository, []refusedRepository, error) {
+// both GitHub Apps' installations and Dispatch's (checkMapping).
+func readMapping(ctx context.Context, client dispatch.Client, project string, installs appauth.Installations) ([]mappedRepository, []refusedRepository, []webhookAppGap, error) {
 	mappings, err := listMapping(ctx, client)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return checkMapping(ctx, mappings, project, installs)
+	return checkMapping(ctx, client, mappings, project, installs)
 }
 
 // listMapping is Dispatch's repository mapping, every project's.
@@ -260,10 +290,14 @@ func listMapping(ctx context.Context, client dispatch.Client) ([]dispatch.RepoPr
 // out only its own issues, whose admission waits for it (prepareUnrecorded), and
 // refreshOnMappingChange reads it again until GitHub answers, so nothing is left out for good on
 // a guess. The check fails only when ctx ends. Accepted
-// repositories carry Dispatch's spelling until nameAccepted reads GitHub's. The installation
-// reads run at once, mappingReads at a time, so a check takes about as long as its slowest read
-// rather than the sum of them.
-func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project string, installs appauth.Installations) ([]mappedRepository, []refusedRepository, error) {
+// repositories carry Dispatch's spelling until nameAccepted reads GitHub's. Beside the two role
+// Apps, it asks client whether Dispatch's GitHub App is installed on each repository
+// (checkWebhookApp), and gaps is every repository it is not known to be on, refused ones included,
+// for the caller to keep the served ones (servedGaps): that answer never refuses a repository and
+// never fails the check, since Legion serves a repository whose events GitHub does not send by the
+// pass. The reads run at once, mappingReads at a time, so a check takes about as long as its
+// slowest read rather than the sum of them.
+func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispatch.RepoProject, project string, installs appauth.Installations) ([]mappedRepository, []refusedRepository, []webhookAppGap, error) {
 	type mapped struct {
 		mapping dispatch.RepoProject
 		repo    ghrepo.Repository
@@ -271,6 +305,8 @@ func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project 
 		// installed and failed are each App's answer, in appauth.Roles order.
 		installed []bool
 		failed    []error
+		// webhookGap is why Dispatch's GitHub App is not known to be installed on it, "" when it is.
+		webhookGap string
 	}
 	var entries []mapped
 	for _, mapping := range mappings {
@@ -283,7 +319,7 @@ func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project 
 	}
 	var group errgroup.Group
 	group.SetLimit(mappingReads)
-	for _, m := range entries {
+	for i, m := range entries {
 		if m.parse != nil {
 			continue
 		}
@@ -295,14 +331,24 @@ func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project 
 				return nil
 			})
 		}
+		group.Go(func() error {
+			read, cancel := context.WithTimeout(ctx, installReadAttempt)
+			defer cancel()
+			entries[i].webhookGap = checkWebhookApp(read, client, m.repo)
+			return nil
+		})
 	}
 	_ = group.Wait() // every read keeps its own failure, so none fails the group
 	if err := ctx.Err(); err != nil {
-		return nil, nil, fmt.Errorf("check the GitHub Apps' installations: %w", err)
+		return nil, nil, nil, fmt.Errorf("check the GitHub Apps' installations: %w", err)
 	}
+	var gaps []webhookAppGap
 	var accepted []mappedRepository
 	var refused []refusedRepository
 	for _, m := range entries {
+		if m.webhookGap != "" {
+			gaps = append(gaps, webhookAppGap{Repo: m.mapping.Repo, Reason: m.webhookGap})
+		}
 		if m.parse != nil {
 			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: m.parse.Error()})
 			continue
@@ -346,7 +392,35 @@ func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project 
 		}
 		accepted = append(accepted, mappedRepository{Repo: m.repo, Default: m.mapping.Default})
 	}
-	return accepted, refused, nil
+	return accepted, refused, gaps, nil
+}
+
+// checkWebhookApp is why Dispatch's GitHub App, the one GitHub sends repo's webhook events through
+// to Envoy, is not known to be installed on repo, "" when Dispatch answers that it is: not
+// installed, the check failed, or a Dispatch older than the check answers its route 404.
+func checkWebhookApp(ctx context.Context, client dispatch.Client, repo ghrepo.Repository) string {
+	installed, err := client.WebhookAppInstalled(ctx, repo.String())
+	switch {
+	case dispatch.Missing(err):
+		return "this Dispatch does not answer the webhook App check"
+	case err != nil:
+		return "the webhook App check failed: " + err.Error()
+	case !installed:
+		return fmt.Sprintf("Dispatch's GitHub App is not installed on %s: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes", repo)
+	}
+	return ""
+}
+
+// servedGaps is each of gaps whose repository refused does not leave out: the served
+// repositories, the only ones legion state names without the webhook App.
+func servedGaps(gaps []webhookAppGap, refused []refusedRepository) []webhookAppGap {
+	var served []webhookAppGap
+	for _, gap := range gaps {
+		if !slices.ContainsFunc(refused, func(refusal refusedRepository) bool { return strings.EqualFold(refusal.Repo, gap.Repo) }) {
+			served = append(served, gap)
+		}
+	}
+	return served
 }
 
 // installReadRetry is how long refreshOnMappingChange waits before it reads the mapping again of
@@ -362,8 +436,9 @@ var recoveryHoldBound = defaultHoldWarnEvery
 // installReadAttempt bounds one installation read: as long as any one GitHub call the boot waits
 // for (appMintAttempt), so a GitHub that answers slowly is still answered for, while a read GitHub
 // has not answered by then is a failed read, and a repository GitHub hangs on is left out for now
-// rather than holding up the mapping. Nothing bounds the check as a whole: mappingReads reads run at
-// once, so a check of n repositories takes at most ceil(2n / mappingReads) of these.
+// rather than holding up the mapping. It bounds the webhook App check (checkWebhookApp) the same
+// way. Nothing bounds the check as a whole: mappingReads reads run at once, so a check of n
+// repositories, three reads each, takes at most ceil(3n / mappingReads) of these.
 var installReadAttempt = 15 * time.Second
 
 // readFailures is the refusals of refused that a failed installation read made (readErr).
@@ -417,8 +492,11 @@ func nameAccepted(ctx context.Context, accepted []mappedRepository, named *defau
 // answers. A project with no repository mapped refuses the boot. One whose every mapped
 // repository lacks an App boots serving none, each left out and reported: it admits nothing,
 // saying why on each issue, until an App is installed and a read of the mapping finds it, one the
-// next mapping change or an issue held for it asks for (requestMappingRead). nameMapping, once the
-// Apps' tokens are minted, reads GitHub's spelling.
+// next mapping change or an issue held for it asks for (requestMappingRead). The webhook App check
+// neither refuses the boot nor is read again of its own: each served repository it finds Dispatch's
+// App not known to be on is kept for legion state (setWithoutWebhookApp), and every later read of
+// the mapping checks it again. nameMapping, once the Apps' tokens are minted, reads GitHub's
+// spelling.
 func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	var mappings []dispatch.RepoProject
 	err := bootprobe.Run(ctx, "repository mapping read", readinessRetry, w.log, readinessAttempt(func(ctx context.Context) error {
@@ -429,7 +507,7 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	accepted, refused, err := checkMapping(ctx, mappings, w.dispatchProject, w.installs)
+	accepted, refused, gaps, err := checkMapping(ctx, w.dispatch, mappings, w.dispatchProject, w.installs)
 	if err != nil {
 		return err
 	}
@@ -446,6 +524,7 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 			"refused", refusalReasons(failed), "retryIn", installReadRetry.Initial.String())
 	}
 	w.repositories.set(accepted, refused)
+	w.repositories.setWithoutWebhookApp(servedGaps(gaps, refused))
 	return nil
 }
 
@@ -465,7 +544,8 @@ func (w *workflowRuntime) nameMapping(ctx context.Context) error {
 		return err
 	}
 	w.repositories.set(named, w.repositories.Refused())
-	w.log.Info("legion workflow boot stage", "stage", "repositories", "accepted", repositoryNames(w.repositories.Accepted()), "refused", refusalReasons(w.repositories.Refused()))
+	w.log.Info("legion workflow boot stage", "stage", "repositories", "accepted", repositoryNames(w.repositories.Accepted()), "refused", refusalReasons(w.repositories.Refused()),
+		"withoutWebhookApp", webhookGapReasons(w.repositories.WithoutWebhookApp()))
 	return nil
 }
 
@@ -487,7 +567,9 @@ func (w *workflowRuntime) nameMapping(ctx context.Context) error {
 // project names, so a repository unmapped while an issue is recorded on it is still heard, and
 // only then publishes the new mapping: a read that fails before the subscription took publishes
 // nothing, so a repository is never served, and an issue never recorded on it, while GitHub intake
-// does not hear it, and the refresher reads it again.
+// does not hear it, and the refresher reads it again. The webhook App check's served repositories
+// (servedGaps, kept ones included) replace the last read's with the publication; a failed check
+// keeps nothing out and asks for no read again.
 func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	w.mappingMu.Lock()
 	defer w.mappingMu.Unlock()
@@ -497,7 +579,7 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	accepted, refused, err := checkMapping(ctx, mappings, w.dispatchProject, w.installs)
+	accepted, refused, gaps, err := checkMapping(ctx, w.dispatch, mappings, w.dispatchProject, w.installs)
 	if err != nil {
 		return err
 	}
@@ -545,13 +627,15 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 		before := readFailures(w.repositories.Refused())
 		added, removed = w.repositories.set(accepted, refused)
 		w.repositories.setUnverified(unverified)
+		w.repositories.setWithoutWebhookApp(servedGaps(gaps, refused))
 		w.markRecovered(before, readFailures(w.repositories.Refused()))
 		return nil
 	}); err != nil {
 		return err
 	}
 	w.log.Info("legion workflow repositories changed", "added", added, "removed", removed,
-		"refused", refusalReasons(w.repositories.Refused()), "heard", repositoryNames(heard))
+		"refused", refusalReasons(w.repositories.Refused()), "withoutWebhookApp", webhookGapReasons(w.repositories.WithoutWebhookApp()),
+		"heard", repositoryNames(heard))
 	return nil
 }
 
@@ -1406,6 +1490,15 @@ func refusalReasons(refused []refusedRepository) []string {
 	reasons := make([]string, 0, len(refused))
 	for _, refusal := range refused {
 		reasons = append(reasons, refusal.Reason)
+	}
+	return reasons
+}
+
+// webhookGapReasons is each of gaps as "<repo>: <reason>", as the boot and refresh log them.
+func webhookGapReasons(gaps []webhookAppGap) []string {
+	reasons := make([]string, 0, len(gaps))
+	for _, gap := range gaps {
+		reasons = append(reasons, gap.Repo+": "+gap.Reason)
 	}
 	return reasons
 }

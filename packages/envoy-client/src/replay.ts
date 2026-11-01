@@ -172,9 +172,10 @@ export interface ReplayFrame {
  * return `queued` for a frame it did not hand at all and could not hold (Oh My Pi's inert card of
  * a frame with no ledger key, sent while the host is busy): it released the claim, so the next
  * sweep shows the frame again.
- * `suppressed`: the host's renderer skips it for this session (`notify: false`, its own event,
- * another session's follow); nothing is recorded, so a copy on another subject that the renderer
- * does show still reaches the session. `failed`, or a throw: the frame stays for a later sweep.
+ * `suppressed`: the host's renderer skips it for this session (an event Dispatch marks `quiet` on
+ * an owner topic, its own event, another session's follow); nothing is recorded, so a copy on
+ * another subject that the renderer does show still reaches the session. `failed`, or a throw:
+ * the frame stays for a later sweep.
  */
 export type ReplayDeliveryOutcome = "shown" | "queued" | "suppressed" | "failed";
 
@@ -1036,9 +1037,12 @@ export function replaySuppressed(
   return rendered.skip || rendered.malformedDelivery === true;
 }
 
+/** What a replayed frame's text ends with (`replayedText`); a live frame's text has no such line. */
+export const REPLAYED_SUFFIX = "while this session's connection was down.";
+
 /** A replayed frame's text: the rendered frame, then when it was published. */
 export function replayedText(content: string, publishedAt: string): string {
-  return `${content}\nPublished at ${publishedAt} while this session's connection was down.`;
+  return `${content}\nPublished at ${publishedAt} ${REPLAYED_SUFFIX}`;
 }
 
 /** What the notice shown in place of a frame the session could not be shown says, field by field. */

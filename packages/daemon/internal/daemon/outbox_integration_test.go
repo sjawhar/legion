@@ -302,6 +302,9 @@ func (d *blockingDispatch) BuildCommit(context.Context) (string, error) { return
 func (d *blockingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *blockingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
+}
 func (d *blockingDispatch) count() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -459,6 +462,9 @@ func (d *refusingDispatch) BuildCommit(context.Context) (string, error) { return
 func (d *refusingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *refusingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
+}
 
 // boardDispatch is one issue's Dispatch board: it fails the first failures writes, then applies.
 type boardDispatch struct {
@@ -497,6 +503,7 @@ func (d *boardDispatch) BuildCommit(context.Context) (string, error) { return ""
 func (d *boardDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *boardDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 // A failed transaction is one row's failure, never the runner's end: a Postgres restart drops the
 // pool's connections, and the outbox has to keep draining once they are back. A claim that fails
@@ -763,9 +770,7 @@ func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
 	})
 	prompts := len(conn.Prompts())
 
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
-		t.Fatalf("end the foreign turn: %v", err)
-	}
+	endTurn(ctx, t, machine, token)
 
 	if got := machine.Claim().Pending; got != nil {
 		t.Fatalf("the finished phase's task is still pending as %+v, want it dropped", got)

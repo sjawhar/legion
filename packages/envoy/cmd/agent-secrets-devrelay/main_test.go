@@ -89,7 +89,7 @@ func newDevrelayTestServer(t *testing.T) (brokerURL, callerToken string) {
 	}
 	api.Register(mux, api.Deps{
 		PublicURL:     srv.URL,
-		APIAccounts:   map[string]string{dispatchAccount: "dispatch"},
+		APIAccounts:   map[string]api.Account{dispatchAccount: brokertest.Caller(t, "dispatch")},
 		AccountTokens: enroll.K8sPodVerifier{Verifier: accountTokens},
 		Enroll:        enr, Machine: reqMachine, MachineLogin: mach,
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),

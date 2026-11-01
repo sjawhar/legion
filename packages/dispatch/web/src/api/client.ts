@@ -1,3 +1,17 @@
+import {
+  AUTH_NO_IDENTITY,
+  answerNotKept,
+  DISPATCH_LOGIN_HEADER,
+  IDEMPOTENCY_ANSWER_NOT_KEPT,
+  IDEMPOTENCY_KEY_COMMITTED,
+  IDEMPOTENCY_KEY_HEADER,
+  IDEMPOTENCY_KEY_IN_FLIGHT,
+  IDEMPOTENCY_REPLAYED_HEADER,
+  type IdempotencyLandedCode,
+} from "@legion/contracts";
+
+import { reachable, routeOf, unreachable } from "./reachability";
+
 import type {
   Agent,
   AgentToken,
@@ -44,6 +58,7 @@ import type {
   DeliverySettings,
   DeliverySettingsInput,
   DispatchUser,
+  DocumentReferenceSummary,
   EditCommentInput,
   Event,
   GraphReferences,
@@ -52,8 +67,10 @@ import type {
   IssueAskRow,
   IssueAskThreadRow,
   IssueDetails,
+  IssueReferenceSummary,
   IssueReferences,
   IssueSummary,
+  ItemBlocks,
   ListUsersResponse,
   MachineLoginsResponse,
   Message,
@@ -67,6 +84,7 @@ import type {
   RepoProject,
   SearchResponse,
   Subscriber,
+  Suggestions,
   UpdateDeliverySessionGroupInput,
   UpdateIssueInput,
   UserAgentState,
@@ -82,24 +100,29 @@ export type FetchImplementation = (
   init?: RequestInit
 ) => Promise<Response>;
 
+/**
+ * How an upload reaches Dispatch: `init` (its body a multipart form) sent to `path`, answered with
+ * Dispatch's response, and `progress` called as each piece of the body goes up - with how much of
+ * it has gone (`sent`), when the transport knows - and as the answer comes back. The browser's
+ * `fetch` reports no upload progress, so a large file on a slow line would look silent for as long
+ * as it uploads; `xhrUpload` is the one that reports it.
+ */
+export type UploadImplementation = (
+  path: string,
+  init: RequestInit,
+  progress: (sent?: UploadProgress) => void
+) => Promise<Response>;
+
+/** How much of an upload's body has gone up, in bytes, out of how many. */
+export interface UploadProgress {
+  readonly loaded: number;
+  readonly total: number;
+}
+
+/** The largest body a write the page lets finish as it goes (`keepalive`) may carry: the browser
+ *  caps every such request's body together at 64 KiB. */
 const maxKeepaliveBodyBytes = 30 * 1024;
 const utf8 = new TextEncoder();
-
-function idempotentWriteInit(method: "DELETE" | "PUT", body?: unknown): RequestInit {
-  const serializedBody = body === undefined ? undefined : JSON.stringify(body);
-  const keepalive =
-    serializedBody === undefined || utf8.encode(serializedBody).byteLength < maxKeepaliveBodyBytes;
-  return {
-    ...(serializedBody === undefined
-      ? {}
-      : {
-          body: serializedBody,
-          headers: { "Content-Type": "application/json" },
-        }),
-    ...(keepalive ? { keepalive: true } : {}),
-    method,
-  };
-}
 
 interface ErrorPayload {
   code?: string;
@@ -111,14 +134,143 @@ export class ApiError extends Error {
   readonly code: string | undefined;
   readonly status: number;
   readonly state: UserIssueState | undefined;
+  /** How long the server asked the caller to wait before trying again (`Retry-After` in
+   *  delta-seconds, as Dispatch sends with a 503 refusing excess load), in milliseconds;
+   *  undefined when the response carried none. */
+  readonly retryAfterMs: number | undefined;
 
-  constructor(status: number, payload: ErrorPayload) {
+  constructor(status: number, payload: ErrorPayload, retryAfterMs?: number) {
     super(payload.error ?? `Dispatch request failed (${status})`);
     this.name = "ApiError";
     this.code = payload.code;
     this.status = status;
     this.state = payload.state;
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+/** A request the browser could not get an answer to at all: the connection failed or dropped
+ *  (`fetch`'s and XHR's own error). It is no refusal - the request may have reached Dispatch - so
+ *  a read is asked again by the queries' policy and a write again under its key. */
+export class NetworkError extends Error {
+  readonly path: string;
+
+  constructor(path: string, cause: unknown) {
+    super("Dispatch could not be reached", { cause });
+    this.name = "NetworkError";
+    this.path = path;
+  }
+}
+
+/** A 2xx whose body is not JSON - a proxy's page, a body cut short - so it says nothing of what
+ *  Dispatch did. The write is asked again under its key, and Dispatch answers the repeat with the
+ *  first's answer. */
+export class UnreadableAnswerError extends Error {
+  readonly status: number;
+
+  constructor(status: number, cause: unknown) {
+    super(`Dispatch answered ${status} with a body that is not JSON`, { cause });
+    this.name = "UnreadableAnswerError";
+    this.status = status;
+  }
+}
+
+/** How long the page lets Dispatch go silent on a request - no response headers yet, no piece of
+ *  its body, and for an upload no piece of the request body sent either - before it gives the
+ *  request up (`RequestTimeoutError`). A read Dispatch never answers, or stops answering halfway,
+ *  would otherwise hold its page loading for good; given up, it is retried by the queries' shared
+ *  policy, as a dropped connection is. A body that keeps moving, either way, goes on however long
+ *  it takes: the deadline is on the silence, not the transfer. */
+export const REQUEST_DEADLINE_MS = 30_000;
+
+/** A request Dispatch went silent on for its deadline, which the page then aborted. It is no
+ *  refusal: the request may still have reached Dispatch, so only a read, or a write made again
+ *  under its key (`writeUnderKey`), is asked again. */
+export class RequestTimeoutError extends Error {
+  readonly path: string;
+
+  constructor(path: string, deadlineMs: number) {
+    super(`Dispatch did not answer within ${deadlineMs / 1000} seconds`);
+    this.name = "RequestTimeoutError";
+    this.path = path;
+  }
+}
+
+/** How a caller bounds one attempt of a request: how long Dispatch may go silent on it (`null` for
+ *  no limit; left out, `REQUEST_DEADLINE_MS` for a GET, and no limit for any other method). */
+export interface RequestBounds {
+  readonly deadlineMs?: number | null;
+}
+
+/** Every method a write goes as: the one list `WriteRequest.method` and the check of a kept write
+ *  (`write-storage.ts`) are both read from. */
+export const WRITE_METHODS = ["DELETE", "PATCH", "POST", "PUT"] as const;
+
+export type WriteMethod = (typeof WRITE_METHODS)[number];
+
+/** What a request is answered with, for the type checker alone: no request carries it. */
+declare const answeredWith: unique symbol;
+
+/** One write as it goes to Dispatch: its method, its path and its body - JSON, a multipart form
+ *  (an upload), or none - and, for the type checker, what Dispatch answers it with (`T`): a
+ *  request's builder names it (`issuePatchRequest` answers an `Issue`), so a write made from its
+ *  request alone (`WriteSpec.request`) is answered as its client method's is. A kept write is
+ *  this, made again after a reload (`send`). */
+export interface WriteRequest<T = unknown> {
+  readonly method: WriteMethod;
+  readonly path: string;
+  readonly body?: unknown;
+  readonly [answeredWith]?: T;
+}
+
+/** One attempt of a write, as the one write path (`Writes.run`) hands it over from the press it
+ *  belongs to: the key that names the person's action - minted when the person acts, the same on
+ *  every attempt of it, and what the store keeps it under; sent as `Idempotency-Key` on a `POST`
+ *  and a `PATCH`, and never on a `PUT` or a `DELETE`, which are the same however often they are
+ *  made - the login of the person who pressed it (`Dispatch-Login`, sent on every write, so
+ *  Dispatch refuses it under anyone else's session), the attempt's silence deadline, `sent`, told
+ *  the request as it goes out, for a caller that keeps it to make again, and `progress`, told how
+ *  much of an upload's body has gone up. Every write method takes these, so a write made outside
+ *  the store does not type-check. */
+export interface WriteBounds extends RequestBounds {
+  readonly key: string;
+  readonly login?: string;
+  readonly sent?: (request: WriteRequest) => void;
+  readonly progress?: (loaded: number, total: number) => void;
+}
+
+/** A write Dispatch had already made, with no answer it can give for it (`code`): the first
+ *  answer was too large for it to keep, so the repeat came back with the first one's status and
+ *  no resource (`IDEMPOTENCY_ANSWER_NOT_KEPT`), or the answer was lost before Dispatch stored it,
+ *  so the repeat came back `409 KEY_COMMITTED` (`isKeyCommitted`). The write landed; its caller
+ *  reads what it wrote again, and shows no refusal. */
+export class AnswerNotKeptError extends Error {
+  readonly code: IdempotencyLandedCode;
+  readonly status: number;
+
+  constructor(code: IdempotencyLandedCode, status: number, message: string) {
+    super(message);
+    this.name = "AnswerNotKeptError";
+    this.code = code;
+    this.status = status;
+  }
+}
+
+/** Whether Dispatch is still running the first request under this write's key: nothing ran, and
+ *  the write is asked again under the same key. */
+export function isKeyInFlight(error: unknown): error is ApiError {
+  return (
+    error instanceof ApiError && error.status === 409 && error.code === IDEMPOTENCY_KEY_IN_FLIGHT
+  );
+}
+
+/** Whether Dispatch made this write's key's write already, and lost the answer before it stored
+ *  it (`409 KEY_COMMITTED`, even after a 5xx the first attempt was answered): the write landed, and
+ *  Dispatch will not run it again. */
+export function isKeyCommitted(error: unknown): error is ApiError {
+  return (
+    error instanceof ApiError && error.status === 409 && error.code === IDEMPOTENCY_KEY_COMMITTED
+  );
 }
 
 // A 401 means "not signed in" and should never be retried or confused with a transient
@@ -126,6 +278,26 @@ export class ApiError extends Error {
 // affordance instead of bouncing the user to the sign-in page.
 export function isUnauthorized(error: unknown): boolean {
   return error instanceof ApiError && error.status === 401;
+}
+
+/** Whether `error` is the sign-in check's `503 EVENT_HEAD_UNAVAILABLE`: Dispatch has no event id
+ *  it can vouch for as final yet, which a process just restarted while an event write from before
+ *  it is still open answers until that write ends. The page asks again until it answers
+ *  (`queryRetry`); nothing about the session is wrong. */
+export function isEventHeadUnavailable(error: unknown): boolean {
+  return (
+    error instanceof ApiError && error.status === 503 && error.code === "EVENT_HEAD_UNAVAILABLE"
+  );
+}
+
+/** Whether `error` is Dispatch's own answer that the caller is signed in to nobody
+ *  (`401 AUTH_NO_IDENTITY`), rather than a 401 from something in front of Dispatch - an
+ *  authenticating proxy refusing the request, which says nothing about the Dispatch session. A
+ *  sign-out's landing turns on the difference: Dispatch's 401 means the session it was ending is
+ *  already gone, and a proxy's means the sign-out never reached Dispatch at all.
+ */
+export function isNoIdentity(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401 && error.code === AUTH_NO_IDENTITY;
 }
 
 // The architecture TREE read answers this 404 for a project with no source — definitive like an
@@ -164,6 +336,12 @@ export function isDocumentSchemaError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "DOC_SCHEMA";
 }
 
+// The server refusing a send because the document does not hold the mark it names
+// (`docs.VerifyMark`): the margin answers it by writing the mark again over the same words.
+export function isAnchorMissing(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.code === "ANCHOR_MISSING";
+}
+
 // A document whose stored history cannot load at all: the state a rebuild from its latest saved
 // version repairs, and retrying the read cannot.
 export function isDocumentUnloadable(error: unknown): boolean {
@@ -173,8 +351,8 @@ export function isDocumentUnloadable(error: unknown): boolean {
 // The retry policy every query in the app shares: an auth outcome (401), a missing architecture
 // source, an unconfigured credential broker or delivery timeline, a stored document outside
 // Proof's schema, or a stored history that cannot load is definitive and retrying it changes
-// nothing; any other failure (dropped connection, 5xx) is worth a couple of automatic attempts
-// before surfacing a Retry affordance to the user.
+// nothing; any other failure (dropped connection, a read past its deadline, 5xx) is worth a couple
+// of automatic attempts before surfacing a Retry affordance to the user.
 export function isRetryableQueryError(error: unknown): boolean {
   return (
     !isUnauthorized(error) &&
@@ -186,11 +364,27 @@ export function isRetryableQueryError(error: unknown): boolean {
   );
 }
 
+/** The codes of the two `503`s Dispatch answers with a `Retry-After` it means: its database is
+ *  too busy to take the request now (`DATABASE_BUSY`), or the request ran past the time Dispatch
+ *  gives one (`REQUEST_TIMEOUT`). Any other `503` - a gateway's, or Dispatch's own without one of
+ *  these codes - names no wait the page can trust, and keeps the page's own backoff. */
+const BUSY_CODES: ReadonlySet<string> = new Set(["DATABASE_BUSY", "REQUEST_TIMEOUT"]);
+
+/** How long Dispatch asked to be left before this request is asked again, when it was too busy
+ *  for it (`BUSY_CODES`) and said so with a `Retry-After`; `undefined` for anything else. A
+ *  write's retry waits it out (`features/writes/keyed-write.ts`). */
+export function busyRetryAfterMs(error: unknown): number | undefined {
+  if (!(error instanceof ApiError) || error.status !== 503) return undefined;
+  return error.code !== undefined && BUSY_CODES.has(error.code) ? error.retryAfterMs : undefined;
+}
+
 // The reason to show a reader for a failed write: the server's own message when it answered
-// with one, otherwise the caller's fallback line (the request never reached the server, or died
-// in transit).
+// with one, that it did not answer in time when it did not, otherwise the caller's fallback line
+// (the request never reached the server, or died in transit).
 export function apiErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof ApiError ? error.message : fallback;
+  return error instanceof ApiError || error instanceof RequestTimeoutError
+    ? error.message
+    : fallback;
 }
 
 // Whether the server refused with one of `codes`: a refusal the same request meets every time,
@@ -228,6 +422,59 @@ export interface CreateArtifactReviewInput {
 
 function pathSegment(value: string): string {
   return encodeURIComponent(value);
+}
+
+// The requests of the writes that wait their turn on a line (`WriteSpec.request`), each the exact
+// request its client method sends, answered as that method is: a surface names it at the press,
+// and the write is made from it alone (`api.send`), so a write waiting behind another is kept as
+// the very request that goes out, and nothing of it runs before its turn.
+
+/** `PATCH /api/v1/issues/{key}`: one change of an issue's fields (`patchIssue`). */
+export function issuePatchRequest(key: string, input: UpdateIssueInput): WriteRequest<Issue> {
+  return { body: input, method: "PATCH", path: `/api/v1/issues/${pathSegment(key)}` };
+}
+
+/** `POST /api/v1/agents/{session}/messages`: a person's message to one session
+ *  (`createAgentMessage`). */
+export function agentMessageRequest(
+  sessionID: string,
+  input: CreateAgentMessageInput
+): WriteRequest<Message> {
+  return { body: input, method: "POST", path: `/api/v1/agents/${pathSegment(sessionID)}/messages` };
+}
+
+/** `PUT /api/v1/me/asks/{id}/snooze` (`snoozeAsk`). */
+export function askSnoozeRequest(id: string, snoozedUntil: string): WriteRequest<AskSnooze> {
+  return {
+    body: { snoozed_until: snoozedUntil },
+    method: "PUT",
+    path: `/api/v1/me/asks/${pathSegment(id)}/snooze`,
+  };
+}
+
+/** `PUT /api/v1/me/threads/{id}/read`: a thread's read mark (`markThreadRead`). */
+export function threadReadRequest(threadId: string, readThrough: string): WriteRequest {
+  return {
+    body: { read_through: readThrough },
+    method: "PUT",
+    path: `/api/v1/me/threads/${pathSegment(threadId)}/read`,
+  };
+}
+
+/** `PUT /api/v1/me/issues/{key}/state`: the person's state of an issue (`putIssueState`). */
+export function issueStateRequest(
+  key: string,
+  input: Partial<UserIssueState>
+): WriteRequest<UserIssueState> {
+  return { body: input, method: "PUT", path: `/api/v1/me/issues/${pathSegment(key)}/state` };
+}
+
+/** `PUT /api/v1/me/agents/{session}/state`: the person's state of a session (`putAgentState`). */
+export function agentStateRequest(
+  sessionID: string,
+  input: UserAgentStateInput
+): WriteRequest<UserAgentState> {
+  return { body: input, method: "PUT", path: `/api/v1/me/agents/${pathSegment(sessionID)}/state` };
 }
 
 /** The owner's artifact list, the route an upload posts to. */
@@ -273,42 +520,287 @@ function pathWithQuery(path: string, values: object): string {
   return search ? `${path}?${search}` : path;
 }
 
+/** The wait `Retry-After` names, in milliseconds: its delta-seconds form, which is the one
+ *  Dispatch sends. An HTTP-date (Dispatch never sends one) or any other value is no delay. */
+function retryAfterMs(response: Response): number | undefined {
+  const retryAfter = response.headers.get("Retry-After")?.trim();
+  return retryAfter !== undefined && /^\d+$/.test(retryAfter)
+    ? Number(retryAfter) * 1_000
+    : undefined;
+}
+
 async function errorFrom(response: Response): Promise<ApiError> {
   const payload = (await response.json().catch(() => ({}))) as ErrorPayload;
-  return new ApiError(response.status, payload);
+  return new ApiError(response.status, payload, retryAfterMs(response));
+}
+
+/** The statuses whose response carries no body, which `new Response` refuses one for. */
+const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([101, 204, 205, 304]);
+
+/** `XMLHttpRequest`'s response headers (`getAllResponseHeaders`), as `Headers`. */
+function headersOf(xhr: XMLHttpRequest): Headers {
+  const headers = new Headers();
+  for (const line of xhr
+    .getAllResponseHeaders()
+    .trim()
+    .split(/[\r\n]+/u)) {
+    const colon = line.indexOf(":");
+    if (colon > 0) headers.append(line.slice(0, colon).trim(), line.slice(colon + 1).trim());
+  }
+  return headers;
+}
+
+/**
+ * An upload through `XMLHttpRequest`, the one transport whose upload progress every engine the
+ * suite runs reports (`upload.onprogress`), so a file on a slow line is never mistaken for a
+ * silent Dispatch: `progress` runs as each piece of the body goes up, as the response's headers
+ * arrive, and as each piece of the answer does. The request fails as `fetch` does - a `TypeError`
+ * for a connection that failed, the signal's reason once `init.signal` aborts.
+ */
+export function xhrUpload(
+  makeXhr: () => XMLHttpRequest = () => new XMLHttpRequest()
+): UploadImplementation {
+  return (path, init, progress) => {
+    const { promise, reject, resolve } = Promise.withResolvers<Response>();
+    const xhr = makeXhr();
+    const signal = init.signal ?? undefined;
+    const aborted = () => xhr.abort();
+    xhr.open(init.method ?? "POST", path);
+    xhr.withCredentials = init.credentials === "include";
+    for (const [name, value] of new Headers(init.headers)) xhr.setRequestHeader(name, value);
+    xhr.upload.onprogress = (event) =>
+      progress(
+        event?.lengthComputable === true ? { loaded: event.loaded, total: event.total } : undefined
+      );
+    xhr.onprogress = () => progress();
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState === xhr.HEADERS_RECEIVED) progress();
+    };
+    xhr.onload = () => {
+      signal?.removeEventListener("abort", aborted);
+      resolve(
+        new Response(NULL_BODY_STATUSES.has(xhr.status) ? null : xhr.responseText, {
+          headers: headersOf(xhr),
+          status: xhr.status,
+          statusText: xhr.statusText,
+        })
+      );
+    };
+    xhr.onerror = () => {
+      signal?.removeEventListener("abort", aborted);
+      reject(new TypeError("Failed to upload"));
+    };
+    xhr.onabort = () => reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+    if (signal?.aborted === true) {
+      reject(signal.reason);
+      return promise;
+    }
+    signal?.addEventListener("abort", aborted, { once: true });
+    xhr.send(init.body as XMLHttpRequestBodyInit | null | undefined);
+    return promise;
+  };
+}
+
+/** `response` with its body watched: `arrived` runs as each piece of it does, for a reader that
+ *  bounds the silence between them (`exchange`'s idle deadline) rather than the download. A
+ *  response with no body - a 204, a 304 - is handed back as it is: Chromium and WebKit give one
+ *  an empty stream all the same, and refuse a new 204 Response built around it. */
+function watchBody(response: Response, arrived: () => void): Response {
+  const body = response.body;
+  if (body === null || NULL_BODY_STATUSES.has(response.status)) return response;
+  const pieces = body.getReader();
+  const watched = new ReadableStream<Uint8Array>({
+    async pull(toReader) {
+      const piece = await pieces.read();
+      if (piece.done) {
+        toReader.close();
+        return;
+      }
+      arrived();
+      toReader.enqueue(piece.value);
+    },
+    cancel: (reason) => pieces.cancel(reason),
+  });
+  return new Response(watched, {
+    headers: response.headers,
+    status: response.status,
+    statusText: response.statusText,
+  });
 }
 
 export class DispatchApiClient {
-  constructor(private readonly fetchImpl: FetchImplementation) {}
+  /** `upload` is the transport of a multipart form; left out, it goes by `fetchImpl`, which
+   *  reports no upload progress, so an upload's deadline then runs from its send. */
+  constructor(
+    private readonly fetchImpl: FetchImplementation,
+    private readonly upload?: UploadImplementation
+  ) {}
 
-  private async response(path: string, init: RequestInit = {}): Promise<Response> {
-    const response = await this.fetchImpl(path, {
-      credentials: "same-origin",
-      ...init,
-    });
-
-    if (!response.ok) {
-      throw await errorFrom(response);
+  /** One request to Dispatch, answered with what `read` makes of its response. It is held to a
+   *  deadline on Dispatch's silence - `deadlineMs`, or `REQUEST_DEADLINE_MS` for a GET that names
+   *  none, and none for any other method that names none - that starts over as the request's body
+   *  goes up (an upload's), as the response's headers arrive and as each piece of its body does,
+   *  `read` included: a transfer that keeps moving goes on however slowly, either way, and one
+   *  that stops fails as headers that never come do. A caller's `init.signal` still aborts the
+   *  request, as itself. */
+  private async exchange<T>(
+    path: string,
+    init: RequestInit,
+    deadlineMs: number | null | undefined,
+    read: (response: Response) => Promise<T>,
+    uploaded?: (loaded: number, total: number) => void
+  ): Promise<T> {
+    const limit =
+      deadlineMs !== undefined
+        ? deadlineMs
+        : (init.method ?? "GET").toUpperCase() === "GET"
+          ? REQUEST_DEADLINE_MS
+          : null;
+    if (limit === null) return read(await this.answered(path, init, undefined, uploaded));
+    const deadline = new AbortController();
+    let timer = setTimeout(() => deadline.abort(), limit);
+    const caller = init.signal ?? undefined;
+    const arrived = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => deadline.abort(), limit);
+    };
+    try {
+      const signal =
+        caller === undefined ? deadline.signal : AbortSignal.any([caller, deadline.signal]);
+      return await read(await this.answered(path, { ...init, signal }, arrived, uploaded));
+    } catch (error) {
+      // An answer Dispatch gave stays its answer and the caller's abort stays the caller's: only
+      // what the deadline cut short is a timeout.
+      if (deadline.signal.aborted && !(error instanceof ApiError) && caller?.aborted !== true) {
+        // Dispatch went silent on it: its route cannot be reached, as far as the page knows.
+        unreachable(routeOf(init.method, path));
+        throw new RequestTimeoutError(path, limit);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
     }
+  }
 
+  /** Dispatch's response to one request, or its refusal as an `ApiError`; a connection that
+   *  failed is a `NetworkError`, and says Dispatch cannot be reached on its route - its method
+   *  and path (`unreachable`). `arrived`, for a request held to a deadline, runs as the request's
+   *  body goes up (an upload's), as the response's headers arrive and as each piece of its body
+   *  does, the body of a refusal included; `uploaded` is told how much of an upload's body has gone
+   *  up. Any answer of Dispatch's own - one below 500, which no gateway gives for a Dispatch that
+   *  is down - says it can be reached on that route (`reachable`), which matters only once it
+   *  could not be. */
+  private async answered(
+    path: string,
+    init: RequestInit,
+    arrived?: () => void,
+    uploaded?: (loaded: number, total: number) => void
+  ): Promise<Response> {
+    const sent = { credentials: "same-origin", ...init } satisfies RequestInit;
+    const progress = (part?: UploadProgress) => {
+      arrived?.();
+      if (part !== undefined) uploaded?.(part.loaded, part.total);
+    };
+    let answer: Response;
+    try {
+      answer =
+        sent.body instanceof FormData && this.upload !== undefined
+          ? await this.upload(path, sent, progress)
+          : await this.fetchImpl(path, sent);
+    } catch (error) {
+      // An abort is the deadline's or the caller's (`exchange`), never the network's.
+      if (init.signal?.aborted === true) throw error;
+      unreachable(routeOf(init.method, path));
+      throw new NetworkError(path, error);
+    }
+    if (answer.status < 500) reachable("answer", routeOf(init.method, path));
+    arrived?.();
+    const response = arrived === undefined ? answer : watchBody(answer, arrived);
+    if (!response.ok) throw await errorFrom(response);
     return response;
   }
 
-  private async json<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const response = await this.response(path, init);
-    return (await response.json()) as T;
+  /** The response itself, for a caller that reads its body: the deadline holds until the
+   *  response arrives, and the caller reads the body on its own time. */
+  private response(
+    path: string,
+    init: RequestInit = {},
+    deadlineMs?: number | null
+  ): Promise<Response> {
+    return this.exchange(path, init, deadlineMs, async (response) => response);
   }
 
-  private send<T>(method: "PATCH" | "POST" | "PUT", path: string, body: unknown): Promise<T> {
-    return this.json<T>(path, {
-      body: JSON.stringify(body),
-      headers: { "Content-Type": "application/json" },
+  private json<T>(path: string, init: RequestInit = {}, deadlineMs?: number | null): Promise<T> {
+    return this.exchange(path, init, deadlineMs, (response) => response.json() as Promise<T>);
+  }
+
+  /**
+   * The one path every write to Dispatch takes. A `POST` or a `PATCH` goes under `bounds.key`, the
+   * `Idempotency-Key` that names the person's action, so a repeat of it - a retry after a dropped
+   * answer, a reload resuming it - is answered with what the first did rather than done twice; a
+   * `PUT` or a `DELETE` is the same however often it is made, so it carries none, and one with a
+   * small body is let finish as the page goes (`keepalive`). The key is the caller's, minted when
+   * the person acts (`Writes.run`), never here; so is `bounds.login` (`Dispatch-Login`), the
+   * person who pressed it. A JSON body goes as JSON and a multipart form as itself, through the
+   * upload transport; `bounds.sent` is told the request as it goes out. Answers what Dispatch
+   * answered (nothing for an empty body), as the request's builder names it (`WriteRequest`), or
+   * rejects with its refusal; a 2xx whose body is not JSON rejects with `UnreadableAnswerError`,
+   * and a replay of an answer Dispatch did not keep with `AnswerNotKeptError`.
+   */
+  send<T>(
+    request: WriteRequest<T>,
+    { deadlineMs, key, login, progress, sent }: WriteBounds
+  ): Promise<T> {
+    const { body, method, path } = request;
+    const idempotent = method === "PUT" || method === "DELETE";
+    const form = body instanceof FormData ? body : undefined;
+    const json = body === undefined || form !== undefined ? undefined : JSON.stringify(body);
+    const keepalive =
+      idempotent && (json === undefined || utf8.encode(json).byteLength < maxKeepaliveBodyBytes);
+    const init: RequestInit = {
+      ...(form !== undefined ? { body: form } : json !== undefined ? { body: json } : {}),
+      headers: {
+        ...(idempotent ? {} : { [IDEMPOTENCY_KEY_HEADER]: key }),
+        ...(login === undefined ? {} : { [DISPATCH_LOGIN_HEADER]: login }),
+        ...(json === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      ...(keepalive ? { keepalive: true } : {}),
       method,
-    });
+    };
+    sent?.(request);
+    const read = async (response: Response): Promise<T> => {
+      const text = await response.text();
+      let answer: unknown;
+      try {
+        answer = text === "" ? undefined : JSON.parse(text);
+      } catch (error) {
+        throw new UnreadableAnswerError(response.status, error);
+      }
+      if (
+        answerNotKept(response.status, response.headers.has(IDEMPOTENCY_REPLAYED_HEADER), answer)
+      ) {
+        const reason = Reflect.get(answer as object, "error");
+        throw new AnswerNotKeptError(
+          IDEMPOTENCY_ANSWER_NOT_KEPT,
+          response.status,
+          typeof reason === "string" ? reason : "Dispatch did not keep this write's answer"
+        );
+      }
+      return answer as T;
+    };
+    return this.exchange(path, init, deadlineMs, read, progress);
   }
 
-  private post<T>(path: string, body: unknown): Promise<T> {
-    return this.send<T>("POST", path, body);
+  private post<T>(path: string, body: unknown, bounds: WriteBounds): Promise<T> {
+    return this.send<T>({ body, method: "POST", path }, bounds);
+  }
+
+  private put<T>(path: string, body: unknown, bounds: WriteBounds): Promise<T> {
+    return this.send<T>({ body, method: "PUT", path }, bounds);
+  }
+
+  private remove<T>(path: string, bounds: WriteBounds): Promise<T> {
+    return this.send<T>({ method: "DELETE", path }, bounds);
   }
 
   getBlockSchema(): Promise<BlockSchema> {
@@ -319,8 +811,8 @@ export class DispatchApiClient {
     return this.json<Project[]>("/api/v1/projects");
   }
 
-  createProject(input: CreateProjectInput): Promise<Project> {
-    return this.post<Project>("/api/v1/projects", input);
+  createProject(input: CreateProjectInput, bounds: WriteBounds): Promise<Project> {
+    return this.post<Project>("/api/v1/projects", input, bounds);
   }
 
   listRepoProjects(): Promise<RepoProject[]> {
@@ -329,13 +821,14 @@ export class DispatchApiClient {
 
   putRepoProject(
     repo: string,
-    input: { project: string; default?: boolean }
+    input: { project: string; default?: boolean },
+    bounds: WriteBounds
   ): Promise<RepoProject> {
-    return this.send<RepoProject>("PUT", `/api/v1/settings/repo-projects/${repoPath(repo)}`, input);
+    return this.put<RepoProject>(`/api/v1/settings/repo-projects/${repoPath(repo)}`, input, bounds);
   }
 
-  async deleteRepoProject(repo: string): Promise<void> {
-    await this.response(`/api/v1/settings/repo-projects/${repoPath(repo)}`, { method: "DELETE" });
+  async deleteRepoProject(repo: string, bounds: WriteBounds): Promise<void> {
+    await this.remove(`/api/v1/settings/repo-projects/${repoPath(repo)}`, bounds);
   }
 
   /** Only the projects that name a default; a project left out names nobody. Human-only. */
@@ -347,12 +840,13 @@ export class DispatchApiClient {
    *  Human-only, and a login nobody has signed in as is refused `400 ASSIGNEE_NOT_ALLOWED`. */
   putProjectDefaultAssignee(
     project: string,
-    input: ProjectDefaultAssigneeInput
+    input: ProjectDefaultAssigneeInput,
+    bounds: WriteBounds
   ): Promise<ProjectDefaultAssignee> {
-    return this.send<ProjectDefaultAssignee>(
-      "PUT",
+    return this.put<ProjectDefaultAssignee>(
       `/api/v1/projects/${pathSegment(project)}/default-assignee`,
-      input
+      input,
+      bounds
     );
   }
 
@@ -374,27 +868,39 @@ export class DispatchApiClient {
   putArchitectureSource(
     project: string,
     repo: string,
-    input: { branch: string }
+    input: { branch: string },
+    bounds: WriteBounds
   ): Promise<ArchitectureSource> {
-    return this.send<ArchitectureSource>(
-      "PUT",
+    return this.put<ArchitectureSource>(
       `/api/v1/projects/${pathSegment(project)}/architecture-sources/${repoPath(repo)}`,
-      input
+      input,
+      bounds
     );
   }
 
   /** Imports one source's model now; the row's `last_error` says whether the import failed. */
-  syncArchitectureSource(project: string, repo: string): Promise<ArchitectureSource> {
-    return this.json<ArchitectureSource>(
-      `/api/v1/projects/${pathSegment(project)}/architecture-sources/${repoPath(repo)}/sync`,
-      { method: "POST" }
+  syncArchitectureSource(
+    project: string,
+    repo: string,
+    bounds: WriteBounds
+  ): Promise<ArchitectureSource> {
+    return this.send<ArchitectureSource>(
+      {
+        method: "POST",
+        path: `/api/v1/projects/${pathSegment(project)}/architecture-sources/${repoPath(repo)}/sync`,
+      },
+      bounds
     );
   }
 
-  async deleteArchitectureSource(project: string, repo: string): Promise<void> {
-    await this.response(
+  async deleteArchitectureSource(
+    project: string,
+    repo: string,
+    bounds: WriteBounds
+  ): Promise<void> {
+    await this.remove(
       `/api/v1/projects/${pathSegment(project)}/architecture-sources/${repoPath(repo)}`,
-      { method: "DELETE" }
+      bounds
     );
   }
 
@@ -407,15 +913,12 @@ export class DispatchApiClient {
     return this.json<AgentToken[]>("/api/v1/me/agent-tokens");
   }
 
-  createAgentToken(input: { name: string }): Promise<CreatedAgentToken> {
-    return this.post<CreatedAgentToken>("/api/v1/me/agent-tokens", input);
+  createAgentToken(input: { name: string }, bounds: WriteBounds): Promise<CreatedAgentToken> {
+    return this.post<CreatedAgentToken>("/api/v1/me/agent-tokens", input, bounds);
   }
 
-  async revokeAgentToken(id: string): Promise<void> {
-    await this.response(
-      `/api/v1/me/agent-tokens/${pathSegment(id)}`,
-      idempotentWriteInit("DELETE")
-    );
+  async revokeAgentToken(id: string, bounds: WriteBounds): Promise<void> {
+    await this.remove(`/api/v1/me/agent-tokens/${pathSegment(id)}`, bounds);
   }
 
   /** Everyone who has signed in, sorted by email: the assignee picker's options. */
@@ -434,25 +937,44 @@ export class DispatchApiClient {
     return this.json<SearchResponse>(pathWithQuery("/api/v1/search", { q: query, ...options }));
   }
 
-  createIssue(input: CreateIssueInput): Promise<Issue> {
-    return this.post<Issue>("/api/v1/issues", input);
+  /**
+   * `GET /api/v1/projects/{key}/related`: the related-item check over a title, recording nothing.
+   * The create dialog asks while a person types, so a caller passes the `signal` of the check it
+   * is still interested in and a superseded one is aborted rather than raced.
+   */
+  relatedItems(
+    project: string,
+    title: string,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<Suggestions> {
+    return this.json<Suggestions>(
+      pathWithQuery(`/api/v1/projects/${pathSegment(project)}/related`, { title }),
+      { signal: options.signal }
+    );
+  }
+
+  createIssue(input: CreateIssueInput, bounds: WriteBounds): Promise<Issue> {
+    return this.post<Issue>("/api/v1/issues", input, bounds);
   }
 
   getIssue(key: string): Promise<IssueDetails> {
     return this.json<IssueDetails>(`/api/v1/issues/${pathSegment(key)}`);
   }
 
-  patchIssue(key: string, input: UpdateIssueInput): Promise<Issue> {
-    return this.send<Issue>("PATCH", `/api/v1/issues/${pathSegment(key)}`, input);
+  /** What a reference to the issue or one of its documents shows: title, status and each
+   *  document's name, kind and latest version, without the full issue read. */
+  getIssueSummary(key: string): Promise<IssueReferenceSummary> {
+    return this.json<IssueReferenceSummary>(`/api/v1/issues/${pathSegment(key)}/summary`);
+  }
+
+  patchIssue(key: string, input: UpdateIssueInput, bounds: WriteBounds): Promise<Issue> {
+    return this.send<Issue>(issuePatchRequest(key, input), bounds);
   }
 
   /** `DELETE /api/v1/issues/{key}/claim`: release the claim. A human may release any claim;
    *  the issue's status does not move. */
-  releaseIssueClaim(key: string): Promise<Issue> {
-    return this.json<Issue>(
-      `/api/v1/issues/${pathSegment(key)}/claim`,
-      idempotentWriteInit("DELETE")
-    );
+  releaseIssueClaim(key: string, bounds: WriteBounds): Promise<Issue> {
+    return this.remove<Issue>(`/api/v1/issues/${pathSegment(key)}/claim`, bounds);
   }
 
   getIssueEvents(key: string, options: ListEventsOptions = {}): Promise<Event[]> {
@@ -468,25 +990,22 @@ export class DispatchApiClient {
 
   /** `PUT /api/v1/me/asks/{id}/snooze`: fold this inbox row away for the caller until
    *  `snoozedUntil` (RFC3339). Human-only, like the inbox itself. */
-  snoozeAsk(id: string, snoozedUntil: string): Promise<AskSnooze> {
-    return this.json<AskSnooze>(
-      `/api/v1/me/asks/${pathSegment(id)}/snooze`,
-      idempotentWriteInit("PUT", { snoozed_until: snoozedUntil })
-    );
+  snoozeAsk(id: string, snoozedUntil: string, bounds: WriteBounds): Promise<AskSnooze> {
+    return this.send<AskSnooze>(askSnoozeRequest(id, snoozedUntil), bounds);
   }
 
   /** `DELETE /api/v1/me/asks/{id}/snooze`: bring the row back now. A row that is not snoozed
    *  answers the same 204. */
-  async unsnoozeAsk(id: string): Promise<void> {
-    await this.response(`/api/v1/me/asks/${pathSegment(id)}/snooze`, idempotentWriteInit("DELETE"));
+  async unsnoozeAsk(id: string, bounds: WriteBounds): Promise<void> {
+    await this.remove(`/api/v1/me/asks/${pathSegment(id)}/snooze`, bounds);
   }
 
   listAgents(): Promise<Agent[]> {
     return this.json<Agent[]>("/api/v1/agents");
   }
 
-  createAsk(key: string, input: CreateAskInput): Promise<Ask> {
-    return this.post<Ask>(`/api/v1/issues/${pathSegment(key)}/asks`, input);
+  createAsk(key: string, input: CreateAskInput, bounds: WriteBounds): Promise<Ask> {
+    return this.post<Ask>(`/api/v1/issues/${pathSegment(key)}/asks`, input, bounds);
   }
 
   /** `GET /api/v1/issues/{key}/asks`: the issue's asks with their newest reply and no thread,
@@ -508,8 +1027,8 @@ export class DispatchApiClient {
     );
   }
 
-  answerAsk(id: string, input: AnswerAskInput): Promise<Ask> {
-    return this.post<Ask>(`/api/v1/asks/${pathSegment(id)}/answer`, input);
+  answerAsk(id: string, input: AnswerAskInput, bounds: WriteBounds): Promise<Ask> {
+    return this.post<Ask>(`/api/v1/asks/${pathSegment(id)}/answer`, input, bounds);
   }
 
   getAsk(id: string): Promise<AskRead> {
@@ -537,17 +1056,15 @@ export class DispatchApiClient {
   /** `PUT /api/v1/me/threads/{id}/read`: move the signed-in person's read mark on one thread
    *  forward to `readThrough` (RFC3339, the newest reply shown). Answers 204 whether or not it
    *  moved. */
-  async markThreadRead(threadId: string, readThrough: string): Promise<void> {
-    await this.response(
-      `/api/v1/me/threads/${pathSegment(threadId)}/read`,
-      idempotentWriteInit("PUT", { read_through: readThrough })
-    );
+  async markThreadRead(threadId: string, readThrough: string, bounds: WriteBounds): Promise<void> {
+    await this.send(threadReadRequest(threadId, readThrough), bounds);
   }
 
-  async removeAskFollower(id: string, sessionId: string): Promise<void> {
-    await this.response(`/api/v1/asks/${pathSegment(id)}/followers/${pathSegment(sessionId)}`, {
-      method: "DELETE",
-    });
+  async removeAskFollower(id: string, sessionId: string, bounds: WriteBounds): Promise<void> {
+    await this.remove(
+      `/api/v1/asks/${pathSegment(id)}/followers/${pathSegment(sessionId)}`,
+      bounds
+    );
   }
 
   listComments(key: string, artifact?: string): Promise<Comment[]> {
@@ -556,58 +1073,76 @@ export class DispatchApiClient {
     );
   }
 
-  createComment(key: string, input: CreateCommentInput): Promise<Comment> {
-    return this.post<Comment>(`/api/v1/issues/${pathSegment(key)}/comments`, input);
+  createComment(key: string, input: CreateCommentInput, bounds: WriteBounds): Promise<Comment> {
+    return this.post<Comment>(`/api/v1/issues/${pathSegment(key)}/comments`, input, bounds);
   }
 
   getComment(id: string): Promise<CommentRead> {
     return this.json<CommentRead>(`/api/v1/comments/${pathSegment(id)}`);
   }
 
-  resolveComment(id: string): Promise<Comment> {
-    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/resolve`, {});
+  resolveComment(id: string, bounds: WriteBounds): Promise<Comment> {
+    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/resolve`, {}, bounds);
   }
 
-  reopenComment(id: string): Promise<Comment> {
-    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/reopen`, {});
+  reopenComment(id: string, bounds: WriteBounds): Promise<Comment> {
+    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/reopen`, {}, bounds);
   }
 
-  editComment(id: string, input: EditCommentInput): Promise<Comment> {
-    return this.send<Comment>("PATCH", `/api/v1/comments/${pathSegment(id)}`, input);
+  editComment(id: string, input: EditCommentInput, bounds: WriteBounds): Promise<Comment> {
+    return this.send<Comment>(
+      { body: input, method: "PATCH", path: `/api/v1/comments/${pathSegment(id)}` },
+      bounds
+    );
   }
 
-  acceptComment(id: string): Promise<Comment> {
-    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/accept`, {});
+  /** The comment's current blocks, each with its span in the stored body, and its revision: what
+   *  the editor carries block ids from (`editComment`'s `blocks` and `base_revision`). */
+  commentBlocks(id: string): Promise<ItemBlocks> {
+    return this.json<ItemBlocks>(`/api/v1/comments/${pathSegment(id)}/blocks`);
   }
 
-  rejectComment(id: string): Promise<Comment> {
-    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/reject`, {});
+  acceptComment(id: string, bounds: WriteBounds): Promise<Comment> {
+    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/accept`, {}, bounds);
   }
+
+  rejectComment(id: string, bounds: WriteBounds): Promise<Comment> {
+    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/reject`, {}, bounds);
+  }
+
   createCommentDelivery(
     id: string,
     target: string | undefined,
-    delivery: "btw" | "aside" | "steer"
+    delivery: "btw" | "aside" | "steer",
+    bounds: WriteBounds
   ): Promise<CommentDelivery> {
-    return this.post<CommentDelivery>(`/api/v1/comments/${pathSegment(id)}/deliveries`, {
-      delivery,
-      ...(target === undefined ? {} : { target }),
-    });
+    return this.post<CommentDelivery>(
+      `/api/v1/comments/${pathSegment(id)}/deliveries`,
+      { delivery, ...(target === undefined ? {} : { target }) },
+      bounds
+    );
   }
 
-  createMessage(key: string, input: CreateMessageInput): Promise<Message> {
-    return this.post<Message>(`/api/v1/issues/${pathSegment(key)}/messages`, input);
+  createMessage(key: string, input: CreateMessageInput, bounds: WriteBounds): Promise<Message> {
+    return this.post<Message>(`/api/v1/issues/${pathSegment(key)}/messages`, input, bounds);
   }
 
-  createAgentMessage(sessionID: string, input: CreateAgentMessageInput): Promise<Message> {
-    return this.post<Message>(`/api/v1/agents/${pathSegment(sessionID)}/messages`, input);
+  /** A person's message to one session. */
+  createAgentMessage(
+    sessionID: string,
+    input: CreateAgentMessageInput,
+    bounds: WriteBounds
+  ): Promise<Message> {
+    return this.send<Message>(agentMessageRequest(sessionID, input), bounds);
   }
 
   listAgentMessages(sessionID: string): Promise<MessageRead[]> {
     return this.json<MessageRead[]>(`/api/v1/agents/${pathSegment(sessionID)}/messages`);
   }
 
-  createBroadcast(input: CreateBroadcastInput): Promise<BroadcastCreated> {
-    return this.post<BroadcastCreated>("/api/v1/broadcasts", input);
+  /** A person's message to many sessions. */
+  createBroadcast(input: CreateBroadcastInput, bounds: WriteBounds): Promise<BroadcastCreated> {
+    return this.post<BroadcastCreated>("/api/v1/broadcasts", input, bounds);
   }
 
   listBroadcasts(): Promise<BroadcastSummary[]> {
@@ -618,10 +1153,16 @@ export class DispatchApiClient {
     return this.json<BroadcastRead>(`/api/v1/broadcasts/${pathSegment(id)}`);
   }
 
-  createMessageDelivery(id: string, delivery: "btw" | "aside" | "steer"): Promise<MessageDelivery> {
-    return this.post<MessageDelivery>(`/api/v1/messages/${pathSegment(id)}/deliveries`, {
-      delivery,
-    });
+  createMessageDelivery(
+    id: string,
+    delivery: "btw" | "aside" | "steer",
+    bounds: WriteBounds
+  ): Promise<MessageDelivery> {
+    return this.post<MessageDelivery>(
+      `/api/v1/messages/${pathSegment(id)}/deliveries`,
+      { delivery },
+      bounds
+    );
   }
 
   getMessage(key: string, id: string): Promise<MessageRead> {
@@ -644,18 +1185,18 @@ export class DispatchApiClient {
     );
   }
 
-  async uploadArtifact(
+  uploadArtifact(
     owner: ArtifactOwner,
-    input: CreateArtifactInput
+    input: CreateArtifactInput,
+    bounds: WriteBounds
   ): Promise<ArtifactUploadResponse> {
     const path = artifactsPath(owner);
     if ("content" in input) {
-      return this.post<ArtifactUploadResponse>(path, {
-        actor: input.actor,
-        content: input.content,
-        name: input.name,
-        summary: input.summary,
-      });
+      return this.post<ArtifactUploadResponse>(
+        path,
+        { actor: input.actor, content: input.content, name: input.name, summary: input.summary },
+        bounds
+      );
     }
     const body = new FormData();
     body.set("name", input.name);
@@ -667,10 +1208,7 @@ export class DispatchApiClient {
     }
     body.set("file", input.file);
 
-    return this.json<ArtifactUploadResponse>(path, {
-      body,
-      method: "POST",
-    });
+    return this.post<ArtifactUploadResponse>(path, body, bounds);
   }
 
   getArtifact(id: string): Promise<Artifact> {
@@ -680,6 +1218,14 @@ export class DispatchApiClient {
   getProjectArtifact(key: string, slug: string): Promise<Artifact> {
     return this.json<Artifact>(
       `/api/v1/projects/${pathSegment(key)}/artifacts/${pathSegment(slug)}`
+    );
+  }
+
+  /** What a reference to a project document shows: name, kind and latest version, without its
+   *  versions. */
+  getProjectDocumentSummary(key: string, slug: string): Promise<DocumentReferenceSummary> {
+    return this.json<DocumentReferenceSummary>(
+      `/api/v1/projects/${pathSegment(key)}/artifacts/${pathSegment(slug)}/summary`
     );
   }
 
@@ -694,19 +1240,29 @@ export class DispatchApiClient {
     return this.json<ArtifactText>(`/api/v1/artifacts/${pathSegment(id)}/text`);
   }
 
-  rebuildArtifact(id: string, markdown?: string): Promise<ArtifactRebuildReport> {
-    return this.post<ArtifactRebuildReport>(`/api/v1/artifacts/${pathSegment(id)}/rebuild`, {
-      ...(markdown === undefined ? {} : { markdown }),
-    });
+  rebuildArtifact(
+    id: string,
+    markdown: string | undefined,
+    bounds: WriteBounds
+  ): Promise<ArtifactRebuildReport> {
+    return this.post<ArtifactRebuildReport>(
+      `/api/v1/artifacts/${pathSegment(id)}/rebuild`,
+      markdown === undefined ? {} : { markdown },
+      bounds
+    );
   }
 
   getArtifactBlocks(id: string): Promise<ArtifactBlock[]> {
     return this.json<ArtifactBlock[]>(`/api/v1/artifacts/${pathSegment(id)}/blocks`);
   }
 
+  /** One version's bytes. A large file on a slow line can take longer than any read deadline, so
+   *  this GET carries none. */
   async getArtifactVersion(id: string, version: number): Promise<ArtifactVersionContent> {
     const response = await this.response(
-      `/api/v1/artifacts/${pathSegment(id)}/versions/${pathSegment(String(version))}`
+      `/api/v1/artifacts/${pathSegment(id)}/versions/${pathSegment(String(version))}`,
+      {},
+      null
     );
     const mime = response.headers.get("Content-Type") ?? "application/octet-stream";
 
@@ -717,42 +1273,58 @@ export class DispatchApiClient {
     return { blob: await response.blob(), mime, version };
   }
 
-  createArtifactVersion(id: string, input: CreateVersionInput): Promise<Version> {
-    return this.post<Version>(`/api/v1/artifacts/${pathSegment(id)}/versions`, input);
+  createArtifactVersion(
+    id: string,
+    input: CreateVersionInput,
+    bounds: WriteBounds
+  ): Promise<Version> {
+    return this.post<Version>(`/api/v1/artifacts/${pathSegment(id)}/versions`, input, bounds);
   }
 
   listArtifactReviews(id: string): Promise<ArtifactReview[]> {
     return this.json<ArtifactReview[]>(`/api/v1/artifacts/${pathSegment(id)}/reviews`);
   }
 
-  createArtifactReview(id: string, input: CreateArtifactReviewInput): Promise<ArtifactReview> {
-    return this.post<ArtifactReview>(`/api/v1/artifacts/${pathSegment(id)}/reviews`, input);
+  createArtifactReview(
+    id: string,
+    input: CreateArtifactReviewInput,
+    bounds: WriteBounds
+  ): Promise<ArtifactReview> {
+    return this.post<ArtifactReview>(`/api/v1/artifacts/${pathSegment(id)}/reviews`, input, bounds);
   }
 
   listArtifactAsks(id: string, state: "all" | "open" | "answered" = "all"): Promise<Ask[]> {
     return this.json<Ask[]>(pathWithQuery(`/api/v1/artifacts/${pathSegment(id)}/asks`, { state }));
   }
 
-  createArtifactAsk(id: string, input: CreateAskInput): Promise<Ask> {
-    return this.post<Ask>(`/api/v1/artifacts/${pathSegment(id)}/asks`, input);
+  createArtifactAsk(id: string, input: CreateAskInput, bounds: WriteBounds): Promise<Ask> {
+    return this.post<Ask>(`/api/v1/artifacts/${pathSegment(id)}/asks`, input, bounds);
   }
 
   listArtifactComments(id: string): Promise<Comment[]> {
     return this.json<Comment[]>(`/api/v1/artifacts/${pathSegment(id)}/comments`);
   }
 
-  createArtifactComment(id: string, input: CreateCommentInput): Promise<Comment> {
-    return this.post<Comment>(`/api/v1/artifacts/${pathSegment(id)}/comments`, input);
+  createArtifactComment(
+    id: string,
+    input: CreateCommentInput,
+    bounds: WriteBounds
+  ): Promise<Comment> {
+    return this.post<Comment>(`/api/v1/artifacts/${pathSegment(id)}/comments`, input, bounds);
   }
 
   getArtifactSubscribers(id: string): Promise<Subscriber[]> {
     return this.json<Subscriber[]>(`/api/v1/artifacts/${pathSegment(id)}/subscribers`);
   }
 
-  async unsubscribeArtifactSession(id: string, sessionId: string): Promise<void> {
-    await this.response(
+  async unsubscribeArtifactSession(
+    id: string,
+    sessionId: string,
+    bounds: WriteBounds
+  ): Promise<void> {
+    await this.remove(
       `/api/v1/artifacts/${pathSegment(id)}/subscribers/${pathSegment(sessionId)}`,
-      { method: "DELETE" }
+      bounds
     );
   }
 
@@ -775,46 +1347,56 @@ export class DispatchApiClient {
 
   /** Replaces the delivery timeline's configuration (human callers only). The server first proves
    *  the GitHub App can read `deploy_repo`, answering `409 DELIVERY_SETTINGS_ACCESS` when not. */
-  putDeliverySettings(input: DeliverySettingsInput): Promise<DeliverySettings> {
-    return this.send<DeliverySettings>("PUT", "/api/v1/settings/delivery", input);
+  putDeliverySettings(
+    input: DeliverySettingsInput,
+    bounds: WriteBounds
+  ): Promise<DeliverySettings> {
+    return this.put<DeliverySettings>("/api/v1/settings/delivery", input, bounds);
   }
 
   /** Creates a Delivery session group: its sessions' pull requests take it as their Parent agent.
    *  A session another group holds is `409 SESSION_IN_GROUP`; a name another group has, or that is
    *  the title of a session outside the group, is `409` as well, the message naming which. */
   createDeliverySessionGroup(
-    input: CreateDeliverySessionGroupInput
+    input: CreateDeliverySessionGroupInput,
+    bounds: WriteBounds
   ): Promise<DeliverySessionGroup> {
-    return this.post<DeliverySessionGroup>("/api/v1/delivery/session-groups", input);
+    return this.post<DeliverySessionGroup>("/api/v1/delivery/session-groups", input, bounds);
   }
 
   /** Renames a session group, adds sessions to it or removes sessions from it. */
   updateDeliverySessionGroup(
     id: string,
-    input: UpdateDeliverySessionGroupInput
+    input: UpdateDeliverySessionGroupInput,
+    bounds: WriteBounds
   ): Promise<DeliverySessionGroup> {
     return this.send<DeliverySessionGroup>(
-      "PATCH",
-      `/api/v1/delivery/session-groups/${pathSegment(id)}`,
-      input
+      {
+        body: input,
+        method: "PATCH",
+        path: `/api/v1/delivery/session-groups/${pathSegment(id)}`,
+      },
+      bounds
     );
   }
 
   /** Deletes a session group; its sessions show as themselves again. */
-  async deleteDeliverySessionGroup(id: string): Promise<void> {
-    await this.response(`/api/v1/delivery/session-groups/${pathSegment(id)}`, {
-      method: "DELETE",
-    });
+  async deleteDeliverySessionGroup(id: string, bounds: WriteBounds): Promise<void> {
+    await this.remove(`/api/v1/delivery/session-groups/${pathSegment(id)}`, bounds);
   }
 
   getIssueSubscribers(key: string): Promise<Subscriber[]> {
     return this.json<Subscriber[]>(`/api/v1/issues/${pathSegment(key)}/subscribers`);
   }
 
-  async unsubscribeIssueSession(key: string, sessionId: string): Promise<void> {
-    await this.response(
+  async unsubscribeIssueSession(
+    key: string,
+    sessionId: string,
+    bounds: WriteBounds
+  ): Promise<void> {
+    await this.remove(
       `/api/v1/issues/${pathSegment(key)}/subscribers/${pathSegment(sessionId)}`,
-      { method: "DELETE" }
+      bounds
     );
   }
 
@@ -822,33 +1404,38 @@ export class DispatchApiClient {
     return this.json<UserState>("/api/v1/me/state");
   }
 
-  putIssueState(key: string, input: Partial<UserIssueState>): Promise<UserIssueState> {
-    return this.json<UserIssueState>(
-      `/api/v1/me/issues/${pathSegment(key)}/state`,
-      idempotentWriteInit("PUT", input)
-    );
+  putIssueState(
+    key: string,
+    input: Partial<UserIssueState>,
+    bounds: WriteBounds
+  ): Promise<UserIssueState> {
+    return this.send<UserIssueState>(issueStateRequest(key, input), bounds);
   }
 
   getMyAgentState(): Promise<UserAgentStates> {
     return this.json<UserAgentStates>("/api/v1/me/agents/state");
   }
 
-  putAgentState(sessionID: string, input: UserAgentStateInput): Promise<UserAgentState> {
-    return this.json<UserAgentState>(
-      `/api/v1/me/agents/${pathSegment(sessionID)}/state`,
-      idempotentWriteInit("PUT", input)
-    );
+  putAgentState(
+    sessionID: string,
+    input: UserAgentStateInput,
+    bounds: WriteBounds
+  ): Promise<UserAgentState> {
+    return this.send<UserAgentState>(agentStateRequest(sessionID, input), bounds);
   }
 
   whoAmI(): Promise<AuthenticatedUser> {
     return this.json<AuthenticatedUser>("/auth/whoami");
   }
 
+  /** Ends this browser's session. `/auth/logout` sits outside Dispatch's keyed layer and is the
+   *  same however often it is made, so it goes with no key. */
   logout(): Promise<{ ok: true }> {
-    return this.post<{ ok: true }>("/auth/logout", {});
+    return this.json<{ ok: true }>("/auth/logout", { method: "POST" });
   }
 
-  async githubRest(path: string, init: RequestInit = {}): Promise<Response> {
+  /** A read through Dispatch's GitHub proxy; it makes no write. */
+  githubRest(path: string, init: { readonly signal?: AbortSignal } = {}): Promise<Response> {
     return this.response(`/api/github/rest/${path.replace(/^\/+/, "")}`, init);
   }
 
@@ -870,30 +1457,38 @@ export class DispatchApiClient {
    *  the code the viewer typed. */
   approveCredentialRecord(
     recordId: string,
-    body: { code?: string } = {}
+    body: { code?: string },
+    bounds: WriteBounds
   ): Promise<CredentialDecisionResponse> {
     return this.post<CredentialDecisionResponse>(
       `/api/v1/credential-requests/${pathSegment(recordId)}/approve`,
-      body
+      body,
+      bounds
     );
   }
 
   /** Deny a credential request as the signed-in viewer; a machine login also carries its code. */
   denyCredentialRecord(
     recordId: string,
-    body: { code?: string } = {}
+    body: { code?: string },
+    bounds: WriteBounds
   ): Promise<CredentialDecisionResponse> {
     return this.post<CredentialDecisionResponse>(
       `/api/v1/credential-requests/${pathSegment(recordId)}/deny`,
-      body
+      body,
+      bounds
     );
   }
 
   /** A machine (`launcher_credential`) record is only ever selected through this route: the code
    *  the operator types in is what proves which pending login they mean, and deciding it takes
    *  the same code again. */
-  lookupMachineCredential(code: string): Promise<CredentialRecord> {
-    return this.post<CredentialRecord>("/api/v1/credential-requests/machine-lookup", { code });
+  lookupMachineCredential(code: string, bounds: WriteBounds): Promise<CredentialRecord> {
+    return this.post<CredentialRecord>(
+      "/api/v1/credential-requests/machine-lookup",
+      { code },
+      bounds
+    );
   }
 
   /** `GET /api/v1/credential-grants?approver=me`: every live grant of the viewer's sessions,
@@ -907,12 +1502,8 @@ export class DispatchApiClient {
   /** Revoke a grant as the signed-in viewer, its approver or its enrollment's operator. The
    *  operator's revoke of an automatic grant also ends that session's other automatic grants of
    *  those secrets and makes it ask before it gets them again. */
-  async revokeCredentialGrant(grantId: string): Promise<void> {
-    await this.response(`/api/v1/credential-grants/${pathSegment(grantId)}/revoke`, {
-      body: JSON.stringify({}),
-      headers: { "Content-Type": "application/json" },
-      method: "POST",
-    });
+  async revokeCredentialGrant(grantId: string, bounds: WriteBounds): Promise<void> {
+    await this.post(`/api/v1/credential-grants/${pathSegment(grantId)}/revoke`, {}, bounds);
   }
 
   /** `GET /api/v1/machine-logins`: the machine logins the viewer may revoke, their own machines'
@@ -925,19 +1516,21 @@ export class DispatchApiClient {
   /** Revoke a machine login, expired or not: a service's, or one of the viewer's machines'.
    *  Dispatch names the viewer as the person revoking, and every session the login enrolled ends
    *  with it. */
-  async revokeMachineLogin(credentialId: string): Promise<void> {
-    await this.response(`/api/v1/machine-logins/${pathSegment(credentialId)}/revoke`, {
-      body: JSON.stringify({}),
-      headers: { "Content-Type": "application/json" },
-      method: "POST",
-    });
+  async revokeMachineLogin(credentialId: string, bounds: WriteBounds): Promise<void> {
+    await this.post(`/api/v1/machine-logins/${pathSegment(credentialId)}/revoke`, {}, bounds);
   }
 }
 
+/** A client over `fetchImpl`. The page's own (`api`) sends its uploads through `XMLHttpRequest`
+ *  (`xhrUpload`), so their progress counts against the silence deadline; one given a `fetchImpl`
+ *  of its own sends them through it unless it is given an `upload` too. */
 export function createApiClient(
-  fetchImpl: FetchImplementation = (...args) => fetch(...args)
+  fetchImpl?: FetchImplementation,
+  upload?: UploadImplementation
 ): DispatchApiClient {
-  return new DispatchApiClient(fetchImpl);
+  return fetchImpl === undefined
+    ? new DispatchApiClient((...args) => fetch(...args), upload ?? xhrUpload())
+    : new DispatchApiClient(fetchImpl, upload);
 }
 
 export const api = createApiClient();

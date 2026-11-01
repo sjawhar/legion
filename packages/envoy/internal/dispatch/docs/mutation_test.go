@@ -732,7 +732,7 @@ func TestAJoinedWriteWhoseTransactionChangesNothingAppendsNoUpdateAndKeepsItsSet
 			return err
 		}},
 		{name: "a rewrite whose edit changes nothing", answers: ygws.ErrNoChanges, write: func(ctx context.Context) error {
-			return service.applyLive(ctx, artifactID, closer, func(doc *crdt.Doc, _ *pmdoc.Node, _ func(func(*crdt.Transaction))) error {
+			return service.applyLive(ctx, artifactID, closer, func(doc *crdt.Doc, _ pmdoc.ValidDocument, _ func(func(*crdt.Transaction))) error {
 				_, _, err := rewriteLive(doc, nil, func(*pmdoc.Node) bool { return false })
 				return err
 			})
@@ -1004,7 +1004,12 @@ func TestVersionWritersReportChangedReferenceTargets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("name version: %v", err)
 	}
-	want = []model.ChangedReference{{Kind: "ask", ID: askIDs[1], IssueKey: &issueKey}}
+	// The new mention lands in the paragraph that holds the first one, so the first ask's edge is
+	// kept but the block its referenced-by panel shows moved: it is named too, after the new one.
+	want = []model.ChangedReference{
+		{Kind: "ask", ID: askIDs[1], IssueKey: &issueKey},
+		{Kind: "ask", ID: askIDs[0], IssueKey: &issueKey},
+	}
 	if !reflect.DeepEqual(named.Changes.Targets, want) {
 		t.Fatalf("named version changes = %#v, want %#v", named.Changes.Targets, want)
 	}

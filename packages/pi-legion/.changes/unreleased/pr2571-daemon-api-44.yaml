@@ -1,0 +1,9 @@
+kind: Changed
+body: |-
+    `legion.daemonApiVersion` is 44. Contract 44 drops
+    `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` from a Claude Code role's start command and pane, so
+    the worker environment the contract covers is one variable smaller; a daemon at 44 and a
+    plugin at 43 are refused by the boot gate, which is why the two move together.
+time: 2026-10-30T09:45:00Z
+custom:
+    Issue: pr2571

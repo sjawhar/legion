@@ -6,8 +6,8 @@
 # lib/workflow.sh, and drives real agents through:
 #   - prompts.New rewriting a stale Go prompt part at boot and leaving identical ones untouched;
 #   - the refused root stop naming `legion claims close` only for a tree no workflow issue backs;
-#   - the phase-stall follow-up: a planner whose turn ends with its phase open gets the one
-#     follow-up, and the tool's handoff_complete closes the stall, with no follow-up after it;
+#   - the phase reminder: a planner whose turn ends with its phase open is reminded, and the
+#     tool's handoff_complete closes the phase, with no reminder after it;
 #   - park_child / rerun_child with their refusals, and the Dispatch writes' actor;
 #   - phase-finished carrying the worker's summary and verdict;
 #   - the daemon posting the merger's READY packet (direct, and stored across a refused gate), and
@@ -362,7 +362,7 @@ rig_sessions_json() {
   jq -R -s -c 'split("\n") | map(fromjson? | select(.msg == "api: claim registered") | .session) | unique' "$evidence/logs/daemon.log"
 }
 production_audit() {
-  local sessions header events envoy found=0
+  local sessions bearer events envoy found=0
   audited=1
   sessions=$(rig_sessions_json)
   printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
@@ -371,12 +371,20 @@ production_audit() {
   printf '%s\n' "$envoy" >"$evidence/production-envoy-rig-sessions.json"
   if [ "$envoy" != "[]" ]; then printf 'production Envoy listener holds rig sessions: %s\n' "$envoy"; found=1; fi
   if [ "$prod_baseline" = none ]; then printf 'no user-level Dispatch configuration\n'; return "$found"; fi
-  header=$(prod_header_file)
-  curl -sS -N --max-time 25 -H "@$header" "$prod_dispatch_url/api/v1/events?since=$((prod_baseline - 1))" >"$work/production-events.sse" 2>/dev/null || true
-  rm -f "$header"
-  events=$(sed -n 's/^data: //p' "$work/production-events.sse" | jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+  bearer=$work/production-dispatch-bearer
+  (umask 077 && printf '%s\n' "$prod_token" >"$bearer")
+  # A refusal of the feed is printed on stderr; the replay's close, resubscribe and duplicate lines
+  # carry no event and are not counted, so an event a redial repeats counts once. The probe takes
+  # its cursor from Dispatch's own events_start, so a --since the server clamps to its head leaves
+  # the events after that head counted, not written off as duplicates.
+  bun "$root/scripts/e2e/lib/dispatch-live-events.ts" \
+    --url "$prod_dispatch_url" --bearer-file "$bearer" --since "$((prod_baseline - 1))" --timeout 25 \
+    >"$work/production-events.jsonl" || true
+  rm -f "$bearer"
+  events=$(jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+    [.[] | .event | select(. != null)] |
     {control: any(.[]; .id == $baseline), count: length,
-     rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project))) | {id, issue_key, type, actor: .actor.id, created_at}]}')
+     rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project))) | {id, issue_key, type, actor: .actor.id, created_at}]}' "$work/production-events.jsonl")
   printf '%s\n' "$events" >"$evidence/production-dispatch-audit.json"
   if ! jq -e '.control' >/dev/null <<<"$events"; then printf 'production Dispatch replay did not return its baseline event %s\n' "$prod_baseline"; return 1; fi
   if ! jq -e '.rig == []' >/dev/null <<<"$events"; then printf 'production Dispatch has rig-authored events: %s\n' "$(jq -c .rig <<<"$events")"; found=1; fi
@@ -395,7 +403,8 @@ role_unheld() { ! envoy_role_holder "$1" >/dev/null 2>&1; }
 role_held_by() { [ "$(envoy_role_holder "$1" 2>/dev/null)" = "$2" ]; }
 token_session() { claim_json "$1" | jq -er '.session // empty | select(. != "")'; }
 
-# The follow-up the phase stall sends (packages/pi-legion/src/phase-stall.ts FOLLOW_UP).
+# The reminder the phase stall sends (packages/pi-shared/src/phase-stall.ts REMINDER), which now
+# comes at the end of every turn a phase stays open through; this check reads the first of them.
 followup_needle="Your turn ended with your Legion phase still open"
 
 # tool_outcomes FILE: every tool result in an OMP session file, joined to the call that produced it.
@@ -418,11 +427,10 @@ gate_send() {
   gate_artifacts[$issue]=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   architect_registers_gate "$issue" "$issue"
 }
-# gate_finish ISSUE: the root waits on a person at its closed gate without a slot, its architect
-# suspended (await_gate_wait); the proof human approves, the root takes a slot back
+# gate_finish ISSUE: the root waits on a person at its closed gate without a slot while its
+# architect stays live (await_gate_wait); the proof human approves, the root takes a slot back
 # (await_answered_slot), and only then reaches planning. admission_cap 3 is the run's three roots
-# (the child takes none), so the slots every waiting root gave back stand free and the answered root
-# takes one at once.
+# (the child takes none), so the slots every waiting root gave back stand free and the answered root takes one at once.
 gate_finish() {
   local issue=$1 artifact=${gate_artifacts[$1]}
   until_true 600 "$issue architect to register primary artifact $artifact" sh -c \
@@ -806,8 +814,8 @@ pass
 begin phase-stall-follow-up
 db_value "select coalesce(handoff_commit, '') || '|' || coalesce(summary, '') from phases where issue = '$root1' and role = 'planner'" >"$evidence/phase-stall-planner-row-before-follow-up.txt" || true
 note "planner phase row before the follow-up: '$(cat "$evidence/phase-stall-planner-row-before-follow-up.txt")' (no row, or an empty handoff: nothing completed)"
-# The planner's turn ended with its phase open, so the phase stall's follow-up fires; the rig's
-# instructions let it answer WAITING. Once the follow-up is in its session, it is given 60 s to
+# The planner's turn ended with its phase open, so the reminder comes; the rig's
+# instructions let it answer WAITING. Once the reminder is in its session, it is given 60 s to
 # complete on its own, then told to.
 followup_seen() { grep -qF -- "$followup_needle" "$(root1_planner_file)"; }
 until_true 600 "the phase stall's follow-up to reach $root1's planner" followup_seen

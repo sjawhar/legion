@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -251,10 +252,8 @@ func TestRejectionLogOmitsTheTokensUnverifiedClaims(t *testing.T) {
 	claims := issuer.Claims(serviceTokenSubject, serviceTokenAudience)
 	claims["iss"] = chosen
 
-	previous := slog.Default()
 	logs := &storetest.LockedLog{}
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 
 	response := agentRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil,
 		issuer.Mint(t, issuer.signing, claims))

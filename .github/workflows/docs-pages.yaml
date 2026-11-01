@@ -1,0 +1,254 @@
+name: Docs (main)
+
+# Builds the documentation site (docs/site) on every push to main whose change could change it, and
+# publishes it to GitHub Pages (https://sjawhar.github.io/legion/). The build is docs-site.yaml's,
+# which holds those steps once. Pull requests and merge groups call the same workflow from
+# ci.yaml's docs job; this workflow is main's half.
+#
+# A `workflow_dispatch` run starts this workflow on any branch. The build job runs as it does on
+# main, with the `upload-pages-artifact` step that no other caller of docs-site.yaml asks for, so
+# a dispatch of a branch proves that step before the merge. The deploy job runs on main alone
+# (`github.ref`), so a dispatch of a branch deploys nothing to
+# https://sjawhar.github.io/legion/.
+#
+# A workflow of its own, so deployments happen in push order and the site ends at the newest
+# docs-selecting commit's build. A workflow-level concurrency group takes runs in the order they
+# start, and GitHub starts a push's run when the push lands. A job-level group takes jobs in the
+# order the jobs they need end: in ci.yaml every push to main is a run of its own, so a deploy job
+# there joined its group when its build ended, and a slower build of an older commit could deploy
+# after a newer one.
+#
+# The paths below are ci.yaml's docs filter flattened as dorny/paths-filter reads it (each
+# anchor's group in its place and order, the one duplicate kept), so main builds the site on
+# exactly the changes a pull request's docs job builds it on. .github/scripts/check-ci-filters.sh
+# fails when the two lists differ, naming each missing and extra pattern (ci_job_reads.py's
+# PUSH_WORKFLOWS pairs them), so change the filter and this list together.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ci.yaml'
+      - '.github/workflows/docs-pages.yaml'
+      - '.github/workflows/docs-site.yaml'
+      # ci.yaml's *bun_install, 16 patterns:
+      - 'package.json'
+      - 'bun.lock'
+      - 'patches/**'
+      - 'packages/contracts/package.json'
+      - 'packages/envoy-client/package.json'
+      - 'packages/pi-envoy/package.json'
+      - 'packages/pi-legion/package.json'
+      - 'packages/pi-shared/package.json'
+      - 'packages/claude-envoy/package.json'
+      - 'packages/proof-editor/package.json'
+      - 'packages/dispatch/package.json'
+      - 'packages/envoy/internal/dispatch/pmdoc/gen/package.json'
+      - 'docs/site/package.json'
+      - '.bun-version'
+      - '.github/actions/setup-bun/**'
+      # ci.yaml's *biome, 2 patterns:
+      - 'biome.json'
+      - '.gitignore'
+      # ci.yaml's *go_workspace, 6 patterns:
+      - 'go.work'
+      - 'go.work.sum'
+      - 'packages/daemon/go.mod'
+      - 'packages/daemon/go.sum'
+      - 'packages/envoy/go.mod'
+      - 'packages/envoy/go.sum'
+      # The docs filter's own:
+      - 'docs/site/**'
+      # ci.yaml's *legion_command, 57 patterns:
+      - 'packages/daemon/cmd/legion/*'
+      - 'packages/daemon/internal/admit/*'
+      - 'packages/daemon/internal/agentsecrets/*'
+      - 'packages/daemon/internal/api/*'
+      - 'packages/daemon/internal/appauth/*'
+      - 'packages/daemon/internal/backoff/*'
+      - 'packages/daemon/internal/blockers/*'
+      - 'packages/daemon/internal/bootprobe/*'
+      - 'packages/daemon/internal/capabilities/*'
+      - 'packages/daemon/internal/claim/*'
+      - 'packages/daemon/internal/classify/*'
+      - 'packages/daemon/internal/claudebridge/*'
+      - 'packages/daemon/internal/claudelaunch/*'
+      - 'packages/daemon/internal/config/*'
+      - 'packages/daemon/internal/controller/*'
+      - 'packages/daemon/internal/credential/*'
+      - 'packages/daemon/internal/daemon/**'
+      - 'packages/daemon/internal/dispatch/*'
+      - 'packages/daemon/internal/ghautomerge/*'
+      - 'packages/daemon/internal/ghbranch/*'
+      - 'packages/daemon/internal/ghconfig/*'
+      - 'packages/daemon/internal/ghrepo/*'
+      - 'packages/daemon/internal/githubrest/*'
+      - 'packages/daemon/internal/intake/*'
+      - 'packages/daemon/internal/launcher/*'
+      - 'packages/daemon/internal/lookpath/*'
+      - 'packages/daemon/internal/modeltoken/*'
+      - 'packages/daemon/internal/natsauth/*'
+      - 'packages/daemon/internal/notify/*'
+      - 'packages/daemon/internal/ompdirs/*'
+      - 'packages/daemon/internal/omplaunch/*'
+      - 'packages/daemon/internal/ompsessions/*'
+      - 'packages/daemon/internal/phase/*'
+      - 'packages/daemon/internal/podsafety/**'
+      - 'packages/daemon/internal/procgroup/*'
+      - 'packages/daemon/internal/projection/*'
+      - 'packages/daemon/internal/promptrefs/*'
+      - 'packages/daemon/internal/prompts/**'
+      - 'packages/daemon/internal/record/*'
+      - 'packages/daemon/internal/registry/*'
+      - 'packages/daemon/internal/repocache/*'
+      - 'packages/daemon/internal/requiredchecks/*'
+      - 'packages/daemon/internal/runtime/*'
+      - 'packages/daemon/internal/runtime/sandbox/*'
+      - 'packages/daemon/internal/runtime/shellprefix/*'
+      - 'packages/daemon/internal/runtime/tmux/*'
+      - 'packages/daemon/internal/runtime/workerbin/*'
+      - 'packages/daemon/internal/sessionproxy/*'
+      - 'packages/daemon/internal/shim/*'
+      - 'packages/daemon/internal/shimwire/*'
+      - 'packages/daemon/internal/store/**'
+      - 'packages/daemon/internal/stream/*'
+      - 'packages/daemon/internal/supervise/*'
+      - 'packages/daemon/internal/treelifecycle/*'
+      - 'packages/daemon/internal/wait/*'
+      - 'packages/daemon/internal/workflow/*'
+      - 'packages/daemon/internal/workspace/*'
+      - 'packages/envoy/listenfd/*'
+      # ci.yaml's *dispatch_server, 42 patterns:
+      - 'packages/envoy/cmd/dispatch/*'
+      - 'packages/envoy/internal/bus/*'
+      - 'packages/envoy/internal/contracts/*'
+      - 'packages/envoy/internal/dispatch/accesslog/*'
+      - 'packages/envoy/internal/dispatch/agentsecrets/*'
+      - 'packages/envoy/internal/dispatch/agentstream/*'
+      - 'packages/envoy/internal/dispatch/api/*'
+      - 'packages/envoy/internal/dispatch/architecture/*'
+      - 'packages/envoy/internal/dispatch/asks/*'
+      - 'packages/envoy/internal/dispatch/auth/*'
+      - 'packages/envoy/internal/dispatch/config/*'
+      - 'packages/envoy/internal/dispatch/dashboard/*'
+      - 'packages/envoy/internal/dispatch/delivery/**'
+      - 'packages/envoy/internal/dispatch/docs/*'
+      - 'packages/envoy/internal/dispatch/docs/crafted/*'
+      - 'packages/envoy/internal/dispatch/duty/*'
+      - 'packages/envoy/internal/dispatch/embed/*'
+      - 'packages/envoy/internal/dispatch/embedqueue/*'
+      - 'packages/envoy/internal/dispatch/envoy/*'
+      - 'packages/envoy/internal/dispatch/events/*'
+      - 'packages/envoy/internal/dispatch/files/*'
+      - 'packages/envoy/internal/dispatch/githubapi/*'
+      - 'packages/envoy/internal/dispatch/githubapp/*'
+      - 'packages/envoy/internal/dispatch/identity/*'
+      - 'packages/envoy/internal/dispatch/itemblocks/*'
+      - 'packages/envoy/internal/dispatch/model/*'
+      - 'packages/envoy/internal/dispatch/outbox/*'
+      - 'packages/envoy/internal/dispatch/pmdoc/**'
+      - 'packages/envoy/internal/dispatch/processes/*'
+      - 'packages/envoy/internal/dispatch/rank/*'
+      - 'packages/envoy/internal/dispatch/redeliver/*'
+      - 'packages/envoy/internal/dispatch/refs/*'
+      - 'packages/envoy/internal/dispatch/retry/*'
+      - 'packages/envoy/internal/dispatch/routes/*'
+      - 'packages/envoy/internal/dispatch/sessionanswers/*'
+      - 'packages/envoy/internal/dispatch/startup/*'
+      - 'packages/envoy/internal/dispatch/store/*'
+      - 'packages/envoy/internal/dispatch/store/migrations/**'
+      - 'packages/envoy/internal/dispatch/text/*'
+      - 'packages/envoy/internal/githubappjwt/*'
+      - 'packages/envoy/internal/id/*'
+      - 'packages/envoy/internal/metrics/*'
+      - 'packages/envoy/internal/oidc/*'
+      - 'packages/envoy/internal/pglisten/*'
+      - 'packages/envoy/internal/pgmigrate/*'
+      - 'packages/envoy/internal/redact/*'
+      - 'packages/envoy/internal/routing/*'
+      - 'packages/envoy/listenfd/*'
+      # The docs filter's own:
+      - 'packages/envoy/cmd/agent-secrets/*'
+      - 'packages/envoy/cmd/agent-secrets-helper/*'
+      - 'packages/envoy/cmd/broker/*'
+      - 'packages/envoy/cmd/broker-refgen/*'
+      - 'packages/envoy/internal/broker/api/*'
+      - 'packages/envoy/internal/broker/config/*'
+      - 'packages/envoy/internal/broker/enroll/*'
+      - 'packages/envoy/internal/broker/exchange/*'
+      - 'packages/envoy/internal/broker/helper/*'
+      - 'packages/envoy/internal/broker/machine/*'
+      - 'packages/envoy/internal/broker/oauth/*'
+      - 'packages/envoy/internal/broker/oauthstore/*'
+      - 'packages/envoy/internal/broker/oauthwire/*'
+      - 'packages/envoy/internal/broker/policy/*'
+      - 'packages/envoy/internal/broker/proof/*'
+      - 'packages/envoy/internal/broker/record/*'
+      - 'packages/envoy/internal/broker/requests/*'
+      - 'packages/envoy/internal/broker/reread/*'
+      - 'packages/envoy/internal/broker/secrets/*'
+      - 'packages/envoy/internal/broker/store/*'
+      - 'packages/envoy/internal/broker/store/migrations/**'
+      - 'packages/envoy/internal/broker/wake/*'
+      - 'packages/envoy/internal/brokertoken/*'
+      - 'packages/envoy/internal/buildversion/*'
+      - 'packages/envoy/internal/ratelimit/*'
+      - 'packages/dispatch/**'
+      - 'scripts/e2e/lib/held-port.py'
+      - 'packages/proof-editor/src/**'
+      - 'packages/contracts/src/**'
+      - 'packages/envoy-client/src/**'
+      - 'skills/**'
+      - 'deploy/kubernetes/**'
+      - 'scripts/third-party-notices.ts'
+      - '.github/scripts/check-private-names.sh'
+  workflow_dispatch:
+
+# One run at a time, in push order: `queue: max` keeps up to 100 runs waiting in the group, first
+# in, first out, where the default keeps one and replaces it with the next arrival
+# (docs.github.com, "Control the concurrency of workflows and jobs"), and cancel-in-progress: false
+# never cancels a running one. GitHub promises two bounds and no more: a run past the 100 waiting
+# is not queued, and the `paths:` filter skips a push whose diff holds more than 3,000 files when
+# none of the first 3,000 matches (workflow syntax, "Git diff comparisons"). A push either bound
+# drops leaves the site at the last build published; the next docs-selecting push heals it.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+  queue: max
+
+# Read-only: the token clones and downloads pinned tools. The deploy job declares what publishing
+# to GitHub Pages needs in a block of its own.
+permissions:
+  contents: read
+
+jobs:
+  # The shared build, plus the two steps only main needs: the Pages artifact the deploy job
+  # below publishes, and the save of the go-docs cache entry.
+  #
+  # No timeout-minutes: GitHub's keywords for a job that calls a reusable workflow leave it out.
+  # docs-site.yaml's own job carries the limit.
+  build:
+    uses: ./.github/workflows/docs-site.yaml
+    with:
+      upload-pages-artifact: true
+      save-cache: true
+
+  # No concurrency of its own: the workflow's group already holds the next run until this one's
+  # deploy ends. The if: holds the deployment to main: a workflow_dispatch of a branch builds the
+  # site and uploads the artifact, and publishes nothing to the live site.
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Publishes the built site to GitHub Pages: pages: write performs the deployment, id-token:
+    # write is the OIDC token actions/deploy-pages exchanges for it.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

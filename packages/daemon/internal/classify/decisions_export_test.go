@@ -213,6 +213,48 @@ func TestPushesAreSpentOnceTheirMoveIsJudged(t *testing.T) {
 	}
 }
 
+// Dispatch's redelivery sweep can deliver a push up to three days late, after its head arrived and
+// the branch moved on, under a delivery of its own. The push is the move's the record already
+// judged, and it changes nothing: not the count, its mark, the planned mark or the settlement, and
+// not the pushes the record keeps, whether it is a push the record spent or one it keeps (a handoff
+// carries an approval for good) and recorded once under its two heads. A push so old that the
+// record has let its move go (maxMoves) waits for a link no head brings and, with no head run
+// open, judges nothing and is no code on its way.
+func TestALatePushOfAMoveJudgedSinceChangesNothing(t *testing.T) {
+	red := record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{"ci"}, Required: []string{"ci"},
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1}
+	code := record.ClassifiedPush{SHA: "h1", Before: "h0"}
+	tests := record.ClassifiedPush{SHA: "h2", Before: "h1", ByReviewApp: true}
+	handoff := record.ClassifiedPush{SHA: "h3", Before: "h2", HandoffOnly: true}
+	pr := red
+	for i, p := range []record.ClassifiedPush{code, tests, handoff} {
+		pr = stored(t, AdvancePullRequestHead(ApplyPush(pr, p), Arrival{}, p.SHA))
+		pr = stored(t, settles(p.SHA, int64(i+2), "ci").apply(pr))
+	}
+	if pr.Run != nil || pr.FixAttempts != 2 || !pr.PlannedRed {
+		t.Fatalf("after the three moves fixAttempts=%d plannedRed=%v run open %v, want the code counted, the red tests' red planned and no run", pr.FixAttempts, pr.PlannedRed, pr.Run != nil)
+	}
+	for _, late := range []record.ClassifiedPush{code, tests, handoff} {
+		got := stored(t, ApplyPush(pr, late))
+		if JudgementChanged(pr, got) || got.Run != nil || !slices.Equal(got.Pushes, pr.Pushes) {
+			t.Fatalf("the late push %s..%s changed the record: judgement %+v pushes %+v run open %v; was %+v pushes %+v",
+				late.Before, late.SHA, judgementOf(got), got.Pushes, got.Run != nil, judgementOf(pr), pr.Pushes)
+		}
+	}
+	old := pr
+	for i := 4; i < 4+maxMoves; i++ {
+		p := record.ClassifiedPush{SHA: fmt.Sprintf("h%d", i), Before: fmt.Sprintf("h%d", i-1)}
+		old = stored(t, AdvancePullRequestHead(ApplyPush(old, p), Arrival{}, p.SHA))
+	}
+	if moveIndex(old.Moves, code.Before, code.SHA) >= 0 {
+		t.Fatalf("after %d more moves the record still remembers the move %s..%s", maxMoves, code.Before, code.SHA)
+	}
+	if got := stored(t, ApplyPush(old, code)); JudgementChanged(old, got) || got.Run != nil || CodeOnItsWay(got) {
+		t.Fatalf("the push of a move the record let go changed the judgement %+v to %+v, run open %v, code on its way %v",
+			judgementOf(old), judgementOf(got), got.Run != nil, CodeOnItsWay(got))
+	}
+}
+
 // A push that links into no move the record makes - one of a line of commits the branch never
 // takes, or one behind a webhook that never arrives - is spent by no move. The pull request keeps
 // at most maxWaitingPushes of them, letting the oldest go first and saying which it let go
@@ -324,7 +366,7 @@ func TestTheCountedMarkStaysUntilAHeadIsPushedOntoGreen(t *testing.T) {
 		t.Fatalf("h4's late handoff-only push after h5 arrived = fixAttempts=%d headCounted=%q, want 3 and \"h5\": the replay spares h4 and counts h5",
 			got.FixAttempts, got.HeadCounted)
 	}
-	unjudged, _ = ApplyCheckSettlement(unjudged, SettlementCandidate{Head: "h5", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green", Failing: []string{}})
+	unjudged, _, _ = ApplyCheckSettlement(unjudged, SettlementCandidate{Head: "h5", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green", Failing: []string{}})
 	onGreen := AdvancePullRequestHead(unjudged, Arrival{}, "h6")
 	if onGreen.FixAttempts != 3 || onGreen.HeadCounted != "" {
 		t.Fatalf("a push onto green h5 = %#v, want the count kept and the mark cleared", onGreen)
@@ -401,7 +443,7 @@ func TestAnUncountedPushOntoAMarkedRedKeepsTheMarkInEitherOrder(t *testing.T) {
 
 func TestApplySettlementUsesTheExportedSettlementClassifiers(t *testing.T) {
 	prior := record.PullRequest{HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "unit", ID: 1}}}
-	got, applied := ApplySettlement(prior, SettlementCandidate{
+	got, applied, _ := ApplySettlement(prior, SettlementCandidate{
 		CheckRuns: []record.AttemptRun{{Name: "unit", ID: 2}}, Generation: 1, Snapshot: "snapshot", Failing: []string{"unit"}, Cancelled: []string{"e2e"},
 	})
 	if !applied || got.Generation != 1 || got.Snapshot != "snapshot" || len(got.Failing) != 1 || len(got.Cancelled) != 1 {

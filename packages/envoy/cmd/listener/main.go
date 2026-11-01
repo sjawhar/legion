@@ -49,6 +49,19 @@ type listenerDeps struct {
 	consumer   string
 	streamName string
 	streamInfo streamInfoLookup
+	// delivery is the config main hands the delivery handlers (the role lane, the live lane and the
+	// durable), wired once, so the publish route forwards through its forwardRole, records each
+	// session it confirms in its dedupeCache (so the handlers do not push that key to it again), and
+	// writes each send's delivery line and delivery_status count through its logger and
+	// messagesDelivered, reading as the role lane's do, beside the route's own request record
+	// (request_record.go). The route never reads that dedupeCache, since the handlers also
+	// record a self-subscribed session whose push they skipped without hearing from it.
+	delivery *listenerDeliveryHandlerConfig
+	// confirmed is the publish route's own record of each (dedupe key, session) whose receipt arrived
+	// through the route, which only the route writes. A send skips a holder or recipient recorded
+	// there, so envoy-client's retry of a send does not forward again to one the first attempt
+	// confirmed, and no one is counted as confirming a message without having sent its receipt.
+	confirmed *dedupe.Cache
 }
 
 // kvCache is what the listener asks of each KV-backed cache it keeps.
@@ -370,11 +383,36 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // healthzBudget, or the durable consumer is
 // "not bound to this listener's subscription" because it was recreated server-side and now
 // delivers elsewhere; and 200 "degraded" for a transient KV failure the self-health monitor and
-// the NATS reconnect retry. A listener that mounts no GitHub webhook route keeps no CI cache,
-// and its answer carries "ci_cache": "not_applicable". "live_topics" says whether the live topics
-// lane is "subscribed" or, with ENVOY_SUBSCRIBE_ALL_TOPICS off, "not_applicable"; with it on, a
-// live client that is not connected or holds no valid subscription is 503 "live subscription
-// inactive", since every topic the stream does not store then reaches no session.
+// the NATS reconnect retry, and for a KV watch rebuild stalled past bus.RepairGrace (below). A
+// listener that mounts no GitHub webhook route keeps no CI cache, and its answer carries
+// "ci_cache": "not_applicable". "live_topics" says whether the live topics lane is "subscribed"
+// or, with ENVOY_SUBSCRIBE_ALL_TOPICS off, "not_applicable"; with it on, a live client that is
+// not connected or holds no valid subscription is 503 "live subscription inactive", since every
+// topic the stream does not store then reaches no session.
+//
+// A rewatch of the KV caches that keeps failing after a reconnect ends no watcher and clears no
+// cache, so every other check still passes while the caches follow buckets they no longer watch
+// (INFRA-743). The handler therefore reads the client's HookStall, how long the bus's reconnect
+// hooks have been due without a run that succeeded, and reports the dependency "KV watch rebuild"
+// once it reaches bus.RepairGrace. It reads it last, below every 503 check and immediately before
+// the healthy answer, so a stall never stands in for a worse fault: a durable consumer that is
+// gone, unbound, or whose info read did not answer is still 503, since a listener that receives
+// nothing is not the case the 200 is for. That answer is 200 "degraded" and not 503, because the
+// probes act on /healthz: the ECS container health check is curl -sf /healthz, every 30 s with 3
+// retries (infra/aws/rendering/listener.go:202-203), on a service of one task
+// (infra/aws/webhooklistener.go:227), and GKE's readiness probe reads it too
+// (infra/gcp/dispatch_kube.go, readyProbe). A 503 would replace, or unroute, the only listener
+// there is, and its replacement rebuilds into the same failing rewatch with cold caches that warm
+// up empty, whose fanout then acknowledges general-topic messages as unmatched and loses them
+// (delivery.go, fanoutDelivery), while the running task still serves from the caches it holds,
+// stale but not empty. The paging signal for this state is the bus's ERROR "envoy nats reconnect
+// hooks have not succeeded" (internal/bus/recovery.go, reportHookFailure), which the AWS rendering
+// counts as a log metric filter (infra/aws/rendering/metricfilters.go). A shorter stall is reported
+// nowhere here: the bus runs the hooks again within seconds of a failure (internal/bus/recovery.go,
+// recoverUntilHealthy), so a rebuild under the bound is being repaired, and a listener would
+// otherwise read as degraded over every reconnect. The stall is one bus.Client's, naming no
+// cache, so a listener that keeps no CI cache needs no branch of its own, and the live topics
+// lane's client, which carries no reconnect hook, has no stall to report.
 //
 // The checks that go to the bus share one healthzBudget taken from the request's own context: the
 // flush, each cache's KV ping and the durable consumer's info read. A ping or that read that has
@@ -383,6 +421,22 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // fails the container health check inside the budget, as the 10 s JetStream wait it replaces
 // failed it by running past the check's timeout. A check that answered with a failure keeps its
 // answer.
+//
+// The role claim view is reported too, last of all and as a 200 "degraded" naming it
+// (store.Registry.RoleViewErr): until its watcher's first scan has delivered every claim the view
+// answers no read, so GET /v1/sessions and GET /v1/registry/<session_id> answer 503 while every
+// other check here passes, and the report reads the very state those routes read. It is last so
+// that it hides nothing: it comes after every check that can answer 503, so a degraded view never
+// takes the place of a fault that does not repair itself. A KV ping or durable info read that
+// answered with a transient failure is reported before it, as its own 200 "degraded" carrying
+// only status and error, and returns before the checks after it. The role claim view's degraded
+// answer instead carries the healthy body's own fields, so a reader loses no counter while the
+// view fills. Degraded and not unhealthy, because that view fills itself through its watcher's
+// own rescan and a 503 would take a serving listener out of a load balancer for a state that
+// repairs itself: a readiness check runs curl -f or -sf against /healthz, which a 200 passes.
+// For the same reason the view is no part of Ping or WatchErr, whose terminal failures the
+// self-health monitor self-terminates the listener over: a restart completes no scan that keeps
+// timing out.
 func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -421,17 +475,6 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 				return
 			}
 		}
-		response := map[string]interface{}{"status": "healthy"}
-		for k, v := range sessionHealthFields(d.sessions) {
-			response[k] = v
-		}
-		if d.ciStore == nil {
-			response["ci_cache"] = "not_applicable"
-		}
-		response["live_topics"] = "not_applicable"
-		if d.live != nil {
-			response["live_topics"] = "subscribed"
-		}
 		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.consumer, nats.Context(ctx))
 		if err != nil {
 			// A read ctx ended did not answer, the info read's own form of healthzPing's unanswered.
@@ -445,8 +488,38 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeDependencyHealth(w, "durable consumer", errDurableUnbound, true)
 			return
 		}
+		// Last, below every 503 check: "degraded" is the answer only when nothing worse holds.
+		if stall, hookErr := d.client.HookStall(); stall >= bus.RepairGrace {
+			rebuild := fmt.Errorf("no rebuild has succeeded for %s", stall.Round(time.Second))
+			if hookErr != nil {
+				// The last failure says what is broken; the stall, for how long. A run still in
+				// flight past the grace has no error of its own, and writeDependencyHealth needs
+				// one, so then the stall is the whole report.
+				rebuild = fmt.Errorf("%w (%w)", hookErr, rebuild)
+			}
+			writeDependencyHealth(w, "KV watch rebuild", rebuild, false)
+			return
+		}
+		response := map[string]interface{}{"status": "healthy"}
+		for k, v := range sessionHealthFields(d.sessions) {
+			response[k] = v
+		}
+		if d.ciStore == nil {
+			response["ci_cache"] = "not_applicable"
+		}
+		response["live_topics"] = "not_applicable"
+		if d.live != nil {
+			response["live_topics"] = "subscribed"
+		}
 		response["num_pending"] = consumerInfo.NumPending
 		response["num_ack_pending"] = consumerInfo.NumAckPending
+		// Last, so that no fault above is reported as this one: every check before it that can
+		// answer 503 has passed. The answer keeps the fields above it, so a reader of the counters
+		// loses none while the view fills.
+		if err := d.registry.RoleViewErr(); err != nil {
+			response["status"] = "degraded"
+			response["error"] = dependencyUnavailable("role claim view", err)
+		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(response)
 	}
@@ -476,8 +549,15 @@ func writeDependencyHealth(w http.ResponseWriter, dependency string, err error, 
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": status,
-		"error":  dependency + " unavailable: " + err.Error(),
+		"error":  dependencyUnavailable(dependency, err),
 	})
+}
+
+// dependencyUnavailable is the `error` field a /healthz answer gives for a dependency, so the
+// degraded answer that keeps the healthy body's fields reads exactly as writeDependencyHealth's
+// does.
+func dependencyUnavailable(dependency string, err error) string {
+	return dependency + " unavailable: " + err.Error()
 }
 
 // webhookRoute is one configured webhook path and the handler it serves over the only
@@ -579,6 +659,28 @@ func openV1Routes(gate *startingGate, ready *listenerDeps, machineID string, log
 	logger.Info("envoy-listener /v1 open", slog.Int64("since_listening_ms", time.Since(listeningAt).Milliseconds()))
 }
 
+// listenerStreamOptions are the options envoy-listener starts the stream with
+// (bus.ConnectOwningStream): the deployment's replica count and byte limit, from cfg, and the
+// buckets the listener opens at that count (bus.ListenerBuckets: store.Open's interest and role
+// buckets, session.OpenSessionRegistry's and cistore.Open's, the list its NATS grant is built
+// from), which the client's keeper raises back to it when a concurrent start or an operator
+// lowered one (bus.WithKeptBuckets). The CI bucket is named even on a listener with no GitHub
+// route, which opens none: the keeper skips a bucket that does not exist. main and the tests that
+// start the listener's stream both take them from here.
+//
+// Each connection the client makes declares itself lost two to three seconds after the hub stops
+// answering it (bus.WithSilentCutDetection). A hub whose packets stop closes nothing. On nats.go's
+// default pings (one every two minutes, two outstanding) the connection reads connected for four
+// to six minutes, and the reconnect that finds a hub which answers starts only once it reads lost.
+func listenerStreamOptions(cfg config.Service) []bus.ConnectOption {
+	return []bus.ConnectOption{
+		bus.WithReplicas(cfg.NATSReplicas),
+		bus.WithStreamMaxBytes(cfg.StreamMaxBytes),
+		bus.WithKeptBuckets(bus.ListenerBuckets()...),
+		bus.WithSilentCutDetection(),
+	}
+}
+
 func main() {
 	// Phase 1: Load config (synchronous, fast). With ENVOY_LISTEN_FD, Load inspects the inherited
 	// socket and takes its address as cfg's, so the API auth fence below judges the address that
@@ -642,11 +744,7 @@ func main() {
 		if d == nil {
 			return 0
 		}
-		entries, err := d.sessions.List()
-		if err != nil {
-			return 0
-		}
-		return int64(len(entries))
+		return int64(d.sessions.LiveCount())
 	})
 	met.NewGaugeFunc("envoy_active_interests", "Number of active interest subscriptions", func() int64 {
 		d := deps.Load()
@@ -696,8 +794,9 @@ func main() {
 	logger.Info("envoy-listener listening", slog.String("addr", ln.Addr().String()))
 
 	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here). The listener owns
-	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream).
-	client, err := bus.ConnectOwningStream(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
+	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream) at the
+	// deployment's replica count and byte limit (listenerStreamOptions).
+	client, err := bus.ConnectOwningStream(cfg.NATSURLs, listenerStreamOptions(cfg)...)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -743,25 +842,40 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Wait for the interest cache to finish its initial scan of existing KV
-	// entries before we start accepting NATS messages. Without this gate, real
-	// events that arrive in the warm-up window get "no matching interests"
-	// even when the durable KV entry has subscribers.
+	// Wait for both of the registry's views before accepting NATS messages or HTTP requests.
+	// Without this gate, real events that arrive in the warm-up window get "no matching interests"
+	// even when the durable KV entry has subscribers, and the two routes that report a session's
+	// roles - GET /v1/sessions and GET /v1/registry/<session_id> - answer a live client the
+	// bus-unavailable 503 while the bus is healthy, because the role claim view refuses every read
+	// until its watcher has delivered every claim. So the gate waits for that view to be complete,
+	// not merely ready: a first scan nats.go's idle timer ended releases readiness, and the
+	// watcher's rescan ends this wait.
 	//
-	// Bounded at 30s: a healthy NATS cluster completes the scan in milliseconds.
-	// If the watcher fails to start, signalReady() unblocks startup and the
-	// health endpoint exposes the unavailable registry while NATS recovers.
+	// Bounded at 30s: a healthy NATS cluster completes the scan in milliseconds. The wait also
+	// ends before that bound with the role claim watcher's terminal error - a first start that
+	// failed, a bucket recreated under it, the watcher's own end - or its stop, none of which the
+	// watcher completes a scan after.
+	// A warm-up that does not complete still serves, fail open: the warn below names the cache and
+	// carries the cause, whichever of those it was, the registry keeps answering from whatever it
+	// holds, and /healthz reports the role claim view as degraded and the buckets themselves while
+	// NATS recovers.
 	cacheReadyCtx, cacheReadyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := registry.WaitForCacheReady(cacheReadyCtx); err != nil {
-		logger.Warn("interest or role claim cache warm-up timed out; serving with possibly empty cache",
+		logger.Warn("interest or role claim cache warm-up did not complete; serving with possibly empty cache",
 			slog.String("error", err.Error()))
 	}
 	cacheReadyCancel()
 
+	// A dead session's last heartbeat is kept for as long as the interest reaper can still hold its
+	// interest: the reaper deletes the row only store.InterestReapAllowance after its last write,
+	// so /v1/interests/ can report the session's real last heartbeat (the row's updated_at lags it
+	// by up to store.InterestRefreshAge) for every row it still lists. The allowance is the
+	// reaper's own (store.Registry.Reap), so the two cannot drift apart.
 	sessions, err := session.OpenSessionRegistry(
 		client.Conn,
 		session.WithSessionReplicas(cfg.NATSReplicas),
 		session.WithSessionLogger(logger.Slog()),
+		session.WithLastSeenRetention(store.InterestReapAllowance(store.InterestReapGrace)),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -900,6 +1014,8 @@ func main() {
 		caches:     caches,
 		consumer:   consumer,
 		streamName: bus.Stream,
+		delivery:   &deliveryConfig,
+		confirmed:  dedupe.New(10 * time.Minute),
 	}
 	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
 

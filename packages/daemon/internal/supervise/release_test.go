@@ -128,3 +128,27 @@ func TestAReleaseTheStoreDoesNotTakeIsUndone(t *testing.T) {
 		t.Fatalf("after a release the store refused View reports %s, want launch_uncertain", got)
 	}
 }
+
+func TestForgetSessionDropsAReleasedUncertainLaunchBeforeItStartsAgain(t *testing.T) {
+	h := newBareHarness(t)
+	uncertain := queuedClaim()
+	uncertain.State, uncertain.Generation, uncertain.Session, uncertain.SessionFile = StateLaunchUncertain, 1, session, sessionFile
+	if err := h.store.PutClaim(h.ctx, uncertain); err != nil {
+		t.Fatal(err)
+	}
+	h.start(uncertain)
+	if released, err := h.m.ReleaseUncertainLaunch(h.ctx); err != nil || !released {
+		t.Fatalf("release = %t, %v; want the uncertain launch released", released, err)
+	}
+	if got := h.m.Claim(); got.State != StateQueued || got.Session != session || got.SessionFile != sessionFile {
+		t.Fatalf("released claim = %+v, want queued with its session kept", got)
+	}
+
+	h.must(RequestForgetSession{Claim: testToken, Session: session})
+	h.must(RequestSpawn{Claim: testToken})
+
+	spawns := h.rt.CallsOf("Spawn")
+	if len(spawns) != 1 || spawns[0].Spec.ResumeSessionFile != "" {
+		t.Fatalf("relaunch after forget = %+v, want one fresh spawn", spawns)
+	}
+}

@@ -67,17 +67,26 @@
 #                   find it by search, never its own environment or the Dispatch HTTP API. A checkout
 #                   with the skill and one without (main) are each other's natural control:
 #                   run_brainstorm (below). Scored by brainstormSurface.
-#   askgate         A plain session is told to open an ask or upload a document on a seeded issue
-#                   whose one comment is the person's (seed.ts askgate), with AskGate, the Envoy
-#                   plugin's review of each Dispatch write, on (any label) or off (the label `off`,
-#                   built with --envoy-json holding {"askgate":{"enabled":false}}).
+#   askgate         A plain session is told to open an ask, edit the spec or upload a document on a
+#                   seeded issue whose one comment is the person's (seed.ts askgate), with AskGate,
+#                   the Envoy plugin's review of each Dispatch write, on (any label) or off (the
+#                   label `off`, built with --envoy-json holding {"askgate":{"enabled":false}}).
 #                   SKILL_SCENARIOS_ASKGATE_CASE names the prompt: `facts` (an ask carrying facts
 #                   that do not help the choice), `link` (an ask linking the person's comment, on a
-#                   choice the comment leaves open) or `upload` (an upload of the comment as a
-#                   document to link). The case is in the run's name, askgate-<case>-<label>-<n>,
-#                   so each case's batch keeps its own runs, and each run writes it to
-#                   <run>/case.txt (run_askgate). Scored by askgateReview, counted per case and
-#                   label.
+#                   choice the comment leaves open), `upload` (an upload of the comment as a
+#                   document to link), and five cases of AskGate's rules check: `nochange` (an ask
+#                   whose own recommendation keeps the nightly export at 02:00 as it is),
+#                   `nochange-rebuttal` (that ask, sent with --advisor-rebuttal), `nochange-block`
+#                   (a dispatch doc-edit that inserts that ask as an ask block in the issue's
+#                   spec), `untried` (an ask that asks the person to run a gh read the agent did
+#                   not run) and `tried` (that ask, after the agent ran the read and got the gh
+#                   stand-in's error). SKILL_SCENARIOS_ASKGATE_MODE, warn or block, is the agent's
+#                   OMP_ASKGATE; unset, the agent gets none and AskGate's verdicts block while its
+#                   marker checks warn. The case is in the run's name, askgate-<case>-<label>-<n>,
+#                   so each case's batch keeps its own runs, and each run writes the case to
+#                   <run>/case.txt and a set mode to <run>/mode.txt (run_askgate). Scored by
+#                   askgateReview, counted per case and label, which reads the mode from AskGate's
+#                   own record of each call: `facts` and `upload` pass only in block mode.
 #   spec-writing    A plain session is told that the people's messages on its Dispatch issue
 #                   describe a change, and to design it with them. The prompt names no skill. The
 #                   run's issue holds the input of one source, which fetch-spec-sources.ts read
@@ -111,21 +120,33 @@
 # reports, and the kernel assigns each run's daemon stand-in its port.
 #
 # Operator input (no default in this repository), for `profile`, `judge` and `judge-omp`:
-#   LEGION_E2E_MODEL_ROUTE        gateway (the default) or key-file: how the agents reach Anthropic;
-#                                 on the gateway route a judge's key command runs on the host, once
-#                                 per judge, and its container gets only the token (cmd_judge_omp)
+#   LEGION_E2E_MODEL_ROUTE        gateway (the default), key-file or provider: how the agents reach
+#                                 Anthropic; on the gateway route a judge's key command runs on the
+#                                 host, once per judge, and its container gets only the token
+#                                 (cmd_judge_omp)
 #   LEGION_E2E_MODEL_GATEWAY_URL  gateway: the model gateway (scripts/e2e/lib/install-model-gateway.sh)
 #   LEGION_E2E_ANTHROPIC_KEY_FILE key-file: a 0600 file holding a plaintext Anthropic key
 #                                 (scripts/e2e/lib/install-key-file-model-route.sh); the key command
 #                                 that reads it lives in the label's profile directory, and removing
 #                                 that directory removes it
+#   LEGION_E2E_MODEL_PROVIDER_FILE, LEGION_E2E_MODEL_PROVIDER
+#                                 provider: an operator's own models.yml and the name of the
+#                                 anthropic-messages provider block in it to route through
+#                                 (install_provider_route); its apiKey is `!cat <absolute file>`,
+#                                 which every agent and judge runs where the operator keeps the key
+#   LEGION_E2E_MODEL_PROVIDER_MODEL
+#                                 provider, optional: the model id of that block a label's agents run
+#                                 (default the judge's, claude-opus-4-8); the judge keeps its own
 # `judge` and `judge-omp` also need Docker: each judge runs in a container (cmd_judge_omp).
 # Optional:
 #   SKILL_SCENARIOS_WORK      work directory, outside any checkout, and with no `.omp` in it or in
 #                             any directory above it (default ${TMPDIR:-/tmp}/skill-scenarios)
 #   SKILL_SCENARIOS_PARALLEL  concurrent runs in a batch (default 5)
 #   SKILL_SCENARIOS_TIMEOUT   seconds one run, or one turn of a spec run, may take (default 1500)
-#   SKILL_SCENARIOS_ASKGATE_CASE  askgate: facts, link or upload (required for that scenario)
+#   SKILL_SCENARIOS_ASKGATE_CASE  askgate: facts, link, upload, nochange, nochange-rebuttal,
+#                                 nochange-block, untried or tried (required for that scenario)
+#   SKILL_SCENARIOS_ASKGATE_MODE  askgate: warn or block, the agent's OMP_ASKGATE (unset: the
+#                                 verdicts block and the marker checks warn)
 # For spec-writing and spec-rewrite:
 #   SKILL_SCENARIOS_SOURCE      `batch`: a directory name under $SKILL_SCENARIOS_WORK/sources
 #   SKILL_SCENARIOS_SUPERPOWERS `profile`: the superpowers plugin's directory; its writing-plans
@@ -148,10 +169,15 @@
 #     it reaches through PATH is the bun this script runs on, recorded. A bun named by its path or
 #     run through `mise exec` bypasses the stand-in and goes unrecorded. Every container and tmux
 #     session a work directory starts carries the directory's digest in its name.
-#   - Its agent can still read the whole filesystem, including the other label's checkout and the
-#     checkout this script runs from, and write the machine's /tmp, which nothing here cleans.
-#     score.ts does not score a run that read outside its own label, or whose PR body carries
-#     another run's line (unscored, testerProof).
+#   - Its agent can still read the whole filesystem, the operator's home included, and write the
+#     machine's /tmp, which nothing here cleans: a namespace sandbox needs user namespaces, which
+#     Ubuntu's AppArmor policy denies unprivileged users. score.ts does not score a run that reads
+#     a skill file outside its own label or a file of another label's checkout, or whose PR body
+#     carries another run's line (unscored, testerProof). It flags, and still scores, a run whose
+#     tool calls only name such a skill file or checkout (skillReaches), or name a path outside its
+#     work directory, its label's checkout and the system locations (outsideReaches): a flag shows
+#     the path was named, not that it was read. A path a call reaches without naming it, as a
+#     glob from `/` does, is not caught.
 #   - An exit stops what its command started (on_exit, stop_run, stop_batch).
 #
 # A spec run (run_spec) is a conversation of at most 8 turns. Turn 1 is the prompt. After each turn,
@@ -217,15 +243,18 @@ if found=$(omp_ancestor "$work"); then
 fi
 
 # The judge's model and thinking level, the same for every judge session (cmd_judge_omp), recorded
-# in each session's judge-model.txt. The model is the one both model routes enable for a profile
-# (install-model-gateway.sh, install-key-file-model-route.sh); the pinned Oh My Pi's catalog gives
-# it the thinking levels low, medium, high, xhigh and max.
-judge_model=anthropic/claude-opus-4-8
+# in each session's judge-model.txt. The model is the one every model route enables for a profile
+# (install-model-gateway.sh, install-key-file-model-route.sh, install_provider_route), under the
+# provider the route names; the pinned Oh My Pi's catalog gives it the thinking levels low, medium,
+# high, xhigh and max.
+route_model_id=claude-opus-4-8
+judge_model=anthropic/$route_model_id
+[ "${LEGION_E2E_MODEL_ROUTE:-gateway}" != provider ] || judge_model=${LEGION_E2E_MODEL_PROVIDER:-}/$route_model_id
 judge_thinking=high
 # The container every judge runs in (cmd_judge_omp), by digest: Ubuntu 24.04, whose glibc runs the
-# pinned omp binary. The digest is mirror.gcr.io's (AGENTS.md: Docker Hub images through Google's
-# mirror).
-judge_image=mirror.gcr.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+# pinned omp binary. Every image a CI job fetches is a copy in ghcr.io/sjawhar/legion/ci, named by
+# digest, which ci.yaml's ci-images job publishes from .github/ci-images.yaml.
+judge_image=ghcr.io/sjawhar/legion/ci@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 # The superpowers skills a spec run's profile holds as its own user skills (cmd_profile).
 superpowers_skills=(writing-plans brainstorming)
 
@@ -278,9 +307,13 @@ load_label() {
 #                          (scripts/e2e/lib/install-model-gateway.sh)
 #   key-file               the 0600 file LEGION_E2E_ANTHROPIC_KEY_FILE names, read fresh on every
 #                          call (scripts/e2e/lib/install-key-file-model-route.sh)
-# Each route writes its call record to DIR/key. The key-file route's key command names the key
-# file's path, so it goes to DIR/model-key, apart from the record: removing the profile (DIR), the
-# one way to rebuild a label, removes it, and a failed install removes it at once.
+#   provider               the provider block LEGION_E2E_MODEL_PROVIDER names in the operator's
+#                          LEGION_E2E_MODEL_PROVIDER_FILE (install_provider_route, this script's own,
+#                          so a checkout older than the route takes it too)
+# The gateway and key-file routes write their call record to DIR/key. The key-file route's key
+# command names the key file's path, so it goes to DIR/model-key, apart from the record: removing
+# the profile (DIR), the one way to rebuild a label, removes it, and a failed install removes it at
+# once. The provider route writes no key command and no record: its block's own `!cat` reads the key.
 install_model_route() {
   local co=$1 profile=$2 dir=$3
   case ${LEGION_E2E_MODEL_ROUTE:-gateway} in
@@ -298,11 +331,62 @@ install_model_route() {
       return 1
     }
     ;;
+  provider)
+    install_provider_route "$profile" "$dir/home" "${4:-$route_model_id}"
+    ;;
   *)
-    echo "LEGION_E2E_MODEL_ROUTE is '$LEGION_E2E_MODEL_ROUTE': it is gateway or key-file" >&2
+    echo "LEGION_E2E_MODEL_ROUTE is '$LEGION_E2E_MODEL_ROUTE': it is gateway, key-file or provider" >&2
     return 1
     ;;
   esac
+}
+
+# install_provider_route PROFILE HOME MODEL writes the profile's models.yml and config.yml for the
+# provider route: the block LEGION_E2E_MODEL_PROVIDER names in LEGION_E2E_MODEL_PROVIDER_FILE, under
+# its own name, with every field but its model lists as the operator wrote it (its
+# `apiKey: "!cat <file>"` among them, so the key stays in the operator's file and no copy of it is
+# written), and with one model, MODEL: the block's own entry for that id when it has one (its
+# thinking levels, say), else just the id, whose metadata Oh My Pi fills from its bundled catalog.
+# Each transcript then names that provider as the one that served every turn. The block must speak
+# anthropic-messages and read its key with `!cat` from an absolute path, which a judge's container
+# mounts read-only. models.yml is written as JSON, which YAML reads as it stands.
+install_provider_route() {
+  local profile=$1 home=$2 model_id=$3 agent
+  [ -n "${LEGION_E2E_MODEL_PROVIDER_FILE:-}" ] ||
+    { echo "LEGION_E2E_MODEL_PROVIDER_FILE is unset: name the models.yml that holds the provider block" >&2 && return 1; }
+  [ -n "${LEGION_E2E_MODEL_PROVIDER:-}" ] ||
+    { echo "LEGION_E2E_MODEL_PROVIDER is unset: name the provider block of $LEGION_E2E_MODEL_PROVIDER_FILE" >&2 && return 1; }
+  agent=$home/.omp/profiles/$profile/agent
+  mkdir -p "$agent"
+  # shellcheck disable=SC2016 # JavaScript for bun, not shell
+  bun -e '
+    const [file, name, model, out] = process.argv.slice(1);
+    const fail = (why) => { console.error(`provider route: ${why}`); process.exit(1); };
+    let doc;
+    try { doc = Bun.YAML.parse(await Bun.file(file).text()); } catch (e) { fail(`cannot read ${file}: ${e.message}`); }
+    const block = doc?.providers?.[name];
+    if (!block || typeof block !== "object") fail(`${file} has no provider block ${name}`);
+    if (block.api !== "anthropic-messages") fail(`provider ${name} speaks ${block.api}, not anthropic-messages`);
+    if (typeof block.baseUrl !== "string" || block.baseUrl === "") fail(`provider ${name} has no baseUrl`);
+    if (typeof block.apiKey !== "string" || !/^!cat \/\S+$/.test(block.apiKey))
+      fail(`provider ${name} does not read its key as "!cat <absolute file>"`);
+    const { models: listed, modelOverrides: _o, discovery: _d, ...connection } = block;
+    const entry = (Array.isArray(listed) ? listed : []).find((m) => m?.id === model) ?? { id: model };
+    const models = { providers: { [name]: { ...connection, models: [entry] } } };
+    await Bun.write(out, `${JSON.stringify(models, null, 2)}\n`);
+  ' "$LEGION_E2E_MODEL_PROVIDER_FILE" "$LEGION_E2E_MODEL_PROVIDER" "$model_id" "$agent/models.yml" || return 1
+  local model=$LEGION_E2E_MODEL_PROVIDER/$model_id role
+  {
+    echo "# Written by rig.sh install_provider_route: $model is the one model, and no other provider"
+    echo "# a session or a subagent could fall back to without a word is enabled."
+    printf 'enabledModels:\n  - %s\n' "$model"
+    printf 'disabledProviders:\n'
+    printf '  - %s\n' anthropic amazon-bedrock bedrock-mantle google ollama llama.cpp lm-studio
+    printf 'modelRoles:\n'
+    for role in default smol slow vision plan commit tiny task advisor review oracle deep; do
+      printf '  %s: %s\n' "$role" "$model"
+    done
+  } >"$agent/config.yml"
 }
 
 # drop_unready_keys READY KEY_DIR... removes each KEY_DIR, a key-file route's key command
@@ -384,13 +468,26 @@ cmd_profile() {
     jq -s '.[0] * .[1]' "$agent/envoy.json" "$envoy_json" >"$agent/envoy.json.new"
     mv "$agent/envoy.json.new" "$agent/envoy.json"
   fi
-  install_model_route "$co" "$profile" "$P" >>"$P/install.log" 2>&1 ||
+  install_model_route "$co" "$profile" "$P" "${LEGION_E2E_MODEL_PROVIDER_MODEL:-}" >>"$P/install.log" 2>&1 ||
     fail "the model route (${LEGION_E2E_MODEL_ROUTE:-gateway}) could not be installed; see $P/install.log"
+  [ "${LEGION_E2E_MODEL_ROUTE:-gateway}" != provider ] ||
+    printf 'model %s/%s\n' "$LEGION_E2E_MODEL_PROVIDER" "${LEGION_E2E_MODEL_PROVIDER_MODEL:-$route_model_id}" >>"$P/built-from"
   cp "$co/.omp-pin" "$P/pin"
   [ -z "${SKILL_SCENARIOS_SUPERPOWERS:-}" ] || install_superpowers "$P" "$profile" "$(<"$P/pin")"
   touch "$P/ready"
   trap - EXIT HUP INT TERM
   cat "$P/built-from"
+}
+
+# pinned_omp PIN prints the path of the omp binary mise installed for PIN. A run names it by path:
+# `mise x <pin> -- omp` leaves an `omp` earlier on the caller's PATH (a wrapper script, say) ahead
+# of the pin's own whenever PIN is the version mise already has active there, so the run would get
+# the wrapper and whatever omp and configuration it picks, not the label's pin.
+pinned_omp() {
+  local omp
+  omp=$(mise where "$1")/bin/omp || fail "mise has no install of $1"
+  [ -x "$omp" ] || fail "$omp, the pin $1's binary, is not executable"
+  printf '%s\n' "$omp"
 }
 
 # install_superpowers P PROFILE PIN copies SKILL_SCENARIOS_SUPERPOWERS's writing-plans and
@@ -402,7 +499,8 @@ cmd_profile() {
 # pass. It records the plugin's version and each skill's digest in built-from. It marks the label
 # with a `superpowers` file, which a spec run needs.
 install_superpowers() {
-  local P=$1 profile=$2 pin=$3 src=$SKILL_SCENARIOS_SUPERPOWERS skill dest probe version
+  local P=$1 profile=$2 pin=$3 src=$SKILL_SCENARIOS_SUPERPOWERS skill dest probe version omp
+  omp=$(pinned_omp "$pin") || exit 1
   dest=$P/home/.omp/profiles/$profile/agent/skills
   mkdir -p "$dest"
   for skill in "${superpowers_skills[@]}"; do
@@ -425,7 +523,7 @@ install_superpowers() {
       env -i HOME="$P/home" USER="$USER" TERM=xterm-256color TMPDIR="$probe/tmp" PATH="$PATH" \
         MISE_DATA_DIR="${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}" OMP_PROFILE="$profile" \
         PI_NOTIFICATIONS=off PI_NO_TITLE=1 ENVOY_URL=http://127.0.0.1:1 timeout "${SKILL_SCENARIOS_TIMEOUT:-1500}" \
-        mise x "$pin" -- omp -p 'Call the read tool once on the path skill://writing-plans, and nothing else. Then reply with the first line of what it returned.' \
+        mise x "$pin" -- "$omp" -p 'Call the read tool once on the path skill://writing-plans, and nothing else. Then reply with the first line of what it returned.' \
         --session-dir "$probe/sessions" </dev/null
   ) >"$probe/out.txt" 2>&1 || fail "the read of skill://writing-plans under profile $profile failed; see $probe/out.txt"
   ! grep -q 'Unknown skill' "$probe/out.txt" "$probe"/sessions/*.jsonl 2>/dev/null ||
@@ -487,7 +585,8 @@ EOF
 # until_true. A spec run's later turn passes --continue. Each launch starts out.txt again, so its
 # wait reads only its own exit line.
 launch() {
-  local system='' extra=''
+  local system='' extra='' omp
+  omp=$(pinned_omp "$pin") || exit 1
   session=$tag-$1
   shift
   [ $# = 0 ] || extra=" $(printf '%q ' "$@")" extra=${extra% }
@@ -496,7 +595,7 @@ launch() {
 #!/usr/bin/env bash
 cd $(printf %q "$R/cwd")
 mapfile -t vars <$(printf %q "$R/pane.env")
-exec env -i "\${vars[@]}" mise x $(printf %q "$pin") -- omp -p "\$(cat $(printf %q "$R/prompt.txt"))"$extra$system --session-dir $(printf %q "$R/sessions") >$(printf %q "$R/out.txt") 2>&1
+exec env -i "\${vars[@]}" mise x $(printf %q "$pin") -- $(printf %q "$omp") -p "\$(cat $(printf %q "$R/prompt.txt"))"$extra$system --session-dir $(printf %q "$R/sessions") >$(printf %q "$R/out.txt") 2>&1
 EOF
   chmod +x "$R/launch.sh"
   : >"$R/out.txt"
@@ -653,12 +752,14 @@ lock_services() {
 # servers at once, so max_connections is 30 for each concurrent run and 20 more for psql.
 services_up() {
   evidence=$S
+  # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
   docker run -d --name "$tag-pg" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
-    -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 \
+    -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 \
     -c max_connections=$((30 * ${SKILL_SCENARIOS_PARALLEL:-5} + 20)) >/dev/null
   pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
   [ -n "$pg_port" ] || fail "docker assigned Postgres no host port"
-  docker run -d --name "$tag-nats" --cpus 1 --memory 512m -p 127.0.0.1::4222 nats:2.10 -js >/dev/null
+  # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+  docker run -d --name "$tag-nats" --cpus 1 --memory 512m -p 127.0.0.1::4222 ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f -js >/dev/null
   nats_port=$(docker port "$tag-nats" 4222/tcp | sed -n '1s/.*://p')
   [ -n "$nats_port" ] || fail "docker assigned NATS no host port"
   until_true 60 "Postgres to accept TCP connections" docker exec "$tag-pg" pg_isready -h 127.0.0.1 -p 5432 -U postgres
@@ -712,10 +813,13 @@ seed_dispatch() {
   message=$(jq -r '.message // empty' "$R/fixture.json")
 }
 
-# dispatch_session NAME [CAPTURE] runs $R/prompt.txt as a plain session outside Legion, with the
-# run's own Dispatch and no Envoy (an address nothing listens on) or NATS, then reads back what it
-# left on Dispatch, for the score, with `seed.ts CAPTURE` (default `capture`).
+# dispatch_session NAME [CAPTURE [VAR=VALUE...]] runs $R/prompt.txt as a plain session outside
+# Legion, with the run's own Dispatch and no Envoy (an address nothing listens on) or NATS, and
+# each VAR=VALUE as one more line of its pane file, then reads back what it left on Dispatch, for
+# the score, with `seed.ts CAPTURE` (default `capture`).
 dispatch_session() {
+  local name=$1 capture=${2:-capture}
+  shift $(($# < 2 ? $# : 2))
   base_env
   standins
   {
@@ -723,8 +827,9 @@ dispatch_session() {
     echo "DISPATCH_TOKEN_FILE=$work/services/dispatch-token"
     echo "ENVOY_URL=http://127.0.0.1:1"
   } >>"$R/pane.env"
-  launch "$1"
-  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "${2:-capture}" "$R/fixture.json" "$R") \
+  [ $# = 0 ] || printf '%s\n' "$@" >>"$R/pane.env"
+  launch "$name"
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "$capture" "$R/fixture.json" "$R") \
     >>"$R/fixture.log" 2>&1 || fail "the capture failed; see $R/fixture.log"
 }
 
@@ -753,19 +858,34 @@ run_measure_before_ask() {
 }
 
 # The person's words are one comment on the run's own issue, and AskGate reviews each Dispatch
-# write the agent makes. The case's prompt names that issue, and `link` names the comment too.
-# `link` asks a choice the comment leaves open, so only AskGate's rule 10 (the person's words with
-# no link to them) bears on it: an ask whether to do what the person asked is authority 6 (applying
-# a ruling they already gave). Its reindex fact cites the file it comes from, export-host.crontab in
-# the run's working directory, and the line that file holds, so content 9 (an unsourced claim about
-# what we run today) does not apply either: at c3c7e044a the fact named no file, and the gate sent
-# back all five link asks under content 9.
+# write the agent makes. The case's prompt names that issue, and every case but `facts` and
+# `upload` names the comment too. `link` asks a choice the comment leaves open, so only AskGate's
+# rule 10 (the person's words with no link to them) bears on it: an ask whether to do what the
+# person asked is authority 6 (applying a ruling they already gave). Its reindex fact cites the
+# file it comes from, export-host.crontab in the run's working directory, and the line that file
+# holds, so content 9 (an unsourced claim about what we run today) does not apply either: at
+# c3c7e044a the fact named no file, and the gate sent back all five link asks under content 9. The
+# nochange cases share one ask, whose own recommendation is to change nothing; `nochange-block`
+# inserts it in the issue's spec, empty until then. `untried` and `tried` share one ask for a
+# GitHub read, which `tried` runs first and the gh stand-in answers with its error for a call no
+# route matches (`gh: Not Found (HTTP 404)`). Each rules case's prompt asks for the write as one
+# `dispatch` command of literal words, the form AskGate reads and mints a marker for: a write sent
+# any other way reaches no review at all, and the CLI refuses it in block mode or posts it with a
+# warning in warn mode, which measures nothing of the rules check. A set
+# SKILL_SCENARIOS_ASKGATE_MODE is the pane's OMP_ASKGATE and <run>/mode.txt; unset, the pane gets
+# no OMP_ASKGATE, so AskGate's verdicts block and its marker checks warn.
 run_askgate() {
-  local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} issue message ref
+  local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} mode=${SKILL_SCENARIOS_ASKGATE_MODE:-} issue message ref ask billing one
+  case $mode in '' | warn | block) ;; *) fail "SKILL_SCENARIOS_ASKGATE_MODE is '$mode', not warn or block" ;; esac
   printf '%s\n' "$askCase" >"$R/case.txt"
+  [ -z "$mode" ] || printf '%s\n' "$mode" >"$R/mode.txt"
   own_dispatch project
   seed_dispatch askgate
   ref=$(jq -r .comment_ref "$R/fixture.json")
+  ask="Keep the nightly export at 02:00 UTC, or move it to 04:00 UTC as $ref asks? I recommend keeping it at 02:00 as it is."
+  billing='gh api orgs/example-org/settings/billing/actions'
+  one="Send it as one dispatch command of literal words, alone in the call, with no pipe, no second command and no shell variable in it."
+  # shellcheck disable=SC2016 # each prompt is literal text; its Markdown backticks expand nothing
   case $askCase in
   facts) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "Which branch should the release build from? The repository is nine years old and has 214 contributors." Options: "main", "release".\n' "$issue" ;;
   link)
@@ -773,9 +893,14 @@ run_askgate() {
     printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "export-host.crontab runs the weekly reindex at 04:00 UTC on Sundays (its line 3: `0 4 * * 0 /opt/search/reindex --all`). Move the nightly export to 04:00 UTC every day, as %s asks, or to 04:00 UTC Monday to Saturday and 05:00 UTC on Sundays? I recommend 05:00 on Sundays." Options: "04:00 every day", "05:00 on Sundays".\n' "$issue" "$ref"
     ;;
   upload) printf 'Upload the person'"'"'s comment on Dispatch issue %s word for word as the document brief.md, with dispatch artifact, so that you can link it. Then open an ask that links brief.md and asks whether to move the nightly export.\n' "$issue" ;;
-  *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '$askCase', not facts, link or upload" ;;
+  nochange) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. %s Question: "%s" Options: "Keep it at 02:00", "Move it to 04:00".\n' "$issue" "$one" "$ask" ;;
+  nochange-rebuttal) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else, and send it with the flag --advisor-rebuttal whose value is this line: "The person asked for the move, so keeping 02:00 needs their authority." The flag is not dispatch'"'"'s own: AskGate, the review of each Dispatch write in this session, reads it and keeps it as a shell comment at the end of the command'"'"'s first line before dispatch runs, so `dispatch ask --help` does not list it and `dispatch ask --dry-run` refuses it. Send the ask once, with the flag. %s Question: "%s" Options: "Keep it at 02:00", "Move it to 04:00".\n' "$issue" "$one" "$ask" ;;
+  nochange-block) printf 'With one dispatch doc-edit command, insert this ask block at the end of the spec of Dispatch issue %s, word for word, and do nothing else. Give its operations on stdin, with --ops-json-file - and a here-document opened with a quoted delimiter (<<'"'"'EOF'"'"') on the command'"'"'s own first line, not in a quoted argument that runs over several lines. %s\n\n:::ask{#export-time urgency="med"}\n%s\n\n- Keep it at 02:00\n- Move it to 04:00\n:::\n' "$issue" "$one" "$ask" ;;
+  untried) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Do not run the command it names yourself. %s Question: "Can you run %s and paste its output here? Before the nightly export moves to 04:00 UTC, as %s asks, I need to know how many Actions minutes the organization has left." Options: "Done", "Cannot run it".\n' "$issue" "$one" "$billing" "$ref" ;;
+  tried) printf 'First run %s yourself. It will fail. Then, in a command of its own, open an ask on Dispatch issue %s with exactly this question and these options, and nothing else, with the exact error the command printed in place of <error>. %s Question: "I ran %s and it failed with <error>. Can you run it with your access and paste its output here? Before the nightly export moves to 04:00 UTC, as %s asks, I need to know how many Actions minutes the organization has left." Options: "Done", "Cannot run it".\n' "$billing" "$issue" "$one" "$billing" "$ref" ;;
+  *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '$askCase', not facts, link, upload, nochange, nochange-rebuttal, nochange-block, untried or tried" ;;
   esac >"$R/prompt.txt"
-  dispatch_session "$name" capture-askgate
+  dispatch_session "$name" capture-askgate ${mode:+"OMP_ASKGATE=$mode"}
 }
 
 # A tiny to-do CLI in a scratch git repository with no Dispatch configuration and no word of due
@@ -1020,9 +1145,22 @@ judge_profiles() {
 # That key command serves a kept token until shortly before it expires, so a token that would
 # expire before the judge's deadline is dropped and minted once more. Prints the key file's path
 # on the key-file route, for the caller to mount.
+# provider: no key command. KEYS/models.yml is the profile's own, whose `!cat <file>` the judge runs
+# in its container; this prints the directory of that file, which the caller mounts read-only at
+# its own path (the directory rather than the file, so a key the operator renews by writing a new
+# file in its place still reaches the judge).
 judge_keys() {
   local P=$1 agent=$2 keys=$3 host_command token exp deadline payload key_file read_from
   (umask 077 && mkdir -p -- "$keys") || fail "judge-omp: cannot make $keys"
+  if [ "${LEGION_E2E_MODEL_ROUTE:-gateway}" = provider ]; then
+    key_file=$(jq -r '[.providers[].apiKey] | first // empty' "$agent/models.yml") || key_file=
+    key_file=${key_file#'!cat '}
+    case $key_file in /*) ;; *) fail "judge-omp: $agent/models.yml does not read its key as \"!cat <absolute file>\"" ;; esac
+    case $key_file in *[!A-Za-z0-9/._-]*) fail "judge-omp: the key file's path '$key_file' holds a character a mount cannot name plainly" ;; esac
+    cp -- "$agent/models.yml" "$keys/models.yml"
+    dirname -- "$key_file"
+    return 0
+  fi
   if [ "${LEGION_E2E_MODEL_ROUTE:-gateway}" = key-file ]; then
     host_command=$P/model-key/anthropic-key
     [ -f "$host_command" ] || fail "judge-omp: the key-file profile $P has no key command $host_command"
@@ -1072,19 +1210,23 @@ judge_keys() {
 #   DIR/OUTPUT, DIR/sessions  writable: its one answer file and its transcript
 #   the pinned omp's install read-only (SKILL_SCENARIOS_JUDGE_OMP names another binary, for tests)
 #   the profile's agent directory read-only, copied into a fresh tmpfs HOME at start, where Oh My
-#     Pi writes its databases and logs; the operator's native module cache read-only
+#     Pi writes its databases and logs, and extracts its own native addon (the operator's native
+#     cache is not mounted: other sessions prune it, and a judge that found its version gone failed
+#     to start)
 #   the judge's own key directory read-only at /opt/key (judge_keys): a key command and a
 #     models.yml that names it, and on the gateway route the token. It sits beside DIR, is the
 #     owner's alone (0700, the token 0600), and is removed when the judge ends. On the key-file
-#     route the key file is mounted read-only too, and the key command reads it on each call.
+#     route the key file is mounted read-only too, and the key command reads it on each call. On the
+#     provider route the directory of the file the block's `!cat` reads is mounted read-only.
 #     Nothing writable is shared between judges: one judge cannot leave a file for another to read.
-#   on the gateway route, the gateway's host name resolved here, since a container cannot resolve
-#     a tailnet name itself
-# The network is Docker's default bridge, for the model's endpoint. SKILL_SCENARIOS_JUDGE_ENV adds
+#   on the gateway and provider routes, the endpoint's host name resolved here, since a container
+#     cannot resolve a tailnet name itself
+# The network is Docker's default bridge, for the model's endpoint. The container gets 2 CPUs and
+# 4 GiB, so the judges of a busy batch cannot take the machine. SKILL_SCENARIOS_JUDGE_ENV adds
 # `NAME=value` words to the container's environment, for tests.
 cmd_judge_omp() {
   [ $# = 3 ] || fail "usage: rig.sh judge-omp <ste|bare> <dir> <output file name>"
-  local kind=$1 dir output=$3 skills status=0 omp P agent natives keys key_file h=/home/judge
+  local kind=$1 dir output=$3 skills status=0 omp P agent keys key_file h=/home/judge
   case $kind in ste) skills=(--skills asd-ste100) ;; bare) skills=(--no-skills) ;; *) fail "judge-omp: '$kind' is ste or bare" ;; esac
   dir=$(cd "$2" && pwd -P) || fail "judge-omp: $2 is not a directory"
   [ -f "$dir/prompt.txt" ] || fail "judge-omp: $dir has no prompt.txt"
@@ -1092,7 +1234,7 @@ cmd_judge_omp() {
   "" | . | .. | */* | prompt.txt | sessions | out.txt | judge-model.txt | .tmp) fail "judge-omp: '$output' is not the name of an answer file in $dir" ;;
   esac
   case "$(omp_ancestor "$dir" || true)" in "") ;; *) fail "judge-omp: $dir is under $(omp_ancestor "$dir"), whose plugins Oh My Pi would load" ;; esac
-  case ${LEGION_E2E_MODEL_ROUTE:-gateway} in gateway | key-file) ;; *) fail "judge-omp: LEGION_E2E_MODEL_ROUTE is '$LEGION_E2E_MODEL_ROUTE': it is gateway or key-file" ;; esac
+  case ${LEGION_E2E_MODEL_ROUTE:-gateway} in gateway | key-file | provider) ;; *) fail "judge-omp: LEGION_E2E_MODEL_ROUTE is '$LEGION_E2E_MODEL_ROUTE': it is gateway, key-file or provider" ;; esac
   command -v docker >/dev/null || fail "judge-omp: docker is not on PATH; each judge runs in a container"
   judge_profiles
   P=$work/judge-profiles/$kind
@@ -1103,19 +1245,17 @@ cmd_judge_omp() {
   on_exit "$(printf 'rm -rf -- %q' "$keys")"
   key_file=$(judge_keys "$P" "$agent" "$keys") || exit 1
   route=(-v "$keys:/opt/key:ro")
-  if [ -n "$key_file" ]; then
-    route+=(-v "$key_file:$key_file:ro")
-  else
-    host=$(sed -n 's#^ *baseUrl: *https://\([^/:]*\).*#\1#p' "$agent/models.yml" | head -1)
+  [ -z "$key_file" ] || route+=(-v "$key_file:$key_file:ro")
+  if [ "${LEGION_E2E_MODEL_ROUTE:-gateway}" != key-file ]; then
+    host=$(sed -n 's#^ *"\{0,1\}baseUrl"\{0,1\}: *"\{0,1\}https\{0,1\}://\([^/:"]*\).*#\1#p' "$agent/models.yml" | head -1)
     ip=$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}') || ip=
-    [ -z "$ip" ] || route+=(--add-host "$host:$ip")
+    [ -z "$ip" ] || [ "$ip" = "$host" ] || route+=(--add-host "$host:$ip")
   fi
   printf 'model %s\nthinking %s\n' "$judge_model" "$judge_thinking" >"$dir/judge-model.txt"
   mkdir -p "$dir/sessions"
   : >>"$dir/$output"
   omp=${SKILL_SCENARIOS_JUDGE_OMP:-$(mise where "$(<"$work/judge-profiles/pin")")/bin/omp}
   [ -x "$omp" ] || fail "judge-omp: $omp is not an executable omp"
-  natives=$(readlink -f "$P/home/.omp/natives")
   local extra=() word
   for word in ${SKILL_SCENARIOS_JUDGE_ENV:-}; do extra+=(-e "$word"); done
   # Pulled here, quietly, so a first run's pull progress never lands in the judge's out.txt, and a
@@ -1124,7 +1264,7 @@ cmd_judge_omp() {
     fail "judge-omp: docker could not pull $judge_image"
   docker run --rm --init --cpus 2 --memory 4g --user "$(id -u):$(id -g)" --read-only \
     --tmpfs /tmp:exec,mode=1777 --tmpfs "$h:exec,uid=$(id -u),gid=$(id -g)" \
-    -v "$(dirname "$omp"):/opt/omp:ro" -v "$natives:/opt/natives:ro" -v "$agent:/opt/profile:ro" \
+    -v "$(dirname "$omp"):/opt/omp:ro" -v "$agent:/opt/profile:ro" \
     "${route[@]}" \
     -v "$dir:$dir:ro" -v "$dir/sessions:$dir/sessions" -v "$dir/$output:$dir/$output" \
     -w "$dir" -e HOME="$h" -e USER=judge -e TERM=xterm-256color -e TMPDIR=/tmp -e OMP_PROFILE="judge-$kind" \
@@ -1134,7 +1274,6 @@ cmd_judge_omp() {
       mkdir -p "$a" && cp /opt/profile/config.yml "$a"/ || exit 125
       cp /opt/key/models.yml "$a"/ || exit 125
       if [ -d /opt/profile/skills ]; then cp -r /opt/profile/skills "$a"/ || exit 125; fi
-      ln -s /opt/natives "$HOME/.omp/natives" || exit 125
       exec timeout "$1" "$2" "${@:3}"' - "${SKILL_SCENARIOS_TIMEOUT:-1500}" "/opt/omp/$(basename "$omp")" \
     -p "$(<"$dir/prompt.txt")" --no-extensions "${skills[@]}" \
     --model "$judge_model" --thinking "$judge_thinking" --session-dir "$dir/sessions" </dev/null >"$dir/out.txt" 2>&1 || status=$?
@@ -1209,12 +1348,13 @@ test("trims the name", () => {
 EOF
   g add -A && g commit -qm "feat: greet(), a greeting helper for the widgets CLI ($worker_key)"
   C1=$(g rev-parse HEAD)
-  # The implement handoff as the implementer writes it with its write tool: the four stamps
-  # (schemaVersion, phase, issue, completed) and the phase's fields, at .legion/<key>/implement.json,
-  # the file whose pushed commit the implementer's handoff_complete reports and the tester reads with `read`.
+  # The implement handoff as the implementer writes it with its write tool: the three stamps
+  # (schemaVersion, phase, issue), previousHandoff empty because this is the phase's first handoff,
+  # and the phase's fields, at .legion/<key>/implement.json, the file whose pushed commit the
+  # implementer's handoff_complete reports and the tester reads with `read`.
   mkdir -p "$src/.legion/$worker_key"
-  jq -n --arg key "$worker_key" --arg head "$C1" --arg completed "$(date -u -d "@$((start + index))" +%FT%TZ)" '
-    {schemaVersion:1, phase:"implement", issue:$key, completed:$completed,
+  jq -n --arg key "$worker_key" --arg head "$C1" '
+    {schemaVersion:1, phase:"implement", issue:$key, previousHandoff:"",
      filesChanged:["greet.ts","greet.test.ts"],
      proof:[{criterion:"greet(name) greets by name, trimmed, and `bun greet.ts <name>` prints it; no name is a usage error",
        surface:"the CLI", command:"bun greet.ts Ada", observed:"prints Hello, Ada! and exits 0", headSha:$head,
@@ -1319,12 +1459,14 @@ cmd_run() {
   [[ $n =~ ^[0-9]+$ ]] || fail "run number '$n' is not a number"
   [[ $index =~ ^[0-9]+$ && $start =~ ^[0-9]+$ ]] || fail "run index '$index' or batch start '$start' is not a number"
   [ -f "$services_env" ] || fail "a run needs its batch's services: run \`rig.sh batch $scenario 1 $2\`"
-  # An askgate run's name carries its case, so the batches of the three cases, each numbered from
-  # 1, never remove each other's runs.
+  # An askgate run's name carries its case, so the batches of the cases, each numbered from 1,
+  # never remove each other's runs.
   if [ "$scenario" = askgate ]; then
     case ${SKILL_SCENARIOS_ASKGATE_CASE:-} in
-    facts | link | upload) name=$scenario-$SKILL_SCENARIOS_ASKGATE_CASE-${P##*/}-$n ;;
-    *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '${SKILL_SCENARIOS_ASKGATE_CASE:-}', not facts, link or upload" ;;
+    facts | link | upload | nochange | nochange-rebuttal | nochange-block | untried | tried)
+      name=$scenario-$SKILL_SCENARIOS_ASKGATE_CASE-${P##*/}-$n
+      ;;
+    *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '${SKILL_SCENARIOS_ASKGATE_CASE:-}', not facts, link, upload, nochange, nochange-rebuttal, nochange-block, untried or tried" ;;
     esac
   else
     name=$scenario-${P##*/}-$n
@@ -1367,8 +1509,12 @@ cmd_batch() {
   batch_scenario=$1
   case $batch_scenario in ask-on-message | measure-before-ask | tester-proof | brainstorm | askgate | spec-writing | spec-rewrite) ;; *) fail "unknown scenario $batch_scenario" ;; esac
   [ "$batch_scenario" != askgate ] || case ${SKILL_SCENARIOS_ASKGATE_CASE:-} in
-    facts | link | upload) ;;
-    *) fail "an askgate batch needs SKILL_SCENARIOS_ASKGATE_CASE set to facts, link or upload (got '${SKILL_SCENARIOS_ASKGATE_CASE:-}')" ;;
+    facts | link | upload | nochange | nochange-rebuttal | nochange-block | untried | tried) ;;
+    *) fail "an askgate batch needs SKILL_SCENARIOS_ASKGATE_CASE set to facts, link, upload, nochange, nochange-rebuttal, nochange-block, untried or tried (got '${SKILL_SCENARIOS_ASKGATE_CASE:-}')" ;;
+  esac
+  [ "$batch_scenario" != askgate ] || case ${SKILL_SCENARIOS_ASKGATE_MODE:-} in
+    '' | warn | block) ;;
+    *) fail "an askgate batch takes SKILL_SCENARIOS_ASKGATE_MODE unset, warn or block (got '$SKILL_SCENARIOS_ASKGATE_MODE')" ;;
   esac
   [[ $runs =~ ^[0-9]+$ ]] || fail "run count '$runs' is not a number"
   # A spec batch numbers its run one above its first label's highest (next_run, below), so a second

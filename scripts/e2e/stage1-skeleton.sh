@@ -147,9 +147,11 @@ bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" | sed 's/^/   
 # CI passes its service's DSN; the devbox brings its own container on an ephemeral port.
 if [ -z "${LEGION_E2E_PG_DSN:-}" ]; then
   docker ps >/dev/null # a broken docker is a failure of this run, not of the daemon
-  docker run -d --name "$container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
+  # ghcr.io/sjawhar/legion/ci, the copy of PostgreSQL 18 (.github/ci-images.yaml), the major
+  # version CI's service and Cloud SQL run
+  docker run -d --name "$container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
     -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion \
-    -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16 >/dev/null
+    -e POSTGRES_DB=legion -p 127.0.0.1::5432 ghcr.io/sjawhar/legion/ci@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4 >/dev/null
   # Over TCP, not the container's unix socket: the entrypoint's bootstrap phase answers on the
   # socket while nothing listens on 5432 yet, and a daemon that connects then is reset.
   for i in $(seq 1 40); do
@@ -273,8 +275,11 @@ jq -e --arg p "$project" \
 # row present, since the tmux runtime runs no probe pod. Both carry `source` "configuration"
 # (contract 25): under tmux, resource-limits is what the runtime alone decides and pool-capacity
 # reads that tmux runs no probe pod, so neither is boot's measurement; and no live, image or
-# withheld row carries `source` at all.
-jq -e '(.capabilities | length) == 20
+# withheld row carries `source` at all. The twenty-first row is `claude-code` (INFRA-220): the
+# worker image carries Claude Code's pin and the Legion plugin unconditionally — the binary itself
+# a pod installs at launch — so every deployment's image is probed for the pin and the plugin,
+# this one included.
+jq -e '(.capabilities | length) == 21
   and (.capabilities | map(select(.name == "resource-limits" and .status == "open"
     and .configLine == "capabilities.decided.resource-limits: \"<reason>\""
     and .source == "configuration")) | length) == 1
@@ -283,7 +288,7 @@ jq -e '(.capabilities | length) == 20
   and (.capabilities | map(select((.name != "resource-limits" and .name != "pool-capacity"
     and .name != "secrets" and .name != "model-fallback") and has("source"))) | length) == 0' \
   "$work/state1.json" || {
-  echo "the state does not carry the 20-row capability report with resource-limits and pool-capacity's source under tmux"
+  echo "the state does not carry the 21-row capability report with resource-limits and pool-capacity's source under tmux"
   exit 1
 }
 # The daemon's resolved settings ride the same document (LEGION-791, contract 35): the value the

@@ -46,6 +46,22 @@ var ErrSessionHeld = errors.New("oauthstore: another identity holds this session
 // from oauth_session_bindings.
 const SessionRetention = 90 * 24 * time.Hour
 
+// PodSessionRetention is how long a pod's registration to write under a session name
+// (RegisterPodSession) is kept past the last write of it: 24 hours.
+//
+// It is the longest a subject token the exchange accepts from a pod can live
+// (oauth.kubernetesTolerance, which admits a projected service-account token's whole life,
+// Kubernetes bounding one at 24 hours), so a registration outlives every token the pod it was
+// written for can still present. Shorter would refuse a pod still holding a token the exchange
+// accepts; longer would let a pod write under the name after every token naming it had been
+// refused for age anyway.
+//
+// It is a constant rather than a setting because the bound follows from that tolerance and from
+// nothing a deployment chooses. What it means for an operator: the authority is the registrar's,
+// so a daemon that stops registering costs its pods their writes within this window, and a
+// registration is renewed by writing it again.
+const PodSessionRetention = 24 * time.Hour
+
 // heldByConfiguration is the expires_at of a session name an entry fixes, which ReserveSessions
 // and a fixed entry's own BindSession write and nothing lets lapse: the name is its entry's for as
 // long as the configuration says so, and Sweep's expires_at <= now() never selects it.
@@ -82,6 +98,14 @@ type ExchangeSession struct {
 	// token's expiry. It is not a claim of the token and is not stored: the row the claim is
 	// recorded in is oauth_session_bindings.
 	Principal string `json:"-"`
+
+	// Instance is the pod uid the exchange decided this token's writes come from
+	// (exchange.Claims.Instance), empty for a caller no registration separates from the others of
+	// its principal: a fixed-session entry, a workflow run or a dev box. The provider reads it
+	// against oauth_pod_sessions in the exchange's own transaction, so a pod writes under a
+	// session name only while a registration says it may. Like Principal it is no claim of the
+	// token and is not stored.
+	Instance string `json:"-"`
 }
 
 // NewExchangeSession is an empty exchange session with its extra claims ready to be written, the
@@ -137,6 +161,7 @@ func (s *ExchangeSession) Clone() oauth2.Session {
 		SubjectToken: maps.Clone(s.SubjectToken),
 		ActorToken:   maps.Clone(s.ActorToken),
 		Principal:    s.Principal,
+		Instance:     s.Instance,
 	}
 	if s.DefaultSession != nil {
 		cloned.DefaultSession, _ = s.DefaultSession.Clone().(*oauth2.DefaultSession)
@@ -239,6 +264,43 @@ func (s *Store) ReserveSessions(ctx context.Context, reserved map[string]string)
 		return nil, fmt.Errorf("reserve the session names the configuration fixes: %w", err)
 	}
 	return left, nil
+}
+
+// RegisterPodSession records that the pod podUID may exchange under the session name session,
+// until PodSessionRetention from now, and answers when that registration runs out. A pod uid
+// already registered for the name has its registration extended rather than duplicated, so a
+// registrar that writes the same row each time a pod starts, or renews it while the pod runs,
+// keeps the pod writing and never shortens what another write left.
+//
+// It is what separates two pods of one listed account, which the exchange reads as one principal:
+// the name belongs to the account, so nothing in the claim on the name can tell them apart, and
+// without this row either pod could mint a token naming the other's session. A registration says
+// only that this deployment started this pod under this name; who the name belongs to stays the
+// claim's answer (BindSession).
+func (s *Store) RegisterPodSession(ctx context.Context, podUID, session string) (time.Time, error) {
+	var expires time.Time
+	err := s.db(ctx).QueryRow(ctx, `insert into oauth_pod_sessions (pod_uid, session, expires_at)
+		values ($1, $2, $3)
+		on conflict (pod_uid, session) do update set expires_at = greatest(oauth_pod_sessions.expires_at, excluded.expires_at)
+		returning expires_at`, podUID, session, time.Now().Add(PodSessionRetention)).Scan(&expires)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("register the pod's session name: %w", err)
+	}
+	return expires, nil
+}
+
+// PodSessionRegistered reports whether a registration still says the pod podUID may exchange
+// under session. It reads through s.db(ctx), so the exchange's own transaction asks it, and it
+// asks the cluster nothing: a pod that no longer runs goes on being registered until its row
+// runs out, exactly as its own token goes on verifying until its expiry.
+func (s *Store) PodSessionRegistered(ctx context.Context, podUID, session string) (bool, error) {
+	var registered bool
+	err := s.db(ctx).QueryRow(ctx, `select exists (select 1 from oauth_pod_sessions
+		where pod_uid = $1 and session = $2 and expires_at > now())`, podUID, session).Scan(&registered)
+	if err != nil {
+		return false, fmt.Errorf("read the pod's session registration: %w", err)
+	}
+	return registered, nil
 }
 
 // SetTokenExchangeCustomJWT remembers a subject token's jti until exp plus jtiRetentionMargin and

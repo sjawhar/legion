@@ -23,7 +23,7 @@ import (
 const localRun = "From the repository root, build the listener image, then the held-port image the " +
 	"live tests run on top of it, and fetch the docker provider plugin v" + DockerPluginVersion +
 	", checking it against the SHA-256 the envoy-smoke job of " +
-	".github/workflows/envoy-and-contracts.yaml pins:\n" +
+	".github/workflows/ci.yaml pins:\n" +
 	"  docker buildx build --load -t legion-envoy-smoke:local -f packages/envoy/docker/Dockerfile .\n" +
 	"  docker buildx build --load --build-arg BASE=legion-envoy-smoke:local " +
 	"-t legion-envoy-smoke-heldport:local -f packages/envoy/infra/host/heldportwrapper/Dockerfile .\n" +
@@ -35,8 +35,8 @@ const localRun = "From the repository root, build the listener image, then the h
 	"ENVOY_INFRA_DOCKER_PLUGIN=/tmp/" + dockerPluginTarball + " " +
 	"go test -count=1 -tags pulumilive -v -timeout 15m ./host/\n" +
 	"-count=1 because go's test cache cannot see the image behind a fixed tag, and would " +
-	"replay a cached PASS against an image that had since changed. In CI each is a step of its " +
-	"own; see .github/workflows/envoy-and-contracts.yaml."
+	"replay a cached PASS against an image that had since changed. In CI each is a step of the " +
+	"envoy-smoke job; see .github/workflows/ci.yaml."
 
 // DockerPluginVersion is the docker provider plugin the live programs pin, and so the version of
 // the tarball DockerPluginEnv names. CI reads it from here when it downloads that tarball.

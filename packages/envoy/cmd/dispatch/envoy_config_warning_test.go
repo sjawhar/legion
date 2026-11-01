@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/config"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 func writeConfigFile(t *testing.T, path, contents string) {
@@ -50,9 +51,7 @@ func TestTheServerWarnsOfTheOldCheckoutFile(t *testing.T) {
 	writeConfigFile(t, filepath.Join(home, ".config", "legion", "envoy.json"), `{"dispatch": {"serverUrl": "https://user.dispatch.example"}}`)
 	writeConfigFile(t, oldPath, `{"dispatch": {"serverUrl": "https://old.dispatch.example"}, "natsUrls": ["nats://old:4222"]}`)
 	var logged bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
 
 	cfg, err := loadEnvoyConfig(envGetter(map[string]string{}), config.LoadOptions{CWD: cwd, HomeDir: home})
 	if err != nil {

@@ -10,7 +10,7 @@ import (
 	"unicode/utf8"
 )
 
-// TokenSpan is where one block-id node's token representation lies in an AppendTokenJSON buffer.
+// TokenSpan is where one block-id node's token representation lies in an EncodeTokenJSON buffer.
 type TokenSpan struct {
 	ID         string
 	Start, End int
@@ -20,10 +20,10 @@ type TokenSpan struct {
 // concurrency. Block identity and typed-block server state are excluded, while
 // inline marks remain part of the state a document edit can destroy.
 func (n *Node) TokenJSON() ([]byte, error) {
-	return AppendTokenJSON(nil, n, nil)
+	return EncodeTokenJSON(n, nil)
 }
 
-// AppendTokenJSON appends n's token representation to dst and returns the extended buffer. The
+// EncodeTokenJSON returns n's token representation in a buffer it allocates. The
 // representation is a node with the fields type, attrs, content, text and marks, in that order and
 // each but type left out when empty: its attributes in canonical form (no block id, no server-owned
 // typed attribute, no nil value, every number a float64) and its marks in the order of their
@@ -31,33 +31,42 @@ func (n *Node) TokenJSON() ([]byte, error) {
 // Marshal makes of that representation, errors included, because callers hold tokens across
 // releases as edit preconditions and a single byte of difference refuses every edit.
 //
-// When blocks is non-nil, AppendTokenJSON appends to it one TokenSpan for each node carrying a
+// When blocks is non-nil, EncodeTokenJSON appends to it one TokenSpan for each node carrying a
 // block id, inline nodes included, in the order the nodes open; each span's offsets index the
 // returned buffer, and its bytes are that node's own token representation. A document read hashes
 // the whole buffer for the document token and each span for a block token, so the tree is encoded
 // once, into one buffer, for a document and all its blocks, rather than once more for each block
-// enclosing a node. The encoder keeps nothing once it returns. On an error, AppendTokenJSON returns
-// dst as it was passed in and leaves blocks as long as it was.
-func AppendTokenJSON(dst []byte, n *Node, blocks *[]TokenSpan) ([]byte, error) {
+// enclosing a node. The encoder keeps nothing once it returns. It validates n first. On an error,
+// EncodeTokenJSON returns nil and the error; the spans it appended to blocks by then are the
+// caller's to discard.
+func EncodeTokenJSON(n *Node, blocks *[]TokenSpan) ([]byte, error) {
 	if err := n.Validate(); err != nil {
-		return dst, err
+		return nil, err
 	}
-	spans := 0
-	if blocks != nil {
-		spans = len(*blocks)
-	}
-	encoder := tokenEncoder{blocks: blocks}
-	out, err := encoder.node(dst, n)
-	if err != nil {
-		if blocks != nil {
-			*blocks = (*blocks)[:spans]
-		}
-		return dst, err
-	}
-	return out, nil
+	return encodeTokenJSON(n, blocks)
 }
 
-// tokenEncoder is the state of one AppendTokenJSON call. Each map it encodes is canonicalised as
+// TokenJSON is EncodeTokenJSON of d's tree, its spans appended to blocks when blocks is non-nil,
+// without validating the tree again. The zero ValidDocument is EncodeTokenJSON's error for a nil
+// tree.
+func (d ValidDocument) TokenJSON(blocks *[]TokenSpan) ([]byte, error) {
+	if d.doc == nil {
+		return EncodeTokenJSON(nil, blocks)
+	}
+	return encodeTokenJSON(d.doc, blocks)
+}
+
+// encodeTokenJSON is EncodeTokenJSON without the validation, for a tree its caller has validated.
+func encodeTokenJSON(n *Node, blocks *[]TokenSpan) ([]byte, error) {
+	encoder := tokenEncoder{blocks: blocks}
+	encoded, err := encoder.node(nil, n)
+	if err != nil {
+		return nil, err
+	}
+	return encoded, nil
+}
+
+// tokenEncoder is the state of one EncodeTokenJSON call. Each map it encodes is canonicalised as
 // it is written, through the entries stack, rather than copied into a canonical map first, and a
 // node's marks are encoded into one scratch buffer that every node of the call reuses.
 type tokenEncoder struct {
@@ -130,12 +139,6 @@ func (e *tokenEncoder) node(dst []byte, n *Node) ([]byte, error) {
 func (e *tokenEncoder) nodeMarks(dst []byte, marks []Mark) ([]byte, error) {
 	dst = append(dst, `,"marks":[`...)
 	var err error
-	if len(marks) == 1 {
-		if dst, err = e.mark(dst, marks[0]); err != nil {
-			return dst, err
-		}
-		return append(dst, ']'), nil
-	}
 	e.marks, e.markRanges = e.marks[:0], e.markRanges[:0]
 	for _, mark := range marks {
 		start := len(e.marks)

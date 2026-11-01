@@ -11,6 +11,7 @@ import {
   claudeChannelGate,
   claudeCommandLine,
   installedMarketplace,
+  installedPluginVersion,
   loadedMarketplace,
   managedSettingsDirectory,
   processCommandLine,
@@ -379,6 +380,17 @@ test("names the marketplace of a cached plugin install, and none for any other p
   expect(installedMarketplace("/work/legion/packages/claude-envoy/dist/envoy-channel.js")).toBe(
     undefined,
   )
+})
+
+test("names the version of a cached plugin install, and none for any other path", () => {
+  expect(
+    installedPluginVersion(
+      "/home/u/.claude/plugins/cache/legion-plugins/claude-envoy/afe10b2f3e1b/dist/envoy-channel.js",
+    ),
+  ).toBe("afe10b2f3e1b")
+  expect(
+    installedPluginVersion("/work/legion/packages/claude-envoy/dist/envoy-channel.js"),
+  ).toBeUndefined()
 })
 
 test("the highest managed settings source present is the allowlist alone", async () => {

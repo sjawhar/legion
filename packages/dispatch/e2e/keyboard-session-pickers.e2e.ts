@@ -132,7 +132,9 @@ async function expectPicked(page: Page, model: string, level: string): Promise<v
   await expect(shownThinking).toHaveText(level);
 }
 
-/** The stored id of the switch whose body is `body`, once Dispatch has stored it, with its author. */
+/** The stored id of the switch whose body is `body`, once Dispatch has stored it and opened its
+ *  first delivery, with its author. A session only ever answers a delivery it received, and
+ *  Dispatch opens the delivery after the message commits, so a listed message can have none yet. */
 async function storedSwitch(
   sessionID: string,
   body: string
@@ -141,7 +143,7 @@ async function storedSwitch(
   await expect
     .poll(async () => {
       const read = (await listAgentMessages(sessionID)).find((row) => row.message.body === body);
-      found = read === undefined ? undefined : read.message;
+      found = read === undefined || read.message.deliveries.length === 0 ? undefined : read.message;
       return found !== undefined;
     })
     .toBe(true);

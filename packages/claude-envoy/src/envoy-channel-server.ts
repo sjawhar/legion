@@ -1,4 +1,4 @@
-import { unwatchFile, watchFile } from "node:fs"
+import { type Stats, unwatchFile, watchFile } from "node:fs"
 import { rm } from "node:fs/promises"
 import {
   agentSubject,
@@ -15,14 +15,12 @@ import {
   type RenderInboundResult,
   renderInbound,
 } from "@legion/envoy-client/delivery"
-import {
-  sessionDirectory as dispatchSessionDirectory,
-  writeSessionTitle,
-} from "@legion/envoy-client/dispatch-session-state"
+import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory"
+import { writeSessionTitle } from "@legion/envoy-client/dispatch-session-state"
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
-import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
+import { natsConnectionOptions } from "@legion/envoy-client/nats-connection"
 import {
   closeReplayedRemoval,
   createReplayEngine,
@@ -59,6 +57,7 @@ import {
   type EnvoyClient,
   expandSubscriptionTopics,
   mergeInterestSources,
+  newClientInstanceID,
 } from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
 import { findHandoffCommit } from "@legion/pi-shared/handoff-commit"
@@ -67,14 +66,16 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { connect } from "nats"
 import { z } from "zod"
-import { version as packageVersion } from "../package.json" with { type: "json" }
+import { name as packageName, version as packageVersion } from "../package.json" with {
+  type: "json",
+}
 import {
   type ChannelForwarder,
   type ChannelForwarderConnection,
   type ChannelInboundMessage,
   createChannelForwarder,
 } from "./channel-forwarder"
-import { type ChannelGate, detectClaudeChannel } from "./claude-channel"
+import { type ChannelGate, detectClaudeChannel, installedPluginVersion } from "./claude-channel"
 import { claudeProjectDirectory, claudeSessionId, configuredValue } from "./claude-session"
 import { inboundOffChannelSession, serveEnvoyOff } from "./envoy-off"
 import {
@@ -86,6 +87,13 @@ import {
   stopPane,
 } from "./legion-claim"
 import { createInboxNotifier, INBOX_CAPABILITIES, INBOX_VARIABLE } from "./legion-inbox"
+import {
+  createPhaseHookEndpoint,
+  PHASE_HOOK_TOOL_NAME,
+  paneReminderLog,
+  phaseHookToolDefinition,
+  phaseStallFile,
+} from "./legion-phase-hook"
 import {
   executeLegionTool,
   LEGION_TOOL_NAME,
@@ -114,7 +122,7 @@ import { type SessionTitle, sessionTitle } from "./session-title"
 
 const CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel" as const
 const CHANNEL_INSTRUCTIONS =
-  "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
+  "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is how soon the sender asks you to act (it does not change when or in what order deliveries arrive), from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
 const CHANNEL_INBOX_LIMIT = 50
 const EMPTY_RECEIPT = new Uint8Array()
 const ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -262,6 +270,15 @@ export interface ChannelSessionOptions {
    */
   readonly stateDirectory: string
   /**
+   * The channel-server process this session runs in, as a random 128-bit hex id minted once per
+   * process (`runEnvoyChannelServer`). Every registration and every deregistration carries it,
+   * so the listener can tell this process's registry entry from one another process made under
+   * the same session id: a soft role claim against a live predecessor is granted only to the
+   * instance that registered it, and a deregistration removes an entry only while it is this
+   * instance's.
+   */
+  readonly clientInstanceID: string
+  /**
    * The `claude` process this server belongs to. When set, the server polls that
    * process's handoff file and rebinds to the id it names; unset under the QA override.
    */
@@ -277,6 +294,11 @@ export interface ChannelSessionOptions {
    * My Pi session; omitted, nothing is written.
    */
   readonly stampTitle?: (sessionId: string, title: string) => void
+  /**
+   * The build every registration names (`installedPluginVersion` of the bundle Claude Code runs,
+   * or `source` for a bundle outside its plugin cache).
+   */
+  readonly pluginVersion: string
 }
 
 // The shared tool contract builds schemas from each host's Zod API. Claude's
@@ -398,7 +420,9 @@ export function createChannelDelivery(input: {
         // <channel> tag, so the Envoy producer travels under `producer`.
         meta: sanitizeChannelMetadata({
           producer: envelope?.source ?? "unknown",
-          topic: subject,
+          // A forward on the agent subject (a role message, or an ad-hoc topic's copy the
+          // publish route confirms with this session) carries the topic it was published to.
+          topic: envelope?.topic || subject,
           event_id: envelope?.event_id,
           dedupe_key: envelope?.dedupe_key,
           urgency: envelope?.urgency,
@@ -738,12 +762,23 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true,
+      clientInstanceID: options.clientInstanceID,
+      plugin: { name: packageName, version: options.pluginVersion },
     })
   }
 
   /**
    * Take back the role persisted for `previousSessionID` (this id on `--resume`,
-   * the pre-`/clear` id on a handoff) with a soft claim naming that predecessor.
+   * the pre-`/clear` id on a handoff) with a soft claim naming that predecessor. The listener
+   * grants such a claim only when that predecessor has no live registry entry, when its entry
+   * carries this process's own client instance id, or when either side carries none; a
+   * predecessor still live under another client instance keeps the role.
+   *
+   * Which is why a refusal naming the predecessor itself keeps the record: it belongs to that
+   * live holder, another process sharing this state directory, and deleting it would cost that
+   * process its only way back to the role. A refusal naming any other session says the
+   * predecessor demonstrably no longer holds it, so its record goes — the one path that removes
+   * a role record by hand.
    */
   const restoreRole = async (previousSessionID = identity.id): Promise<void> => {
     const previousFile = roleStateFile(options.stateDirectory, previousSessionID)
@@ -756,7 +791,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       previousSessionID: persisted.session_id,
     })
     if (!claim.claimed) {
-      await rm(previousFile, { force: true })
+      if (claim.holder !== persisted.session_id) await rm(previousFile, { force: true })
       return
     }
     heldRole = persisted.role
@@ -876,6 +911,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * subject is consumed before anything is advertised under the new id, and the
    * old one leaves the topic list before the first registration under it. Runs
    * only inside `serialized`.
+   *
+   * The deregistration of the old id carries this process's client instance id, so the listener
+   * removes that entry only while it is still this instance's: a later process that resumed the
+   * old session id and registered it keeps its registration, and this handoff takes nothing
+   * from it.
    */
   const adoptHandoff = async (): Promise<void> => {
     if (handoffFile === undefined) return
@@ -893,7 +933,10 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         options.handoffFlushTimeoutMs ?? HANDOFF_FLUSH_TIMEOUT_MS,
         "flushing NATS",
       )
-      await options.client.unregisterSession(previous)
+      await options.client.unregisterSession({
+        sessionID: previous,
+        clientInstanceID: options.clientInstanceID,
+      })
     } catch (error) {
       // The session stays on the old id until a later tick retries, so the new
       // subject leaves the topic list; otherwise the next registration would
@@ -1123,8 +1166,17 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   // at the next heartbeat minutes later. The hook replaces the file by rename,
   // which a directory watch reports only as its temporary file, so the file is
   // polled by path; the first tick picks up a file written before polling began.
+  //
+  // `watchFile` also calls the listener, with every stat field zeroed, when the file
+  // is missing as polling begins and when it is removed. A missing file names no id
+  // to adopt, and the request below already covers startup: a tick there would be a
+  // second one for the same moment, and in an outage one more attempt than the
+  // bounded retry allows.
+  const handoffFileChanged = (current: Stats): void => {
+    if (current.ino !== 0) requestHeartbeat()
+  }
   if (handoffFile !== undefined) {
-    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, requestHeartbeat)
+    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, handoffFileChanged)
     requestHeartbeat()
   }
   // nats.js resubscribes by itself after a reconnect; what was published while it was away is in
@@ -1187,15 +1239,18 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       if (shuttingDown) return
       shuttingDown = true
       clearInterval(heartbeatTimer)
-      if (handoffFile !== undefined) unwatchFile(handoffFile, requestHeartbeat)
+      if (handoffFile !== undefined) unwatchFile(handoffFile, handoffFileChanged)
       await forwarder.close()
-      await serialized(() => options.client.unregisterSession(identity.id)).catch(
-        (error: unknown) => {
-          process.stderr.write(
-            `envoy-channel: session deregistration failed — ${messageFor(error)}\n`,
-          )
-        },
-      )
+      await serialized(() =>
+        options.client.unregisterSession({
+          sessionID: identity.id,
+          clientInstanceID: options.clientInstanceID,
+        }),
+      ).catch((error: unknown) => {
+        process.stderr.write(
+          `envoy-channel: session deregistration failed — ${messageFor(error)}\n`,
+        )
+      })
       // The handoff directory stays: Claude Code restarts this server inside the
       // same `claude` process (plugin reload, changed config), and the hook does
       // not rewrite the file until the next SessionStart. Startup pruning removes
@@ -1341,7 +1396,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
   // that throws when it is unset and runs only after the Envoy-off return: a session with Envoy
   // off and no plugin data must still serve.
   const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"])
-  const title = sessionTitle(
+  const title = await sessionTitle(
     {
       ENVOY_SESSION_TITLE: process.env["ENVOY_SESSION_TITLE"],
       TMUX: process.env["TMUX"],
@@ -1398,6 +1453,11 @@ export async function runEnvoyChannelServer(): Promise<void> {
   const stateDirectory = pluginStateDirectory()
   // The Legion bridge's inbox takes the events itself; otherwise they go to Claude Code's channel.
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE])
+  // The plugin's own bundle, which Claude Code runs from its plugin cache when installed.
+  const bundlePath = process.argv[1] ?? ""
+  // One connection to the bridge carries every line this server writes into the session: each
+  // Envoy delivery, and the reminders and notices the phase endpoint writes.
+  const inbox = inboxSocket === undefined ? undefined : createInboxNotifier(inboxSocket)
   // Claude Code drops a notification from a channel it did not load without telling this server,
   // so such a session advertises no delivery mode and Dispatch refuses a message to it rather than
   // reporting it delivered. The bridge's inbox needs no channel.
@@ -1405,7 +1465,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
     inboxSocket === undefined
       ? detectClaudeChannel({
           claudePid: process.ppid,
-          bundlePath: process.argv[1] ?? "",
+          bundlePath,
           environment: process.env,
         })
       : { loaded: true }
@@ -1426,15 +1486,52 @@ export async function runEnvoyChannelServer(): Promise<void> {
     fetch: globalThis.fetch,
     token: envoy.token,
   })
+  // INFRA-404: this process, as the listener knows it. Minted once here and sent on every
+  // registration and every deregistration, so the listener can tell the entry this process made
+  // from one another process made under the same session id: a soft role claim against a live
+  // predecessor goes only to the instance that registered it, and a deregistration removes only
+  // this instance's entry. One per process, not per session id: this server drives one session
+  // at a time, and a restart is a new instance with a new id.
+  const clientInstanceID = newClientInstanceID()
   let runtime: ChannelToolRuntime | undefined
   let claim: LegionClaim | undefined
   const daemon = pane === undefined ? undefined : createLegionDaemonClient(pane.daemonUrl)
+  // INFRA-220: the phase reminder's Claude Code host (`./legion-phase-hook`), which Claude Code's
+  // own hooks drive through the `legion_phase_hook` tool. It is started here, beside the claim it
+  // gates on, and restores this session's record as it starts, before any hook can be answered.
+  const phaseLog = paneReminderLog(logLegion)
+  // The claim's boot, for the endpoint's resume reminder and its recreated-workspace notice: both
+  // need the claim, and the claim starts further down, once the channel session exists.
+  const claimBooted = Promise.withResolvers<void>()
+  const phaseHook =
+    pane === undefined || daemon === undefined
+      ? undefined
+      : createPhaseHookEndpoint({
+          stateFile: phaseStallFile(pane.configDir, identity.id),
+          claim: () => claim?.capability(),
+          booted: claimBooted.promise,
+          readState: (signal) => daemon.state({ signal }),
+          inbox:
+            inbox === undefined
+              ? undefined
+              : (text) =>
+                  inbox.notification({
+                    method: CHANNEL_NOTIFICATION_METHOD,
+                    params: { content: text, meta: {} },
+                  }),
+          publish: client.publish,
+          env: process.env,
+          log: phaseLog,
+        })
   const toolDefinitions = [
     ...channelToolDefinitions(),
-    ...(daemon === undefined ? [] : [legionToolDefinition()]),
+    ...(daemon === undefined ? [] : [legionToolDefinition(), phaseHookToolDefinition()]),
   ]
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }))
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    if (phaseHook !== undefined && request.params.name === PHASE_HOOK_TOOL_NAME) {
+      return mcpResult(await phaseHook.handle(request.params.arguments))
+    }
     if (daemon !== undefined && request.params.name === LEGION_TOOL_NAME) {
       const legionRuntime: LegionToolRuntime = {
         daemon,
@@ -1443,14 +1540,32 @@ export async function runEnvoyChannelServer(): Promise<void> {
       }
       // The request's signal aborts on the client's notifications/cancelled, which ends a wait
       // for a restarting daemon.
-      return mcpResult(
-        await executeLegionTool(legionRuntime, request.params.arguments, extra.signal),
-      )
+      const answer = await executeLegionTool(legionRuntime, request.params.arguments, extra.signal)
+      // A call that returned without throwing: a completion, and a backward move, which hands the
+      // issue to another phase. Either way this session's phase is no longer open, and the
+      // reminder must stop — the same two operations the Oh My Pi host closes its phase on
+      // (`createLegionTool` in `packages/pi-legion/src/tools.ts`).
+      const op = request.params.arguments?.["op"]
+      if (op === "handoff_complete" || op === "request_backward_move") phaseHook?.phaseClosed()
+      return mcpResult(answer)
     }
     if (runtime === undefined) throw new Error("Envoy channel server is still starting")
     return mcpResult(await executeEnvoyTool(runtime, request.params.name, request.params.arguments))
   })
-  const notifier = inboxSocket === undefined ? server : createInboxNotifier(inboxSocket)
+  // The endpoint is told every line this server writes for a delivery: the `UserPromptSubmit`
+  // that carries one back is that delivery's turn, not a fresh assignment, and this server, which
+  // writes them all, is the only place that knows.
+  const notifier: ChannelNotifier =
+    inbox === undefined
+      ? server
+      : phaseHook === undefined
+        ? inbox
+        : {
+            notification: async (notification) => {
+              phaseHook.deliveryWritten(notification.params.content)
+              await inbox.notification(notification)
+            },
+          }
   // A session whose deliveries are channel notifications Claude Code did not load shows the model
   // nothing, so it advertises no delivery mode at all.
   const capabilities =
@@ -1464,6 +1579,8 @@ export async function runEnvoyChannelServer(): Promise<void> {
     if (stopping) return
     stopping = true
     booting.abort()
+    // A reminder waiting on a 15-minute WAITING wait holds no shutting-down server open.
+    phaseHook?.stop()
     if (session === undefined) {
       stopped.resolve()
       return
@@ -1491,14 +1608,13 @@ export async function runEnvoyChannelServer(): Promise<void> {
       stampOnce(() => identity.id)
       session = inboundOffChannelSession({ identity, stateDirectory, why: inbound.off })
     } else {
-      connection = await connect({
-        servers: [...inbound.natsUrls],
-        name: `claude-envoy-channel-${identity.id}`,
-        ...natsAuthOptions(inbound.natsSeed),
-        reconnect: true,
-        maxReconnectAttempts: -1,
-        reconnectTimeWait: 2_000,
-      })
+      connection = await connect(
+        natsConnectionOptions({
+          servers: inbound.natsUrls,
+          name: `claude-envoy-channel-${identity.id}`,
+          seed: inbound.natsSeed,
+        }),
+      )
       session = await startChannelSession({
         identity,
         connection,
@@ -1508,7 +1624,9 @@ export async function runEnvoyChannelServer(): Promise<void> {
         heartbeatMs: envoy.heartbeatMs,
         configFile,
         stateDirectory,
+        clientInstanceID,
         title,
+        pluginVersion: installedPluginVersion(bundlePath) ?? "source",
         ...(stamping ? { stampTitle } : {}),
         // The QA override names a fixed identity; only a Claude-minted id follows `/clear`.
         ...(configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}),
@@ -1526,6 +1644,10 @@ export async function runEnvoyChannelServer(): Promise<void> {
         log: logLegion,
         stop: endPane,
       })
+      // What `claimSession.bootstrap` returning is to the Oh My Pi host: the point the phase
+      // endpoint may read the claim, arm its resume reminder and tell the worker its workspace
+      // was recreated.
+      void claim.booted.then(claimBooted.resolve)
     }
     if (stopping) await session.shutdown()
     await stopped.promise

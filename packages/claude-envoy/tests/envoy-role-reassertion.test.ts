@@ -91,6 +91,8 @@ test("reasserts a restored role after a successful registration heartbeat loses 
     heartbeatMs: 25,
     configFile: { path: join(stateDirectory, "envoy.json"), error: null },
     stateDirectory,
+    clientInstanceID: "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    pluginVersion: "source",
   })
 
   try {
@@ -136,6 +138,8 @@ test("runs the regain hook once a heartbeat's soft claim takes the held role bac
     heartbeatMs: 25,
     configFile: { path: join(stateDirectory, "envoy.json"), error: null },
     stateDirectory,
+    clientInstanceID: "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    pluginVersion: "source",
   })
   session.onRoleRegained(async (role, reason) => {
     regains.push(`${role} ${reason}`)

@@ -105,26 +105,34 @@ func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 	// 1.5 s after it, on one machine at a load of 309 to 343. Replaced blocks that stand apart, kept
 	// blocks between them, still cost a walk each in ygo (pmdoc's TestUpdateIsLinearInTheBlockCount).
 	// Each rung is timed in this process's CPU (cputest.Process), since a rung's wall time at these
-	// sizes is mostly the request's own cost and the runner's load. No test in this package calls
-	// t.Parallel.
+	// sizes is mostly the request's own cost and the runner's load, over as many replacements, each
+	// of a document of its own, as the clock needs to resolve their time (cputest.Measure). No test
+	// in this package calls t.Parallel.
 	t.Run("replacing many blocks", func(t *testing.T) {
 		const from, to = "> #\n", "> ***\n"
 		growsLinearly(t, "replacing a quote of headings with a quote of rules", []int{682 * len(to), 5_461 * len(to), 21_844 * len(to)}, func(size int) time.Duration {
 			blocks := size / len(to)
-			documents++
-			name := fmt.Sprintf("many-blocks-%d.md", documents)
-			for index, body := range []string{strings.Repeat(from, blocks), strings.Repeat(to, blocks)} {
-				before := cputest.Process()
-				response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": name}, "body.md", "text/markdown", []byte(body), "alice")
-				took := cputest.Process() - before
+			headings, rules := []byte(strings.Repeat(from, blocks)), []byte(strings.Repeat(to, blocks))
+			upload := func(name string, body []byte) {
+				response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": name}, "body.md", "text/markdown", body, "alice")
 				if response.Code != http.StatusCreated {
 					t.Fatalf("upload %d blocks of %q: status=%d body=%.200s", blocks, body[:len(from)], response.Code, response.Body.String())
 				}
-				if index == 1 {
-					return took
-				}
 			}
-			return 0
+			took, _ := cputest.Measure(func(runs int) (time.Duration, error) { // this batch has no error to report
+				names := make([]string, runs)
+				for i := range names {
+					documents++
+					names[i] = fmt.Sprintf("many-blocks-%d.md", documents)
+					upload(names[i], headings)
+				}
+				before := cputest.Process()
+				for _, name := range names {
+					upload(name, rules)
+				}
+				return cputest.Process() - before, nil
+			})
+			return took
 		})
 	})
 }

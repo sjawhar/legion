@@ -86,8 +86,9 @@ func TestAnAgentsConversationOwnsTheFilesUploadedToIt(t *testing.T) {
 	if backlinks.Node.ID != artifact.ID || backlinks.Node.Ref != "dispatch://agent/"+agentSession+"/artifact/shot-png" {
 		t.Fatalf("node = %+v, want artifact %s addressed under the session", backlinks.Node, artifact.ID)
 	}
-	if len(backlinks.Edges) != 1 || backlinks.Edges[0].Kind != "mentions" || backlinks.Edges[0].Node.Kind != "message" {
-		t.Fatalf("edges = %+v, want the message's one mention", backlinks.Edges)
+	if len(backlinks.Edges) != 1 || backlinks.Edges[0].Kind != "mentions" || backlinks.Edges[0].Node.Kind != "block" ||
+		backlinks.Edges[0].Node.Parent == nil || backlinks.Edges[0].Node.Parent.Kind != "message" {
+		t.Fatalf("edges = %+v, want the message's one mention, from its block", backlinks.Edges)
 	}
 }
 
@@ -304,5 +305,54 @@ func TestAnAgentsConversationRefusesADocumentAndAnInvalidSessionID(t *testing.T)
 		if response.Code != http.StatusBadRequest || responseCode(t, response) != "ARTIFACT_AGENT_OWNED" {
 			t.Errorf("POST %s on a session's file: status=%d body=%s, want 400 ARTIFACT_AGENT_OWNED", path, response.Code, response.Body.String())
 		}
+	}
+}
+
+// TestAnUploadIsHeldToTheSessionTheCredentialProved: an agent conversation's files belong to
+// that conversation, and a caller whose credential proved a session may put bytes only in its
+// own. A broker-issued token is the one credential that proves one, and it is refused another
+// session's path by name before the upload is read; its own is taken and stored under it. A
+// person's cookie proves no session and keeps uploading into the conversation it names, which
+// is how a person puts a file in front of an agent.
+func TestAnUploadIsHeldToTheSessionTheCredentialProved(t *testing.T) {
+	rig := newBrokerTokenRig(t)
+	caller := newBrokerCaller(t)
+	const token = "a-token-uploading-into-a-conversation"
+	rig.broker.Says(token, liveNamedToken(caller.jkt))
+	const anotherSession = "01a1058e-f14f-7684-87eb-3dc885955552"
+	image := pngBytes("another session's conversation")
+
+	intruding := rig.serve(caller.presentingUpload(t,
+		"/api/v1/agents/"+anotherSession+"/artifacts", token, "shot.png", "image/png", image))
+	if intruding.Code != http.StatusForbidden {
+		t.Fatalf("an upload into another session: status=%d body=%s, want 403", intruding.Code, intruding.Body.String())
+	}
+	refusal := decodeBody[refusalAnswer](t, intruding)
+	if refusal.Code != codeSessionScope {
+		t.Fatalf("refusal = %+v, want %s", refusal, codeSessionScope)
+	}
+	if !strings.Contains(refusal.Error, brokerTestSession) || !strings.Contains(refusal.Error, anotherSession) {
+		t.Fatalf("refusal %q names neither the session the credential proved (%s) nor the session addressed (%s)",
+			refusal.Error, brokerTestSession, anotherSession)
+	}
+	if strings.Contains(refusal.Error, token) {
+		t.Fatalf("the refusal repeats the token: %q", refusal.Error)
+	}
+	read := rig.serve(withPerson(brokerRequest(t, http.MethodGet,
+		"/api/v1/agents/"+anotherSession+"/artifacts/shot-png", nil, "", ""), brokerTestPerson))
+	if read.Code != http.StatusNotFound {
+		t.Fatalf("the other session's conversation: status=%d body=%s, want nothing stored in it", read.Code, read.Body.String())
+	}
+
+	own := rig.serve(caller.presentingUpload(t,
+		"/api/v1/agents/"+brokerTestSession+"/artifacts", token, "shot.png", "image/png", image))
+	if own.Code != http.StatusCreated {
+		t.Fatalf("an upload into its own conversation: status=%d body=%s, want 201", own.Code, own.Body.String())
+	}
+	stored := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, own).Artifact
+	if stored.SessionID == nil || *stored.SessionID != brokerTestSession || stored.RefKey != "agent/"+brokerTestSession+"/shot-png" {
+		t.Fatalf("artifact = %+v, want it owned by session %s", stored, brokerTestSession)
 	}
 }

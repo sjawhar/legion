@@ -1,7 +1,0 @@
-kind: Changed
-body: |-
-    `/auth/start` no longer answers `429` "too many pending sign-in attempts": no process holds a
-    sign-in in flight, so there is nothing to cap.
-time: 2026-10-28T09:38:44.226566089Z
-custom:
-    Issue: pr2390

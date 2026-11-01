@@ -38,6 +38,10 @@ type Options struct {
 	State StateSource
 	// StateTransactions opens the repeatable-read, read-only snapshot the state projection uses.
 	StateTransactions StateTransactions
+	// ConsumerLag reads the lag of the daemon's durable consumers from NATS (the daemon's
+	// intake.Consumers.Lag), which the state route reads after its transaction commits and serves as
+	// `consumers`. Nil, a daemon with no workflow and so no consumers, serves none.
+	ConsumerLag func(ctx context.Context) []intake.ConsumerLag
 	// Supervisor is the claims the claim and operator routes post their requests to.
 	Supervisor Supervisor
 	// BootTokens resolves a registration's boot token.
@@ -158,6 +162,7 @@ type TreeLifecycles interface {
 type server struct {
 	state             StateSource
 	stateTransactions StateTransactions
+	consumerLag       func(ctx context.Context) []intake.ConsumerLag
 	supervisor        Supervisor
 	bootTokens        *BootTokens
 	// project and dispatchProject are Options.Project and Options.DispatchProject.
@@ -198,6 +203,8 @@ type server struct {
 	drained   context.Context
 	decisions *RouteDecisions
 	log       *slog.Logger
+	// beforeForgetSessionHandle pauses the route's preflight in its concurrency regression test.
+	beforeForgetSessionHandle func()
 }
 
 // NewServer builds the daemon's HTTP server on bind:port, the configured address: every interface
@@ -212,6 +219,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	s := &server{
 		state:              opts.State,
 		stateTransactions:  opts.StateTransactions,
+		consumerLag:        opts.ConsumerLag,
 		supervisor:         opts.Supervisor,
 		bootTokens:         opts.BootTokens,
 		project:            opts.Project,
@@ -292,6 +300,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/resume", s.operator(s.claimRequest("resume", resumeEvent)))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/stop", s.operator(s.claimRequest("stop", stopEvent)))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/retry", s.operator(s.retryClaim))
+	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/forget-session", s.operator(s.forgetSession))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/close", s.operator(s.closeTree))
 
 	// The catch-all answers every unrouted request, including a known path asked for with the
@@ -417,6 +426,11 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("api: commit state transaction failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
 		return
+	}
+	// The consumers' lag is read from NATS after the commit, so a slow or silent NATS server holds
+	// no snapshot open; what it does not answer is each consumer's `unavailable`, never a refusal.
+	if s.consumerLag != nil {
+		state.Consumers = ConsumerLagViewsOf(s.consumerLag(r.Context()))
 	}
 	writeJSON(w, http.StatusOK, state)
 }

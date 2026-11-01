@@ -277,6 +277,16 @@ lock=$HOME/.local/state/legion/e2e/stage4b.lock
 record=$work/sandboxes
 pg_container=legion-e2e4b-pg-$$
 session_db_container=legion-e2e4b-db-$$
+# Set once session_db_start has the session database accepting connections. No role pod, the kind
+# that keeps an Oh My Pi session, runs before then: the daemon launches each one, and it starts
+# later. So a run stopped earlier has no session in a database to copy (collect_transcripts).
+session_db_ready=
+# Both container names hold the driver's pid, which the kernel hands out again, so a container of
+# either name can be an earlier run's, still working. Every container this run starts carries this
+# run's own id as the label legion.dev/e2e-run, and the teardown removes a container only when it
+# carries this id (remove_run_container), never by name alone.
+run_container_label=legion.dev/e2e-run
+run_container_id=$$-$(date +%s%N)
 profile=legion-e2e4b-$$-$(date +%s)
 state=$work/state
 # The HOME the controller's Oh My Pi runs under, so its profile lives in the work directory
@@ -287,6 +297,10 @@ daemon_log=$evidence/logs/daemon.log
 check=setup
 TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 ok=
+# Set by the signal traps below to the signal's own name, so the teardown can say that the run was
+# stopped rather than that the checkpoint it cut failed. Only a trap sets it: a command of the run
+# that exits 143 or 130 by itself is a failure, as it always was.
+signalled=
 was_blocked= # set by blocked: the run stopped on a prerequisite, so it did not run, and did not fail
 torn_down=
 snapshotted=
@@ -296,6 +310,10 @@ locked=
 # that sets a hook of its own sets this one back after it.
 timeout_hook=limit_pending_blocked
 daemon_pid=
+# Set when start_daemon first launches the daemon, and never cleared (daemon_pid is, at every
+# restart and at hygiene). Every role pod is the daemon's, so before then none can have run
+# (session_copy).
+daemon_started=
 watch_pid=
 leaks_pid=
 events_pid=
@@ -395,6 +413,8 @@ blocked() {
 . "$root/scripts/e2e/lib/namespace-rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/session-db.sh
+. "$root/scripts/e2e/lib/session-db.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/role-namespaces.sh
 . "$root/scripts/e2e/lib/role-namespaces.sh"
 
@@ -416,6 +436,22 @@ rk() { timeout --foreground 300 kubectl --kubeconfig "$runtime_kubeconfig" --con
 # beside what it already runs; and their sum, null when the pool has no limits to bound it. The
 # reads go through files in the run's work directory: a cluster's pods can exceed the argument list
 # a --argjson would put them in.
+# expected_issue_pod_reservation reads the cpu and memory reservation the run passes to the pool
+# capacity checks. A malformed run_resources must stop preflight before the pool-room read.
+expected_issue_pod_reservation() {
+  jq -cn -L "$root/scripts/e2e/lib" --argjson expected "$run_resources" '
+    include "stage4b-room";
+    issue_pod_reservation($expected)'
+}
+
+# preflight_issue_pod_reservation stops before the pool-room read when the run does not describe
+# its issue pod's CPU or memory reservation.
+preflight_issue_pod_reservation() {
+  if ! expected_pod_reservation=$(expected_issue_pod_reservation 2>&1); then
+    blocked "the run's issue pod reservation is invalid: $expected_pod_reservation"
+  fi
+}
+
 pool_pod_room() {
   kubectl --context "$operator" --request-timeout=30s get nodepool legion -o json >"$work/room-pool.json" || return 1
   kubectl --context "$operator" --request-timeout=30s get nodes -l karpenter.sh/nodepool=legion -o json >"$work/room-nodes.json" || return 1
@@ -660,52 +696,24 @@ pod_commands() {
 # could not be read is neither running nor stopped: the read fails, as the caller's wait expects.
 pod_runs() { local out; out=$(pod_commands "$1" "$2") || return 1; grep -qF -- "$3" <<<"$out"; }
 pod_file() { pod_exec "$1" "$2" test -s "$3"; }
-# takeover_lines ROW TESTER prints the daemon log's lines of a CI-red takeover, one JSON object a
-# line: the implementer's start held and going on, and the tester's claim TESTER interrupted for
-# it and its turn over. The hold is the outbox's shared retry log (outbox.go's RunOnce), logged
-# "outbox row waits" for every reason a row waits, not only this one (a held notice, a
-# suspension, a pending delivery, a tree's cleanup reservation, a close waiting for its stops); a
-# start Quiesce holds for the outgoing worker's turn is this one row's kind supervise and
-# Quiesce's own error text (ErrQuiesceHeld, supervise/quiesce.go), never a message of its own. That
-# line is not load-bearing here: RunOnce logs it at INFO only for a row's first attempt or once it
-# has waited waitWarnAttempts (7) times, DEBUG every attempt between, so a row whose first attempt
-# failed for an unrelated reason (the abort RPC itself timed out, say) and reached ErrQuiesceHeld
-# only on a later, still-early attempt never logs it at a level this evidence carries.
-# `takeover_interrupted` is not load-bearing either: Oh My Pi answers an abort only once the agent
-# is idle, so a turn that winds down between the RPC timeout (worker_rpc_timeout) and the outbox's
-# own retry interval later can have its answer arrive after Quiesce's own call already timed out —
-# interruptOver still fires and logs `takeover_over` for the row (quiesce.go's `m.interrupt` was
-# set before the abort was ever attempted), but `takeover_interrupted`'s log, guarded by the abort
-# succeeding inside Quiesce itself, never does. The row number below comes from `takeover_over`
-# instead — the tester's claim's own "the interrupted turn is over", logged whenever a start was
-# genuinely held for this claim's turn, independent of how the abort round-trip went.
-takeover_held_error="the start waits for the outgoing worker's interrupted turn to end"
-takeover_goes_on="outbox start goes on: the claim it takes the phase from is out of its turn"
-takeover_interrupted="supervise: interrupted the agent's turn: a start takes over its issue's phase"
-takeover_over="supervise: the interrupted turn is over"
-takeover_lines() {
-  jq -R -c --argjson row "$1" --arg tester "$2" --arg err "$takeover_held_error" --arg on "$takeover_goes_on" \
-    --arg interrupted "$takeover_interrupted" --arg over "$takeover_over" \
-    'fromjson? | select(.row == $row and (
-        (.msg == "outbox row waits" and .kind == "supervise" and (.error // "" | contains($err))) or
-        .msg == $on or
-        ((.msg == $interrupted or .msg == $over) and .claim == $tester)
-      ))' "$daemon_log"
+# ci_red_task_taken ISSUE: the daemon's own record that the implementer the CI red started took
+# its task — its claim is working on a delivery of the implementing phase whose turn the daemon
+# has seen start (confirmedAt). It is the start acting, read from the state rather than from the
+# agent's session, and the one fact ci-red-no-takeover times the tester's reads against: a start
+# that waited for the outgoing worker's turn, as the deleted takeover did, would not reach it
+# while the tester's own turn runs.
+ci_red_task_taken() {
+  claim_view "$1" implementer |
+    jq -e '.state == "working" and .pending != null and .pending.phase == "implementing" and (.pending.confirmedAt // "") != ""' >/dev/null
 }
-# takeover_ordered FILE TASK_AT: the takeover's lines FILE (takeover_lines) hold the start going on
-# only after the tester's turn was over, and the implementer's task, which reached its session at
-# TASK_AT, after it too. takeover_interrupted may be absent (the race the header comment above
-# names: the abort's answer arrives after Quiesce's own call already timed out) — when it is
-# present, it must still come no later than the turn being over.
-takeover_ordered() {
-  jq -s -e --arg task "$2" --arg on "$takeover_goes_on" \
-    --arg interrupted "$takeover_interrupted" --arg over "$takeover_over" '
-    def secs: (.[0:19] + "Z" | fromdateiso8601) + (.[19:] | rtrimstr("Z") | if . == "" then 0 else "0" + . | tonumber end);
-    def at($m): map(select(.msg == $m) | .time | secs) | first;
-    at($interrupted) as $i | at($over) as $o | at($on) as $g
-    | $o != null and $g != null
-      and ($i == null or $i <= $o) and $o <= $g and $o <= ($task | secs)' "$1" >/dev/null
-}
+# aborted_turns_jq selects every aborted turn of a session read as one raw string: an assistant
+# message Oh My Pi ended on an abort, which is what an interrupt of a running turn leaves behind
+# (`stopReason: "aborted"`, with `errorMessage` "Interrupted by user"). no_aborted_turn SESSION
+# holds that a session has none; the fail line and the negative control both read it through this
+# one selector, so neither can drift from the other.
+aborted_turns_jq='[split("\n")[] | fromjson?
+  | select(.type == "message" and .message.role == "assistant" and (.message.stopReason? // "") == "aborted")]'
+no_aborted_turn() { session_jq "$1" -e "$aborted_turns_jq"' | length == 0' >/dev/null; }
 # claims_cli ARGS... is `legion claims` from the operator shell, over the operator bearer.
 claims_cli() { "$work/legion" claims "$@" --config "$work/legion.yaml" --operator-token-file "$work/operator-token"; }
 # claim_by_token TOKEN prints the claim TOKEN as `legion claims` shows it, and fails with none.
@@ -953,37 +961,11 @@ bash_legion_commands() {
 # keys a session by the path its file would have had (internal/ompsessions): the session file a
 # claim records is that key, and so is a subagent's <parent's stem>/<id>.jsonl beside it. No pod
 # holds a file at either, so every read of a pod's session goes to the table, through the database
-# container the run started (session_db_container), with no client on the devbox and no input
-# beyond the ones that start it. The operator's controller runs on this machine, outside the sandbox
-# runtime, and keeps its sessions as files in the run's profile, which are read as files.
+# container the run started (session_db_container) with lib/session-db.sh's readers, with no client
+# on the devbox and no input beyond the ones that start it. The operator's controller runs on this
+# machine, outside the sandbox runtime, and keeps its sessions as files in the run's profile, which
+# are read as files.
 
-# session_psql NAME VALUE runs the SQL on stdin in the session database as its owner, legion, with
-# VALUE the psql variable NAME, which the SQL quotes as a literal (:'NAME'), so no value is ever
-# spliced into it; the SQL comes on stdin because psql interpolates no variable into a -c command.
-# The output is unaligned and tuples-only (-A -t): each value exactly as the server sent it, with no
-# padding, wrapping, quoting, escaping, header or row count, so a transcript's quotes, backslashes
-# and newlines arrive as Oh My Pi wrote them, and psql ends the last row with one newline of its own.
-# The aligned default pads and wraps a value of many lines, and COPY's text and CSV formats escape
-# or quote one, so each would corrupt the JSONL. ON_ERROR_STOP makes an SQL error psql's exit status.
-session_psql() {
-  docker exec -i -e PGCLIENTENCODING=UTF8 "$session_db_container" \
-    psql -X -q -A -t -v ON_ERROR_STOP=1 -U legion -d sessions -v "$1=$2"
-}
-# session_text PATH prints the session the table holds at PATH whole, as Oh My Pi reads it and
-# ompsessions.Read does: the row's content, then each of its parts in start_offset order, in one
-# statement so both come from one snapshot. The statement answers one row for a session the table
-# holds and none otherwise, so psql's closing newline is what tells a held session, however short,
-# from none: it is taken off, and none fails naming PATH, as the `cat` of a missing file did. The x
-# after psql's output keeps the substitution from stripping the session's own trailing newlines.
-session_text() {
-  local out
-  out=$(session_psql path "$1" <<<"SELECT f.content || coalesce((SELECT string_agg(p.content, '' ORDER BY p.start_offset)
-    FROM omp_session_files_parts p WHERE p.path = f.path), '') FROM omp_session_files f WHERE f.path = :'path';" && printf x) ||
-    { echo "the session database $session_db_container could not be read for the session $1" >&2; return 1; }
-  out=${out%x}
-  [ -n "$out" ] || { echo "the session database $session_db_container holds no session $1" >&2; return 1; }
-  printf '%s' "${out%$'\n'}"
-}
 # session_copy PREFIX AREA STEM copies every session the table holds under the key prefix PREFIX into
 # the directory STEM of AREA, one of the evidence directories this function names for itself:
 # `transcripts`, `daemon-controller` (transcripts/daemon-controller) or `review-pair`, under
@@ -1012,9 +994,15 @@ session_text() {
 # agent's row cannot cost the run the rest of its transcripts. Any key not copied fails the call at
 # the end, so the caller still sees the loss. The listing gives each key as hex, one line a key even
 # when the key holds a newline, decoded here byte for byte. The directory is made only once the
-# listing holds a key.
+# listing holds a key. Oh My Pi's sql storage creates the session table when it starts
+# (docs/kubernetes.md, "What Oh My Pi creates"; internal/ompsessions), so a database with no session
+# table means no role pod's Oh My Pi ever reached it. Before the daemon has started that is no
+# fault, since every role pod is the daemon's: a note says so, nothing is copied, and the call
+# succeeds. Once the daemon has started, the call cannot tell a role pod not launched yet from one
+# that came up and never reached the database, a fault of the system under test, so it fails,
+# naming the database. An answer to that question that is neither yes nor no fails the call too.
 session_copy() {
-  local prefix=$1 area=$2 stem=$3 LC_ALL=C root hex line path name other dest resolved i lost=
+  local prefix=$1 area=$2 stem=$3 LC_ALL=C root table hex line path name other dest resolved i lost=
   local -a keys=() names=()
   local -A first=() also=()
   case $area in
@@ -1039,6 +1027,20 @@ session_copy() {
     echo "the sessions under $prefix are not copied: their directory $root/$stem resolves to $dest, not directly inside $root" >&2
     return 1
   fi
+  table=$(session_psql table omp_session_files <<<"SELECT to_regclass(:'table') IS NOT NULL;") || return 1
+  case $table in
+    t) ;;
+    f)
+      if [ -z "$daemon_started" ]; then
+        note "transcripts: the session database $session_db_container has no session table and the daemon never started, so no role pod ran and no session under $prefix is copied"
+        return 0
+      fi
+      echo "the sessions under $prefix are not copied: the session database $session_db_container has no session table, so no role pod's Oh My Pi reached it, though the daemon started" >&2
+      return 1 ;;
+    *)
+      echo "the sessions under $prefix are not copied: the session database $session_db_container answered '$table' to whether it has a session table" >&2
+      return 1 ;;
+  esac
   hex=$(session_psql prefix "$prefix" <<<"SELECT encode(convert_to(path, 'UTF8'), 'hex') FROM omp_session_files WHERE left(path, length(:'prefix')) = :'prefix' ORDER BY path;") || return 1
   [ -n "$hex" ] || return 0
   mkdir -p -- "$dest" || return 1
@@ -1111,10 +1113,10 @@ claim_session_text() {
 pair_agents="thermonuclear-deep-review thermonuclear-code-quality"
 # pair_dispatch AGENT reads a reviewer session on stdin and prints what the session holds for AGENT:
 # every task call naming it, the tool result of each call (text, isError, details), the ids its
-# results name for AGENT (details.results — a task call is synchronous with async.enabled off,
-# LEGION-462), and every task-result block naming AGENT the session received, however it arrived:
-# an async-result delivery, or a `wait` result or a `read` of a `proc://` job that recovered it
-# first, neither of which a synchronous call itself needs. A delivery is that block alone, never
+# results name for AGENT (details.results — a task call runs in the background, since
+# async.enabled is the pinned binary's own default), and every task-result block
+# naming AGENT the session received, however it arrived: an async-result delivery, or a `wait`
+# result or a `read` of a `proc://` job that recovered it first. A delivery is that block alone, never
 # the rest of a snapshot, which carries other jobs' output. Nothing else is summarised, so the
 # evidence keeps each failure's text.
 pair_dispatch() {
@@ -1515,6 +1517,7 @@ start_daemon() {
   env -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
     "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- 7>&- &
   daemon_pid=$!
+  daemon_started=1
   timeout_hook=report_boot
   # A daemon that exits (a refused image probe, a config it will not run) ends the wait at once.
   until_true 900 "the Go daemon to boot and answer /healthz" daemon_answers_or_exited
@@ -2561,7 +2564,7 @@ agent_pid() {
 }
 # agent_setting POD ROLE PID DIR KEY prints KEY's value, as JSON, as ROLE's Oh My Pi (PID) reads it
 # in DIR: `omp config get` run under that process's own environment (/proc/PID/environ), the one
-# that carries PI_CONFIG_FILES, so the pod baseline and the operator's overlay rank over DIR's own
+# that carries PI_CONFIG_FILES, so the operator's overlays and the role's own rank over DIR's own
 # .omp/config.yml as they do for the agent (live_operator_test.go reads one key the same way).
 agent_setting() {
   local pod=$1 role=$2 pid=$3 dir=$4 key=$5 script
@@ -2594,11 +2597,13 @@ fixture_markers() {
 # assignment (the daemon's task, a user message) its worker answered with the legion tool's
 # handoff_complete, the calls that got no result, how many results succeeded, and whether the phase
 # stall recorded `closed` after the call that succeeded (the extension records it inside the call,
-# before Oh My Pi writes the result); and how many phase-stall follow-ups came after the session's
+# before Oh My Pi writes the result); and how many phase reminders came after the session's
 # last successful completion. It is the 4b.13b acceptance's stall check
 # (stage3-4b13b-acceptance.sh, phase-stall-follow-up) for a pod's session: a worker
 # stopped while its handoff_complete call runs leaves that call with no result and no `closed`
-# (LEGION-283), and a worker resumed from such a session may report the phase again.
+# (LEGION-283), and a worker resumed from such a session may report the phase again. The reminder
+# comes at the end of every turn a phase stays open through, and none at all once it is closed,
+# which is what the count after the last success reads.
 completion_verdict() {
   jq -R -s -c --arg followup "Your turn ended with your Legion phase still open" '
     [split("\n")[] | fromjson?] | to_entries
@@ -2630,7 +2635,7 @@ completion_verdict() {
 }
 # completions_answered FILE: every assignment its worker answered with handoff_complete got a
 # result for each call, exactly one success (the report, made once), and `closed` after the call
-# that succeeded, and no phase-stall follow-up came after the last success.
+# that succeeded, and no phase reminder came after the last success.
 completions_answered() {
   completion_verdict <"$1" | jq -e '(.segments | length) > 0
     and all(.segments[]; (.unanswered | length) == 0 and .succeeded == 1 and .closed)
@@ -2695,10 +2700,13 @@ remove_run_branches() {
 # fails when session_copy left any out (a key refused or unreadable, each named on stderr) or could
 # not list them, or when the controller's sessions could not be copied, after copying everything
 # else all the same, and cleanup makes that the teardown check `transcripts`, never a note a
-# passing run reads past.
+# passing run reads past. A run stopped before its session database accepted connections
+# (session_db_ready unset: a refusal in prerequisites or preflight, say) ran no role pod, so it has
+# no pod session to copy: a note says so in place of the copy, which could only fail to reach a
+# database that never accepted connections.
 # The pods' transcripts go in a directory of their own because of where, not what: session_copy
-# writes only names that resolve as a direct child of the directory it writes in (:1065-1071, a
-# parent-equality test rather than a prefix one), so a key's derived name can never leave
+# writes only names that resolve as a direct child of the directory it writes in (its `resolved`
+# check, a parent-equality test rather than a prefix one), so a key's derived name can never leave
 # transcripts/pods whatever it derives — controller, daemon-controller and pods among them. The
 # collector's own directories are that directory's siblings, not its parent. Merging them back into
 # one directory would put a pod's derived name and the collector's own paths in one namespace
@@ -2706,10 +2714,14 @@ remove_run_branches() {
 # containment assertion are all about a name's shape and its parent, and none of them knows which
 # names the collector owns. Nor need they know which directory they measure against: session_copy
 # is handed none, but anchors it itself, transcripts/pods here, as a direct child of a root of its
-# own (:1008-1025), so no value a caller derives can move it.
+# own (its checks of STEM and `dest`), so no value a caller derives can move it.
 collect_transcripts() {
   local copied=1
-  session_copy "$pod_sessions_dir/" transcripts pods || copied=
+  if [ -n "$session_db_ready" ]; then
+    session_copy "$pod_sessions_dir/" transcripts pods || copied=
+  else
+    note "transcripts: the run stopped before its session database $session_db_container accepted connections, so no pod kept a session in it and none is copied"
+  fi
   if [ -d "$profile_agent/sessions" ]; then
     if ! { mkdir -p -- "$evidence/transcripts/controller" && cp -R -- "$profile_agent/sessions/." "$evidence/transcripts/controller/"; }; then
       echo "the operator's controller's sessions in $profile_agent/sessions could not all be copied into $evidence/transcripts/controller" >&2
@@ -2725,8 +2737,21 @@ collect_transcripts() {
 remove_negative_config() {
   [ -z "$negative_config_pod" ] || roles_exec "$negative_config_pod" rm -f "$negative_config_workspace/.omp/config.yml"
 }
+# remove_run_container NAME removes the container NAME with its volumes, but only while NAME is
+# this run's own: the container carries run_container_id as its legion.dev/e2e-run label. The two
+# names hold the driver's pid, and a pid the kernel hands out again names an earlier run's
+# container, which may still be serving that run; the label, not the name, says whose it is. A
+# name no container has, a container with no such label and a docker that cannot answer each leave
+# the host as it is.
+remove_run_container() {
+  local name=$1 id owner
+  read -r id owner < <(docker inspect -f "{{.Id}} {{index .Config.Labels \"$run_container_label\"}}" "$name" 2>/dev/null) || return 0
+  [ "$owner" = "$run_container_id" ] || return 0
+  # By id, not by name: between the two calls the name can move to another container.
+  docker rm -f -v "$id" >/dev/null 2>&1 || return 0
+}
 cleanup() {
-  local status=$? p teardown_failed=""
+  local status=$? p exit_status teardown_failed=""
   # A second signal must not cut the teardown short, and a closed output must not end it.
   trap '' HUP INT TERM PIPE
   exec >&7 2>&7
@@ -2769,7 +2794,8 @@ cleanup() {
     fi
   fi
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
-  docker rm -f -v "$pg_container" "$session_db_container" >/dev/null 2>&1
+  remove_run_container "$pg_container"
+  remove_run_container "$session_db_container"
   rm -rf "$work"
   # The notes are for a checkpoint that failed itself: none once ok is set, after a blocked
   # checkpoint, or after a signal (129, 130, 143, as trapped below). Otherwise a failed teardown
@@ -2778,6 +2804,17 @@ cleanup() {
   # failure while done cleans the smoke main (smoke_main_cleaning) is the fixture's teardown, not the
   # workflow under test, and the verdict says so, unless a teardown check failed or a production
   # guard recorded a violation: then the ordinary failure stands.
+  # The status the run exits with is settled before any of it is printed, since the line for a
+  # signal names it: a failed teardown check makes it 1, as it always has, while the verdict below
+  # still reads the status the checkpoints left.
+  exit_status=$status
+  [ -z "$teardown_failed" ] || exit_status=1
+  # A signal is what the run did not choose, and the checkpoint it cut was still running: the line
+  # below says so, above a verdict that would otherwise read as that checkpoint's own failure. Only
+  # a trap sets signalled, so a command of the run that exits 143 or 130 by itself is the failure it
+  # always was.
+  [ -z "$signalled" ] ||
+    echo "stage 4b e2e: $signalled stopped the run (exit $exit_status) while check $check was running: the checkpoint it cut neither failed nor passed, so the run is no verdict on the change, and the checkpoints before it stand"
   if [ -z "$ok" ] && [ -z "$was_blocked" ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
     bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
     if [ -n "$smoke_main_cleaning" ] && [ -z "$teardown_failed" ] && [ ! -s "$evidence/pane-endpoint-violation.txt" ]; then
@@ -2793,14 +2830,13 @@ cleanup() {
     echo "stage 4b e2e: FAIL (check $check)"
   fi
   echo "evidence: $evidence (transcript.log, logs/daemon.log, pod-watch.json, pods/, transcripts/, the namespace snapshots)"
-  [ -z "$teardown_failed" ] || status=1
-  exit "$status"
+  exit "$exit_status"
 }
 trap cleanup EXIT
 trap 'echo "CHECK $check: FAIL: line $LINENO exited $?: $BASH_COMMAND" >&2' ERR
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'signalled=SIGHUP; exit 129' HUP
+trap 'signalled=SIGINT; exit 130' INT
+trap 'signalled=SIGTERM; exit 143' TERM
 
 # ---- the production audit (checkpoint production-audit) --------------------------------------------
 
@@ -3046,6 +3082,38 @@ case "$port_session_db" in
 esac
 [ "$port_session_db" != "$port_daemon" ] && [ "$port_session_db" != "$port_worker_stream" ] ||
   fail "LEGION_E2E_SESSION_DB_PORT $port_session_db is the daemon's API port or its worker stream's: the lane's three ports are three"
+# The development switches are read from the operator's environment alone, against this script and
+# the file a switch names, so they are refused here, above the run's first write anywhere: a
+# mistyped STAGE4B_UNTIL used to reach ensure_project below, which creates the run's project in
+# production Dispatch, before the run refused the value.
+if [ -n "$until" ]; then
+  # A name no checkpoint has would run the whole proof as a development run.
+  grep -qxF -e "begin $until" -e "begin \"$until\"" "$root/scripts/e2e/stage4b-sandbox-tree.sh" ||
+    fail "STAGE4B_UNTIL=$until names no checkpoint of this driver"
+  note "STAGE4B_UNTIL=$until: a development run, never the proof"
+fi
+if [ -n "$skip_controller" ]; then
+  [ -n "$until" ] || fail "STAGE4B_SKIP_CONTROLLER is for a development run: set STAGE4B_UNTIL too"
+  note "STAGE4B_SKIP_CONTROLLER=$skip_controller: controller's checks are skipped; it only takes tree 3 out"
+fi
+if [ -n "$design_gate" ]; then
+  [ "$design_gate" = root-issues ] || fail "STAGE4B_DESIGN_GATE=$design_gate: the one policy it arms is root-issues"
+  [ -n "$until" ] || fail "STAGE4B_DESIGN_GATE is for a development run: set STAGE4B_UNTIL too"
+  # Only tree 1 exists under the switch, so a checkpoint past spec-posted, which drives trees 2 to
+  # 4, cannot run.
+  sed -n '1,/^begin spec-posted$/s/^begin //p' "$root/scripts/e2e/stage4b-sandbox-tree.sh" | grep -qxF "$until" ||
+    fail "STAGE4B_DESIGN_GATE runs tree 1 alone, so STAGE4B_UNTIL must be spec-posted or a checkpoint before it, not $until"
+  note "STAGE4B_DESIGN_GATE=$design_gate: the design gate is armed and tree 1 runs alone"
+fi
+if [ -n "$pod_file" ]; then
+  # The run's every pod carries the deployment's block, and the checkpoints after this one rely on
+  # the operator route's pod (its token audience, its route ConfigMap), so the run stops here.
+  [ "$until" = deployment-pod-block ] || fail "LEGION_E2E_POD_FILE is for a development run stopped at it: set STAGE4B_UNTIL=deployment-pod-block"
+  jq -e 'type == "object" and ((.volumes // []) | type == "array") and ((.volume_mounts // []) | type == "array") and ((.env // {}) | type == "object")' "$pod_file" >/dev/null 2>&1 ||
+    fail "LEGION_E2E_POD_FILE=$pod_file is not a JSON object with volumes, volume_mounts and env in runtime.kubernetes.pod's shape"
+  jq -cS . "$pod_file" >"$pod_block" || fail "could not copy LEGION_E2E_POD_FILE=$pod_file into the run"
+  note "LEGION_E2E_POD_FILE=$pod_file: the run's pods carry that block, copied into the run as $pod_block (sha256 $(sha256sum "$pod_block" | cut -d' ' -f1); service account $(jq -r '.service_account // "the namespace default"' "$pod_block"), $(jq '.volumes // [] | length' "$pod_block") volumes)"
+fi
 # The production services, each a fully-qualified host (a bare alias resolves through whatever
 # search domain the box or the pod has) and no path. A refusal names the variable, never its value.
 fqdn='[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+'
@@ -3140,34 +3208,6 @@ jq -n --arg revision "$revision" --arg image "$image" \
   --arg started "$(date -u +%FT%TZ)" '{revision: $revision, image: $image, plugins: {envoy: $envoy, legion: $legion}, started: $started}' >"$evidence/run.json"
 note "source $revision; image $image; plugins $(jq -r '.plugins.envoy + " and " + .plugins.legion' "$evidence/run.json")"
 note "daemon bind $bind, advertise_host $host: API http://$host:$port_daemon, worker stream tcp://$host:$port_worker_stream; runtime identity context $runtime_context in $runtime_kubeconfig; operator context $operator"
-if [ -n "$until" ]; then
-  # A name no checkpoint has would run the whole proof as a development run.
-  grep -qxF -e "begin $until" -e "begin \"$until\"" "$root/scripts/e2e/stage4b-sandbox-tree.sh" ||
-    fail "STAGE4B_UNTIL=$until names no checkpoint of this driver"
-  note "STAGE4B_UNTIL=$until: a development run, never the proof"
-fi
-if [ -n "$skip_controller" ]; then
-  [ -n "$until" ] || fail "STAGE4B_SKIP_CONTROLLER is for a development run: set STAGE4B_UNTIL too"
-  note "STAGE4B_SKIP_CONTROLLER=$skip_controller: controller's checks are skipped; it only takes tree 3 out"
-fi
-if [ -n "$design_gate" ]; then
-  [ "$design_gate" = root-issues ] || fail "STAGE4B_DESIGN_GATE=$design_gate: the one policy it arms is root-issues"
-  [ -n "$until" ] || fail "STAGE4B_DESIGN_GATE is for a development run: set STAGE4B_UNTIL too"
-  # Only tree 1 exists under the switch, so a checkpoint past spec-posted, which drives trees 2 to
-  # 4, cannot run.
-  sed -n '1,/^begin spec-posted$/s/^begin //p' "$root/scripts/e2e/stage4b-sandbox-tree.sh" | grep -qxF "$until" ||
-    fail "STAGE4B_DESIGN_GATE runs tree 1 alone, so STAGE4B_UNTIL must be spec-posted or a checkpoint before it, not $until"
-  note "STAGE4B_DESIGN_GATE=$design_gate: the design gate is armed and tree 1 runs alone"
-fi
-if [ -n "$pod_file" ]; then
-  # The run's every pod carries the deployment's block, and the checkpoints after this one rely on
-  # the operator route's pod (its token audience, its route ConfigMap), so the run stops here.
-  [ "$until" = deployment-pod-block ] || fail "LEGION_E2E_POD_FILE is for a development run stopped at it: set STAGE4B_UNTIL=deployment-pod-block"
-  jq -e 'type == "object" and ((.volumes // []) | type == "array") and ((.volume_mounts // []) | type == "array") and ((.env // {}) | type == "object")' "$pod_file" >/dev/null 2>&1 ||
-    fail "LEGION_E2E_POD_FILE=$pod_file is not a JSON object with volumes, volume_mounts and env in runtime.kubernetes.pod's shape"
-  jq -cS . "$pod_file" >"$pod_block" || fail "could not copy LEGION_E2E_POD_FILE=$pod_file into the run"
-  note "LEGION_E2E_POD_FILE=$pod_file: the run's pods carry that block, copied into the run as $pod_block (sha256 $(sha256sum "$pod_block" | cut -d' ' -f1); service account $(jq -r '.service_account // "the namespace default"' "$pod_block"), $(jq '.volumes // [] | length' "$pod_block") volumes)"
-fi
 read_bearers
 pass
 
@@ -3188,6 +3228,7 @@ note "[operator] CRD sandboxes.agents.x-k8s.io installed; NodePool legion floor 
 # The run needs run_pods_at_once pods placed at once (tree 1's root and its two children beside tree
 # 2's root), each holding the issue pod reservation; whatever already runs on the pool's nodes,
 # of any namespace, counts against it, as does what the pool's limits already hold.
+preflight_issue_pod_reservation
 room=$(pool_pod_room) || blocked "the operator context could not read the legion NodePool, its nodes or the cluster's pods"
 pod_reservation=$(jq -r '"\(.pod.cpu) CPU, \(.pod.memory / 1073741824) GiB"' <<<"$room")
 note "[operator] legion pool room for the run's pods ($pod_reservation each, an issue pod under this run's reservations): $(jq -c '{room, new_pods, free_nodes: [.free_nodes[] | {node, fits, free: {cpu: .free.cpu, memoryGiB: (.free.memory / 1073741824 * 100 | floor / 100)}}]}' <<<"$room")"
@@ -3315,30 +3356,19 @@ while IFS= read -r line; do note "$line"; done <<<"$built"
 # The build's source is the run's recorded source, or the tree changed between the two.
 [ "$(sed -n 's/^source: //p' <<<"$built")" = "$(jq -r .revision "$evidence/run.json")" ] ||
   fail "the tree changed between prerequisites ($(jq -r .revision "$evidence/run.json")) and the build ($(sed -n 's/^source: //p' <<<"$built"))"
-docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$pg_container" --label "$run_container_label=$run_container_id" \
+  --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=legion \
-  -p "127.0.0.1::5432" postgres:16 >/dev/null
+  -p "127.0.0.1::5432" mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4 >/dev/null
 port_pg=$(docker port "$pg_container" 5432/tcp | sed -n '1s/.*://p')
 until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d legion
-# The run's session database, a second throwaway Postgres: every pod's Oh My Pi keeps its session
-# in it (session_store postgres: the daemon requires a store that keeps sessions in a database), so
-# a role's conversation outlives the issue pod whose disk dies with it. It is its own container and
-# its own credential, never the daemon's own database above: that one holds the daemon's state, and
-# its URL reaches every pod through the providers Secret, which no pod may be given a way into. It
-# binds the devbox's private address, not loopback, since the pods dial it as they dial the worker
-# stream; its password reaches docker through an owner-only env file, never an argument, and its URL
-# is written only to an owner-only file the providers Secret reads, and is never printed.
-session_db_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
-(
-  umask 077
-  printf 'POSTGRES_USER=legion\nPOSTGRES_DB=sessions\nPOSTGRES_PASSWORD=%s\n' "$session_db_password" >"$work/session-db.env"
-  printf 'postgres://legion:%s@%s:%s/sessions?sslmode=disable\n' "$session_db_password" "$host" "$port_session_db" >"$work/session-dsn"
-)
-unset session_db_password
-docker run -d --name "$session_db_container" --cpus 2 --memory 4g --mount type=tmpfs,destination=/var/lib/postgresql \
-  --env-file "$work/session-db.env" -p "$host:$port_session_db:5432" "$session_db_image" >/dev/null ||
-  fail "docker could not start the scratch session database $session_db_container on $host:$port_session_db"
-until_true 60 "the session database to accept TCP connections" docker exec "$session_db_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d sessions
+# The run's session database (lib/session-db.sh's session_db_start), a second throwaway Postgres:
+# every pod's Oh My Pi keeps its session in it (session_store postgres: the daemon requires a store
+# that keeps sessions in a database), so a role's conversation outlives the issue pod whose disk
+# dies with it. It binds the devbox's private address, not loopback, since the pods dial it as they
+# dial the worker stream.
+session_db_start "$host" --cpus 2 --memory 4g --label "$run_container_label=$run_container_id"
+session_db_ready=1
 note "container $session_db_container: database sessions on $host:$port_session_db ($session_db_image), which every pod reads through the providers Secret's $session_dsn_key (the URL is in an owner-only file, not printed)"
 mkdir -p "$state"
 cat >"$work/instructions.md" <<'EOF'
@@ -3557,8 +3587,8 @@ gate_open() {
 # "Approve <name> (version N)?", a human answered at least one of the spec's decision blocks, and no
 # approval request it made on the spec named a version holding one open or came before a human
 # answered one raised before the human's turn on that request. While the root waits on the human (a
-# question, or a closed gate it registered) it is in awaiting_person without a slot and its
-# architect is suspended; the approval answers it, and nothing of its tree advances until it holds a
+# question, or a closed gate it registered) it is in awaiting_person without a slot while its
+# architect stays live; the approval answers it, and nothing of its tree advances until it holds a
 # slot again. Tree 1 is the run's one root under admission_cap 2, so a slot stands free for it.
 drive_gated_spec() {
   local issue=$1 artifact approved asks events version verdict request early blocks requested_versions waits
@@ -4458,89 +4488,86 @@ grep -q GH_TOKEN "$evidence/github-credential-negative.txt" || fail "gh with GH_
 note "in $gh_pod the implementer's gh ($gh_bin, GH_CONFIG_DIR=$gh_config_dir) is $implement_app and the reviewer's $review_app from different hosts.yml files, each role's namespaces seeing its own gh-<role> copy and an empty roles directory, no grant file or App login is in the environment; the implementer's subagent answered $implement_app with no legion command, and its own bash ran jj undo --help; GitHub records the planner's handoff commit $plan_head as $review_app's (skip-checks: true, 0 check runs) and the implementer's head $pr_head as $implement_app's, its code head $code_head with check runs; the daemon recorded both heads as the completions"
 pass
 
-begin ci-red-takeover
+begin ci-red-no-takeover
 # CI settling red while the tester is in its turn takes the phase back without the tester's
-# completion (workflow's TriggerChecksRed). The tester runs a command that writes a file once its
-# sleep ends; the proof human commits .fail-me to the pull request's branch, and the smoke
+# completion (workflow's TriggerChecksRed) and takes nothing else: the implementer's start acts at
+# once and waits for nobody, and the tester keeps its turn, its background job, its process and
+# its session: the daemon takes no turn over, waits for no outgoing turn, and its RPC carries no
+# abort frame. The tester starts a job that writes a witness file once a ten-minute sleep ends and
+# waits for it; the proof human commits .fail-me to the pull request's branch, and the smoke
 # repository's fail-on-demand check fails on that head. The daemon moves tree 1 back to
-# implementing and interrupts the tester's turn: the command's process ends and its file is never
-# written, the tester stays live on its session in its first pod, and the implementer's start,
-# held meanwhile, acts and hands the implementer its task only once that turn is over
-# (supervise.Machine.Quiesce). The control: the same command with a shorter sleep, which nothing
-# interrupts, writes its file.
+# implementing and hands the implementer its task while that sleep is still in the tester's
+# process list and the witness file is absent; nothing aborted the tester's turn; the tester is
+# told its phase ended by one message on its own role topic, which is also what ends the `wait` it
+# is in; and its job runs on, so the witness file appears after all. The control: the same chain
+# with a twenty-second sleep, run before the red, which writes its file.
 #
-# A long bash call here depends on podsafety/turnscope.yml's bash.autoBackground.enabled: false
-# (LEGION-462). Oh My Pi backgrounds a bash call left running past its own threshold under
-# `--mode rpc` by default, and a backgrounded call is a job the turn-level abort no longer reaches:
-# the abort still lands, on the `wait` tool call the agent is told to use while the job runs, but
-# the job underneath a `wait` keeps running regardless, to its own completion, since a background
-# job outlives the turn that started it. 80d0c82b ran this check before the overlay's setting
-# existed and found exactly that: its witness's `/usr/bin/sleep 1207` backgrounded at 60.006s
-# (stage4b-80d0c82b.log), and the command was still running after the daemon's interrupt. With
-# the setting in place, the one bash call this witness makes never backgrounds, so the abort that
-# ends the turn ends it too, and this check proves the guarantee directly rather than routing
-# around how it could fail.
+# The witness is a background job because that is what a long bash call is: with
+# `bash.autoBackground.enabled` the pinned binary's own default (nothing of Legion's turns it
+# off), Oh My Pi backgrounds a bash call left running past its own threshold under
+# `--mode rpc` and hands the agent a job to `wait` on. A background job outlives the turn that
+# started it, so the witness file is the proof that the role's work was left alone.
 tester_pod=$(claim_sandbox "$tree1" tester) || fail "tree 1's tester has no Sandbox"
-witness=/tmp/stage4b-takeover-witness control=/tmp/stage4b-takeover-control
+witness=/tmp/stage4b-ci-red-witness control=/tmp/stage4b-ci-red-control
 send_agent "$tree1" tester "Stage 4b proof control operation: run exactly this as one bash tool call, with the tool's timeout at least 1800 seconds, and change nothing else: /usr/bin/sleep 20 && date -u +%FT%TZ > $control && echo CONTROL-WRITTEN. Then reply WAITING and wait for the next targeted message."
 on_tree "$tree1" until_true 300 "the tester's control command to write $control" pod_file "$tester_pod" tester "$control"
 on_tree "$tree1" until_true 300 "tree 1's tester to go idle after the control" resident_idle "$tree1" tester
-note "the control: the tester's uninterrupted /usr/bin/sleep 20 chain wrote $control in pod $tester_pod"
-send_agent "$tree1" tester "Stage 4b proof witness operation: run exactly this as one bash tool call, with the tool's timeout at least 1800 seconds, and change nothing else: /usr/bin/sleep 1207 && date -u +%FT%TZ > $witness && echo WITNESS-WRITTEN. Wait for it to finish."
-on_tree "$tree1" until_true 300 "the tester's witness command to run in its pod" pod_runs "$tester_pod" tester "/usr/bin/sleep 1207"
-issue_worker_state "$tree1" tester working || fail "the tester runs its witness command while its claim is $(claim_view "$tree1" tester | jq -c .state), not working"
-# fail_me_at is taken before the commit, not derived from a log line: the negative control below
-# needs a timestamp that can never be null (takeover_interrupted can be absent — see the comment
-# above takeover_lines) and is unconditionally before the turn could possibly be over, since CI
-# only reads red once this commit lands.
-fail_me_at=$(date -u +%FT%TZ)
-fail_me=$(jq -cn --arg branch "legion/$tree1" --arg content "$(printf 'Stage 4b CI-red takeover\n' | base64 -w0)" \
+note "the control: the tester's /usr/bin/sleep 20 chain wrote $control in pod $tester_pod"
+send_agent "$tree1" tester "Stage 4b proof witness operation: run exactly this as one bash tool call, with the tool's timeout at least 1800 seconds, and change nothing else: /usr/bin/sleep 600 && date -u +%FT%TZ > $witness && echo WITNESS-WRITTEN. Oh My Pi will background the call once it outruns its own threshold; wait for that job with the wait tool until it is done, and reply WITNESS-WRITTEN then."
+on_tree "$tree1" until_true 300 "the tester's witness job to run in its pod" pod_runs "$tester_pod" tester "/usr/bin/sleep 600"
+issue_worker_state "$tree1" tester working || fail "the tester runs its witness job while its claim is $(claim_view "$tree1" tester | jq -c .state), not working"
+fail_me=$(jq -cn --arg branch "legion/$tree1" --arg content "$(printf 'Stage 4b CI red\n' | base64 -w0)" \
   '{message: "Stage 4b proof: fail-on-demand", content: $content, branch: $branch}' |
   timeout 60 gh api --method PUT "repos/$repo/contents/.fail-me" --input - --jq .commit.sha) ||
   fail "the proof human could not commit .fail-me to legion/$tree1"
-note "the proof human committed .fail-me to legion/$tree1 as $fail_me while the tester's witness command ran"
+note "the proof human committed .fail-me to legion/$tree1 as $fail_me while the tester's witness job ran"
 on_tree "$tree1" wait_for_phase "$tree1" implementing 900
-on_tree "$tree1" until_true 120 "tree 1's interrupted tester to go idle on its session in its first pod" resident_idle "$tree1" tester
-# The witness is asserted gone from a list read whole: `! pod_runs` would take a list that could
-# not be read for one with no witness on it.
-witness_commands=$(pod_commands "$tester_pod" tester) || fail "the tester's container's process list could not be read after its turn was interrupted"
-! grep -qF -- "/usr/bin/sleep 1207" <<<"$witness_commands" || fail "the tester's witness command still runs after its turn was interrupted"
-! pod_file "$tester_pod" tester "$witness" || fail "the tester's interrupted witness command wrote $witness"
-# The row that held the implementer's start: the tester's own "the interrupted turn is over"
-# (takeover_over), logged whenever a start was genuinely held for this claim's turn, not the
-# outbox's "outbox row waits" line (which this same event can log only at DEBUG) nor
-# takeover_interrupted (which can be absent entirely — see the comment above takeover_lines).
-takeover_row=$(jq -R -c --arg tester "$(claim_token "$tree1" tester)" --arg over "$takeover_over" \
-  'fromjson? | select(.msg == $over and .claim == $tester) | .row' "$daemon_log" |
-  jq -s -r 'last // empty')
-[ -n "$takeover_row" ] || fail "the daemon log holds no implementer start of $tree1 held for the tester's turn"
+# The start acting is read where production reads it: the daemon's own record that the implementer
+# took the red's task — its claim working on a delivery of the implementing phase it has confirmed
+# — and the task in its session. The tester's process list and its witness file are read in the
+# same breath, so what they say is what held while the start acted.
+on_tree "$tree1" until_true 900 "the implementer to be in a turn of the task the red handed it" ci_red_task_taken "$tree1"
 on_tree "$tree1" until_true 300 "the implementer's CI-red task to reach its session" session_contains "$tree1" implementer "Reason: CI is red at"
-task_at=$(claim_session_text "$tree1" implementer | jq -R -s -r '[split("\n")[] | fromjson? |
-  select(.type == "message" and .message.role == "user" and (tostring | contains("Reason: CI is red at"))) | .timestamp] | first // empty')
-[ -n "$task_at" ] || fail "the implementer's session holds no CI-red task"
-takeover_lines "$takeover_row" "$(claim_token "$tree1" tester)" >"$evidence/ci-red-takeover-log.jsonl"
-takeover_ordered "$evidence/ci-red-takeover-log.jsonl" "$task_at" ||
-  fail "the takeover's order does not hold: the tester's turn interrupted and over before the implementer's start went on and its task arrived at $task_at ($evidence/ci-red-takeover-log.jsonl)"
-# The control: the implementer's task arriving before the tester's turn was interrupted (or, where
-# that never logged — the comment above takeover_lines names the race — before the .fail-me commit
-# that starts the takeover) fails the order. The interrupt time is the tighter control (real runs
-# put it 0.1 to 1.4ms before the turn being over, fail_me_at seconds before); fail_me_at only
-# stands in when the row has no interrupt line to read, so the control never reads a null.
-control_at=$(jq -s -r --arg m "$takeover_interrupted" '[.[] | select(.msg == $m) | .time] | first // empty' "$evidence/ci-red-takeover-log.jsonl")
-[ -n "$control_at" ] || control_at=$fail_me_at
-expect_failure takeover-task-before-turn-over takeover_ordered "$evidence/ci-red-takeover-log.jsonl" "$control_at"
-note "start row $takeover_row was held, the tester's turn interrupted and over, and only then did the start go on; the implementer's task reached it at $task_at ($evidence/ci-red-takeover-log.jsonl); no witness, the tester idle in its first pod"
+witness_commands=$(pod_commands "$tester_pod" tester) || fail "the tester's container's process list could not be read while the implementer took its task"
+grep -qF -- "/usr/bin/sleep 600" <<<"$witness_commands" ||
+  fail "the tester's witness job is gone from its pod's process list while the implementer takes its task: the red stopped work it must leave alone"
+! pod_file "$tester_pod" tester "$witness" ||
+  fail "the tester's witness file $witness was written before the implementer took its task, so its absence proves nothing of the red"
+note "the implementer is in a turn of the red's task ($(claim_view "$tree1" implementer | jq -c '{state, pending: {phase: .pending.phase, confirmedAt: .pending.confirmedAt}}')) while the tester's /usr/bin/sleep 600 still runs in $tester_pod and $witness is absent"
+# The tester's turn was not taken over: no turn of its session was aborted, its claim is still the
+# one it registered with in its first pod, and nothing suspended it.
+tester_session=$evidence/ci-red-tester-session.jsonl
+claim_session_text "$tree1" tester >"$tester_session" || fail "tree 1's tester has no readable session"
+no_aborted_turn "$tester_session" ||
+  fail "tree 1's tester holds an aborted turn: $(session_jq "$tester_session" -c "$aborted_turns_jq") ($tester_session)"
+resident_kept "$tree1" tester || fail "tree 1's tester lost its first process or session across the red: $(resident_lost "$tree1" tester)"
+note "the tester's session holds no aborted turn and its claim is the one it registered with ($tester_session)"
+# The role the red left with no phase is told so on its own Envoy role topic, which is also what
+# ends the `wait` it is in (record.PhaseEnded, the outbox's role-message lane).
+on_tree "$tree1" until_true 600 "the phase-ended message to reach tree 1's tester" \
+  session_contains "$tree1" tester "CI went red, so your testing phase has ended"
+note "the tester was told on its own role topic: $(claim_session_text "$tree1" tester | grep -o 'CI went red, so your testing phase has ended[^"]*' | head -n 1)"
+# The negative control mutates the evidence alone: the same reader over a copy of the tester's
+# session with one aborted assistant turn appended must refuse it, so the pass above is the
+# session's own and not a reader that never looks.
+cp "$tester_session" "$evidence/ci-red-tester-session-aborted.jsonl"
+jq -cn '{type: "message", timestamp: "2026-01-01T00:00:00.000Z", message: {role: "assistant", stopReason: "aborted", errorMessage: "Interrupted by user", content: []}}' \
+  >>"$evidence/ci-red-tester-session-aborted.jsonl"
+expect_failure ci-red-aborted-turn no_aborted_turn "$evidence/ci-red-tester-session-aborted.jsonl"
+# The job the red left alone finishes, so the file its chain writes appears: the whole of what the
+# tester was doing survived the phase it lost.
+on_tree "$tree1" until_true 900 "the tester's witness job to write $witness" pod_file "$tester_pod" tester "$witness"
+note "the tester's witness job ran on and wrote $witness: the red took the phase, not the turn, the job, the process or the session"
 send_agent "$tree1" implementer "Stage 4b proof CI-red operation: CI on pull request #$pr_number is red because the proof committed the file .fail-me to legion/$tree1, which the smoke repository's fail-on-demand check fails on. Fetch the branch, start a new change on top of legion/$tree1@origin, delete .fail-me and change nothing else, commit it and push the issue branch (\`jj bookmark set legion/$tree1 -r @- && jj git push --bookmark legion/$tree1\`), record the required implementation handoff, then call the legion tool's handoff_complete. Do not merge."
 on_tree "$tree1" wait_for_phase "$tree1" testing 1800
 on_tree "$tree1" until_true 300 "tree 1's tester to be handed testing again in its first pod and session" resident_kept "$tree1" tester
-! pod_file "$tester_pod" tester "$witness" || fail "the tester's interrupted witness command wrote $witness after all"
-note "the implementer removed .fail-me and $tree1 is back in testing; the tester, in its first pod and session, still never wrote $witness"
+note "the implementer removed .fail-me and $tree1 is back in testing; the tester is in its first pod and session, the one it held through the red"
 pass
 
 begin tree-reviewed
 send_agent "$tree1" tester "Stage 4b proof test operation: inspect the implementer's actual one-file change and pull request #$pr_number, run a focused observable check, record the required test handoff with verdict pass, then call the legion tool's handoff_complete with verdict pass."
 on_tree "$tree1" wait_for_phase "$tree1" reviewing 1200
-# The daemon's checks-red move back (ci-red-takeover, Testing → Implementing) counted the
+# The daemon's checks-red move back (ci-red-no-takeover, Testing → Implementing) counted the
 # implementer a round, as every move back does since #1850 (workflow/engine.go movesBack →
 # recordRound), so tree 1 stands at round 1 here and at round 2 once the review below requests
 # changes; `round_line 1` and `round_correction_pushed 1` below label the proof's correction, not
@@ -5448,9 +5475,12 @@ grep -qF "[legion] the controller's gh acts as the review App for owners ${gh_co
 note "the operator-launched controller's gh: pull request state $state, viewer $viewer from $controller_gh; GH_CONFIG_DIR=/nonexistent failed; controller.stderr names the review App and its owners; github-credential.log exists"
 # The controller's first turn starts itself (LEGION-392): nothing is ever typed into its pane, so
 # its session's first user message is the start message `legion controller start` carries as
-# LEGION_CONTROLLER_START_MESSAGE (daemon.ControllerStartMessage, internal/daemon/controller.go) and
-# the pi-legion extension sends right after its role claim, before it opens the live wake
-# subscription a tick could race it on (controller-session.ts `claim`); the model answers it.
+# LEGION_CONTROLLER_START_MESSAGE (daemon.ControllerStartMessage, internal/daemon/controller.go),
+# which pi-legion's `/legion-controller-start` (daemon.ControllerStartCommand, the word the command
+# puts on Oh My Pi's command line) sends once Oh My Pi's startup is over: that command claims the
+# controller and sends it once registered, right before the role claim and the live wake
+# subscription a tick could race it on (controller-session.ts `claim`, `startCommand`); the model
+# answers it.
 controller_started_itself() {
   local file
   for file in "$profile_agent/sessions"/*/*.jsonl; do

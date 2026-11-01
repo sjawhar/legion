@@ -70,6 +70,13 @@ func (m *Memory) Watches(sessionID string) int {
 	return m.watchSeen[sessionID]
 }
 
+// Viewers reports how many viewers are subscribed to sessionID's frames now.
+func (m *Memory) Viewers(sessionID string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.viewers[sessionID])
+}
+
 // SetReplay is what a session would answer a replay request with. Answering at all makes it a
 // responder, exactly as a running session with a streaming plugin is.
 func (m *Memory) SetReplay(sessionID string, frame Frame) {
@@ -104,10 +111,10 @@ func (m *Memory) Publish(sessionID string, frame Frame) {
 	}
 }
 
-// Drop ends every viewer's stream for sessionID, as a connection lost on the way to the browser
-// does. The relay's viewer reads a nil frame as the relay ending its stream
-// (api/agent_stream.go), which a session's own frame never is: a browser rebuilds its transcript
-// only from a reconnect's replay, so this is how the e2e suite gets a second one.
+// Drop ends every viewer's subscription for sessionID, as a connection lost on the way to the
+// browser does. The relay's viewer reads a nil frame as the relay ending it (api/live_agent.go),
+// which a session's own frame never is: a page rebuilds its transcript only from a new
+// subscription's replay, so this is how the e2e suite gets a second one.
 func (m *Memory) Drop(sessionID string) {
 	m.Publish(sessionID, nil)
 }

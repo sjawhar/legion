@@ -9,6 +9,11 @@
       "bun": "./src/askgate-marker.ts",
       "default": "./dist/askgate-marker.js"
     },
+    "./askgate-new-asks": {
+      "types": "./src/askgate-new-asks.ts",
+      "bun": "./src/askgate-new-asks.ts",
+      "default": "./dist/askgate-new-asks.js"
+    },
     "./delivery": {
       "types": "./src/delivery.ts",
       "bun": "./src/delivery.ts",
@@ -48,6 +53,11 @@
       "types": "./src/dispatch-subscribe.ts",
       "bun": "./src/dispatch-subscribe.ts",
       "default": "./dist/dispatch-subscribe.js"
+    },
+    "./dispatch-session-directory": {
+      "types": "./src/dispatch-session-directory.ts",
+      "bun": "./src/dispatch-session-directory.ts",
+      "default": "./dist/dispatch-session-directory.js"
     },
     "./dispatch-session-state": {
       "types": "./src/dispatch-session-state.ts",
@@ -89,10 +99,10 @@
       "bun": "./src/machine.ts",
       "default": "./dist/machine.js"
     },
-    "./nats-auth": {
-      "types": "./src/nats-auth.ts",
-      "bun": "./src/nats-auth.ts",
-      "default": "./dist/nats-auth.js"
+    "./nats-connection": {
+      "types": "./src/nats-connection.ts",
+      "bun": "./src/nats-connection.ts",
+      "default": "./dist/nats-connection.js"
     },
     "./replay": {
       "types": "./src/replay.ts",
@@ -104,6 +114,11 @@
       "bun": "./src/secret-file.ts",
       "default": "./dist/secret-file.js"
     },
+    "./session-answers": {
+      "types": "./src/session-answers.ts",
+      "bun": "./src/session-answers.ts",
+      "default": "./dist/session-answers.js"
+    },
     "./session-settings": {
       "types": "./src/session-settings.ts",
       "bun": "./src/session-settings.ts",
@@ -113,6 +128,18 @@
       "types": "./src/slack-post.ts",
       "bun": "./src/slack-post.ts",
       "default": "./dist/slack-post.js"
+    },
+    "./test/envoy-stack": {
+      "types": "./test/envoy-stack.ts",
+      "bun": "./test/envoy-stack.ts"
+    },
+    "./test/stall-proxy": {
+      "types": "./test/stall-proxy.ts",
+      "bun": "./test/stall-proxy.ts"
+    },
+    "./test/stall-scenario": {
+      "types": "./test/stall-scenario.ts",
+      "bun": "./test/stall-scenario.ts"
     },
     "./tool-contract": {
       "types": "./src/tool-contract.ts",
@@ -126,10 +153,10 @@
     }
   },
   "scripts": {
-    "build": "bun build src/askgate-marker.ts src/delivery.ts src/dispatch-cli.ts src/dispatch-command.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-first.ts src/dispatch-http.ts src/dispatch-picture-tools.ts src/dispatch-pictures.ts src/dispatch-session-state.ts src/dispatch-subscribe.ts src/envoy-config.ts src/envoy-settings.ts src/errors.ts src/machine.ts src/nats-auth.ts src/replay.ts src/secret-file.ts src/session-settings.ts src/slack-post.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/askgate-marker.ts src/askgate-new-asks.ts src/delivery.ts src/dispatch-cli.ts src/dispatch-command.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-first.ts src/dispatch-http.ts src/dispatch-picture-tools.ts src/dispatch-pictures.ts src/dispatch-session-directory.ts src/dispatch-session-state.ts src/dispatch-subscribe.ts src/envoy-config.ts src/envoy-settings.ts src/errors.ts src/machine.ts src/nats-connection.ts src/replay.ts src/secret-file.ts src/session-answers.ts src/session-settings.ts src/slack-post.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
-    "lint": "bunx biome check src/ bin/"
+    "lint": "bunx biome check src/ bin/ test/"
   },
   "dependencies": {
     "@legion/contracts": "workspace:*",

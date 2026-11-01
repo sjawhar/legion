@@ -79,7 +79,7 @@ func TestARestartStillHearsAnUnmappedRepositoryInGitHubsSpelling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := intake.OpenConsumers(ctx, js, intake.ConsumerSpec{Project: "LEGION", Repositories: heard, Logger: quietLogger()}); err != nil {
+	if _, err := intake.OpenConsumers(ctx, js, pool, intake.ConsumerSpec{Project: "LEGION", Repositories: heard, Logger: quietLogger()}); err != nil {
 		t.Fatal(err)
 	}
 	if filters := githubFilterSubjects(t, stream); !slices.Contains(filters, "notifications.github.Acme.Widgets.>") {

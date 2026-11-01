@@ -14,14 +14,17 @@ import (
 // list to those constants: ompsessions imports this package, so it cannot name them here.
 var sessionPlacing = []string{"OMP_SESSION_SQL_DSN", "OMP_SESSION_SQL_DSN_FILE", "OMP_SESSION_STORAGE", "PI_CODING_AGENT_DIR", "PI_CONFIG_DIR"}
 
-// ClaudeConfigDirVariable is the variable the tmux runtime names a Claude Code pane's own
-// configuration directory in: the claim's session transcripts, MCP configuration and bridge state
-// (tmux.ClaudeConfigDir).
+// ClaudeConfigDirVariable is the variable a Claude Code worker's own configuration directory is
+// named in, under either runtime (claudelaunch.Environment): the claim's session transcripts, MCP
+// configuration and bridge state (tmux.ClaudeConfigDir).
 const ClaudeConfigDirVariable = "CLAUDE_CONFIG_DIR"
 
-// ClaudeDisabledFeatures are the variables the tmux runtime sets to 1 on every Claude Code pane to
-// turn off what would run after a turn's end unseen: background tasks and scheduled prompts.
-var ClaudeDisabledFeatures = []string{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "CLAUDE_CODE_DISABLE_CRON"}
+// ClaudeDisabledFeatures are the variables every Claude Code worker carries set to 1, under either
+// runtime (claudelaunch.Environment), to turn off what would start a turn no task of the daemon's
+// asked for and nothing would read: scheduled prompts. Background tasks are on, and a task that
+// finishes while no turn runs wakes Claude Code into a turn of its own, which the bridge tells the
+// daemon of like any other (internal/claudebridge).
+var ClaudeDisabledFeatures = []string{"CLAUDE_CODE_DISABLE_CRON"}
 
 // launchSecrets are every secret the daemon hands a launch in its spec (daemon.launchSecrets: the
 // Envoy bearer and the pane NATS nkey seed, each when the daemon has one), which a runtime gives

@@ -56,6 +56,37 @@ on an open issue instead; it is then posted on that issue as a comment that ment
 
 Press `Ctrl+Enter` (`⌘Enter` on a Mac) to send.
 
+A message straight to the agent that Dispatch has not confirmed after 30 seconds says **Still
+sending — Dispatch has not confirmed it yet. It keeps trying, and the message is delivered once.**
+The page keeps sending it under one key, so however many tries reach Dispatch, the agent gets the
+message once, and it keeps trying while your connection is down as well. When your connection or
+Dispatch comes back, it tries again at once. **Stop trying** ends the tries: the message comes back
+with **Retry**, which sends it again under the same key, and **Discard**, which drops it. Dispatch
+keeps a key for 24 hours from the first try, so a Retry within that is still delivered at most once,
+and a later one is a new message and may be delivered twice; the message says so. A message
+belongs to the agent, not to the page you sent it from: it keeps going when you close the row or
+leave the live view. Each message sent from the live view shows as its own turn, on the live view
+and on the agent's row alike, until Dispatch makes it, and **Retry**, **Discard** and **Stop
+trying** on either act on the same message; one sent from the row's own box stays in that box
+until Dispatch answers. Your messages to one agent go out in the order you sent them: one still
+being tried holds back the ones after it, one that is refused or stopped does not, and its
+**Retry** sends it after them. A message waiting behind an earlier one that has not gone out yet
+reads **Waiting to send**, with **Discard**, which drops it before anything is sent. Every message
+survives a reload of the tab, in the order you sent them. While any message is unconfirmed, the
+browser asks you to confirm before you leave or reload the page.
+
+A message a reload brings back is yours alone, and only for a while. It belongs to the person who
+pressed it: if someone else signs in at that browser, in this tab or another, it is dropped unsent.
+If your sign-in lapses, nothing is lost: the page stops trying, keeps every message, lists them on
+the sign-in page, and sends them on once you sign in again. Signing out asks first — **Sign out and
+discard 2 unsent changes?**, each one listed, your other Dispatch tabs' among them — and drops them
+in every tab only once you confirm and Dispatch has signed you out; nothing is sent meanwhile, and a
+sign-out that fails leaves every message where it was. And a tab reopened more than five
+minutes later does not send it behind your back — it comes back as **Not sent: this page was closed
+before Dispatch confirmed it. Retry asks again under the same key, so it is delivered at most once
+if you retry within 24 hours of the first try. After that Dispatch no longer knows the key: a Retry
+is a new write and may be delivered twice.**, with **Retry** and **Discard**.
+
 ### Send, Aside, and BTW
 
 How a message reaches the agent depends on its mode:
@@ -123,8 +154,26 @@ does not drop anyone; the count beside the checkbox says how many selected agent
 filter. **Clear selection** empties it.
 
 Each send gets a row above the broadcast box: `Queued`, `Sending to N…`, `Sent to N agents`, or
-`Could not send to N` with the reason. A failed row offers **Retry**, which sends the same request
-again, and **Restore draft**, which puts the message and the selection back in the box.
+`Could not send to N` with the reason. A queued row, which has not gone out yet, offers
+**Discard**. A failed row offers **Retry**, which sends the same request again, and **Restore
+draft**, which puts the message and the selection back in the box. Once
+Dispatch has made the broadcast, its row says so at once, and then how its delivery stands:
+`Sent to N agents — delivering to N agents…` while recipients are still being reached, then
+`— delivered`, or `— not delivered to N` when some could not be.
+
+A broadcast is sent the same way as a message to one agent: under one key, tried again until
+Dispatch confirms it, so it is made once however many tries reach Dispatch, and kept through a
+reload of the tab. Once Dispatch has not confirmed it for 30 seconds, its row says `Still sending to
+N agents — Dispatch has not confirmed it yet. It keeps trying, and the broadcast is made once.` and
+offers **Stop trying**. A stopped row says `Stopped sending to N agents:` with the reason, and
+offers **Retry**, which tries the same request again under the same key, and **Restore draft**, as
+a refused one does. Broadcasts go out in the order you sent them: one still being tried holds back
+the ones you send after it, and one refused or stopped does not. A kept broadcast follows the same
+two rules a message to one agent does: it comes back for the person who pressed it and for nobody
+else, and one reopened more than five minutes later comes back as `Not sent: this page was closed
+before Dispatch confirmed it.` with the same note on a Retry within 24 hours, rather than going out on its
+own. A recipient Dispatch had not reached when it restarted or was deployed is reached by
+Dispatch itself within a few minutes, so every agent gets it exactly once.
 
 ![A broadcast page listing each recipient, its delivery state, and its reply](/legion/media/dispatch/broadcast.png)
 
@@ -178,8 +227,8 @@ links to its conversation as it happens, at `/agents/<session>/live`.
   model instead), "This session's Oh My Pi does not tell Dispatch its model and thinking level.",
   or "This session switches its model and thinking level only at its own terminal." A model with
   no adjustable thinking shows `no adjustable thinking`, and a level the model decides shows
-  `model default`. Claude Code and OpenCode sessions don't publish their model or thinking level,
-  so their header is unchanged.
+  `model default`. Claude Code sessions don't publish their model or thinking level, so their
+  header is unchanged.
 - The agent's turns stream in while the page is open. They are relayed, not stored.
 - Your messages to the agent, and its replies through Dispatch, are stored and shown in the same
   thread. A reply through Dispatch is labelled **Reply via Dispatch**.
@@ -188,14 +237,15 @@ links to its conversation as it happens, at `/agents/<session>/live`.
   `/` to choose from its commands. The list marks commands that only the session's terminal runs;
   their reply says they did not run. Use the arrow keys to choose, **Tab** or **Enter** to pick, and
   **Escape** to close the list. BTW offers no commands.
-- **Send** works while the agent is in the middle of a turn. The message goes at once, and the
+- **Send** works while the agent is in the middle of a turn, and while earlier messages of yours
+  are still on their way or were refused. Each press sends at once, as its own message, and the
   session takes it as its mode says ([Send, Aside, and BTW](#send-aside-and-btw)). **Enter** sends
   and **Shift+Enter** starts a new line. With an empty box, Send cannot be pressed, and the line
   under the box says "Type a message first."
-- While your message is on its way, Send reads **Sending…** until Dispatch answers; you can go on
-  typing, but **Enter** waits too, and the line under the box says so. If Dispatch refuses the
-  message, the reason shows above the thread and your message comes back into the box, ahead of
-  anything you typed since.
+- Each message you sent that Dispatch has not made yet shows as its own turn at the end of the
+  thread: **Sending…**, then, past 30 seconds, **Still sending** with **Stop trying**. A refused or
+  stopped one shows the reason with **Retry** and **Discard**. Once Dispatch makes it, the stored
+  message takes its place. The agent's row on the Agents page shows the same turns.
 - What you type for one agent stays with that agent: moving to another agent's live view shows that
   agent's own box, and coming back finds your text. Leaving the live view drops it.
 

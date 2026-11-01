@@ -23,12 +23,16 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 
 	"golang.org/x/sync/semaphore"
+	"golang.org/x/sync/singleflight"
 
+	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
@@ -42,6 +46,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
@@ -68,19 +73,30 @@ type AppContext struct {
 	// reaching Dispatch over plain http (cmd/dispatch: DISPATCH_INSECURE_COOKIE).
 	InsecureCookie bool
 	apiDeps        api.Deps
+	// lifetime is AppContextOptions.Lifetime, which New passes to api.Register.
+	lifetime context.Context
 	// devSignInHost is the dashboard origin's host:port when the dev sign-in route is mounted,
 	// and empty otherwise. Only BuildAppContext sets it, from DevSignInOrigin, so no caller can
 	// turn the route on without the origin check.
 	devSignInHost string
+	// eventHead reads the event_head GET /auth/whoami answers: nil for a context with a Store, whose
+	// router reads it through the API server it registers (api.Background's EventHead, an id at or
+	// below which every event is final), and, for a context with no Store, nothing, since it has no
+	// event log to read (whoami then answers 503). A test sets it to answer a head of its own.
+	eventHead func(context.Context) (int64, error)
 }
 
 // AppContextOptions is the explicit-injection bundle main.go assembles
 // after deciding which storage / config sources to use. The router takes
 // what it's given; selection logic stays in cmd/dispatch/main.go.
 type AppContextOptions struct {
-	SigningKey     auth.SigningKeys
-	WebDistDir     string
-	AssetStore     AssetStore
+	SigningKey auth.SigningKeys
+	WebDistDir string
+	AssetStore AssetStore
+	// DashboardEntry is the entry chunk of the dashboard build at WebDistDir, which main read
+	// when it published the build (dashboard.Publish); "" when it serves none. See
+	// api.DepsInput.
+	DashboardEntry string
 	Sessions       auth.SessionStore
 	People         auth.PeopleStore
 	Identity       identity.Identity
@@ -102,8 +118,14 @@ type AppContextOptions struct {
 	App           *auth.AppConfig
 	GitHubAPIBase string
 	OIDC          api.ServiceTokenVerifier
-	AgentStream   agentstream.Source
-	Lifetime      context.Context
+	// BrokerTokens decides a caller presenting an access token the secrets broker issued, under
+	// the DPoP scheme; nil where no broker is configured. cmd/dispatch builds it
+	// (brokerTokenVerifier). See api.DepsInput.
+	BrokerTokens *brokertoken.Verifier
+	AgentStream  agentstream.Source
+	// Lifetime is the process context the API's background work runs on, which New passes to
+	// api.Register as its lifetime; required, since api.Register refuses a nil one.
+	Lifetime context.Context
 	// AgentSecretsURL/AgentSecretsTokenFile configure the credential-request UI's secrets broker
 	// client; empty URL means the feature is off. See api.DepsInput.
 	AgentSecretsURL       string
@@ -161,16 +183,23 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		App:                    opts.App,
 		GitHubAPIBase:          opts.GitHubAPIBase,
 		OIDC:                   opts.OIDC,
+		BrokerTokens:           opts.BrokerTokens,
 		AgentStream:            opts.AgentStream,
-		Lifetime:               opts.Lifetime,
 		AgentSecretsURL:        opts.AgentSecretsURL,
 		AgentSecretsTokenFile:  opts.AgentSecretsTokenFile,
 		Files:                  opts.Files,
 		TestHooksEnabled:       opts.TestHooksEnabled,
 		ListenerRosterUncached: opts.ListenerRosterUncached,
+		DashboardEntry:         opts.DashboardEntry,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("BuildAppContext: %w", err)
+	}
+	// A context with a Store reads its head through the API server New registers (api.Background's
+	// EventHead), which holds the event horizon it is read from.
+	var eventHead func(context.Context) (int64, error)
+	if apiDeps.Store == nil {
+		eventHead = func(context.Context) (int64, error) { return 0, errNoEventLog }
 	}
 	return &AppContext{
 		SigningKey:     opts.SigningKey,
@@ -187,8 +216,13 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		InsecureCookie: opts.InsecureCookie,
 		devSignInHost:  devSignInHost,
 		apiDeps:        apiDeps,
+		eventHead:      eventHead,
+		lifetime:       opts.Lifetime,
 	}, nil
 }
+
+// errNoEventLog is what a context built with no Store answers for the event log's head.
+var errNoEventLog = errors.New("this server holds no store, so no event log to read the head of")
 
 // Architecture is the shared architecture importer the HTTP routes use, so the
 // server's five-minute sync ticker drives the same serialized Sync the Refresh
@@ -209,15 +243,28 @@ const oauthStateTTL = oauthStateMaxAge * time.Second
 
 type router struct {
 	ctx *AppContext
-	// retainedHeld counts the bytes of retained objects held by responses in flight, up to
-	// maxRetainedBytesHeld (serveRetainedAsset).
+	// retainedHeld counts the bytes of store reads held by responses in flight, and by the reads
+	// abandoned requests left running, up to maxRetainedBytesHeld (serveRetainedAsset).
 	retainedHeld *semaphore.Weighted
+	// assets keeps what the asset store answered, for every request of the process
+	// (serveRetainedAsset).
+	assets *assetCache
+	// eventHead is what GET /auth/whoami answers as event_head: the context's own (AppContext's
+	// eventHead) when it names one, else the registered API server's (api.Background's EventHead).
+	eventHead func(context.Context) (int64, error)
 }
 
-// New returns an http.Handler that serves all dispatch routes, and a wait that returns once the
-// delivery hub and its sockets have ended after the process lifetime is cancelled.
-func New(ctx *AppContext) (http.Handler, func()) {
-	r := &router{ctx: ctx, retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld)}
+// New returns an http.Handler that serves all dispatch routes, and the API server's background
+// work (api.Background): its Wait returns once every keyed write's handler and every delivery a
+// request left running past its answer has settled, and the delivery hub, every live socket and
+// their subscriptions, and the event stream relay have ended after the process lifetime is
+// cancelled; its ResumeDeliveries is the delivery sweep's pass the maintenance loop runs.
+func New(ctx *AppContext) (http.Handler, api.Background) {
+	r := &router{
+		ctx:          ctx,
+		retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld),
+		assets:       newAssetCache(maxCachedAssetBytes),
+	}
 	mux := http.NewServeMux()
 	// Every route the server itself answers writes one access-log line (accesslog.Handler); the
 	// dashboard's own files, served by staticHandler, write none.
@@ -226,13 +273,17 @@ func New(ctx *AppContext) (http.Handler, func()) {
 	mux.HandleFunc("POST /auth/logout", accesslog.HandlerFunc("/auth/logout", r.authLogout))
 	mux.HandleFunc("GET /auth/whoami", accesslog.HandlerFunc("/auth/whoami", r.authWhoami))
 	mux.HandleFunc(githubapi.Prefix, accesslog.HandlerFunc(githubapi.Prefix, r.apiGithubRest))
-	waitDelivery := api.Register(mux, r.ctx.apiDeps)
+	background := api.Register(mux, r.ctx.lifetime, r.ctx.apiDeps)
+	r.eventHead = ctx.eventHead
+	if r.eventHead == nil {
+		r.eventHead = background.EventHead
+	}
 	mux.HandleFunc("/", r.staticHandler)
 	if ctx.devSignInHost == "" {
-		return r.enforceCookieOrigin(mux), waitDelivery
+		return r.enforceCookieOrigin(mux), background
 	}
 	mux.HandleFunc("GET /auth/_dev/signin", accesslog.HandlerFunc("/auth/_dev/signin", r.authDevSignIn))
-	return requireHost(ctx.devSignInHost, r.enforceCookieOrigin(mux)), waitDelivery
+	return requireHost(ctx.devSignInHost, r.enforceCookieOrigin(mux)), background
 }
 
 // ───── auth ─────────────────────────────────────────────────────────────────
@@ -400,12 +451,46 @@ func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
 	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// whoamiAnswer is what GET /auth/whoami answers a signed-in person, the Go mirror of
+// packages/contracts' AuthenticatedUser. Its fields are in their keys' order, which is the order the
+// answer's JSON has always carried them in.
+type whoamiAnswer struct {
+	EventHead string `json:"event_head"`
+	Kind      string `json:"kind"`
+	Login     string `json:"login"`
+}
+
+// authWhoami answers the signed-in person and event_head, the decimal id at or below which every
+// event is final (api.Background's EventHead), read after the sign-in check and before the answer
+// is written. The page starts every read
+// the event feed keeps current only once whoami has answered, and resumes its first events
+// subscription from event_head, so a change committed while it loads is replayed rather than
+// missed. A head it cannot answer is a 503, never a whoami without it: a page that took a missing
+// head for an older server's answer would start its feed at the server's head and could miss such a
+// change. EVENT_HEAD_UNAVAILABLE says only that no event id is proven final yet
+// (api.ErrEventHeadUnproven: an event insert open since before every mark, with no horizon proven
+// or persisted), which ends on its own and which the page asks again for as long as it lasts.
+// Every other failure (the database or the horizon's pool not answering) is
+// EVENT_HEAD_READ_FAILED, which the page retries a few times and then shows as an error.
 func (r *router) authWhoami(w http.ResponseWriter, req *http.Request) {
 	email, ok := r.login(w, req)
 	if !ok {
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"kind": "user", "login": email})
+	head, err := r.eventHead(req.Context())
+	if err != nil {
+		// A read the page's own leaving cut short says nothing of the database.
+		if req.Context().Err() == nil {
+			slog.Warn("dispatch: whoami could not read the event log's head", "error", err)
+		}
+		if errors.Is(err, api.ErrEventHeadUnproven) {
+			writeCodeError(w, http.StatusServiceUnavailable, "no event id is proven final yet; ask again", "EVENT_HEAD_UNAVAILABLE")
+			return
+		}
+		writeCodeError(w, http.StatusServiceUnavailable, "the event log's head could not be read", "EVENT_HEAD_READ_FAILED")
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, whoamiAnswer{EventHead: strconv.FormatInt(head, 10), Kind: "user", Login: email})
 }
 
 // apiGithubRest serves the web app's GitHub reads to a person, as the GitHub App.
@@ -503,11 +588,14 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		serveFile(w, req, candidate)
 		return
 	}
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err != nil && !isMissingFile(err) {
 		writeError(w, http.StatusInternalServerError, "stat failed")
 		return
 	}
-	if isRetainedAssetPath(normalized) && r.ctx.AssetStore != nil {
+	// The store's key is a Postgres text parameter, which cannot carry a NUL byte or invalid UTF-8
+	// (a path such as /assets/%ff.js): asking it would take a reservation and answer a store
+	// failure for a name no build can hold, so such a path is a plain miss.
+	if isRetainedAssetPath(normalized) && r.ctx.AssetStore != nil && text.Storable(normalized) {
 		r.serveRetainedAsset(w, req, strings.TrimPrefix(normalized, "/"))
 		return
 	}
@@ -518,32 +606,53 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	servePage(w, req, filepath.Join(r.ctx.WebDistDir, "index.html"))
 }
 
+// isMissingFile reports whether os.Stat's err means no file is there: the path does not exist,
+// or the path itself is one no file can have — a NUL byte in it (EINVAL), a name too long
+// (ENAMETOOLONG), or a file where a directory must be (ENOTDIR). Those are a request's own
+// spelling, answered as a miss; any other error (EACCES, EIO) is the filesystem failing.
+func isMissingFile(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.EINVAL) ||
+		errors.Is(err, syscall.ENAMETOOLONG) || errors.Is(err, syscall.ENOTDIR)
+}
+
 // isRetainedAssetPath reports whether normalized names a file below an asset root: the only paths
-// the retained-asset store is asked for, never a page or an asset root itself.
+// the asset store is asked for, never a page or an asset root itself.
 func isRetainedAssetPath(normalized string) bool {
 	return isReservedPath(normalized, assetRoots) && !slices.Contains(assetRoots, normalized)
 }
 
-// serveRetainedAsset answers a local asset miss from the retained-asset store. The whole object is
-// read under retainedAssetFetchTimeout before anything is written, so a slow, failed or short read
-// is an uncached 502 and never a 200 carrying the immutable header; the browser's download of the
-// bytes read is not bounded by that timeout. A read that instead runs out of that shared bound
-// (errors.Is(err, context.DeadlineExceeded), most often because most of it was already spent
-// waiting for memory-cap room) is answered the same way the cap's own refusal is, a 503, not a 502
-// store failure: the store was never actually unhealthy, only asked too late to answer in time.
+// serveRetainedAsset answers a local asset miss — a file of another build than this process's —
+// from the asset store, through the process's cache of what the store has answered (r.assets). A
+// cached object is served at once, with no reservation below: it is in memory whichever request
+// holds it. On a miss the whole object is read under retainedAssetFetchTimeout before anything is
+// written, so a slow or failed read is an uncached 502 and never a 200 carrying the immutable
+// header; the browser's download of the bytes read is not bounded by that timeout. A read that
+// instead runs out of that shared bound (errors.Is(err, context.DeadlineExceeded), most often
+// because most of it was already spent waiting for memory-cap room) is answered the same way the
+// cap's own refusal is, a 503, not a 502 store failure: the store was never actually unhealthy,
+// only asked too late to answer in time.
 //
-// An object stays in memory until its client has read it, so the bytes held at once are capped at
-// maxRetainedBytesHeld. Before asking the store a request reserves the most one object can hold,
-// waiting within the same bound for earlier requests to give theirs back, so a burst of a stale
-// tab's chunks is served in turn and a request that cannot reserve in time is a 503 that asks the
-// store nothing. A request whose context ends because its client went away while still queued for
-// that room logs nothing more than a debug line and writes no response, since the cap was never
-// the reason and nobody is left to answer. Once the object is read the request keeps only its size
-// until its response is written or its client goes away.
+// An object stays in memory until its client has read it, so the bytes misses hold at once are
+// capped at maxRetainedBytesHeld. Before asking the store a miss reserves the most one object can
+// hold, waiting within the same bound for earlier requests to give theirs back, so a burst of a
+// stale tab's chunks is served in turn and a request that cannot reserve in time is a 503 that
+// asks the store nothing. A request whose context ends because its client went away, while still
+// queued for that room or while waiting for the store's answer (a navigation cancels the chunks
+// still loading), logs nothing more than a debug line and writes no response, since neither the
+// cap nor the store was the reason and nobody is left to answer. Once the object is read the
+// request keeps only its size until its response is written or its client goes away. A request
+// that stops waiting for the store's answer (its client went away, or its bound ran out) leaves
+// the read running for the requests after it (readRetainedAsset), and its reservation outlives
+// the request until that read ends: a client that abandons each request the moment it reaches
+// the store cannot hold more store reads at once than the cap has room for.
 func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, key string) {
+	if asset, ok := r.assets.get(key); ok {
+		writeRetainedAsset(w, req, key, asset)
+		return
+	}
 	ctx, cancel := context.WithTimeout(req.Context(), retainedAssetFetchTimeout)
 	defer cancel()
-	if err := r.retainedHeld.Acquire(ctx, maxRetainedAssetSize); err != nil {
+	if err := r.retainedHeld.Acquire(ctx, MaxRetainedAssetSize); err != nil {
 		if errors.Is(err, context.Canceled) {
 			slog.Debug("dispatch: retained asset request canceled while queued for the memory cap", "key", key)
 			return
@@ -551,11 +660,25 @@ func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, ke
 		refuseRetainedAssetAtCap(w, key)
 		return
 	}
-	held := maxRetainedAssetSize
-	// Release reads held when the handler returns: the object's size once it is read.
+	held := MaxRetainedAssetSize
+	// Release reads held when the handler returns: the object's size once it is read, or nothing
+	// once the reservation is handed to a read the request stopped waiting for.
 	defer func() { r.retainedHeld.Release(held) }()
 
-	asset, err := r.ctx.AssetStore.GetAsset(ctx, key)
+	asset, pending, err := r.readRetainedAsset(ctx, key)
+	if pending != nil {
+		go func(held int64) {
+			<-pending
+			r.retainedHeld.Release(held)
+		}(held)
+		held = 0
+	}
+	// The read itself runs on a context no request cancels (readRetainedAsset), so a cancellation
+	// is this request's own client going away.
+	if errors.Is(err, context.Canceled) {
+		slog.Debug("dispatch: retained asset request canceled while the store read it", "key", key)
+		return
+	}
 	if errors.Is(err, ErrAssetNotFound) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
@@ -571,7 +694,45 @@ func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, ke
 	}
 	r.retainedHeld.Release(held - int64(len(asset)))
 	held = int64(len(asset))
+	writeRetainedAsset(w, req, key, asset)
+}
 
+// readRetainedAsset reads key from the asset store into the cache, once however many requests
+// miss it at the same moment: the first starts the read and the rest wait for its answer, each
+// within its own ctx. The read is bounded by retainedAssetFetchTimeout from its start and not by
+// the first request's context, so that request's client going away fails none of the others. A
+// failed read caches nothing, and the next miss asks the store again. When ctx ends before the
+// read answers, it returns ctx's error and the channel the read will still answer on, so the
+// caller can keep the read's reservation until it does; it returns no channel otherwise.
+func (r *router) readRetainedAsset(ctx context.Context, key string) ([]byte, <-chan singleflight.Result, error) {
+	read := r.assets.reads.DoChan(key, func() (any, error) {
+		// A read that finished between this request's cache miss and its flight answers it.
+		if asset, ok := r.assets.get(key); ok {
+			return asset, nil
+		}
+		readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), retainedAssetFetchTimeout)
+		defer cancel()
+		asset, err := r.ctx.AssetStore.GetAsset(readCtx, key)
+		if err != nil {
+			return nil, err
+		}
+		r.assets.put(key, asset)
+		return asset, nil
+	})
+	select {
+	case result := <-read:
+		if result.Err != nil {
+			return nil, nil, result.Err
+		}
+		return result.Val.([]byte), nil, nil
+	case <-ctx.Done():
+		return nil, read, ctx.Err()
+	}
+}
+
+// writeRetainedAsset answers a whole object the asset store holds. Its key names content-hashed
+// build output, so the browser may keep it for a year.
+func writeRetainedAsset(w http.ResponseWriter, req *http.Request, key string, asset []byte) {
 	w.Header().Set("Cache-Control", assetCacheControl)
 	w.Header().Set("Content-Type", contentType(key))
 	http.ServeContent(w, req, key, time.Time{}, bytes.NewReader(asset))

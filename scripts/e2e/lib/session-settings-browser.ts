@@ -1,10 +1,11 @@
 // The one held-open Chromium page of the dispatch-session-settings driver, signed in to Dispatch as
 // alice: the session's live view, its header (what it shows, and its pickers), the composer, the
-// thread as shown, the stream's first replay, and a screenshot per check.
+// thread as shown, the agent view's first replay, and a screenshot per check.
 //
 // Playwright is resolved from packages/dispatch, the package that owns the browser suite, and
 // launched on the Chromium the rig names: a pod has no Playwright browser of its own (INFRA-42).
 import { createRequire } from "node:module";
+import { readAgentReplay } from "./agent-replay";
 import { currentNumber, PERSON, type Rig, until } from "./session-settings-common";
 
 interface Locator {
@@ -190,35 +191,28 @@ export class Browser {
     }, undefined);
   }
 
-  /** The first replay the session's stream serves a page that opens, read over the page's own
-   *  connection: its frames. */
+  /** The first replay the session's agent view serves a page that opens, read over a live socket
+   *  of the page's own, as its person: its frames. A view Dispatch refused or ended, an empty
+   *  replay and a session that never answered each fail the read, saying which
+   *  (`readAgentReplay`). */
   async replay(session: string): Promise<{ kind: string; seq: number; [key: string]: unknown }[]> {
-    return this.page.evaluate(async (sessionID: string) => {
-      const response = await fetch(`/api/v1/agents/${encodeURIComponent(sessionID)}/stream`);
-      if (!response.ok || response.body === null) throw new Error(`stream: ${response.status}`);
-      const reader = response.body.getReader();
-      const decode = new TextDecoder();
-      let buffer = "";
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) throw new Error("the stream ended before its replay");
-          buffer += decode.decode(value, { stream: true });
-          for (let end = buffer.indexOf("\n\n"); end >= 0; end = buffer.indexOf("\n\n")) {
-            const lines = buffer.slice(0, end).split("\n");
-            buffer = buffer.slice(end + 2);
-            if (!lines.includes("event: replay")) continue;
-            const data = lines
-              .filter((line) => line.startsWith("data: "))
-              .map((line) => line.slice("data: ".length))
-              .join("\n");
-            return JSON.parse(data).frames;
-          }
-        }
-      } finally {
-        await reader.cancel();
-      }
-    }, session);
+    const socket = new URL("/ws/live", this.#rig.dispatchUrl);
+    socket.protocol = socket.protocol === "https:" ? "wss:" : "ws:";
+    const replay = await this.page.evaluate(readAgentReplay, {
+      emptyAfterMs: 5_000,
+      sessionId: session,
+      timeoutMs: 30_000,
+      url: socket.href,
+    });
+    if (
+      typeof replay !== "object" ||
+      replay === null ||
+      !("frames" in replay) ||
+      !Array.isArray(replay.frames)
+    ) {
+      throw new Error(`the replay of ${session} holds no frames: ${JSON.stringify(replay)}`);
+    }
+    return replay.frames;
   }
 
   /** Keeps the page as <evidence>/checks/<NN>-<name>.png, NN the running check's number. */

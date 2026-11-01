@@ -10,7 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -28,12 +31,17 @@ const excerptRunes = 240
 // Query selects one node's edges. Direction "in" reads edges pointing at the node (Kind, ID
 // are its to_kind, to_id: ref_key for artifacts); "out" reads edges it writes (from_kind,
 // from_id: the uuid for artifacts). Kinds narrows edge types; Since keeps mentions whose
-// source_seq is greater, which excludes every structural edge.
+// source_seq is greater, and Through those whose source_seq is at or below it; either excludes
+// every structural edge.
 //
 // A document's read also lists the edges at its current blocks: on "in", every edge pointing at
 // one of them, and on "out", every link one of them holds; each such edge names that block as
-// GraphEdge.Block. A document's own mention of a target one of its blocks also cites is listed
-// from that block alone (heldByABlock), so each link shows once, where its block holds it.
+// GraphEdge.Block. A comment's or a message's read does the same with the item's blocks. A
+// document's, comment's or message's own mention of a target one of its blocks also cites is
+// listed from that block alone (heldByABlock), so each link shows once, where its block holds it.
+// A reply that names a current block of the item read is listed once, under that block: its
+// replies_to edge to the item itself (a comment's thread root, the message a message answers) is
+// not listed.
 type Query struct {
 	Direction string
 	Kind      string
@@ -43,6 +51,11 @@ type Query struct {
 	// inbound `replies_to` edges are its own clarification thread, which its card renders.
 	ExcludeKinds []string
 	Since        *int64
+	// Through bounds a Since read at a safe horizon of the event log (events.Horizon), at or
+	// below which every event is final: event ids are not commit order, so a caller that moved
+	// its since past a returned edge's source_seq would never be shown an edge whose event
+	// drew a lower id and committed later.
+	Through *int64
 	// WholeDocuments, on a document's "in" read, lists the items and documents that cite it or
 	// one of its current blocks, and no block: a citing document is listed by its own edges.
 	WholeDocuments bool
@@ -56,9 +69,10 @@ var AskBacklinkExclusions = []string{"replies_to"}
 // BacklinkCounts is how many edges point at each of ids, in one grouped query: the number a
 // list carries beside a row, counted the same way the rows behind it are listed. It counts only
 // edges whose source is a node kind this build reads, so the count is the rows its list shows,
-// and counts a document's mention once for each of its blocks citing the node, in place of the
-// document's own edge (heldByABlock). A node with no inbound edge is absent from the result; the
-// caller decides what zero means.
+// and counts a document's, comment's or message's mention once for each of its blocks citing the
+// node, in place of the item's own edge (heldByABlock): a comment citing a node from two
+// paragraphs counts 2. A node with no inbound edge is absent from the result; the caller decides
+// what zero means.
 func BacklinkCounts(
 	ctx context.Context,
 	q Queryer,
@@ -106,19 +120,30 @@ type edgeRow struct {
 	otherID   string
 	createdAt time.Time
 	sourceSeq *int64
-	// atBlock is the node id of the queried document's block at the queried end, on a
-	// document's read of an edge at one of its blocks.
+	// atBlock is the node id of the queried document's, comment's or message's block at the
+	// queried end, on such a read of an edge at one of its blocks.
 	atBlock *string
 }
 
-// heldByABlock is true of a document's mention edge (graph_edges row alias) when a block of that
-// document holds a link of the same kind to the same target: that block's own edge is listed and
-// counted in its place, so each link shows once. A document the block index has not reached
-// holds no block_refs row, so its own edge stays.
+// heldByABlock is true of a document's, comment's or message's mention edge (graph_edges row
+// alias) when a block of that item holds a link of the same kind to the same target: that block's
+// own edge is listed and counted in its place, so each link shows once. An item the block index
+// has not reached holds no block mention, so its own edge stays.
 func heldByABlock(alias string) string {
-	return `(` + alias + `.from_kind = 'artifact' and ` + alias + `.kind = 'mentions' and exists (
-		select 1 from block_refs b where b.to_kind = ` + alias + `.to_kind and b.to_id = ` + alias + `.to_id
-		and b.kind = ` + alias + `.kind and b.artifact_id::text = ` + alias + `.from_id))`
+	holders := []string{blockHolds(alias, "artifact", "block_refs", "artifact_id")}
+	for _, item := range []ItemKind{ItemComment, ItemMessage} {
+		tables, _ := item.tables()
+		holders = append(holders, blockHolds(alias, string(item), tables.refs, tables.item))
+	}
+	return `(` + alias + `.kind = 'mentions' and (` + strings.Join(holders, " or ") + `))`
+}
+
+// blockHolds is true of a graph_edges row alias written by an item of fromKind when one of the
+// item's blocks holds a link of the row's kind to its target in table, whose column keys the item.
+func blockHolds(alias, fromKind, table, column string) string {
+	return `(` + alias + `.from_kind = '` + fromKind + `' and exists (
+		select 1 from ` + table + ` b where b.to_kind = ` + alias + `.to_kind and b.to_id = ` + alias + `.to_id
+		and b.kind = ` + alias + `.kind and b.` + column + `::text = ` + alias + `.from_id))`
 }
 
 // documentBlockIDs is the node id of every current block of the document whose ref_key is the
@@ -126,6 +151,48 @@ func heldByABlock(alias string) string {
 // block has no row, so the edges at it drop out of every list until a version holds its id again.
 func documentBlockIDs(param string) string {
 	return `(select d.node_id from document_blocks d join artifacts a on a.id = d.artifact_id where a.ref_key = ` + param + `)`
+}
+
+// itemBlockIDs is the node id of every current block of the item of kind whose uuid is the
+// numbered parameter param, the set an "in" arm reads an item's blocks' edges by. A removed block
+// keeps its row with no position, and the edges at it drop out of every list until a revision
+// holds its id again.
+func itemBlockIDs(kind ItemKind, param string) string {
+	tables, _ := kind.tables()
+	return `(select b.node_id from ` + tables.blocks + ` b where b.` + tables.item + ` = ` + param + `::uuid and b.position is not null)`
+}
+
+// repliesToABlockOf is true of a graph_edges row alias that is the replies_to edge of a reply
+// naming a current block of the item of kind whose uuid is the numbered parameter param: the
+// reply is listed under that block, by its replies_to edge to it.
+func repliesToABlockOf(kind ItemKind, alias, param string) string {
+	tables, _ := kind.tables()
+	return `(` + alias + `.kind = 'replies_to' and ` + alias + `.from_kind = '` + string(kind) + `' and ` + alias + `.from_id in (
+		select r.id::text from ` + tables.items + ` r where r.replies_to_block in ` + itemBlockIDs(kind, param) + `))`
+}
+
+// itemRead is the item whose blocks' edges a query's read lists with its own: a comment or a
+// message, named by its uuid as the item's own edges name it (canonical, lowercase), as every
+// item that holds blocks is. A comment or message reference whose id is no such uuid names no
+// item with blocks.
+func itemRead(query Query) (ItemKind, bool) {
+	kind := ItemKind(query.Kind)
+	if kind != ItemComment && kind != ItemMessage {
+		return "", false
+	}
+	if id, err := uuid.Parse(query.ID); err != nil || id.String() != query.ID {
+		return "", false
+	}
+	return kind, true
+}
+
+// blockKindAt is the storage kind of the blocks a read of a node of kind lists edges at: a
+// document's blocks, or a comment's or message's.
+func blockKindAt(kind string) string {
+	if kind == string(ItemComment) || kind == string(ItemMessage) {
+		return ItemKind(kind).BlockKind()
+	}
+	return "block"
 }
 
 // Edges reads a node's edges from graph_edges, newest first, with the other end of each
@@ -152,9 +219,10 @@ func resolveEdges(ctx context.Context, q Queryer, query Query) ([]resolvedEdge, 
 		return nil, err
 	}
 	lookups := rows
+	atKind := blockKindAt(query.Kind)
 	for _, row := range rows {
 		if row.atBlock != nil {
-			lookups = append(lookups, edgeRow{otherKind: "block", otherID: *row.atBlock})
+			lookups = append(lookups, edgeRow{otherKind: atKind, otherID: *row.atBlock})
 		}
 	}
 	nodes, err := resolveNodes(ctx, q, query.Direction == "out", lookups)
@@ -178,7 +246,7 @@ func resolveEdges(ctx context.Context, q Queryer, query Query) ([]resolvedEdge, 
 			refKey: node.refKey,
 		}
 		if row.atBlock != nil {
-			block, found := nodes[[2]string{"block", *row.atBlock}]
+			block, found := nodes[[2]string{atKind, *row.atBlock}]
 			if !found {
 				continue
 			}
@@ -198,25 +266,42 @@ func resolveEdges(ctx context.Context, q Queryer, query Query) ([]resolvedEdge, 
 }
 
 // readEdgeRows reads the rows a query lists, as arms over graph_edges that its filters then
-// narrow. A document's read adds the edges at its blocks (see Query), and every inbound read
-// lists a document's mention from the block holding it (heldByABlock).
+// narrow. A document's, comment's or message's read adds the edges at its blocks (see Query),
+// and every inbound read lists an item's mention from the block holding it (heldByABlock).
 func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error) {
 	args := []any{query.Kind, query.ID}
 	document := query.Kind == "artifact"
+	item, itemBlocks := itemRead(query)
+	if itemBlocks {
+		// The item's id again, bound as the uuid its blocks are keyed by.
+		args = append(args, query.ID)
+	}
 	var arms string
 	switch {
 	case query.Direction == "in":
 		source := `not ` + heldByABlock("g")
 		if document && query.WholeDocuments {
-			source = `g.from_kind <> 'block'`
+			// The document's citers, each by its own edges: a document's, a comment's or a
+			// message's blocks are listed by their item.
+			source = `g.from_kind not in ('block', 'comment_block', 'message_block')`
+		}
+		own := source
+		if itemBlocks {
+			own += ` and not ` + repliesToABlockOf(item, "g", "$3")
 		}
 		arms = `select g.kind, g.from_kind, g.from_id, g.created_at, g.source_seq, null::text
-			from graph_edges g where g.to_kind = $1 and g.to_id = $2 and ` + source
-		if document {
+			from graph_edges g where g.to_kind = $1 and g.to_id = $2 and ` + own
+		switch {
+		case document:
 			arms += `
 			union all
 			select g.kind, g.from_kind, g.from_id, g.created_at, g.source_seq, g.to_id
 			from graph_edges g where g.to_kind = 'block' and g.to_id in ` + documentBlockIDs("$2") + ` and ` + source
+		case itemBlocks:
+			arms += `
+			union all
+			select g.kind, g.from_kind, g.from_id, g.created_at, g.source_seq, g.to_id
+			from graph_edges g where g.to_kind = '` + item.BlockKind() + `' and g.to_id in ` + itemBlockIDs(item, "$3") + ` and ` + source
 		}
 	case query.Direction == "out" && document:
 		// The document's id again, bound as the uuid block_refs keys its rows by.
@@ -226,6 +311,14 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 			union all
 			select b.kind, b.to_kind, b.to_id, b.created_at, b.source_seq, b.from_node
 			from block_refs b where b.artifact_id = $3::uuid`
+	case query.Direction == "out" && itemBlocks:
+		tables, _ := item.tables()
+		arms = `select g.kind, g.to_kind, g.to_id, g.created_at, g.source_seq, null::text
+			from graph_edges g where g.from_kind = $1 and g.from_id = $2 and not ` + heldByABlock("g") + `
+			union all
+			select r.kind, r.to_kind, r.to_id, r.created_at, r.source_seq, r.from_node
+			from ` + tables.refs + ` r join ` + tables.blocks + ` b on b.` + tables.item + ` = r.` + tables.item + ` and b.block_id = r.block_id
+			where r.` + tables.item + ` = $3::uuid and b.position is not null`
 	case query.Direction == "out":
 		arms = `select g.kind, g.to_kind, g.to_id, g.created_at, g.source_seq, null::text
 			from graph_edges g where g.from_kind = $1 and g.from_id = $2`
@@ -246,6 +339,10 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 	if query.Since != nil {
 		args = append(args, *query.Since)
 		sql.WriteString(" and source_seq > $" + strconv.Itoa(len(args)))
+	}
+	if query.Through != nil {
+		args = append(args, *query.Through)
+		sql.WriteString(" and source_seq <= $" + strconv.Itoa(len(args)))
 	}
 	sql.WriteString(" order by created_at desc, kind, other_kind, other_id, at_block")
 	rows, err := q.Query(ctx, sql.String(), args...)
@@ -292,16 +389,20 @@ type nodeLoader func(ctx context.Context, q Queryer, kind string, byRefKey bool,
 
 // nodeLoaders resolves each node kind this build knows. These are node kinds, the ends of an
 // edge, not edge kinds: a node kind a newer build adds to the graph is addressable, listed and
-// counted only once it has an entry here.
+// counted only once it has an entry here. The keys are the kinds graph_edges stores; a comment's
+// or message's block is stored as comment_block or message_block and resolves to a node of kind
+// block, as a document's block does.
 var nodeLoaders = map[string]nodeLoader{
-	"issue":     loadIssueNodes,
-	"artifact":  loadArtifactNodes,
-	"ask":       loadAskNodes,
-	"comment":   loadCommentNodes,
-	"message":   loadMessageNodes,
-	"component": loadComponentNodes,
-	"session":   loadSessionNodes,
-	"block":     loadBlockNodes,
+	"issue":         loadIssueNodes,
+	"artifact":      loadArtifactNodes,
+	"ask":           loadAskNodes,
+	"comment":       loadCommentNodes,
+	"message":       loadMessageNodes,
+	"component":     loadComponentNodes,
+	"session":       loadSessionNodes,
+	"block":         loadBlockNodes,
+	"comment_block": loadCommentBlockNodes,
+	"message_block": loadMessageBlockNodes,
 }
 
 // nodeKinds is every node kind nodeLoaders resolves, sorted, as the reads that filter
@@ -505,20 +606,27 @@ func anchorVersion(alias string) string {
 // loadAskNodes resolves ask nodes. An ask is made by its author. Its last change is its own edit
 // (edited_at: its wording, a block ask's settlement, an approval request's version move), by the
 // editor the latest ask.edited event names; an answer or a resolution is no change of it. It
-// belongs to the document it is written on: the one its anchor names, at the anchored version; a
-// block ask's document, at the version that first held its block when Dispatch knows it
-// (blockFirstVersion); an approval request's document, at the version it named when it opened
-// (written_version); the document that owns it, at the version current when it was written
-// (written_version). An ask written on no document belongs to its issue.
+// belongs to the document it is written on: the one its anchor names, when the anchor's
+// artifact_id casts to a uuid, at the anchored version; a block ask's document, at the version
+// that first held its block when Dispatch knows it (blockFirstVersion); an approval request's
+// document, at the version it named when it opened (written_version); the document that owns it,
+// at the version current when it was written (written_version). An ask written on no document
+// belongs to its issue.
+//
+// An artifact_id that casts to no uuid names no document, so such an anchor falls through to the
+// branch below - the ask's block document, at that branch's version - exactly as an anchor
+// carrying no artifact_id at all does, and as both search arms link the same ask. The version and
+// the document therefore always come from one branch.
 //
 // The edit lookup repeats events_ask_payload_id's type list (migration 0030), so the planner can
 // prove the partial index serves it.
 func loadAskNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
+	anchorArtifact := store.CastableUUID(`k.anchor->>'artifact_id'`)
 	rows, err := q.Query(ctx, `
 		select k.id::text, k.issue_key, coalesce(i.project_key, a.project_key, ''), coalesce(a.slug, ''), k.question,
 		       k.author, k.created_at, k.edited_at, edit.edited_by, `+documentColumns("doc")+`,
 		       case
-		         when k.anchor->>'artifact_id' is not null then `+anchorVersion("k")+`
+		         when `+anchorArtifact+` is not null then `+anchorVersion("k")+`
 		         when k.block_artifact_id is not null then case when first.known then first.version end
 		         else k.written_version
 		       end
@@ -526,7 +634,7 @@ func loadAskNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string
 		left join issues i on i.key = k.issue_key
 		left join artifacts a on a.id = k.artifact_id
 		left join artifacts doc on doc.id = case
-		  when k.anchor->>'artifact_id' is not null then (k.anchor->>'artifact_id')::uuid
+		  when `+anchorArtifact+` is not null then `+anchorArtifact+`
 		  when k.block_artifact_id is not null then k.block_artifact_id
 		  when k.kind = 'approval' then (k.approval->>'artifact_id')::uuid
 		  else k.artifact_id
@@ -570,15 +678,16 @@ func loadAskNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string
 
 // loadCommentNodes resolves comment nodes. A comment is made by its author, and only its author
 // edits it, so its last change is its author at edited_at; a resolution is no change of it. A
-// reply belongs to its thread's head comment, a comment in an ask's thread to the ask, and
-// another comment to the document it is written on: the one its anchor names, at the anchored
-// version, else the document that owns it, at the version current when it was written
-// (written_version). A comment written on no document belongs to its issue. A reply shares its
-// head's owner, and so the owner its reference is written under.
+// reply that names a block it answers belongs to that block, another reply to its thread's head
+// comment, a comment in an ask's thread to the ask, and another comment to the document it is
+// written on: the one its anchor names, at the anchored version, else the document that owns it,
+// at the version current when it was written (written_version). A comment written on no document
+// belongs to its issue. A reply shares its head's owner, and so the owner its reference, and the
+// reference of the block it names, are written under.
 func loadCommentNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
 	rows, err := q.Query(ctx, `
 		select c.id::text, c.issue_key, coalesce(i.project_key, a.project_key, ''), coalesce(a.slug, ''), c.body,
-		       c.author, c.created_at, c.edited_at, c.reply_to::text, c.ask_id::text, `+documentColumns("doc")+`,
+		       c.author, c.created_at, c.edited_at, c.reply_to::text, c.replies_to_block, c.ask_id::text, `+documentColumns("doc")+`,
 		       case when c.anchor->>'artifact_id' is not null then `+anchorVersion("c")+` else c.written_version end
 		from comments c
 		left join issues i on i.key = c.issue_key
@@ -591,13 +700,13 @@ func loadCommentNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []st
 	defer rows.Close()
 	for rows.Next() {
 		var id, project, slug, body string
-		var issueKey, replyTo, askID *string
+		var issueKey, replyTo, replyBlock, askID *string
 		var author []byte
 		var createdAt time.Time
 		var editedAt *time.Time
 		var document documentParent
 		var version *int
-		targets := append([]any{&id, &issueKey, &project, &slug, &body, &author, &createdAt, &editedAt, &replyTo, &askID}, document.targets()...)
+		targets := append([]any{&id, &issueKey, &project, &slug, &body, &author, &createdAt, &editedAt, &replyTo, &replyBlock, &askID}, document.targets()...)
 		if err := rows.Scan(append(targets, &version)...); err != nil {
 			return fmt.Errorf("scan comment node: %w", err)
 		}
@@ -606,6 +715,8 @@ func loadCommentNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []st
 			return err
 		}
 		switch parent := document.parent(); {
+		case replyBlock != nil:
+			node.Parent = itemBlockParent(issueKey, project, slug, *replyBlock)
 		case replyTo != nil:
 			node.Parent = itemParent("comment", issueKey, project, slug, *replyTo)
 		case askID != nil:
@@ -621,11 +732,12 @@ func loadCommentNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []st
 }
 
 // loadMessageNodes resolves message nodes. A message is made by its author and no route edits
-// it. A reply belongs to the message it answers, which shares its issue, and another message to
-// its issue; a direct message belongs to no node.
+// it. A reply that names a block it answers belongs to that block, another reply to the message
+// it answers, which shares its issue, and another message to its issue; a direct message belongs
+// to no node.
 func loadMessageNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
 	rows, err := q.Query(ctx, `
-		select m.id::text, m.issue_key, coalesce(i.project_key, ''), m.body, m.author, m.created_at, m.in_reply_to::text
+		select m.id::text, m.issue_key, coalesce(i.project_key, ''), m.body, m.author, m.created_at, m.in_reply_to::text, m.replies_to_block
 		from messages m
 		left join issues i on i.key = m.issue_key
 		where m.id::text = any($1)`, ids)
@@ -635,19 +747,23 @@ func loadMessageNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []st
 	defer rows.Close()
 	for rows.Next() {
 		var id, project, body string
-		var issueKey, inReplyTo *string
+		var issueKey, inReplyTo, replyBlock *string
 		var author []byte
 		var createdAt time.Time
-		if err := rows.Scan(&id, &issueKey, &project, &body, &author, &createdAt, &inReplyTo); err != nil {
+		if err := rows.Scan(&id, &issueKey, &project, &body, &author, &createdAt, &inReplyTo, &replyBlock); err != nil {
 			return fmt.Errorf("scan message node: %w", err)
 		}
 		node := model.GraphNode{Kind: "message", ID: id, IssueKey: issueKey, Project: project, Ref: itemRef("message", issueKey, project, "", id)}
 		if err := setMadeAndChanged(&node, author, createdAt, nil, nil, storedActor); err != nil {
 			return err
 		}
-		node.Parent = issueParent(issueKey)
-		if inReplyTo != nil {
+		switch {
+		case replyBlock != nil:
+			node.Parent = itemBlockParent(issueKey, project, "", *replyBlock)
+		case inReplyTo != nil:
 			node.Parent = itemParent("message", issueKey, project, "", *inReplyTo)
+		default:
+			node.Parent = issueParent(issueKey)
 		}
 		nodes[[2]string{"message", id}] = resolvedNode{GraphNode: node, text: body}
 	}

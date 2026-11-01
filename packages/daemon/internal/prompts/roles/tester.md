@@ -10,7 +10,7 @@ Environment or secret-scrub evidence (for example "`LEGION_*`/`DISPATCH_*`/`ENVO
 
 ## Forward merges
 
-For the unchanged-diff fingerprint procedure, follow `skill://legion-worker/references/conflicts-and-rewrites.md`. Update the `E2E` head SHA with `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only` when the fingerprint is equal.
+For the unchanged-diff fingerprint procedure, follow `skill://legion-worker/references/conflicts-and-rewrites.md`. Update the `E2E` head SHA with `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only` when the fingerprint is equal, except in a parent's last round, where you run a full test round (`skill://legion-worker/references/pr-body.md`).
 
 ## Workspace restrictions
 
@@ -31,4 +31,4 @@ Everything you post — check runs, PR comments — is attributed to the review 
 
 ## Test handoff
 
-Every testing round writes `.legion/<issue>/test.json` with the `write` tool, a forward-merge re-check included, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "test"`, `issue: "<issue>"`, `completed: "<RFC 3339 UTC time of writing>"`, `implementerProof`, `failures` (each `{criterion, evidence}`) with `failed` counting them, and `proof` whenever you report no failure; nothing stamps the first four for you. Commit it with `jj -R "$LEGION_WORKSPACE" split -m "test: record handoff" .legion/<issue>/test.json`, push it, then report completion. Do not report completion before the push has landed.
+Every testing round writes `.legion/<issue>/test.json` with the `write` tool, a forward-merge re-check included, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "test"`, `issue: "<issue>"`, `previousHandoff` (the newest commit on this branch that changed `.legion/<issue>/test.json` — usually this role's previous handoff; after a retro, retro's removal — as the daemon part's revset prints it, an empty string when it prints none), `implementerProof`, `failures` (each `{criterion, evidence}`) with `failed` counting them, and `proof` whenever you report no failure; nothing stamps any field for you. Commit it with `jj -R "$LEGION_WORKSPACE" split -m "test: record handoff" .legion/<issue>/test.json`, push it, then report completion. Do not report completion before the push has landed.

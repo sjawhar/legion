@@ -22,8 +22,15 @@ parsed event under `dispatch: { issue_key, type, actor, payload }` with `payload
 type; a payload whose shape disagrees with its event type's schema is preserved as its raw parsed
 value under `dispatch`, never dropped or reduced to prose. A dispatch envelope with no payload at
 all falls back to the same `summary` field every other source gets and marks `unrecognised:
-payload`. The renderer skips Dispatch events marked `notify: false` on an issue topic before a host
-can steer or record them in its inbox, as well as events authored by the reader's own session.
+payload`. On a `notifications.dispatch.*` topic, which carries every event of its owner, the
+renderer skips the events Dispatch marks `quiet` — a delivery receipt, an anchor refresh,
+settings or per-viewer bookkeeping, a targeted message its session already had, an ask edit that
+only moved a version, or a version nobody named — before a host can steer or record them in its
+inbox, as well as events authored by the reader's own session. It does not skip on `notify`,
+which answers whether to wake the owner's route and is false for every event an agent wrote: a
+session that subscribed to an issue's topic subscribed for exactly that activity. A frame with no
+`quiet` was published before Dispatch stated it and is judged by `notify`, so a replay of the 72
+hours the stream still holds shows no receipts.
 
 ## Missed messages
 
@@ -111,6 +118,42 @@ frame was stored (`followedBefore`, through the host's `close`), then starts the
 belongs: `not_served` and `unavailable` are a warning, `stream_recreated`, `stream_moved_back` and
 `retention_gap` a card rendered by `envoyNoticeText`.
 
+## NATS connection
+
+`natsConnectionOptions({ servers, name, seed })` (`@legion/envoy-client/nats-connection`) is the
+nats.js `connect` options every session plugin dials with: the credential `natsAuthOptions` builds
+from the seed (`src/nats-auth.ts`, which the package does not export, so a plugin dials only with
+these options), reconnecting forever 2 s apart, and a ping every 10 s (`NATS_PING_INTERVAL_MS`)
+with the connection dropped on the tick that finds two pings unanswered (`NATS_MAX_PINGS_OUT`). So a
+path that freezes without closing is left within 30 s and redialed at once, and a session is back
+within 52 s when that redial also hangs on nats.js's 20 s dial timeout and the 2 s wait; nats.js's
+default 120 s interval left a frozen path for up to 6 minutes.
+
+nats.js 2.29.3, the last 2.x release, leaves a redial's socket open when it gives up on that dial
+at its 20 s timeout (a TCP connect that hangs, or a server that never sends `INFO`): it closes
+only a transport that finished connecting, so the socket keeps the process alive and a channel
+server never exits on SIGTERM. Its stale-connection close (two unanswered pings) flushes the
+transport before it destroys the socket, and behind data a dead path never acknowledged that flush
+never completes, so the transport never closes and a client that wrote since the path froze never
+redials. `patches/nats@2.29.3.patch` (root `package.json`'s `patchedDependencies`, applied by bun
+at install and so carried by both plugins' bundles) makes `NodeTransport` keep the socket from the
+moment it dials and destroy it when a transport that never connected is closed, and makes the
+stale-connection close skip the flush (`transport.close()` in place of `transport.disconnect()`
+in `ProtocolHandler.disconnect()`, which the stale-connection close after two unanswered pings and
+`handleAuthError` with no `connectError` handler both call, while a client-initiated `reconnect()`
+still flushes); `src/__tests__/nats-stall.test.ts` fails without either. Bun ignores a
+`patchedDependencies` entry for a version that is not installed without a word, so moving nats
+means carrying the patch to the new version.
+
+`@legion/envoy-client/test/stall-proxy`, `@legion/envoy-client/test/envoy-stack` and
+`@legion/envoy-client/test/stall-scenario` (Bun only, not built, in `test/`) are what the stall
+tests run: a TCP proxy whose `freeze()` stops forwarding on, and stops reading, the connections
+open at that moment without closing either side, and which records when each connection was
+accepted, first subscribed and closed; a real natsd and listener that each stack builds with
+`go build` from `packages/envoy` into its own scratch directory; and `runFreezeScenario`, the
+freeze both plugins' stall tests put their session through. A test that uses the stack runs only
+with `LEGION_E2E_ENVOY_STACK=1`.
+
 ## HTTP transport
 
 `createEnvoyClient` sends and receives the listener's `/v1` JSON contracts. Send and publish
@@ -121,9 +164,25 @@ the envelope and an optional role holder. Network failures and 5xx responses ret
 listener's bearer is the `token` the client is given (`envoySettings`); without one it sends no
 `Authorization` header.
 
-`subscribe` exposes listener warnings, including a topic that has no event in the configured
-stream. `getRole` returns a role holder with its last-seen timestamp, and `listSessions` accepts
-optional directory and title filters.
+`subscribe` sends the host's `plugin` (`{name, version}`, required) as `plugin` and
+`plugin_version` on every registration, and exposes listener warnings, including a topic that has
+no event in the configured stream. It sends the client instance driving the session
+(`clientInstanceID`: one Oh My Pi Envoy extension instance, one Claude Code channel-server
+process, minted once when that instance starts) as `client_instance_id`, omitted when the host
+has none so an older listener sees an unchanged body; the listener stores it on the session's
+registry entry. `getRole` returns a role holder with its last-seen timestamp,
+and `listSessions` accepts optional directory and title filters; its rows carry `plugin` and
+`plugin_version` when the session registered them.
+
+A `setRole` soft claim (`soft`) naming a predecessor (`previousSessionID`) takes the role from it
+only when that predecessor has no live registry entry, when its live entry carries this client
+instance's own instance id, or when either side carries no instance id; any other live holder
+keeps the role and is answered as `{claimed: false, holder}`. `unregisterSession({sessionID,
+clientInstanceID?})` deletes the session's registry entry: with an instance id the listener
+deletes it only when the entry carries the same id or none, so a departing client instance never
+deletes the registration a successor instance made under the same session id, and without one it
+deletes the entry as before. The answer says whether the entry stayed, and the call resolves
+`void` because no caller acts on it: a deregistering client has nothing to retry either way.
 
 `replay` posts `POST /v1/replay` once, with no retry and a 10 s timeout, and returns the
 listener's answer in its wire shape; an error body's `code` (such as `REPLAY_UNAVAILABLE`) is on
@@ -152,18 +211,17 @@ Every client and command reads one envoy.json holding a `dispatch` section and a
 
 `envoyConfigPath(harness, env)` (`envoy-config.ts`) picks the file. A plugin reads its own
 harness's directory and no other harness's: Oh My Pi's `$PI_CODING_AGENT_DIR/envoy.json` when
-`OMP_PROFILE` names a profile other than `default`, Claude Code's `$CLAUDE_CONFIG_DIR/envoy.json`,
-OpenCode's `$OPENCODE_CONFIG_DIR/envoy.json`. Without that directory it reads the file
-`ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`. A script
-outside any plugin (harness `command`: `scripts/dispatch/ask-census.ts`, the e2e operator scripts,
-`claude-envoy`'s `envoy-send`) reads `ENVOY_CONFIG_FILE` first, then the Oh My Pi, Claude Code and
-OpenCode directories in that order (Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`, which
-Claude Code alone sets, in every Bash it runs), then the same neutral file. A relative
-`ENVOY_CONFIG_FILE`, harness directory or `XDG_CONFIG_HOME` is refused, naming it and its value,
-when the rule would use it. Each plugin hands the path it chose to the commands its session runs in
-`ENVOY_CONFIG_FILE` (Oh My Pi sets it in `process.env` at load, Claude Code's `SessionStart` hook
-appends it to `$CLAUDE_ENV_FILE`, OpenCode's `shell.env` hook sets it), beside `DISPATCH_HOST`; the
-innermost session's value wins.
+`OMP_PROFILE` names a profile other than `default`, Claude Code's `$CLAUDE_CONFIG_DIR/envoy.json`.
+Without that directory it reads the file `ENVOY_CONFIG_FILE` names, else
+`${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`. A script outside any plugin (harness
+`command`: `scripts/dispatch/ask-census.ts`, the e2e operator scripts, `claude-envoy`'s
+`envoy-send`) reads `ENVOY_CONFIG_FILE` first, then the Oh My Pi and Claude Code directories in
+that order (Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`, which Claude Code alone sets,
+in every Bash it runs), then the same neutral file. A relative `ENVOY_CONFIG_FILE`, harness
+directory or `XDG_CONFIG_HOME` is refused, naming it and its value, when the rule would use it.
+Each plugin hands the path it chose to the commands its session runs in `ENVOY_CONFIG_FILE` (Oh My
+Pi sets it in `process.env` at load, Claude Code's `SessionStart` hook appends it to
+`$CLAUDE_ENV_FILE`), beside `DISPATCH_HOST`; the innermost session's value wins.
 
 The `dispatch` command reads the file its session's plugin chose: with `DISPATCH_HOST` set, the
 file `ENVOY_CONFIG_FILE` names, else its host's own rule (`envoyConfigPath(host)`). A Bash that
@@ -178,7 +236,8 @@ so is a top-level `natsUrls`, which belongs in `envoy.natsUrls`. JSON that does 
 refused at its line and column, never with the parser's message, which quotes the text it stopped
 at. A missing chosen file contributes nothing and sets `missing`: each section is then on only when
 its variables name it, and a section still off says `no envoy.json at <path>: Dispatch is off`
-(`Envoy is off`, or `Dispatch and Envoy are off` when neither is on), with
+(`Envoy is off`, or `Dispatch and Envoy are off` when neither is on; Dispatch with
+`DISPATCH_TOKEN_FILE` set says the lost `DISPATCH_URL` instead, below), with
 `(a link to <target>, which does not exist)` after the path when it is a dangling link. A chosen
 file that cannot be read or is not valid is `failed`, naming the file and the key, and both
 sections are off with that error.
@@ -280,8 +339,9 @@ empty `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED` is refused, naming it. `inbound`
 takes inbound messages: `{ natsUrls, natsSeed }`, never with an empty `natsUrls`, or `{ off }`, `off`
 saying why: `Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)` when nothing names one, a
 seed's refusal (below), or `this session opens no NATS connection` for a caller that opens none
-(`{ nats: false }`, OpenCode's plugin). The seed is resolved only when there are NATS servers to
-use it on, so that caller resolves none. A set `_FILE` pointer that
+(`{ nats: false }`: the `dispatch` command, `claude-envoy`'s `envoy-send`,
+pi-legion's extension). The seed is resolved only when there are NATS servers
+to use it on, so that caller resolves none. A set `_FILE` pointer that
 cannot be read is refused, never a fallback. The file's `envoy.token` goes with `ENVOY_URL` only
 when it names the origin of the listener written in the file (`http://127.0.0.1:9020` when it names
 none), and is otherwise refused with `ENVOY_URL names <origin>, but <file>'s envoy.token is for
@@ -307,13 +367,15 @@ session's commands, or null when that is unset or empty. `sessionSettings(file, 
 })` reads it once and returns both sections (`dispatchSettings`, `envoySettings`) and the one
 notice the session shows at its start: the file's error (`<error>: Dispatch and Envoy are off`),
 the missing file's notice, the missing-file text for a section still off when a variable turned
-the other on, or a section's own error (`Dispatch is off: <error>`, `Envoy is off: <error>`), then
-what a checkout's files hold that the session does not read (its `envoy` section, its `askgate`
-section as `askgate in <checkout file> is not read; set it in <session file>`, the file's own
-error while `DISPATCH_URL` replaces it, or its `.opencode/envoy.json`), then, for a session that
-opens a NATS connection (`nats` not `false`), that an Envoy that is on takes no inbound messages:
-`Envoy's inbound messages are off: <inbound.off>; the Envoy tools still work`. A file that turns a
-section off, or holds no section for it, says nothing.
+the other on, the lost-`DISPATCH_URL` notice for Dispatch when `DISPATCH_TOKEN_FILE` is set and no
+server is named (below), or a section's own error (`Dispatch is off: <error>`,
+`Envoy is off: <error>`), then what a checkout's files hold that the session does not read (its
+`envoy` section, its `askgate` section as `askgate in <checkout file> is not read; set it in
+<session file>`, the file's own error while `DISPATCH_URL` replaces it, or its
+`.opencode/envoy.json`), then, for a session that opens a NATS connection (`nats` not `false`),
+that an Envoy that is on takes no inbound messages: `Envoy's inbound messages are off:
+<inbound.off>; the Envoy tools still work`. Otherwise a file that turns a section off, or holds no
+section for it, says nothing.
 `askgateSetting(file)` reads the session file's top-level `askgate` section now, on its own, so a
 section that does not parse never fails the Dispatch or Envoy read: `{"askgate":{"enabled":false}}`
 turns AskGate off (`{ enabled: false, error: null }`); no file, no section or `enabled: true`
@@ -325,7 +387,11 @@ Dispatch alone, now: `{ dispatch, warnings, missing }`, Dispatch's resolution be
 read found and did not read and the missing-file record, for a command, which says the `warnings`
 itself, and for a plugin whose Dispatch calls follow a file that changes. `activeDispatchSettings`
 turns its `dispatch` into the configuration a caller uses, null when nothing configures Dispatch,
-or a `dispatch config: <reason>` throw. `sessionEnvoySettings(file, env, { cwd, nats })` reads
+or a `dispatch config: <reason>` throw. `sessionDispatchUrl(file, env, { cwd })` is the URL alone
+(`dispatchUrl`), resolved without reading the token, so no `!` command runs, or undefined when
+Dispatch is off before its token is read: what a caller on a deadline names to
+`readSessionAnswers` as `dispatchUrl` while a kept resolution is off with an error, so only the list
+read from that URL stands in. `sessionEnvoySettings(file, env, { cwd, nats })` reads
 Envoy alone, for a command such as `envoy-send`.
 
 ## Dispatch
@@ -342,6 +408,42 @@ them, covers the issue; with Envoy off or no answer from the listener it names n
 `dispatch-subscribe.ts` turns `details.follows` into the one-time host notice.
 `dispatch-first.ts` reads the `dispatch-first` skill from a plugin's staged `skills/` and wraps it in
 `DISPATCH_FIRST_MARKER`, the text pi-envoy and claude-envoy inject into a session with Dispatch.
+
+Every write `DispatchClient` makes carries one key. `#send`, which every JSON, multipart and file
+call goes through, mints a `crypto.randomUUID()` `Idempotency-Key` per `POST` and `PATCH` call and
+sends it on every attempt of that call, so Dispatch runs the write once however many attempts
+reach it and answers a repeat with the first answer (`packages/envoy/cmd/dispatch/README.md`,
+"Keyed writes"); a `GET`, `PUT` or `DELETE` carries none and is sent once. The body is encoded once
+for the whole call, a multipart form under a boundary of its own, since a retry whose bytes differ
+from the first attempt's is a different request to Dispatch and its key is refused. A transport
+failure, any 5xx, a 408, a 429 and Dispatch's `409 KEY_IN_FLIGHT` (`retriesUnderKey`, the rule
+the page shares from `@legion/contracts`) are asked again under that key, `DISPATCH_WRITE_RETRY`'s
+pace: at most five attempts, 1, 2, 4 and 8 s apart, a longer `Retry-After` waited instead, and no
+attempt started more than 30 s after the first. An attempt that goes 20 s without progress before
+its answer begins (`silenceMs`) is cut off and asked again the same way, so a write Dispatch is
+slow to finish is answered `409 KEY_IN_FLIGHT` and then replayed rather than waited on for the
+whole deadline. Progress is the connection taking the body: a body of a megabyte or more goes out
+as a stream read 64 KiB at a time, with its `Content-Length`, and each read restarts the bound, so
+an upload on a slow line is never cut off while it is still going out; a smaller body leaves in
+one write. All of it sits inside the call's own 60 s deadline, so a Dispatch that is down holds a
+`dispatch` command, and the session waiting on it, no longer than that. The call's deadline and
+its cancellation end the write at once and are never retried. Any other answer - a 2xx, a replay,
+`422 KEY_REUSED`, another 4xx - is the answer, at once.
+
+A write is asked again only against a Dispatch this process has lately seen run the keyed layer,
+since an earlier Dispatch ignores the header and would run a retried write a second time. A
+failing answer that echoes the request's key (`Idempotency-Key: <key>`) is that proof itself, so
+one of Dispatch's 5xx, 429 or `409 KEY_IN_FLIGHT` is resent at once. A transport failure, a
+silence cut and a gateway's answer carry no echo, so they rely on what an echo, or a
+`GET /healthz` answering `idempotency_keys: true`, showed for that origin within the last five
+minutes (`KEYED_LAYER_MEMORY_MS`), and otherwise read `/healthz` before the first resend, bounded
+at 5 s. Its status is not read, since Dispatch answers 503 while its database or NATS is down and
+still says `idempotency_keys`; a probe that fails, times out, answers no JSON or lacks the field
+means no resend, and the attempt's own failure is the call's. Only a yes is remembered, and only
+for those five minutes, so a rollback to a Dispatch without the layer is noticed within that
+bound. Dispatch's own refusal that carries no echo says its layer did not judge the request, so
+it sets the memory aside and `/healthz` decides afresh. The probe runs only after a write has
+already failed, so the ordinary path makes no request of its own.
 
 A non-2xx answer is thrown as `DispatchServiceError`. Dispatch's own refusal, JSON with a string
 `error`, is the error's message under its `code` (`HTTP_<status>` when the server set none), with
@@ -363,6 +465,31 @@ Dispatch, so the advice is to check whether it took effect before retrying. The 
 request, such as `dispatch issue-update`'s close path, give its own advice instead. The executor
 reads a status as Dispatch's meaning (a 404 as no linked issue, no such document, or a server
 without the route) only when `fromDispatch` is true.
+
+A write whose attempts run out is thrown as the last attempt's own error, with its usual message,
+except where that last answer alone would say the write never took effect while an earlier attempt
+may have reached Dispatch: a gateway's 408 or 429, Dispatch's own 429, and `409 KEY_IN_FLIGHT`.
+Those are a `DispatchWriteUnsettledError`, deliberately not a `DispatchServiceError`, since a
+caller reads one as a refusal Dispatch decided: its message is the last answer, the number of
+attempts, whether an earlier attempt may have reached Dispatch or Dispatch was still running one,
+and that the write may or may not have taken effect, so check before running it again - a new
+command is a new key. A write that ends with no answer at all is one too, naming the request: its
+last attempt cut off for silence ("made no progress for 20 s, so it was cut off"), or the call's
+deadline ending it while an attempt was out or after one that may have reached Dispatch ("had no
+definitive answer when its deadline ended it"); `last` is the cut or the timeout. A write Dispatch
+made whose answer is gone is a `DispatchWriteLandedError` (`code`, an `IdempotencyLandedCode`, and
+`status`): `409 KEY_COMMITTED`, a write that landed before its answer was lost, which Dispatch will
+not run again, or a replayed 2xx (`Idempotency-Replayed: ?1`) reading `ANSWER_NOT_KEPT`, a first
+answer larger than Dispatch keeps (`answerNotKept`, shared with the page). It is no refusal and no
+`DispatchServiceError`, and it is never asked again. Its message is the one line the session
+reads: the method and URL were made, why the answer is gone, and to read what it made back with
+`dispatch read` or the matching list. The `dispatch` command exits 0 on one and records
+`landed_without_answer: <code>` in its ledger entry. A step before the
+command's own write that lands this way fails the command (exit 1) with that line and what it
+means: a picture upload (nothing else was written: run the call again, which uploads it as its
+next version), or the closing reason of `issue-update --status done` (the close was not sent: read
+the issue's messages for the reason, then close with one that points at it). The close's own
+`PATCH` landing this way is the command's write, and exits 0.
 
 Successful write responses may include `advice`. The executor preserves that object as
 `details.advice` and appends short pointers after the subscription/follow suffix: a primary spec
@@ -390,7 +517,17 @@ DISPATCH_TOKEN_FILE for it`. Invalid configuration, malformed URLs, and empty to
 disabled and name the failing source in `error`; nothing configuring it, or a file turning it off,
 leaves it disabled with a `notice` (`<file> sets dispatch.enabled to false: Dispatch is off`,
 `<file> names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off`, or the
-missing-file text). `DISPATCH_PUBLIC_URL`, when set, is Dispatch's dashboard as people open it, for
+missing-file text). One case is told apart: `DISPATCH_TOKEN_FILE` set while nothing names the
+server. Legion sets that variable only beside `DISPATCH_URL`, a Legion pod has no envoy.json, and
+an Oh My Pi session keeps one shell, where an `unset DISPATCH_URL` lasts for every later command.
+So the notice names the lost variable rather than the file (`lostDispatchUrlNotice`):
+`DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the
+DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is
+for`. When the chosen file is missing, what may have named the server follows it: a dangling link
+(`; <file> is a link to <target>, which does not exist`), then the unread OpenCode-era user file,
+as in the missing-file text. The session's start notice (`sessionSettings`) says the same for
+Dispatch. `DISPATCH_TOKEN` alone keeps the file's notice, since it also goes with a server an
+envoy.json names. `DISPATCH_PUBLIC_URL`, when set, is Dispatch's dashboard as people open it, for
 a session that reaches Dispatch at an address they cannot (a Legion pod's in-cluster one): the
 settings carry it as `publicUrl`, less a trailing slash; every link the executor prints resolves
 against it rather than the API's URL, which every call still goes to; a dashboard URL given as a
@@ -417,8 +554,8 @@ the ref). It reads neither Dispatch nor this session's state, so it runs with Di
 and a call it passed can still stop on either.
 
 `runDispatchCli` (`dispatch-cli.ts`) runs one call per process. The host plugin sets
-`DISPATCH_HOST` (`omp`, `claude` or `opencode`) and the session's id (`CLAUDE_CODE_SESSION_ID`
-under Claude Code, `DISPATCH_SESSION_ID` elsewhere); with either missing the command exits 2
+`DISPATCH_HOST` (`omp` or `claude`) and the session's id (`CLAUDE_CODE_SESSION_ID` under Claude
+Code, `DISPATCH_SESSION_ID` elsewhere); with either missing the command exits 2
 naming it, and an empty variable counts as unset. `DISPATCH_SESSION_TITLE`, or the session
 directory's `title` file, names the session on what it writes. It resolves Dispatch from the
 envoy.json its session's plugin chose (above): with Dispatch off it prints `dispatch: <notice>` for

@@ -25,6 +25,15 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shim"
 )
 
+// imageClaudeRoot and imageClaudeCodePin are where the worker image carries the claude-envoy root
+// and the Claude Code pin (packages/daemon/docker/worker.Dockerfile; claudePluginDir and
+// claudeCodePin, internal/runtime/sandbox/names.go, which a Claude role's pod names): the defaults
+// of --claude-root and --claude-code-pin.
+const (
+	imageClaudeRoot    = "/opt/legion/claude-envoy"
+	imageClaudeCodePin = "/opt/legion/claude-code"
+)
+
 // digits is what --daemon-api-version accepts before it is read as a number.
 var digits = regexp.MustCompile(`^[0-9]+$`)
 
@@ -34,7 +43,16 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // ProbeImage). Both pass --plugin-root and --envoy-plugin-root, the Legion and Envoy plugin
 // directories a pod loads as its two explicit extensions, and the command refuses a run without
 // either (exit 2): the probe certifies the lane a pod uses, so a build line that lost a flag fails
-// the build instead of probing a lane no pod loads.
+// the build instead of probing a lane no pod loads. Every run also checks the Claude lane:
+// --claude-root, the claude-envoy package root the image carries, and --claude-code-pin, the
+// directory of the Claude Code pin a pod installs Claude Code from at launch, both defaulting to
+// where the worker image carries them, so the daemon's probe Sandbox, which names neither, checks
+// them as the build does. The image carries no Claude Code — its licence grants no
+// redistribution and the image is public — so the lane holds the root's built channel server and
+// generated Legion plugin, and its manifest to the same contract, and holds the pin to one a pod
+// can install and verify, exact and checksummed (daemon.ProbeImage, whose verifyClaude says why
+// it reads the pin rather than installing from it); the claude-code capability row checks the
+// same two facts.
 // It runs the image's launch probes under the image's own environment (daemon.ProbeImage), then
 // the capability check (capabilities.CheckImage) under the same environment and launch: every
 // image-site capability of the list every worker is held to (LEGION-578), with the whole table
@@ -56,11 +74,11 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // row unchecked, and the OK line's capabilities mark says so (capabilities=browser-skipped, which
 // the daemon's probe Sandbox refuses: it never passes the flag, and passes only an image whose
 // whole capability list was checked). The
-// probe Sandbox starts it on the pod baseline's variables and overlay, with no state home of its
-// own: with --pod-safety, as a worker's shim starts Oh My Pi (podsafety.Apply: the turn-scoping
-// overlay named first in PI_CONFIG_FILES, written to a fresh temporary directory since the probe
-// pod mounts no state volume, and the two session-placing variables where the pod leaves them
-// unset), but not the per-role state home the shim makes (podsafety.EnsureStateHome): the probe
+// probe Sandbox starts it on the pod baseline's variables, with no state home of its
+// own: with --pod-safety, as a worker's shim starts Oh My Pi (podsafety.Apply: the two
+// session-placing variables where the pod leaves them unset, and no overlay of Legion's own,
+// since it writes none, so the probe reads the role's own PI_CONFIG_FILES as its pod carries
+// it), but not the per-role state home the shim makes (podsafety.EnsureStateHome): the probe
 // pod runs one container, so no broker lock collides; with --provider-env-dir, each
 // provider key exported after it as the shim exports them (shim.ReadProviderEnv); and with
 // --role-references, the references of the role prompts the daemon inlines into its pods
@@ -74,8 +92,8 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // an issue pod's launcher runs every role, its own `legion version` as the shim, over a layout of
 // its own in that directory (launcher.CheckRoleNamespaces), and refuses, exit 1, when the
 // namespaces, a mount role-init makes or the shim fails there. That layout's home is an empty
-// directory on the probe's volume carrying no mount, so the check does not make the overlay over
-// the image's own home, bind a home's volume back, or copy a config home.
+// directory on the probe's volume carrying no mount, so the check does not bind a home's volume
+// back or copy a config home.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("probe-image", "usage: legion probe-image --plugin-root <dir> --envoy-plugin-root <dir> [flags]", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
@@ -83,12 +101,16 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		"the daemon API contract the image's pi-legion must declare (the daemon's probe Sandbox passes its own)")
 	pluginRoot := flags.String("plugin-root", "", "the Legion plugin directory a pod loads as an explicit extension, which the load probe loads the same way (required)")
 	envoyPluginRoot := flags.String("envoy-plugin-root", "", "the Envoy plugin directory a pod loads as its other explicit extension, which the load probe loads the same way (required)")
+	claudeRoot := flags.String("claude-root", imageClaudeRoot, "the claude-envoy package root a worker on the `claude` backend loads, which the Claude lane checks")
+	claudeCodePin := flags.String("claude-code-pin", imageClaudeCodePin, "the directory of the package.json and package-lock.json a pod installs Claude Code from at launch, which the Claude lane checks")
 	podSafety := flags.Bool("pod-safety", false, "run the probes on a pod's baseline (internal/podsafety), as a pod's shim starts Oh My Pi")
 	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files NAME=contents the probes' Oh My Pi gets, as a worker's shim exports them")
+	probeBudget := flags.Duration("probe-budget", 0, "the duration the daemon's probe pod reserves for this command")
 	skipAgentModels := flags.Bool("skip-agent-models", false, "leave the prompt-named task agents' models unresolved (the image build's probe)")
 	skipBrowser := flags.Bool("skip-browser", false, "leave the browser row unchecked: the build of an image for a deployment that turns Oh My Pi's browser off (browser.enabled: false), which carries no Chromium")
 	roleReferences := flags.String("role-references", "", "the task agents and skills the daemon's own role prompts name, resolved in place of the role prompts this binary embeds")
 	roleNamespaces := flags.String("role-namespaces", "", "run one role generation's namespaces (legion launcher role-init) over a layout of its own in this directory, on a volume of its own, and refuse when it fails; its home is an empty directory there, not the image's (the probe Sandbox passes it)")
+	testPostgres := flags.String("test-postgres", "", "prove the pod's own test database in this directory — the image's legion-testpg checked and started, a database made and dropped through LEGION_TEST_PG_DSN, and the server stopped — and refuse when it fails (the probe Sandbox passes it for a deployment that sets runtime.kubernetes.test_postgres; the image build does not)")
 	var roleOverlays roleConfigFilesFlag
 	flags.Var(&roleOverlays, strings.TrimPrefix(bootprobe.RoleConfigFilesFlag, "--"), "<role>=<file>[:<file>…]: a role's own Oh My Pi overlays (role_config_files), read after the environment's PI_CONFIG_FILES as that role's Oh My Pi starts on them; repeatable, one per role (the probe Sandbox passes it)")
 	if code, ok := parseFlags(flags, args); !ok {
@@ -106,12 +128,35 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintln(stderr, "legion probe-image: --envoy-plugin-root is required: the Envoy plugin directory a pod loads as its other explicit extension, which the load probe loads the same way")
 		return 2
 	}
+	if *claudeRoot == "" || *claudeCodePin == "" {
+		fmt.Fprintln(stderr, "legion probe-image: --claude-root and --claude-code-pin each name a directory: the claude-envoy plugin and the Claude Code pin a worker on the `claude` backend needs, which the Claude lane checks")
+		return 2
+	}
+
+	if *probeBudget < 0 {
+		fmt.Fprintln(stderr, "legion probe-image: --probe-budget must not be negative")
+		return 1
+	}
+	if *probeBudget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *probeBudget)
+		defer cancel()
+	}
 	if *roleNamespaces != "" {
 		self, err := os.Executable()
 		if err == nil {
 			err = launcher.CheckRoleNamespaces(*roleNamespaces, self, "version")
 		}
 		if err != nil {
+			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+			return 1
+		}
+	}
+	// The pod's own test database, under the runtime a pod runs on: the probe pod is the first
+	// place this deployment's gVisor starts the server, so a runtime it cannot run under refuses
+	// the boot probe rather than every pod's first Postgres test.
+	if *testPostgres != "" {
+		if err := launcher.CheckTestPostgres(*testPostgres); err != nil {
 			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 			return 1
 		}
@@ -162,15 +207,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	environ := os.Environ()
 	if *podSafety {
-		state, err := os.MkdirTemp("", "legion-probe-image-")
-		if err == nil {
-			defer os.RemoveAll(state)
-			environ, err = podsafety.Apply(environ, state)
-		}
-		if err != nil {
-			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
-			return 1
-		}
+		environ = podsafety.Apply(environ)
 	}
 	if *providerEnvDir != "" {
 		providerEnv, err := shim.ReadProviderEnv(*providerEnvDir, os.LookupEnv)
@@ -188,6 +225,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	err = daemon.ProbeImage(ctx, daemon.ImageProbe{
 		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, PluginRoot: *pluginRoot, EnvoyPluginRoot: *envoyPluginRoot,
+		ClaudeRoot: *claudeRoot, ClaudeCodePin: *claudeCodePin,
 		RoleReferences: references, SkipAgentModels: *skipAgentModels,
 		Log: slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})
@@ -199,7 +237,14 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	// and the provider keys' included — so a PATH or a PUPPETEER_EXECUTABLE_PATH the operator's pod
 	// env sets is checked as a worker's Oh My Pi would honour it. The table is printed whole even
 	// when a row is missing: the operator reads what was checked, then why it failed.
-	img := capabilities.Image{Launch: invocation, Env: environ, WorkDir: workDir, SkipBrowser: *skipBrowser}
+	img := capabilities.Image{
+		Launch:        invocation,
+		Env:           environ,
+		WorkDir:       workDir,
+		ClaudeRoot:    *claudeRoot,
+		ClaudeCodePin: *claudeCodePin,
+		SkipBrowser:   *skipBrowser,
+	}
 	lines, err := capabilities.CheckImage(ctx, img)
 	for _, line := range lines {
 		fmt.Fprintln(stdout, line)

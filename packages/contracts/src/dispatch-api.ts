@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AgentStreamResponder } from "./agent-stream";
 import type {
   ASK_URGENCIES,
   DOC_EDIT_OPS,
@@ -29,6 +30,12 @@ export type Actor =
       /** The subject of the verified service token that authenticated the write
        *  (`system:serviceaccount:<namespace>:<name>`); absent under any other bearer. */
       readonly service?: string;
+      /** The one project key the write's credential may write. The server reads it from an
+       *  access token the secrets broker issued for that project and never from a body, as it
+       *  reads `service` from a service token; it is absent under every credential that names
+       *  none, a browser cookie, a personal token and a broker token scoped to its person
+       *  included. */
+      readonly project?: string;
     }
   /** A server-owned writer, such as the architecture importer
    *  (`{kind: "system", id: "architecture-importer"}`). */
@@ -224,15 +231,39 @@ export interface WriteAdvice {
    */
   readonly decision_blocks_added?: number;
   /**
+   * The related-item check each of a document edit's new decision blocks got, in
+   * document order; a block past the fifth in one edit answers `not_made`. Omitted when the edit
+   * added none, and absent from a Dispatch server predating the check, which only counts them in
+   * `decision_blocks_added`.
+   */
+  readonly decision_block_checks?: DecisionBlockCheck[];
+  /**
    * The typed block openings (`:::ask{…}`) the written document holds as text rather than as
    * blocks, outside code: written inside a line, or escaped. `examples` quotes the first few with a
    * little of the text before each. Omitted when there are none.
    */
   readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
   /**
-   * LEGION-550's write-time feedback, set only on an issue or ask creation: the items most like
-   * what was just filed, and any past decision that matches. Never refuses or delays the write;
-   * `suggestions.missing` explains why search did not answer in time instead.
+   * The approval a document write superseded: the version it stored replaced the one a person
+   * had approved, so that approval is stale until someone approves the new version. A Legion
+   * design gate is such an approval, so this write closed it. Set by a document edit and by an
+   * upload that replaced an existing document, and only on the write that superseded the
+   * approval: a write on a document nobody approved, one whose approval was already stale, and
+   * one whose version carried that approval forward (the approval carry) each omit it.
+   */
+  readonly superseded_approval?: {
+    /** The version a person approved, the one this write superseded. */
+    readonly approved_version: number;
+    /** The version this write stored. */
+    readonly version: number;
+    /** Who gave that approval. */
+    readonly approved_by: string;
+  };
+  /**
+   * The related-item check (LEGION-550), set on an issue or ask creation: the items
+   * most like what was just filed, any past decision that matches, and what the check did
+   * (`outcome`). Never refuses the write; it waits at most five seconds, and a check that did not
+   * search to the end says why in `missing`.
    */
   readonly suggestions?: Suggestions;
   /**
@@ -428,6 +459,44 @@ export interface IssueSummaryPage {
   readonly total: number;
   readonly limit: number;
   readonly offset: number;
+}
+
+/**
+ * One artifact of an `IssueReferenceSummary`: what a reference to an issue's document shows.
+ * `latest_version` is its greatest version number, null only for an artifact with no version,
+ * which no committed write leaves. `primary` marks the issue's spec, the document a reference to
+ * a block of the spec (`dispatch://<issue>/spec#b-…`) names.
+ */
+export interface IssueReferenceSummaryDocument {
+  readonly id: string;
+  readonly slug: string;
+  readonly name: string;
+  readonly kind: Artifact["kind"];
+  readonly latest_version: number | null;
+  readonly primary: boolean;
+}
+
+/**
+ * `GET /api/v1/issues/{key}/summary`: what a reference to an issue shows, read without the full
+ * issue (`IssueDetails`). `documents` is every artifact of the issue, in the order the full read
+ * lists its `artifacts`, so an issue reference and its documents' references share one read.
+ * 404 `NOT_FOUND` for no such issue.
+ */
+export interface IssueReferenceSummary {
+  readonly key: string;
+  readonly project: string;
+  readonly title: string;
+  readonly status: string;
+  readonly documents: IssueReferenceSummaryDocument[];
+}
+
+/**
+ * `GET /api/v1/projects/{key}/artifacts/{slug}/summary`: what a reference to a project document
+ * shows, read without its versions. The slug or unambiguous filename resolves as the project
+ * document read resolves it (404 `ARTIFACT_NOT_FOUND`, 400 `ARTIFACT_REFERENCE_AMBIGUOUS`).
+ */
+export interface DocumentReferenceSummary extends Omit<IssueReferenceSummaryDocument, "primary"> {
+  readonly project: string;
 }
 
 export interface IssueChild {
@@ -1004,6 +1073,83 @@ export interface MyRepliesResponse {
   readonly offset: number;
 }
 
+/** What a `SessionAnswer` is to the session Dispatch delivered it to, one snake_case wire value per
+ *  relation, each spelling the phrase a reader prints: a person answered the session's ask,
+ *  replied in its ask's thread, replied in a comment thread it wrote in, commented on a document it
+ *  wrote, commented on an issue routed to it, mentioned it, sent it a message (direct, on an issue,
+ *  or a broadcast's copy), or replied to its message. Mirrored in Go as the
+ *  `model.SessionAnswerRelation*` constants. */
+export const SESSION_ANSWER_RELATIONS = [
+  "answered_your_ask",
+  "replied_on_your_ask",
+  "replied_in_a_comment_thread",
+  "commented_on_a_document",
+  "commented_on_an_issue",
+  "mentioned_you",
+  "sent_you_a_message",
+  "replied_to_your_message",
+] as const;
+
+export type SessionAnswerRelation = (typeof SESSION_ANSWER_RELATIONS)[number];
+
+/** One thing a person wrote that Dispatch delivered to a session, on
+ *  `GET /api/v1/agents/{session_id}/answers`: an ask's current answer, a comment at its current
+ *  body, or a message. The list holds each `(kind, id)` once, whichever ways it reached the
+ *  session. Mirrors `model.SessionAnswer`. */
+export interface SessionAnswer {
+  /** `answer` is an ask's current answer, `comment` a comment (a reply in an ask's thread
+   *  included), `message` a message. */
+  readonly kind: "answer" | "comment" | "message";
+  /** What the item is to the session. */
+  readonly relation: SessionAnswerRelation;
+  /** The ask's id for an answer, else the comment's or the message's id. */
+  readonly id: string;
+  /** When the person wrote it (RFC 3339, UTC): the current answer's time, or the comment's or the
+   *  message's creation. The window and the order both read it. */
+  readonly at: string;
+  /** When a comment's body was last edited; absent on a comment never edited, and on an answer or
+   *  a message. */
+  readonly edited_at?: string;
+  /** The person who wrote it: the list carries nothing an agent or the system wrote. */
+  readonly author: Extract<Actor, { readonly kind: "user" }>;
+  /** The person's words in full, never cut: the answer's text (`""` when the answer chose options
+   *  only), the comment's current body, or the message's body. */
+  readonly text: string;
+  /** An answer's chosen option labels, in the order the person chose them; absent when it chose
+   *  none, and on a comment or a message. */
+  readonly selected?: string[];
+  /** `true` on an answer when the ask has more than one answer, so this one replaced an earlier
+   *  one; absent otherwise. */
+  readonly replaced?: true;
+  /** The ask the item answers or replies in, with the session's whole question (a reader cuts
+   *  it): present on an answer and on a reply in an ask's thread, absent otherwise. */
+  readonly ask?: { readonly id: string; readonly question: string };
+  /** The issue (key and title) or the project document holding the item; null for a direct
+   *  message, which is on no issue. */
+  readonly owner: OpenAskOwner | null;
+  /** The item's `dispatch://` address (`dispatch://KEY/ask/ID`, `dispatch://KEY/comment/ID`,
+   *  `dispatch://KEY/message/ID`, or `dispatch://PROJECT/artifact/SLUG/ask/ID` and `/comment/ID`
+   *  on a project document); null for a direct message, which has no address. */
+  readonly ref: string | null;
+  /** Relative Dispatch deep link to the item, as `DISPATCH_HREF_REFERENCES` lists the shapes, or
+   *  `/agents/SESSION/live` for a direct message. */
+  readonly href: string;
+}
+
+/** `GET /api/v1/agents/{session_id}/answers`: what people wrote to one session since `since`,
+ *  newest first. Mirrors `model.SessionAnswersResponse`. */
+export interface SessionAnswersResponse {
+  readonly session_id: string;
+  /** The window's start the server applied (RFC 3339, UTC): the request's `since`, or 72 hours
+   *  before the read when it named none. */
+  readonly since: string;
+  /** How many items the window holds, `max_chars` notwithstanding. */
+  readonly total: number;
+  /** Newest first by `at`, then by `id`. With `max_chars`, the list stops after the item whose
+   *  `text` takes the running sum of text lengths past it, so it can be shorter than `total`. */
+  readonly items: SessionAnswer[];
+}
+
 export interface AskOption {
   readonly label: string;
   readonly description?: string;
@@ -1040,22 +1186,56 @@ export interface ReferenceChangesPayload {
    *  their batched backlink counts refreshes exactly those rows. Absent when the write moved
    *  no counted node, and on every event recorded before the field existed. */
   readonly references_changed?: ChangedReference[];
-  /** The write moved more counted nodes than an event carries: `references_changed` is absent
-   *  and the reader refreshes every list that holds a count. */
+  /** The write moved more counted nodes of some kind than an event carries (`refs.CountedChangeLimit`
+   *  of each kind): a reader that does not read `references_changed_truncated_kinds` refreshes
+   *  every list that holds a count. */
   readonly references_changed_truncated?: boolean;
+  /** The kinds whose targets the write cut from `references_changed`, set with
+   *  `references_changed_truncated`; the targets of every other kind are still named. A reader
+   *  refreshes every read of each kind listed, and only those. Absent from an event written
+   *  before the field existed, whose truncation said nothing of its kinds. */
+  readonly references_changed_truncated_kinds?: ChangedReference["kind"][];
+}
+
+/** Whose Replies count a write can have moved, mirroring the server's `ThreadLogins` payload
+ *  field: every login with a Replies row (the server's `user_threads`) on the write's thread once
+ *  the write is in, sorted, `[]` when nobody has one. Each payload family names the event types
+ *  that carry it; it is absent from every other type and from every event written before the
+ *  field existed, which a reader takes as "anyone's count may have moved". */
+export interface ThreadLoginsPayload {
+  readonly thread_logins?: string[];
+}
+
+/** What an `issue.created`, `issue.updated` or `issue.closed` write changed, read in its own
+ *  transaction. Each field is absent from every other `issue.*` type and from an event written
+ *  before the fields existed, which a reader takes as "anything may have changed". */
+export interface IssueEventChanges {
+  /** Each field whose value the write moved, of `title`, `status`, `closed_at` (for a close or a
+   *  reopen), `rank`, `priority`, `assignee`, `parent`, `labels`, `route`, `repo`, `components`,
+   *  `blocked_by` and `external_links`; for `issue.created`, every field the new issue holds a
+   *  value in. */
+  readonly changed?: string[];
+  /** The issue's parent chain after the write, parent first up to the root; `[]` for a root. */
+  readonly ancestors?: string[];
+  /** Present only when the status moved: for a close or a reopen every login with a Replies row
+   *  on one of the issue's open asks, for any other status move `[]`. */
+  readonly thread_logins?: string[];
 }
 
 /** Every `issue.*` event payload is the issue row, flat, plus what the write moved in the
  *  reference graph: a new issue's spec text is indexed in the creating transaction. */
-export type IssueEventPayload = Issue & ReferenceChangesPayload;
+export type IssueEventPayload = Issue & ReferenceChangesPayload & IssueEventChanges;
 
 /** Every `ask.*` event payload is the ask row, flat, plus what the write moved in the reference
  *  graph. `restored` is true on the `ask.opened` or `ask.answered` settlement appends when an edit
  *  restores a decision block it retracted: the ask returns to the state it had, and no one answered
  *  anything new. A restore the release before Dispatch kept the mark writes - every one already in
  *  the event log, and one written during a rollout or an image rollback - carries no mark, so a
- *  missing `restored` does not prove an event is a new answer. */
-export type AskEventPayload = Ask & ReferenceChangesPayload & { readonly restored?: boolean };
+ *  missing `restored` does not prove an event is a new answer. `thread_logins` (the ask's own
+ *  thread) is carried by `ask.opened`, `ask.answered` and `ask.resolved`. */
+export type AskEventPayload = Ask &
+  ReferenceChangesPayload &
+  ThreadLoginsPayload & { readonly restored?: boolean };
 
 /** An `ask.answered` payload. `previous_answer` is present when the answer replaced an earlier
  *  one; the asker and every follower receive it as they received the first. */
@@ -1152,6 +1332,49 @@ export interface Comment extends AnchorPosition {
   readonly created_at: string;
   readonly mentions: CommentMention[];
   readonly deliveries: CommentDelivery[];
+  /** The block of the comment this reply answers (`reply_to_block`); null on every other
+   *  comment, and absent from a Dispatch older than the field. */
+  readonly reply_block?: ReplyBlock | null;
+}
+
+/** The block a reply answers: its node id (`comment/<uuid>#b2`), its reference (absent for a
+ *  block of a direct message, which has no address), its id, its text cut to 480 characters (the
+ *  last text it held once removed), and whether its item's current revision no longer holds it. */
+export interface ReplyBlock {
+  readonly node: string;
+  readonly ref?: string;
+  readonly block_id: string;
+  readonly text: string;
+  readonly removed: boolean;
+}
+
+/** What `GET /api/v1/comments/{id}/blocks` and `GET /api/v1/messages/{id}/blocks` answer: the
+ *  comment or message as a graph node, the comment's revision (absent for a message, which is
+ *  never edited), whether its blocks are indexed from the body it stores, and its current blocks
+ *  in body order. While the item is owed an index, or was indexed from another body than it
+ *  stores, `indexed` is false and `blocks` is empty (the read writes nothing): an editor then
+ *  edits the comment without carrying block ids. */
+export interface ItemBlocks {
+  readonly item: GraphNode;
+  readonly revision?: number;
+  readonly indexed: boolean;
+  readonly blocks: readonly ItemBlock[];
+}
+
+/** One current block of a comment or message: its id (`b2`), its type, its whole text as its
+ *  author wrote it, its reference (absent for a block of a direct message, which has no address),
+ *  and `from`/`to`, where it starts and ends in the stored body in UTF-16 code units (a JavaScript
+ *  string index). A comment block also carries the revision its text last changed in and that
+ *  revision's time; a message block has neither. */
+export interface ItemBlock {
+  readonly id: string;
+  readonly type: string;
+  readonly text: string;
+  readonly ref?: string;
+  readonly from: number;
+  readonly to: number;
+  readonly changed_revision?: number;
+  readonly changed_at?: string;
 }
 
 /** What a route that writes a comment answers (`POST /api/v1/issues/{key}/comments`,
@@ -1186,11 +1409,13 @@ export interface AcceptSuggestionResponse extends Comment {
  * The payload of every `comment.*` event. It is the comment row as it stood when the event was
  * written, and events are retained verbatim, so the row's later additions are optional here:
  * `mentions` and `deliveries` were added on 2026-09-18 (#1188), and every comment event recorded
- * before that day carries neither. A read row (`Comment`) always has both.
+ * before that day carries neither. A read row (`Comment`) always has both. `thread_logins` (the
+ * comment's ask, else its root) is carried by `comment.created` and `comment.answered`.
  */
 export interface CommentEventPayload
   extends Omit<Comment, "mentions" | "deliveries">,
-    ReferenceChangesPayload {
+    ReferenceChangesPayload,
+    ThreadLoginsPayload {
   readonly mentions?: CommentMention[];
   readonly deliveries?: CommentDelivery[];
   readonly artifact_name: string;
@@ -1225,6 +1450,130 @@ export const DELIVERY_CAPABILITIES = ["aside", "btw", "steer"] as const;
  * the server's are one number.
  */
 export const MAX_BROADCAST_RECIPIENTS = 100;
+
+/**
+ * The request header that names one write's intent: the same on every retry of that write, and
+ * different for every new press. Dispatch accepts it, optionally, on every `POST` and `PATCH`
+ * route (`PUT` and `DELETE` are idempotent already): a repeat with the same key and the same
+ * request, once the first has finished, is answered with the first's stored status and body and
+ * `IDEMPOTENCY_REPLAYED_HEADER`, and runs nothing again; the same key with a different request is
+ * `422 IDEMPOTENCY_KEY_REUSED`; the same key while the first is still running (within
+ * `IDEMPOTENCY_LEASE_MS`) is `409 IDEMPOTENCY_KEY_IN_FLIGHT` with `Retry-After: 1`, which a client
+ * asks again after. A 5xx, 401, 408 or 429 is not stored, so the next attempt runs the request
+ * again - unless the first attempt's write committed before its answer was lost, which a repeat
+ * is answered `409 IDEMPOTENCY_KEY_COMMITTED` for. Keys belong to the signed-in login that sent
+ * them and are kept `IDEMPOTENCY_KEY_TTL_MS`.
+ * Five routes answer a repeat from the record they made rather than the stored body: `POST
+ * /api/v1/agents/{session_id}/messages`, `POST /api/v1/broadcasts`, `POST
+ * /api/v1/issues/{key}/messages`, `POST /api/v1/issues/{key}/comments` and `POST
+ * /api/v1/artifacts/{id}/comments` resume any delivery still owed and answer `201` with
+ * `IDEMPOTENCY_REPLAYED_HEADER` and the resource read afresh in the first answer's shape (a
+ * broadcast with the first answer's `excluded`), so a recipient whose attempt a live sender holds
+ * can still read `pending`, and a repeat after a lost answer is that replay, never
+ * `409 IDEMPOTENCY_KEY_COMMITTED`. A write without the header is run as it always was, with no
+ * replay (the IETF `Idempotency-Key` draft; Google AIP-155).
+ */
+export const IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+
+/** The response header (`?1`, a structured-field boolean) on an answer Dispatch replayed from
+ *  the first request under the key rather than ran again. */
+export const IDEMPOTENCY_REPLAYED_HEADER = "Idempotency-Replayed";
+
+/** The longest `IDEMPOTENCY_KEY_HEADER` value, in characters. */
+export const IDEMPOTENCY_KEY_MAX = 128;
+
+/** A whole `IDEMPOTENCY_KEY_HEADER` value: letters, digits, `.`, `_`, `:` and `-`, from one to
+ *  `IDEMPOTENCY_KEY_MAX` characters. Any other is `400 KEY_INVALID` (`IDEMPOTENCY_KEY_INVALID`). */
+export const IDEMPOTENCY_KEY_PATTERN = new RegExp(`^[A-Za-z0-9._:-]{1,${IDEMPOTENCY_KEY_MAX}}$`);
+
+/** The code of the `422` for a key already used for a different request (another method,
+ *  route, path value or body); that request was not run. */
+export const IDEMPOTENCY_KEY_REUSED = "KEY_REUSED";
+
+/** The code of the `409` (with `Retry-After: 1`) for a key whose first request is still running;
+ *  nothing was run, and the client asks again under the same key. */
+export const IDEMPOTENCY_KEY_IN_FLIGHT = "KEY_IN_FLIGHT";
+
+/** The code of the `409` for a key whose write landed before its answer was lost: Dispatch will
+ *  not run it again and has no answer to replay. The write is done; a client treats it as landed
+ *  and reads again what it wrote (the event feed carries the change too). */
+export const IDEMPOTENCY_KEY_COMMITTED = "KEY_COMMITTED";
+
+/** The code of the `400` for an `IDEMPOTENCY_KEY_HEADER` that does not match
+ *  `IDEMPOTENCY_KEY_PATTERN`, or is sent twice: named as `KEY_REUSED`, `KEY_IN_FLIGHT` and
+ *  `KEY_COMMITTED` are. */
+export const IDEMPOTENCY_KEY_INVALID = "KEY_INVALID";
+
+/** The code a replay's body carries when the first answer was larger than Dispatch keeps (1 MiB):
+ *  the replay has the first answer's status and this body instead of the first's. A 2xx with it
+ *  means the write ran; the client reads the resource again rather than this body. */
+export const IDEMPOTENCY_ANSWER_NOT_KEPT = "ANSWER_NOT_KEPT";
+
+/**
+ * The request header a page puts on every write it makes (`POST`, `PATCH`, `PUT`, `DELETE`): the
+ * login of the person who pressed it. Dispatch answers `409 DISPATCH_LOGIN_CHANGED` before
+ * anything runs, its key untouched, when the request's caller is another person or no person at
+ * all, so a write one person pressed never runs under another's session - another tab signs in
+ * in place, and this tab's retry goes out on the new cookie before it learns of it. A caller that
+ * resolves to nobody (a lapsed cookie) is answered by the route's own `401`. A write without the
+ * header (the `dispatch` command, an agent) is not checked.
+ */
+export const DISPATCH_LOGIN_HEADER = "Dispatch-Login";
+
+/** The code of the `409` for a write whose `DISPATCH_LOGIN_HEADER` names a login that is not its
+ *  caller's: nothing ran. The page drops every write that login pressed. */
+export const DISPATCH_LOGIN_CHANGED = "LOGIN_CHANGED";
+
+/** The codes of a write Dispatch made and has no answer to give for: `409 KEY_COMMITTED`, or a
+ *  replayed 2xx reading `ANSWER_NOT_KEPT`. A client treats either as landed. */
+export type IdempotencyLandedCode =
+  | typeof IDEMPOTENCY_KEY_COMMITTED
+  | typeof IDEMPOTENCY_ANSWER_NOT_KEPT;
+
+/**
+ * Whether an attempt Dispatch answered with `status` (and `code`, its error body's) ended without
+ * Dispatch's verdict on the key, so a client asks again under the same key: a 5xx, a 408 or a 429
+ * (none of which Dispatch stores, `IDEMPOTENCY_KEY_HEADER`), or `409 IDEMPOTENCY_KEY_IN_FLIGHT`
+ * (the first request under the key is still running). Any other answer is Dispatch's verdict, and
+ * the same key would be answered with it again. The page and the `dispatch` command both retry by
+ * this one rule.
+ */
+export function retriesUnderKey(status: number, code: string | undefined): boolean {
+  return (
+    status >= 500 ||
+    status === 408 ||
+    status === 429 ||
+    (status === 409 && code === IDEMPOTENCY_KEY_IN_FLIGHT)
+  );
+}
+
+/**
+ * Whether an answer of `status`, `replayed` (it carried `IDEMPOTENCY_REPLAYED_HEADER`) and parsed
+ * `body` is a replay whose first answer Dispatch did not keep: a replayed 2xx whose body is
+ * `{ code: IDEMPOTENCY_ANSWER_NOT_KEPT }`. The write ran; the client reads the resource again
+ * rather than taking this body for it. An answer that is not a replay is the resource itself,
+ * whatever it holds.
+ */
+export function answerNotKept(status: number, replayed: boolean, body: unknown): boolean {
+  return (
+    replayed &&
+    status >= 200 &&
+    status < 300 &&
+    typeof body === "object" &&
+    body !== null &&
+    Reflect.get(body, "code") === IDEMPOTENCY_ANSWER_NOT_KEPT
+  );
+}
+
+/** How long Dispatch keeps a key's answer: 24 hours. */
+export const IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** How long a key's first request holds the key: a repeat within this is
+ *  `409 IDEMPOTENCY_KEY_IN_FLIGHT`. One after it, the first one's process presumed dead, is
+ *  answered `409 IDEMPOTENCY_KEY_COMMITTED` when that first run's write committed, is answered
+ *  from the record on the five routes that keep one (`IDEMPOTENCY_KEY_HEADER`), and otherwise
+ *  takes the key over and runs the request again. 60 seconds. */
+export const IDEMPOTENCY_LEASE_MS = 60 * 1000;
 
 export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
 
@@ -1281,9 +1630,9 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  * under a MsgId of its delivery id, and GitHub redelivers deliveries up to three days old, so a
  * window shorter than that lets a GitHub redelivery be stored, and handed to a host, twice.
  *
- * This window bounds a *delivery* retry, not a broadcast *create*:
- * `CreateBroadcastInput.idempotency_key` is a database row that lives as long as its broadcast,
- * so a repeated `POST /api/v1/broadcasts` is recognised with no window, however late it arrives.
+ * This window bounds a *delivery* retry, not a repeated *write*: a write's `Idempotency-Key`
+ * (`IDEMPOTENCY_KEY_HEADER`) is recognised for `IDEMPOTENCY_KEY_TTL_MS`, however late within
+ * that the repeat arrives.
  */
 export const DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 
@@ -1367,23 +1716,39 @@ export interface Message {
   readonly broadcast_id?: string | null;
   readonly deliveries: MessageDelivery[];
   readonly created_at: string;
+  /** The block of the message this reply answers (`in_reply_to_block`); null on every other
+   *  message, and absent from a Dispatch older than the field. */
+  readonly reply_block?: ReplyBlock | null;
 }
 
 /**
- * A node whose inbound reference edges one write moved, addressed the way the lists carrying
- * its backlink count are keyed: an issue by key, an ask by id together with the issue or
- * document whose ask list holds its row. Only the kinds a reader counts are named; a citation
- * of a comment, message or document changes no counted row and the graph query covers it.
+ * A node whose inbound reference edges one write moved, addressed the way the reads that show
+ * it are keyed: an issue by key, an ask by id together with the issue or document whose ask list
+ * holds its row, and a document or file (`artifact`) by its uuid (`id`, the node id its
+ * `GET /api/v1/references` read reports) and its `ref`, the dispatch:// address its Referenced by
+ * panel is opened on (`dispatch://CORE/artifact/runbook`, `dispatch://CORE-1/spec`,
+ * `dispatch://CORE-1/artifact/notes-md`). An `artifact` entry carries neither `issue_key` nor
+ * `artifact_id`; `ref` is absent for one whose owner names no address. A block of a document
+ * (`block`) is named by its node id (`<document ref_key>#<block id>`, as its read reports it), its
+ * `ref` (`dispatch://CORE-1/spec#b-intro`) and its document's uuid as `artifact_id`, whose panel
+ * lists the edges at its blocks; a write names one whose inbound edges or whose text it moved. A
+ * citation of a comment or message changes no row read by name and the graph query covers it. An
+ * event written before `artifact` or `block` entries existed names none.
  */
 export interface ChangedReference {
-  readonly kind: "issue" | "ask";
+  readonly kind: "issue" | "ask" | "artifact" | "block";
   readonly id: string;
   readonly issue_key?: string | null;
   readonly artifact_id?: string | null;
+  readonly ref?: string;
 }
 
-export interface MessageEventPayload extends Message, ReferenceChangesPayload {
-  /** First 160 characters of the reply target's body; empty otherwise. */
+/** `thread_logins` (the message's thread root, up `in_reply_to`) is carried by an issue message's
+ *  `message.created` and `message.answered`; a direct (issue-less) conversation has no Replies
+ *  thread, so its messages carry none. */
+export interface MessageEventPayload extends Message, ReferenceChangesPayload, ThreadLoginsPayload {
+  /** First 160 characters of the reply target's body, or of the block it names (`reply_block`);
+   *  empty otherwise. */
   readonly reply_body?: string;
   /** The target of a reply's thread root: the conversation the reply lands in, for a consumer
    *  that groups a thread under its root. A session replying to a message aimed at that
@@ -1565,10 +1930,12 @@ export interface DuplicateCandidate {
 }
 
 /**
- * One item LEGION-550's write-time feedback judges similar to what was just filed: a fused-search
- * hit (`SearchResult`) over the same project. `answered_by`/`answered_at` are set only when this
- * is `Suggestions.decision` — the "past decision" case, where the agent needs who answered and
- * when, not just a link.
+ * One item the related-item check (LEGION-550) judges like what was just filed: a
+ * search hit over the same project. `ask` is where an ask item stands, absent from an older
+ * Dispatch and when the check could not read the asks' states (no item then carries `ask`, and
+ * there is no `decision`). `answered_by`/`answered_at` are set only when this is
+ * `Suggestions.decision` — the "past decision" case, where the agent needs who answered and when,
+ * not just a link — and repeat `ask.answer`'s user and time for clients built before `ask`.
  */
 export interface WriteSuggestion {
   readonly kind: SearchResultKind;
@@ -1577,20 +1944,101 @@ export interface WriteSuggestion {
   readonly id: string;
   readonly snippet: string;
   readonly href: string;
+  readonly ask?: SearchAsk;
   readonly answered_by?: string;
   readonly answered_at?: string;
 }
 
+/** `Suggestions.outcome`: the check listed items, searched and found none, or did not search to
+ *  the end (`missing` says why). */
+export type RelatedCheckOutcome = "found" | "none" | "not_made";
+
+/** `Suggestions.search`: how the check searched; keywords only when meaning search could not run
+ *  (`search_note` says why) or the caller asked for it. */
+export type RelatedCheckSearch = "meaning_and_keywords" | "keywords_only";
+
 /**
- * LEGION-550's write-time feedback on a newly created issue or ask: the three items most like
- * it (`related`) and, when an answered ask already settles the same question, that decision
- * (`decision`). `missing` explains why search did not answer within the write's bounded budget,
- * instead of refusing or delaying the write itself.
+ * The related-item check's result (LEGION-550) on a newly created issue or ask, on
+ * each new decision block of a document edit, and as the whole answer of the no-write related
+ * route: the three items most like it (`related`, one per owner, always an array) and, when an
+ * answered ask already settles the same question, that decision (`decision`). The check never
+ * refuses the write; it waits at most five seconds.
+ *
+ * A Dispatch predating the check's outcome sends only `related`, `decision` and `missing`; every other
+ * field is absent there. From that release on, `outcome` is always set, `search` is set unless the
+ * check was not made, and `missing` is set, to the reason, exactly when `outcome` is `not_made`.
+ * `search_query` is two or three of the words the keyword search used, spelled as the text spells
+ * them, for a reader to run `dispatch search` with. `title_matches` is the issues whose titles
+ * near-duplicate a new issue's when the create was forced past that refusal. Mirrors
+ * `model.Suggestions`.
  */
 export interface Suggestions {
+  readonly outcome?: RelatedCheckOutcome;
+  readonly search?: RelatedCheckSearch;
+  readonly search_note?: string;
+  readonly search_query?: string;
   readonly related: WriteSuggestion[];
   readonly decision?: WriteSuggestion;
   readonly missing?: string;
+  readonly title_matches?: DuplicateCandidate[];
+}
+
+/** One new decision block's related-item check in a document edit's advice
+ *  (`WriteAdvice.decision_block_checks`): the block's id, its question, and the check's result. */
+export interface DecisionBlockCheck {
+  readonly block_id: string;
+  readonly question: string;
+  readonly suggestions: Suggestions;
+}
+
+/**
+ * The body of `POST /api/v1/projects/{key}/related` (and the query of its `GET` form, which caps
+ * title and text together at `SEARCH_QUERY_MAX`): the related-item check over a title and a text
+ * without writing anything. `exclude_issue` leaves that issue's own items out of the results, as a
+ * check on that issue's own write does; `keywords_only` skips meaning search. A blank title and
+ * text answer `not_made`. The answer is `Suggestions`.
+ */
+export interface RelatedCheckInput {
+  readonly title?: string;
+  readonly text?: string;
+  readonly exclude_issue?: string;
+  readonly keywords_only?: boolean;
+}
+
+/** One millisecond column of `RelatedChecksReport` over the checks that hold a value in it
+ *  (`count`): discrete 50th and 95th percentiles, the largest, and how many took more than 300 ms.
+ *  `p50`, `p95` and `max` are null when `count` is 0. Mirrors `model.RelatedCheckTiming`. */
+export interface RelatedCheckTiming {
+  readonly count: number;
+  readonly p50: number | null;
+  readonly p95: number | null;
+  readonly max: number | null;
+  readonly over_300ms: number;
+}
+
+/**
+ * `GET /api/v1/related-checks?project=&from=&to=&source_kind=`: how the related-item checks of
+ * writes recorded within one window went. `project`, `source_kind`, `from` and `to` echo the
+ * filters, each null when not given (`from` inclusive, `to` exclusive). Each `by_*` map holds only
+ * the values seen; `by_search` counts a check not made under `not_made`, and `by_reason` leaves
+ * out checks with no reason. `completed` is the checks that searched to the end (found or none),
+ * `skipped_for_time` those not made because the search ran out of time. Mirrors
+ * `model.RelatedChecksReport`.
+ */
+export interface RelatedChecksReport {
+  readonly project: string | null;
+  readonly source_kind: string | null;
+  readonly from: string | null;
+  readonly to: string | null;
+  readonly total: number;
+  readonly by_source_kind: Readonly<Record<string, number>>;
+  readonly by_outcome: Readonly<Record<string, number>>;
+  readonly by_search: Readonly<Record<string, number>>;
+  readonly by_reason: Readonly<Record<string, number>>;
+  readonly completed: number;
+  readonly skipped_for_time: number;
+  readonly keyword_ms: RelatedCheckTiming;
+  readonly total_ms: RelatedCheckTiming;
 }
 
 export interface Agent {
@@ -1655,6 +2103,8 @@ export interface ReferenceMember {
   readonly via: ReferenceVia;
 }
 
+// IssueReferences is the answer of GET /api/v1/issues/{key}/references. With `?versions=latest`
+// each member's `artifact.versions` holds only its latest version.
 export interface IssueReferences {
   readonly members: ReferenceMember[];
   readonly truncated: boolean;
@@ -1699,9 +2149,12 @@ export type GraphEdgeKind =
 //
 // A block node (`kind: "block"`, id `<document ref_key>#<block id>`) also carries `block_id`,
 // its document's reference as `document`, and `changed_version`, the document version in which
-// its text last changed (its `changed_at` is that version's time). `text` and `pin` are set only
-// on the node a reference read names: `text` is the block's whole current text, and `pin`
-// answers a reference pinned to a version.
+// its text last changed (its `changed_at` is that version's time). A block of a comment or an
+// issue message (id `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`) carries no
+// `document`: its `parent` is the comment or message, and a comment block's `changed_version` is
+// the comment revision in which its text last changed (a message block has none). `text` and
+// `pin` are set only on the node a reference read names: `text` is the block's whole current
+// text, and `pin` answers a reference pinned to a version (or a comment's revision).
 export interface GraphNode {
   readonly kind:
     | "issue"
@@ -1937,7 +2390,16 @@ export interface ArchitectureSyncFailedEventPayload {
 
 export interface UserStateUpdatedEventPayload {
   readonly login: string;
-  readonly state: UserIssueState;
+  /** The viewer's row for one issue as the write left it. Absent from a snooze's event, which
+   *  every signed-in feed carries and so names no issue of the writer's. */
+  readonly state?: UserIssueState;
+  /** Which of `pinned`, `last_read_seq`, `dismissed` and `snoozed` the write moved (`[]` when it
+   *  moved none), so another tab refreshes its pinned list for a pin, its whole Inbox for a snooze
+   *  or an un-snooze (`PUT`/`DELETE /api/v1/me/asks/{id}/snooze`, whose event carries only `login`
+   *  and `["snoozed"]`), and neither for a read mark. Absent from an event written before the
+   *  field existed, which a reader takes as "any of pinned, last_read_seq and dismissed may have
+   *  moved". */
+  readonly changed?: string[];
 }
 
 /** `user_agent_state.updated`: one viewer's Clear or read mark on one session's conversation
@@ -2034,6 +2496,9 @@ interface DispatchEventBase {
   readonly project?: string;
   readonly seq: number;
   readonly actor: Actor;
+  /** Whether the event wakes the issue's route, claimant and authors (`events.Notify`), so an
+   *  agent's own event is not a wake. A reader following an owner topic on the bus skips on the
+   *  published copy's `quiet` instead (`PublishedDispatchEvent`). */
   readonly notify: boolean;
   readonly created_at: string;
 }
@@ -2243,9 +2708,27 @@ export interface EditOp {
   readonly attributes?: Readonly<Record<string, unknown>>;
 }
 
+/** The code of the `401` Dispatch itself answers a caller it cannot resolve to a person - no
+ *  session cookie, one it cannot read, one whose generation it has revoked, or a membership the
+ *  sign-in issuer no longer confirms (`identity.WriteError`). A `401` without it came from
+ *  something in front of Dispatch, an authenticating proxy among them, and says nothing about
+ *  the session: a sign-out answered that way did not go through. */
+export const AUTH_NO_IDENTITY = "NO_IDENTITY";
+
+/** `GET /auth/whoami`'s answer for a person signed in to the dashboard. */
 export interface AuthenticatedUser {
   readonly kind: "user";
   readonly login: string;
+  /** The decimal id at or below which every event is final (committed or rolled back for good)
+   *  when Dispatch answered. Every read the page makes after this answer holds every event at or
+   *  below it, so the event feed resumes from it on its first
+   *  subscription and replays exactly what committed since. Always answered: a server that cannot
+   *  answer the head answers a 503 rather than a whoami without one (`EVENT_HEAD_UNAVAILABLE` while
+   *  no event id is proven final yet, which ends on its own; `EVENT_HEAD_READ_FAILED` when its
+   *  database does not answer), and a
+   *  server older than the field serves no `/ws/live` either, so no page of this release ever
+   *  reads one of its answers. */
+  readonly event_head: string;
 }
 
 export interface UserIssueState {
@@ -2352,10 +2835,20 @@ export interface ListUsersResponse {
 
 /** GET /api/v1/whoami: a person by lowercase email (`login`), or an agent with its personal
  *  token's owner (a lowercase email) — null under the shared token or a verified service token —
- *  and that service token's subject, null unless one authenticated the request. */
+ *  and that service token's subject, null unless one authenticated the request. `session` is the
+ *  session the credential itself proved, which only an access token the secrets broker issued
+ *  does, and `project` the one project key that credential lets the caller write, null where it
+ *  names none. Both are absent from a Dispatch older than broker-issued tokens, which a client
+ *  reads as an older build rather than as null. */
 export type WhoamiResponse =
   | { readonly kind: "user"; readonly login: string }
-  | { readonly kind: "agent"; readonly owner: string | null; readonly service: string | null };
+  | {
+      readonly kind: "agent";
+      readonly owner: string | null;
+      readonly service: string | null;
+      readonly session?: string | null;
+      readonly project?: string | null;
+    };
 
 export interface CreateAskInput {
   readonly question: string;
@@ -2393,6 +2886,10 @@ export interface CreateCommentInput {
   readonly body: string;
   readonly anchor?: AnchorInput;
   readonly reply_to?: string;
+  /** The id of the block of the comment `reply_to` names that the reply answers (`b2`), checked
+   *  against that comment before `reply_to` climbs to its thread's head. `400 INVALID_COMMENT`
+   *  without `reply_to`, for a block that comment does not hold now, and in an ask's thread. */
+  readonly reply_to_block?: string;
   readonly ask_id?: string;
   readonly mentions?: Array<{ readonly target: string }>;
   readonly delivery?: DeliveryCapability;
@@ -2407,11 +2904,24 @@ export interface CreateCommentInput {
 
 export interface EditCommentInput {
   readonly body: string;
+  /** The comment's revision the editor read its blocks at. Required with `blocks`; when it is not
+   *  the comment's current revision (another edit saved first), `blocks` is ignored and the
+   *  server matches the new body's blocks to the comment's by their text. */
+  readonly base_revision?: number;
+  /** Each block id the editor carried through the edit, in body order, with `from`, where the
+   *  block's span starts in `body`, in UTF-16 code units (a JavaScript string index). The new
+   *  body's block holding a carried `from` keeps that id. `400 INVALID_COMMENT` naming the field
+   *  for an id that is not a block of the comment at `base_revision`, an id twice, a `from`
+   *  outside `body` or before the one ahead of it, or `blocks` without `base_revision`. */
+  readonly blocks?: readonly { readonly id: string; readonly from: number }[];
 }
 
 export interface CreateMessageInput {
   readonly body: string;
   readonly in_reply_to?: string;
+  /** The id of the block of the message `in_reply_to` names that the reply answers (`b2`).
+   *  `400 INVALID_MESSAGE` without `in_reply_to` and for a block that message does not hold. */
+  readonly in_reply_to_block?: string;
   readonly target?: string;
   readonly delivery?: MessageDeliveryMode;
   readonly urgency?: "low" | "med" | "high" | "blocking";
@@ -2424,6 +2934,8 @@ export interface CreateAgentMessageInput {
   readonly body: string;
   readonly delivery: MessageDeliveryMode;
   readonly in_reply_to?: string;
+  /** The id of the block of the message `in_reply_to` names that the reply answers (`b2`). */
+  readonly in_reply_to_block?: string;
 }
 
 /** The targeted session's answer to one delivery attempt of a message
@@ -2438,6 +2950,9 @@ export interface MessageReplyInput {
   /** The delivery attempt being answered; attempts count from 1. */
   readonly attempt: number;
   readonly actor: Actor;
+  /** The id of the block of the message answered that the reply answers (`b2`); refused on a
+   *  follow-up, which is filed under the session's first reply. */
+  readonly in_reply_to_block?: string;
 }
 
 /** What `POST /api/v1/messages/{id}/reply` answers for a body: the message, with `duplicate`
@@ -2564,15 +3079,6 @@ export interface CreateBroadcastInput {
   /** The sessions the human selected. A session named twice is one recipient; one that is no
    *  longer live, or that does not advertise `delivery`, comes back under `excluded`. */
   readonly session_ids: readonly string[];
-  /** Names this one send, the same on every retry of it: letters, digits, `.`, `_`, `:` and `-`,
-   *  at most 128 characters. The server answers a repeat (same human, same key, same body, mode
-   *  and session_ids) with the broadcast the first request made, 200 instead of 201, and refuses
-   *  a reuse of the key for a different request with 409 BROADCAST_KEY_REUSED, whose body names
-   *  the broadcast that already used the key as `broadcast_id`; that request is not sent.
-   *  Recognised for as long as the broadcast exists: there is no window (see
-   *  DELIVERY_DUPLICATE_WINDOW_MS). The dashboard sends a UUID per composed send; a script mints
-   *  its own. Required. */
-  readonly idempotency_key: string;
 }
 
 export interface IssueRead {
@@ -2691,6 +3197,21 @@ export const DispatchEventSchema = z.object({
 
 export type InboundDispatchEvent = z.infer<typeof DispatchEventSchema>;
 
+/**
+ * One event as Dispatch's outbox publishes it to NATS: the event this API serves, plus `quiet`.
+ *
+ * `quiet` is whether the event carries nothing for a reader following its owner topic
+ * (`events.Quiet` in envoy): a delivery receipt, an anchor refresh, settings or per-viewer
+ * bookkeeping, a targeted message its session already had, an ask edit that only moved a version,
+ * or a version nobody named. That is what such a reader skips on, where `notify` answers only
+ * whether the event wakes the issue's route, claimant and authors - false for every event an agent
+ * wrote, so a reader skipping on it drops the activity a session subscribed to the issue asked
+ * for. It is optional because a frame published before Dispatch stated it carries none, and such a
+ * frame is judged by `notify` instead. The API's own event shape carries no `quiet`: the outbox
+ * adds it to the copy it publishes.
+ */
+export type PublishedDispatchEvent = DispatchEvent & { readonly quiet?: boolean };
+
 export const IssueEventPayloadSchema = z.object({
   title: z.string().optional(),
   labels: z.array(z.string()).optional(),
@@ -2698,6 +3219,9 @@ export const IssueEventPayloadSchema = z.object({
   priority: z.number().int().min(0).max(3).nullable().optional(),
   rank: z.string().optional(),
   route: z.string().nullish(),
+  changed: z.array(z.string()).optional(),
+  ancestors: z.array(z.string()).optional(),
+  thread_logins: z.array(z.string()).optional(),
 });
 
 export const ArtifactCreatedEventPayloadSchema = z.object({
@@ -2779,6 +3303,7 @@ const askEventPayloadFields = {
       at: z.string().optional(),
     })
     .nullish(),
+  thread_logins: z.array(z.string()).optional(),
 };
 
 export const AskEventPayloadSchema = z.intersection(
@@ -2826,6 +3351,16 @@ const CommentDeliverySchema = z.object({
   created_at: z.string(),
 });
 
+/** The block a reply answers, as a comment or message event payload carries it (`ReplyBlock`).
+ *  An event recorded before the field, or by a Dispatch older than it, carries none. */
+export const ReplyBlockSchema = z.object({
+  node: z.string(),
+  ref: z.string().optional(),
+  block_id: z.string(),
+  text: z.string(),
+  removed: z.boolean(),
+});
+
 export const CommentEventPayloadSchema = z
   .object({
     id: z.string().optional(),
@@ -2854,6 +3389,8 @@ export const CommentEventPayloadSchema = z
     created_at: z.string().optional(),
     mentions: z.array(CommentMentionSchema).optional(),
     deliveries: z.array(CommentDeliverySchema).optional(),
+    reply_block: ReplyBlockSchema.nullish(),
+    thread_logins: z.array(z.string()).optional(),
   })
   // Bus frames are untrusted and this schema declares only the fields Dispatch
   // clients are known to read today, but the wire payload always carries every
@@ -2871,6 +3408,8 @@ export const MessageEventPayloadSchema = z.object({
   reply_body: z.string().optional(),
   thread_target: z.string().optional(),
   author: z.object({ kind: z.string(), id: z.string() }).optional(),
+  reply_block: ReplyBlockSchema.nullish(),
+  thread_logins: z.array(z.string()).optional(),
 });
 
 export const DispatchTargetedResourceIDSchema = z.uuid();
@@ -3431,19 +3970,66 @@ export interface DeliveryLiveRevChanges {
   readonly fields?: Readonly<Record<string, string>>;
 }
 
-export interface DeliveryLiveSubscribe {
+/** A delivery view's resume: the page's last applied change and what it holds; Dispatch answers
+ *  the delta. */
+export interface DeliveryLiveResume {
+  readonly seq: string;
+  readonly revs: DeliveryLiveRevs;
+}
+
+/** The close code Dispatch ends a live socket with once the socket reaches its age, a random point
+ *  in [LIVE_SOCKET_MIN_AGE_MS, LIVE_SOCKET_MAX_AGE_MS). It is in the private 4000-4999 range, apart
+ *  from the 4000 a page closes a silent socket with: the page reopens at once and resumes every
+ *  subscription, showing no pill and refreshing nothing. */
+export const LIVE_SOCKET_MAX_AGE_CLOSE = 4001;
+/** The youngest age at which Dispatch ends a live socket: 30 minutes. */
+export const LIVE_SOCKET_MIN_AGE_MS = 1_800_000;
+/** The age before which Dispatch ends every live socket: 60 minutes. */
+export const LIVE_SOCKET_MAX_AGE_MS = 3_600_000;
+/** The most subscriptions one live socket holds at once; a subscribe past it is refused with a
+ *  `TOO_MANY_SUBSCRIPTIONS` error frame. */
+export const LIVE_SOCKET_MAX_SUBSCRIPTIONS = 64;
+
+/** The Dispatch event feed, event by event in id order. */
+export interface EventsLiveView {
+  readonly kind: "events";
+}
+/** One session's agent stream: whether it is responding, its replay, and each frame it publishes. */
+export interface AgentLiveView {
+  readonly kind: "agent";
+  /** The session's id, a UUID. */
+  readonly session_id: string;
+}
+/** One view a live socket subscription shows. */
+export type LiveView = DeliveryLiveView | EventsLiveView | AgentLiveView;
+
+/** An events view's resume: the decimal id of the last event the page applied. */
+export interface EventsLiveResume {
+  readonly since: string;
+}
+
+/** A subscribe frame for a view of type `V`, whose resume is an `R`. */
+interface LiveSubscribeTo<V extends LiveView, R> {
   readonly type: "subscribe";
   /** The page's own id for this subscription, echoed on every frame for it. */
   readonly sub: string;
-  readonly view: DeliveryLiveView;
-  /** A reconnecting page's last applied change and what it holds; Dispatch answers the delta. */
-  readonly resume?: { readonly seq: string; readonly revs: DeliveryLiveRevs };
+  readonly view: V;
+  /** A reconnecting page's resume point, of its view's kind. */
+  readonly resume?: R;
 }
-export interface DeliveryLiveUnsubscribe {
+/** Starts the subscription `sub` names. Its resume is its view's kind's: a `DeliveryLiveResume`
+ *  for a delivery view, an `EventsLiveResume` for the events view, and none for an agent view,
+ *  which starts from the session's replay. Dispatch refuses any other pairing with an
+ *  `INVALID_FRAME` error frame, so the type admits none. */
+export type LiveSubscribe =
+  | LiveSubscribeTo<DeliveryLiveView, DeliveryLiveResume>
+  | LiveSubscribeTo<EventsLiveView, EventsLiveResume>
+  | LiveSubscribeTo<AgentLiveView, never>;
+export interface LiveUnsubscribe {
   readonly type: "unsubscribe";
   readonly sub: string;
 }
-export type DeliveryLiveClientFrame = DeliveryLiveSubscribe | DeliveryLiveUnsubscribe;
+export type LiveClientFrame = LiveSubscribe | LiveUnsubscribe;
 
 export type DeliveryLiveBody =
   | DeliveryTimelineResponse
@@ -3488,14 +4074,63 @@ export interface DeliveryLiveDelta {
   >;
   readonly revs: DeliveryLiveRevChanges;
 }
-/** Sent to every subscriber when the freshness row's verdict changes, and never otherwise. */
+/** Sent to every subscriber when the freshness row's verdict changes, and to a subscription right
+ *  after its first answer, so a page that was not subscribed at a change still learns it; never
+ *  otherwise. */
 export interface DeliveryLiveFreshness {
   readonly type: "freshness";
   readonly freshness: DeliveryTimelineResponse["freshness"];
   /** The sources past their threshold: "prs", "runs", "ci", "events". */
   readonly stale: readonly string[];
 }
-export interface DeliveryLiveError {
+/** Sent once at the start of every events subscription, before any `event`: the id it starts
+ *  after, which is the page's `since` clamped to the feed's head, or the head when the page sent
+ *  none. A page holding no cursor adopts it, so a page that has applied no event still resumes
+ *  without a gap. */
+export interface LiveEventsStart {
+  readonly type: "events_start";
+  readonly sub: string;
+  /** A decimal event id. */
+  readonly since: string;
+  /** True when the page resumed from an id at or below the feed's head: the subscription replays
+   *  every event after it before it goes live, so the page missed nothing and owes no refresh for
+   *  the gap. False with no resume, and for a resume above the head (an id of a log since
+   *  replaced), which start at the head and replay nothing the page missed. */
+  readonly replay_complete: boolean;
+}
+/** One event of the feed. */
+export interface LiveEventFrame {
+  readonly type: "event";
+  readonly sub: string;
+  /** The event's decimal id, which an `EventsLiveResume` names as `since`. */
+  readonly id: string;
+  readonly event: DispatchEvent;
+}
+interface LiveAgentEvent<E extends string, D> {
+  readonly type: "agent";
+  readonly sub: string;
+  readonly event: E;
+  readonly data: D;
+}
+/** One message of a session's agent stream; `event` names what `data` is. The responder verdict
+ *  is Dispatch's own. A replay's or a frame's data is the session's own JSON, which Dispatch
+ *  relays and never parses, so it is `unknown` here: meant to be an `AgentStreamReplay` or an
+ *  `AgentStreamFrame`, it is whatever the session published, and a page checks it before it
+ *  renders it. */
+export type LiveAgentFrame =
+  | LiveAgentEvent<"responder", AgentStreamResponder>
+  | LiveAgentEvent<"replay", unknown>
+  | LiveAgentEvent<"frame", unknown>;
+/** Dispatch ended this one subscription: it fell behind (`behind`), or the relay dropped the
+ *  viewer (`dropped`). The page subscribes it again at once. */
+export interface LiveEnded {
+  readonly type: "ended";
+  readonly sub: string;
+  readonly reason: "behind" | "dropped";
+}
+/** A refusal: of the subscription `sub` names, or, without `sub`, of a frame Dispatch could not
+ *  read. */
+export interface LiveError {
   readonly type: "error";
   readonly sub?: string;
   readonly code: string;
@@ -3503,15 +4138,19 @@ export interface DeliveryLiveError {
 }
 /** Sent every heartbeat interval beside the socket's own ping, carrying nothing: a browser never
  *  shows a ping to the page, so this is how the page tells a quiet socket from a dead one. */
-export interface DeliveryLiveHeartbeat {
+export interface LiveHeartbeat {
   readonly type: "heartbeat";
 }
-export type DeliveryLiveServerFrame =
+export type LiveServerFrame =
   | DeliveryLiveSnapshot
   | DeliveryLiveDelta
   | DeliveryLiveFreshness
-  | DeliveryLiveError
-  | DeliveryLiveHeartbeat;
+  | LiveEventsStart
+  | LiveEventFrame
+  | LiveAgentFrame
+  | LiveEnded
+  | LiveError
+  | LiveHeartbeat;
 
 /**
  * The delivery timeline's one configuration record: `GET /api/v1/settings/delivery` answers it, or

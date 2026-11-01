@@ -19,6 +19,7 @@ import type {
   Harness as E2eHarness,
   HarnessProcess,
 } from "../../../packages/dispatch/e2e/harness-start";
+import { sessionIds } from "../../../packages/dispatch/e2e/session-ids";
 import type { SeededWorkspace } from "../../../packages/dispatch/e2e/workspace";
 
 export const REPO = resolve(import.meta.dir, "../../..");
@@ -175,7 +176,7 @@ export async function seedDispatchWorkspace(): Promise<DispatchWorkspace> {
       body: "Does the seeded corpus cover the snoozed and the retracted asks?",
     },
     {
-      actor: { id: "reviewer-session", kind: "session", origin: { session_title: "Reviewer" } },
+      actor: { id: sessionIds.reviewer, kind: "session", origin: { session_title: "Reviewer" } },
       as: "agent",
     }
   );

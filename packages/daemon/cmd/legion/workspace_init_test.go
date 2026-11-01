@@ -239,6 +239,11 @@ func (v *issueVolume) codegraphCalls(t *testing.T) []string { return logLines(t,
 func (v *issueVolume) jj(t *testing.T, args ...string) string {
 	t.Helper()
 	command := exec.Command(v.realJJ, args...)
+	// Every call names the repository it reads with -R, so the helper runs in the volume's root,
+	// which holds them all: jj searches upward from the directory it runs in for the closest .jj,
+	// so a command with no Dir would open the workspace the test process stands in, which in a
+	// Legion issue pod is a real one.
+	command.Dir = v.root
 	command.Env = append(os.Environ(), "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
 	output, err := command.Output()
 	if err != nil {
@@ -249,7 +254,11 @@ func (v *issueVolume) jj(t *testing.T, args ...string) string {
 
 func (v *issueVolume) git(t *testing.T, args ...string) string {
 	t.Helper()
-	output, err := exec.Command(v.env["WINIT_REAL_GIT"], args...).Output()
+	command := exec.Command(v.env["WINIT_REAL_GIT"], args...)
+	// Every call names the repository it reads with --git-dir, which is not a working directory:
+	// the helper runs in the volume's root rather than wherever the test process stands.
+	command.Dir = v.root
+	output, err := command.Output()
 	if err != nil {
 		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
 	}
@@ -455,7 +464,11 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	if origin := v.git(t, "--git-dir="+filepath.Join(v.clone(), ".git"), "remote", "get-url", "origin"); origin != "https://github.com/acme/widgets" {
 		t.Fatalf("the clone's origin is %q, want GitHub's", origin)
 	}
-	helpers, err := exec.Command("git", "--git-dir="+filepath.Join(v.clone(), ".git"), "config", "--get-all", "credential.helper").Output()
+	read := exec.Command("git", "--git-dir="+filepath.Join(v.clone(), ".git"), "config", "--get-all", "credential.helper")
+	// --git-dir is not a working directory: the read runs in the clone provisioning just made,
+	// never in the directory the test process happens to have.
+	read.Dir = v.clone()
+	helpers, err := read.Output()
 	if err != nil || !strings.HasSuffix(string(helpers), "\n"+winitHelper+"\n") {
 		t.Fatalf("the clone's credential helpers are %q (%v), want the named helper last", helpers, err)
 	}

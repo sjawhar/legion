@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -37,14 +38,18 @@ type writeAdvice struct {
 	*documentBlocks
 	// editBlocks is set by a document edit; nil omits its field.
 	*editBlocks
-	// Suggestions is LEGION-550's write-time feedback, set only on an issue or ask creation;
-	// nil (omitted) everywhere else.
+	// SupersededApproval is set by a document write that stored a version replacing the one a
+	// person had approved; nil (omitted) everywhere else.
+	SupersededApproval *supersededApproval `json:"superseded_approval,omitempty"`
+	// Suggestions is the related-item check's result, set only on an issue or ask
+	// creation; nil (omitted) everywhere else.
 	Suggestions *model.Suggestions `json:"suggestions,omitempty"`
 }
 
 // suggestionsOnlyAdvice is the advice of a write with no issue state to report: an ask on an
 // unlinked project document, which has no issue status, no writes-since-human count and no
-// issue-scoped open-ask list, but does get LEGION-550's suggestions.
+// issue-scoped open-ask list, or an issue or ask write whose write-advice read failed. It still
+// carries the related-item check's result (withSuggestions).
 type suggestionsOnlyAdvice struct {
 	Suggestions *model.Suggestions `json:"suggestions"`
 }
@@ -131,11 +136,10 @@ func (s *server) computeWriteAdvice(
 // failure is not fatal to the advice: the two before it are what a session asked for, while this
 // one decides a single line, and every issue is created in triage, so returning an
 // adviceQueryError here would put a third failure mode on the path that runs for every
-// session-authored `dispatch issue`. What that costs a creation is not a copy of something
-// already stored: issue_create.go computes and persists LEGION-550's suggestions only once the
-// advice survives (`if advice != nil`), after it, so a fatal advice failure there means the
-// suggestions are never computed and no row is ever written. Nothing runs after this step, so
-// the advice already assembled is complete without it.
+// session-authored `dispatch issue`. What that would cost a creation is its issue state alone: the
+// related-item check runs after the write commits whatever the advice answered, and rides a
+// suggestions-only advice when it failed (withSuggestions). Nothing runs after this step, so the
+// advice already assembled is complete without it.
 //
 // The walk takes a savepoint of its own inside the advice savepoint, because a failed statement
 // aborts the transaction it ran in: run directly on the advice savepoint, its failure would also
@@ -254,9 +258,109 @@ type unparsedOpeners struct {
 
 // editBlocks is what a document edit's advice reports about the typed blocks it wrote: how many ask
 // blocks the edited document holds that the document before the edit did not
-// (docs.EditOutcome.AskBlocksAdded), as the server's parser reads them.
+// (docs.EditOutcome.AddedAskBlocks), as the server's parser reads them, and the related-item check
+// each of them got (decisionBlockChecks), omitted when the edit added none.
 type editBlocks struct {
-	DecisionBlocksAdded int `json:"decision_blocks_added"`
+	DecisionBlocksAdded int                  `json:"decision_blocks_added"`
+	DecisionBlockChecks []decisionBlockCheck `json:"decision_block_checks,omitempty"`
+}
+
+// decisionBlockCheck is one added decision block's related-item check: the block, its
+// question, and the check's result.
+type decisionBlockCheck struct {
+	BlockID     string             `json:"block_id"`
+	Question    string             `json:"question"`
+	Suggestions *model.Suggestions `json:"suggestions"`
+}
+
+// supersededApproval is what a document write reports when the version it stored replaced the
+// version a person had approved: that approval is now stale, and nothing but a person's review of
+// the new version restores it. Legion's design gate is exactly such an approval - a person's
+// approval of a root issue's spec at a version - so a write that supersedes it closes that gate,
+// and every READY in the tree is refused until a person approves again. The writer is the only
+// one who can be told in time, and only the write that superseded the approval is told: a write
+// on a document whose approval was already stale closed nothing.
+type supersededApproval struct {
+	// ApprovedVersion is the version a person approved, the one this write superseded.
+	ApprovedVersion int `json:"approved_version"`
+	// Version is the version this write stored.
+	Version int `json:"version"`
+	// ApprovedBy is who gave that approval, as its review records the actor's id.
+	ApprovedBy string `json:"approved_by"`
+}
+
+// supersededApprovalAdvice reports the approval the write of version just made stale, or nil when
+// it made none, which is every write of a document nobody has approved. It runs inside the write's
+// own transaction, after the version row and the approval carry (docs.carryApproval) are written,
+// so it reads what the write left: a carried approval is pinned to version itself and reports
+// nothing, which is right - the gate reopens on that carry's own artifact.approved event.
+//
+// The read is the newest review of the document (docs.NewestReview), one entry of
+// artifact_reviews_by_artifact_event_seq in docs.ReviewOrder, the order the reviews' events
+// committed: artifact_reviews.created_at is its transaction's start and its id is random, so the
+// carry's own approval of this version can carry an earlier pair than an approval committed while
+// this write was open, and ordering by those two alone would report a gate this write did not
+// close. It reports only when that newest review approves the version right below this one: an
+// older approval was already stale before this write, and a newer changes request had already
+// closed the gate.
+//
+// Like every other advice query this runs behind a savepoint, because a failed statement aborts
+// the transaction it ran in and this must never fail the write it describes. It writes nothing,
+// so the savepoint is always rolled back, which also restores the statement_timeout it set.
+func (s *server) supersededApprovalAdvice(
+	ctx context.Context,
+	tx pgx.Tx,
+	route string,
+	issueKey string,
+	artifactID string,
+	version int,
+) *supersededApproval {
+	adviceTx, err := tx.Begin(ctx)
+	if err != nil {
+		s.logAdviceError(route, issueKey, "superseded_approval", err)
+		return nil
+	}
+	defer func() { _ = adviceTx.Rollback(ctx) }()
+	if _, err := adviceTx.Exec(ctx, "set local statement_timeout = '500ms'"); err != nil {
+		s.logAdviceError(route, issueKey, "superseded_approval", err)
+		return nil
+	}
+	approval, err := newestReviewAsApproval(ctx, adviceTx, artifactID, version)
+	if err != nil {
+		s.logAdviceError(route, issueKey, "superseded_approval", err)
+		return nil
+	}
+	return approval
+}
+
+// newestReviewAsApproval is supersededApprovalAdvice's rule, over whatever queryer the caller
+// holds: the document's newest review in docs.ReviewOrder, reported when it approves the version
+// right below version. A document with no review at all, an approval of an older version, an
+// approval of version itself (the approval carry's own review) and a changes request each report
+// nothing.
+func newestReviewAsApproval(ctx context.Context, q docs.Queryer, artifactID string, version int) (*supersededApproval, error) {
+	review, err := docs.NewestReview(ctx, q, artifactID)
+	if err != nil {
+		return nil, fmt.Errorf("read the document's newest review: %w", err)
+	}
+	if review == nil || review.State != "approved" || review.Version != version-1 {
+		return nil, nil
+	}
+	return &supersededApproval{
+		ApprovedVersion: review.Version,
+		Version:         version,
+		ApprovedBy:      review.Actor.ID,
+	}, nil
+}
+
+// documentWriteAdvice is the whole advice of a document write with no issue state to report: a
+// project document's write, or an issue document's whose bounded issue-advice read failed. It
+// carries the document half of writeAdvice - the block report its route produces, and the
+// approval the write superseded - so neither depends on the issue advice beside it.
+type documentWriteAdvice struct {
+	*documentBlocks
+	*editBlocks
+	SupersededApproval *supersededApproval `json:"superseded_approval,omitempty"`
 }
 
 const (
@@ -384,9 +488,10 @@ func withAdvice(payload any, advice *writeAdvice) any {
 
 // withRawAdvice wraps payload with whatever advice shape the caller already decided is worth
 // sending, with no nil-check (contrast withAdvice, which treats a nil *writeAdvice as "send
-// nothing"). Three shapes ride it: a document write's block counts (*documentBlocks/*editBlocks,
+// nothing). Two kinds of shape ride it: a document write's block report (*documentBlocks/*editBlocks,
 // when a project document has no issue state to report, or an issue document's bounded
-// issue-advice query failed), and an ask on an unlinked project document's suggestionsOnlyAdvice.
+// issue-advice query failed), and suggestionsOnlyAdvice (withSuggestions): an ask on an unlinked
+// project document, or an issue or ask write whose write advice failed.
 func withRawAdvice(payload any, advice any) any {
 	return advisedResponse{payload: payload, advice: advice}
 }

@@ -7,7 +7,7 @@
 # file CI runs.
 #
 # Run from anywhere: .github/scripts/check-image-trigger-paths.test.sh
-# CI runs it in the Tests workflow (pr-and-main.yaml, job test).
+# CI runs it in ci.yaml's test job.
 set -euo pipefail
 shopt -s inherit_errexit
 
@@ -344,6 +344,14 @@ sed -i "s#^        with:\$#&\n          predicate-quantifier: 'every'#" "$root/.
 run_check "$root"
 check "predicate-quantifier: every fails" "$(is "$status" 1)"
 check "names it" "$(contains "$out" 'predicate-quantifier: every, which this check cannot evaluate')"
+check "  and the two quantifiers it reads" "$(contains "$out" 'use the default, some, or some-with-excludes to exclude with `!` patterns')"
+
+# With no `!` pattern, some-with-excludes matches what some does.
+root=$(fixture called-some-with-excludes)
+callers "$root" "$all_inputs"
+sed -i "s#^        with:\$#&\n          predicate-quantifier: 'some-with-excludes'#" "$root/.github/workflows/release.yaml"
+run_check "$root"
+check "predicate-quantifier: some-with-excludes on filters with no ! pattern passes" "$(is "$status" 0)"
 
 echo "case: a paths-filter pattern keeps picomatch's ?"
 root=$(fixture called-dorny-question)
@@ -351,12 +359,13 @@ callers "$root" "$(printf '%s\n' "$all_inputs" | sed "s|'package.json'|'package.
 run_check "$root"
 check "package.jso? covers package.json in a dorny filter" "$(is "$status" 0)"
 
-echo "case: a workflow_call input compared with a literal is a call mode, not a path filter"
+echo "case: a workflow_call input tested == '' is a call mode, not a path filter"
 # call_modes <root> <docker job if line> <calling job if line> [extra release.yaml on: line]:
 # makes image.yaml a called workflow declaring one workflow_call input, mode, beside a
-# pull_request trigger of its own, and adds a release.yaml whose push covers everything and
-# calls it twice, the way release.yaml calls worker-image.yaml: build with mode unset, then
-# attest with mode: attest. An empty line argument leaves that if: out.
+# pull_request trigger of its own, whose paths drop the dist the .dockerignore drops so they match
+# only files the build reads, and adds a release.yaml whose push covers everything and calls it
+# twice, the way release.yaml calls worker-image.yaml: build with mode unset, then attest with
+# mode: attest. An empty line argument leaves that if: out.
 call_modes() {
   local root=$1 docker_if=$2 caller_if=$3 caller_on=${4:-}
   cat > "$root/.github/workflows/image.yaml" <<YAML
@@ -372,6 +381,7 @@ on:
     paths:
       - "package.json"
       - "packages/app/**"
+      - "!packages/app/dist/**"
       - "docker/**"
       - ".dockerignore"
       - ".github/workflows/image.yaml"
@@ -441,9 +451,11 @@ run_check "$root"
 check "  and without ready_for_review the draft term is refused as before" "$(is "$status" 1)"
 check "  naming the trigger" "$(contains "$out" 'image.yaml on.pull_request, which runs it, does not list ready_for_review')"
 
-# An input left out is "" on a call (its default) and null on the called workflow's own
-# pull_request, which GitHub compares equal to '', so only `== ''` holds on both; every other
-# comparison is refused.
+# The check admits one known-safe shape, `inputs.<name> == ''` on a `type: string` input with no
+# default or `default: ""`: an input left out is "" on a call and null on the called workflow's own
+# pull_request, which GitHub compares equal to ''. It does not model GitHub's number coercion
+# beyond that shape, so every other comparison is refused, whether or not it would hold while the
+# input is left out.
 root=$(fixture call-mode-equals-non-empty)
 call_modes "$root" "if: inputs.mode == 'attest'" ""
 run_check "$root"
@@ -478,10 +490,25 @@ run_check "$root"
 check "inputs.mode == '' on an input with default: \"build\" is refused" "$(is "$status" 1)"
 check "  and quotes the term" "$(contains "$out" "jobs.docker builds or calls an image, and its if: is narrowed by \`inputs.mode == ''\`")"
 
-# A boolean input's default is never ''.
+# A dispatch that sets no value gets the default its workflow_dispatch declares, so on an input
+# workflow_dispatch declares with a non-empty default, == '' is false on that dispatch.
+root=$(fixture call-mode-dispatch-default)
+call_modes "$root" "if: inputs.mode == ''" ""
+sed -i 's|^  pull_request:$|  workflow_dispatch:\n    inputs:\n      mode:\n        type: string\n        default: "build"\n&|' \
+  "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "inputs.mode == '' on an input workflow_dispatch declares with default: \"build\" is refused" "$(is "$status" 1)"
+check "  and quotes the term" "$(contains "$out" "jobs.docker builds or calls an image, and its if: is narrowed by \`inputs.mode == ''\`")"
+check "  and names the workflow_dispatch default" "$(contains "$out" "on.workflow_dispatch.inputs.mode declares it with default: \"build\", which this check does not read as '' on a dispatch that sets no value")"
+sed -i 's|^        default: "build"$|        default: ""|' "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "  while the same input with default: \"\" there passes" "$(is "$status" 0)"
+
+# A boolean input is not the admitted shape, whatever its default: its type alone refuses it, so
+# the input here declares no default at all.
 root=$(fixture call-mode-boolean)
 call_modes "$root" "if: inputs.mode == ''" ""
-sed -i -e 's|^        type: string$|        type: boolean|' -e 's|^        default: ""$|        default: false|' \
+sed -i -e 's|^        type: string$|        type: boolean|' -e '/^        default: ""$/d' \
   "$root/.github/workflows/image.yaml"
 run_check "$root"
 check "inputs.mode == '' on a type: boolean input is refused" "$(is "$status" 1)"
@@ -526,7 +553,7 @@ run_check "$root"
 check "an input workflow_call does not declare is refused" "$(is "$status" 1)"
 check "  and quotes the term" "$(contains "$out" "jobs.docker builds or calls an image, and its if: is narrowed by \`inputs.other == ''\`")"
 
-# A declared input tested any way but a plain comparison with a literal.
+# A declared input tested in any shape but inputs.<name> == '', the one comparison admitted.
 shape_index=0
 for shape in "inputs.mode" "contains(inputs.mode, 'attest')" "inputs.mode == github.ref_name" "'' == inputs.mode"; do
   shape_index=$((shape_index + 1))
@@ -553,7 +580,7 @@ PYEOF
 
 echo "case: the building job's own if: gate narrows what the trigger covers"
 # gate_build_job <root> <filter patterns>: adds a changes job to image.yaml and gates the
-# building job on one of its filters, the shape envoy-and-contracts.yaml uses.
+# building job on one of its filters, the shape ci.yaml uses.
 gate_build_job() {
   local root=$1 patterns=$2
   python3 - "$root/.github/workflows/image.yaml" "$patterns" <<'PY'
@@ -695,27 +722,28 @@ run_check "$root"
 check "a complete own gate does not excuse a narrow inherited one" "$(is "$status" 1)"
 
 # (b) A top-level && term naming a github. context narrows the gate on something that is not a
-# path, so a trigger this check pairs it with may never reach the job.
+# path, so a trigger this check pairs it with may never reach the job. (github.event_name is the
+# one context read, and only in the shapes the event-term cases below exercise.)
 root=$(fixture gate-and-event-term)
 gate_probe "$root" "  docker:
     needs: changes
-    if: needs.changes.outputs.img == 'true' && github.event_name != 'merge_group'
+    if: needs.changes.outputs.img == 'true' && github.actor != 'dependabot'
     runs-on: ubuntu-24.04
 "
 run_check "$root"
 check "an && term on a github. context is refused" "$(is "$status" 1)"
-check "quotes the term" "$(contains "$out" "is narrowed by \`github.event_name != 'merge_group'\`")"
+check "quotes the term" "$(contains "$out" "is narrowed by \`github.actor != 'dependabot'\`")"
 
 # (c) An if: naming no needs.*.outputs is a gate this check cannot evaluate, not an absent one.
 root=$(fixture gate-no-needs-if)
 gate_probe "$root" "  docker:
     needs: changes
-    if: github.event_name == 'push'
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
 "
 run_check "$root"
 check "an if: with no paths-filter output is refused" "$(is "$status" 1)"
-check "quotes the term" "$(contains "$out" "is narrowed by \`github.event_name == 'push'\`")"
+check "quotes the term" "$(contains "$out" "is narrowed by \`github.ref == 'refs/heads/main'\`")"
 
 # always() does not narrow by path, so it stays ungated.
 root=$(fixture gate-always)
@@ -749,8 +777,9 @@ echo "case: the terms that do not narrow by path stay accepted"
 shape_index=0
 # `!cancelled()` and a bare `!github…` need quoting or ${{ }}: bare, YAML reads them as tags.
 # The draft and closed event terms are true on every event that builds a pinnable image (push,
-# merge_group, workflow_call, workflow_dispatch carry no pull_request and no closed action), and
-# this fixture's trigger is push; the draft term under a pull_request trigger is the next case.
+# merge_group, workflow_dispatch and a workflow_call from one of them carry no pull_request and
+# no closed action), and this fixture's trigger is push; the draft term under a pull_request
+# trigger is the next case.
 for shape in "success()" '"!cancelled()"' "always() && needs.changes.outputs.img == 'true'" \
   "(needs.changes.result == 'success' || needs.changes.result == 'skipped') && needs.changes.outputs.img == 'true'" \
   '"!github.event.pull_request.draft"' "github.event.action != 'closed'" \
@@ -771,8 +800,8 @@ for shape in "success()" '"!cancelled()"' "always() && needs.changes.outputs.img
   esac
 done
 
-# changes_if <root> <expression>: gates the dorny/paths-filter job itself, as
-# envoy-and-contracts.yaml gates the changes job its envoy-smoke build needs.
+# changes_if <root> <expression>: gates the dorny/paths-filter job itself, as ci.yaml gates the
+# changes job its worker-image call needs.
 changes_if() {
   python3 - "$1/.github/workflows/image.yaml" "$2" <<'PYEOF'
 import sys
@@ -812,13 +841,19 @@ echo "case: the draft term is admitted only under pull request triggers that lis
 # ready_for_review run. A trigger whose types leave it out, or that has none and so GitHub's
 # default (opened, synchronize, reopened), would merge that head with no image built at it.
 # on_pull_request <workflow file> [types]: makes the file's push trigger a pull_request trigger
-# on the same paths, with `types: [<types>]` when given and GitHub's default types when not.
+# on the same paths, with `types: [<types>]` when given and GitHub's default types when not. It
+# also gives image.yaml's building job, its last, a step after the build, and image.yaml a job
+# that builds nothing, so neither that job nor a call of image.yaml only builds and the other
+# direction (case 6: a pull request trigger whose filters match a file no build reads) is not
+# owed here; these cases are about the draft term.
 on_pull_request() {
   local file=$1 types=${2:-}
   sed -i 's|^  push:$|  pull_request:|' "$file"
   if [ -n "$types" ]; then
     sed -i "s|^    branches: \[main\]$|&\n    types: [$types]|" "$file"
   fi
+  printf '      - run: echo tested\n  tested:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo tested\n' \
+    >> "$(dirname "$file")/image.yaml"
 }
 draft_build="  docker:
     needs: changes
@@ -893,11 +928,64 @@ on_pull_request "$root/.github/workflows/image.yaml" "$without_ready"
 run_check "$root"
 check "github.event.action != 'closed' alone needs no ready_for_review" "$(is "$status" 0)"
 
-root=$(fixture draft-push-only)
-gate_probe "$root" "$draft_build"
-sed -i '/^  workflow_dispatch:$/d' "$root/.github/workflows/image.yaml"
+# The draft term inside the filters clause is one more || term, which only widens: it skips no
+# draft (a draft whose diff the filter matches still builds), so it owes no ready_for_review.
+root=$(fixture draft-widening-in-filters-clause)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: \${{ needs.changes.outputs.img == 'true' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+"
+on_pull_request "$root/.github/workflows/image.yaml" "$without_ready"
 run_check "$root"
-check "a push-only workflow with the draft term passes" "$(is "$status" 0)"
+check "a draft term ||-joined into the filters clause needs no ready_for_review" "$(is "$status" 0)"
+check "  and the filter is still read" "$(contains "$out" 'jobs.docker.if (jobs.changes filter img)')"
+check "  and no draft skip is reported" "$(is "$(contains "$out" 'skips a draft')" false)"
+
+# draft_on <name> <on: block>: a draft-gated build in image.yaml whose whole `on:` is the given
+# block, with on_pull_request's job that builds nothing beside it.
+draft_on() {
+  root=$(fixture "$1")
+  gate_probe "$root" "$draft_build"
+  on_pull_request "$root/.github/workflows/image.yaml"
+  python3 - "$root/.github/workflows/image.yaml" "$2" <<'PYEOF'
+import sys
+path, block = sys.argv[1], sys.argv[2]
+head, marker, rest = open(path).read().partition("\non:\n")
+_, jobs, tail = rest.partition("jobs:\n")
+open(path, "w").write(f"{head}\n{block}\n{jobs}{tail}")
+PYEOF
+  run_check "$root"
+}
+draft_on draft-pull-request-target-without-ready "on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]"
+check "pull_request_target without ready_for_review is refused like pull_request" "$(is "$status" 1)"
+check "  and names it" "$(contains "$out" 'image.yaml on.pull_request_target, which runs it, does not list ready_for_review')"
+draft_on draft-pull-request-target-with-ready "on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]"
+check "pull_request_target listing ready_for_review passes" "$(is "$status" 0)"
+draft_on draft-on-list "on: [pull_request, workflow_dispatch]"
+check "list-form on: [pull_request, ...] has the default types, so it is refused" "$(is "$status" 1)"
+check "  and names on.pull_request" "$(contains "$out" 'image.yaml on.pull_request, which runs it, does not list ready_for_review')"
+draft_on draft-on-string "on: pull_request"
+check "string-form on: pull_request has the default types, so it is refused" "$(is "$status" 1)"
+check "  and names on.pull_request" "$(contains "$out" 'image.yaml on.pull_request, which runs it, does not list ready_for_review')"
+draft_on draft-types-empty "on:
+  pull_request:
+    types: []"
+check "types: [] lists no ready_for_review, so it is refused" "$(is "$status" 1)"
+check "  and names on.pull_request" "$(contains "$out" 'image.yaml on.pull_request, which runs it, does not list ready_for_review')"
+draft_on draft-types-string-ready "on:
+  pull_request:
+    types: ready_for_review"
+check "a string types: ready_for_review passes" "$(is "$status" 0)"
+draft_on draft-types-string-other "on:
+  pull_request:
+    types: opened"
+check "a string types: opened is refused" "$(is "$status" 1)"
+check "  and names on.pull_request" "$(contains "$out" 'image.yaml on.pull_request, which runs it, does not list ready_for_review')"
 
 echo "case: needs.<job>.result is neutral only when it admits 'skipped'"
 # The live shape this guards: envoy-smoke tidied up to reuse envoy-go's setup. always() does not
@@ -973,10 +1061,10 @@ check "names an input it drops" "$(contains "$out" 'does not cover package.json'
 
 root=$(fixture step-gate-unreadable)
 gate_probe "$root" "$unchanged"
-step_if "$root" "github.event_name == 'push'"
+step_if "$root" "github.ref == 'refs/heads/main'"
 run_check "$root"
 check "a step gate this check cannot evaluate is refused" "$(is "$status" 1)"
-check "quotes the term" "$(contains "$out" "is narrowed by \`github.event_name == 'push'\`")"
+check "quotes the term" "$(contains "$out" "is narrowed by \`github.ref == 'refs/heads/main'\`")"
 
 root=$(fixture step-gate-vars)
 gate_probe "$root" "$unchanged"
@@ -1941,5 +2029,400 @@ run_check "$root"
 check "a foreign workflow_call is refused" "$(is "$status" 1)"
 check "  and names it" "$(contains "$out" 'acme/ci/.github/workflows/image.yml@v1')"
 
+echo "case: a github.event_name conjunct narrows which events trigger the build"
+# two_events <root> <if:>: image.yaml triggered by pull_request, whose paths cover every input and
+# drop the dist the .dockerignore drops (so they match no file the build does not read), and by
+# push, whose paths leave out .dockerignore, with the building job carrying that if:.
+two_events() {
+  local root=$1 condition=$2
+  cat > "$root/.github/workflows/image.yaml" <<YAML
+name: Image
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "package.json"
+      - "packages/app/**"
+      - "docker/**"
+      - ".dockerignore"
+      - ".github/workflows/image.yaml"
+      - "!packages/app/dist/**"
+  push:
+    branches: [main]
+    paths:
+      - "package.json"
+      - "packages/app/**"
+      - "docker/**"
+      - ".github/workflows/image.yaml"
+jobs:
+  docker:
+    if: $condition
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+YAML
+}
+
+# The control: with no event term, push owes .dockerignore and fails.
+root=$(fixture event-control)
+two_events "$root" "always()"
+run_check "$root"
+check "without an event term, push's gap fails" "$(is "$status" 1)"
+check "  and names it" "$(contains "$out" 'image.yaml on.push.paths does not cover .dockerignore')"
+
+root=$(fixture event-admits-pull-request)
+two_events "$root" "github.event_name == 'pull_request'"
+run_check "$root"
+check "an event term admitting only pull_request leaves push's coverage unowed" "$(is "$status" 0)"
+check "  checks pull_request" "$(contains "$out" 'against .github/workflows/image.yaml on.pull_request.paths')"
+check "  and says push is not checked" "$(contains "$out" 'image.yaml on.push.paths: not checked, since jobs.docker.if admits no push run')"
+
+root=$(fixture event-admits-pull-request-gap)
+two_events "$root" "github.event_name == 'pull_request'"
+sed -i '/^      - ".dockerignore"$/d' "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "an input pull_request leaves out still fails" "$(is "$status" 1)"
+check "  and names the admitted trigger" "$(contains "$out" 'image.yaml on.pull_request.paths does not cover .dockerignore')"
+
+root=$(fixture event-admits-wrapped-cased)
+two_events "$root" "\${{ github.event_name == 'Pull_Request' || github.event_name == 'merge_group' }}"
+run_check "$root"
+check "an || list of events, wrapped and in any case, is read the same" "$(is "$status" 0)"
+
+root=$(fixture event-excludes-push)
+two_events "$root" "github.event_name != 'push'"
+run_check "$root"
+check "!= 'push' excludes push" "$(is "$status" 0)"
+
+root=$(fixture event-excludes-pull-request)
+two_events "$root" "github.event_name != 'pull_request'"
+run_check "$root"
+check "!= 'pull_request' leaves push owed" "$(is "$status" 1)"
+check "  and names push's gap" "$(contains "$out" 'image.yaml on.push.paths does not cover .dockerignore')"
+
+root=$(fixture event-on-needed-job)
+gate_probe "$root" "  docker:
+    needs: [changes, gatekeeper]
+    runs-on: ubuntu-24.04
+" "  gatekeeper:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo gate"
+run_check "$root"
+check "an event term on a needed job narrows the build too" "$(is "$status" 0)"
+check "  so push is not checked" "$(contains "$out" 'image.yaml on.push.paths: not checked, since jobs.gatekeeper.if admits no push run')"
+
+echo "case: any other use of github.event_name stays refused"
+shape_index=0
+while IFS= read -r shape; do
+  shape_index=$((shape_index + 1))
+  root=$(fixture "event-refused-$shape_index")
+  two_events "$root" "$shape"
+  run_check "$root"
+  check "if: $shape is refused" "$(is "$status" 1)"
+  check "  and quotes the term" "$(contains "$out" 'which this check cannot')"
+done <<'SHAPES'
+github.event_name == 'pull_request' || vars.RUN_IT == 'true'
+startsWith(github.event_name, 'pull')
+github.event_name != 'push' || github.event_name != 'pull_request'
+github.event_name == 'pull_request' || github.event_name != 'push'
+${{ 'pull_request' == github.event_name }}
+SHAPES
+
+echo "case: !github.event.pull_request.draft is neutral only beside ready_for_review"
+# draft_gate <root> <line under pull_request:>: adds a pull_request trigger to the fixture, whose
+# paths match exactly the files the build reads, and skips the building job on a draft.
+draft_gate() {
+  local root=$1 line=$2
+  sed -i "s|^  workflow_dispatch:\$|  pull_request:\n$line\n    paths:\n      - \"package.json\"\n      - \"packages/app/**\"\n      - \"!packages/app/dist/**\"\n      - \"docker/**\"\n      - \".dockerignore\"\n      - \".github/workflows/image.yaml\"\n&|" "$root/.github/workflows/image.yaml"
+  sed -i 's|^  docker:$|&\n    if: ${{ !github.event.pull_request.draft }}|' "$root/.github/workflows/image.yaml"
+}
+
+root=$(fixture draft-ready-for-review)
+draft_gate "$root" "    types: [opened, synchronize, reopened, ready_for_review]"
+run_check "$root"
+check "a draft term passes when pull_request lists ready_for_review" "$(is "$status" 0)"
+
+root=$(fixture draft-no-ready-for-review)
+draft_gate "$root" "    types: [opened, synchronize, reopened]"
+run_check "$root"
+check "a draft term fails without ready_for_review" "$(is "$status" 1)"
+check "  and names the remedy" "$(contains "$out" 'add ready_for_review to the pull_request types')"
+
+root=$(fixture draft-gate-default-types)
+draft_gate "$root" "    branches: [main]"
+run_check "$root"
+check "a draft term fails on the default types, which leave ready_for_review out" "$(is "$status" 1)"
+check "  and names the remedy" "$(contains "$out" 'add ready_for_review to the pull_request types')"
+
+root=$(fixture draft-beside-event)
+two_events "$root" "\${{ !github.event.pull_request.draft && github.event_name == 'pull_request' }}"
+run_check "$root"
+check "a draft term as one && conjunct beside an event term passes" "$(is "$status" 0)"
+
+echo "case: the router's shape: a pull_request-only call behind a draft-skipped changes job"
+# ci_router <root> <filter lines> [quantifier]: image.yaml becomes a called workflow with no path
+# trigger, and ci.yaml calls it as the router does: triggered by pull_request (with
+# ready_for_review), push and merge_group, none filtered by path; a changes job skipped on a draft,
+# whose paths-filter step runs under the quantifier (default some); the calling job admitted on
+# pull_request only and gated on one filter. The build reads the Actions cache under its own scope
+# and writes it only on main, as worker-image.yaml does.
+ci_router() {
+  local root=$1 gate=$2 quantifier=${3:-some}
+  cat > "$root/.github/workflows/image.yaml" <<'YAML'
+name: Image
+on:
+  workflow_call:
+  workflow_dispatch:
+jobs:
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          cache-from: type=gha,scope=worker-image
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=worker-image,ignore-error=true' || '' }}
+YAML
+  cat > "$root/.github/workflows/ci.yaml" <<YAML
+name: CI
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+jobs:
+  changes:
+    if: \${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    outputs:
+      worker_image: \${{ steps.filter.outputs.worker_image }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          predicate-quantifier: $quantifier
+          filters: |
+            worker_image:
+$gate
+  worker-image:
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.worker_image == 'true'
+    uses: ./.github/workflows/image.yaml
+YAML
+}
+
+# The same inputs, with packages/app named by what the .dockerignore keeps of it, so the filter
+# matches only files the build reads.
+router_inputs="              - 'package.json'
+              - 'packages/app/package.json'
+              - 'packages/app/src/**'
+              - 'docker/**'
+              - '.dockerignore'
+              - '.github/workflows/image.yaml'"
+
+root=$(fixture router-green)
+ci_router "$root" "$router_inputs"
+run_check "$root"
+check "the router's shape passes" "$(is "$status" 0)"
+check "  checks pull_request through the call's gate" "$(contains "$out" 'against .github/workflows/ci.yaml on.pull_request + jobs.worker-image.if (jobs.changes filter worker_image)')"
+check "  and not push" "$(contains "$out" 'ci.yaml on.push: not checked, since jobs.worker-image.if admits no push run')"
+check "  nor merge_group" "$(contains "$out" 'ci.yaml on.merge_group: not checked, since jobs.worker-image.if admits no merge_group run')"
+
+root=$(fixture router-gap)
+ci_router "$root" "$(printf '%s\n' "$router_inputs" | grep -v '.dockerignore')"
+run_check "$root"
+check "a filter missing an input fails" "$(is "$status" 1)"
+check "  and names it" "$(contains "$out" 'jobs.changes filter worker_image) does not cover .dockerignore')"
+
+root=$(fixture router-no-ready-for-review)
+ci_router "$root" "$all_inputs"
+sed -i 's|types: \[opened, reopened, synchronize, ready_for_review\]|types: [opened, reopened, synchronize]|' \
+  "$root/.github/workflows/ci.yaml"
+run_check "$root"
+check "the draft-skipped changes job fails without ready_for_review" "$(is "$status" 1)"
+check "  and names the job and the remedy" "$(contains "$out" 'jobs.changes builds or calls an image and its if: .*add ready_for_review to the pull_request types')"
+
+# pr_trigger <root>: a pull_request trigger with the push trigger's paths beside it.
+pr_trigger() {
+  sed -i 's|^  workflow_dispatch:|  pull_request:\n    paths:\n      - "package.json"\n      - "packages/app/**"\n      - "docker/**"\n      - ".dockerignore"\n      - ".github/workflows/image.yaml"\n  workflow_dispatch:|' \
+    "$1/.github/workflows/image.yaml"
+}
+
+echo "case: a pull request trigger of a build-only workflow that matches a file no build reads"
+root=$(fixture pr-over-broad)
+pr_trigger "$root"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the trigger and the file the .dockerignore drops" "$(contains "$out" 'image.yaml on.pull_request.paths matches packages/app/dist/out.js, which no image build reads')"
+check "  and the remedy" "$(contains "$out" 'narrow the filter so it matches only files the build reads')"
+check "the push trigger with the same paths is not refused" "$(is "$(contains "$out" 'on.push.paths matches')" false)"
+sed -i 's|^  workflow_dispatch:|      - "!packages/app/dist/**"\n  workflow_dispatch:|' "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "passes once a ! pattern drops it" "$(is "$status" 0)"
+check "  and says so" "$(contains "$out" 'on.pull_request.paths: matches only files its image builds read')"
+
+echo "case: a file in a matched directory that no COPY names"
+root=$(fixture pr-uncopied)
+pr_trigger "$root"
+sed -i 's|      - "packages/app/\*\*"|      - "packages/**"|' "$root/.github/workflows/image.yaml"
+sed -i 's|^  workflow_dispatch:|      - "!**/dist/**"\n  workflow_dispatch:|' "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the uncopied file" "$(contains "$out" 'on.pull_request.paths matches packages/other/readme.md, which no image build reads')"
+
+echo "case: a job that needs the build still makes the workflow build-only"
+root=$(fixture pr-needs-build)
+pr_trigger "$root"
+printf '  after:\n    needs: docker\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo done\n' >> "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "  on the over-broad trigger" "$(contains "$out" 'on.pull_request.paths matches packages/app/dist/out.js')"
+
+echo "case: a workflow with a job that does not need the build answers for that job too"
+root=$(fixture pr-other-job)
+pr_trigger "$root"
+printf '  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo test\n' >> "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "passes" "$(is "$status" 0)"
+
+echo "case: a pull request gate on a job that only builds matches a file no build reads"
+root=$(fixture pr-gated-build)
+sed -i 's|^  workflow_dispatch:|  pull_request:\n&|' "$root/.github/workflows/image.yaml"
+gate_build_job "$root" "              - 'package.json'
+              - 'packages/**'
+              - 'docker/**'
+              - '.dockerignore'
+              - '.github/workflows/image.yaml'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "  names the gate, a file and how many more" "$(contains "$out" 'image.yaml on.pull_request + jobs.docker.if (jobs.changes filter gated) matches packages/[a-z/.]* and 1 more, which no image build reads')"
+sed -i "s|              - 'packages/\*\*'|              - 'packages/app/package.json'\n              - 'packages/app/src/**'|" \
+  "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "passes once the filter is narrowed" "$(is "$status" 0)"
+check "  and says so" "$(contains "$out" 'jobs.docker.if (jobs.changes filter gated): matches only files its image builds read')"
+
+root=$(fixture pr-gated-build-and-test)
+sed -i 's|^  workflow_dispatch:|  pull_request:\n&|' "$root/.github/workflows/image.yaml"
+gate_build_job "$root" "              - 'package.json'
+              - 'packages/**'
+              - 'docker/**'
+              - '.dockerignore'
+              - '.github/workflows/image.yaml'"
+printf '      - run: echo test\n' >> "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "a building job that also runs a step of its own is left alone" "$(is "$status" 0)"
+check "  and says why" "$(contains "$out" 'not checked for files no image build reads, since jobs.changes filter gated gates jobs.docker, which does more than build an image')"
+
+echo "case: the router's call of a build-only workflow, gated on a filter that matches a file no build reads"
+# The inputs, with a `!` pattern for the dist the .dockerignore drops: under some-with-excludes
+# the filter then matches only files the build reads.
+excluding_inputs="$all_inputs
+              - '!**/dist/**'"
+
+root=$(fixture router-over-broad)
+ci_router "$root" "$all_inputs"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "  names the gate and the file" "$(contains "$out" 'ci.yaml on.pull_request + jobs.worker-image.if (jobs.changes filter worker_image) matches packages/app/dist/out.js, which no image build reads')"
+check "  and the remedy" "$(contains "$out" 'under predicate-quantifier: some-with-excludes, a `!` pattern excludes')"
+ci_router "$root" "$excluding_inputs" some-with-excludes
+run_check "$root"
+check "passes once some-with-excludes and a ! pattern drop the dist" "$(is "$status" 0)"
+check "  and says so" "$(contains "$out" 'jobs.changes filter worker_image): matches only files its image builds read')"
+
+root=$(fixture router-shared-filter)
+ci_router "$root" "$all_inputs"
+printf "  test:\n    needs: changes\n    if: needs.changes.outputs.worker_image == 'true'\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo test\n" \
+  >> "$root/.github/workflows/ci.yaml"
+run_check "$root"
+check "a filter that also gates a job doing more than build is left alone" "$(is "$status" 0)"
+check "  and says why" "$(contains "$out" 'not checked for files no image build reads, since jobs.changes filter worker_image gates jobs.test, which does more than build an image')"
+
+root=$(fixture router-push-only)
+ci_router "$root" "$all_inputs"
+sed -i "s|if: github.event_name == 'pull_request' \&\& needs|if: github.event_name == 'push' \&\& needs|" \
+  "$root/.github/workflows/ci.yaml"
+run_check "$root"
+check "a call admitting only push is left alone" "$(is "$status" 0)"
+check "  and no file is named" "$(is "$(contains "$out" 'which no image build reads')" false)"
+
+echo "case: worker_image's ! patterns under predicate-quantifier: some-with-excludes"
+root=$(fixture excludes-green)
+ci_router "$root" "$excluding_inputs" some-with-excludes
+run_check "$root"
+check "! patterns that drop exactly what the build does not read pass" "$(is "$status" 0)"
+check "  checks the gate" "$(contains "$out" 'against .github/workflows/ci.yaml on.pull_request + jobs.worker-image.if (jobs.changes filter worker_image)')"
+check "  and finds it exact" "$(contains "$out" 'jobs.changes filter worker_image): matches only files its image builds read')"
+
+root=$(fixture excludes-missing)
+ci_router "$root" "$all_inputs" some-with-excludes
+run_check "$root"
+check "a missing ! pattern fails the reverse check" "$(is "$status" 1)"
+check "  and names the file the .dockerignore drops" "$(contains "$out" 'jobs.changes filter worker_image) matches packages/app/dist/out.js, which no image build reads')"
+
+root=$(fixture excludes-input)
+ci_router "$root" "$excluding_inputs
+              - '!docker/**'" some-with-excludes
+run_check "$root"
+check "a ! pattern that drops a file the build reads fails the forward check" "$(is "$status" 1)"
+check "  and names the input" "$(contains "$out" 'jobs.changes filter worker_image) does not cover docker/Dockerfile')"
+
+root=$(fixture excludes-before-include)
+ci_router "$root" "              - '!docker/**'
+$all_inputs" some-with-excludes
+run_check "$root"
+check "an exclusion holds wherever it stands in the list" "$(is "$status" 1)"
+check "  so a later include takes nothing back" "$(contains "$out" 'jobs.changes filter worker_image) does not cover docker/Dockerfile')"
+
+root=$(fixture some-negated)
+ci_router "$root" "$excluding_inputs"
+run_check "$root"
+check "a ! pattern under some is refused" "$(is "$status" 1)"
+check "  and says what some makes of it" "$(contains "$out" "has !\*\*/dist/\*\*, a \`!\` pattern under predicate-quantifier: some, where it matches every file outside")"
+check "  and names the remedy" "$(contains "$out" 'give the step predicate-quantifier: some-with-excludes')"
+
+root=$(fixture excludes-two-steps)
+ci_router "$root" "$excluding_inputs" some-with-excludes
+sed -i "s|^  worker-image:\$|      - uses: dorny/paths-filter@v4\n        id: second\n        with:\n          filters: \|\n            worker_image:\n              - 'docker/**'\n&|" \
+  "$root/.github/workflows/ci.yaml"
+run_check "$root"
+check "a filter of one name in two paths-filter steps is refused" "$(is "$status" 1)"
+check "  and names both steps" "$(contains "$out" 'defines filter worker_image in two dorny/paths-filter steps (filter, second)')"
+
+for shape in 'alternation:{docker/**,.dockerignore}' 'closer:docker/}'; do
+  pattern=${shape#*:}
+  root=$(fixture "excludes-brace-${shape%%:*}")
+  ci_router "$root" "$excluding_inputs
+              - '$pattern'" some-with-excludes
+  run_check "$root"
+  check "$pattern in a paths-filter filter is refused" "$(is "$status" 1)"
+  check "  as a brace picomatch expands" "$(contains "$out" "jobs.changes filter worker_image has ${pattern//\*/\\*}, a brace picomatch expands")"
+done
+
+echo "case: braces in a GitHub path filter are refused, and a .dockerignore reads them literally"
+root=$(fixture github-paths-brace)
+sed -i 's|      - "docker/\*\*"|      - "{docker/**,.dockerignore}"|' "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "a GitHub paths pattern with braces is refused" "$(is "$status" 1)"
+check "  and named" "$(contains "$out" 'on.push.paths has {docker/\*\*,.dockerignore}')"
+
+root=$(fixture dockerignore-brace)
+sed -i 's|"packages/app/\*\*"|"packages/app/package.json"|' "$root/.github/workflows/image.yaml"
+printf 'packages/app/{src,dist}\n' > "$root/.dockerignore"
+run_check "$root"
+check "a .dockerignore brace drops nothing, as Docker reads it" "$(is "$status" 1)"
+check "  so the sources stay owed" "$(contains "$out" 'does not cover packages/app (docker/Dockerfile:3): packages/app/[a-z/.]* and 2 more are built')"
 
 summary "check-image-trigger-paths.sh"

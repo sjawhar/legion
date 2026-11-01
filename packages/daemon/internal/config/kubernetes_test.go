@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -232,6 +233,61 @@ func TestLoadForValidationSetsAShareReadOnlyAtItsSourceUnlessAMountWritesIt(t *t
 	}
 }
 
+// A Secret or ConfigMap volume's default_mode is the mode of every file it projects, written in
+// octal digits with YAML 1.1's leading 0 (kubectl's spelling) or YAML 1.2's 0o, unquoted or as a
+// string ("0440", the one octal spelling a block written as JSON can carry). It is what keeps a key
+// file at Legion's own 0440 rather than Kubernetes' default 0644, which every user in the pod may
+// read. Left out, the source carries none and Kubernetes' default stands. The loader keeps the mode
+// as written; in a pod the kubelet adds group read under the pod's fsGroup, so 0400 and 0 reach the
+// files as 0440.
+func TestLoadForValidationReadsAVolumesDefaultModeInOctal(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+`    pod:
+      volumes:
+        - {name: key, secret: {name: legion-acme-providers, items: [{key: MODEL_KEY, path: key}], default_mode: 0440}}
+        - {name: mode-0400, secret: {name: legion-operator-creds, default_mode: 0o400}}
+        - {name: route, config_map: {name: legion-operator-route, default_mode: 0444}}
+        - {name: mode-0, config_map: {name: legion-operator-roles, default_mode: 0}}
+        - {name: json, secret: {name: legion-operator-json, default_mode: "0440"}}
+        - {name: single, config_map: {name: legion-operator-single, default_mode: '0o640'}}
+        - {name: tagged, secret: {name: legion-operator-tagged, default_mode: !!int 0440}}
+        - {name: ca, secret: {name: legion-operator-ca}}
+        - {name: roles, config_map: {name: legion-operator-overlays}}
+        - {name: null-mode, secret: {name: legion-operator-null, default_mode: ~}}
+`), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode := func(m *int32) string {
+		if m == nil {
+			return "unset"
+		}
+		return fmt.Sprintf("%#o", *m)
+	}
+	got := map[string]string{}
+	for _, v := range cfg.Runtime.Kubernetes.Pod.Volumes {
+		switch {
+		case v.Secret != nil:
+			got[v.Name] = mode(v.Secret.DefaultMode)
+		case v.ConfigMap != nil:
+			got[v.Name] = mode(v.ConfigMap.DefaultMode)
+		}
+	}
+	want := map[string]string{
+		"key": "0440", "mode-0400": "0400", "route": "0444", "mode-0": "0", "json": "0440", "single": "0640", "tagged": "0440",
+		"ca": "unset", "roles": "unset", "null-mode": "unset",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("volumes' defaultMode = %v, want %v", got, want)
+	}
+}
+
+// modeRefusal is load's refusal of the first volume's default_mode under its source kind, got
+// naming what the file holds there.
+func modeRefusal(kind, got string) string {
+	return "runtime.kubernetes.pod.volumes[0]." + kind + ".default_mode must be a file mode in octal digits with a leading 0 or 0o, " +
+		`from 0 to 0777, such as 0440 or "0440"; got ` + got
+}
+
 // What a block that sets only its required members settles to: the issue volume at 50Gi, both
 // pods' reservations at the daemon's default (an issue pod 3 CPU and 19Gi over an 80Gi disk limit
 // and a 6Gi disk request, the controller's pod 1 CPU and 4Gi over a 10Gi limit and a 1Gi request),
@@ -261,6 +317,7 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		{"pod", block.Pod, PodConfig{}},
 		{"session_store", block.SessionStore, ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"}},
 		{"setup", block.Setup, []string(nil)},
+		{"test_postgres", block.TestPostgres, false},
 		{"repository_cache", block.RepositoryCache, RepositoryCacheConfig{
 			Volume: "20Gi", RefreshMinutes: 10, RetainHours: 168,
 			Resources: Reservation{CPU: "1", CPURequest: "1", Memory: "4Gi", MemoryRequest: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"},
@@ -560,6 +617,16 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "setup naming no command",
 			body: kubernetesFile + "    setup: []\n",
 			want: "runtime.kubernetes.setup must name a command: leave it out to run none",
+		},
+		{
+			name: "test_postgres a string",
+			body: kubernetesFile + "    test_postgres: yes please\n",
+			want: "runtime.kubernetes.test_postgres must be true or false",
+		},
+		{
+			name: "test_postgres a mapping",
+			body: kubernetesFile + "    test_postgres: {on: true}\n",
+			want: "runtime.kubernetes.test_postgres must be true or false",
 		},
 		{
 			name: "repository_cache volume zero",
@@ -1199,6 +1266,68 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "runtime.kubernetes.pod.volumes[0].config_map.items[0].path is required",
 		},
 		{
+			name: "a default_mode written in decimal",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 440}}]\n",
+			want: modeRefusal("secret", `"440"`),
+		},
+		{
+			name: "a quoted default_mode written in decimal",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, config_map: {name: a, default_mode: \"288\"}}]\n",
+			want: modeRefusal("config_map", `"288"`),
+		},
+		{
+			name: "a default_mode above 0777",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 01000}}]\n",
+			want: modeRefusal("secret", `"01000"`),
+		},
+		{
+			name: "a default_mode with a digit octal lacks",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 0o448}}]\n",
+			want: modeRefusal("secret", `"0o448"`),
+		},
+		{
+			name: "a default_mode that is the octal prefix alone",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: \"0o\"}}]\n",
+			want: modeRefusal("secret", `"0o"`),
+		},
+		{
+			name: "a default_mode YAML reads as a float",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 08}}]\n",
+			want: modeRefusal("secret", `"08"`),
+		},
+		{
+			name: "a default_mode with a digit separator",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 0_440}}]\n",
+			want: modeRefusal("secret", `"0_440"`),
+		},
+		{
+			name: "a default_mode in hexadecimal",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 0x120}}]\n",
+			want: modeRefusal("secret", `"0x120"`),
+		},
+		{
+			name: "a signed default_mode",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: -0440}}]\n",
+			want: modeRefusal("secret", `"-0440"`),
+		},
+		{
+			name: "a plus-signed default_mode",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: +0440}}]\n",
+			want: modeRefusal("secret", `"+0440"`),
+		},
+		{
+			name: "a default_mode that is a mapping",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: {mode: 0440}}}]\n",
+			want: modeRefusal("secret", "a mapping"),
+		},
+		{
+			// Kubernetes sets the mode of a projected volume's files for the whole volume, never per
+			// source, so a projected source takes no default_mode.
+			name: "a default_mode on a projected source",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: token, projected: {sources: [{secret: {name: a, default_mode: 0440}}]}}]\n",
+			want: "unknown key runtime.kubernetes.pod.volumes[0].projected.sources[0].secret.default_mode",
+		},
+		{
 			name: "a projected volume with no sources",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: token, projected: {sources: []}}]\n",
 			want: "runtime.kubernetes.pod.volumes[0].projected.sources must name at least one source",
@@ -1633,5 +1762,17 @@ func TestPluginsBlockRefusals(t *testing.T) {
 				t.Fatalf("err %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// test_postgres settles true when the file sets it, so the runtime gives every issue pod's
+// launcher the server to start and every role of that pod its DSN.
+func TestTestPostgresSettlesFromTheFile(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    test_postgres: true\n"), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Runtime.Kubernetes.TestPostgres {
+		t.Error("test_postgres: true settled false")
 	}
 }

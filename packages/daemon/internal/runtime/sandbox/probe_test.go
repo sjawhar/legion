@@ -20,6 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -246,6 +247,7 @@ const testRoleReferencesJSON = `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/core/p
 func probeOptions(t *testing.T) ImageProbe {
 	return ImageProbe{
 		Contract: 3, Budget: 10 * time.Second, RoleReferences: testRoleReferences,
+		commandReserve: time.Millisecond, startupBudget: unfinishedBudget,
 		Retry: bootprobe.Retry{Initial: time.Millisecond, Max: time.Millisecond, Attempts: 2},
 	}
 }
@@ -346,6 +348,125 @@ func TestProbeImagePassesOnTheOKLineConfirmingTheContract(t *testing.T) {
 		t.Fatalf("created %+v, want the Sandbox %s", created, probeSandboxName)
 	}
 	g.eventually("the probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
+}
+
+func TestProbeImagePassesTheRemainingAttemptBudgetToItsCommand(t *testing.T) {
+	g := newProbeRig(t, nil)
+	now := time.Date(2026, 10, 28, 13, 30, 0, 0, time.UTC)
+	g.r.now = func() time.Time { return now }
+	g.succeeds(okLine(3) + "\n")
+	probe := probeOptions(t)
+	probe.Budget = 300 * time.Second
+	probe.startupBudget = 0
+	probe.commandReserve = 0
+
+	if _, err := g.r.ProbeImage(g.ctx, probe); err != nil {
+		t.Fatalf("ProbeImage = %v, want a pass", err)
+	}
+	var created probeSandbox
+	for _, write := range g.writes() {
+		if write.verb != "create" || write.resource != "sandboxes" {
+			continue
+		}
+		if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(write.object.(*unstructured.Unstructured).Object, &created); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command := created.Spec.PodTemplate.Spec.Containers[0].Command
+	flag := slices.Index(command, "--probe-budget")
+	if flag < 0 || flag+1 == len(command) {
+		t.Fatalf("probe command = %q, want --probe-budget", command)
+	}
+	if got, want := command[flag+1], (240 * time.Second).String(); got != want {
+		t.Fatalf("probe budget = %q, want the 300s attempt budget less the 60s reserve %q", got, want)
+	}
+	if got, want := created.Spec.ShutdownTime.Time, now.Add(probeStartupBudget+probe.Budget+apiTimeout).UTC().Truncate(time.Second); !got.Equal(want) {
+		t.Fatalf("probe shutdown time = %s, want startup budget plus command budget and API cleanup %s", got, want)
+	}
+}
+
+func TestProbeCommandBudgetKeepsTheFullReserveBelowFourMinutes(t *testing.T) {
+	if got, want := probeCommandBudget(180*time.Second), 120*time.Second; got != want {
+		t.Fatalf("probeCommandBudget(180s) = %s, want 120s after the 60s reserve", got)
+	}
+}
+
+func TestProbeImageRefusesABudgetWithoutCommandTime(t *testing.T) {
+	g := newProbeRig(t, nil)
+	probe := probeOptions(t)
+	probe.Budget = probeCommandReserve
+	probe.commandReserve = 0
+
+	_, err := g.r.ProbeImage(g.ctx, probe)
+	if err == nil || !strings.Contains(err.Error(), "budget") || !strings.Contains(err.Error(), "command reserve") {
+		t.Fatalf("ProbeImage() = %v, want a refusal naming the budget and command reserve", err)
+	}
+	if got := g.creates.Load(); got != 0 {
+		t.Fatalf("created %d probe sandboxes, want a budget refusal before a pod", got)
+	}
+}
+
+func TestProbeImageRefusesAProbePodThatDoesNotStart(t *testing.T) {
+	g := newProbeRig(t, nil).waits("ErrImagePull")
+	phases := make(chan string, 1)
+	releaseStartup := make(chan struct{})
+	probe := probeOptions(t)
+	probe.Budget = 100 * time.Millisecond
+	probe.startupBudget = 100 * time.Millisecond
+	probe.Retry.Attempts = 1
+	probe.onPhase = func(phase string) {
+		phases <- phase
+		if phase == "startup" {
+			<-releaseStartup
+		}
+	}
+	result := make(chan error, 1)
+	go func() { result <- g.probe(probe) }()
+
+	if phase := <-phases; phase != "startup" {
+		t.Fatalf("first phase = %q, want startup", phase)
+	}
+	g.eventually("the probe pod pending before the startup bound", func() bool {
+		pod := g.pod(probeSandboxName)
+		return pod != nil && pod.Status.Phase == corev1.PodPending && probeWaiting(pod) != nil
+	})
+	close(releaseStartup)
+	wantContains(t, <-result, "did not start within 100ms", "phase Pending", "container probe waiting: ErrImagePull")
+}
+
+func TestProbeImageCollectsAProbeDeadlineAfterStartup(t *testing.T) {
+	g := newProbeRig(t, nil)
+	g.with(func() {
+		g.log = "worker TLS probe failed: curl cannot verify refusal of the AAA chain: unavailable (probe deadline)"
+	})
+	phases := make(chan string, 2)
+	probe := probeOptions(t)
+	probe.Retry.Attempts = 1
+	probe.onPhase = func(phase string) { phases <- phase }
+	result := make(chan error, 1)
+	go func() { result <- g.probe(probe) }()
+
+	if phase := <-phases; phase != "startup" {
+		t.Fatalf("first phase = %q, want startup", phase)
+	}
+	g.eventually("the probe pod pending before startup completes", func() bool {
+		pod := g.pod(probeSandboxName)
+		return pod != nil && pod.Status.Phase == corev1.PodPending
+	})
+	g.update(g.pod(probeSandboxName), func(pod *corev1.Pod) {
+		pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: probeContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}}
+	})
+	if phase := <-phases; phase != "command" {
+		t.Fatalf("second phase = %q, want command", phase)
+	}
+	g.update(g.pod(probeSandboxName), func(pod *corev1.Pod) {
+		pod.Status = corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: probeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}},
+		}}}
+	})
+	wantContains(t, <-result, "curl cannot verify refusal of the AAA chain", "probe deadline")
 }
 
 // A passing probe reports what its OK line said of the image: the model-fallback mark, as the
@@ -492,7 +613,7 @@ func TestProbeImageRetriesAProbeThatNeverFinished(t *testing.T) {
 		want  []string
 	}{
 		{"an image still being pulled", func(g *probeRig) { g.waits("ImagePullBackOff") },
-			[]string{"probe pod " + probeSandboxName + " still Pending after 300ms (container probe waiting: ImagePullBackOff)"}},
+			[]string{"probe pod " + probeSandboxName + " did not start within 300ms (phase Pending) (container probe waiting: ImagePullBackOff)"}},
 		// A pull that failed for any reason but the registry not having the image says nothing
 		// about the image: credentials, the network and a rate limit may all change by the next
 		// attempt.
@@ -545,7 +666,7 @@ func TestProbeImageRetriesAProbeThatNeverFinished(t *testing.T) {
 			g.waitsSaying("ErrImagePull", pullFailure("ErrImagePull", "NotFound", resolving(testImage+": not found"))).pullsFailed(1, "NotFound", resolving(testImage+": not found"))
 		}, []string{"(container probe waiting: ErrImagePull)"}},
 		{"no pod at all", func(g *probeRig) { g.hold.Store(true) },
-			[]string{"probe sandbox " + probeSandboxName + " has no pod after 300ms"}},
+			[]string{"probe pod " + probeSandboxName + " did not start within 300ms: no pod"}},
 		// A pod whose probe outlasts the attempt: what it logged so far is quoted.
 		{"a pod still probing", func(g *probeRig) {
 			g.with(func() {
@@ -1404,7 +1525,7 @@ func TestProbeImageWaitsOnAProbePodThePoolCannotPlace(t *testing.T) {
 		err := g.probe(p)
 
 		wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)",
-			"probe pod "+probeSandboxName+" still Pending after 300ms")
+			"probe pod "+probeSandboxName+" did not start within 300ms (phase Pending)")
 		if strings.Contains(logged.String(), "waiting on capacity") {
 			t.Errorf("a pod unschedulable for less than the boot timeout was read as a capacity wait:\n%s", logged.String())
 		}
@@ -1486,7 +1607,7 @@ func TestProbeImagesCapacityStopNeedsTheBudgetToOutliveTheBootTimeout(t *testing
 		err := g.probe(p)
 
 		wantContains(t, err, "the worker image probe never completed within its retry budget (1 attempts)",
-			"probe pod "+probeSandboxName+" still Pending after 300ms")
+			"probe pod "+probeSandboxName+" did not start within 300ms (phase Pending)")
 		if strings.Contains(logged.String(), "waiting on capacity") {
 			t.Errorf("a budget below the boot timeout read a capacity wait it never had time to see:\n%s", logged.String())
 		}
