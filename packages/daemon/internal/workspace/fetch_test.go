@@ -1156,13 +1156,15 @@ func TestFetchKeepsAFeedAfterGitGC(t *testing.T) {
 // pack, a tmp_pack_* entry under objects/pack. The kill is deliberate: a pod can end at this point,
 // leaving gc.pid and the partial pack. git gc writes gc.pid before it packs refs and expires the
 // reflog, both of which come before the repack, so a kill at gc.pid could land in pack-refs instead;
-// that kill is the "killed during pack-refs" case.
+// that kill is the "killed during pack-refs" case. The gc runs under the fixture's environment, so
+// no git configuration of the process running the tests reaches the repack, and the helper returns
+// only once the kill, and not a failure of git's own, ended that gc with its pack half written.
 func killGitGC(t *testing.T, feed string) {
 	t.Helper()
 	slowGitGC(t, feed)
 	command := exec.Command("/usr/bin/git", "--git-dir="+feed, "gc", "--prune=now")
 	command.Dir = feed
-	environment := without(os.Environ(), "PATH")
+	environment := without(fixtureEnvironment(), "PATH")
 	for _, key := range []string{"OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION"} {
 		environment = without(environment, key)
 	}
@@ -1179,16 +1181,18 @@ func killGitGC(t *testing.T, feed string) {
 	poll := time.NewTicker(time.Millisecond)
 	defer poll.Stop()
 	for {
-		packs, err := os.ReadDir(filepath.Join(feed, "objects", "pack"))
-		if err != nil {
-			t.Fatalf("read the feed's packs during git gc: %v", err)
-		}
-		if slices.ContainsFunc(packs, func(entry os.DirEntry) bool { return strings.HasPrefix(entry.Name(), "tmp_pack_") }) {
+		if writing, _ := writingAPack(t, feed); writing {
 			if err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); err != nil {
 				t.Fatalf("kill git gc: %v", err)
 			}
-			if err := command.Wait(); err == nil {
-				t.Fatal("git gc exited cleanly after its process group was killed")
+			var ended *exec.ExitError
+			if err := command.Wait(); !errors.As(err, &ended) {
+				t.Fatalf("git gc exited cleanly after its process group was killed: %v", err)
+			} else if status, ok := ended.Sys().(syscall.WaitStatus); !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+				t.Fatalf("git gc ended on its own, not on the kill: %v", err)
+			}
+			if left, packs := writingAPack(t, feed); !left {
+				t.Fatalf("git gc finished its pack before the kill reached it: the feed holds %q, not a repack's partial pack", packs)
 			}
 			return
 		}
@@ -1196,14 +1200,36 @@ func killGitGC(t *testing.T, feed string) {
 		case <-deadline.C:
 			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 			_ = command.Wait()
-			t.Fatal("git gc did not start writing a pack during its repack")
+			_, packs := writingAPack(t, feed)
+			t.Fatalf("git gc did not start writing a pack during its repack: the feed holds %q", packs)
 		case <-poll.C:
 		}
 	}
 }
 
-// slowGitGC adds a large incompressible loose object, keeping git gc's repack live long enough to
-// kill while it writes its pack.
+// writingAPack answers whether the feed's repack is writing its pack, a tmp_pack_* entry under
+// objects/pack: the file pack-objects streams a pack into before it renames it into place, which
+// stays behind when the repack is killed. It answers what that directory holds either way, so a
+// wait that ends in neither state says what it saw instead.
+func writingAPack(t *testing.T, feed string) (bool, []string) {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(feed, "objects", "pack"))
+	if err != nil {
+		t.Fatalf("read the feed's packs during git gc: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return slices.ContainsFunc(names, func(name string) bool { return strings.HasPrefix(name, "tmp_pack_") }), names
+}
+
+// slowGitGC gives the feed a large incompressible object the repack must write into its pack, so
+// that the pack write lasts about a second and the wait above meets it. A ref holds the object:
+// `git gc --prune=now` repacks what the feed's refs reach and prunes the rest, so an object no ref
+// reaches never enters the pack at all. With one, the repack wrote the feed's whole pack, 194
+// bytes, in 11 milliseconds: a window a wait polling every millisecond held only by luck, and lost
+// on a loaded runner, where the whole repack ran between two polls of a starved test.
 func slowGitGC(t *testing.T, feed string) {
 	t.Helper()
 	blob, err := os.Create(filepath.Join(t.TempDir(), "large-blob"))
@@ -1217,7 +1243,8 @@ func slowGitGC(t *testing.T, feed string) {
 	if err := blob.Close(); err != nil {
 		t.Fatal(err)
 	}
-	runSetup(t, feed, "git", "--git-dir="+feed, "hash-object", "-w", blob.Name())
+	object := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "hash-object", "-w", blob.Name()))
+	runSetup(t, feed, "git", "--git-dir="+feed, "update-ref", "refs/large-blob", object)
 }
 
 // writeExecutable writes an executable script at path, making its directory.
