@@ -15,7 +15,7 @@ body: |-
     route or author copy skipped for it is published to it then. The comment's own event waits on a
     mention for at most a minute after the comment committed, however long the recipient's lane is
     held and whether or not a Retry overtook the attempt: past that the outbox records the copy it
-    skipped (migration `0161`,
+    skipped (migration `20261101180039`,
     `comment_fallback_copies`), publishes the event to every other destination, and publishes that
     copy to its one destination only if every send of that mention - the sweep's resend, the
     queued send the lane comes to, a Retry that overtook it - failed; a copy whose publish fails is
@@ -33,7 +33,11 @@ body: |-
     session second repeats the key of the one that landed, and its host drops it, so that resend
     cannot deliver the comment twice. A mention's first attempt is made in that mode, so an
     automatic send, the delivery sweep's resend and a Retry all go under the one key, and a
-    mention delivered before a deploy is dropped as a repeat after it. The same key is why a
+    mention delivered before a deploy is dropped as a repeat after it. The one exception is an
+    attempt the build before this one opened by a Retry in ANOTHER mode: its key named that
+    attempt's mode, which this build never writes, so a resend of it after the deploy, and the
+    outbox's copy for it, can reach the session a second time, for the 72-hour duplicate window
+    after the deploy. The same key is why a
     Retry in ANY mode of a mention whose earlier attempt reached the session is recorded
     `duplicate` and delivers nothing, where a mode change used to be a second delivery.
     The comment's own event is never published again, so a route, claimant or follower that

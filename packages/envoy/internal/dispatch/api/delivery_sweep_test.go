@@ -91,8 +91,8 @@ type sweepRoute struct {
 	// broadcast and a comment's mentions, which the mention sender delivers after the response.
 	// Every other route answers once its own attempt has settled.
 	atCommit bool
-	// comment says the attempt is a comment mention's, keyed <comment id>:<target>; any other is
-	// a message's, keyed <message id>:<mode>.
+	// comment says the attempt is a comment mention's, keyed <comment id>:<target>:<the mention's
+	// mode>; any other is a message's, keyed <message id>:<mode>.
 	comment bool
 }
 
