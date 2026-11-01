@@ -5,10 +5,9 @@ import (
 	"testing"
 )
 
-// 0068 marks every existing claim as file-backed. Those claims predate the
-// session-store record, and a later Kubernetes runtime must retain their
-// volume until an operator imports or explicitly forgets the session.
-func TestClaimsBefore0068AreConservativelyFileBacked(t *testing.T) {
+// 0068 leaves every existing claim's session store unknown until the daemon
+// resolves it from the configured deployment store at boot.
+func TestClaimsBefore0068StartWithAnUnknownSessionStore(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
 	migrateThrough(t, store, 67)
@@ -25,7 +24,7 @@ func TestClaimsBefore0068AreConservativelyFileBacked(t *testing.T) {
 	if err := store.Pool().QueryRow(ctx, `select session_store from claims where token = 'legion-legion-LEGION-208-architect'`).Scan(&sessionStore); err != nil {
 		t.Fatal(err)
 	}
-	if sessionStore != "pvc" {
-		t.Fatalf("session_store after 0068 = %q, want pvc", sessionStore)
+	if sessionStore != "" {
+		t.Fatalf("session_store after 0068 = %q, want unknown", sessionStore)
 	}
 }

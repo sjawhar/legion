@@ -1169,9 +1169,11 @@ func register(m *Machine, ctx context.Context, ev Event) error {
 // daemon's is relaunched at once and refused the same way register's is (staleRegistration).
 func reregister(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
-	m.claim.SessionFile, m.claim.SessionStore = r.SessionFile, r.SessionStore
+	m.claim.SessionFile = r.SessionFile
+	if m.claim.SessionStore == "" {
+		m.claim.SessionStore = r.SessionStore
+	}
 	m.claim.CapabilityHash = bytes.Clone(r.CapabilityHash)
-	m.claim.PluginContract = r.PluginContract
 	if r.PluginContract == m.deps.PluginContract {
 		m.claim.PluginRelaunchFor = 0
 	}
@@ -1294,7 +1296,7 @@ func issueClose(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.release(ctx); err != nil {
 		return err
 	}
-	m.forgetSession()
+	m.dropIssueSession()
 	return m.retire(ctx)
 }
 
@@ -1306,7 +1308,7 @@ func issueCloseRetired(m *Machine, ctx context.Context, _ Event) error {
 	if m.claim.Session == "" && m.claim.SessionFile == "" {
 		return nil
 	}
-	m.forgetSession()
+	m.dropIssueSession()
 	return m.persist(ctx)
 }
 
@@ -1322,6 +1324,17 @@ func forgetSession(m *Machine, ctx context.Context, ev Event) error {
 	}
 	m.forgetSession()
 	return m.persist(ctx)
+}
+
+// dropIssueSession leaves a file-backed session id as the reaping guard's
+// durable evidence but clears its resume path, so a later admission starts
+// fresh once the volume is gone.
+func (m *Machine) dropIssueSession() {
+	if m.claim.SessionStore == "pvc" {
+		m.claim.SessionFile = ""
+		return
+	}
+	m.forgetSession()
 }
 
 // operatorClose is the operator's own close, asked of a claim through the API. TreeClosable is

@@ -270,6 +270,14 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		st.Close()
 		return err
 	}
+	sessionStore := "pvc"
+	if cfg.Runtime.Kubernetes != nil {
+		sessionStore = string(cfg.Runtime.Kubernetes.SessionStore.Kind)
+	}
+	if err := st.ResolveUnknownSessionStores(boot, sessionStore); err != nil {
+		st.Close()
+		return err
+	}
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
