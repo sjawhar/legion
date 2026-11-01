@@ -1,0 +1,14 @@
+kind: Changed
+body: |-
+    The Legion daemon API contract moves to 46, and three schemas move with it. The phase
+    vocabulary loses `awaiting_merge`, which no issue reaches any more: the merger merges the
+    pull request itself, and the daemon's own reading of the merged pull request is what closes
+    the issue. The claim schema gains the cause a claim died of, the cause a start failed with,
+    and the times of a claim's last turn. And the turn-outcome request is a union of the two
+    callers that report one: the plugin, which authenticates with the claim's registration
+    secret, and `legion claude-bridge`, which authenticates with the launch's boot token. Every
+    one of these is a `z.strictObject`, so a plugin and a daemon of different releases refuse
+    each other at the handshake rather than part way through a turn.
+time: 2026-11-01T04:30:00.000000000Z
+custom:
+    Issue: pr2539

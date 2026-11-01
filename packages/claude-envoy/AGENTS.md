@@ -135,10 +135,12 @@ the bridge's inbox from a timer, because a line written while a turn runs is app
 and the run would never settle for the daemon. `StopFailure` runs instead of `Stop` when the turn
 ended on an API error ("Hooks reference", code.claude.com/docs/en/hooks), and its
 `${last_assistant_message}` is then the error text itself, not what the worker said: that is the
-provider refusing the turn, so the machine takes it as `refused` and earns no reminder at all —
-reminding the session would only buy another refusal, which is what left dispatch://INFRA-264's
-implementer reminded for ever. Claude Code ignores whatever this hook returns, which now costs
-nothing. What ends a session the provider keeps refusing is the daemon: the bridge reports each
+provider refusing the turn, so the machine takes it as `refused`: it earns no continuation, since
+continuing into another turn at once would only buy another refusal, which is what left
+dispatch://INFRA-264's implementer reminded for ever.
+It does arm one timer, because the task that refused turn carried ended with it and nothing else
+would wake this worker, so one transient refusal would leave the issue idle.
+Claude Code ignores whatever this hook returns, which now costs nothing. What ends a session the provider keeps refusing is the daemon: the bridge reports each
 turn's outcome to `POST /legion/v1/claims/turn-outcome` and the daemon fails the claim once the
 trailing run of refusals reaches `launch_failure_limit`, and the runner's record check then drops
 every reminder, since a failed claim is replaced by a retry in a session of its own.

@@ -1,7 +1,7 @@
 kind: Changed
 body: |-
     The controller's `read_state` answers a summary, and `read_record` defaults to the caller's own
-    issue (dispatch://INFRA-714 R11, dispatch://INFRA-329). `read_state` with no field returns a
+    issue. `read_state` with no field returns a
     line-oriented summary the plugin builds from the state the daemon already serves — the project,
     the admission lists, each capability's status, one line per recorded issue with its phase and
     status, and, under each issue Legion still runs, its slot, its hold, its design gate and every
@@ -13,4 +13,4 @@ body: |-
     reads the record of the issue the caller's claim holds instead of refusing.
 time: 2026-10-30T00:00:00.000000000Z
 custom:
-    Issue: INFRA-714
+    Issue: pr2539

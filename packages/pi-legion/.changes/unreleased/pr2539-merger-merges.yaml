@@ -1,6 +1,6 @@
 kind: Changed
 body: |-
-    The merger merges the pull request itself (dispatch://INFRA-714 R2). Its role prompt, the Go
+    The merger merges the pull request itself. Its role prompt, the Go
     daemon fragment beside it, the architects' prompts and the `legion-worker`, `legion-architect`,
     `legion-retro` and `legion-controller` skills now say that the merger reads the pull request
     with `gh pr view`, merges that head as the implement App with
@@ -22,4 +22,4 @@ body: |-
     the commits that follow.
 time: 2026-10-30T00:00:00.000000000Z
 custom:
-    Issue: INFRA-714
+    Issue: pr2539
