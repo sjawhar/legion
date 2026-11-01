@@ -253,10 +253,15 @@ export function renderAskBlockShell(node: ProseMirrorNode): DOMOutputSpec {
 /** The class every `view` block's frame carries, in a document and in a body alike. */
 const VIEW_FRAME_CLASS = `proof-typed-block proof-typed-block-view my-5 rounded-xl border px-4 pt-3 pb-4 ${borderDefault}`;
 
+/** The one selector for a `view` block's frame slot, which the mounted `ViewBlock` owns: the
+ *  element `renderViewBlockShell` stamps `data-dispatch-view-frame` on. Every pass that runs
+ *  over a painted body reads it, to leave the slot and everything in it to React. */
+export const VIEW_FRAME_SLOT = "[data-dispatch-view-frame]";
+
 /**
  * The `view` block's shell as a static spec: the frame, a header naming the block and its page
  * file, the content hole that holds the caption, and the frame slot. The editor's
- * `ViewBlockView` and the read-only text engine (a comment, ask or message body) both draw this
+ * `viewBlockView` and the read-only text engine (a comment, ask or message body) both draw this
  * one spec, so a view in a document and the same view in a comment are one shape.
  *
  * The frame slot sits outside the content hole, is `contenteditable="false"`, and holds the

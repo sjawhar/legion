@@ -33,13 +33,14 @@ interface FrameSlot {
   /** Within three screen heights of the screen. */
   kept: boolean;
   running: boolean;
+  /** Pixels from the screen, written by the ranking pass that reads it. */
+  distance: number;
 }
 
 const slots = new Map<Element, FrameSlot>();
 
-let watchers:
-  | { readonly keep: IntersectionObserver; readonly start: IntersectionObserver }
-  | undefined;
+/** The two observers, made with the first slot and dropped with the last. */
+let watchers: IntersectionObserver[] = [];
 
 /**
  * How far the slot is from the screen, in pixels: zero while any of it is on screen. The ranking
@@ -48,7 +49,7 @@ let watchers:
  */
 function distanceFromScreen(element: Element): number {
   const rectangle = element.getBoundingClientRect();
-  const screen = window.innerHeight || document.documentElement.clientHeight;
+  const screen = window.innerHeight;
   if (rectangle.bottom >= 0 && rectangle.top <= screen) {
     return 0;
   }
@@ -61,9 +62,14 @@ function distanceFromScreen(element: Element): number {
  * told once.
  */
 function rankFrames(): void {
-  const eligible = [...slots.values()].filter((slot) => slot.kept && (slot.near || slot.running));
-  const distances = new Map(eligible.map((slot) => [slot, distanceFromScreen(slot.element)]));
-  eligible.sort((left, right) => (distances.get(left) ?? 0) - (distances.get(right) ?? 0));
+  const eligible: FrameSlot[] = [];
+  for (const slot of slots.values()) {
+    if (slot.kept && (slot.near || slot.running)) {
+      slot.distance = distanceFromScreen(slot.element);
+      eligible.push(slot);
+    }
+  }
+  eligible.sort((left, right) => left.distance - right.distance);
   const running = new Set(eligible.slice(0, MAX_RUNNING_FRAMES));
   for (const slot of [...slots.values()]) {
     const next = running.has(slot);
@@ -90,21 +96,6 @@ function observerOf(rootMargin: string, write: (slot: FrameSlot, inside: boolean
   );
 }
 
-function watch(element: Element): void {
-  if (watchers === undefined || !(watchers.start instanceof IntersectionObserver)) {
-    watchers = {
-      keep: observerOf(KEEP_MARGIN, (slot, inside) => {
-        slot.kept = inside;
-      }),
-      start: observerOf(START_MARGIN, (slot, inside) => {
-        slot.near = inside;
-      }),
-    };
-  }
-  watchers.start.observe(element);
-  watchers.keep.observe(element);
-}
-
 /**
  * Takes one slot out of the budget: the frame of the block that held it stops, and another
  * block near the screen may take its place. A slot that is not under the budget is left alone,
@@ -114,12 +105,16 @@ export function releaseViewFrame(element: Element): void {
   if (!slots.delete(element)) {
     return;
   }
-  watchers?.start.unobserve(element);
-  watchers?.keep.unobserve(element);
-  if (slots.size === 0) {
-    watchers?.start.disconnect();
-    watchers?.keep.disconnect();
-    watchers = undefined;
+  const last = slots.size === 0;
+  for (const watcher of watchers) {
+    if (last) {
+      watcher.disconnect();
+    } else {
+      watcher.unobserve(element);
+    }
+  }
+  if (last) {
+    watchers = [];
     return;
   }
   rankFrames();
@@ -136,15 +131,26 @@ export function registerViewFrame(
   element: Element,
   onRunningChange: (running: boolean) => void
 ): () => void {
-  slots.set(element, { element, kept: false, near: false, onRunningChange, running: false });
-  watch(element);
+  slots.set(element, {
+    distance: 0,
+    element,
+    kept: false,
+    near: false,
+    onRunningChange,
+    running: false,
+  });
+  if (watchers.length === 0) {
+    watchers = [
+      observerOf(START_MARGIN, (slot, inside) => {
+        slot.near = inside;
+      }),
+      observerOf(KEEP_MARGIN, (slot, inside) => {
+        slot.kept = inside;
+      }),
+    ];
+  }
+  for (const watcher of watchers) {
+    watcher.observe(element);
+  }
   return () => releaseViewFrame(element);
-}
-
-/** Forgets every slot and both observers, for a test that drives the budget itself. */
-export function resetViewFrames(): void {
-  watchers?.start.disconnect();
-  watchers?.keep.disconnect();
-  watchers = undefined;
-  slots.clear();
 }

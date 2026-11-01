@@ -10,7 +10,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { type AskBlockHost, applyAskBlockShell, askShellSlots } from "../doc/typed-block-drawing";
-import { collectViewSlots, ViewBlock, type ViewBlockSlot } from "../view/ViewBlock";
+import { collectViewSlots, type ViewBlockSlot, viewPortals } from "../view/ViewBlock";
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
 import { TextAskCard } from "./markdown-cards";
 import { renderWithEngine, type SoftBreaks } from "./markdown-engine";
@@ -209,13 +209,7 @@ export function useRenderedMarkdown(
           key
         )
       ),
-      ...viewSlots.map((slot) =>
-        createPortal(
-          <ViewBlock caption={slot.caption} data={slot.data} host={slot.host} page={slot.page} />,
-          slot.host,
-          slot.key
-        )
-      ),
+      ...viewPortals(viewSlots),
       ...(Card === undefined
         ? []
         : askHosts.map((host) => <Card host={host} key={`ask-${host.key}`} />)),

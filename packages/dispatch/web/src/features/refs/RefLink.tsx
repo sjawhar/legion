@@ -1,6 +1,7 @@
 import { type ReactNode, useLayoutEffect, useState } from "react";
 
 import { borderDefault } from "../../theme/classes";
+import { VIEW_FRAME_SLOT } from "../doc/typed-block-drawing";
 import { referenceSpans } from "./reference-spans";
 import { useReferencePath, useReferenceTarget } from "./reference-target";
 import {
@@ -74,13 +75,12 @@ export function RefLink({
 const excludedRefAncestorTags: Record<string, true> = { A: true, CODE: true, PRE: true };
 
 /**
- * A `view` block's frame slot, which the block mounted in it owns
- * (`features/view/ViewBlock.tsx`). The rule: no pass that runs after a body is painted writes
- * inside the slot. The link passes would otherwise rewrite the block's "not granted to this
+ * Whether a reference pass must leave this node alone: it sits inside a link, inline code or a
+ * preformatted block, or inside a `view` block's frame slot. The slot belongs to the block
+ * mounted in it (`features/view/ViewBlock.tsx`), and no pass that runs after a body is painted
+ * writes inside it. The link passes would otherwise rewrite the block's "not granted to this
  * page" link and empty it for a portal, inside DOM React renders and owns.
  */
-const VIEW_FRAME_SLOT = "[data-dispatch-view-frame]";
-
 function isInsideExcludedAncestor(node: Node, root: Node): boolean {
   for (
     let current = node.parentNode;

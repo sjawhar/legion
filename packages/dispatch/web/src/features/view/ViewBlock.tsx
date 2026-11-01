@@ -1,13 +1,5 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
-import {
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 
 import { ApiError, api } from "../../api/client";
@@ -17,6 +9,7 @@ import type {
   IssueReferenceSummary,
 } from "../../api/types";
 import { borderDefault, dangerText, linkText, textMutedOnSurface } from "../../theme/classes";
+import { VIEW_FRAME_SLOT } from "../doc/typed-block-drawing";
 import { documentSummaryQuery, issueSummaryQuery } from "../refs/reference-target";
 import { buildReferencePath } from "../refs/routes";
 import { registerViewFrame } from "./frame-budget";
@@ -64,20 +57,25 @@ export interface ViewBlockSlot {
  *  own previous sibling, so a caption edit reaches the block without touching the frame. */
 export function collectViewSlots(root: HTMLElement): ViewBlockSlot[] {
   const slots: ViewBlockSlot[] = [];
-  for (const host of root.querySelectorAll<HTMLElement>("[data-dispatch-view-frame]")) {
-    const page = host.getAttribute("data-dispatch-view-page") ?? "";
+  for (const host of root.querySelectorAll<HTMLElement>(VIEW_FRAME_SLOT)) {
+    const page = host.dataset.dispatchViewPage ?? "";
     const hole = host.previousElementSibling;
     slots.push({
       caption:
-        (hole?.matches("[data-proof-block-content]") === true ? hole.textContent : "")?.trim() ??
-        "",
-      data: host.getAttribute("data-dispatch-view-data") ?? "",
+        hole?.matches("[data-proof-block-content]") === true ? (hole.textContent ?? "").trim() : "",
+      data: host.dataset.dispatchViewData ?? "",
       host,
       key: `view:${page}:${slots.length}`,
       page,
     });
   }
   return slots;
+}
+
+/** A `ViewBlock` portalled into each of these frame slots, which is how both the body renderer
+ *  and the document editors mount one. */
+export function viewPortals(slots: readonly ViewBlockSlot[]): ReactNode[] {
+  return slots.map((slot) => createPortal(<ViewBlock slot={slot} />, slot.host, slot.key));
 }
 
 /**
@@ -90,44 +88,37 @@ const editorSlots = new Map<string, ViewBlockSlot>();
 let editorSnapshot: readonly ViewBlockSlot[] = [];
 const editorListeners = new Set<() => void>();
 
-/** Adds the node view's slot, or writes the one already under its key: a caption edit or a new
- *  `data` attribute reaches the mounted `ViewBlock` without a new frame. */
-export function setEditorViewSlot(slot: ViewBlockSlot): void {
-  editorSlots.set(slot.key, slot);
+function publishEditorSlots(): void {
   editorSnapshot = [...editorSlots.values()];
   for (const listener of [...editorListeners]) {
     listener();
   }
 }
 
+/** Adds the node view's slot, or writes the one already under its key: a caption edit or a new
+ *  `data` attribute reaches the mounted `ViewBlock` without a new frame. */
+export function setEditorViewSlot(slot: ViewBlockSlot): void {
+  editorSlots.set(slot.key, slot);
+  publishEditorSlots();
+}
+
 export function removeEditorViewSlot(key: string): void {
   if (editorSlots.delete(key)) {
-    editorSnapshot = [...editorSlots.values()];
-    for (const listener of [...editorListeners]) {
-      listener();
-    }
+    publishEditorSlots();
   }
+}
+
+function subscribeEditorSlots(listener: () => void): () => void {
+  editorListeners.add(listener);
+  return () => {
+    editorListeners.delete(listener);
+  };
 }
 
 /** A `ViewBlock` in every frame slot a document editor's node views have registered. The live
  *  editor (`ProofDocument`) and the version view render it once each. */
 export function EditorViewBlocks(): ReactNode {
-  const slots = useSyncExternalStore(
-    (listener: () => void) => {
-      editorListeners.add(listener);
-      return () => {
-        editorListeners.delete(listener);
-      };
-    },
-    () => editorSnapshot
-  );
-  return slots.map((slot) =>
-    createPortal(
-      <ViewBlock caption={slot.caption} data={slot.data} host={slot.host} page={slot.page} />,
-      slot.host,
-      slot.key
-    )
-  );
+  return viewPortals(useSyncExternalStore(subscribeEditorSlots, () => editorSnapshot));
 }
 
 /** What a summary read of one file has answered so far. */
@@ -135,7 +126,6 @@ interface SummaryResult {
   readonly data: DocumentReferenceSummary | IssueReferenceSummary | undefined;
   readonly error: unknown;
   readonly isError: boolean;
-  readonly isPending: boolean;
 }
 
 /** One file of a block as its summary read answers: the version the block reads and that
@@ -161,20 +151,6 @@ interface DataEntry {
   readonly version?: number;
 }
 
-/** The frame that is running now. Every count belongs to that one element, so the page that
- *  moved away is never mistaken for the frame that replaced it. */
-interface FrameRun {
-  readonly frame: HTMLIFrameElement;
-  heightChanges: number;
-  heightFrame: number | undefined;
-  loads: number;
-  pendingHeight: number;
-  ready: boolean;
-  readyTimer: number | undefined;
-  sendTimer: number | undefined;
-  sentAt: number;
-}
-
 /** The same-origin address of one version's bytes, which the block reads with the reader's own
  *  session, as every artifact read is made. */
 function versionAddress(id: string, version: number): string {
@@ -184,29 +160,28 @@ function versionAddress(id: string, version: number): string {
 /** What a read that failed says: the status Dispatch answered, or that it could not be reached
  *  at all. One wording, for the page and for a data file alike. */
 function answerCause(status: number | undefined, what: string): string {
-  return status === undefined
-    ? `Dispatch could not be reached for this ${what}`
-    : `Dispatch answered ${status} for this ${what}`;
+  const answer =
+    status === undefined ? "Dispatch could not be reached" : `Dispatch answered ${status}`;
+  return `${answer} for this ${what}`;
 }
 
 /** The file one summary read names, resolved to what the block needs of it. An issue's summary
  *  carries every document of that issue, so one read serves every file of one issue. */
 function resolveFile(file: ViewFile, result: SummaryResult): FileState {
   const base = { name: file.slug, ref: file.reference, size: 0 };
-  if (result.isPending) {
-    return base;
-  }
-  if (result.isError) {
+  const summary = result.data;
+  if (summary === undefined) {
+    // Either the read has not answered yet, or it failed and the line says how.
+    if (!result.isError) {
+      return base;
+    }
     const status = result.error instanceof ApiError ? result.error.status : undefined;
     return { ...base, cause: answerCause(status, "file") };
   }
-  const summary = result.data;
   const record =
-    summary === undefined
-      ? undefined
-      : "documents" in summary
-        ? summary.documents.find((document) => document.slug === file.slug)
-        : summary;
+    "documents" in summary
+      ? summary.documents.find((document) => document.slug === file.slug)
+      : summary;
   if (record === undefined) {
     return { ...base, cause: "this file is not found" };
   }
@@ -237,9 +212,13 @@ function coveringGrant(
   state: FileState,
   pinned: number | undefined
 ): { id: string; version: number } | undefined {
+  const newest = state.version;
+  if (state.id === undefined || newest === undefined) {
+    return undefined;
+  }
   let best: { id: string; version: number } | undefined;
   for (const grant of grants) {
-    if (grant.artifact_id !== state.id || state.version === undefined) {
+    if (grant.artifact_id !== state.id) {
       continue;
     }
     if (pinned !== undefined) {
@@ -249,7 +228,7 @@ function coveringGrant(
       continue;
     }
     if (grant.version === null) {
-      return { id: grant.id, version: state.version };
+      return { id: grant.id, version: newest };
     }
     if (best === undefined || grant.version > best.version) {
       best = { id: grant.id, version: grant.version };
@@ -266,40 +245,41 @@ interface ViewLine {
   readonly ref: string;
 }
 
+/** One quiet line beside the frame: that the block has no caption, that it waits for a frame of
+ *  the budget, or that the page has no data yet. */
+function note(words: string): ReactNode {
+  return <p className={textMutedOnSurface}>{words}</p>;
+}
+
 /**
  * A `view` block: the sandboxed frame that shows its page, and the lines a reader sees when
  * Dispatch cannot show it. It renders into the block's own frame slot, which no repaint takes
  * out of the document, so the frame and its page keep running through a caption edit, a streamed
  * turn and another session's edit of the body around it.
  *
- * The block holds everything about the one frame it runs: the element, how many times it loaded,
- * whether the page answered `ready`, when it last sent data, the versions it sent, what the
- * `HEAD` of the page route answered, and whether the page moved away from its address. The
- * budget (`frame-budget.ts`) decides only whether this block is among the four frames that run,
- * and the block reads nothing at all until it says yes. A change of the grants that cover the
- * named files starts a new frame, so a page that lost a grant loses the data it held.
+ * One effect owns the one frame that is running and everything about it: the element, how many
+ * times it loaded, whether the page answered `ready`, when it last sent data and the version of
+ * each file it sent. Those live as that effect's own variables, so the page that moved away is
+ * never mistaken for the frame that replaced it, and the effect's cleanup ends them. The block
+ * holds beside them what the `HEAD` of the page route answered and whether the page moved away.
+ * The budget (`frame-budget.ts`) decides only whether this block is among the four frames that
+ * run, and the block reads nothing at all until it says yes. A change of the grants that cover
+ * the named files starts a new frame, so a page that lost a grant loses the data it held.
  */
-export function ViewBlock({
-  caption,
-  data,
-  host,
-  page,
-}: {
-  caption: string;
-  data: string;
-  host: HTMLElement;
-  page: string;
-}): ReactNode {
+export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
+  const { caption, data, host, page } = slot;
   const attributes = useMemo(() => readViewAttributes(page, data), [data, page]);
   const named = attributes.kind === "files" ? [attributes.page, ...attributes.data] : [];
   const [running, setRunning] = useState(false);
   const [movedAway, setMovedAway] = useState(false);
   const [silent, setSilent] = useState(false);
-  const [generation, setGeneration] = useState(0);
   const [head, setHead] = useState<{ address: string; cause: string | undefined }>();
   const [sent, setSent] = useState(false);
   const holder = useRef<HTMLDivElement>(null);
-  const runRef = useRef<FrameRun>(undefined);
+  /** The frame that is running now, and the call that sends it the newest data: the two things
+   *  the effect that owns a frame lends to the renders and effects around it. */
+  const element = useRef<HTMLIFrameElement>(undefined);
+  const scheduleSend = useRef<() => void>(undefined);
   const texts = useRef(new Map<string, DataEntry>());
 
   const watched = attributes.kind === "files";
@@ -311,133 +291,92 @@ export function ViewBlock({
   }, [host, watched]);
 
   const summaries = useQueries({
-    queries: named.map((file) => {
-      const owner = file.owner;
-      return "issue" in owner
-        ? { ...issueSummaryQuery(owner.issue), enabled: running }
-        : { ...documentSummaryQuery(owner.project, file.slug), enabled: running };
-    }),
+    queries: named.map((file) => ({
+      ...("issue" in file.owner
+        ? issueSummaryQuery(file.owner.issue)
+        : documentSummaryQuery(file.owner.project, file.slug)),
+      enabled: running,
+    })),
   });
-  const pending: SummaryResult = {
-    data: undefined,
-    error: undefined,
-    isError: false,
-    isPending: true,
-  };
-  const states = named.map((file, index) => resolveFile(file, summaries[index] ?? pending));
+  // `useQueries` answers one result for each query, so every named file has one of its own.
+  const states = named.map((file, index) => resolveFile(file, summaries[index]));
   const pageState = states[0];
+  const pageId = pageState?.id;
 
   const grants = useQuery({
-    enabled: running && pageState?.id !== undefined,
-    queryFn: () => api.listArtifactGrants(pageState?.id ?? ""),
-    queryKey: ["artifact-grants", pageState?.id],
+    enabled: running && pageId !== undefined,
+    queryFn: () => api.listArtifactGrants(pageId ?? ""),
+    queryKey: ["artifact-grants", pageId],
     staleTime: Number.POSITIVE_INFINITY,
   });
 
+  // Every line this block shows, in the order a reader reads them: what the attributes or the
+  // page file cannot answer, then one line per data file, then what the frame itself answered.
+  const lines: ViewLine[] = [];
+  if (attributes.kind === "problem") {
+    lines.push({ cause: attributes.cause, ref: attributes.reference });
+  }
+  const pageCause = pageState?.cause;
+  if (pageCause !== undefined) {
+    lines.push({ cause: pageCause, ref: page });
+  }
+
   // One pass over the data files: what goes to the page, what the reader is told, how many bytes
-  // the grants cover, and which grants cover them.
+  // the grants cover, which grants cover them, and which versions the page has already had.
   const rows = grants.data;
   const entries: DataEntry[] = [];
-  const lines: ViewLine[] = [];
-  const cover: string[] = [];
+  let cover = "";
+  let sendSignature = "";
   let bytes = 0;
-  for (const [index, state] of states.slice(1).entries()) {
-    const grant =
-      rows === undefined ? undefined : coveringGrant(rows, state, named[index + 1]?.version);
-    cover.push(grant?.id ?? "none");
+  for (let index = 1; index < states.length; index += 1) {
+    const state = states[index];
+    const grant = rows === undefined ? undefined : coveringGrant(rows, state, named[index].version);
+    let entry: DataEntry;
     if (state.cause !== undefined) {
       lines.push({ cause: state.cause, ref: state.ref });
-      entries.push({ error: "unreadable", ref: state.ref });
-      continue;
-    }
-    if (grant === undefined) {
+      entry = { error: "unreadable", ref: state.ref };
+    } else if (grant === undefined) {
       if (rows !== undefined) {
         lines.push({ cause: "not granted to this page", panel: true, ref: state.ref });
       }
-      entries.push({ error: "not-granted", ref: state.ref });
-      continue;
+      entry = { error: "not-granted", ref: state.ref };
+    } else {
+      bytes += state.size;
+      entry = { id: state.id, name: state.name, ref: state.ref, version: grant.version };
     }
-    bytes += state.size;
-    entries.push({ id: state.id, name: state.name, ref: state.ref, version: grant.version });
+    entries.push(entry);
+    cover += grant === undefined ? " none" : ` ${grant.id}`;
+    sendSignature += ` ${entry.ref}@${entry.error ?? entry.version}`;
   }
   const overBudget = rows !== undefined && bytes > MAX_DATA_BYTES;
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
-  const sendSignature = entries
-    .map((entry) => `${entry.ref}@${entry.error ?? entry.version}`)
-    .join(" ");
-  const coverSignature = rows === undefined ? undefined : cover.join(" ");
 
+  const pageVersion = pageState?.version;
   const pageAddress =
-    pageState?.id === undefined || pageState.version === undefined
+    pageId === undefined || pageVersion === undefined
       ? undefined
-      : `${versionAddress(pageState.id, pageState.version)}/page`;
+      : `${versionAddress(pageId, pageVersion)}/page`;
   const answered = head !== undefined && head.address === pageAddress ? head : undefined;
-  const canRun = running && answered?.cause === undefined && answered !== undefined && !movedAway;
+  const refusal = answered?.cause;
+  const canRun = running && answered !== undefined && refusal === undefined && !movedAway;
   const frameTitle = caption === "" ? page : caption;
-  const titleRef = useRef(frameTitle);
-  titleRef.current = frameTitle;
 
-  /** Sends the newest version of every file the grants cover. The bytes are read as the message
-   *  goes out, so ten uploads inside one wait cost one read of the newest version. */
-  const send = useCallback(async (run: FrameRun): Promise<void> => {
-    const held = texts.current;
-    const files: DataEntry[] = [];
-    for (const entry of entriesRef.current) {
-      const { id, version } = entry;
-      if (id === undefined || version === undefined) {
-        files.push(entry);
-        continue;
-      }
-      let read = held.get(id);
-      if (read?.version !== version) {
-        read = await fetch(versionAddress(id, version), { credentials: "same-origin" }).then(
-          async (response) =>
-            response.ok
-              ? {
-                  contentType: response.headers.get("Content-Type") ?? "application/octet-stream",
-                  name: entry.name,
-                  ref: entry.ref,
-                  text: new TextDecoder("utf-8", { fatal: true }).decode(
-                    await response.arrayBuffer()
-                  ),
-                  version,
-                }
-              : { error: "unreadable", ref: entry.ref },
-          () => ({ error: "not-text", ref: entry.ref })
-        );
-        if (read.text === undefined) {
-          files.push(read);
-          continue;
-        }
-        held.set(id, read);
-      }
-      files.push(read);
+  for (const cause of [
+    refusal,
+    movedAway ? "the page moved away from its address" : undefined,
+    silent ? "this page sent no ready message in 10 seconds" : undefined,
+  ]) {
+    if (cause !== undefined) {
+      lines.push({ cause, ref: page });
     }
-    if (runRef.current !== run || run.loads > 1) {
-      return;
-    }
-    run.sentAt = Date.now();
-    // The page's origin is opaque, so there is no origin to name but any.
-    run.frame.contentWindow?.postMessage({ files, type: "dispatch-view:data" }, "*");
-    setSent(true);
-  }, []);
-
-  const schedule = useCallback(() => {
-    const run = runRef.current;
-    if (run === undefined || !run.ready || run.sendTimer !== undefined) {
-      return;
-    }
-    run.sendTimer = window.setTimeout(
-      () => {
-        run.sendTimer = undefined;
-        void send(run);
-      },
-      Math.max(0, SEND_INTERVAL_MS - (Date.now() - run.sentAt))
-    );
-  }, [send]);
-  const scheduleRef = useRef(schedule);
-  scheduleRef.current = schedule;
+  }
+  if (overBudget) {
+    lines.push({
+      cause: "the data files together are larger than 16 MiB, so Dispatch sends no data",
+      ref: "data",
+    });
+  }
 
   // One HEAD before the frame, so a refusal of the page route is a line rather than an empty
   // frame. A page over 5 MiB, a file that is no page and a version that is not there answer it.
@@ -464,17 +403,9 @@ export function ViewBlock({
     };
   }, [pageAddress, running]);
 
-  // A change of which grants cover the named files starts a new frame, so a page that lost a
-  // grant loses the data it holds. A new version of a granted file changes no grant and no frame.
-  const lastCover = useRef(coverSignature);
-  useEffect(() => {
-    if (coverSignature !== undefined && coverSignature !== lastCover.current) {
-      lastCover.current = coverSignature;
-      setGeneration((value) => value + 1);
-    }
-  }, [coverSignature]);
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: a new generation is a new frame, which is what this effect makes; its body reads no generation.
+  // A change of which grants cover the named files is a new frame, so a page that lost a grant
+  // loses the data it holds; a new version of a granted file changes no grant and no frame.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `cover` is the set of grants, which this effect starts a frame for; its body reads the files through refs.
   useEffect(() => {
     const parent = holder.current;
     if (!canRun || parent === null || pageAddress === undefined) {
@@ -485,28 +416,89 @@ export function ViewBlock({
     const frame = document.createElement("iframe");
     frame.setAttribute("sandbox", "allow-scripts");
     frame.setAttribute("referrerpolicy", "no-referrer");
-    frame.title = titleRef.current;
     frame.className = "block w-full border-0";
     frame.style.height = `${DEFAULT_FRAME_HEIGHT}px`;
     // The address is set before the frame is inserted, so the frame loads once and this block
     // counts that one load.
     frame.src = pageAddress;
-    const run: FrameRun = {
-      frame,
-      heightChanges: 0,
-      heightFrame: undefined,
-      loads: 0,
-      pendingHeight: DEFAULT_FRAME_HEIGHT,
-      ready: false,
-      readyTimer: undefined,
-      sendTimer: undefined,
-      sentAt: 0,
+    element.current = frame;
+
+    // Everything this one frame holds, and nothing of the frame before it.
+    let stopped = false;
+    let loads = 0;
+    let ready = false;
+    let sentAt = 0;
+    let heightChanges = 0;
+    let pendingHeight = DEFAULT_FRAME_HEIGHT;
+    // A timer and an animation frame are always above zero, so zero is "none running".
+    let heightFrame = 0;
+    let readyTimer = 0;
+    let sendTimer = 0;
+
+    /** Sends the newest version of every file the grants cover. The bytes are read as the
+     *  message goes out, so ten uploads inside one wait cost one read of the newest version. */
+    const send = async (): Promise<void> => {
+      const held = texts.current;
+      const files: DataEntry[] = [];
+      for (const entry of entriesRef.current) {
+        const { id, version } = entry;
+        if (id === undefined || version === undefined) {
+          files.push(entry);
+          continue;
+        }
+        let read = held.get(id);
+        if (read?.version !== version) {
+          read = await fetch(versionAddress(id, version), { credentials: "same-origin" }).then(
+            async (response) =>
+              response.ok
+                ? {
+                    contentType: response.headers.get("Content-Type") ?? "application/octet-stream",
+                    name: entry.name,
+                    ref: entry.ref,
+                    text: new TextDecoder("utf-8", { fatal: true }).decode(
+                      await response.arrayBuffer()
+                    ),
+                    version,
+                  }
+                : { error: "unreadable", ref: entry.ref },
+            () => ({ error: "not-text", ref: entry.ref })
+          );
+          if (read.text === undefined) {
+            files.push(read);
+            continue;
+          }
+          held.set(id, read);
+        }
+        files.push(read);
+      }
+      if (stopped || loads > 1) {
+        return;
+      }
+      sentAt = Date.now();
+      // The page's origin is opaque, so there is no origin to name but any.
+      frame.contentWindow?.postMessage({ files, type: "dispatch-view:data" }, "*");
+      setSent(true);
     };
-    runRef.current = run;
-    const onLoad = () => {
-      run.loads += 1;
-      if (run.loads === 1) {
-        run.readyTimer = window.setTimeout(() => setSilent(true), READY_DEADLINE_MS);
+
+    const schedule = (): void => {
+      if (!ready || sendTimer !== 0) {
+        return;
+      }
+      sendTimer = window.setTimeout(
+        () => {
+          sendTimer = 0;
+          void send();
+        },
+        Math.max(0, SEND_INTERVAL_MS - (Date.now() - sentAt))
+      );
+    };
+    scheduleSend.current = schedule;
+
+    // The block owns this element alone, so the one `load` handler is its own property.
+    frame.onload = () => {
+      loads += 1;
+      if (loads === 1) {
+        readyTimer = window.setTimeout(() => setSilent(true), READY_DEADLINE_MS);
         return;
       }
       // The page moved its own frame to another address. Nothing more goes to it, and the block
@@ -517,7 +509,7 @@ export function ViewBlock({
       const message: unknown = event.data;
       if (
         event.source !== frame.contentWindow ||
-        run.loads > 1 ||
+        loads > 1 ||
         typeof message !== "object" ||
         message === null ||
         !("type" in message)
@@ -525,13 +517,12 @@ export function ViewBlock({
         return;
       }
       if (message.type === "dispatch-view:ready") {
-        if (run.ready) {
+        if (ready) {
           return;
         }
-        run.ready = true;
-        window.clearTimeout(run.readyTimer);
-        run.readyTimer = undefined;
-        scheduleRef.current();
+        ready = true;
+        window.clearTimeout(readyTimer);
+        schedule();
         return;
       }
       const height =
@@ -539,80 +530,51 @@ export function ViewBlock({
       if (typeof height !== "number" || !Number.isFinite(height)) {
         return;
       }
-      run.pendingHeight = Math.min(
-        MAX_FRAME_HEIGHT,
-        Math.max(MIN_FRAME_HEIGHT, Math.round(height))
-      );
-      if (run.heightFrame === undefined && run.heightChanges < MAX_HEIGHT_CHANGES) {
-        run.heightFrame = window.requestAnimationFrame(() => {
-          run.heightFrame = undefined;
-          run.heightChanges += 1;
-          run.frame.style.height = `${run.pendingHeight}px`;
+      pendingHeight = Math.min(MAX_FRAME_HEIGHT, Math.max(MIN_FRAME_HEIGHT, Math.round(height)));
+      if (heightFrame === 0 && heightChanges < MAX_HEIGHT_CHANGES) {
+        heightFrame = window.requestAnimationFrame(() => {
+          heightFrame = 0;
+          heightChanges += 1;
+          frame.style.height = `${pendingHeight}px`;
         });
       }
     };
-    frame.addEventListener("load", onLoad);
     window.addEventListener("message", onMessage);
     parent.appendChild(frame);
     return () => {
+      stopped = true;
+      scheduleSend.current = undefined;
+      element.current = undefined;
       window.removeEventListener("message", onMessage);
-      frame.removeEventListener("load", onLoad);
-      window.clearTimeout(run.readyTimer);
-      window.clearTimeout(run.sendTimer);
-      if (run.heightFrame !== undefined) {
-        window.cancelAnimationFrame(run.heightFrame);
-      }
+      window.clearTimeout(readyTimer);
+      window.clearTimeout(sendTimer);
+      window.cancelAnimationFrame(heightFrame);
       frame.remove();
-      if (runRef.current === run) {
-        runRef.current = undefined;
-      }
     };
-  }, [canRun, generation, pageAddress]);
+  }, [canRun, cover, pageAddress]);
 
+  // The frame's title follows the caption, so another session's caption edit renames the frame
+  // and starts no new one. It runs on every render, because a new frame is a new element to name
+  // and the effect above has already made it by the time this one runs.
   useEffect(() => {
-    const run = runRef.current;
-    if (run !== undefined) {
-      run.frame.title = frameTitle;
+    if (element.current !== undefined) {
+      element.current.title = frameTitle;
     }
-  }, [frameTitle]);
+  });
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new signature is a new set of versions to send, which is what this effect schedules; the send itself reads the newest through a ref.
   useEffect(() => {
     if (!overBudget) {
-      scheduleRef.current();
+      scheduleSend.current?.();
     }
   }, [overBudget, sendSignature]);
 
-  if (attributes.kind === "problem") {
-    lines.unshift({ cause: attributes.problem.cause, ref: attributes.problem.reference });
-  }
-  if (pageState?.cause !== undefined) {
-    lines.unshift({ cause: pageState.cause, ref: page });
-  }
-  if (answered?.cause !== undefined) {
-    lines.push({ cause: answered.cause, ref: page });
-  }
-  if (movedAway) {
-    lines.push({ cause: "the page moved away from its address", ref: page });
-  }
-  if (silent) {
-    lines.push({ cause: "this page sent no ready message in 10 seconds", ref: page });
-  }
-  if (overBudget) {
-    lines.push({
-      cause: "the data files together are larger than 16 MiB, so Dispatch sends no data",
-      ref: "data",
-    });
-  }
   // The panel where a person grants a data file sits on the page file's own view.
-  const pageRoute = named[0]?.route;
-  const panel = pageRoute === undefined ? undefined : buildReferencePath(pageRoute);
+  const panel = attributes.kind === "files" ? buildReferencePath(attributes.page.route) : undefined;
 
   return (
     <div className="not-prose mt-2 text-sm">
-      {caption === "" ? (
-        <p className={textMutedOnSurface}>{page} — this view has no caption</p>
-      ) : null}
+      {caption === "" ? note(`${page} — this view has no caption`) : null}
       {lines.map((line) => (
         <p className={dangerText} key={`${line.ref} ${line.cause}`}>
           {line.ref} — {line.cause}
@@ -626,8 +588,8 @@ export function ViewBlock({
           ) : null}
         </p>
       ))}
-      {watched && !running ? <p className={textMutedOnSurface}>waiting</p> : null}
-      {canRun && !sent ? <p className={textMutedOnSurface}>loading</p> : null}
+      {watched && !running ? note("waiting") : null}
+      {canRun && !sent ? note("loading") : null}
       <div className={`overflow-hidden rounded-lg border ${borderDefault}`} ref={holder} />
     </div>
   );

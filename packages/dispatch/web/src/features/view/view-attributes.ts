@@ -22,18 +22,12 @@ export interface ViewFile {
   readonly version: number | undefined;
 }
 
-/** Why a `view` block cannot show, as the one line a reader sees: what the line names (a
- *  reference, or the attribute that holds none) and the cause. */
-export interface ViewProblem {
-  readonly cause: string;
-  readonly reference: string;
-}
-
 /** What a `view` block's `page` and `data` attributes say: the page file and its one to eight
- *  data files, or the reason the block cannot show. */
+ *  data files, or the reason the block cannot show. A problem is the one line a reader sees:
+ *  what it names (a reference, or the attribute that holds none) and the cause. */
 export type ViewAttributes =
   | { readonly data: readonly ViewFile[]; readonly kind: "files"; readonly page: ViewFile }
-  | { readonly kind: "problem"; readonly problem: ViewProblem };
+  | { readonly cause: string; readonly kind: "problem"; readonly reference: string };
 
 /** The file a reference names, or undefined when it names no issue file and no project file: an
  *  agent conversation file, an issue, an ask, a comment, a block of a document, or text that is
@@ -55,12 +49,15 @@ function viewFile(reference: string): ViewFile | undefined {
 }
 
 function problem(reference: string, cause: string): ViewAttributes {
-  return { kind: "problem", problem: { cause, reference } };
+  return { cause, kind: "problem", reference };
 }
 
 /** An attribute's references: its words, with one space between two (the spec's decision
  *  "References as one string"). */
 const REFERENCE_SEPARATOR = /\s+/u;
+
+/** The cause of a reference that names neither an issue file nor a project file. */
+const NOT_A_FILE = "this is not an issue file or a project file";
 
 /**
  * The one reading of a `view` block's `page` and `data` attributes, used by the editor's node
@@ -72,24 +69,23 @@ const REFERENCE_SEPARATOR = /\s+/u;
  * the reads the block makes, not here.
  */
 export function readViewAttributes(page: unknown, data: unknown): ViewAttributes {
-  const pageReferences = String(page ?? "")
-    .trim()
-    .split(REFERENCE_SEPARATOR)
-    .filter((word) => word !== "");
+  // One reading for the two attributes: the words of each, with the empty ones dropped.
+  const [pageReferences, dataReferences] = [page, data].map((value) =>
+    String(value ?? "")
+      .trim()
+      .split(REFERENCE_SEPARATOR)
+      .filter((word) => word !== "")
+  );
   if (pageReferences.length === 0) {
     return problem("page", "this view names no page file");
   }
   if (pageReferences.length > 1) {
     return problem("page", "this view names more than one page file");
   }
-  const pageFile = viewFile(pageReferences[0] ?? "");
+  const pageFile = viewFile(pageReferences[0]);
   if (pageFile === undefined) {
-    return problem(pageReferences[0] ?? "", "this is not an issue file or a project file");
+    return problem(pageReferences[0], NOT_A_FILE);
   }
-  const dataReferences = String(data ?? "")
-    .trim()
-    .split(REFERENCE_SEPARATOR)
-    .filter((word) => word !== "");
   if (dataReferences.length === 0) {
     return problem("data", "this view names no data file");
   }
@@ -103,7 +99,7 @@ export function readViewAttributes(page: unknown, data: unknown): ViewAttributes
   for (const reference of dataReferences) {
     const file = viewFile(reference);
     if (file === undefined) {
-      return problem(reference, "this is not an issue file or a project file");
+      return problem(reference, NOT_A_FILE);
     }
     dataFiles.push(file);
   }

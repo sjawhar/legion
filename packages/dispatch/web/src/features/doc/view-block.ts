@@ -1,9 +1,9 @@
 import { DOMSerializer, type Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
-import type { NodeView, ViewMutationRecord } from "@milkdown/kit/prose/view";
+import type { NodeView } from "@milkdown/kit/prose/view";
 
 import { releaseViewFrame } from "../view/frame-budget";
 import { removeEditorViewSlot, setEditorViewSlot } from "../view/ViewBlock";
-import { renderViewBlockShell } from "./typed-block-drawing";
+import { renderViewBlockShell, VIEW_FRAME_SLOT } from "./typed-block-drawing";
 
 let nextViewKey = 0;
 
@@ -23,61 +23,48 @@ let nextViewKey = 0;
  * whose `page` is unchanged: a decoration, a caption edit and a new `data` attribute all leave
  * the frame running. A new `page` is a new view and a new frame.
  */
-export class ViewBlockView implements NodeView {
-  readonly dom: HTMLElement;
-  readonly contentDOM: HTMLElement;
-  private readonly slot: HTMLElement;
-  private readonly key = `view-editor:${nextViewKey++}`;
-  private node: ProseMirrorNode;
-
-  constructor(node: ProseMirrorNode, document: Document) {
-    this.node = node;
-    const { contentDOM, dom } = DOMSerializer.renderSpec(document, renderViewBlockShell(node));
-    this.dom = dom as HTMLElement;
-    const slot = this.dom.querySelector<HTMLElement>(":scope > [data-dispatch-view-frame]");
-    if (!(contentDOM instanceof HTMLElement) || slot === null) {
-      throw new Error("the view shell has no caption hole or frame slot");
-    }
-    this.contentDOM = contentDOM;
-    this.slot = slot;
-    // The block's identity is the editor's to stamp, as `AskBlockView` stamps it.
-    const blockId = node.attrs.blockId;
-    if (typeof blockId === "string" && blockId !== "") {
-      this.dom.dataset.blockId = blockId;
-    }
-    this.publish();
+export function viewBlockView(node: ProseMirrorNode, document: Document): NodeView {
+  const key = `view-editor:${nextViewKey++}`;
+  const rendered = DOMSerializer.renderSpec(document, renderViewBlockShell(node));
+  const dom = rendered.dom as HTMLElement;
+  const contentDOM = rendered.contentDOM;
+  const slot = dom.querySelector<HTMLElement>(`:scope > ${VIEW_FRAME_SLOT}`);
+  if (!(contentDOM instanceof HTMLElement) || slot === null) {
+    throw new Error("the view shell has no caption hole or frame slot");
   }
-
-  private publish(): void {
+  // The block's identity is the editor's to stamp, as `AskBlockView` stamps it.
+  const blockId = node.attrs.blockId;
+  if (typeof blockId === "string" && blockId !== "") {
+    dom.dataset.blockId = blockId;
+  }
+  let current = node;
+  const publish = (): void => {
     setEditorViewSlot({
-      caption: this.node.textContent.trim(),
-      data: String(this.node.attrs.data ?? ""),
-      host: this.slot,
-      key: this.key,
-      page: String(this.node.attrs.page ?? ""),
+      caption: current.textContent.trim(),
+      data: String(current.attrs.data ?? ""),
+      host: slot,
+      key,
+      page: String(current.attrs.page ?? ""),
     });
-  }
-
-  update(node: ProseMirrorNode): boolean {
-    if (node.type !== this.node.type || node.attrs.page !== this.node.attrs.page) {
-      return false;
-    }
-    this.node = node;
-    this.slot.setAttribute("data-dispatch-view-data", String(node.attrs.data ?? ""));
-    this.publish();
-    return true;
-  }
-
-  ignoreMutation(mutation: ViewMutationRecord): boolean {
-    return !this.contentDOM.contains(mutation.target);
-  }
-
-  stopEvent(event: Event): boolean {
-    return event.target instanceof Node && !this.contentDOM.contains(event.target);
-  }
-
-  destroy(): void {
-    removeEditorViewSlot(this.key);
-    releaseViewFrame(this.slot);
-  }
+  };
+  publish();
+  return {
+    contentDOM,
+    destroy: () => {
+      removeEditorViewSlot(key);
+      releaseViewFrame(slot);
+    },
+    dom,
+    ignoreMutation: (mutation) => !contentDOM.contains(mutation.target),
+    stopEvent: (event) => event.target instanceof Node && !contentDOM.contains(event.target),
+    update: (next) => {
+      if (next.type !== current.type || next.attrs.page !== current.attrs.page) {
+        return false;
+      }
+      current = next;
+      slot.dataset.dispatchViewData = String(next.attrs.data ?? "");
+      publish();
+      return true;
+    },
+  };
 }
