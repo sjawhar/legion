@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-588",
+  "completed": "2026-11-01T06:35:54Z",
+  "round": 11,
+  "decision": "approved",
+  "codeHead": "911858609804 (CI head 323d7449c977)",
+  "scope": "Two forward merges of main since the round-10 approval at d696ff642bb1, with retro's commits: fea4f37cc0ab (main f699b131, #2607 drops the OpenCode plugin from the fold) and 911858609804 (main d09b46d7, closings raised to daemon 0067_phase_assignment and Dispatch 0150_dpop_proofs). Retro: b7ccc333 (one docs/solutions learning), 1e8492bf (removal of .legion/).",
+  "checks": "fea4f37c: outside #2607's conflict the diff against main equals the approved one; .github/changelog-packages holds main's six specs (envoy-plugin gone), changelog-fold.yaml reads it in all three steps with no CHANGELOG_PACKAGES; AGENTS.md names the file and six packages, layout checker exit 0; release.yaml and both credentials scripts untouched by the PR; check-release-credentials.sh and its test, check-ci-filters.sh (29 gates), release-push.test.sh (635/0), fold-orphans pass. 91185860: the resolution changes only the two closings entries and the three lines naming them (embed.go, docs/kubernetes.md, cmd/dispatch/README.md); main's newest numbered files are 0067 and 0150; migrationid and daemon migrations tests pass; fold-orphans exit 0.",
+  "ci": "Required ci-ok and pr-title (rulesets): both success at 323d7449c977 (ci-ok 06:35Z); nothing else red there. compare 323d7449...098a22c4: only .legion/INFRA-588/test.json. At the earlier head aa3a96f5, envoy-session-stall (nats-stall.test.ts row B, packages/envoy-client, untouched by this PR) failed once and passed on re-run: a flaky timing test.",
+  "thermonuclear": "Not run: two forward merges whose resolutions are a package-list line and two closing numbers, each checked directly.",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": []
+}
