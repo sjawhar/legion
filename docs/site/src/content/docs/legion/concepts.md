@@ -383,9 +383,12 @@ work after the close: the implementer — the agent that wrote the change — is
 check in its live session as the issue closes. Each look of the check reaches the deploy as your
 deployment instructions say (the merge commit published to your deploy role, with no reply
 awaited), reads whether production carries the merge, and ends one of three ways: `pass`, once
-the implementer drove the change in production through a user's own access path and wrote the
+the implementer drove the change in production through a user's own access path, drove each
+requirement of the issue only the deploy can show as the requirement names it, and wrote the
 pull request's `Production:` line, naming the merge commit and what woke the look; `pending`,
-when production does not carry the merge yet; or `fail`, a defect, naming the issue, the pull
+when production does not carry the merge yet, or an observation a requirement names has not
+happened yet; or `fail`, a requirement observed as not met, one still unobserved at the last
+look, or a defect, naming the issue, the pull
 request, the merge commit, what it drove and what failed. A defect with a clear fix goes to the
 controller, which gives it to the tree that owns that code and files an issue only when none does.
 One that needs a decision is a Dispatch ask on Legion's

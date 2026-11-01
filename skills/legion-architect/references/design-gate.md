@@ -122,46 +122,47 @@ reason, and answer it in the spec if the latest version does not already.
 
 ## After approval
 
-Approval is pinned to the spec version: any new version closes the gate again, and no
-`design-approved`-type wake says so; you know from your own edit, or from the `artifact.version`
-event on your issue. The exception is the
-version a human's own answer to a decision block writes when that answer is the whole change since
-the version they approved: Dispatch records an `approved` review in their name at the new version
-and emits `artifact.approved`, and the daemon reopens the gate and sends `design-approved`.
+Approval is pinned to the spec version: any new version closes the gate again, with no wake to
+say so; you know from your own edit, or from the `artifact.version` event on your issue. The
+exception is the version a human's own answer to a decision block writes when that answer is the
+whole change since the version they approved: Dispatch records an `approved` review in their name
+at the new version and emits `artifact.approved`, and the daemon reopens the gate and sends
+`design-approved`.
 
-So edit an approved root spec only when its Summary, its Acceptance, the tree's scope, or a
-decision a human settled in one of its decision blocks changes. Such a change is a point the human
-has not agreed to: put the problem behind it to them as its own decision block, with its evidence,
-at the end of the section it changes, and add nothing else to the spec. If you edit the block before
-the human answers, the gate closes like any new version, but their answer still carries the approval
-to the version it writes. Once they have answered:
+So edit an approved root spec only when its Summary, its Acceptance, the tree's scope or a
+settled decision changes. Such a change is a point the human has not agreed to: put the problem
+behind it to them as its own decision block, with its evidence, at the end of the section it
+changes, and add nothing else. If you edit the block before the human answers, the gate closes
+like any new version, but their answer still carries the approval to the version it writes. Once
+they have answered:
 
 - When the answer is the whole change, request nothing: the document's chip reads Approved at the
-  new version, its reviews dialog shows the review in their name, and the `design-approved` the
-  daemon sent opens nothing new. Carry on, and release no wave because of it.
+  new version and the `design-approved` the daemon sent opens nothing new. Carry on; release no
+  wave because of it.
 - When the answer changes the Summary, the Acceptance or the tree's scope, rewrite that text and
-  repeat steps 3 to 5 on the new version, with a one-sentence `--summary` naming what changed since
-  the earlier approval, then the reviews' sentence (the card shows that approval, `Approved at
-  version N on <date> by <who>.`, and its `Show diff` control carries the detail). The rewrite
-  closes the gate until they approve;
-  work the daemon started at the answer keeps running. Release no new wave until the `design-approved`
-  after the rewrite; work already in flight continues. Every merger's `READY` in the tree is
-  refused until a human approves the latest version.
+  repeat steps 3 to 5 on the new version, with a one-sentence `--summary` naming what changed
+  since the earlier approval, then the reviews' sentence (the card shows `Approved at version N
+  on <date> by <who>.`, and its `Show diff` control carries the detail). The rewrite closes the
+  gate until they approve. Release no new wave until the `design-approved` after it; work already
+  in flight, including what the daemon started at the answer, continues. Every merger's `READY`
+  in the tree is refused until a human approves the latest version.
 
-A settled decision is the human's. A plan that would overturn one goes back to the planner with the
-decision kept, unless the planner brings evidence the human did not weigh that would change it
-(such as a measurement showing the settled choice cannot meet the Acceptance); then a decision
-block names the decision and that evidence. A plan never overturns a settled decision on its own.
+A settled decision is the human's. A plan that would overturn one goes back to the planner with
+the decision kept, unless the planner brings evidence the human did not weigh that would change
+it; then a decision block names the decision and that evidence.
 
-A design change that leaves the Summary, Acceptance, scope and settled decisions intact (a
-planner's measurement that finds a better way to build the same outcome) goes in the plan (the
-issue's `plan.md` document and `.legion/<issue>/plan.json`), never into the approved spec, even
-where the spec's text describes the older design; the reviewer reads the plan beside the spec.
+An owner's act after the approval binds at once, with no new version and no new approval: their
+answer or comment asking for work here adds a requirement, one saying this issue will not do one
+removes it, and the later act governs. Each role reads these acts from the issue's events; nobody
+copies them into the spec or the plan.
 
-When a planner's `phase-finished` names a departure from the spec's design, compare it with the
-approved spec. If the Summary, the Acceptance, the scope and every settled decision are unchanged,
-the plan is the record and the tree carries on; otherwise change the root spec and request
-approval again.
+A design change that leaves the Summary, Acceptance, scope and settled decisions intact — a
+planner's measurement finding a better way to the same outcome — goes in the plan (the issue's
+`plan.md` and `.legion/<issue>/plan.json`), never into the approved spec, even where the
+spec's text describes the older design; the reviewer reads the plan beside the spec. So
+when a planner's `phase-finished` names a departure, compare it with the approved spec: with
+those four unchanged the plan is the record and the tree carries on; otherwise change the root
+spec and request approval again.
 
 Later waves and re-scoping open children toward the same Acceptance need no spec edit and no new
 approval. A child issue's spec is never gated.

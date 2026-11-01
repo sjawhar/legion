@@ -37,24 +37,23 @@ EOF
   document (name a requirement of the root by what it says), and no text copied from the root that
   does not apply to this child. The child's workers read only this spec.
 - Before `dispatch issue` creates any child, dispatch a fresh red-team subagent
-  (`task(agent="oracle")`) with the
-  root spec, the tree's open children with their repositories and pull requests, and the proposed
-  child list, each child's title and whole spec. Its mandate: *"You did not write this list. Argue
-  that each child should not exist. Name every child that is a to-do, a fix found in review, a
-  proof of the root's acceptance, or a part of the architect's own work, and say where it folds:
-  the root's pull request or an open child's."* `wait` for its verdict, since it runs as a job of
-  its own. A child survives only when it cannot ride in the
-  root's pull request or an open child's: its code is in a repository no open pull request of this
-  tree is in, or it is its own deploy: it must be applied on its own before other work of the tree
-  can build on it.
+  (`task(agent="oracle")`) with the root spec, the tree's open children with their repositories
+  and pull requests, and the proposed child list with each child's title and whole spec. Its
+  mandate: *"You did not write this list. Argue that each child should not exist. Name every
+  child that is a to-do, a fix found in review, a proof of the root's acceptance, or a part of
+  the architect's own work, and say where it folds: the root's pull request or an open child's.
+  Then name every root requirement neither its pull request nor a child of this list carries."*
+  `wait` for its verdict, since it runs as a job of its own. A child survives only when it
+  cannot ride in the root's pull request or an open child's: its code is in a repository no open
+  pull request of this tree is in, or it is its own deploy, applied before other work of the
+  tree can build on it.
   A repeated change — the same edit per program, directory or wave of this tree's own work —
   survives as one child, never one per instance, and a deletion of what this tree replaced rides
   in the pull request of the last change it waits on, never a child of its own: a wave is an order
   of merges, not a deliverable.
-  Post the verdict, with the folds you made, as one `dispatch comment` on your own issue (the root,
-  in a root session): the architect
-  who wrote the list reads every child on it as needed, and the comment stops a later session
-  filing the same children again.
+  Post the verdict, with your folds, as one `dispatch comment` on your own issue (the
+  root, in a root session): the architect who wrote the list rereads each child as needed, and
+  the comment stops a later session filing the same children again.
 - Then paste each survivor's whole spec into a fresh `task(agent="plan-gap-analyst")` to check it
   against `skill://dispatch-writing-specs`, `wait` for its result, and fix what it flags: your own
   reread misses the terms

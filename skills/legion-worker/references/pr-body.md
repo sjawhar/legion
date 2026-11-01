@@ -138,20 +138,21 @@ and the tester's proof below are both this proof.
   implementing round, after its own proof and before it completes that round, when the diff
   touches runtime code; a docs-only diff gets none.** The daemon starts no implementing round
   between a clean review and the approval, so this is the one slot before the tester and the
-  reviewer read the head; a later round answering a review runs no second pass. It is scoped to
-  the pull request's own diff at that head: nothing applied leaves the head as it is; applied →
-  the implementer re-runs the repository's checks and its own proof on the applied head for the
-  surface the simplify diff touched, since a refactor that "preserves behaviour" is a claim until
-  it is executed, and updates the `E2E (implementer)` line to that head before it completes.
-  That cost is why 0-applied is the expected outcome and a pass that applies is spent sparingly.
-  The reviewer's pair runs at the head each round reviews. Record both in the `Thermo` line.
+  reviewer read the head; a later round runs no second pass. It is scoped to the pull request's
+  own diff at that head: nothing applied leaves the head as it is; applied → the implementer
+  re-runs the repository's checks and its own proof on the applied head for the surface the
+  simplify diff touched, since a refactor that "preserves behaviour" is a claim until executed,
+  and updates the `E2E (implementer)` line to that head before completing. That cost is why
+  0-applied is expected and an applying pass is spent sparingly. The reviewer's pair runs at the
+  head each round reviews. Record both in the `Thermo` line.
 - **No deferrals** is the body's rule (*PR body, review, and the merge gate* in
   `skill://legion-worker`): a wording nit, and any clear fix in a file this pull request touches,
-  is made in the running round, because a later round costs a CI pass and a re-read of the whole
-  change (the operator's answer on that case: fix it while you are there, and defer no fix to
-  another issue). The `Fast-follow:` line reads
-  `none`, or names only cleanup in files this pull request does not touch.
-  A base frozen for others to stack on is never rewritten (*Rewriting pushed commits* in
+  is made in the running round: a later round costs a CI pass and a re-read of the whole
+  change. A requirement on the `Not proven / risk:` line is unmet, not declared away, unless only
+  the deploy can show it and its production observation is named, or the owner recorded that this
+  issue will not do it; the `Fast-follow:` line never carries one, and reads `none` or names only
+  cleanup in files this pull request does not touch. A base frozen for others to stack on is
+  never rewritten (*Rewriting pushed commits* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`); the `Chain` line records it.
 - **GitHub refuses a pull request body over 65,536 characters.** Each verification round links its
   evidence (the run, the comment) rather than inlining it once the body passes about 48,000

@@ -34,6 +34,10 @@ it out without getting stuck? You find blockers, not improvements.
    acceptance criteria.
 4. **Runnable checks.** Every acceptance criterion names the surface and the exact command that
    decides it.
+5. **The goal and the requirements.** The plan delivers the issue's goal and every requirement of
+   its spec. One left out or narrowed with no act of the owner letting it go is a rejection that
+   names it, and so is a plan whose own text says it leaves out work the goal covers: where two
+   parts of the spec disagree on scope, take the broader. Never "approve when in doubt" here.
 
 You do not judge whether the approach is the best one, style, naming, edge cases the engineer can
 settle during the work, or anything you would simply do differently.
@@ -42,7 +46,7 @@ settle during the work, or anything you would simply do differently.
 
 Approve when in doubt. A plan that is mostly clear is good enough. Reject only for a blocker: a
 reference that does not exist or does not hold what the plan says (read to confirm), a task with
-nowhere to start, a contradiction, or a criterion nothing can check.
+nowhere to start, a contradiction, a criterion nothing can check, or check 5.
 
 A rejection names at most three blocking issues, the most severe first. Each gives:
 
@@ -55,8 +59,9 @@ raised again, and a second round is no place for requests that would not have bl
 
 ### Output
 
-The first line is the verdict alone: `approved` or `rejected`. Then one or two sentences on why.
-On `rejected`, the numbered blocking issues. Nothing else.
+The first line is the verdict alone: `approved` or `rejected`. Then one line on the goal and the
+requirements, outside the count below. Then one or two sentences on why.
+On `rejected`, the numbered blocking issues, at most three. Nothing else.
 
 ## A spec
 

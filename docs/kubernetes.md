@@ -378,6 +378,8 @@ The Legion plugin ships these in `agents/`:
 
 - the planner's `plan-gap-analyst` and `plan-reviewer`
 
+- the reviewer's `goal-red-team`
+
 It ships these with Legion's other skills in its `dist/skills`:
 
 - the pair's rubrics
@@ -4529,7 +4531,7 @@ each issue's pod (every role of it alike) and the image probe's.
 - **Model roles.**
   Legion's shipped agents dispatch by role alias:
   `oracle` and the planner's `plan-gap-analyst` as `@oracle`;
-  both review agents and the planner's `plan-reviewer` as `@review`; and `deep-worker`, which writes the implementer's code, as `@deep`.
+  both review agents, the planner's `plan-reviewer` and the reviewer's `goal-red-team` as `@review`; and `deep-worker`, which writes the implementer's code, as `@deep`.
   The boot gate refuses, by agent, any whose role the operator's settings (`modelRoles`, or `task.agentModelOverrides`) leave unconfigured, or whose model's key does not work, because Oh My Pi's task tool would quietly run it on the parent session's model.
   The bundled agents Legion's prompts also dispatch use Oh My Pi's built-in roles: `scout` is `@smol` and `reviewer` is `@slow`.
   `smol` and `slow`, left unset in every layer, inherit the default role's model, which the gate accepts.
