@@ -2,26 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-839",
-  "completed": "2026-11-01T14:20:00Z",
-  "round": 7,
-  "reviewedCodeHead": "9c02143e3c9d28d57567ec9ef214a0cda99e03e5",
-  "diffBase": "6ef5cefabac2 (legion/INFRA-594, merged at 9c02143e)",
+  "completed": "2026-11-01T17:05:00Z",
+  "round": 8,
+  "reviewedCodeHead": "9f31a51503b9a2d7c21253a1bd99537d62daec52",
+  "diffBase": "bab78c8b3d97 (legion/INFRA-594 before #2446 merged); the pull request now targets main",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 5,
-  "ci": "Run 41306087031 (CI, pull_request, 9c02143e3c9d) completed success at 14:09Z. ci-ok, envoy-go, envoy-go-race and claude-envoy succeeded, and pr-title succeeded at the handoff head. I pushed nothing while the run ran. The base legion/INFRA-594 requires no check.",
-  "round6": "Both round-6 findings and the two minors are fixed in 628cb287. Every failed read goes through one retry() that retries and reports at Error only while the cached claim names a session, and otherwise ends at Debug. hold(ctx, role) is a channel of one that gives up with its context. Every exit returns ended(). The merge 9c02143e is correct: the merged tool-contract.ts and deliveries.md are this branch's text plus every change the base made. I answered each round-6 thread.",
-  "whyChangesRequested": "No correctness finding stands. The deep review approved; the code quality review returned CHANGES on Minor findings only. Under the no-deferrals rule, a clear fix in a file this pull request touches is fixed in this round, and three of the five are test code, which the implementer must change. The next round should be an approval once these land and CI is green.",
+  "important": 3,
+  "minor": 3,
+  "ci": "#2446 (this pull request's old base) merged at 16:10:39Z as squash 621cf0909, and GitHub retargeted #2588 to main, where it reports mergeable CONFLICTING (dirty). Run 41322163397 at 9f31a515 was still in_progress at about 17:00Z. It no longer decides anything, because the next code head is a forward merge of main. The merge 9f31a515 adds no change beyond 824ee98f (empty diff).",
+  "round7": "Round-7 minors 2, 3 and 4 are fixed in 824ee98f: one table test whose unclaimed row asserts that nothing is logged at Error, one swapSessionBucket, and the retry test pinned to the handover's own read by elapsed >= roleKeepDrainRetryPause, a lower bound with no flake risk. Minor 1 is mostly fixed (one wording issue remains at AGENTS.md:2420). Minor 5's fix brings in a regression (finding 2).",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 9c02143e",
-    "codeQuality": "Verdict: CHANGES at 9c02143e (Minor only)"
+    "deepReview": "Verdict: CHANGES at 9f31a515",
+    "codeQuality": "Verdict: CHANGES at 9f31a515"
   },
   "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/AGENTS.md:2418", "description": "This passage and the roleKeepDrainRetryCap doc (role_keep.go:90-94) still state the deleted rule: failed reads retried 'after one' walk, 'while the holder is live'. The code now retries a failed lane-head read or holder resolution while the cached claim names a session, live or lapsed, and otherwise ends at Debug."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep_handover_test.go:659", "description": "TestAHandoverForAnUnclaimedRoleEndsOnACursorNoReadCanDecode: the report-and-count after the err == nil check is dead, because reportKeptRoleDrain(nil) returns at once. The test repeats the setup of TestAHandoverRetriesALaneHeadReadThatFailedOnItsFirstPass. Make the two one table test, with no dead assertion."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep_handover_test.go:694", "description": "The reflect/unsafe swap of the session registry's watcher is now written three times (:473-476, :694-698, api_test.go:1009-1012). Use one helper."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep_handover_test.go:700", "description": "TestAHandoverOfAClaimedRoleRetriesAHolderResolutionThatFailed counts that some session read failed, not that the handover's resolution was the one that failed. Pin it to the handover's read, for example by asserting the retry's debug line or that the holder was handed the copy after one failure."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:533", "description": "retry() now carries a context-canceled error out of a claimed role's handover, so a listener shutdown that cancels a sweep handover mid-resolution logs 'listener kept role drain failed' at Error. Do not carry a read error that is only the handover's own context ending."}
+    {"severity": "important", "file": "main", "description": "Merge main forward (not a rebase) to resolve the conflict that GitHub's retarget to main created, now that #2446 is squashed into main as 621cf0909. The tester runs the merged head."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:541", "description": "retry() returns false whenever ctx has ended, without setting readErr, and readErr is cleared at :564 before each read. So a claimed role's handover whose 10-minute window ends during a slow read (a stalled JetStream request waits up to roleKeepDrainWindow, 60 s, longer than the 30 s cap on pauses) ends reporting nothing above Debug. The same failure ending during a pause is logged at Error. Make only cancellation quiet: errors.Is(ctx.Err(), context.Canceled), or keep the previous pass's readErr when the deadline cuts the read. Correct :497-498 and AGENTS.md:2420, and add a row whose stalled read outlasts a short window."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:1", "description": "role_keep.go is 1010 lines, over the 1000-line rule, and all 11 new lines are comments. The retry rule is written four times (:90-95, :487-499, :531-536, AGENTS.md:2420), which is how round-7 minor 1 drifted. State it once in handOverKeptRole's doc and point to it from the others."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep_handover_test.go:600", "description": "The 'copy is still kept' check reads the newest kept message, which no handover path deletes, so it cannot fail. Check that the cursor or the forward count did not change, or drop it."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep_handover_test.go:491", "description": "Lines 491-509 are a third copy of claimRoleBeyondTheSessionCache (:676). Let the helper take several roles and call it here."},
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md:2420", "description": "This puts a failed walk under the cached-claim rule, but a failed walk retries without checking the claim and ends at Error. Also, the item at :2409 ('A role send has three answers') now also holds the handover and sweep sentences (:2417-2427): start a new item there. A walk that a shutdown cancels still logs at Error (role_keep.go:868-870, :874-876), which the PR body's shutdown line does not cover; either make it quiet with the same Canceled check or narrow the PR body's claim."}
   ]
 }
