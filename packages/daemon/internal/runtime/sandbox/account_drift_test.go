@@ -26,12 +26,13 @@ func onAccount(account string) func(*corev1.Pod) {
 // A pod created under a ServiceAccount other than the configured one runs its agents with that
 // account's identity for the pod's whole life: nothing the daemon writes moves it, so a relaunch
 // of any of its roles replaces it, as one on another image is replaced (accountDrift beside
-// imageDrift), the daemon-launched controller's pod included, and the Sandbox and its disk are
-// kept under the new pod. Unlike image drift, a launch installing a stale-plugin pair is no
-// exemption: the install cannot move the account either, so such a pod is replaced and the launch
-// starts plain into a fresh pod already on the configured account. A pod already on the configured
-// account is kept, the role's new generation started in it — including a pod on `default` under a
-// configuration naming no account, which is that same account spelled the other way.
+// imageDrift), the daemon-launched controller's pod included, and the Sandbox is kept under the
+// new pod (an issue pod's disk is the pod's own ephemeral volume and goes with it, as for image
+// drift). Unlike image drift, a launch installing a stale-plugin pair is no exemption: the install
+// cannot move the account either, so such a pod is replaced and the launch starts plain into a
+// fresh pod already on the configured account. A pod already on the configured account is kept,
+// the role's new generation started in it — including a pod on `default` under a configuration
+// naming no account, which is that same account spelled the other way.
 func TestARelaunchReplacesAPodRunningAnotherServiceAccount(t *testing.T) {
 	plugins := &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: 24}
 	for name, tc := range map[string]struct {
@@ -75,7 +76,8 @@ func TestARelaunchReplacesAPodRunningAnotherServiceAccount(t *testing.T) {
 				t.Fatalf("resumed at %+v, want generation 2", newLoc.Sandbox)
 			}
 			// The replacement is the Sandbox's next pod, never another Sandbox: the issue keeps
-			// its disk and its address record across it.
+			// its Sandbox and its address record across it; its disk, the pod's own ephemeral
+			// volume, does not.
 			if after := g.sandbox(loc.Sandbox.Name); after == nil || after.UID != sandboxUID {
 				t.Fatalf("the Sandbox is %+v, want the one the launch spawned (%s) kept", after, sandboxUID)
 			}

@@ -688,12 +688,13 @@ func serviceAccountOr(name string) string {
 // next launch of any of its roles, reconcileCachePod at the next sweep of a cache's, and
 // ReconcileOrphans warns of each one it finds, as all three do for imageDrift. The comparison is
 // of the live pod's spec.ServiceAccountName, never the Sandbox's stored template: the API server
-// leaves that field as written. It reads an unset account as `default` on both sides, because the
-// two sides spell the same account differently — the daemon writes "" into the template when
-// service_account is unset (manifest.go, config's optionalString), where the API server stores
-// "default" on the pod it creates — and comparing either raw would read every pod of a deployment
-// that names no account as drifted and replace the whole fleet. A nil pod holds no drift: it is
-// replaced for being absent.
+// keeps a named account as written and writes `default` only where none is named. It reads an
+// unset account as `default` on both sides, because the two sides spell the same account
+// differently — the daemon writes "" into the template when service_account is unset
+// (manifest.go, config's optionalString), where the API server stores "default" on the pod it
+// creates — and comparing either raw would read every pod of a deployment that names no account
+// as drifted and replace the whole fleet. A nil pod holds no drift: it is replaced for being
+// absent.
 func accountDrift(p *corev1.Pod, account string) (string, bool) {
 	if p == nil {
 		return "", false
@@ -926,9 +927,9 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // stops setting a variable, that the previous image's agents call or read leaves such a pod's
 // agents calling this daemon as the older release, and a pod created under an account the
 // configuration has since moved off leaves its agents holding the identity that account grants,
-// so each is pinned only once every tree is drained or every pod relaunched, and the boot log is
-// where an operator reads which pods are still to go. Only a warning: refusing the pod would stop
-// it being observed.
+// so a release is pinned, or the account changed, only once every tree is drained or every pod
+// relaunched, and the boot log is where an operator reads which pods are still to go. Only a
+// warning: refusing the pod would stop it being observed.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
 	var errs []error
 	// controllers are the Sandboxes of the known controller claims, which the sweep keeps.
