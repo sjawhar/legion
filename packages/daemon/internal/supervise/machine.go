@@ -104,7 +104,6 @@ type Claim struct {
 	// A cleanup reservation closes that epoch before a later claim/launch can write or run.
 	TreeEpoch uint64
 	// Session and SessionFile are the agent's reported session id and absolute transcript path.
-	// Every relaunch resumes that recorded session and refuses another one.
 	Session     string
 	SessionFile string
 	// Abandoned is the session this claim stopped resuming when it last forgot one

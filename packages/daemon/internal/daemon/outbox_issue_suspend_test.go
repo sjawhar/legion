@@ -520,8 +520,8 @@ func (s issueLaunchSpecs) SpawnSpec(context.Context, supervise.Claim) (runtime.S
 // PVC request from the restricted daemon; the root's Sandbox stays Running. A child parked in
 // backlog keeps its claims suspended with their sessions, and its Sandbox goes the same way,
 // since the pod it ran in, and the disk with it, go either way. The done child set back to todo
-// launches fresh: a new Sandbox is created, and since the issue records no session, nothing is
-// expected of the disk its new pod brings.
+// launches fresh because its resume path was cleared, while its session id stays as reaping
+// evidence until the volume is gone.
 func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -666,9 +666,10 @@ func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 		t.Fatalf("the child's close deleted the root's Sandbox (%t) or sent %d PVC requests, want neither", touched, api.pvcRequests)
 	}
 	// The claim keeps the session it recorded: a done issue is reopened, and its roles are then
-	// started again on the same issue (dispatch://INFRA-714 R8).
-	if got := storedClaim(planner.Token); got.State != supervise.StateRetired || got.Session != "saved-planner" || got.Locator != nil {
-		t.Fatalf("done child's planner after the close = %+v, want retired with its session and no locator", got)
+	// started again on the same issue (dispatch://INFRA-714 R8). It keeps no resume path, which is
+	// the volume the reaping guard leaves behind rather than anything a resume reads.
+	if got := storedClaim(planner.Token); got.State != supervise.StateRetired || got.Session != planner.Session || got.SessionFile != "" || got.Locator != nil {
+		t.Fatalf("done child's planner after the close = %+v, want retired with its session, no resume path and no locator", got)
 	}
 	if got := storedClaim(architect.Token); got.State != supervise.StateWorking || got.Session != "saved-architect" {
 		t.Fatalf("root architect after the child's close = %+v, want it working with its session", got)
@@ -722,11 +723,14 @@ func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 	if !slices.Contains(env, "PATH") {
 		t.Fatalf("the re-entered child's workspace-init environment %v names no PATH; the Running patch wrote no pod template", env)
 	}
-	// The pod and its disk are new, and the session is not: the planner that worked this issue
-	// resumes the session it recorded, where a fresh agent would have read none of its own earlier
-	// work (dispatch://INFRA-714 R8). The session lives in the session store, not on the disk the
-	// close deleted.
-	if got := storedClaim(planner.Token); got.SessionFile != "/legion/sessions/planner.jsonl" {
-		t.Fatalf("re-entered child's planner = %+v, want the session it recorded kept for its resume", got)
+	// The pod and its disk are new, and the session is not: the planner that worked this issue is
+	// started again on the session it recorded, where a fresh agent would have read none of its
+	// own earlier work (dispatch://INFRA-714 R8). What carries it is the session id, which lives
+	// in the session store rather than on the disk the close deleted. The resume path does not
+	// survive and must not: it named a file on that disk, so a launch built for it would resume
+	// from a path nothing holds, and clearing it leaves the id alone to carry the session and to
+	// stand as the volume reaping's evidence.
+	if got := storedClaim(planner.Token); got.Session != "saved-planner" || got.SessionFile != "" {
+		t.Fatalf("re-entered child's planner = %+v, want the session it recorded kept and no resume path", got)
 	}
 }

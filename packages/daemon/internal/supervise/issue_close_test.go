@@ -6,13 +6,15 @@ package supervise
 // its roles are then started again on the same issue; a session dropped here would start each as a
 // fresh agent that has read none of the work it is continuing (dispatch://INFRA-714 R8). The
 // session is a row in the session database rather than a file on the volume the close releases, so
-// it outlives both the pod and the workspace; a resume that cannot find it is the one case that
-// starts fresh, uncharged and reported (machine.go's start).
+// it outlives both the pod and the workspace, and it is also what the Sandbox-volume reap guard
+// reads as its evidence. What does go is the resume path, which named a file on that volume. The
+// workspace is not recovered, and the issue's next run is a fresh spawn.
 
 import "testing"
 
 // The claim is released as a tree close releases it — with its process where one runs, with no
-// locator where none does — and retires with the session it recorded, in memory and in the store.
+// locator where none does — and retires with the session it recorded and no resume path, in memory
+// and in the store.
 func TestAnIssueCloseRetiresTheClaimAndKeepsItsSessionForAReopen(t *testing.T) {
 	for _, state := range []ClaimState{StateRegistered, StateReady, StateWorking, StateIdle, StateSuspended} {
 		t.Run(string(state), func(t *testing.T) {
@@ -35,11 +37,11 @@ func TestAnIssueCloseRetiresTheClaimAndKeepsItsSessionForAReopen(t *testing.T) {
 				t.Errorf("released %+v, want the process %+v", released, before.Locator)
 			}
 			h.wantState(StateRetired)
-			if c := h.claim(); c.Session != session || c.SessionFile != sessionFile || c.Locator != nil {
-				t.Errorf("claim %+v after the close, want it retired with its session and no locator", c)
+			if c := h.claim(); c.Session != session || c.SessionFile != "" || c.Locator != nil {
+				t.Errorf("claim %+v after the close, want it retired with its session, no resume path and no locator", c)
 			}
-			if stored := h.store.load(testToken); stored.State != StateRetired || stored.Session != session || stored.SessionFile != sessionFile {
-				t.Errorf("stored %+v, want the retired claim with its session kept", stored)
+			if stored := h.store.load(testToken); stored.State != StateRetired || stored.Session != session || stored.SessionFile != "" {
+				t.Errorf("stored %+v, want the retired claim with its session kept and no resume path", stored)
 			}
 		})
 	}
@@ -63,15 +65,16 @@ func TestAnIssueCloseWhoseReleaseFailsKeepsTheClaimForTheRetry(t *testing.T) {
 	h.rt.FailRelease(nil)
 	h.must(RequestIssueClose{Claim: testToken})
 	h.wantState(StateRetired)
-	if c := h.claim(); c.Session != session || c.SessionFile != sessionFile {
-		t.Fatalf("claim %+v after the retried close, want its session kept", c)
+	if c := h.claim(); c.Session != session || c.SessionFile != "" {
+		t.Fatalf("claim %+v after the retried close, want its session kept and no resume path", c)
 	}
 }
 
 // A claim a tree close already retired keeps its session for a re-admission to resume, and the
-// issue's close reaching it changes nothing at all: it asks the runtime nothing and writes
-// nothing, since the session it would once have dropped is the session a reopen resumes.
-func TestAnIssueCloseOfARetiredClaimKeepsItsSessionAndWritesNothing(t *testing.T) {
+// issue's close reaching it clears the resume path alone, since the volume that path named goes
+// with the pod while the session it kept is the session a reopen resumes and the reap guard's
+// evidence. One that records no resume path is left as it is.
+func TestAnIssueCloseOfARetiredClaimKeepsItsSessionAndClearsItsResumePath(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateIdle)
 	h.must(RequestTreeClose{Claim: testToken})
@@ -85,23 +88,31 @@ func TestAnIssueCloseOfARetiredClaimKeepsItsSessionAndWritesNothing(t *testing.T
 	h.must(RequestIssueClose{Claim: testToken})
 
 	h.wantState(StateRetired)
-	if c := h.claim(); c.Session != session || c.SessionFile != sessionFile {
-		t.Errorf("claim %+v after the issue close, want its session kept", c)
+	if c := h.claim(); c.Session != session || c.SessionFile != "" {
+		t.Errorf("claim %+v after the issue close, want its session kept and no resume path", c)
 	}
-	if stored := h.store.load(testToken); stored.Session != session || stored.SessionFile != sessionFile {
-		t.Errorf("stored %+v, want the session kept", stored)
+	if stored := h.store.load(testToken); stored.Session != session || stored.SessionFile != "" {
+		t.Errorf("stored %+v, want the session kept and no resume path", stored)
 	}
 	if got := h.rt.Calls()[calls:]; len(got) > 0 {
 		t.Errorf("asked the runtime %v, want nothing of a retired claim", got)
 	}
-	if got := len(h.store.history()); got != puts {
-		t.Errorf("wrote the claim %d times, want nothing to write", got-puts)
+	if got := len(h.store.history()); got != puts+1 {
+		t.Errorf("wrote the claim %d times, want once for the cleared resume path", got-puts)
+	}
+
+	h.must(RequestIssueClose{Claim: testToken})
+	if got := len(h.store.history()); got != puts+1 {
+		t.Errorf("a second close of the claim wrote it %d more times, want nothing to write", got-puts-1)
 	}
 }
 
-// A closed claim relaunched by the workflow — the child set back to todo — resumes the session it
-// kept, so the worker that continues the reopened issue is the one that worked it.
-func TestAClaimAnIssueCloseRetiredResumesItsSession(t *testing.T) {
+// A closed claim relaunched by the workflow — the child set back to todo — is built for the
+// session it kept and for no volume: the worker that continues the reopened issue is the one that
+// worked it, which its session id is what carries (dispatch://INFRA-714 R8), while the resume path
+// is gone with the volume it named, so the launch provisions the workspace anew rather than
+// recovering one.
+func TestAClaimAnIssueCloseRetiredRelaunchesOnItsSessionWithNoVolume(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateIdle)
 	h.must(RequestIssueClose{Claim: testToken})
@@ -110,10 +121,15 @@ func TestAClaimAnIssueCloseRetiredResumesItsSession(t *testing.T) {
 	h.must(RequestRetry{Claim: testToken})
 
 	h.wantState(StateLaunching)
-	if last := h.rt.Calls()[len(h.rt.Calls())-1]; last.Method != "Resume" || last.Spec.ResumeSessionFile != sessionFile {
-		t.Errorf("the relaunch was %s %+v, want a resume of %s", last.Method, last.Spec, sessionFile)
+	// The runtime is asked to spawn rather than to resume, because a resume is of a session file
+	// on the issue's own volume and that volume went with the pod. The session the claim kept
+	// reaches the new process through the spec instead, so a deployment whose sessions live in a
+	// database continues the same session in a workspace provisioned afresh.
+	h.wantCalls("Resume", 0)
+	if last := h.rt.Calls()[len(h.rt.Calls())-1]; last.Method != "Spawn" || last.Spec.ResumeSessionFile != "" {
+		t.Errorf("the relaunch was %s %+v, want a spawn with no resume path", last.Method, last.Spec)
 	}
-	if built := h.specs.last(t); built.Session != session || built.SessionFile != sessionFile {
-		t.Errorf("the relaunch was built for %+v, want the claim's recorded session", built)
+	if built := h.specs.last(t); built.Session != session || built.SessionFile != "" {
+		t.Errorf("the relaunch was built for %+v, want the session it kept and no resume path", built)
 	}
 }

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-714",
-  "completed": "2026-11-01T08:40:00Z",
+  "completed": "2026-11-01T10:05:00Z",
   "proof": [
     {
       "criterion": "A3 / R1 - a red CI settlement moves no issue and reaches the phase holder, the implementer and the architect as one message naming each check and its conclusion, and the result they are told is the code head's latest attempt, carried by a handoff-only head.",
@@ -169,7 +169,7 @@
       "surface": "The repository tree, read with a command that can fail, and the e2e-tagged build.",
       "command": "cd packages/daemon && go vet -tags e2e ./internal/daemon/ && cd ../.. && grep -rnE 'merged-root-waits|no-required-checks|merged_root_waits|no_required_checks' . | grep -v '^./.jj' | grep -v node_modules | grep -v '^./docs/solutions' | grep -v '^./.legion/'",
       "observed": "`go vet -tags e2e ./internal/daemon/` exit 0 with `merged_root_waits_live_test.go` removed, and the sweep prints nothing and exits 1 (grep's no-match status). Everything outside the two exclusions is clean: `docs/solutions/` records what past changes did and keeps its text by the repository's own rule, and `.legion/` holds this issue's committed handoffs, whose earlier rounds quote the names. The two the tester found are fixed at their own words rather than by deleting the sentence: `scripts/e2e/README.md:3520` now names `child-adoption.sh`, the one script that still makes that run, and `conflict_no_takeover_live_test.go:35` names `child_adoption_live_test.go`, the driver it really shares `live_proof_test.go` with.",
-      "headSha": "cd9457ed734dfaa1a95fd49d0db31d2e2e58df98",
+      "headSha": "1ad9e299d0447404c66c13de51e770039be8c867",
       "negativeControl": "The same command run at the head before this round prints the two lines it is meant to catch — `./scripts/e2e/README.md:3520:The four checks below are ... the run `merged-root-waits.sh` and `no-required-checks.sh` make too.` and `./packages/daemon/internal/daemon/conflict_no_takeover_live_test.go:35:// harness this driver shares with merged_root_waits_live_test.go).` — where the entry's old command printed nothing at either head, which is why it proved nothing."
     },
     {
@@ -249,8 +249,24 @@
       "surface": "The daemon package that owns the corrected file, over the pod's PostgreSQL and a JetStream nats-server.",
       "command": "cd packages/daemon && gofmt -l ./internal && go build ./... && go vet -tags e2e ./internal/daemon/ && go test ./internal/daemon/ -count=1 -timeout 40m -skip '<the ten names this pod cannot run>'",
       "observed": "gofmt silent, build and e2e-tagged vet exit 0, and `ok github.com/sjawhar/legion/daemon/internal/daemon 515.195s`. The e2e-tagged vet matters here because the corrected comment is in a file only the `e2e` tag compiles, so an ordinary build would not have read it.",
-      "headSha": "cd9457ed734dfaa1a95fd49d0db31d2e2e58df98",
+      "headSha": "1ad9e299d0447404c66c13de51e770039be8c867",
       "negativeControl": "None is possible or wanted: this round changes two comment lines and no behaviour, so no test can be made to fail by reverting them. What stands in for one is the sweep in the entry above, which printed the two lines before the change and prints nothing after it."
+    },
+    {
+      "criterion": "The forward merge this round needed, and the one question its three conflicts were all about: what an issue's close leaves on a retired claim.",
+      "surface": "The daemon's supervise machine and its outbox lane, over the pod's PostgreSQL and a JetStream nats-server.",
+      "command": "cd packages/daemon && go test ./internal/... ./cmd/... -count=1 -p 1 -timeout 90m -skip '<the names this pod cannot run>'",
+      "observed": "Every package ok but the four below, each environment-blocked. GitHub reported the pull request CONFLICTING, so a forward merge was the one way to a judged head. The conflicts were in supervise/table.go, supervise/issue_close_test.go and daemon/outbox_issue_suspend_test.go, and all of them asked the same thing: this branch's R8 keeps the session on an issue's close, because a reopened issue starts its roles again and a forgotten session would make each a fresh agent that has read none of its own work; main's new reaping guard keeps the session id as evidence and clears the resume path, because that path names a file on the volume the close deletes. Both hold, and the resolution takes both: the id stays and is what carries the session to a deployment whose sessions live in a database, while the resume path goes because it would resolve to nothing. The assertions this branch had written for the old shape are corrected to that rule, each saying why.",
+      "headSha": "1ad9e299d0447404c66c13de51e770039be8c867",
+      "negativeControl": "The resolution was wrong once and a test said so rather than a reading: taking this branch's side whole left TestAClaimAnIssueCloseRetiredRelaunchesOnItsSessionWithNoVolume demanding a Resume of a session file on a deleted volume, which failed `the relaunch was Spawn {... ResumeSessionFile:} ..., want a resume of /state/sessions/implementer.jsonl`; and the same side in the Sandbox lane failed `re-entered child's planner = {... SessionFile: ...}, want the session it recorded kept for its resume`. Both are green under the rule above."
+    },
+    {
+      "criterion": "Four tests this pod cannot run, each measured rather than assumed, so the next reader does not spend the time again.",
+      "surface": "The pod itself: gVisor, no Docker.",
+      "command": "go test ./internal/natsauth/ -run TestItsSeedConnectsToAServerThatRequiresIt ; go test ./cmd/legion/ -run TestSessionsImportRefusesSymlinkedSessionDirectory ; a six-line Go program calling os.OpenRoot on an escaping symlink",
+      "observed": "internal/natsauth's case and the two others this handoff has named all end `panic: rootless Docker not found` from testcontainers before any code of this change runs. cmd/legion's TestSessionsImportRefusesSymlinkedSessionDirectory fails differently and is not this change's: it asserts that `os.Root` refuses a symlink escaping the tree volume, and in this pod os.Root follows it — a six-line program on go1.27.1 here prints `FOLLOWED the escaping symlink, read \"outside\\n\"` where it should refuse. This change touches neither cmd/legion/sessions.go, nor its test, nor internal/ompsessions, nor sandbox.SessionOnVolume and SessionsSubPath, which `jj diff --from main@origin` confirms, so the guard it tests is main's and intact; only this sandbox's filesystem cannot show it.",
+      "headSha": "1ad9e299d0447404c66c13de51e770039be8c867",
+      "negativeControl": "The probe is its own control: the same program is what a host with working RESOLVE_BENEATH answers `REFUSED as expected` to, and the test passes wherever that holds — it is green in CI, where this pull request's `test` job runs it."
     }
   ],
   "filesChanged": [
@@ -294,5 +310,5 @@
     "cmd/legion's TestProbeImageReadsEachRolesOwnOverlaysAsTheRoleStarts fails in a Kubernetes issue pod on this branch's base as well; it was reproduced at the parent commit with every changed file restored. internal/intake's TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead starts a NATS container and internal/runtime/tmux's TestNewRefusesLaunchersItCannotRun wants tmux on PATH, neither of which a pod has, and nine internal/daemon tests are the known gVisor and Docker cases. CI's run at this head is the proof for all of them.",
     "TestTheKeeperRetriesAControllerWhoseLaunchesRanOut was a race rather than a pre-existing failure, which two workers reported it as. Its three refused launches and the keeper's retry all fell between two ten-millisecond polls, so the wait read zero spawns and then four and never the failure it exists to prove. The retry is now two seconds; the test ran five times green."
   ],
-  "previousHandoff": "03005ece5f45a63c88c66c867c857e9aeadfc85a"
+  "previousHandoff": "23da1630737ffe219e6f325d50147a1bbb3a5337"
 }

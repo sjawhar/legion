@@ -125,8 +125,13 @@ const legion: ShotSet<LegionJourney> = {
     },
     {
       id: "spec-approval",
-      alt: "The architect's request to approve the spec in the Inbox, with its summary and the Approve and Request changes options.",
-      route: "/",
+      alt: "The architect's request to approve the spec, selected in the Inbox's reading column: Approve and Request changes at the head of the column, and the version it asks about below them.",
+      // The column shows the selected question, and an approval request has no card in the
+      // list: `?item=` selects its row (`buildInboxPath`), as a link to it would.
+      route: (journey) => {
+        if (journey.approval === undefined) throw new Error("the spec approval was not requested");
+        return `/?item=${journey.approval}`;
+      },
       viewport: "desktop",
       theme: "light",
       prepare: async (journey) => {
@@ -134,9 +139,17 @@ const legion: ShotSet<LegionJourney> = {
         journey.approval = await requestSpecApproval(journey, SAVED_CART);
       },
       ready: async (page, journey) => {
-        await expect(page.getByTestId(`ask-${journey.approval}`)).toContainText(
-          "Approval requested"
+        const pane = page.getByTestId("inbox-pane");
+        await expect(page.locator(`[data-inbox-row="${journey.approval}"]`)).toHaveAttribute(
+          "data-inbox-selected",
+          "true"
         );
+        const head = pane.locator("header").first();
+        await expect(head.getByRole("button", { exact: true, name: "Approve" })).toBeVisible();
+        await expect(
+          head.getByRole("button", { exact: true, name: "Request changes" })
+        ).toBeVisible();
+        await expect(pane.getByRole("region", { name: /^Document version / })).toBeVisible();
       },
     },
     {

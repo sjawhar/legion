@@ -1,5 +1,24 @@
 # Changelog
 
+## [13.13.1] - 2026-11-01
+
+### Added
+
+- Every model request shows each Envoy card with `delivered:`, the time the session got it, after its send time (`at:` on a card, `published_at:` on the notice that names a message the session could not be shown), and with `waited:` in words once the two are 15 minutes or more apart, so a session reading its inbox late does not take a card's send time for the present time. The two lines name their clocks: the send time is the Envoy server's, `delivered:` is the session's machine's. When the machine's clock runs 15 minutes or more ahead of or behind the Envoy listener's, read from the listener's replies, the card says so in `clocks:` and `waited:` leaves that difference out, so a skewed clock neither makes a wait nor hides one, and a card still dated after its delivery once that difference is taken off says the sending server's own clock runs ahead of the listener's. A difference under 15 minutes is not shown and stays in the stated wait. Each time is kept per session, so a session the host moves to that is shown the same message reads when it got it there. The card stored in the transcript is unchanged.
+
+### Fixed
+
+- Every Envoy card but an inert one goes to Oh My Pi as an aside with `triggerTurn`, busy session or idle, so no such card waits in the steering queue a person's typed message waits in. A card handed to an idle session as a steer joined that queue whenever the session turned busy first, and the queue releases one message per model turn. The startup phase keeps its follow-up, and an inert card (a replayed BTW, or a failure notice naming one) stays a steer with no turn, handed only to a settled session. This needs Oh My Pi 18.13.2-sami.20261027-235348 or later; `.omp-pin` moves to 18.13.3-sami.20261029-115123.
+
+## [13.13.0] - 2026-11-01
+
+### Changed
+
+- `dispatch`, "References": a local path is not a reference, and outside Dispatch (a chat reply, Slack, a pull request, an email) neither is a `dispatch://` reference, which opens nothing there; give the `https://` link `dispatch` printed. To stay under the 2,000-word guard, "A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`" is cut: `dispatch-first` says it ("an ask block for a design question its document records, else `dispatch ask`").
+- The `dispatch-writing-specs` skill now says to `wait` for the read-only fact check it runs
+  before each approval request: that `task(agent="scout")` runs as a background job under Oh My
+  Pi's own defaults, so its findings arrive from the `wait` rather than from the dispatch.
+
 ## [13.11.1] - 2026-10-31
 
 ### Changed
