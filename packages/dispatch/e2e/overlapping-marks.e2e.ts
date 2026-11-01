@@ -36,6 +36,8 @@ test.beforeEach(async () => {
 // "brown". Each record mark keeps its own text in both browsers and in the server's reading of the
 // document, so the anchor refresh a document version runs leaves Bob's quote "quick brown" rather
 // than cutting it to "quick ".
+// SLOW(>=2s): two browser contexts, three composer round trips and the typed paragraph whose
+// settlement writes the version that refreshes both anchors - the refresh is the property.
 test("two readers' comments can cover the same text, and neither cuts the other's anchor @phone", async ({
   browser,
 }, testInfo) => {
@@ -163,6 +165,7 @@ test("two readers' comments can cover the same text, and neither cuts the other'
 // Bob suggests on "quick brown" and his thread stays selected while Alice suggests on "brown"
 // from the same selection control a person uses. Selecting a thread only highlights its text;
 // both browsers keep Bob's anchor whole, show Alice's inside it, and send both quotes to the server.
+// SLOW(>=2s): two browser contexts and two suggestion sends, each read back from the server.
 test("two readers' suggestions keep both action-bar anchors @phone", async ({
   browser,
 }, testInfo) => {
@@ -308,6 +311,8 @@ const overlapOrders: { name: string; quotes: [string, string] }[] = [
 
 for (const { kind, noun } of overlapKinds) {
   for (const order of overlapOrders) {
+    // SLOW(>=2s): two records made through the selection bar and the margin, each waited for in
+    // the server's reading of the document before the click this row is about.
     test(`a click on text a wider and a narrower ${noun} both cover opens the narrower one, ${order.name} @phone`, async ({
       browser,
     }, testInfo) => {

@@ -102,6 +102,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): two readers of one document - bob's editor is where the retyped mark has to appear
+// for the switch to have reached the shared document at all. Both loads already run together.
 test("switching an anchored composer from Comment to Ask retypes its mark and asks about the selected text", async ({
   browser,
 }) => {
@@ -141,6 +143,8 @@ test("switching an anchored composer from Comment to Ask retypes its mark and as
   );
 });
 
+// SLOW(>=2s): the two readers this file's fixture opens, and the held send whose refusal the row
+// waits for before it reads the restored replacement.
 test("a send holds every suggestion control and restores its replacement on refusal", async ({
   browser,
 }) => {
@@ -337,6 +341,8 @@ test("Suggest on a mid-word selection is refused, and the comment stays", async 
   });
 });
 
+// SLOW(>=2s): two readers of one document, bob's recorded comment, alice's over it, and both
+// read back from the server's reading of the document.
 test("Comment over text another reader's comment covers goes through, and that comment stays whole", async ({
   browser,
 }) => {

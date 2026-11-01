@@ -1640,6 +1640,36 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_MARK_WAIT": func(t *testing.T) {
+			const shortWait = 250 * time.Millisecond
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":     "1",
+				"DISPATCH_TEST_MARK_WAIT": shortWait.String(),
+			})
+			if boot.MarkWait != shortWait {
+				t.Errorf("DISPATCH_TEST_MARK_WAIT: MarkWait = %v, want %v", boot.MarkWait, shortWait)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_MARK_WAIT": invalid},
+					fmt.Sprintf("DISPATCH_TEST_MARK_WAIT=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_MARK_WAIT": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
+		"DISPATCH_TEST_UNRECORDED_MARK_TTL": func(t *testing.T) {
+			const shortTTL = 4 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":               "1",
+				"DISPATCH_TEST_UNRECORDED_MARK_TTL": shortTTL.String(),
+			})
+			if boot.UnrecordedMarkTTL != shortTTL {
+				t.Errorf("DISPATCH_TEST_UNRECORDED_MARK_TTL: UnrecordedMarkTTL = %v, want %v", boot.UnrecordedMarkTTL, shortTTL)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_UNRECORDED_MARK_TTL": invalid},
+					fmt.Sprintf("DISPATCH_TEST_UNRECORDED_MARK_TTL=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_UNRECORDED_MARK_TTL": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 		"DISPATCH_TEST_EDIT_NOTICE_QUIET": func(t *testing.T) {
 			const shortQuiet = 3 * time.Second
 			boot := resolveWith(t, map[string]string{

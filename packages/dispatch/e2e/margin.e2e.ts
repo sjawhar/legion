@@ -636,6 +636,8 @@ test("a Conversation reply to an agent's anchored comment carries no anchor and 
   }
 });
 
+// SLOW(>=2s): the ask is written through the composer in the document and then answered in the
+// Inbox, which is a second view of the same page and a second write.
 test("margin ask composer sends option choices that the inbox records as a selected answer", async ({
   browser,
 }, testInfo) => {
@@ -685,7 +687,9 @@ test("margin ask composer sends option choices that the inbox records as a selec
         },
       });
 
-    await page.goto("/");
+    // The Inbox as the reader reaches it, by the navigation rather than a reload: this row is
+    // about the answer it records, not about loading it cold.
+    await navigateInApp(page, "/");
     const inboxCard = page.getByTestId(`ask-${askId}`);
     await inboxCard.getByRole("checkbox", { name: "Ship" }).check();
     await inboxCard.getByRole("button", { name: "Answer" }).click();

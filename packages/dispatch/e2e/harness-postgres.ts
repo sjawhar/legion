@@ -284,12 +284,13 @@ function imageProvider(image: string, run: string): LanePostgres {
               `POSTGRES_DB=${databaseName}`,
               "--env",
               "POSTGRES_INITDB_ARGS=--no-sync",
-              // The data stays in the container's own writable layer and goes with it. A bind
-              // mount of a directory this process made is what the image cannot use: its server
-              // runs as the image's own user, which may neither write nor chown a directory the
-              // runner's user owns, and the container then exits before it listens.
-              "--tmpfs",
-              "/var/lib/postgresql/data:rw,exec",
+              // Nothing is mounted at the data directory, so the image places it itself and it
+              // dies with the container, which is what a lane's data is meant to do. Two mounts
+              // were tried and refused: a bind mount of a directory this process made, which the
+              // image's own user may neither write nor chown, and a tmpfs at
+              // /var/lib/postgresql/data, which this image's Postgres 18 entrypoint reports as
+              // "an unused mount/volume" and then exits, since 18 wants one mount a level up
+              // (docker-library/postgres#1259).
               image,
               ...settings.flatMap((setting) => ["-c", setting]),
             ]);

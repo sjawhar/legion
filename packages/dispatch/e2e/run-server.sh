@@ -187,6 +187,19 @@ fi
 # that set the variable itself keeps its own value, as it does for DISPATCH_E2E_SERVER_WEB_DIST.
 settle_delay="${DISPATCH_TEST_SETTLE_DELAY:-250ms}"
 
+# The two waits a provisional comment, ask or suggestion mark lives by, read before the sweep
+# below and passed under the same DISPATCH_TEST_HOOKS=1. A mark no row records is swept one
+# unrecorded-mark TTL after the settlement that first saw it: 4s in place of the document
+# service's own minute (internal/dispatch/docs/service.go), which is the shortest value that
+# still lets a row tell that sweep from a socket reconnect - a reconnect takes about two seconds
+# here, and the mark has to outlive it, since a mark its author's browser is back on is kept.
+# A mark the browser says it wrote is waited for before the server answers that the document does
+# not hold it: 250ms in place of its own 1 s, which is the whole cost of every Send whose mark is
+# already gone, and ample for one document update to arrive over the loopback. A caller that set
+# either variable itself keeps its own value, as it does for the settle delay above.
+mark_wait="${DISPATCH_TEST_MARK_WAIT:-250ms}"
+unrecorded_mark_ttl="${DISPATCH_TEST_UNRECORDED_MARK_TTL:-4s}"
+
 mapfile -t inherited < <(compgen -e)
 for name in "${inherited[@]}"; do
   case "$name" in
@@ -239,8 +252,10 @@ exec "${listen[@]}" env \
   DISPATCH_NATS_DISABLED=1 \
   "${port_env[@]}" \
   DISPATCH_TEST_HOOKS=1 \
+  DISPATCH_TEST_MARK_WAIT="$mark_wait" \
   DISPATCH_TEST_ROSTER_UNCACHED=1 \
   DISPATCH_TEST_SETTLE_DELAY="$settle_delay" \
+  DISPATCH_TEST_UNRECORDED_MARK_TTL="$unrecorded_mark_ttl" \
   DISPATCH_WEB_DIST="$web_dist" \
   ENVOY_URL="http://127.0.0.1:$fake_envoy_port" \
   HOME=/nonexistent \
