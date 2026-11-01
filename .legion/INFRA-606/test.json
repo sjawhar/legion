@@ -2,41 +2,52 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "completed": "2026-10-31T07:50:00Z",
-  "round": 20,
-  "headTested": "3d5c31a9da84b2ba48cc9895ba0add4ea3b0f9d5",
-  "handoffHead": "5c53eb2b79682cadc46b34655a5e34e8aa863966",
+  "round": 21,
+  "previousHandoff": "9e5642edb7e900ef2273f6243625f2ca973ad0da",
+  "headTested": "25206ba7ab966c710745e882522af7bfb99dcadf",
+  "handoffHead": "9558989909b5bdb848fe3b33e2e4ea51ceb3e483",
+  "branchHead": "45530037436dbb21120f3299dedbded3b74b9c1a",
   "roundShape": {
-    "verdict": "confirmation round (forward-merge re-check 783a30cc6990 → 3d5c31a9da84: fingerprint unchanged, bare gates only)",
-    "tool": "round-shape.py v3 (dispatch://INFRA-598/artifact/round-shape-py), run from the workspace with 2406",
-    "oldHead": "783a30cc69908f4fea54a798c54a8c495a7f765b",
-    "newHead": "3d5c31a9da84b2ba48cc9895ba0add4ea3b0f9d5",
-    "differingFiles": [
-      "packages/envoy/AGENTS.md (doc)",
-      "scripts/e2e/README.md (doc)"
-    ],
-    "equalOnlyAfterNormalisation": []
+    "verdict": "confirmation round for 3d5c31a9 -> 25206ba7 (fingerprint unchanged, bare gates only)",
+    "tool": "round-shape.py v3, run from the workspace with 2406",
+    "oldHead": "3d5c31a9da84b2ba48cc9895ba0add4ea3b0f9d5",
+    "newHead": "25206ba7ab966c710745e882522af7bfb99dcadf",
+    "differingFiles": [],
+    "equalOnlyAfterNormalisation": [],
+    "toolCheck": "783a30cc -> 3d5c31a9 on the same tool lists 2 files, so a 0 here is a real answer"
   },
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round20-partial-md; round 18's behaviour evidence stands",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round21-partial-md; round 18's behaviour evidence stands",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's build and vet of packages/envoy at 3d5c31a9 (clean). GitHub reads the PR MERGEABLE."
+    "how": "At 25206ba7: go build -p 1 and go vet -p 1 of packages/envoy exit 0; bun run typecheck in packages/contracts and packages/dispatch exit 0; the PR's own diff is unchanged (round-shape.py, 0 files)."
   },
-  "failures": [],
-  "failed": 0,
+  "failures": [
+    {
+      "criterion": "The pull request merges into main.",
+      "evidence": "gh pr view 2406 reads CONFLICTING / DIRTY at the branch head 45530037 against main d09b46d7, so GitHub runs no CI on it. Testing that head proves nothing that will merge (the architect's ruling at 03:40Z)."
+    },
+    {
+      "criterion": "The fallback table's migration has a number no other migration uses.",
+      "evidence": "This PR adds 0150_comment_fallback_copies.up.sql and .census.sql; main d09b46d7 now carries 0150_dpop_proofs.up.sql and .census.sql. pgmigrate refuses two migrations with one version, and TestMigrationSetIsNumberedOneToN and the shared-version guard fail after a merge that keeps both. Renumber to the next free number on main."
+    },
+    {
+      "criterion": "Review round 9 finding 1 (review 5722118474): a mention the previous build delivered reaches its session once across the deploy.",
+      "evidence": "Main sends a mention under the key <comment>:<target>:<mode> (main's comment_delivery.go: stored.ID+\":\"+target.Target+\":\"+target.Delivery). This PR sends it under <comment>:<target> (model.CommentMentionIdempotencyKey, model.go:1294, used at comment_delivery.go:653 and outbox/mentions.go:403). The listener uses the idempotency key as the dedupe key, so a send by this build of a mention the previous build already delivered is a different event for 72 h after the deploy: a sweep resend of a stranded attempt, a same-mode Retry of an old receipt timeout, and the outbox copy of an old failed attempt. The reviewer's deep reviewer reproduced the first two on the test listener with repeat-dropping on. The fix is the implementer's: key by the mention's own mode, <comment>:<target>:<comment_mentions.delivery>, with a test that sends under main's key and resends from this build. I did not commit a red test for it this round: my attempts to write the test file did not go through, and nothing is on legion/INFRA-606-wip."
+    }
+  ],
+  "failed": 3,
   "proof": [
     {
-      "criterion": "Confirmation round at 3d5c31a9: the PR's own diff changed only in docs, the build step passes, and the named CI lanes are green.",
-      "surface": "round-shape.py over the two heads; go build and go vet of packages/envoy; tsc in the touched TypeScript packages; GitHub checks at 3d5c31a9",
-      "command": "python3 round-shape.py 783a30cc69908f4fea54a798c54a8c495a7f765b 3d5c31a9da84b2ba48cc9895ba0add4ea3b0f9d5 2406; (cd packages/envoy && go build ./... && go vet ./...); (cd packages/contracts && bun run typecheck); (cd packages/dispatch && bun run typecheck); gh api repos/sjawhar/legion/commits/3d5c31a9.../check-runs",
-      "observed": "round-shape.py lists 2 differing files, both docs, and nothing equal only after normalisation. Build and vet exit 0. tsc is clean in both packages. At 3d5c31a9 lint, typecheck, test, pr-title, dispatch and envoy-go-race-api are success. envoy-go is failure on one test only, TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries (internal/broker/oauth), which this PR does not touch (see notes).",
-      "headSha": "3d5c31a9da84",
-      "negativeControl": "The envoy-go failure reproduces without this PR: the same test fails at main 1d35c80b and at the merge base f4ec92ee, and passes at cf152eb4, the parent of main's #2474 (d7e1daaa)."
+      "criterion": "Confirmation checks at 25206ba7.",
+      "surface": "round-shape.py over the two heads; go build and go vet of packages/envoy; tsc in contracts and dispatch; GitHub checks at 25206ba7",
+      "command": "python3 round-shape.py 3d5c31a9da84b2ba48cc9895ba0add4ea3b0f9d5 25206ba7ab966c710745e882522af7bfb99dcadf 2406; GOMAXPROCS=4 GOMEMLIMIT=12GiB go build -p 1 ./... && go vet -p 1 ./...; bun run typecheck in packages/contracts and packages/dispatch; gh api repos/sjawhar/legion/commits/25206ba7.../check-runs",
+      "observed": "0 files differ. Build, vet and both typechecks exit 0. At 25206ba7 ci-ok, lint, typecheck, test, pr-title, dispatch, envoy-go and envoy-go-race-api are all success (read 2026-10-31 18:08Z), so main's claims test is fixed there.",
+      "headSha": "25206ba7ab96",
+      "negativeControl": "At 3d5c31a9, before main's #2598, envoy-go failed TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries (round 20)."
     }
   ],
   "notes": [
-    "envoy-go red at 3d5c31a9 is main's defect, not this PR's. Main's #2474 (d7e1daaa) put blank lines between the items of the list under '#### The Dispatch identity the broker can issue' in docs/kubernetes.md. documentedClaims (claims_doc_test.go:156-194) stops at the first blank line, so it reads only 'session'. GitHub shows envoy-go failure on d7e1daaa itself. I reported it to the controller with this evidence; it answered that sjawhar/legion#2598 (INFRA-588) fixes it and lands first, after which #2406's envoy-go passes on the merge ref with no change here. #2598 was still open at 07:45Z. envoy-go is not in main's required set (lint, typecheck, test, pr-title).",
-    "The pod was recreated during this round. The round-shape, build and tsc results were recorded on Dispatch (round20-partial) before CI finished, and the CI reads were made afterwards.",
-    "packages/envoy/infra is not touched, so its vets do not apply. No load run in this round."
+    "No load run and no Go suite ran in this round, so no memory sample was taken. Nothing of mine is left running.",
+    "The pod was recreated several times during this round; the confirmation results were checkpointed on Dispatch before CI finished."
   ]
 }
