@@ -32,7 +32,6 @@ test("an agent's tools take Claude Code's names, and its autoloaded skills its s
     'model: ["@deep"]',
     "tools: read, glob, grep, bash, edit, write, todo",
     "autoloadSkills: [legion-worker, ce-simplify-code]",
-    "blocking: true",
     "color: cyan",
     "---",
     "",

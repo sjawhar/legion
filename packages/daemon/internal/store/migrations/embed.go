@@ -11,7 +11,7 @@
 // the next number did. A timestamp sorts after every numbered migration and
 // timestamps sort among themselves by time, and migrationid.Check holds a set
 // to that rule: the daemon's numbered series closed at
-// 0064_pull_request_pass_settlement.up.sql (migrationid's closings), so a set holding a
+// 0067_phase_assignment.up.sql (migrationid's closings), so a set holding a
 // number above it is refused.
 package migrations
 

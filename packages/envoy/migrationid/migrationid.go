@@ -49,8 +49,8 @@ var closings = []struct {
 	file     string
 	closedAt int
 }{
-	{series: "the Legion daemon (packages/daemon/internal/store/migrations)", file: "0064_pull_request_pass_settlement.up.sql", closedAt: 64},
-	{series: "Dispatch (packages/envoy/internal/dispatch/store/migrations)", file: "0149_event_horizon.up.sql", closedAt: 149},
+	{series: "the Legion daemon (packages/daemon/internal/store/migrations)", file: "0067_phase_assignment.up.sql", closedAt: 67},
+	{series: "Dispatch (packages/envoy/internal/dispatch/store/migrations)", file: "0150_dpop_proofs.up.sql", closedAt: 150},
 }
 
 // ClosedAt is the number the numbered series of this set closed at, the series found by the

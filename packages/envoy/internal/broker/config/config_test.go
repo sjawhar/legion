@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/redact"
@@ -1020,9 +1021,10 @@ func withK8sIssuer() map[string]string {
 }
 
 // TestLoadReadsTheAPIAccounts pins BROKER_API_ACCOUNTS: whitespace-separated <caller>=<account>
-// entries keyed by account, none when unset, and refusals naming the entry for one that is not
-// of that form, a namespace's default account and an account named twice. It needs the cluster
-// issuer, since the broker verifies those callers' tokens against it.
+// entries keyed by account, each answering the caller and the powers its name carries, none when
+// unset, and refusals naming the entry for one that is not of that form, a namespace's default
+// account and an account named twice. It needs the cluster issuer, since the broker verifies
+// those callers' tokens against it.
 func TestLoadReadsTheAPIAccounts(t *testing.T) {
 	cfg, err := Load(env(validEnv()))
 	if err != nil {
@@ -1037,9 +1039,11 @@ func TestLoadReadsTheAPIAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{
-		"system:serviceaccount:example-ns:example-dispatch": "dispatch",
-		"system:serviceaccount:example-ns:example-listener": "listener",
+	dispatchCaller, _ := api.AccountFor("dispatch")
+	listenerCaller, _ := api.AccountFor("listener")
+	want := map[string]api.Account{
+		"system:serviceaccount:example-ns:example-dispatch": dispatchCaller,
+		"system:serviceaccount:example-ns:example-listener": listenerCaller,
 	}
 	if !maps.Equal(cfg.APIAccounts, want) {
 		t.Fatalf("APIAccounts = %v, want %v", cfg.APIAccounts, want)
@@ -1063,6 +1067,26 @@ func TestLoadReadsTheAPIAccounts(t *testing.T) {
 	e["BROKER_API_ACCOUNTS"] = "dispatch=system:serviceaccount:example-ns:example-dispatch"
 	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_K8S_OIDC_ISSUER") {
 		t.Errorf("BROKER_API_ACCOUNTS with no token issuer: err = %v, want a refusal naming BROKER_K8S_OIDC_ISSUER", err)
+	}
+}
+
+// TestLoadRefusesACallerTheBrokerDoesNotKnow pins the boot refusal a caller name decides: a name
+// the broker's own table (api.AccountFor) does not know is refused, naming the name, the entry
+// and every name it does know, since a caller's name is what says which routes that account
+// reaches. A typo that was merely listed would produce a caller reaching no route at all, which
+// shows up as a working deployment until the day it is called.
+func TestLoadRefusesACallerTheBrokerDoesNotKnow(t *testing.T) {
+	e := withK8sIssuer()
+	const entry = "dispatcher=system:serviceaccount:example-ns:example-dispatch"
+	e["BROKER_API_ACCOUNTS"] = entry
+	_, err := Load(env(e))
+	if err == nil {
+		t.Fatal("BROKER_API_ACCOUNTS naming an unknown caller: want a refusal, got nil")
+	}
+	for _, want := range append([]string{"BROKER_API_ACCOUNTS", strconv.Quote("dispatcher"), strconv.Quote(entry)}, api.KnownCallers()...) {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not name %s", err, want)
+		}
 	}
 }
 
