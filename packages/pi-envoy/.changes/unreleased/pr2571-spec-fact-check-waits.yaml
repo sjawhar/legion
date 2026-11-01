@@ -1,0 +1,8 @@
+kind: Changed
+body: |-
+    The `dispatch-writing-specs` skill now says to `wait` for the read-only fact check it runs
+    before each approval request: that `task(agent="scout")` runs as a background job under Oh My
+    Pi's own defaults, so its findings arrive from the `wait` rather than from the dispatch.
+time: 2026-10-30T18:00:00Z
+custom:
+    Issue: pr2571

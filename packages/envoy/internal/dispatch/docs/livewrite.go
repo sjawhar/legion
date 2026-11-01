@@ -749,7 +749,8 @@ func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, 
 		if rendering, reused := s.reuseRendering(joinedLiveWrite(ctx, artifactID), fork, "docTree"); reused {
 			return rendering.tree, nil
 		}
-		return s.readFork(fork)
+		valid, err := s.readFork(fork)
+		return valid.Node(), err
 	}
 	var tree *pmdoc.Node
 	var treeErr error
@@ -768,9 +769,17 @@ func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, 
 // readFork reads the tree of fork, a write transaction's fork, for that write's operation
 // (applyLive, applyMargin) or a read joined to its transaction (docTree, heldTree,
 // captureLiveTextAndAuthors), and counts the read (forkTreeCounts.read).
-func (s *Service) readFork(fork *crdt.Doc) (*pmdoc.Node, error) {
+//
+// Every one of those reads runs on the request goroutine that holds the fork, and the fork's own
+// writes run there too (forkLive, applyLive's mutate, recordLiveOperation), so nothing else reads
+// or writes it while the read runs: the condition pmdoc.ReadUnshared states, which reads the live
+// text without ygo's ToDelta. The tree it hands back is validated once (pmdoc.ValidDocument), so
+// the renders and reads that follow do not validate it again; its Node is the very tree the reader
+// made, which this transaction's write may keep (liveWrite.tree, anchorsTree), and a tree outside
+// the Proof schema is the document's own refusal, as treeOf makes it.
+func (s *Service) readFork(fork *crdt.Doc) (pmdoc.ValidDocument, error) {
 	s.forkTrees.read.Add(1)
-	return treeOf(fork)
+	return treeOfUnshared(fork)
 }
 
 // reuseRendering is write's rendering of fork, when it has one (liveWrite.rendering), for the

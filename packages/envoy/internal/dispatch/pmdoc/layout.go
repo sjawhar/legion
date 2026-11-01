@@ -52,7 +52,19 @@ const blockMarkerClass = blockEmptyParagraph | blockBulletList | blockOrderedLis
 // RenderWithLayout is RenderWithBlockOffsets that records the document's Layout as well, from the
 // same render: the markdown, the offsets and the errors are RenderWithBlockOffsets'.
 func RenderWithLayout(doc *Node) (string, []BlockOffset, *Layout, error) {
-	r, err := renderDocument(doc, maxSpanCells, true, true)
+	return renderWithLayout(doc, true)
+}
+
+// RenderWithLayout is RenderWithLayout of d's tree without validating it again: the renderer's
+// own refusals still run, and a panic in it is still an ErrPanic. The zero ValidDocument is
+// RenderWithLayout's error for a nil tree.
+func (d ValidDocument) RenderWithLayout() (string, []BlockOffset, *Layout, error) {
+	return renderWithLayout(d.doc, false)
+}
+
+// renderWithLayout is RenderWithLayout, validating doc first only when validate says so.
+func renderWithLayout(doc *Node, validate bool) (string, []BlockOffset, *Layout, error) {
+	r, err := renderDocument(doc, maxSpanCells, validate, true)
 	if err != nil {
 		return "", nil, nil, err
 	}
