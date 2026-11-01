@@ -679,10 +679,12 @@ Closing the terminal leaves the project without one, and the daemon logs
    with the providers Secret holding that key — before the daemon boots: the loader refuses the
    file otherwise ([legion.yaml](#legionyaml)). Before rolling that change, follow
    [Copying file sessions before turning it on](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#copying-file-sessions-before-turning-it-on).
-   A later reaping of an older Sandbox-owned volume reads the retiring Sandbox's pod template:
-   `OMP_SESSION_STORAGE=sql` proves that the Sandbox used the session database and permits the
-   reap. Without that setting, it refuses when the matching claim records a session; import it, or
-   stop the claim and use `legion claims forget-session` when the session is lost. An issue whose
+   A later reaping of an older Sandbox-owned volume reads the retiring Sandbox's pod template.
+   The providers volume's `OMP_SESSION_SQL_DSN` item under `postgres`, or the launcher's three
+   Cloud SQL session flags under `cloudsql-iam`, proves that the Sandbox used the session database
+   and permits the reap. Without either marker, it refuses when the matching claim records a
+   session; import it, or stop the claim and use `legion claims forget-session` when the session is
+   lost. An issue whose
    Sandbox still owns the volume of the earlier shape keeps it until its next launch, which deletes
    that Sandbox and the volume with it and starts the issue on a pod-owned disk, so stop each issue
    with its work pushed and start it again rather than letting a relaunch choose the moment. The

@@ -791,6 +791,9 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 	if err := k.Validate(); err != nil {
 		return fmt.Errorf("sandbox runtime: release: %w", err)
 	}
+	if err := r.guardControllerVolumeReap(ctx, k.Claim); err != nil {
+		return err
+	}
 	if k.Locator != nil {
 		if err := r.Suspend(ctx, *k.Locator); err != nil {
 			return err
@@ -810,19 +813,14 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 // Sandbox to the orphan sweep, which judges it again on the claims known then, and a relaunch that
 // begins after waits for the delete and creates the Sandbox afresh.
 func (r *Runtime) releaseControllerSandbox(ctx context.Context, token claim.Token) error {
-	name := SandboxName(token)
-	s, err := r.storedSandbox(name)
+	s, err := r.controllerSandbox(ctx, token)
 	if err != nil {
-		return fmt.Errorf("release %s: %w", token, err)
+		return err
 	}
-	if s == nil || s.Labels[labelProject] != r.project {
+	if s == nil {
 		return nil
 	}
-	kind, err := podKindOf(s.Labels)
-	if _, controller := kind.(controllerPod); err != nil || !controller {
-		return nil
-	}
-	release, err := r.lockPod(ctx, name)
+	release, err := r.lockPod(ctx, s.Name)
 	if err != nil {
 		return fmt.Errorf("release %s: %w", token, err)
 	}
@@ -831,6 +829,37 @@ func (r *Runtime) releaseControllerSandbox(ctx context.Context, token claim.Toke
 		return fmt.Errorf("release %s: %w", token, err)
 	}
 	return nil
+}
+
+// guardControllerVolumeReap runs before Release suspends the controller, so a
+// file-backed session refusal leaves its process and claim unchanged.
+func (r *Runtime) guardControllerVolumeReap(ctx context.Context, token claim.Token) error {
+	s, err := r.controllerSandbox(ctx, token)
+	if err != nil || s == nil {
+		return err
+	}
+	if err := r.guardSessionVolumeReap(ctx, s); err != nil {
+		return fmt.Errorf("release %s: %w", token, err)
+	}
+	return nil
+}
+
+// controllerSandbox is token's current Sandbox only when it is this runtime's
+// controller. Workflow Sandboxes never reach controller-specific cleanup.
+func (r *Runtime) controllerSandbox(ctx context.Context, token claim.Token) (*sandbox, error) {
+	name := SandboxName(token)
+	s, err := r.storedSandbox(name)
+	if err != nil {
+		return nil, fmt.Errorf("release %s: %w", token, err)
+	}
+	if s == nil || s.Labels[labelProject] != r.project {
+		return nil, nil
+	}
+	kind, err := podKindOf(s.Labels)
+	if _, controller := kind.(controllerPod); err != nil || !controller {
+		return nil, nil
+	}
+	return s, nil
 }
 
 // AdoptWorkingCopy has the agent's shim set its working copy's author (the shared `jj metaedit

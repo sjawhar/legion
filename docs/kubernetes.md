@@ -1064,9 +1064,9 @@ A deployment on `legion-v10.1.0` to `legion-v10.2.x`, which runs one pod per iss
 There is no way back either, and nothing to go back to: this release has no second store, and nothing copies a row out to a file.
 
 Before it reaps a Sandbox-owned volume, including a disk-shape replacement, an issue or tree cleanup, an orphan cleanup, or a controller cleanup, the daemon reads the retiring Sandbox's pod template.
-`OMP_SESSION_STORAGE=sql` on a template container proves that the Sandbox stored sessions in a database, so its matching claims do not block the reap.
-Without that setting, the daemon refuses when a matching claim records a session.
-The daemon has no providers-Secret read permission or session-store connection, so it cannot inspect the session database.
+Under `postgres`, the providers volume's `OMP_SESSION_SQL_DSN` item proves the Sandbox stored sessions in a database; under `cloudsql-iam`, the launcher command's `--session-instance`, `--session-database`, and `--session-user` flags do.
+Either marker permits the reap.
+Without a database marker, the daemon refuses when a matching claim records a session; it has no providers-Secret read permission or session-store connection, so it cannot inspect the session database.
 Its refusal names the claim, session, and volume; import the session with the procedure below and retry the reap, or, when the session is lost, stop the claim and [start it fresh](#starting-fresh-when-a-session-is-lost-or-wedged).
 An issue close keeps the recorded session id as this evidence but clears its resume path, so a later admission starts fresh after the volume is gone.
 

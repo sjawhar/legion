@@ -43,9 +43,9 @@ func (r *Runtime) sessionVolumeClaims(s *sandbox) (func(supervise.Claim) bool, b
 	}
 	switch kind.(type) {
 	case issuePod:
-		tree, issue := s.Labels[labelTree], s.Labels[labelIssue]
+		issue := s.Labels[labelIssue]
 		return func(c supervise.Claim) bool {
-			return c.Project == r.project && c.Tree == tree && c.Issue == issue
+			return c.Project == r.project && c.Issue == issue
 		}, true
 	case controllerPod:
 		token := claim.ControllerToken(r.project)
@@ -67,12 +67,5 @@ func ownsIssueVolume(s *sandbox) bool {
 }
 
 func sandboxStoresSessionsInDatabase(s *sandbox) bool {
-	for _, container := range s.Spec.PodTemplate.Spec.Containers {
-		for _, env := range container.Env {
-			if env.Name == ompsessions.StorageVariable && env.Value == ompsessions.SQLStorage {
-				return true
-			}
-		}
-	}
-	return false
+	return sessionStoreInPod(&s.Spec.PodTemplate.Spec) != sessionStoreName(ompsessions.StoreVolume, "", nil)
 }

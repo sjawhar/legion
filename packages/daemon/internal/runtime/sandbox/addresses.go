@@ -463,7 +463,7 @@ func (r *Runtime) movedSessionStore(pod *corev1.Pod) (movedAddress, bool) {
 	for i, value := range proxy {
 		proxy[i] = kubeletEscape(value)
 	}
-	held := sessionStoreInPod(pod)
+	held := sessionStoreInPod(&pod.Spec)
 	handed := sessionStoreName(r.sessionStore.Kind, r.sessionStore.DSNSecretKey(), proxy)
 	if held == handed {
 		return movedAddress{}, false
@@ -471,12 +471,13 @@ func (r *Runtime) movedSessionStore(pod *corev1.Pod) (movedAddress, bool) {
 	return movedAddress{where: "the session store", held: held, handed: handed}, true
 }
 
-// sessionStoreInPod names the session store pod was created under, read back from the pod itself:
-// the providers volume's session item under postgres (providers), the session proxy's flags a
-// launcher container carries under cloudsql-iam (sessionProxyFlags), and neither under the volume
-// store.
-func sessionStoreInPod(pod *corev1.Pod) string {
-	for _, volume := range pod.Spec.Volumes {
+// sessionStoreInPod names the session store a pod specification was created
+// under: the providers volume's session item under postgres (providers), the
+// session proxy's flags a launcher container carries under cloudsql-iam
+// (sessionProxyFlags), and neither under the volume store. The Sandbox pod
+// template and the created Pod carry the same markers.
+func sessionStoreInPod(spec *corev1.PodSpec) string {
+	for _, volume := range spec.Volumes {
 		if volume.Name != providersVolume || volume.Secret == nil {
 			continue
 		}
@@ -486,7 +487,7 @@ func sessionStoreInPod(pod *corev1.Pod) string {
 			}
 		}
 	}
-	for _, container := range pod.Spec.Containers {
+	for _, container := range spec.Containers {
 		if proxy := sessionProxyFlagsIn(container.Command); proxy != nil {
 			return sessionStoreName(ompsessions.StoreCloudSQLIAM, "", proxy)
 		}
