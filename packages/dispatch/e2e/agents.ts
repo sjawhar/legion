@@ -22,15 +22,17 @@ export interface FakeSession {
   topics?: string[];
 }
 
-/** A request to the harness's fake Envoy. The harness (e2e/harness-start.ts) starts this listener
- *  for local and deployed runs, so fixture state reaches whichever Dispatch server the suite
- *  targets. */
+/** A request to a fake Envoy, by default this process's own lane's. The harness
+ *  (e2e/harness-start.ts) starts that listener for local and deployed runs, so fixture state
+ *  reaches whichever Dispatch server the suite targets; `port` is for the one process that
+ *  addresses every lane's rather than its own (e2e/preflight.ts). */
 async function fixtureRequest(
   path: string,
   method: "GET" | "PATCH" | "PUT",
-  body?: object
+  body?: object,
+  port: number = harnessPorts().fakeEnvoy.port
 ): Promise<Response> {
-  const response = await fetch(`http://127.0.0.1:${harnessPorts().fakeEnvoy.port}${path}`, {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
     body: body === undefined ? undefined : JSON.stringify(body),
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     method,
@@ -42,12 +44,12 @@ async function fixtureRequest(
 }
 
 /** Clears all mutable fake Envoy state between e2e rows. */
-export async function resetFakeEnvoy(): Promise<void> {
-  await fixtureRequest("/__fixture/reset", "PUT");
+export async function resetFakeEnvoy(port?: number): Promise<void> {
+  await fixtureRequest("/__fixture/reset", "PUT", undefined, port);
 }
 
-export async function setLiveSessions(rows: FakeSession[]): Promise<void> {
-  await fixtureRequest("/__fixture/sessions", "PUT", rows);
+export async function setLiveSessions(rows: FakeSession[], port?: number): Promise<void> {
+  await fixtureRequest("/__fixture/sessions", "PUT", rows, port);
 }
 
 export async function setSessionSendStatus(sessionID: string, status: 200 | 404): Promise<void> {

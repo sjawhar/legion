@@ -149,9 +149,11 @@ test("Activity breaks its rows by day and marks where the reader stopped", async
     expect(unreadIndex).toBeGreaterThan(thirdIndex);
     expect(unreadIndex).toBeLessThan(secondIndex);
 
-    // Nothing the tab did wrote the reader's watermark.
-    await page.waitForTimeout(2_000);
+    // Nothing the tab did wrote the reader's watermark, and the Conversation is the control:
+    // its own write is what says the page had the chance to make one.
     expect(stateWrites).toBe(0);
+    await page.getByRole("tab", { name: "Conversation" }).click();
+    await expect.poll(() => stateWrites, { intervals: [50, 50, 100, 200, 500] }).toBe(1);
   } finally {
     await alice.close();
   }

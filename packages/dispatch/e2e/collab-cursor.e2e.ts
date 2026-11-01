@@ -40,6 +40,8 @@ const cases = [
 ];
 
 for (const { name, edge, type, code } of cases) {
+  // SLOW(>=2s): Two signed-in collaborators are two browser contexts with an editor each, in the
+  // engine that misplaces typing beside a caret; the time is two WebKit editor mounts.
   test(`typing at a collaborator's cursor keeps what was typed: ${name}`, async ({ browser }) => {
     await createProject({ key: "CORE", name: "Core" });
     const issue = await createIssue({ project: "CORE", spec, title: "Shared cursor" });
@@ -47,10 +49,12 @@ for (const { name, edge, type, code } of cases) {
     const bob = await asUser(browser, "bob");
 
     try {
-      const alicePage = await alice.newPage();
-      await alicePage.goto(`/issues/${issue.key}/spec`);
-      const bobPage = await bob.newPage();
-      await bobPage.goto(`/issues/${issue.key}/spec`);
+      const [alicePage, bobPage] = await Promise.all([alice.newPage(), bob.newPage()]);
+      // The two readers' loads overlap: neither waits on the other to mount its editor.
+      await Promise.all([
+        alicePage.goto(`/issues/${issue.key}/spec`),
+        bobPage.goto(`/issues/${issue.key}/spec`),
+      ]);
       await expect(connectedDot(alicePage)).toHaveText("connected");
       await expect(connectedDot(bobPage)).toHaveText("connected");
 
@@ -73,6 +77,8 @@ for (const { name, edge, type, code } of cases) {
   });
 }
 
+// SLOW(>=2s): Two contexts, one per collaborator, each with a mounted editor in WebKit; the row
+// waits on no timer.
 test("a reader outside the editor sees a collaborator's cursor even where their own stale selection sits", async ({
   browser,
 }) => {
@@ -82,10 +88,12 @@ test("a reader outside the editor sees a collaborator's cursor even where their 
   const bob = await asUser(browser, "bob");
 
   try {
-    const alicePage = await alice.newPage();
-    await alicePage.goto(`/issues/${issue.key}/spec`);
-    const bobPage = await bob.newPage();
-    await bobPage.goto(`/issues/${issue.key}/spec`);
+    const [alicePage, bobPage] = await Promise.all([alice.newPage(), bob.newPage()]);
+    // The two readers' loads overlap: neither waits on the other to mount its editor.
+    await Promise.all([
+      alicePage.goto(`/issues/${issue.key}/spec`),
+      bobPage.goto(`/issues/${issue.key}/spec`),
+    ]);
     await expect(connectedDot(alicePage)).toHaveText("connected");
     await expect(connectedDot(bobPage)).toHaveText("connected");
 

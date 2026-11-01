@@ -1,5 +1,5 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
-
+import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
 import {
   acceptSuggestion,
   createAsk,
@@ -29,6 +29,7 @@ import {
 } from "./editor";
 import { commentWithBody } from "./margin-helpers";
 import { resetDatabase, setCommentAuthorService } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 
 const session = {
@@ -48,6 +49,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): two browser contexts, three document loads and three composer round trips.
 test("the selection bar comments, suggests, and asks on marks that both users see @phone", async ({
   browser,
 }, testInfo) => {
@@ -109,9 +111,10 @@ test("the selection bar comments, suggests, and asks on marks that both users se
       expectMark(alicePage, comment.anchor.mark_id, "brown"),
       expectMark(bobPage, comment.anchor.mark_id, "brown"),
     ]);
+    // A surface change, as a link does it: a cold load would prove nothing this row is about.
     await Promise.all([
-      alicePage.goto(`/issues/${issue.key}/conversation`),
-      bobPage.goto(`/issues/${issue.key}/conversation`),
+      navigateInApp(alicePage, `/issues/${issue.key}/conversation`),
+      navigateInApp(bobPage, `/issues/${issue.key}/conversation`),
     ]);
     await Promise.all([
       expect(alicePage.locator(`[data-turn="comment:${comment.id}"]`)).toContainText("brown"),
@@ -122,8 +125,10 @@ test("the selection bar comments, suggests, and asks on marks that both users se
     // The comment quotes the spec, so its deep link opens the spec with the thread beside it.
     await alicePage.goto(`/issues/${issue.key}/comments/${comment.id}`);
     await expect(alicePage).toHaveURL(`/issues/${issue.key}/spec?comment=${comment.id}`);
+    // A load, not an in-app step: closing the thread the deep link opened beside the document is
+    // what leaves one composer on the page for the bar action below.
     await alicePage.goto(`/issues/${issue.key}/spec`);
-    await bobPage.goto(`/issues/${issue.key}/spec`);
+    await navigateInApp(bobPage, `/issues/${issue.key}/spec`);
     await expect(documentEditor(alicePage)).toContainText(initialMarkdown);
 
     await setSheet(alicePage, testInfo.project.name, false);
@@ -254,6 +259,7 @@ test("an agent's quote-anchored comment and ask render as highlights in open edi
   }
 });
 
+// SLOW(>=2s): two browser contexts, two live editors and the settlement a version waits for.
 test("highlights follow edits in the other browser and preserve their anchor state @phone", async ({
   browser,
 }) => {
@@ -320,7 +326,7 @@ test("highlights follow edits in the other browser and preserve their anchor sta
         )
       )
       .toMatchObject({ anchor: { orphaned: true, version: 1 } });
-    await bobPage.goto(`/issues/${issue.key}/conversation`);
+    await navigateInApp(bobPage, `/issues/${issue.key}/conversation`);
     const orphanedTurn = bobPage.locator(`li[data-turn="comment:${fox.id}"]`);
     await orphanedTurn.getByRole("button", { name: "Expand thread" }).click();
     const threadDialog = bobPage.getByRole("dialog", { name: "Thread" });
@@ -335,6 +341,7 @@ test("highlights follow edits in the other browser and preserve their anchor sta
   }
 });
 
+// SLOW(>=2s): two browser contexts, two suggestion sends and the accept and reject round trips.
 test("accepting a suggestion changes the text in both browsers and names a version; rejecting leaves the text @phone", async ({
   browser,
 }, testInfo) => {
@@ -370,7 +377,7 @@ test("accepting a suggestion changes the text in both browsers and names a versi
       throw new Error("The accepted suggestion has no anchor.");
     }
 
-    await alicePage.goto(`/issues/${issue.key}/conversation`);
+    await navigateInApp(alicePage, `/issues/${issue.key}/conversation`);
     await alicePage
       .locator(`[data-turn="comment:${accepted.id}"]`)
       .getByTestId(`margin-comment-${accepted.id}`)
@@ -393,7 +400,7 @@ test("accepting a suggestion changes the text in both browsers and names a versi
         .getByTestId(`margin-comment-${accepted.id}`)
         .getByRole("button", { name: "Reopen" })
     ).toHaveCount(0);
-    await alicePage.goto(`/issues/${issue.key}/spec`);
+    await navigateInApp(alicePage, `/issues/${issue.key}/spec`);
     await Promise.all([
       expect(aliceEditor).toContainText("The quick red fox"),
       expect(bobEditor).toContainText("The quick red fox"),
@@ -429,6 +436,8 @@ test("accepting a suggestion changes the text in both browsers and names a versi
       throw new Error("The rejected suggestion was not created with an anchor.");
     }
 
+    // A load, not an in-app step: the accept above left the Conversation filtered to Closed, and
+    // the suggestion rejected below is an open thread.
     await alicePage.goto(`/issues/${issue.key}/conversation`);
     const rejectButton = alicePage
       .locator(`[data-turn="comment:${rejected.id}"]`)
@@ -443,7 +452,7 @@ test("accepting a suggestion changes the text in both browsers and names a versi
       rejectButton.click(),
     ]);
     expect(response.ok()).toBe(true);
-    await alicePage.goto(`/issues/${issue.key}/spec`);
+    await navigateInApp(alicePage, `/issues/${issue.key}/spec`);
     await Promise.all([
       expect(aliceEditor).toContainText("The quick red fox"),
       expect(bobEditor).toContainText("The quick red fox"),
@@ -627,6 +636,8 @@ test("a Conversation reply to an agent's anchored comment carries no anchor and 
   }
 });
 
+// SLOW(>=2s): the ask is written through the composer in the document and then answered in the
+// Inbox, which is a second view of the same page and a second write.
 test("margin ask composer sends option choices that the inbox records as a selected answer", async ({
   browser,
 }, testInfo) => {
@@ -676,7 +687,9 @@ test("margin ask composer sends option choices that the inbox records as a selec
         },
       });
 
-    await page.goto("/");
+    // The Inbox as the reader reaches it, by the navigation rather than a reload: this row is
+    // about the answer it records, not about loading it cold.
+    await navigateInApp(page, "/");
     const inboxCard = page.getByTestId(`ask-${askId}`);
     await inboxCard.getByRole("checkbox", { name: "Ship" }).check();
     await inboxCard.getByRole("button", { name: "Answer" }).click();
@@ -690,6 +703,7 @@ test("margin ask composer sends option choices that the inbox records as a selec
   }
 });
 
+// SLOW(>=2s): two browser contexts, the second of which opens the issue cold - the property.
 test("a viewer who opens the issue after an anchored ask is answered sees it in the margin @phone", async ({
   browser,
 }, testInfo) => {
@@ -896,6 +910,8 @@ test("a browser reconnecting after an accept keeps the accepted text", async ({ 
   try {
     const page = await bob.newPage();
     const transport = await documentTransport(page);
+    // The reconnect draw the sever below arms is spent on the page's clock, not in real time.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}/spec`);
     const connected = connectedDot(page);
     await expect(connected).toHaveText("connected");
@@ -910,6 +926,10 @@ test("a browser reconnecting after an accept keeps the accepted text", async ({ 
       .toBe("The quick red fox\n");
 
     await transport.release();
+    // The provider waits a draw from [0, RECONNECT_SPREAD_MS) set at the previous open
+    // (`web/src/features/doc/connection.ts`) before it dials again; the close that armed it is
+    // already observed above, so one jump spends it.
+    await page.clock.fastForward(RECONNECT_SPREAD_MS);
     await expect(connected).toHaveText("connected");
     await expect(documentEditor(page)).toHaveText("The quick red fox");
   } finally {

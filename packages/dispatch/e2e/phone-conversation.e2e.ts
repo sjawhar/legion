@@ -1,5 +1,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
+import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
+import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
 import {
   createComment,
   createIssue,
@@ -21,6 +23,21 @@ const session = {
   actor: { kind: "session" as const, id: "e2e-phone-conversation" },
   as: "agent" as const,
 };
+
+/** Every fact these rows poll for lands in milliseconds: Playwright's default 100/250/500/1000
+ *  ladder would first see it a quarter-second late. */
+const PROBE = { intervals: [50, 50, 100, 200, 500] };
+
+/** Spends the live socket's reconnect delay - a draw the attempt count grows
+ *  (`web/src/api/live-socket.ts`) - on the page's own clock, until the pill is gone. */
+async function reconnected(page: Page, pill: Locator): Promise<void> {
+  await expect
+    .poll(async () => {
+      await page.clock.fastForward(RECONNECT_SPREAD_MS);
+      return pill.count();
+    }, PROBE)
+    .toBe(0);
+}
 
 function commentTurn(page: Page, commentId: string): Locator {
   return page.locator(`[data-turn="comment:${commentId}"]`);
@@ -665,6 +682,9 @@ test("on a phone, Jump to latest covers none of the docked composer's Retry or D
 
   try {
     const page = await alice.newPage();
+    // The close below reaches this page on a refresh the scheduler holds for at most
+    // `MIN_REFETCH_INTERVAL_MS`: a page timer its own clock fires.
+    await page.clock.install();
     await page.setViewportSize(phone);
     await page.goto(`/issues/${issue.key}/conversation`);
     await expect(page.getByText("Older turn 14")).toBeVisible();
@@ -689,6 +709,7 @@ test("on a phone, Jump to latest covers none of the docked composer's Retry or D
     await expect(field).toBeDisabled();
     expect(send.posts()).toBe(1);
     await patchIssue(issue.key, { status: "done" }, { login: "bob" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
     send.release();
     await expect(form.getByText("Couldn't send — issue is closed")).toBeVisible();
@@ -805,6 +826,9 @@ test("on a phone, the connection pill covers none of a thread's composers @phone
 
   try {
     const page = await alice.newPage();
+    // Each return to the network below waits a reconnect delay the page draws; its own clock
+    // spends that rather than the wall clock.
+    await page.clock.install();
     const network = await pageNetwork(page);
     await page.setViewportSize(narrow);
     await page.goto(`/issues/${issue.key}/conversation`);
@@ -824,7 +848,7 @@ test("on a phone, the connection pill covers none of a thread's composers @phone
     await expect(pill).toHaveText("Reconnecting…");
     await expectUncovered(pill, threadForm);
     await network.online();
-    await expect(pill).toHaveCount(0);
+    await reconnected(page, pill);
 
     // Cancel reply gives the thread back its card's own reply, which a refusal grows too.
     await threadForm.getByRole("button", { name: "Cancel reply" }).click();
@@ -840,7 +864,7 @@ test("on a phone, the connection pill covers none of a thread's composers @phone
     await page.setViewportSize(phone);
     await expectUncovered(pill, cardForm);
     await network.online();
-    await expect(pill).toHaveCount(0);
+    await reconnected(page, pill);
   } finally {
     await alice.close();
   }
@@ -879,59 +903,84 @@ test("on a phone, Jump to latest stays off a thread opened over the Conversation
   }
 });
 
-/** Where a tap at the centre of each control above the turns - the issue's header, its tabs and
- *  the All / Open / Closed filter - lands, for each one it does not reach as it should: a tab
- *  must take its own tap, and no control may lose its tap to `Jump to latest`. Controls whose
- *  centre is off screen, or clipped out of view by a scrolling ancestor (the issue tablist
- *  scrolls sideways at this width, so a tab past its edge is not on screen to tap at all), are
- *  not tapped. */
-async function tapsLostAboveTurns(page: Page): Promise<string[]> {
-  return page.evaluate(() => {
+/** Sweeps the band above the turns in the page: at every 4 px step it scrolls, lets two frames
+ *  pass so the pill's own scroll listener and the render React queues for it have both landed,
+ *  and records where a tap at the centre of each control above the turns - the issue's header,
+ *  its tabs and the All / Open / Closed filter - does not reach it as it should: a tab must take
+ *  its own tap, and no control may lose its tap to `Jump to latest`. Controls whose centre is off
+ *  screen, or clipped out of view by a scrolling ancestor (the issue tablist scrolls sideways at
+ *  this width, so a tab past its edge is not on screen to tap at all), are not tapped. A step
+ *  away from where the page settled that draws no pill is recorded too. */
+async function tapsLostAcrossBand(
+  page: Page,
+  band: { settled: number; turnsTop: number }
+): Promise<string[]> {
+  return page.evaluate(async ({ settled, turnsTop }) => {
     const turns = document.querySelector('[aria-label="Conversation turns"]');
     if (turns === null) throw new Error("expected the Conversation's turns");
-    const pill = document.querySelector('[data-testid="jump-to-latest"]');
-    const turnsTop = turns.getBoundingClientRect().top;
+    const frame = () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => resolve());
+      });
+    const pillBox = () =>
+      document.querySelector('[data-testid="jump-to-latest"]')?.getBoundingClientRect();
     const lost: string[] = [];
-    for (const control of document.querySelectorAll<HTMLElement>(
-      '[role="tab"], button, a[href], input'
-    )) {
-      const box = control.getBoundingClientRect();
-      const x = box.left + box.width / 2;
-      const y = box.top + box.height / 2;
-      if (pill?.contains(control) || box.width === 0 || box.bottom > turnsTop) continue;
-      if (x < 0 || x >= window.innerWidth || y < 0 || y >= window.innerHeight) continue;
-      let clipped = false;
-      for (
-        let ancestor = control.parentElement;
-        ancestor !== null && !clipped;
-        ancestor = ancestor.parentElement
-      ) {
-        const style = getComputedStyle(ancestor);
-        if (style.overflowX === "visible" && style.overflowY === "visible") continue;
-        const bounds = ancestor.getBoundingClientRect();
-        clipped = x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom;
+    for (let top = 1; top <= turnsTop; top += 4) {
+      window.scrollTo(0, top);
+      // One frame carries the scroll into layout and runs the pill's listener; a step that
+      // changes whether the pill shows takes one more for the render React queued for it.
+      await frame();
+      const shows = Math.abs(top - settled) > 1;
+      if (shows !== (pillBox()?.height ?? 0) > 0) await frame();
+      const pill = document.querySelector('[data-testid="jump-to-latest"]');
+      if (shows && (pill?.getBoundingClientRect().height ?? 0) === 0) {
+        lost.push(`scrolled to ${top}: no Jump to latest`);
+        continue;
       }
-      if (clipped) continue;
-      const hit = document.elementFromPoint(x, y);
-      const reached = hit !== null && (control.contains(hit) || hit.contains(control));
-      const lostToPill = hit !== null && pill?.contains(hit) === true;
-      if (reached || (control.getAttribute("role") !== "tab" && !lostToPill)) continue;
-      const name =
-        control.getAttribute("aria-label") ??
-        (control.closest("label") ?? control).textContent?.trim() ??
-        "";
-      lost.push(
-        `${name} at ${Math.round(x)},${Math.round(y)} reached ${hit?.outerHTML.slice(0, 80)}`
-      );
+      const turnsTopNow = turns.getBoundingClientRect().top;
+      for (const control of document.querySelectorAll<HTMLElement>(
+        '[role="tab"], button, a[href], input'
+      )) {
+        const box = control.getBoundingClientRect();
+        const x = box.left + box.width / 2;
+        const y = box.top + box.height / 2;
+        if (pill?.contains(control) || box.width === 0 || box.bottom > turnsTopNow) continue;
+        if (x < 0 || x >= window.innerWidth || y < 0 || y >= window.innerHeight) continue;
+        let clipped = false;
+        for (
+          let ancestor = control.parentElement;
+          ancestor !== null && !clipped;
+          ancestor = ancestor.parentElement
+        ) {
+          const style = getComputedStyle(ancestor);
+          if (style.overflowX === "visible" && style.overflowY === "visible") continue;
+          const bounds = ancestor.getBoundingClientRect();
+          clipped = x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom;
+        }
+        if (clipped) continue;
+        const hit = document.elementFromPoint(x, y);
+        const reached = hit !== null && (control.contains(hit) || hit.contains(control));
+        const lostToPill = hit !== null && pill?.contains(hit) === true;
+        if (reached || (control.getAttribute("role") !== "tab" && !lostToPill)) continue;
+        const name =
+          control.getAttribute("aria-label") ??
+          (control.closest("label") ?? control).textContent?.trim() ??
+          "";
+        lost.push(
+          `scrolled to ${top}: ${name} at ${Math.round(x)},${Math.round(y)} reached ${hit?.outerHTML.slice(0, 80)}`
+        );
+      }
     }
     return lost;
-  });
+  }, band);
 }
 
 // On a phone the issue's header, its tabs and the filters sit above the turns, the latest turn
 // just under them, so a reader scrolling back up passes a band where they are on screen while
 // `Jump to latest` shows. The pill never rises above where the turns begin, so a tap on a tab, or
 // on any control above the turns, reaches it everywhere in that band.
+// SLOW(>=2s): the band is swept 4 px at a time, a frame per step, and every control above the
+// turns is hit-tested at each one.
 test("on a phone, Jump to latest covers none of the issue's tabs or the controls above the turns @phone", async ({
   browser,
 }) => {
@@ -954,12 +1003,13 @@ test("on a phone, Jump to latest covers none of the issue's tabs or the controls
     const turnsTop = await turns.evaluate(
       (list) => list.getBoundingClientRect().top + window.scrollY
     );
-    const lost: string[] = [];
-    for (let top = 1; top <= turnsTop; top += 4) {
-      await page.evaluate((y) => window.scrollTo(0, y), top);
-      if (Math.abs(top - settled) > 1) await expect(jump).toBeVisible();
-      for (const tap of await tapsLostAboveTurns(page)) lost.push(`scrolled to ${top}: ${tap}`);
-    }
+    // Both ends of the band keep Playwright's own visibility check; the sweep between them runs
+    // in the page, one round trip rather than three per step.
+    await page.evaluate(() => window.scrollTo(0, 1));
+    if (Math.abs(1 - settled) > 1) await expect(jump).toBeVisible();
+    const lost = await tapsLostAcrossBand(page, { settled, turnsTop });
+    await page.evaluate((y) => window.scrollTo(0, y), turnsTop);
+    if (Math.abs(turnsTop - settled) > 1) await expect(jump).toBeVisible();
     expect(lost).toEqual([]);
   } finally {
     await alice.close();

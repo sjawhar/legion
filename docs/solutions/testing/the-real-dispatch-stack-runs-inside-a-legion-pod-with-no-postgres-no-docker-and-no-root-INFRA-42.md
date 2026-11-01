@@ -27,6 +27,22 @@ port the OS chooses when theirs is unset and print it. `bun run dispatch:local`,
 `bun e2e/run.ts -- <command>` from `packages/dispatch`, starts the whole stack that way. The
 recipe below is the record as it was written.
 
+**Update (2026-11-01, INFRA-317): the harness can start the Postgres itself, one per lane.**
+`DISPATCH_E2E_WORKERS` is how many Playwright workers a run has (unset or empty: one), and
+`e2e/run.ts` starts one lane per worker before Playwright: a whole harness — server, the three
+fakes, the plain-HTTP proxy, a bucket, ports the OS chose — and a Postgres of its own, since
+`e2e/seed.ts` empties its lane's database before every row; a worker finds its lane by
+`TEST_PARALLEL_INDEX` (`e2e/harness-ports.ts`). In a pod the Postgres comes from
+`DISPATCH_E2E_PG_BIN`, a directory holding `initdb` and `pg_ctl` — the
+`<root>/usr/lib/postgresql/17/bin` step 1 below unpacks is exactly such a directory — and the
+run keeps each lane's data under its own temporary directory and removes it at the end. (CI
+uses the other provider, `DISPATCH_E2E_PG_IMAGE`, a `docker run` of a digest, which a pod has no
+Docker for.) A run of more than one lane refuses a `DATABASE_URL`, `PLAYWRIGHT_BASE_URL`,
+`DISPATCH_E2E_PROCESSES=2`, `DISPATCH_E2E_REUSE_SERVERS` or harness port the caller set, naming
+it: each is one database, one set of servers or one port every lane would share. Every other
+mode is one lane and one worker, so the hand-started stack below is unchanged.
+`packages/dispatch/AGENTS.md`'s end-to-end section has the model.
+
 A `packages/dispatch` change is proved by driving the dashboard — the real Go server, the
 production SPA bundle and a real browser — not by citing a CI run. An issue pod has no `psql`, no
 Postgres, no docker and no root, which reads like a blocker and is not. This recipe stood the whole

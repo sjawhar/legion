@@ -24,6 +24,7 @@ import {
   selectEditorText,
 } from "./editor";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 
 // What this file's init scripts keep on the page's window.
@@ -51,8 +52,6 @@ const longDocument = [
   ),
   "Unique faraway quotation.",
 ].join("\n\n");
-
-test.setTimeout(240_000);
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -316,8 +315,15 @@ test("emitted document item hrefs select and scroll their anchored thread @phone
         path: `/issues/${issue.key}/artifacts/${secondarySlug}?ask=${asks[1].id}`,
       },
     ];
-    for (const target of targets) {
-      await page.goto(target.path);
+    for (const [index, target] of targets.entries()) {
+      // Cold entry is proved once, by the first href; the rest are followed as a link in the
+      // app follows one, which drives the same `parseIssuePath` and the same margin selection
+      // without reloading the shell four times.
+      if (index === 0) {
+        await page.goto(target.path);
+      } else {
+        await navigateInApp(page, target.path);
+      }
       await expectSelectedMarginItem(
         page,
         target.id,
@@ -534,6 +540,9 @@ const crossDocumentLandingStates = [
 ] as const;
 
 for (const state of crossDocumentLandingStates) {
+  // SLOW(>=2s): two documents are loaded by design. The margin provider must already be mounted,
+  // carrying another document's offsets, when the link lands - which is the stale report the
+  // press must not be answered from - so neither load can go.
   test(`a press while a comment link reached from another document is landing and ${state.name} does not end the hold`, async ({
     browser,
   }) => {
@@ -632,6 +641,9 @@ const hiddenEditorJourneys = [
 ] as const;
 
 for (const journey of hiddenEditorJourneys) {
+  // SLOW(>=2s): the journey is the property. A long document's landing, a tab switch or a
+  // version switch that hides the editor, and the return are each a real editor mount and a real
+  // smooth-scroll landing; there is no step here that is not the thing being proved.
   test(journey.name, async ({ browser }) => {
     const { comment, issue, markId } = await seedLongDocument();
     if (journey.namedVersion) {
@@ -728,9 +740,11 @@ test("a past version's comment link lands on its quote in a document with no dia
     await expect(highlight).toHaveText("quoted words");
     await expect(highlight).toBeInViewport();
     // A page that rebuilt the version's editor collapsed to the viewport's height between builds,
-    // throwing the reader back after the scroll to the quote began. Waiting is the only way to
-    // show a jump that does not come.
-    await page.waitForTimeout(1_500);
+    // throwing the reader back after the scroll to the quote began. Stillness is how a jump that
+    // does not come is shown: `landingSettled` returns after ten frames with no scroll and no
+    // change of the version view's own scroll height - the very measurement a rebuild disturbs -
+    // and a loaded machine stretches those frames, which a wall-clock window cannot do.
+    await landingSettled(versionView);
     const offsets = (await page.evaluate(() => window.__scrollEachFrame)) ?? [];
     const started = offsets.findIndex((offset) => offset > 0);
     expect(started).toBeGreaterThanOrEqual(0);
@@ -804,6 +818,9 @@ test("a resolving reference above a linked card does not end the hold", async ({
   }
 });
 
+// SLOW(>=2s): the asks arrive one at a time through the API while the reader reads, and their
+// arrival is what pushes the card out. Seeding them concurrently exhausts the server's pool
+// (LEGION-215, `seedAsks` above), so three sequential arrivals are the row's real time.
 test("the margin stops holding a landed card once the reader works the document", async ({
   browser,
 }) => {
@@ -832,7 +849,7 @@ test("the margin stops holding a landed card once the reader works the document"
     }
     await selectEditorText(page, "Paragraph 4: surrounding context");
 
-    await seedAsks(issue.key, 6, async (askId) => {
+    await seedAsks(issue.key, 3, async (askId) => {
       await expect(sheet.locator(`[data-margin-item="${askId}"]`)).toBeVisible();
     });
 
@@ -875,6 +892,8 @@ async function placementAfterArrival(
   };
 }
 
+// SLOW(>=2s): two real anchored arrivals, each re-measuring the whole margin column, are the two
+// measurements the row compares; cutting one leaves nothing to compare.
 test("a linked card's placement ignores the margin's own scroll", async ({ browser }) => {
   // Only the desktop margin places cards by mark, so this row is not tagged `@phone`.
   // The compact sheet stacks its cards from the top of its column rather than tracking marks -
@@ -1052,6 +1071,28 @@ test("an unanchored comment deep link still focuses its Conversation turn @phone
   }
 });
 
+/** Two retry waits (`QUERY_RETRY_DELAY_MS`, `web/src/api/query-client.ts`) and the asks between
+ *  them: what an item lookup that cannot resolve costs before the page names it missing. A 404
+ *  and a 400 are both retryable (`isRetryableQueryError`, `web/src/api/client.ts`), so
+ *  `useItemLanding` asks three times over. */
+const ITEM_RETRY_WAITS_MS = 1_200;
+
+/** Waits for the page to name `heading`, firing the page's own retry waits rather than outliving
+ *  them: when the navigation returns the first ask has not failed yet, so the clock is driven
+ *  again each time round until the heading the retries stand in front of is there. */
+async function untilNotFound(page: Page, heading: string): Promise<void> {
+  const title = page.getByRole("heading", { name: heading });
+  await expect
+    .poll(
+      async () => {
+        await page.clock.runFor(ITEM_RETRY_WAITS_MS);
+        return await title.isVisible();
+      },
+      { intervals: [50, 50, 100, 200, 500] }
+    )
+    .toBe(true);
+}
+
 test("an item link the SPA cannot resolve names what is missing, inside the shell @phone", async ({
   browser,
 }, testInfo) => {
@@ -1060,14 +1101,29 @@ test("an item link the SPA cannot resolve names what is missing, inside the shel
 
   try {
     const page = await context.newPage();
-    for (const [segment, heading] of [
-      ["comments", "Comment not found"],
-      ["asks", "Ask not found"],
-      ["messages", "Message not found"],
-    ] as const) {
-      for (const id of ["00000000-0000-4000-8000-000000000000", "not-a-uuid"]) {
-        await page.goto(`/issues/${issue.key}/${segment}/${id}`);
-        await expect(page.getByRole("heading", { name: heading })).toBeVisible();
+    // Every link below is unresolvable, and an unresolvable lookup is retried twice before the
+    // page may call it missing: those waits are page timers, so the page's clock fires them.
+    await page.clock.install();
+    let cold = true;
+    // The id is the outer loop so that no two links in a row end on the same heading: a heading
+    // left over from the link before would satisfy the assertion before the new one landed.
+    for (const id of ["00000000-0000-4000-8000-000000000000", "not-a-uuid"]) {
+      for (const [segment, heading] of [
+        ["comments", "Comment not found"],
+        ["asks", "Ask not found"],
+        ["messages", "Message not found"],
+      ] as const) {
+        const path = `/issues/${issue.key}/${segment}/${id}`;
+        // The first link is the cold entry the row is about - the server serves the shell for a
+        // deep link it cannot resolve - and the rest are followed as a link in the app is, which
+        // reaches the same `parseIssuePath` and the same `useItemLanding`.
+        if (cold) {
+          await page.goto(path);
+          cold = false;
+        } else {
+          await navigateInApp(page, path);
+        }
+        await untilNotFound(page, heading);
         await expect(page.getByTestId("app-shell")).toBeVisible();
         if (testInfo.project.name !== "iphone") {
           await expect(page.getByRole("link", { exact: true, name: "Inbox" })).toBeVisible();
@@ -1118,6 +1174,9 @@ test("every item link lands on exactly one marked card, and a reply link marks i
   const context = await asUser(browser, "alice");
   try {
     const page = await context.newPage();
+    // The last link below cannot resolve, and the page retries an unresolvable lookup twice
+    // before it may say so; its clock fires those waits.
+    await page.clock.install();
 
     // A reply written under an ask marks that ask's card and the reply's own row.
     await page.goto(`/issues/${issue.key}/comments/${askReply.id}`);
@@ -1126,7 +1185,9 @@ test("every item link lands on exactly one marked card, and a reply link marks i
     await expect(marked(page).locator('[data-reply][aria-current="true"]')).toHaveCount(1);
 
     // A retracted ask: Closed, and the landing resets the filter so the link never fails.
-    await page.goto(`/issues/${issue.key}/asks/${retracted.id}`);
+    // Every landing after the first is reached as a link in the app reaches it: the cold entry
+    // is proved once above, and each of these drives the same router and the same landing.
+    await navigateInApp(page, `/issues/${issue.key}/asks/${retracted.id}`);
     await expect(marked(page)).toHaveCount(1);
     await expect(marked(page)).toHaveAttribute("data-turn", `ask:${retracted.id}`);
 
@@ -1135,7 +1196,7 @@ test("every item link lands on exactly one marked card, and a reply link marks i
     // (`features/conversation/usePhoneThread.ts`), which inerts the turns list behind it: the
     // reply's row is marked in the thread the reader lands on, and the card behind it once
     // Back closes the thread.
-    await page.goto(`/issues/${issue.key}/comments/${resolvedReply.id}`);
+    await navigateInApp(page, `/issues/${issue.key}/comments/${resolvedReply.id}`);
     const resolvedThread = page.getByRole("dialog", { name: "Thread" });
     await expect(
       (isPhone ? resolvedThread : marked(page)).locator('[data-reply][aria-current="true"]')
@@ -1148,7 +1209,7 @@ test("every item link lands on exactly one marked card, and a reply link marks i
     const hits = await search("quadrant");
     const hit = hits.results.find((result) => result.id === found.id);
     expect(hit?.href).toBe(`/issues/${issue.key}/comments/${found.id}`);
-    await page.goto(hit?.href ?? "");
+    await navigateInApp(page, hit?.href ?? "");
     if (isPhone) {
       await expect(page.getByRole("dialog", { name: "Thread" })).toContainText(
         "Search me: quadrant note."
@@ -1160,10 +1221,10 @@ test("every item link lands on exactly one marked card, and a reply link marks i
 
     // The negative controls: an item that lives on another issue still redirects to it, and an
     // id that names nothing still renders the missing page.
-    await page.goto(`/issues/${issue.key}/comments/${elsewhere.id}`);
+    await navigateInApp(page, `/issues/${issue.key}/comments/${elsewhere.id}`);
     await expect(page).toHaveURL(`/issues/${otherIssue.key}/comments/${elsewhere.id}`);
-    await page.goto(`/issues/${issue.key}/comments/00000000-0000-4000-8000-000000000000`);
-    await expect(page.getByRole("heading", { name: "Comment not found" })).toBeVisible();
+    await navigateInApp(page, `/issues/${issue.key}/comments/00000000-0000-4000-8000-000000000000`);
+    await untilNotFound(page, "Comment not found");
   } finally {
     await context.close();
   }

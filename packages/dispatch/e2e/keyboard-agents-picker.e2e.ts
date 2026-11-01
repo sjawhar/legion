@@ -194,6 +194,8 @@ test.describe("agents page", () => {
   // A message on its way to the server is addressed already, so its issue cannot change under it,
   // and the text the server is taking must never come back to the composer, enabled - one
   // Ctrl+Enter from sending it twice.
+  // SLOW(>=2s): the floor every row here pays - a database reset, `seedAgents()`'s six sequential
+  // writes (`e2e/agents.ts`) and a cold `/agents` render - plus this row's held POST, per engine.
   test("a send in flight holds the picker, and the sent text never comes back", async ({
     browser,
   }) => {
@@ -328,6 +330,8 @@ test.describe("agents page", () => {
   // The reply a refused send was for stays until the reader ends it. Ended then, the message goes
   // back to the issue picked and the draft takes that issue's mention, so Retry reaches the agent
   // there - a direct reply's refusal retried as an issue comment that still tells the agent.
+  // SLOW(>=2s): the same per-row floor (reset, `seedAgents()`'s six writes, a cold `/agents`
+  // render) plus a refusal, a cancel and a retry paced by the engine.
   test("a reply refused and then cancelled retries on the issue, mentioning the agent", async ({
     browser,
   }) => {
@@ -634,6 +638,8 @@ test.describe("agents page", () => {
 
   // A refusal is about the draft it turned down. Retry sends the draft as it stands, so it is
   // offered only when Send would be; Discard drops the draft, and the notice goes with it.
+  // SLOW(>=2s): the same per-row floor (reset, `seedAgents()`'s six writes, a cold `/agents`
+  // render) plus one refused POST and its discard prompt.
   test("Retry asks what Send asks, and Discard takes a refusal's notice with the draft", async ({
     browser,
   }) => {
@@ -779,6 +785,8 @@ test.describe("agents page", () => {
   // An issue comment reaches this agent only by mentioning it, so the reset a send makes seeds the
   // mention again, as a mount does - the next message is as addressed as the first. A direct
   // message already reaches its session, and its channel seeds nothing.
+  // SLOW(>=2s): the same per-row floor (reset, `seedAgents()`'s six writes, a cold `/agents`
+  // render) plus three typed sends, each read back by its key.
   test("every message sent on an issue mentions the agent, and a direct one carries none", async ({
     browser,
   }) => {
@@ -798,13 +806,17 @@ test.describe("agents page", () => {
         if (request.method() !== "POST" || !/\/(comments|messages)$/.test(path)) return;
         sends.push({ ...keyedWrite(request), ok: response.ok(), path });
       });
+      // Typed, not filled: the composer tracks its mention and delivery as the keys arrive, and
+      // a `fill` of the same text sends neither (measured).
       const send = async (text: string) => {
         const before = sends.length;
         await field.click();
         await page.keyboard.press("End");
         await page.keyboard.type(text);
         await page.keyboard.press("Control+Enter");
-        await expect.poll(() => sends.length).toBe(before + 1);
+        await expect
+          .poll(() => sends.length, { intervals: [50, 50, 100, 200, 500] })
+          .toBe(before + 1);
       };
 
       await page.keyboard.press("j");
@@ -857,6 +869,8 @@ test.describe("agents page", () => {
 
   // `i` opens the picker; it never shuts one. A row keeps its picker open when it collapses, so on
   // that row `i` goes back into the select rather than clicking the toggle closed.
+  // SLOW(>=2s): the same per-row floor (reset, `seedAgents()`'s six writes, a cold `/agents`
+  // render); the nine focus transitions after it are all this row spends.
   test("i on a collapsed row goes back into the picker it left open", async ({ browser }) => {
     await seedAgents();
     const context = await asUser(browser, "alice");
@@ -890,6 +904,8 @@ test.describe("agents page", () => {
   // A message on its way holds the picker and Reply of the row that sent it, and its draft, until
   // the server answers. A reader who leaves the page mid-send and comes back finds the row holding
   // the same send - the draft, the picker and Reply held - and its answer lands there.
+  // SLOW(>=2s): the same per-row floor (reset, `seedAgents()`'s six writes, a cold `/agents`
+  // render) plus two in-app route changes with a POST held across them.
   test("a row back after the reader left mid-send holds the send it left, which then lands there", async ({
     browser,
   }) => {

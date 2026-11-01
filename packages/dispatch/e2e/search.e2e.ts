@@ -285,7 +285,8 @@ test("a project-document hit is grouped under the document and opens it; a messa
       page.getByRole("list", { name: "Conversation turns" }).locator('li[aria-current="true"]')
     ).toContainText("Sextant calibration done.");
 
-    await openSearchFromRail(page, false);
+    // The palette opens on the page the reader is already on: Ctrl+K, not another load.
+    await page.keyboard.press("Control+k");
     await page.getByRole("combobox", { name: "Search" }).fill("sextant");
     await dialog.getByRole("option", { name: /^doc / }).click();
     await expect(page).toHaveURL(
