@@ -37,8 +37,14 @@ type StreamTurnStart struct {
 	DeliveryID string
 }
 
-// StreamTurnEnd is the agent's turn ending.
-type StreamTurnEnd struct{ Claim claim.Token }
+// StreamTurnEnd is the agent's turn ending. AwaitingAsyncWork is Oh My Pi saying background work
+// of the agent's own is still running, so the session has not settled and a turn of that work's
+// own follows: the claim is idle of the daemon's tasks but the agent is not idle at all, and the
+// idle suspend's wait is not armed while it holds (notIdle).
+type StreamTurnEnd struct {
+	Claim             claim.Token
+	AwaitingAsyncWork bool
+}
 
 // StreamPromptResult is Oh My Pi saying how one prompt's work ended (shimwire.PromptResult): the
 // one frame that names the prompt a turn belonged to, where agent_start and agent_end name none.
@@ -113,6 +119,10 @@ const (
 	// lifecycle check failed with no cleanup reserved, or a launch whose write failed. The claim waits
 	// launching with no process until it fires.
 	TimerRelaunch TimerKind = "relaunch"
+	// TimerIdle is the idle suspend's wait (worker_idle_suspend_seconds): armed while the claim is
+	// idle with nothing waiting for it, disarmed by anything that gives the agent work, and firing
+	// to suspend a claim that is idle still (idleWait).
+	TimerIdle TimerKind = "idle"
 )
 
 // Timer is a timer the machine armed, firing.
@@ -189,10 +199,15 @@ type RequestResume struct{ Claim claim.Token }
 // included) and of its own controller. It resumes nothing that is not suspended — a failed claim's
 // launch budget is spent, and only the workflow's retry relaunches it — so it is asked again as
 // often as the rule meets the claim without ever relaunching one that is running. Reason is the
-// rule, for the line it logs.
+// rule, for the line it logs. Only, when it is set, is the suspension source the caller decided
+// on: the resume runs only while the claim is still suspended under it, read under the machine's
+// own lock, so a resume decided from a claim read a moment earlier never undoes a suspension of
+// another source that landed in between — the workflow taking an idle suspend over as it parks a
+// child is what this guards (internal/daemon's wakeIdleSuspendedRole, suspendedAgain).
 type RequestRuleResume struct {
 	Claim  claim.Token
 	Reason string
+	Only   SuspendSource
 }
 
 // RequestStop ends one claim. The tree's root claim is not one it can end: a root ends only with
@@ -322,6 +337,7 @@ const (
 	onProbeTimer    eventKind = timerPrefix + eventKind(TimerProbe)
 	onSuspendTimer  eventKind = timerPrefix + eventKind(TimerSuspend)
 	onRelaunchTimer eventKind = timerPrefix + eventKind(TimerRelaunch)
+	onIdleTimer     eventKind = timerPrefix + eventKind(TimerIdle)
 	onSpawn         eventKind = "request_spawn"
 	onRegister      eventKind = "request_register"
 	onReady         eventKind = "request_ready"
@@ -568,6 +584,13 @@ func fillTable(t *builder) {
 		[]ClaimState{StateFailed, StateSuspended}, StateLaunching)
 	t.ignore(onRelaunchTimer, "no relaunch is waiting", StateQueued, StateLaunchUncertain, StateShimConnected, StateRegistered,
 		StateReady, StateWorking, StateIdle, StateSuspended, StateFailed, StateRetired)
+
+	t.row(onIdleTimer, "the worker has been idle its whole idle suspend: suspend it, keeping its session", idleSuspend,
+		[]ClaimState{StateSuspended, StateFailed}, StateIdle, StateReady)
+	t.ignore(onIdleTimer, "the agent is in a turn, so it is not idle", StateWorking)
+	t.ignore(onIdleTimer, "the claim is not idle, so no idle suspend is armed",
+		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered)
+	t.ignore(onIdleTimer, noProcess, gone...)
 
 	// A re-adopted claim found still speaking another plugin contract, at boot or at a later sweep.
 	t.row(onStalePlugin, "the process speaks another plugin contract: relaunch it onto the current one", refreshStalePlugin,
@@ -991,7 +1014,8 @@ func agentBusy(reason string) bool {
 // turnStarted is a turn starting in a ready or idle claim. It confirms the pending delivery when
 // it is that delivery's turn: a replay naming it, or — B1 — Oh My Pi's own agent_start while the
 // delivery is in flight (sent and not yet answered, acknowledged and waiting, or possibly sent by
-// an earlier daemon). Any other turn is a foreign one, and confirms nothing.
+// an earlier daemon). Any other turn is a foreign one, and confirms nothing. The claim leaves idle
+// here whoever asked for the turn, so the idle suspend's wait ends with it (idleWait).
 func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	start := ev.(StreamTurnStart)
 	m.claim.State = StateWorking
@@ -1007,13 +1031,19 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 // turnEnded is the turn over: the delivery whose turn it was retires (settle), and one queued
 // meanwhile goes — unless a suspension is held for this turn (holdSuspension), which runs
 // instead; a stop the runtime refuses leaves the claim idle, still holding it. The agent just
-// said where it is, so nothing is left to ask it after a restart.
+// said where it is, so nothing is left to ask it after a restart. A claim this leaves idle with
+// nothing waiting starts the idle suspend's wait, as every decision does (idleWait).
 //
 // Whose turn it was is a question background work made real, and settle is where it is answered:
 // a turn that ends while the task's prompt is still outstanding retires nothing, because Oh My
 // Pi's agent_end names no prompt and a role's own background result starts turns the daemon
 // never prompted.
-func turnEnded(m *Machine, ctx context.Context, _ Event) error {
+func turnEnded(m *Machine, ctx context.Context, ev Event) error {
+	if end, ok := ev.(StreamTurnEnd); ok {
+		// Another event can end the turn too — a hello that finds it over after a restart — and
+		// says nothing about the agent's background work, so what the last agent_end said stands.
+		m.asyncWork = end.AwaitingAsyncWork
+	}
 	m.askFirst = false
 	if m.held != nil {
 		if err := m.suspendHeld(ctx); err != nil {
@@ -1035,6 +1065,26 @@ func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 		return err
 	}
 	return m.sendPending(ctx)
+}
+
+// idleSuspend is the idle suspend's timer: a phase worker's turn ended a whole
+// worker_idle_suspend_seconds ago and nothing has reached it since. Its process is taken back and
+// its session kept, so the next task resumes the same agent, and the suspension is the daemon's
+// own by rule (SuspendedByIdle), which the boot's resume by rule and every wake act on.
+//
+// The row has nothing of its own to decide. Anything that reaches the claim disarms the wait by
+// the end of that decision (idleWait), and a timer whose arming was disarmed or replaced is
+// fenced out before it reaches a row (fence, Timer), so a claim this row runs for is idle with
+// nothing waiting for it. The table's own ignores hold the states.
+func idleSuspend(m *Machine, ctx context.Context, _ Event) error {
+	// The timer that fired is taken out of the table first, so a suspension the runtime refuses
+	// leaves the claim idle with nothing armed and the decision's own idleWait starts the wait
+	// afresh: the worker is suspended at the next whole wait rather than kept for good by one
+	// failed stop.
+	m.disarm(TimerIdle)
+	m.log.Info("supervise: the worker was idle for its whole idle suspend; suspending it and keeping its session",
+		"idleSuspend", m.deps.Timeouts.IdleSuspend)
+	return m.suspendNow(ctx, RequestSuspend{Claim: m.claim.Token, Reason: "idle for worker_idle_suspend_seconds", By: SuspendedByIdle})
 }
 
 // promptResulted is Oh My Pi's answer to the one question the turn frames cannot settle: which
@@ -1219,7 +1269,13 @@ func resume(m *Machine, ctx context.Context, _ Event) error { return m.revive(ct
 // any other, so a claim the rule resumes that keeps failing fails once the budget is spent, and a
 // failed claim is never resumed by rule.
 func resumeByRule(m *Machine, ctx context.Context, ev Event) error {
-	rule := ev.(RequestRuleResume).Reason
+	request := ev.(RequestRuleResume)
+	rule := request.Reason
+	if request.Only != "" && m.claim.SuspendedBy != request.Only {
+		m.log.Info("supervise: not resumed by rule: another suspension took the claim over since the rule read it",
+			"rule", rule, "only", request.Only, "suspendedBy", m.claim.SuspendedBy)
+		return nil
+	}
 	if !m.claim.RuleMayResume() {
 		m.log.Info("supervise: not resumed by rule: its suspension holds until the operator resumes it", "rule", rule, "suspendedBy", m.claim.SuspendedBy)
 		return nil

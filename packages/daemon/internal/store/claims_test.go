@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -436,13 +437,16 @@ func TestAnEnrollmentWithoutAnIncarnationIsRefusedByTheSchema(t *testing.T) {
 	}
 }
 
-// Who suspended a claim round-trips with it, and the schema refuses a source it does not know:
-// the daemon's resume by rule reads the column after a restart, and a value it cannot read would
-// be a claim nobody can say whether to resume.
-func TestASuspendedClaimsSourceRoundTripsAndTheSchemaRefusesAnUnknownOne(t *testing.T) {
+// Every source a suspension is recorded under round-trips with its claim, and the schema refuses
+// one it does not know: the daemon's resume by rule reads the column after a restart, and a value
+// it cannot read would be a claim nobody can say whether to resume. The loop is
+// supervise.SuspendSources itself, so a source the package gains without the migration that
+// admits it is refused here rather than in production, where the write of every suspension under
+// it would be (0068).
+func TestEverySuspendSourceRoundTripsAndTheSchemaRefusesAnUnknownOne(t *testing.T) {
 	s := migratedStore(t)
 	ctx := context.Background()
-	for _, by := range []supervise.SuspendSource{supervise.SuspendedByOperator, supervise.SuspendedByDaemon, supervise.SuspendedByExit, ""} {
+	for _, by := range append(slices.Clone(supervise.SuspendSources), "") {
 		c := supervise.Claim{Token: "legion-LEGION-209-tester", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209",
 			Role: claim.RoleTester, Generation: 2, State: supervise.StateSuspended, Session: "ses_tester", SuspendedBy: by}
 		if err := s.PutClaim(ctx, c); err != nil {

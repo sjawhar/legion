@@ -694,6 +694,10 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	if earlier := earlierNoticeFor(tree, architect, r.holdsItsRole); earlier != 0 {
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
+	// The notice is about to reach the architect, which answers a Topic it carries with its own
+	// publish to that role; a worker the idle suspend took the process from is brought back now,
+	// so it holds its role again by then (wakeNoticedRole).
+	r.wakeNoticedRole(ctx, payload.Topic)
 	notice, key := payload.Published(row.ID)
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
 	var notDelivered notify.ErrNotDelivered

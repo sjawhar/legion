@@ -111,8 +111,12 @@ type Config struct {
 	WorkerBootRegistrationDeadlineIntervals int
 	WorkerRPCTimeout                        time.Duration
 	WorkerStopTimeout                       time.Duration
-	TreeStopTimeout                         time.Duration
-	SlowCommandTimeout                      time.Duration
+	// WorkerIdleSuspend is how long a worker whose turn is over and that has nothing waiting keeps
+	// its process before the daemon suspends it, keeping its session, so the next task resumes the
+	// same agent (`worker_idle_suspend_seconds`). 0 keeps every idle worker running.
+	WorkerIdleSuspend  time.Duration
+	TreeStopTimeout    time.Duration
+	SlowCommandTimeout time.Duration
 	// ProbeInterval is how often the runtime sweeps every recorded process.
 	ProbeInterval time.Duration
 
@@ -187,20 +191,25 @@ const (
 	maxTimerSeconds = 2_147_483
 )
 
-// durationKeys are the positive-second keys and their defaults (config.ts's DEFAULT_* constants,
-// and the new probe interval). Every one of them is held to the timer bound.
+// durationKeys are the second-valued keys and their defaults (config.ts's DEFAULT_* constants, and
+// the new probe interval). Every one of them is held to the timer bound, and every one is a
+// positive integer but those whose off says so, where 0 is the key turned off.
 var durationKeys = []struct {
 	key          string
 	defaultValue int
-	field        func(*Config) *time.Duration
+	// off is whether 0 is a value this key takes, turning what it times off. Every other key is
+	// positive: a zero timer would fire at once.
+	off   bool
+	field func(*Config) *time.Duration
 }{
-	{"worker_boot_timeout_seconds", 120, func(c *Config) *time.Duration { return &c.WorkerBootTimeout }},
-	{"worker_rpc_timeout_seconds", 5, func(c *Config) *time.Duration { return &c.WorkerRPCTimeout }},
-	{"worker_stop_timeout_seconds", 10, func(c *Config) *time.Duration { return &c.WorkerStopTimeout }},
-	{"tree_stop_timeout_seconds", 60, func(c *Config) *time.Duration { return &c.TreeStopTimeout }},
-	{"slow_command_timeout_seconds", 300, func(c *Config) *time.Duration { return &c.SlowCommandTimeout }},
-	{"probe_interval_seconds", 30, func(c *Config) *time.Duration { return &c.ProbeInterval }},
-	{"controller_wake_interval_seconds", 3600, func(c *Config) *time.Duration { return &c.ControllerWakeInterval }},
+	{"worker_boot_timeout_seconds", 120, false, func(c *Config) *time.Duration { return &c.WorkerBootTimeout }},
+	{"worker_rpc_timeout_seconds", 5, false, func(c *Config) *time.Duration { return &c.WorkerRPCTimeout }},
+	{"worker_stop_timeout_seconds", 10, false, func(c *Config) *time.Duration { return &c.WorkerStopTimeout }},
+	{"worker_idle_suspend_seconds", 1800, true, func(c *Config) *time.Duration { return &c.WorkerIdleSuspend }},
+	{"tree_stop_timeout_seconds", 60, false, func(c *Config) *time.Duration { return &c.TreeStopTimeout }},
+	{"slow_command_timeout_seconds", 300, false, func(c *Config) *time.Duration { return &c.SlowCommandTimeout }},
+	{"probe_interval_seconds", 30, false, func(c *Config) *time.Duration { return &c.ProbeInterval }},
+	{"controller_wake_interval_seconds", 3600, false, func(c *Config) *time.Duration { return &c.ControllerWakeInterval }},
 }
 
 // countKeys are the positive-integer keys with no unit, and their defaults: the registration
@@ -435,12 +444,18 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 }
 
 func isDurationKey(key string) bool {
-	for _, d := range durationKeys {
+	_, ok := durationKey(key)
+	return ok
+}
+
+// durationKey is the duration key named key, and whether there is one.
+func durationKey(key string) (int, bool) {
+	for i, d := range durationKeys {
 		if d.key == key {
-			return true
+			return i, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 func isCountKey(key string) bool {
@@ -452,15 +467,19 @@ func isCountKey(key string) bool {
 	return false
 }
 
-// readPositive reads a duration or count key into the file's map: a positive integer and, for a
-// duration, at most the timer bound (config.ts readPositiveInteger, and loadConfigFromFile's
-// lifecycle keys).
+// readPositive reads a duration or count key into the file's map: a positive integer — or 0 for a
+// duration key that takes it, which turns what it times off — and, for a duration, at most the
+// timer bound (config.ts readPositiveInteger, and loadConfigFromFile's lifecycle keys).
 func readPositive(value *yaml.Node, key string, file fileConfig) error {
 	read, err := readInt(value, key)
 	if err != nil || read == nil {
 		return err
 	}
-	if *read <= 0 {
+	index, duration := durationKey(key)
+	if *read < 0 || (*read == 0 && !(duration && durationKeys[index].off)) {
+		if duration && durationKeys[index].off {
+			return fmt.Errorf("%s must be a positive integer, or 0 to turn it off", key)
+		}
 		return fmt.Errorf("%s must be a positive integer", key)
 	}
 	if isDurationKey(key) {
@@ -970,7 +989,102 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 				shim.DefaultGrace, shim.DrainTimeout, shim.MinWarmUpDrain, shim.MinStopGrace)
 		}
 	}
+	// The idle suspend must not take a worker's process before the worker's own end-of-turn
+	// reminder can fire. A phase worker that ended its turn with a WAITING reply keeps its only
+	// wake in its own process (packages/pi-shared/src/phase-reminder.ts, LEGION_STALL_WAITING_MS),
+	// so an idle suspend shorter than that reminder would stop the process that holds it and leave
+	// an open phase with nothing to wake it until a workflow event or a daemon boot. The daemon
+	// passes that variable from its own environment to every worker (internal/daemon's
+	// stallLimitVariables), so it is read from the same place here; a worker told nothing runs on
+	// the plugin's own default.
+	if cfg.WorkerIdleSuspend > 0 {
+		// Both sides are compared in milliseconds, as the worker holds them: a reminder far past
+		// what a time.Duration can hold is still a number the worker runs on, and converting it
+		// would wrap round to a negative duration that passes every floor.
+		waiting := stallWaitingMs(env)
+		if float64(cfg.WorkerIdleSuspend/time.Millisecond) <= waiting {
+			return Config{}, fmt.Errorf("worker_idle_suspend_seconds must be more than %.0f: a worker that replied WAITING on an open phase is reminded by its own process after %.0f ms (LEGION_STALL_WAITING_MS), and an idle suspend that is not longer than that could take the process holding the reminder first",
+				math.Floor(waiting/1000), waiting)
+		}
+	}
 	return cfg, nil
+}
+
+// defaultStallWaitingMs is what a worker told no LEGION_STALL_WAITING_MS runs on, the plugin's own
+// default (packages/pi-shared/src/stall-limits.ts, DEFAULT_STALL_LIMITS.waitingMs).
+const defaultStallWaitingMs = 900_000
+
+// stallWaitingMs is how long, in milliseconds, a WAITING reply buys a worker before its own
+// process reminds it again: the daemon's LEGION_STALL_WAITING_MS, which it passes to every worker
+// it starts, else the plugin's default. It reads the variable as the worker reads it
+// (stall-limits.ts's integerSetting over JavaScript's Number(), which takes a decimal, an
+// exponent and the 0x/0o/0b radix forms, and falls back to the default on anything that is not an
+// integer of 0 or more, an infinity included), so the floor is judged against the value the
+// worker will really run on: no configuration the worker accepts is refused here, and none it
+// accepts slips past the floor either.
+func stallWaitingMs(env func(string) string) float64 {
+	// JavaScript's own WhiteSpace and LineTerminator set, which Number() trims from both ends:
+	// it holds no NEL (U+0085), which Go's unicode.IsSpace does, and it holds the byte order mark.
+	raw := strings.Trim(env("LEGION_STALL_WAITING_MS"), " \t\v\f\r\n\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
+	if raw == "" {
+		return defaultStallWaitingMs
+	}
+	read, ok := jsNumber(raw)
+	if !ok || read < 0 || math.IsInf(read, 0) || math.IsNaN(read) || read != math.Trunc(read) {
+		return defaultStallWaitingMs
+	}
+	return read
+}
+
+// jsNumber is JavaScript's Number() of a string: the radix forms it takes (0x, 0o, 0b, each
+// unsigned and with no sign before the prefix), and otherwise the StrDecimalLiteral grammar —
+// an optional sign, decimal digits, a decimal point and a decimal exponent, and nothing else.
+// Go's own ParseFloat reads more than that grammar (a separator, a hexadecimal float, the words
+// `Inf` and `NaN`), so every character is checked against it first: a string Number() makes NaN
+// of is this function's false.
+func jsNumber(raw string) (float64, bool) {
+	if strings.ContainsRune(raw, '_') {
+		// Go's own parsers take a separator in a numeric literal and Number() does not, so a value
+		// written with one is NaN to the worker and must be here too.
+		return 0, false
+	}
+	if len(raw) > 2 && raw[0] == '0' {
+		base := 0
+		switch raw[1] {
+		case 'x', 'X':
+			base = 16
+		case 'o', 'O':
+			base = 8
+		case 'b', 'B':
+			base = 2
+		}
+		if base != 0 {
+			read, err := strconv.ParseUint(raw[2:], base, 64)
+			if err == nil {
+				return float64(read), true
+			}
+			// Number() reads a radix form of any length, so one past a uint64 is a number the
+			// worker runs on all the same, and a reminder that long is longer than any idle
+			// suspend the loader takes: it is answered as the largest float there is rather than
+			// as unreadable, which would silently fall back to the plugin's own default.
+			if errors.Is(err, strconv.ErrRange) {
+				return math.MaxFloat64, true
+			}
+			return 0, false
+		}
+	}
+	for _, r := range raw {
+		switch {
+		case r >= '0' && r <= '9', r == '+', r == '-', r == '.', r == 'e', r == 'E':
+		default:
+			return 0, false
+		}
+	}
+	read, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, false
+	}
+	return read, true
 }
 
 // resolveControllerLaunch settles `controller`: the operator's launch unless the file names the

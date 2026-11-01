@@ -1,0 +1,5 @@
+kind: Changed
+body: A publish to a role topic that the listener refuses with 404 (`unclaimed` or `holder_lapsed`) is now also reported on `notifications.envoy.exceptions.<topic>` with reason `role_unheld`, naming the lapsed holder as `recipient_session`. The sender still gets the same 404. The Legion daemon resumes a phase worker that its idle suspend stopped when it reads this report, so a peer agent can reach that worker again after its Envoy registration has lapsed.
+time: 2026-11-01T07:19:01.909302476Z
+custom:
+    Issue: pr2384

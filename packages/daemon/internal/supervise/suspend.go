@@ -112,18 +112,32 @@ func holdSuspendUntilReady(m *Machine, _ context.Context, ev Event) error {
 
 // suspendedAgain is a suspension of a claim already suspended. An operator's suspend of a claim the
 // daemon suspended takes the suspension over (Claim.SuspendedBy), so the rule resumes it no more
-// until the operator does; any other changes nothing, and an operator's suspension stays the
-// operator's.
+// until the operator does, and an operator's suspension stays the operator's.
+//
+// A suspension of any other source takes over one the idle suspend holds, because the two differ
+// in what may end them: the idle suspension is ended by anything that reaches the role, a message
+// to it included (internal/daemon's wakeIdleSuspendedRole), and the workflow's — a child parked in
+// Dispatch, an issue that left the workflow, a lingering tree — only by the workflow. A claim left
+// marked `idle` after the workflow stopped it would be put back by the next message to its role.
 func suspendedAgain(m *Machine, ctx context.Context, ev Event) error {
 	request, err := suspendRequest(m, ev)
 	if err != nil {
 		return err
 	}
-	if request.By != SuspendedByOperator || m.claim.SuspendedBy == SuspendedByOperator {
+	if m.claim.SuspendedBy == SuspendedByOperator {
 		return nil
 	}
-	m.log.Info("supervise: the operator's suspension takes the suspended claim over", "reason", request.Reason, "suspendedBy", m.claim.SuspendedBy)
-	m.claim.SuspendedBy = SuspendedByOperator
+	if request.By == SuspendedByOperator {
+		m.log.Info("supervise: the operator's suspension takes the suspended claim over", "reason", request.Reason, "suspendedBy", m.claim.SuspendedBy)
+		m.claim.SuspendedBy = SuspendedByOperator
+		return m.persist(ctx)
+	}
+	if m.claim.SuspendedBy != SuspendedByIdle || request.By == SuspendedByIdle {
+		return nil
+	}
+	m.log.Info("supervise: the suspension takes over the idle suspend's, which a message to the role would end",
+		"reason", request.Reason, "by", request.By)
+	m.claim.SuspendedBy = request.By
 	return m.persist(ctx)
 }
 

@@ -177,9 +177,10 @@ func (d *listenerDeps) confirm(dedupeKey, sessionID string) {
 // roleSend is one role message through the publish route. The route does not publish on the role
 // lane: it forwards the envelope to the holder's agent subject itself and answers once the holder's
 // receipt arrived, or with the failure once publishDeliveryWindow from arrived has passed, so its
-// sender learns whether the message was taken. It publishes no delivery exception: the sender has
-// the answer. Every answer goes through record, the route's one line per request
-// (request_record.go), and is then settled: counted, and logged on the send's own delivery line.
+// sender learns whether the message was taken. Of its answers only the 404 for a role with no live
+// holder also publishes a delivery exception (noHolder); every other outcome is the sender's alone.
+// Every answer goes through record, the route's one line per request (request_record.go), and is
+// then settled: counted, and logged on the send's own delivery line.
 type roleSend struct {
 	w        http.ResponseWriter
 	record   *requestRecord
@@ -218,13 +219,24 @@ func (s *roleSend) delivered(outcome sendOutcome) {
 // noHolder answers writeRoleHolderError's 404 (unclaimed or holder_lapsed) for a role with no live
 // claim, which the Legion daemon reads as notify.ErrNoHolder, recorded role_unclaimed or
 // role_lapsed. The role lane counts an unclaimed role skipped and a lapsed holder failed.
-func (s *roleSend) noHolder(result roleHolderResult) {
+//
+// The refusal is then reported on the role's exception lane as reason role_unheld, naming the
+// lapsed holder as its recipient (none for an unclaimed role), within ctx, the send's window. The
+// sender has its answer, but a session that can bring the role's holder back is not the sender:
+// the Legion daemon resumes a phase worker its idle suspend stopped once it hears that a message
+// found the worker's role unheld, and a peer agent's publish to that role reaches the daemon only
+// this way. A report that does not go out is logged exceptionPublishFailedLine and changes
+// nothing about the answer.
+func (s *roleSend) noHolder(ctx context.Context, result roleHolderResult) {
 	s.record.refuseRoleHolder(s.w, s.role, result)
 	outcome := sendHolderLapsed
 	if result.state == roleHolderUnclaimed {
 		outcome = sendUnclaimed
 	}
 	s.settle(outcome)
+	if err := publishDeliveryException(ctx, s.d.client, s.item, "role_unheld", result.holder, false); err != nil {
+		s.d.delivery.logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", s.item.Topic))
+	}
 }
 
 // unresolved answers a first resolution of the holder that did not resolve, as GET
@@ -332,7 +344,7 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 		return
 	}
 	if first.state != roleHolderLive {
-		send.noHolder(first)
+		send.noHolder(ctx, first)
 		return
 	}
 	send.holder = first.holder
@@ -360,10 +372,10 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 		case err != nil:
 			// Retried below, as every resolution not answered here is.
 		case resolved.state == roleHolderUnclaimed:
-			send.noHolder(resolved)
+			send.noHolder(ctx, resolved)
 			return
 		case resolved.state == roleHolderLapsed && resolved.claimRelease != store.ExpiredRoleClaimRetained:
-			send.noHolder(resolved)
+			send.noHolder(ctx, resolved)
 			return
 		case resolved.state == roleHolderLive:
 			if send.holder != checked {

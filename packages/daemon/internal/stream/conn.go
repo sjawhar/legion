@@ -437,7 +437,7 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 		c.mu.Lock()
 		c.acked = nil
 		c.mu.Unlock()
-		c.events.push(TurnEnd{Claim: c.claim})
+		c.events.push(TurnEnd{Claim: c.claim, AwaitingAsyncWork: frame.AwaitingAsyncWork})
 	case shimwire.PromptResult:
 		if delivery := promptDelivery(frame.ID); delivery != "" {
 			c.events.push(PromptResult{

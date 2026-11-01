@@ -15,15 +15,18 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// noticeExceptionSubjects is where the Envoy listener reports a role-lane forward it could not
-// complete: notifications.envoy.exceptions.<the original role topic>
-// (packages/envoy/cmd/listener/delivery.go, publishDeliveryException). A role topic is outside the
-// notification stream, so the report goes over core NATS and reaches only a subscriber connected
-// when it is sent.
+// noticeExceptionSubjects is where the Envoy listener reports a role message it could not deliver:
+// notifications.envoy.exceptions.<the original role topic>
+// (packages/envoy/cmd/listener/delivery.go, publishDeliveryException). It reports a role-lane
+// forward that failed, and a publish its confirmed route refused with its 404 because nobody holds
+// the role (`role_unheld`, packages/envoy/cmd/listener/confirmed.go, noHolder). A role topic is
+// outside the notification stream, so the report goes over core NATS and reaches only a subscriber
+// connected when it is sent.
 const noticeExceptionSubjects = "notifications.envoy.exceptions." + notify.RoleTopicPrefix + "*"
 
 // The listener's liveness windows for a role holder (packages/envoy/internal/session): a session's
@@ -55,9 +58,10 @@ var noticeReholdDelays = [...]time.Duration{30 * time.Second, pluginHeartbeat, m
 // a notice.
 var errNoticeException = errors.New("malformed role-lane exception")
 
-// roleLaneException is the listener's report of one failed role-lane forward, the payload of its
-// exception envelope: the original envelope's topic, summary, payload and dedupe key, the session
-// the forward went to, and why it failed.
+// roleLaneException is the listener's report of one role message it could not deliver, the payload
+// of its exception envelope: the original envelope's topic, summary, payload and dedupe key, the
+// session the message was for (the forward's recipient, or the lapsed holder of a `role_unheld`
+// refusal; empty when the listener knew none), and why it was not delivered.
 type roleLaneException struct {
 	OriginalTopic    string `json:"original_topic"`
 	EventID          string `json:"event_id"`
@@ -85,13 +89,18 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 // role message on its role lane, which forwards it once and reports a failure on
 // noticeExceptionSubjects instead of answering it; a listener of the confirmed route answers the
 // publish itself, and the notice executor re-holds from that answer (notice). Both run one policy,
-// reholdNotice. The subscription stays while a deployment may run an earlier listener.
+// reholdNotice. The subscription also carries every report that is not such a notice to
+// wakeExceptionRole, the `role_unheld` report of a refused publish among them, so it stays whatever
+// listener a deployment runs.
 //
 // rehold reads the report: an envelope the listener itself sent, whose payload names a reason it
 // knows and a notice of this daemon's outbox to an architect of this project (exceptionNotice). A
 // report about another daemon's publish, another project, a role that is not an architect, or
-// anything but a notice changes nothing. The exception lane has no redelivery, so a report that
-// cannot be read is logged by the caller and dropped.
+// anything but a notice changes nothing. Nor does a notice's `role_unheld` report: the listener
+// sends it beside the 404 it answered the executor's publish with, and the executor holds the row
+// on that answer (notify.ErrNoHolder) until a session holds the role again, so a copy queued from
+// the report would reach the architect twice once it is back. The exception lane has no
+// redelivery, so a report that cannot be read is logged by the caller and dropped.
 func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	if r.supervisor == nil {
 		return errors.New("notice re-hold has no claim supervisor")
@@ -113,10 +122,16 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	}
 	reported, ok := r.exceptionNotice(exception)
 	if !ok {
-		return nil
+		// Not a notice of this daemon's to an architect. It may still be a report of a message
+		// that reached a worker's role topic and was not forwarded — this daemon's or a peer
+		// agent's — whose claim the idle suspend took the process from: that worker is resumed, so
+		// the sender's next attempt finds its role held (wakeExceptionRole).
+		return r.wakeExceptionRole(ctx, exception)
 	}
 	switch exception.Reason {
 	case "delivery_failed", "no_holder", "receipt_timeout":
+	case "role_unheld":
+		return nil
 	default:
 		return fmt.Errorf("%w: exception %s names reason %q", errNoticeException, envelope.EventID, exception.Reason)
 	}
@@ -223,6 +238,36 @@ func (r *outbox) reholdNotice(ctx context.Context, reported reportedNotice, reas
 			"issue", issue, "kind", notice.Kind, "topic", topic, "key", key, "reason", reason)
 	}
 	return nil
+}
+
+// issueWakeable says whether a worker of issue may be brought back for a message at all, read in
+// one transaction so the record it answers from is one state: the issue is recorded, it is still
+// in a phase of the workflow — a child parked in Dispatch, an issue closed or held is out of it,
+// whether or not the suspension its own stop will write has landed yet — and its tree neither
+// lingers nor has closed. A worker whose issue is out of the workflow is the workflow's to start,
+// never a message's, so a wake never races a stop that is still queued (role_wake.go).
+func (r *outbox) issueWakeable(ctx context.Context, issue string) (bool, error) {
+	wakeable := false
+	err := pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		recorded, err := r.records.Issue(ctx, tx, issue)
+		if err != nil || recorded == nil {
+			return err
+		}
+		switch recorded.Phase {
+		case phase.Done, phase.Held:
+			return nil
+		}
+		lingers, err := record.TreeLingers(ctx, r.records, tx, recorded.Tree)
+		if err != nil {
+			return err
+		}
+		wakeable = !lingers
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("read the issue %s: %w", issue, err)
+	}
+	return wakeable, nil
 }
 
 // issueTreeLingers says whether the tree of issue, as recorded, lingers or has closed. An issue

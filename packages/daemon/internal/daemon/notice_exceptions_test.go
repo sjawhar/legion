@@ -25,9 +25,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
-// laneReport is the listener's report of a failed role-lane forward, as
+// laneReport is the listener's report of a role message it could not deliver, as
 // packages/envoy/cmd/listener/delivery.go publishes it: an envoy envelope whose payload names the
-// original topic, summary, payload and dedupe key, the session the forward went to, and the reason.
+// original topic, summary, payload and dedupe key, the session the message was for, and the reason.
 type laneReport struct {
 	eventID, reason, topic, summary string
 	payload                         any
@@ -240,6 +240,47 @@ func TestAReportOfTheExecutorsOwnPublishIsQueuedAgain(t *testing.T) {
 	want := fmt.Sprintf(`LEGION-2 {"kind": "pr-blocked", "role": "architect", "reason": "max_fix_attempts", "resends": 1, "resend_of": %d}`, published)
 	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != want {
 		t.Fatalf("after a report of the publish %+v, queued %v; want %s", sent, got, want)
+	}
+}
+
+// A notice whose architect's role nobody holds is refused by the listener with its 404, and the
+// notice executor holds the row on that answer until a session holds the role again. The listener
+// also reports that refusal as role_unheld, and the report queues no copy: the held row is the one
+// delivery, and a copy beside it would reach the architect twice once it is back.
+func TestARoleUnheldReportOfAHeldNoticeQueuesNoCopy(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaimOn(t, sup, "LEGION-1", supervise.StateLaunching, "")
+	topic := architectTopic(t, "LEGION-1")
+	publisher := &holderPublisher{}
+	publisher.setAbsent(topic)
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion", now: time.Now}
+	notice := record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}
+	row := mustOutboxRow(t, "LEGION-2", notice, time.Now())
+	enqueueOutbox(t, pool, records, row)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("publish the notice: %v", err)
+	}
+	held := `LEGION-2 {"kind": "pr-blocked", "role": "architect", "reason": "max_fix_attempts"}`
+	if attempts, delivered := publisher.snapshot(); attempts != 1 || len(delivered) != 0 {
+		t.Fatalf("%d attempts, delivered %+v; want the one publish, refused", attempts, delivered)
+	}
+	var id int64
+	if err := pool.QueryRow(context.Background(), "select id from outbox where kind = 'notice'").Scan(&id); err != nil {
+		t.Fatalf("read the held row: %v", err)
+	}
+	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != held {
+		t.Fatalf("after the refusal, queued %v; want the notice held as %s", got, held)
+	}
+
+	report := laneReport{"evt-unheld", "role_unheld", topic, "pr-blocked on LEGION-2", notice, record.OutboxKey(id), ""}
+	if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
+		t.Fatalf("rehold the role_unheld report: %v", err)
+	}
+	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != held {
+		t.Fatalf("after the role_unheld report, queued %v; want the held notice alone, no copy", got)
 	}
 }
 
