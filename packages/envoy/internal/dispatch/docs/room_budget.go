@@ -729,6 +729,18 @@ func (b *roomBudget) reserve(ctx context.Context, deadline time.Time, room strin
 // charged are held by browsers or by nothing at all, and nothing will free them in time. Every
 // change to the budget wakes it to look again (unlock, swept). A budget no service built never
 // sweeps, so it answers at once.
+//
+// What the sweeps know of the browsers is the room states' (unusedLocked, onlyDepartedLocked),
+// and those lag the sockets by ygo's teardown: ygo takes a leaving peer out of its room, flushes
+// the room's pending updates to the store and only then reports the departure (sjawhar/ygo
+// v1.54.1-sami.3, provider/websocket/peer.go:517-663, OnLastPeer), which is what marks the room's
+// browsers departed (settleLastPeer). An admission that weighs the budget inside that window
+// finds every charged room held by a browser, nothing pending, and is refused at once though the
+// room it needs is already on its way out; its retry, which the transient close asks the editor
+// for (errRoomBudgetFull), meets the room pending and waits for it. Nothing the service can read
+// closes that window - ygo offers no peer count and no per-peer leave - so the drive that opens a
+// browser just after another left holds its socket until the report has landed
+// (cmd/dispatch, TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays).
 func (b *roomBudget) await(ctx context.Context, deadline time.Time, weight int64, fits func() bool) bool {
 	if fits() {
 		return true

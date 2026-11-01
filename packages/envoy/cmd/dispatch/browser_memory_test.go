@@ -1002,10 +1002,23 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 				break
 			}
 			// A browser that stayed leaves just before the next asks: that admission waits for the
-			// leaving browser's room to settle and be closed, and is admitted into it.
+			// leaving browser's room to settle and be closed, and is admitted into it. The server
+			// hears of a departure only when ygo reports it, which it does at the end of the
+			// peer's teardown - after it has taken the peer out of the room and flushed the room's
+			// pending updates to the store (sjawhar/ygo v1.54.1-sami.3,
+			// provider/websocket/peer.go:517-663) - and that report is what marks the room's
+			// browsers departed (settleLastPeer, departedPeers). A socket cannot observe that
+			// window from outside, and inside it the room still looks held by a live browser, so a
+			// sweep leaves nothing pending and refuses the admission at once (roomBudget.await):
+			// the drive therefore holds the next socket inside the server for a second, which is
+			// orders of magnitude past that report, measured at 1.6 to 2.7 ms. The hold costs the
+			// admission nothing of the room it waits for: while no admission waits on the budget
+			// and the charges are within its limit, nothing closes a room (Service.unlockState),
+			// so the room the browser left is still the budget's to close when the hold ends.
 			leaving := stayed[len(stayed)-1]
 			stayed = stayed[:len(stayed)-1]
 			left = append(left, leaving.room)
+			server.holdNextAdmission(t, fleet.copies[next], time.Second)
 			leaving.leave()
 			opened, refused := admit(t)
 			if refused != nil {
@@ -3438,6 +3451,22 @@ func (p *memoryServer) roomLive(t *testing.T, artifactID string) bool {
 		t.Fatalf("asking whether document %s is live: %d %.300s, want 200 and {live}", artifactID, answer.status, answer.body)
 	}
 	return *read.Live
+}
+
+// holdNextAdmission makes the server hold the next socket to the document for wait before it
+// weighs the room budget (docs.Service.HoldNextAdmissionForTest), so a drive can place an
+// admission after work of the server's own that the socket cannot observe. The hold is taken by
+// the next socket to that document and by no other.
+func (p *memoryServer) holdNextAdmission(t *testing.T, artifactID string, wait time.Duration) {
+	t.Helper()
+	body, err := json.Marshal(map[string]int64{"ms": wait.Milliseconds()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := p.send(t, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/_test/hold-admission", "application/json", strings.NewReader(string(body)), http.Header{"X-Dispatch-User": {"alice"}})
+	if answer.status != http.StatusNoContent {
+		t.Fatalf("holding the next socket to document %s for %s: %d %.300s, want 204", artifactID, wait, answer.status, answer.body)
+	}
 }
 
 // requireRoomAbsent fails the test unless the server says the document is not live (roomLive).

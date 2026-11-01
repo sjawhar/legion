@@ -723,6 +723,80 @@ func TestTheRoomBudgetAdmitsABrowserOnceTheRoomAnEditingBrowserLeftIsClosed(t *t
 	}
 }
 
+// An admission whose budget is short waits for the one room the sweep could close while a
+// Server.Apply is inside its callback on it: that close declines (closeUnused), since the apply
+// holds the room and holds nothing in the room's state that the sweep could see, and the room is
+// left pending rather than the admission refused. The apply's return is what reports its end
+// (roomApplied), and the sweep that follows closes the room and admits the admission.
+func TestTheRoomBudgetAdmissionWaitsForARoomAnApplyIsInside(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	service.measurer.interval = noInterval
+	ids := createDocuments(t, database, 2)
+	closable, admitted := ids[0], ids[1]
+	appendThroughAPI(t, service, closable)
+	waitFor(t, 10*time.Second, "the written room to settle and hold nothing", func() bool { return roomUnused(service, closable) })
+	service.measurer.waitIdle()
+
+	inside, release := make(chan struct{}), make(chan struct{})
+	var released sync.Once
+	t.Cleanup(func() { released.Do(func() { close(release) }) })
+	applied := make(chan error, 1)
+	go func() {
+		applied <- service.srv.Apply(ctx, closable, func(*crdt.Doc, func(func(*crdt.Transaction))) {
+			close(inside)
+			<-release
+		})
+	}()
+	select {
+	case <-inside:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the apply never reached its callback")
+	}
+	if !roomUnused(service, closable) {
+		t.Fatal("the room an apply is inside holds something in its state, so the sweep would leave it pending without the apply")
+	}
+	service.SetRoomBudgetForTest(budgetUsed(service))
+	t.Cleanup(func() { service.SetRoomBudgetForTest(0) })
+
+	type answer struct {
+		reservation *roomReservation
+		err         error
+	}
+	answered := make(chan answer, 1)
+	go func() {
+		reservation, err := service.reserveRoom(ctx, admitted)
+		answered <- answer{reservation, err}
+	}()
+	waitFor(t, 5*time.Second, "the admission to wait", func() bool { count, _ := waiting(&service.budget); return count == 1 })
+	select {
+	case got := <-answered:
+		t.Fatalf("the admission was answered %v (%v) while the apply held the only room the budget could close", got.reservation, got.err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if service.srv.GetDoc(closable) == nil {
+		t.Fatal("the budget closed the room an apply was inside")
+	}
+
+	released.Do(func() { close(release) })
+	if err := <-applied; err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		t.Fatalf("the apply holding the room answered %v", err)
+	}
+	select {
+	case got := <-answered:
+		if got.err != nil || got.reservation == nil {
+			t.Fatalf("the admission was answered %v (%v) once the apply holding the room returned, want it admitted", got.reservation, got.err)
+		}
+		service.budget.release(got.reservation)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the admission still waits after the apply that held the only closable room returned")
+	}
+	if service.srv.GetDoc(closable) != nil {
+		t.Fatal("the room the apply held is still open after the admission its close made room for")
+	}
+}
+
 // roomHasBrowser is whether room's state has a browser connected.
 func roomHasBrowser(service *Service, room string) bool {
 	state := service.lockExistingState(room)
