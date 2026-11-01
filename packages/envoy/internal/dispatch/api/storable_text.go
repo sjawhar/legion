@@ -12,7 +12,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -20,13 +19,13 @@ import (
 // so any statement given caller text holding either fails (text.Storable). The API's input layer
 // refuses such text before anything is written: a JSON body when it is decoded (decodeJSON, and the
 // two readers that read one themselves: an artifact upload's and a credential relay's), a multipart
-// upload's fields, its markdown file and a binary file part's Content-Type, every path and query
-// parameter, and the actor a document websocket's bearer names (the last two wrapped around every
-// route in Register). Each refusal is 400, NUL_CHARACTER or INVALID_UTF8, naming where the caller
-// wrote the character. A JSON body can only hold the first, since decoding writes each byte that is
-// not UTF-8 as U+FFFD. A browser's edit reaches a document past this layer: the document's update
-// decoder refuses text that is not UTF-8, and the text Dispatch takes from the document's tree
-// carries a U+0000 as U+FFFD (pmdoc's nulAsReplacement).
+// upload's fields, its markdown file and a binary file part's Content-Type, and every path and
+// query parameter (the last two wrapped around every route in Register). Each refusal is 400,
+// NUL_CHARACTER or INVALID_UTF8, naming where the caller wrote the character. A JSON body can only
+// hold the first, since decoding writes each byte that is not UTF-8 as U+FFFD. A browser's edit
+// reaches a document past this layer: the document's update decoder refuses text that is not
+// UTF-8, and the text Dispatch takes from the document's tree carries a U+0000 as U+FFFD (pmdoc's
+// nulAsReplacement).
 
 // unstorableText refuses value when it holds U+0000 or a byte that is not UTF-8, naming field and
 // where the first such character stands, counted from 1 in UTF-16 units as the caps count (len16).
@@ -179,18 +178,4 @@ func unstorableQuery(raw string) *apiError {
 		}
 	}
 	return nil
-}
-
-// refuseUnstorableActor serves a document websocket's handler only when the actor its bearer names
-// (docs.ActorHeader) holds no U+0000: the header is JSON, whose escape spells one past net/http's
-// check of the header itself, and the actor's id and origin are the author of every version the
-// connection's edits make.
-func (s *server) refuseUnstorableActor(handler http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if refusal := unstorableJSON(docs.ActorHeader, []byte(r.Header.Get(docs.ActorHeader))); refusal != nil {
-			s.writeHandlerError(w, r, refusal)
-			return
-		}
-		handler(w, r)
-	}
 }

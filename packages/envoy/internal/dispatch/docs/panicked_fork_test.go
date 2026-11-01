@@ -79,7 +79,7 @@ func TestAPanickedWriteLeavesNoForkForTheTransactionsLaterWrites(t *testing.T) {
 					t.Fatal("the suggestion left the write no rendering")
 				}
 
-				panicErr := service.applyLive(ctx, artifactID, reuseAgent, func(doc *crdt.Doc, _ *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
+				panicErr := service.applyLive(ctx, artifactID, reuseAgent, func(doc *crdt.Doc, _ pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
 					text := openingText(doc, target)
 					if text == nil {
 						return fmt.Errorf("no paragraph opens with %q", target)
