@@ -2,56 +2,70 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-594",
-  "completed": "2026-11-01T02:20:00Z",
-  "round": 16,
+  "completed": "2026-11-01T07:45:00Z",
+  "round": 17,
   "roundShape": {
-    "classification": "narrow, on the fix",
-    "tool": "dispatch://INFRA-598/artifact/round-shape-py version 3, re-fetched into this pod",
-    "output": "pull request 2446, base main / old head d44e1d62 / new head 15e39ed3 / files whose own diff differs: 7 — packages/envoy/.changes/unreleased/INFRA-594-serving-port-relay-refusals.yaml, packages/envoy/AGENTS.md, packages/envoy/cmd/listener/delivery.go, packages/envoy/cmd/listener/fanout_refusal_reports_test.go, packages/envoy/cmd/listener/session_relay_no_entry_refusal_test.go, scripts/e2e/envoy-session-delivery.sh and scripts/e2e/lib/session-delivery-order-compare.test.ts.",
-    "why": "One runtime file, delivery.go, and the live proof's own script; round 15's evidence stands for everything else, as the architect said, and both live runs were re-run here anyway because the script changed."
+    "classification": "full",
+    "tool": "dispatch://INFRA-598/artifact/round-shape-py version 3, re-fetched into this pod, run from 92d1681b as the architect asked",
+    "output": "pull request 2446, base main / old head 92d1681b -> 92d1681b05954553196439f96483b5eba384170a / new head 705f0032 -> 705f003217e87d21783eb919398c684e206f6349 / files whose own diff differs: 11 — packages/daemon/internal/claudebridge/bridge.go and bridge_test.go, packages/envoy/.changes/unreleased/INFRA-594-serving-port-relay-refusals.yaml, packages/envoy/AGENTS.md, packages/envoy/cmd/listener/delivery.go, session_relay.go, session_relay_core_window_refusal_test.go, session_relay_portless_refusal_test.go, session_relay_refusal_states_test.go, packages/pi-envoy/extensions/envoy.ts and envoy.test.ts.",
+    "why": "The relay's own judgement changed, and two forward merges land in runtime on the bridge and the plugin, so every criterion was driven again."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-derived the round's claim rather than read it: the new test run here and its control taken outside the shared workspace with delivery.go alone restored from 3a38540c, and then pushed one step further than the implementer's control goes — with the attempt assertion disabled, the old code is made to show the harm itself, the later message never reaching the port."
+    "how": "Both new tests run here and both fall with the pre-fix session_relay.go and delivery.go in an extraction outside the shared workspace; the invariants, the matrix and the merges' resolutions were read against the code and the tests themselves rather than taken from the round's summary."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Review round 7: a refusal of a session the fan-out could not resolve leaves no attempt record, so the relay of that session holds nothing once it registers again",
-      "surface": "The listener package's real stack (natsd with JetStream, the listener's fan-out and session relays, two serving ports, a bound durable), driven by the test the fix added",
-      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -count=1 -run TestAnUnreadableDeliveryModeToASessionWithNoEntryLeavesNoHoldForItsRelay ./cmd/listener; then -count=20",
-      "observed": "PASS 2.12s, and -count=20 ok 42.566s. The test is the whole case end to end: the session's entry is deleted, an unreadable-mode message is stored and fanned out, no attempt record is left, the session registers again on a serving port with a consumer start at or below that message, a later message is stored, and the relay pushes it to the port within 20 s with no 'session relay holds a message another path is pushing' line and exactly two delivery_failed exceptions — the fan-out's and the relay's.",
-      "headSha": "15e39ed3b8ba4f03a00a5d0cc76ac43800102979",
-      "negativeControl": "Two, both in a `git archive 15e39ed3` extraction under $TMPDIR with delivery.go alone restored from 3a38540c — nothing of mine touched the shared working copy. (1) As committed: FAIL at session_relay_no_entry_refusal_test.go:110, 'the fan-out recorded an attempt of ses_no_entry_relayed_e90a76c4… for a refusal whose resolution failed'. (2) The same tree with that attempt assertion disabled, so the run reaches the part that matters: FAIL at :147 after 20 s, 'the later message 5f352e10… never reached the port of ses_no_entry_relayed_5c3c4db2…: the unreadable-mode message before it is held under the attempt record the fan-out left'. That second control is mine and is the one that shows the harm rather than its marker: without the fix the session's later messages wait out attemptCacheTTL, five minutes."
+      "criterion": "Review round 8: no refusal record holds a relay, whatever the session's entry said when the fan-out wrote it",
+      "surface": "The listener package's real stack (natsd with JetStream, the fan-out, the session relays, serving ports and a bound durable), driven by the two tests the fix added",
+      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -count=1 -timeout 20m -run 'TestAnUnreadableDeliveryModeInACoreWindowLeavesNoHoldForItsRelay|TestARefusedMessageNeverHoldsTheRelayWhateverTheEntrySaid' ./cmd/listener; then -count=20 -timeout 35m",
+      "observed": "Both PASS (2.71s and 9.02s), the states test over all four of its rows — a serving-port session on consumer delivery, a portless one, one with no entry that registers again on its serving port, and one whose entry a consumer-error tick wrote on the core path. Twenty times running: ok 213.896s.",
+      "headSha": "705f003217e87d21783eb919398c684e206f6349",
+      "negativeControl": "In a `git archive 705f0032` extraction under $TMPDIR with session_relay.go and delivery.go alone restored from 92d1681b — nothing of mine touched the shared working copy — both fail, and fail where it matters: the core-window test at :148 after 20 s, 'the later message a39359a7… never reached the port of ses_core_window_relayed_d3954020…: the unreadable-mode message before it is held under the attempt record the fan-out left'; and the states test at :194, 'the later message 02a7961e… never reached the port of ses_refused_state_416f5da2…: the refused message before it is held', on the fourth row alone — the consumer-error tick on the core path — with its other three rows still passing. That is the reviewer's fourth state reproduced on the real stack, and the drive the architect asked for: the session falls back to core for one tick while its consumer stays, the refusal is recorded against the core-path entry, and the later message waits behind it; at this head it arrives."
     },
     {
-      "criterion": "The (no entry × unreadable mode) matrix row says what the code does",
-      "surface": "delivery.go's fan-out read against the row in fanout_refusal_reports_test.go",
-      "observed": "The code: `delivery, err := Resolve(...)`, `relayed := err == nil && delivery.Relayed`, then refusals decided before the take case — `if verdict != takeFollowedTopic { if relayed && target.Port > 0 { skip } ; fanoutRefusalOutcome(..., err == nil && !delivery.Relayed) }`. For a session with no entry: judgeFollowedTopic answers modeUnreadable with no entry to judge against, Resolve fails with ErrNoSessionRecord, so relayed is false, the serving-port skip is not taken (and cannot dereference the nil entry, since relayed requires err == nil), and the refusal is reported with recorded=false. The row says exactly that: wantException true, wantLog 'listener delivery mode cannot be read unambiguously', no wantAttempt. The neighbouring row, a session with no entry sent a mode it does not advertise, is taken rather than refused — a mode cannot be judged against an entry there is none of — and its resolution then fails, recording nothing, which is the row's wantLog 'listener delivery failed'.",
-      "headSha": "15e39ed3b8ba4f03a00a5d0cc76ac43800102979"
+      "criterion": "The two invariants the fix must keep",
+      "surface": "The same real stack",
+      "observed": "ONE REPORT, NOT TWO: the core-window test asserts the exception lane carries exactly one delivery_failed — the fan-out's — and the states test asserts a count its own row names, each reason a delivery_failed, so a second exception from the relay fails them; both pass. A HOLD STILL HAPPENS WHERE A PUSH IS REALLY IN FLIGHT: TestARelayHoldDelaysOnlyThatSession, which turns on an attempt record of a message the relay would push, still passes at this head (ok 3.571s) — the fix narrows the hold to that case rather than removing it. The code says the same: followedTopicVerdict now judges through judgeFollowedTopicWithoutAttempt, and the attempt record is read only on the push path (holdWhilePushedElsewhere).",
+      "headSha": "705f003217e87d21783eb919398c684e206f6349",
+      "negativeControl": "The hold test's own control from round 11, unchanged and still standing: one package-level mutex around holdWhilePushedElsewhere makes it fail, so its pass is not vacuous."
     },
     {
-      "criterion": "Both live runs pass at this head with the issue's order compared for real and the model key reaching the sessions alone",
+      "criterion": "The earlier rounds' tests are unmodified, and the matrix matches the code",
+      "surface": "Checksums against 92d1681b, and delivery.go read against the matrix",
+      "observed": "fanout_refusal_reports_test.go, session_relay_no_entry_refusal_test.go, session_relay_mode_stall_test.go and session_relay_hold_test.go are byte-identical to 92d1681b's. session_relay_portless_refusal_test.go changed in its comment alone, which now names the fan-out's `relayJudges := relayed && target.Port > 0` instead of the older expression; no assertion of it moved. The matrix against the code: the fan-out still leaves a refusal to the relay only where that relay judges it (a serving-port session's), records an attempt only where the resolution read the session and did not relay the message, and the relay now judges without the attempt record and acks a refusal the fan-out already reported — so each (session kind × verdict) cell has exactly one reporter and no cell leaves a record a relay reads back.",
+      "headSha": "705f003217e87d21783eb919398c684e206f6349"
+    },
+    {
+      "criterion": "The two forward merges keep both sides",
+      "surface": "The merged files read where the two sides meet, and the bridge's own suite",
+      "observed": "#2609 (pi-envoy cards): extensions/envoy.ts carries CardWake and CardAges from main beside this pull request's own frame wiring — handCard takes a DedupeIdentity, resolves it through replayLedgerIdentity and carries the frame on the message the host writes, which is this change's replay ledger, while the wake decides aside or steer, which is #2609's. #2571 (claudebridge): bridge.go keeps main's turn-stepping resolution (held prompts handled once a turn is over, the interrupt constant and crypto/rand gone), and the package builds and passes under the race detector here.",
+      "headSha": "705f003217e87d21783eb919398c684e206f6349",
+      "negativeControl": "CI's own lanes at this head are the independent reading: pi-envoy, envoy-plugin, claude-envoy and the daemon lanes are all green, listed below."
+    },
+    {
+      "criterion": "Both live runs pass at this head with the issue's order compared and the model key reaching the sessions alone",
       "surface": "Real Oh My Pi and real Claude Code under this checkout's bridge, natsd with JetStream, two listener processes, envoy-dispatch on Postgres 17 with pgvector, in the issue pod",
-      "command": "SESSION_DELIVERY_EVIDENCE_DIR=… bash scripts/e2e/envoy-session-delivery.sh; and the same with --disruptions a --resume-plugins-from f699b1316430 --second-followed-issue",
-      "observed": "Six windows: ENVOY SESSION DELIVERY: PASS, no '!' cell, and the order compared rather than claimed — `issue order compared in pi (12 comments): LDT1a6f-001Z@seq4:line17 LDT1a6f-002Z@seq5:line19 …`, the same twelve in cc, then the held line. Upgrade: PASS, `issue order compared in pi (2 comments): LDTa259-001Z@seq5:line19 LDTa259-002Z@seq6:line20` and the same two in cc, starting on pi-envoy 13.11.1 from f699b131 and resuming on this run's. The script read LEGION_TEST_PG_DSN from this pod's environment, whose login is legion_test.",
-      "headSha": "15e39ed3b8ba4f03a00a5d0cc76ac43800102979",
-      "negativeControl": "ANTHROPIC_API_KEY unset; the key read into a shell variable and grepped over both evidence trees and both outputs: 0 hits over 247 and 66,108 files. For the order comparison itself the controls are round 15's, which still hold: the old `.event` selectors fail INFRA-771's row, and a swapped pair of transcript lines makes compare_issue_order print an order break and set order_ok=0."
+      "command": "SESSION_DELIVERY_EVIDENCE_DIR=… bash scripts/e2e/envoy-session-delivery.sh; and the same with --disruptions a --resume-plugins-from c656fc4fb294 --second-followed-issue",
+      "observed": "Six windows: ENVOY SESSION DELIVERY: PASS, no '!' cell, and the order compared: `issue order compared in pi (12 comments): LDT5d75-001Z@seq4:line17 LDT5d75-002Z@seq5:line18 …`, the same twelve in cc. Upgrade: PASS, two comments each (`LDT2a18-001Z@seq5:line19 LDT2a18-002Z@seq6:line20`), starting on pi-envoy 13.13.0 from c656fc4f and resuming on this run's.",
+      "headSha": "705f003217e87d21783eb919398c684e206f6349",
+      "negativeControl": "ANTHROPIC_API_KEY unset; the key read into a shell variable and grepped over both evidence trees and both outputs: 0 hits over 248 and 66,228 files. The order comparison's own controls are round 15's and still hold."
     },
     {
-      "criterion": "The listener package is free of data races at this head",
-      "surface": "The listener package under the race detector, cgo enabled, one package at a time, against the pod's test Postgres",
-      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB CGO_ENABLED=1 DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" go test -race -p 1 -count=1 -timeout 40m ./cmd/listener",
-      "observed": "ok github.com/sjawhar/envoy/cmd/listener 687.099s, 0 occurrences of DATA RACE, output kept at $TMPDIR/infra594-tester/r16-race.out.",
-      "headSha": "15e39ed3b8ba4f03a00a5d0cc76ac43800102979",
-      "negativeControl": "The architect's 00:43Z rule applied before it was sent and checked again after: CGO_ENABLED=1 is set, so the run is a real race run rather than the '-race requires cgo' exit 2 that tests nothing, and -timeout 40m is set, so the default ten-minute package timeout cannot kill it and read as a failure. Every -race result I have reported on this issue carried both and ended 'ok', so none needs re-running."
+      "criterion": "The listener and the Claude Code bridge are free of data races at this head",
+      "surface": "Both packages under the race detector, cgo enabled, one package at a time",
+      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB CGO_ENABLED=1 DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" go test -race -p 1 -count=1 -timeout 40m ./cmd/listener; cd packages/daemon && GOMAXPROCS=4 GOMEMLIMIT=12GiB CGO_ENABLED=1 go test -race -p 1 -count=1 -timeout 20m ./internal/claudebridge/...",
+      "observed": "ok github.com/sjawhar/envoy/cmd/listener 772.200s and ok github.com/sjawhar/legion/daemon/internal/claudebridge 7.832s, 0 occurrences of DATA RACE in either; outputs kept at $TMPDIR/infra594-tester/r17-race.out and r17-bridge-race.out.",
+      "headSha": "705f003217e87d21783eb919398c684e206f6349",
+      "negativeControl": "CGO_ENABLED=1 on both, so neither is the '-race requires cgo' exit that tests nothing, and -timeout set on both, so the default ten-minute package timeout cannot kill a run and read as a failure."
     }
   ],
-  "memory": "Both heavy runs under the cap (-p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, -race one package, -timeout 40m). Sampled peak 2.61 GiB of 19 over 363 samples at two-second intervals, a floor rather than a true peak. Leftover check after proc://mem-sampler-r16/kill, by the ps form and judged by its lines: `ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|go test|bun test|envoy-session-delivery'` printed NO LINES.",
-  "ci": "Read on GitHub at the code head 92d1681b, never re-run, settled at 02:17Z: 33 success, 1 skipped (worker-image / attest), 4 cancelled (all pr-title, superseded by that workflow's own later run, which succeeded), nothing red and nothing pending. `ci-ok`, the condenser main's ruleset requires, is GREEN, and so are the other three required checks (test, lint, typecheck) and every lane named in earlier rounds: envoy-go, envoy-go-race and its api/docs/pmdoc lanes, envoy-client, envoy-infra-go, envoy-plugin, pi-envoy, pi-legion, pi-shared, claude-envoy, contracts, listener-server-change, envoy-session-stall, envoy-smoke, envoy-e2e-local, dispatch and its memory/multiprocess/browser lanes, broker-multiprocess, ci-filters, ci-images, docs / build and worker-image / build. The dispatch lane that failed in round 15 on a Playwright teardown is green here. NO LANE IS UNREAD this round. The queue took about three hours from the push to ci-ok.",
+  "memory": "Every Go run under the cap (-p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, -race one package at a time, -timeout always set). Sampled peak 2.55 GiB of 19 over 408 samples at two-second intervals, a floor rather than a true peak. Leftover check after proc://mem-sampler-r17/kill, by the ps form and judged by its lines: `ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|go test|bun test|envoy-session-delivery'` printed NO LINES.",
+  "ci": "Read on GitHub at the code head f8505ab8, never re-run, settled at 07:43Z: 33 success, 1 skipped (worker-image / attest), 3 cancelled (all pr-title, superseded by that workflow's own later run, which succeeded), nothing red and nothing pending. `ci-ok` is GREEN, with the other three required checks (test, lint, typecheck), and every lane named in earlier rounds: envoy-go, envoy-go-race and its api/docs/pmdoc lanes, envoy-client, envoy-infra-go, envoy-plugin, pi-envoy, pi-legion, pi-shared, claude-envoy, contracts, listener-server-change, envoy-session-stall, envoy-smoke, envoy-e2e-local, dispatch and its memory/multiprocess/browser lanes, broker-multiprocess, ci-filters, ci-images, docs / build and worker-image / build. NO LANE IS UNREAD. The pi-legion red the architect expected from main's timestamp assertion did not appear here: pi-legion is green at this head, so I re-ran no job. The queue took about three hours from the push to ci-ok.",
   "observations": [
-    "This pod's test Postgres login is legion_test and LEGION_TEST_PG_DSN is already set in the environment, so the live runs and the race run took it from there rather than naming a DSN of their own.",
+    "The pod was replaced between rounds 16 and 17, so this round's evidence directories are this pod's own; every measurement is quoted here as it was taken.",
     "Still true in this pod: GH_TOKEN and GITHUB_TOKEN are set in the environment, where `skill://legion-worker` says to leave them empty. Every gh call of mine this round was a read."
   ]
 }
