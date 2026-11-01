@@ -2,47 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-625",
-  "completed": "2026-11-01T08:02:00Z",
-  "round": 7,
+  "completed": "2026-11-01T12:35:00Z",
+  "round": 8,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Both of this round's claims re-driven here, not read: D3's new row fails at 66d570f5 and passes at this code head, run by me from a tree of my own making rather than from the implementer's report, and the streamed-turn row's new guard reds the shipped spec when the window is shut. The three engines are green but for one read of the page-parsed row at 1,008 ms in WebKit, which four immediate repeats did not reproduce (814, 569, 581, 547 ms). CI at the code head is unjudged, at run 41285902474."
+    "how": "Every number of this round's claim re-measured here rather than read. The reviewer's thirteen rows are among the rows that now wait, checked row by row against the reviewed file rather than by counting. The forced lag is reproduced in both directions with a seam of my own: the unfixed test file gives 35 pass and 16 fail at one task of lag and 34 pass and 17 fail at 120 ms, and the fixed file gives 51 pass and 0 fail at both. Twenty runs of MarkdownBody.test.tsx here are 51 pass, 0 fail each, and the package is 3,129 pass, 0 fail. CI at the code head is unjudged, at run 41304383884."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Review 5726728941 D3: a second load of the same room survives a failed earlier load - the new row failing at 66d570f5 and passing at the new head.",
-      "surface": "The Go document service's websocket load path, driven through a store whose Load panics, against the harness Postgres.",
-      "command": "cp -r packages/envoy $TMPDIR/d3-old/envoy, then for each of the eight files the fix touches (docs/livewrite.go, marks.go, mutation.go, service.go, stale_room.go, testhooks.go, websocket.go and pmdoc/find.go) `git show 66d570f5:<path>` over the copy, keeping this head's websocket_test.go; then go test ./internal/dispatch/docs -run TestALoadThatPanicsFailsItsRoomWhereThePanicIsMet -count=1 -v in that tree and in the workspace.",
-      "observed": "At 66d570f5 the row fails: subcase 'a caller whose context ended while the load ran' reports 'the panicking load left the room healthy, so nothing reloads the document' and 'the panicking load left its record behind, which no instance will take', while 'a caller still waiting for the load' passes there - at the old code that half is a wrong target rather than no answer, which needs a scheduling seam to show. At this code head (3c7c64c1) both subcases pass, 2.4 s. The row carries no seam the fix introduced, which is what made this pair possible at all: last round the equivalent row could not even compile against the older head.",
-      "headSha": "cb5943aacaab14691661dcb844cc104b8ab0470e",
-      "negativeControl": "The old tree is the control, and its failure names the two things the fix changed. The procedure keeps this head's test file against the old sources, so a row that silently needed new code would fail to build rather than pass."
+      "criterion": "The reviewer's thirteen rows (MarkdownBody.test.tsx :1212, :1235, :1268, :1310, :1353, :1383, :1420, :1425, :1477, :1558, :1622, :1637 and :1656 as they stood at c95e16651) are among the rows that now wait for the mark React commits.",
+      "surface": "The test file itself, compared between the reviewed head and this one.",
+      "command": "git show c95e16651:packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx against the working tree's copy, matching each flagged line to its racing read (the first `pendingMark(...)).toBeNull()` after the paint wait), then to that read in the fixed file by enclosing test name, and checking it is inside a `waitFor`.",
+      "observed": "All thirteen are covered, by twelve distinct racing reads - :1420 and :1425 are two waits in one row that share the single read at :1426 - and every one of the twelve is now `await waitFor(() => expect(pendingMark(...)).toBeNull())`: :1213 to :1221, :1241 to :1249 (the line that reddened CI), :1270 to :1278, :1312 to :1320, :1354 to :1362, :1384 to :1392, :1426 to :1434, :1479 to :1487, :1559 to :1567, :1624 to :1632, :1638 to :1646, :1660 to :1668. The two reads left synchronous inside those same rows are `toBe(\"true\")` assertions, not the flagged ones - the mark has been true continuously since a commit already flushed - which is the classification the implementer recorded.",
+      "headSha": "ba21cdd7678d341f1e3724c0bee5d809e1d2ee03",
+      "negativeControl": "The check reads the reviewed file for the flagged lines rather than trusting the new one: a row that had been renumbered away, or a read left synchronous, shows as a test whose racing read is not inside a wait. Two rows did read that way on a first, coarser pass (counting every pendingMark read in the row), and looking at them is what showed the unwaited reads are the deliberate `toBe(\"true\")` ones."
     },
     {
-      "criterion": "Review 5726728941: the streamed-turn row's guard can now fail, so a green run of that row means the fix held while the race was live rather than that the race never happened.",
-      "surface": "The shipped spec, packages/dispatch/e2e/heavy-streamed-turn.e2e.ts, against the real server in Chromium - not a copy of it.",
-      "command": "DISPATCH_STREAM_PROBE_PARAGRAPHS=2 bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts heavy-streamed-turn.e2e.ts --project=chromium --retries=0 (the frame cadence left at its default, as the implementer advised: sixty frames at a slower one reach the row's timeout before the guard fires)",
-      "observed": "The row reds with the guard's own words: 'no paint of this turn ran across tasks, so this row measured none of the window it is about: no batch landed in a body already holding blocks in 60 recorded samples, at 2 paragraphs and 80 ms a frame'. At the defaults the same row passes in all three engines and reports the window open each time: Chromium 107 samples, 39 a batch landing in a part-built body, 36 of those with a frame published inside that paint; WebKit 75, 22 and 22; Firefox 166, 96 and 87.",
-      "headSha": "cb5943aacaab14691661dcb844cc104b8ab0470e",
-      "negativeControl": "The shut window is the control, and it is the guard's whole purpose: before this round the row's frame-text guard could not fail, so a green row and a row that never opened the window read alike."
+      "criterion": "The forced lag the implementer used is real and reproducible by someone else, and it separates the unfixed rows from the fixed ones.",
+      "surface": "A scratch copy of packages/dispatch under $TMPDIR with a seam in useRenderedMarkdown.tsx: `finish()`'s `setIsPending` and both `setIsFallback` flips deferred together by `PROBE_LAG_MS`, so the commit the real code keeps whole is never split.",
+      "command": "cp -r packages/dispatch $TMPDIR/lag, symlink the root node_modules, apply the seam, then `PROBE_LAG_MS=<0|120> bun test web/src/features/refs/MarkdownBody.test.tsx` with the reviewed file (git show c95e16651:…) and with this head's file.",
+      "observed": "Unfixed file: 35 pass, 16 fail at one task of lag; 34 pass, 17 fail at 120 ms. Fixed file: 51 pass, 0 fail at both. The sixteen reds at one task are every one of the twelve rows the reviewer flagged, by name, plus four the same rule catches - 'raw unsupported HTML renders as literal text with no element created', 'parses nothing on the page when the deadline passes for a body its reader left', 'answers the surface still mounted when another drops the same body first' and 'paints a body whose answer already landed, without asking the worker again'. At 120 ms a fifth joins them, 'repaints for a new decision card without sending the body a second time'. So the fix covers the class, not the one line CI happened to catch.",
+      "headSha": "ba21cdd7678d341f1e3724c0bee5d809e1d2ee03",
+      "negativeControl": "The unfixed file under the same seam is the control, and the seam's faithfulness is its own: deferring the pending clear and the fallback flip together leaves the row that reads the fallback mark after a pending wait green, which is the evidence for leaving that one synchronous. A seam that split the two commits would have reddened it and overstated the fix."
     },
     {
-      "criterion": "The heavy rows in the three engines at the code head, the write row and its ratio among them.",
-      "surface": "The Conversation tab, the Inbox's ask card, a hover card and the live session view in Chromium, WebKit and Firefox against the real server, plus the API's document write.",
-      "command": "for p in chromium webkit firefox; do bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts heavy-bodies.e2e.ts heavy-streamed-turn.e2e.ts heavy-document-writes.e2e.ts --project=$p --retries=0 --reporter=json; done",
-      "observed": "Chromium 19 passed; Firefox 15 passed and 3 skipped; WebKit 17 passed and 1 failed - the page-parsed row '49 list markers on one line then blank lines, just under the worker's threshold' at 1,008 ms against the 1,000 ms gap bound, 8 ms over. Four immediate repeats of that row in WebKit on the same build did not reproduce it: 814, 569, 581, 547 ms. Every other gap in the sweep is 67-613 ms. The write row, now Chromium only (it drives no browser, so the other two projects were re-measuring one Go path and making its 'first write in a fresh server' annotation false): 8,000 items 616 ms whole against 318 at half (1.93x), brackets 757 against 371 (2.04x), 49 markers 818 against 398 (2.06x), every body under the absolute bound and every ratio well under 3.5x.",
-      "headSha": "cb5943aacaab14691661dcb844cc104b8ab0470e",
-      "negativeControl": "The write row's four refused bodies each answered 400 INVALID_MARKDOWN, and the suite's worker-refusal row still ends with 8,000 li and neither marker after every markdown-parse.worker request is aborted."
+      "criterion": "The row that reddened CI's dispatch lane is quiet on repetition, and the package is green.",
+      "surface": "The markdown render path's unit surface in this workspace, at the code head.",
+      "command": "cd packages/dispatch && for n in $(seq 1 20); do bun test web/src/features/refs/MarkdownBody.test.tsx; done; bun run test",
+      "observed": "Twenty runs, 51 pass and 0 fail in every one, no run with a failure. The package once: 3,129 pass, 0 fail, 14,343 expect() calls across 214 files in 128 s - the same count CI's attempt 2 reported green.",
+      "headSha": "ba21cdd7678d341f1e3724c0bee5d809e1d2ee03",
+      "negativeControl": "Repetition alone proves little against a load-dependent race, which is why the forced lag above is the real control: the unfixed file is green in twenty isolated runs here too, and only the seam separates the two files."
     }
   ],
   "ciRead": [
-    "The code head's run is 41285902474 at 3c7c64c1, created 07:43Z and read at 08:01Z: only changes and pr-title exist, both queued, with five earlier pr-title runs cancelled by the pushes before it. So the dispatch lane, the required checks and dispatch-memory are unjudged at this head, with that run id. The run at e8424298 was cancelled when this head superseded it.",
-    "This is the fourth round running in which no lane of a code head settled while a tester round ran. Nothing in this branch's own history suggests the branch is the cause: the lanes are queued, not failing, and the pattern has held across four different heads and three pods."
+    "The code head is 61506401 and its run is 41304383884, read at 12:30Z: pr-title green, every other lane queued - the dispatch lane, dispatch-memory, lint, typecheck and test among them. So the dispatch lane is unjudged at this head, with that run id.",
+    "The last settled run of this branch is 41288413692 at a7c72b55, and it is the evidence this round's change was written against: attempt 1 red in the dispatch lane's unit tests, '(fail) A long body parsed in the worker > rebuilds a body holding a picture, which its own parser writes a null title for', 1 fail of 3,129; attempt 2 green, 1,512 passed and 34 skipped. That run also carried dispatch-memory green at a code head for the first time, with the four-column table at 220 MiB against the 256 MiB bound and the rest 112-217."
   ],
   "observations": [
-    "The one red read in this round is the page-parsed row in WebKit, 1,008 ms against 1,000, inside the three-spec sweep; four repeats of it alone on the same build gave 814, 569, 581 and 547 ms. That row has been the margin all along and it is a node measurement: in round 5 the same row in Firefox was over the bound in 2 of 4 reads at the head and in 4 of 4 at the pre-fix head 94f1caba, so this head is the better of the two on the row that reds. Its verdict belongs to CI's own runners, where the reviewer already requires the Firefox output to pass before approval; on this evidence the WebKit output deserves the same read.",
-    "The streamed-turn row's sample counts differ sharply by engine at the same settings - Chromium 39 part-built batches, WebKit 22, Firefox 96 - so the window the row needs is widest in Firefox and narrowest in WebKit. If it ever goes quiet on a faster runner, WebKit is where it will happen first, and the knob to raise is DISPATCH_STREAM_PROBE_PARAGRAPHS.",
-    "D3's pair was driven before my phase opened, on a quiet pod, with nothing of the implementer's running; the three-engine sweep and the repeats were taken the same way."
+    "The lag matrix differs from the implementer's by one row at 120 ms (I read 34 pass / 17 fail where they read 36 / 15), and the extra red there is 'repaints for a new decision card without sending the body a second time'. Both runs agree exactly at one task of lag, which is the figure the fix was judged on, and both agree the fixed file is 51 / 0 at either lag. A two-core pod under different load will move which rows a longer lag catches; it does not move which rows the class covers.",
+    "This round changed one test file and nothing else, so the browser rows, the write row and the Go rows of round 7 stand as measured there; I did not re-run them, and the architect's instruction for this round was the pending-mark fix only."
   ]
 }
