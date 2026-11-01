@@ -2,30 +2,30 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-625",
-  "completed": "2026-10-31T16:58:00Z",
-  "round": 3,
-  "reviewedCodeHead": "fbf0819bb529cf86b32f6fb02e64a7e4c855762a",
+  "completed": "2026-11-01T06:30:00Z",
+  "round": 4,
+  "reviewedCodeHead": "66d570f51739c269f6178ee575e292d157688621",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 3,
+  "important": 1,
   "minor": 6,
-  "ciRead": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. CI head fbf0819b (run 41214456937) at 16:56Z: lint, typecheck, pr-title success; test, dispatch-memory in progress; dispatch (the Playwright suite with the write row and Firefox's page-parsed row) still queued. Compare fbf0819b...1612321c: handoffsOnly true, 2 files. A request for changes does not wait on CI; the dispatch lane's write-row ratio and Firefox page-parsed row are read at the next code head.",
-  "thermonuclear": "Both run once at fbf0819b: deep-review CHANGES (1 high, 1 medium, 3 minor), code-quality CHANGES (2 important, 4 minor). Both reproduced the fresh-mount mixed body independently in scratch bun tests.",
-  "roundTwoFindings": "All eight hold except: the mid-paint fix holds only for an element that already shows a paint (fresh mount regressed, H1); the item-cap message format is still written three times. Accepted threads: PRRT_kwDORFy7ds6yA3eI, PRRT_kwDORFy7ds6yOKfB, PRRT_kwDORFy7ds6yOKfD, PRRT_kwDORFy7ds6yOKfF, PRRT_kwDORFy7ds6yOKfG, PRRT_kwDORFy7ds6yOKfK. Standing: PRRT_kwDORFy7ds6yOKe_ (mid-paint, fresh mount), PRRT_kwDORFy7ds6yOKfJ (item cap: message format, load blamed by room name).",
-  "architectChecks": [
-    "The shipped write row warms the 49-marker shape before it times the pair (row carries warm: true; the loop writes it once first), so the tester's unwarmed 3.96x/3.77x pairs were not the shipped setup. The CI ratio is still to be read.",
-    "Firefox's page-parsed row is not yet read in CI: the dispatch lane was queued.",
-    "Not proven / risk now says the mid-paint fix is proven by its unit row alone (written by the reviewer in the PR body), and carries the tester's base/head write numbers in place of the '1 in 5 for base as well as head' claim, and the Firefox margin."
+  "ciRead": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. Run 41277300426 at 66d570f5 (the commit the branch holds; run 41275754608 on the dropped c25b344b was cancelled and does not count): at 06:2xZ 2 jobs done, 27 queued, dispatch, dispatch-memory, lint and test among them. Compare 66d570f5...58fe2f68: handoffsOnly true. A request for changes does not wait on CI.",
+  "thermonuclear": "Both run once at 66d570f5: deep-review CHANGES (1 medium, 1 minor), code-quality CHANGES (1 medium, 6 low/nit). Both reproduced the residual D3 race independently against a test Postgres with one scratch seam before applyRoom's loadsBegun read.",
+  "roundThreeFindings": "H1 holds (useRenderedMarkdown.tsx:467, running flag; the fresh-mount row fails on b5f010eb's code with 2,793 characters of loose text). M1 holds (kept waiters; expire/giveUp/dropAbandoned check anyoneIsWaiting; row fails on pre-fix code); its doc overstated and I fixed it. D3 stands in part: refusals now fail their own load on the load's goroutine, and ErrServerShutdown/ErrInvalidRoomName/ErrTooManyRooms and errors from a mutate that ran are filtered; but applyRoom/failUnfinishedLoad still find the load by room name after Apply returns, and the after/number numbering matches the next load when the failing load's record was already dropped (after=0) or when a waiter joined a load that then panicked. Minors: restore row, write-row spec split and docblock, keepAPostedParse doc, one cap formatter, stale comments - all hold.",
+  "mergesChecked": "ca076c5d keeps main's two-phase load (takeLoadedState/applyLoadedState, LoadDoc returning nil data) and this PR's header check; a9f93ce9 imports only; 66d570f5 takes main's accept/edit/mark signatures plus this PR's backs argument and main's flattenedTextSize. Nothing of either side lost or applied twice.",
+  "proseFixedByReviewer": [
+    "worker-queue.ts wait() doc and packages/dispatch/AGENTS.md:548: a kept place does take a page-parse answer when a live waiter shares the key; only a job that kept places alone wait on runs no page parse.",
+    "INFRA-625-one-word-edit-allocates-less.yaml: dropped the quote-finder clause, which is main's #2522 (its own fragment records it).",
+    "pmdoc/find.go buildFlattenedText comment credits sjawhar/legion#2522, not #2519.",
+    "MarkdownBody.test.tsx:1464: about 2,800 characters, not 20,000."
   ],
   "keyFindings": [
-    {"severity": "important", "file": "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx", "description": "H1: painted.current is set only in done(), and a new frame no longer stops a paint, so on a fresh mount a frame that arrives during the first sliced paint writes its raw markdown while the paint keeps attaching batches: raw text followed by 368 of 868 paragraphs, pending until the next answer (both reviewers reproduced; 94f1caba shows text only). The live view opened mid-stream is the trigger."},
-    {"severity": "important", "file": "packages/dispatch/web/src/features/refs/worker-queue.ts", "description": "M1: a kept waiter (keepIfPosted) after unmount or after a newer frame painted makes expire() settle with withoutTheWorker = parseOnThePage, a synchronous page-thread parse of a body nobody shows (reproduced with setParseDeadline(50): 1 request, page parse, cached). Settle kept waiters only with a real answer."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/websocket.go", "description": "failUnfinishedLoad finds the failed load by room name after Apply returns; ygo removes the placeholder before waiters wake, so a newer load's record can be failed and deleted by an older waiter, and ErrServerShutdown/ErrUpdateTooLarge also reach it. Fail the load on its own goroutine (onLoadDocument's refusal, CompareAndDelete its own record) or in the ygo fork."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/persistence.go", "description": "The cap message format is written at :887, :907 and websocket_test.go:320."},
-    {"severity": "minor", "file": "packages/dispatch/web/src/features/refs/MarkdownBody.tsx", "description": "The restore path in paintBlockInSlices (:246-261) has no row: answer frame N+1 during N's paint and assert none-or-all of the previous body."},
-    {"severity": "minor", "file": "packages/dispatch/e2e/heavy-bodies.e2e.ts", "description": "Docblock says 'server otherwise idle' though the reconciliation of the >2,000-block bodies is not drained, and says the body is the first write of its shape, wrong for the warmed 49-marker row; the file grew to 1,058 lines, move the write row out."},
-    {"severity": "minor", "file": "packages/dispatch/web/src/features/refs/markdown-engine.ts", "description": "keepAPostedParse's doc says a streaming surface asks for it; every useRenderedMarkdown element does. packages/dispatch/AGENTS.md:546 does not describe the kept answer or the pending marker through an older frame's paint."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/stale_room.go", "description": "stale_room.go:167-169 and pending_authors.go:221-222 say a roomLoads entry goes only with its document; failRoomLoad now deletes it."},
-    {"severity": "minor", "file": "(PR body)", "description": "Fixed by the reviewer: Not proven / risk carried a write-row claim the tester's measurement contradicts and did not say the mid-paint fix has only its unit row; Look at first updated."}
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/websocket.go", "description": "Residual D3: applyRoom/failUnfinishedLoad still blame a load found by room name after Apply returns; names() matches load.after == waited.after, so a caller whose load's record was already CompareAndDeleted (after=0 for the next) or that joined a load that panicked can fail the next load's room and drop its record. Both reviewers reproduced it. The only failure left for this machinery is a LoadDoc panic (LoadDoc hands ygo nil data): recover it inside LoadDoc and failRoomLoad on the load's own goroutine, then delete applyRoom's failure branch, failUnfinishedLoad, roomLoadWaitedOn, roomLoadNumber, loadsBegun, number/after and the test hook; the ten call sites go back to s.srv.Apply."},
+    {"severity": "minor", "file": "packages/envoy/.changes/unreleased/INFRA-625-one-word-edit-allocates-less.yaml", "description": "'about a third less' was measured against a base #2522 has since changed; re-measure against main or drop the figure."},
+    {"severity": "minor", "file": "packages/dispatch/e2e/heavy-document-writes.e2e.ts", "description": "The spec drives no browser but runs in three projects against one server, so the 'first write of its shape in the server process' sentence and annotation are false in the second and third; run it in one project."},
+    {"severity": "minor", "file": "packages/dispatch/e2e/heavy-bodies.e2e.ts", "description": "The sawAFrameText guard always passes (every fresh mount shows the first frame's text before any paint); and the file is 1,059 lines again with the live-view row; move that row to its own spec."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/refs/worker-queue.ts", "description": "Doc said a kept place is left unanswered by a deadline; fixed by the reviewer. The two-predicate shape (kept flag plus waiters.length) is the quality review's optional simplification."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/find.go", "description": "Credited main's #2522 work to #2519; fixed by the reviewer."},
+    {"severity": "minor", "file": "(PR body)", "description": "Not proven / risk lacked the residual D3 window; Look at first and Thermo overstated; fixed by the reviewer in the body."}
   ]
 }
