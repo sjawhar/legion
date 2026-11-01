@@ -211,11 +211,10 @@ type RequestStop struct{ Claim claim.Token }
 type RequestTreeClose struct{ Claim claim.Token }
 
 // RequestIssueClose is the workflow closing a child issue as done (workflow's leave): the claim
-// ends as a tree close ends it, and drops the session it recorded, since the issue is finished
-// and the pod that session lived on goes with the close (record.IssueSuspend). It is not a lost
-// workspace: nothing is recovered, and the issue's next run, should a person set it todo again,
-// starts fresh on a pod and a disk of its own. Like the tree's close it is the workflow's own
-// decision and is not put to TreeClosable.
+// ends as a tree close ends it, retaining its session id as volume-reap evidence while clearing its
+// resume path. It is not a lost workspace: nothing is recovered, and the issue's next run, should
+// a person set it todo again, starts fresh on a pod and a disk of its own. Like the tree's close it
+// is the workflow's own decision and is not put to TreeClosable.
 type RequestIssueClose struct{ Claim claim.Token }
 
 // RequestOperatorClose is the operator closing a tree through the API, through its root claim; the
@@ -637,9 +636,9 @@ func fillTable(t *builder) {
 	t.row(onTreeClose, "the workflow's close of the tree: release the claim and retire it", treeClose, []ClaimState{StateRetired}, stoppable...)
 	t.row(onTreeClose, "already retired", nothingToDo, nil, StateRetired)
 
-	t.row(onIssueClose, "the workflow's close of the issue as done: release the claim, drop its session and retire it", issueClose,
+	t.row(onIssueClose, "the workflow's close of the issue as done: release the claim, retain its session id as volume-reap evidence, clear its resume path, and retire it", issueClose,
 		[]ClaimState{StateRetired}, stoppable...)
-	t.row(onIssueClose, "already retired: the session it kept goes with the issue", issueCloseRetired, nil, StateRetired)
+	t.row(onIssueClose, "already retired: retain the session id and clear its resume path", issueCloseRetired, nil, StateRetired)
 
 	t.row(onOperatorClose, "the operator's close of the tree, if no workflow issue backs it", operatorClose, []ClaimState{StateRetired}, stoppable...)
 	// A close of a tree already retired is the outcome the operator asked for, so it answers as
@@ -1284,28 +1283,26 @@ func treeClose(m *Machine, ctx context.Context, _ Event) error { return m.end(ct
 // disk it owns go with the separately fenced IssueSuspend, or with the tree cleanup once every
 // claim of the tree has retired. That is why a merged close leaves the implementer's pod standing:
 // its five siblings take this close and no IssueSuspend is queued (workflow/linger.go). The claim
-// ends as a tree close ends it, and the session it recorded goes first — the session is a row in
-// the session database rather than a file on any disk, so what is dropped is the record of which
-// session this claim held. Nothing of the workspace is recovered, and a later start of the issue,
-// re-entered by a person's todo, is a fresh spawn on a pod and a disk of its own. A release that
-// fails changes nothing, so the close can be asked again.
+// keeps its session id as the reaping guard's evidence but clears its resume path because the
+// volume is gone. Nothing of the workspace is recovered, and a later start of the issue, re-entered
+// by a person's todo, is a fresh spawn on a pod and a disk of its own. A release that fails changes
+// nothing, so the close can be asked again.
 func issueClose(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.release(ctx); err != nil {
 		return err
 	}
-	m.forgetSession()
+	m.clearIssueResumePath()
 	return m.retire(ctx)
 }
 
 // issueCloseRetired is the issue's close reaching a claim already retired (a tree's close retired it
-// with its session kept): the issue is finished, so the session goes with it — a later start of the
-// issue, re-entered by a person's todo, is a fresh one — and a claim recording none is left as it
-// is.
+// with its session kept): the issue is finished, so its resume path goes with the volume while the
+// session id remains as reaping evidence. Once its resume path is gone, it is left as it is.
 func issueCloseRetired(m *Machine, ctx context.Context, _ Event) error {
-	if m.claim.Session == "" && m.claim.SessionFile == "" {
+	if m.claim.SessionFile == "" {
 		return nil
 	}
-	m.forgetSession()
+	m.clearIssueResumePath()
 	return m.persist(ctx)
 }
 
@@ -1321,6 +1318,12 @@ func forgetSession(m *Machine, ctx context.Context, ev Event) error {
 	}
 	m.forgetSession()
 	return m.persist(ctx)
+}
+
+// clearIssueResumePath leaves the session id as the reaping guard's durable evidence but clears its
+// resume path, so a later admission starts fresh once the volume is gone.
+func (m *Machine) clearIssueResumePath() {
+	m.claim.SessionFile = ""
 }
 
 // operatorClose is the operator's own close, asked of a claim through the API. TreeClosable is

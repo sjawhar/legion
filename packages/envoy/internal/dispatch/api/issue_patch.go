@@ -534,7 +534,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		// flush to every process and the waits on other writers included: a keystroke that waited
 		// on that lock reaches the gate only after the commit, and was made while the issue was
 		// still open however long the transaction ran. The second write of closed_at fires
-		// migration 0151's trigger again, whose notification Postgres folds into the first (same
+		// migration 0158's trigger again, whose notification Postgres folds into the first (same
 		// channel, same payload, one transaction). The events appended above carry the first
 		// stamp; the response carries this one, the stored value.
 		if err := tx.QueryRow(r.Context(), `
@@ -549,7 +549,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A change of closed_at reaches the document rooms of every process, this one's included, from
-	// the commit itself: migration 0151's trigger notifies, and each process closes its rooms of
+	// the commit itself: migration 0158's trigger notifies, and each process closes its rooms of
 	// the issue's documents so their browsers reconnect with the scope the issue now allows.
 	s.publish(events...)
 	if closing {

@@ -24,13 +24,14 @@ and URL, signed with the session's key, used once, and valid only within
 `BROKER_PROOF_SKEW_SECONDS` of the broker's clock. There is no bearer token for a session to leak.
 
 A **launcher** is the program that enrolls sessions: `agent-secrets-helper`, a per-user daemon on
-a machine, for that machine's sessions, or the Legion daemon for the pods it runs. An enrollment
-has one of two kinds:
+a machine, for that machine's sessions, the Legion daemon for the pods it runs, or a Google Compute
+Engine VM for itself. An enrollment has one of three kinds:
 
 | Kind | What it is | Who holds its key | Who enrolls it |
 | --- | --- | --- | --- |
 | `session` | An agent session on a machine a person logged in: running directly on the machine, or in a container on it (a **box**). | For a session on the machine, the machine's helper, in memory; for a box, the container, in `key.pem` under `AGENT_SECRETS_KEY_DIR`. | The machine's helper: when the session registers with `agent-secrets register`, or, for a box, when whoever starts the container runs `agent-secrets enroll --helper` ([run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/)). |
 | `pod` | A Legion worker pod in Kubernetes. | The pod, in its key directory. | The Legion daemon, which proves the pod with a projected service-account token the broker verifies against `BROKER_K8S_OIDC_ISSUER`. |
+| `vm` | A Google Compute Engine VM of a fleet `BROKER_VM_SERVICES` binds to a service. | The VM, in `key.pem` under its key directory. | The VM itself, with `agent-secrets enroll --vm`: it logs in with the identity token its metadata server signs for its service account (no person approves it), and proves itself with the same token. The enrollment is keyed by `<account>@<project>/<zone>/<instance id>`, since an instance id is unique only within a project and a zone, so each VM of a fleet that shares one account holds a login and an enrollment of its own. |
 
 An enrollment is leased for `BROKER_LEASE_SECONDS` and renewed while its session runs: the helper
 renews the sessions it registered, `agent-secrets renew` renews a box, and Legion's pod shim renews
@@ -49,8 +50,19 @@ current-image pod: a copied token used to renew before the pod's own first renew
 That is seconds while the Legion daemon holds an approved machine login, but after a daemon restart
 its pods enroll only once a person approves the daemon's new login, and a pod that ends before it
 enrolls never renews with its token, so its UID stays open as an old-image pod's does. A grant lasts
-until its session ends, so a copy that keeps renewing keeps the grant one approval gave it. An
-enrollment has **ended** once its launcher revokes it (the helper does
+until its session ends, so a copy that keeps renewing keeps the grant one approval gave it.
+
+A `vm` enrollment renews with `agent-secrets renew --vm`, or by running `agent-secrets enroll --vm`
+again over the same key directory. Every renewal of it carries the VM's current identity token,
+which must name the VM and account the enrollment was made for (`VM_IDENTITY_MISMATCH`, or
+`VM_TOKEN_EXPIRED`); a renewal with no token is refused `VM_TOKEN_REQUIRED`. So a copy of a VM's
+key renews nothing off the VM, since only that VM can fetch its tokens. A VM its fleet's settings
+no longer allow, after its account was dropped or its project or instance-name glob changed, has
+no identity from then on: every call it makes is refused as an ended session's is, so it gets no
+secret, releases no grant it holds, opens no request and renews nothing, and a person's approval of
+a request it left pending grants nothing. Its enrollment then ends with its lease.
+
+An enrollment has **ended** once its launcher revokes it (the helper does
 as soon as a registered session's process exits), whoever may revoke its machine login revokes that
 login
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)), or its
@@ -58,7 +70,12 @@ lease lapses. A `pod` enrollment's launcher is the one machine login that made i
 even another login of the same service, such as the Legion daemon's after a restart or after its
 login reached its expiry and it logged in again, is refused
 `NOT_ENROLLING_CREDENTIAL`, and that pod's enrollment ends with its lease or with that machine
-login. From the moment the lease lapses, its next renewal is refused
+login. A `vm` enrollment is ended by no launcher at all (`VM_ENDS_BY_LOGIN_REVOKE`): a VM's machine
+login moves to whoever last logged in with that VM's token, so it is ended by revoking that login
+or by its lease. Revoking it does not revoke the VM's identity token: someone holding a copy of the
+token logs in again with it within its hour, under a new login, and enrolls a key of their own;
+only taking the VM out of its fleet's settings ends that before the token expires
+([a copied VM token](/legion/broker/operate/#a-copied-vm-token)). From the moment the lease lapses, its next renewal is refused
 `ENROLLMENT_NOT_LIVE`; other session calls remain `PROOF_INVALID`. The broker's sweep, which runs
 every `BROKER_SWEEP_SECONDS`, then ends the enrollment on its first run after the lapse. Ending an
 enrollment any of these ways revokes every grant it held and cancels every request it still had
@@ -182,7 +199,7 @@ marked with tags or annotations:
   `projects/<number>/secrets/agent-secrets-deel-api-key`, is `DEEL_API_KEY`. It is lowercase
   letters, digits and single hyphens, starting with a letter.
 - **`owner`** is `shared`, a person's email in lowercase, the email they sign in to Dispatch with,
-  or a service the broker is configured with (`BROKER_SERVICES`).
+  or a service the broker is configured with (`BROKER_SERVICES` or `BROKER_VM_SERVICES`).
 - **`tier`** is `agent` or `human`.
 - **`kind`** is absent for a stored secret. It is `github-app` for a GitHub App key, or
   `google-login` for a Google authorized-user login. A secret with a kind must have a current value.
@@ -230,6 +247,13 @@ pods that a launcher logged in as that service enrolled, and whose projected tok
 that service's accounts: the Legion daemon's worker pods, for `legion-daemon`. A launcher logs in
 as a service with its own token, for an account `BROKER_SERVICE_LOGINS` names; the pod's own token
 proving the pods' account is what makes a pod the service's.
+
+`BROKER_VM_SERVICES` binds a service to the Google service accounts its Compute Engine VMs run as,
+one entry per account, each account bound to one service; for each account, `BROKER_VM_PROJECTS`
+names the one project its VMs run in and `BROKER_VM_INSTANCES` the glob their names match. A VM of
+a bound account, from that account's project and with a matching name, logs in as that service
+with its own identity token and enrolls itself as a `vm`; that VM is then the service's own
+session, so the service's secrets go to it at once.
 
 A service's secrets go to its own sessions and to no one else. That includes a person's own
 session, and a pod run under another service account even when a launcher logged in as the service

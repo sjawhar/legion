@@ -49,7 +49,7 @@ func newRepairFixtureSettlingAfter(t *testing.T, settle time.Duration) repairFix
 	database := storetest.Open(t)
 	documents := docs.New(docs.Deps{Store: database, Identity: headerIdentity(database), Settle: settle})
 	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
-	// A close or reopen reaches the document rooms from its commit (migration 0151's trigger),
+	// A close or reopen reaches the document rooms from its commit (migration 0158's trigger),
 	// whoever wrote it, an older release's SQL below included.
 	runDocumentRoomSync(t, database, documents)
 	seedPeople(t, database, "alice", "bob")

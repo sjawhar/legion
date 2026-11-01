@@ -230,7 +230,7 @@ func TestRebuildArtifactVersionsSuppliedMarkdownButNotTheLatestVersionSource(t *
 }
 
 // The close's settlement loads the document's room, and the close's commit closes it on every
-// process (migration 0151's trigger, which room sync hears), so the rebuild that follows meets no
+// process (migration 0158's trigger, which room sync hears), so the rebuild that follows meets no
 // live room and is refused for the closed issue alone.
 func TestClosedIssueRebuildRefusesBeforeChangingTheDocument(t *testing.T) {
 	var broken *invalidLoadOnceStore

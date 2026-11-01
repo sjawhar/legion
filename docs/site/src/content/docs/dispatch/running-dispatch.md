@@ -392,14 +392,15 @@ reading where the event log is safe to stream from (the event horizon), and one 
 the list of running servers, which it renews every five seconds. It also holds up to four more
 open for as long as it runs. Three of them wait on Postgres notifications: one for delivery, one
 for the live socket's event-feed relay, and one that the server shares for everything else,
-document sessions included. The other servers on the same database find each server by the name
-of that shared connection. The fourth sends the cursors of the server's document sessions and its
-questions and answers to the other servers about a document. It opens the first time the server
-has one to send. A document edit's own notification goes out in the transaction that writes the
-edit, and needs no connection of its own. That is 91 connections for one server at its ceiling,
-and twice that for two, past a default Postgres's limit of 100. Check the database's connection
-limit before you start the second server: a limit sized for one server, with whatever else uses
-that database counted in, is the thing that runs out.
+its document sessions and the waking of its background work when the rows that work reads change
+included. The other servers on the same database find each server by the name of that shared
+connection. The fourth sends the cursors of the server's document sessions and its questions and
+answers to the other servers about a document. It opens the first time the server has one to
+send. A document edit's own notification goes out in the transaction that writes the edit, and
+needs no connection of its own. That is 91 connections for one server at its ceiling, and twice
+that for two, past a default Postgres's limit of 100. Check the database's connection limit
+before you start the second server: a limit sized for one server, with whatever else uses that
+database counted in, is the thing that runs out.
 
 What a reader sees while two servers are serving:
 

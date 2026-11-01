@@ -828,6 +828,31 @@ test("inbox assignees fold case and spaces, drop duplicates, keep order, and kee
   });
 });
 
+// The selected ask rides in the address beside the filters, so a filter change keeps the reader's
+// selection and a link carries it.
+test("the inbox's selected item round-trips beside the filters and is absent when empty", () => {
+  expect(buildInboxPath({ item: "ask-1" })).toBe("/?item=ask-1");
+  expect(parseInboxSearch("?item=ask-1")).toEqual({ item: "ask-1" });
+  expect(buildInboxPath({ assignees: ["ana@example.com"], item: "ask 2" })).toBe(
+    "/?item=ask+2&assignee=ana%40example.com"
+  );
+  expect(parseInboxSearch("?item=ask+2&assignee=ana%40example.com")).toEqual({
+    assignees: ["ana@example.com"],
+    item: "ask 2",
+  });
+  expect(buildInboxPath({ agent: "s1", item: "ask-3", section: "needs-you" })).toBe(
+    "/?agent=s1&item=ask-3&section=needs-you"
+  );
+  expect(parseInboxSearch("?agent=s1&item=+ask-3+&section=needs-you")).toEqual({
+    agent: "s1",
+    item: "ask-3",
+    section: "needs-you",
+  });
+  expect(parseInboxSearch("?item=")).toEqual({});
+  expect(parseInboxSearch("?item=+")).toEqual({});
+  expect(buildInboxPath({ assignees: [], item: undefined })).toBe("/?assignee=everyone");
+});
+
 // The shell reserves its right gutter from this, and `features/margin/Margin.tsx` renders from
 // it, so the two cannot disagree: an 80 px gutter beside a rail that is not there is exactly
 // what two separate answers produced.

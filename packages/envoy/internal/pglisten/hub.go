@@ -12,12 +12,21 @@ import (
 // Hub is a process's one shared LISTEN connection: a subsystem that learns of another process's
 // work through a NOTIFY channel registers that channel here, and one Listener carries every
 // channel registered. In envoy-dispatch the document rooms' room sync registers on it
-// (internal/dispatch/docs, RegisterRoomSync); the delivery hub and the event stream relay
-// (internal/dispatch/api) still hold a Listener of their own each. Every subsystem given a
-// Listener of its own holds one more connection for the life of the process, one fewer for
-// everything else on the database; and the hub's connection is also what other processes read to
-// learn which processes are listening (the caller names it through Dial), which only one
-// connection per process can answer.
+// (internal/dispatch/docs, RegisterRoomSync) and so does every change-driven background loop
+// cmd/dispatch starts - the embedding queue, the reference excerpts, the edit notices, the
+// suggestion outcomes and the delivery settings - each of which waits on a Wake; the delivery hub
+// and the event stream relay (internal/dispatch/api) still hold a Listener of their own each.
+// Every subsystem given a Listener of its own holds one more connection for the life of the
+// process, one fewer for everything else on the database; and the hub's connection is also what
+// other processes read to learn which processes are listening (the caller names it through Dial),
+// which only one connection per process can answer.
+//
+// Postgres does not replay a notification sent while nothing listened, so every Wake is signalled
+// and every OnConnected callback runs after each successful LISTEN, the first one included: a
+// subscriber catches up there what it missed while the hub had no connection (the redial backoff,
+// RedialBackoff). A subscriber therefore needs no timer of its own for an outage, and must not
+// gate its own start on the hub - a loop runs its boot pass whether or not the hub has connected
+// yet, and the signal after the first LISTEN costs it one more pass at most.
 //
 // Every registration - Handle, Wake, OnConnected, OnDisconnected - happens before Run is called.
 // One made after Run has started panics: the channels a Listener names are fixed when it dials,
@@ -57,8 +66,9 @@ type Hub struct {
 
 // Handle registers onNotify for channel: the hub LISTENs on channel and calls onNotify with the
 // payload of each notification on it, in arrival order, on Run's goroutine (it must not block).
-// Several handlers may register for one channel; each is called, in registration order. It panics
-// once Run has started.
+// Several handlers may register for one channel; each is called, in registration order. channel
+// is spliced into the LISTEN statement as written (Listener.Channels): a package constant, never
+// a value read from a request. It panics once Run has started.
 func (h *Hub) Handle(channel string, onNotify func(payload string)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -125,7 +135,8 @@ func (h *Hub) refuseStarted(method string) {
 }
 
 // Run listens on every registered channel until ctx ends, redialing on any failure as Listener
-// does, and returns once its connection is closed. It panics if called twice.
+// does, and returns once its connection is closed. A hub nobody registered a channel on opens no
+// connection, and Run only waits for ctx. It panics if called twice.
 func (h *Hub) Run(ctx context.Context) {
 	h.mu.Lock()
 	if h.started {
@@ -134,6 +145,10 @@ func (h *Hub) Run(ctx context.Context) {
 	}
 	h.started = true
 	h.mu.Unlock()
+	if len(h.channels) == 0 {
+		<-ctx.Done()
+		return
+	}
 
 	listener := &Listener{
 		Owner:       h.Owner,

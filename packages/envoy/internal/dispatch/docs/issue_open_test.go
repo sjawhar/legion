@@ -20,7 +20,7 @@ import (
 )
 
 // Closing or reopening an issue changes every process's rooms of its documents (plan
-// D5). The trigger migration 0151 puts on issues.closed_at notifies dispatch_issue_open_changed
+// D5). The trigger migration 0158 puts on issues.closed_at notifies dispatch_issue_open_changed
 // from the transaction that wrote it, whichever process wrote it; each process's room sync reads
 // the issue and closes its rooms of the issue's documents (issueOpenChanged), so their browsers
 // reconnect with the scope the issue now allows, which ygo fixes when a browser connects. A

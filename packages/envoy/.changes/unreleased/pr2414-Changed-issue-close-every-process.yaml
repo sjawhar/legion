@@ -1,7 +1,7 @@
 kind: Changed
 body: |-
   Closing or reopening an issue changes the document rooms of every process of this build, the
-  patching one included, and reopening now does too. Migration `0151`'s trigger notifies
+  patching one included, and reopening now does too. Migration `0158`'s trigger notifies
   `dispatch_issue_open_changed` when `closed_at` changes, whoever wrote it. Each process then closes
   its rooms of the issue's documents, so their browsers reconnect read-only or editable to match. A
   browser's append also reads the issue's state in its own transaction. An edit that the room took

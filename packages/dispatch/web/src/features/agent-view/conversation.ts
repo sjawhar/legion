@@ -287,10 +287,10 @@ export function toThreadMessages(state: AgentConversation): KeyedMessage[] {
 /**
  * The model the session is currently running, for the live view's header: the most recent
  * assistant turn's own report, whatever it is. A session whose client never reports one (Claude
- * Code, OpenCode) shows nothing here rather than a guess. `state.messages` is kept sorted
- * ascending by `at` (`applyFrame`), so walking from the end finds the newest assistant entry
- * first; `Array.prototype.findLast` would read the same way but needs ES2023, past this
- * package's ES2022 `lib`.
+ * Code) shows nothing here rather than a guess. `state.messages` is kept sorted ascending by `at`
+ * (`applyFrame`), so walking from the end finds the newest assistant entry first;
+ * `Array.prototype.findLast` would read the same way but needs ES2023, past this package's ES2022
+ * `lib`.
  */
 export function currentModel(state: AgentConversation): string | undefined {
   for (let index = state.messages.length - 1; index >= 0; index -= 1) {

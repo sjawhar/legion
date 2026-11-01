@@ -2597,7 +2597,7 @@ func (s *Service) readRoomIssueStates(ctx context.Context, sql string, arg any) 
 
 // issueOpenChanged is issueOpenChangedChannel's handler, on its room-sync lane (roomSync.handlers):
 // issueKey's closed_at changed, in a transaction of any process - this one's, another's, or an
-// earlier build's - whose commit the trigger of migration 0151 announced. It reads the issue's
+// earlier build's - whose commit the trigger of migration 0158 announced. It reads the issue's
 // state now rather than trusting the notification for it: a close and a reopen in quick
 // succession may both be read as the second, which is the truth by then. Every room this process
 // holds of the issue's documents takes that state (setRoomIssueOpen). A document no room here
