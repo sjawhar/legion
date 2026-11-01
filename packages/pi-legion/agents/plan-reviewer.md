@@ -71,9 +71,18 @@ factual claim in it, one at a time, and you do not judge the design.
    (a cluster, a pull request, an issue, an endpoint) yourself, for example with `kubectl get`,
    `gh pr view`, `gh api` with no `-X`, `-f` or `-F` flag, `curl` with no `-X` or `-d` flag, or
    `dispatch read`. A requirement, a decision or a proposal is not a claim.
-2. **The standard practice.** The spec names how this problem is normally solved and links its
-   sources, or it says why no standard practice applies. When the design departs sharply from that
-   practice, the spec says why.
+2. **Best practice and world-class.** The spec's `### Best practice and world-class` entry must:
+
+   - List every best practice with its source and whether the design follows it.
+   - State the world-class answer and every shortfall from it with its reason.
+   - Hold the best-practice and world-class reviews' final verdicts, with each reviewer's model and
+     the time it answered.
+   - Show every finding from either review fixed or recorded with the fact or cost that requires it.
+   - After a third review round, list the changes since the last round and every finding still open,
+     with its cost.
+
+   Reject the spec if the entry lacks any of these. You check that record; the two reviews judge
+   the design.
 
 ### Output
 

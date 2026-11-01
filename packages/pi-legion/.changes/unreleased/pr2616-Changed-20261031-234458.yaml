@@ -1,0 +1,6 @@
+kind: Changed
+body: |-
+  `legion-architect`, the architect role prompts and `STRATEGY.md` now make best practice the floor and world-class the target, as `skill://following-best-practices` says. Before approval, the design gate runs the gap review, claim review, best-practice review and world-class review in that order, records their results in the spec's `### Best practice and world-class` entry, then runs `plan-reviewer` last to check that record. The approval summary names all four results and what they do not prove.
+time: 2026-10-31T23:44:58.000000000Z
+custom:
+    Issue: pr2616

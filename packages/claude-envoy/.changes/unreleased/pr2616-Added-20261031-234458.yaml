@@ -1,0 +1,6 @@
+kind: Added
+body: |-
+  The plugin ships `claude-envoy:following-best-practices`, which loads before choosing a design, writing options, a spec or plan, or requesting approval. Best practice is the floor and world-class is the target. Before each approval request, two fresh subagents review the proposal against best-practice and world-class answers they formed from the problem alone. The Legion design gate runs the gap review, claim review, best-practice review and world-class review in that order, then runs `plan-reviewer` last to check the spec's record.
+time: 2026-10-31T23:44:58.000000000Z
+custom:
+    Issue: pr2616

@@ -1,0 +1,6 @@
+kind: Added
+body: |-
+  `following-best-practices`, a skill every session with Dispatch ships with. Its description loads it before choosing a design, writing options, a spec or plan, or requesting approval. Before an agent chooses a design or writes options, it researches every applicable best practice with a source, the world-class answer and which fact of the case rules either out. Best practice is the floor and world-class is the target: a cost in time, money or effort is never a fact of the case. Before each approval request, two fresh subagents review the proposal against best-practice and world-class answers they formed from the problem alone. `dispatch-writing-specs` sends a session to it in its opening section. To stay under the 2,000-word guard, "Propose an answer to each point, numbers included, with a reason" is cut from "Questions": the ask-block template, "Name the concrete case first" and the Decisions entry carry it.
+time: 2026-10-31T23:44:58.000000000Z
+custom:
+    Issue: pr2616

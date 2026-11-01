@@ -1931,7 +1931,7 @@ jobs:
       # The release's pack (release.yaml's pi_envoy_build job), which is also this job's build: the
       # manifest pointed at the one bundle, then scripts/pi-plugin-prepack.sh, which bundles
       # envoy.ts, writes dist/THIRD_PARTY_NOTICES (failing the pack on a bundled package whose
-      # license cannot be determined) and stages this plugin's five skills. The listing shows the
+      # license cannot be determined) and stages this plugin's eight skills. The listing shows the
       # tarball ships those and nothing of the Legion plugin's: no legion.js, no agents/, none of
       # its skills.
       - name: Pack pi-envoy
