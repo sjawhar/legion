@@ -550,27 +550,29 @@ something to count.
 
   ```sh
   want=131072   # a tool with its own stack guard may demand more; use its minimum
-  ulimit -S -s "$want"   # soft first: see below
-  ulimit -H -s "$want"
+  ulimit -S -s "$want" 2>/dev/null || { ulimit -H -s "$want" 2>/dev/null || true; ulimit -S -s "$want"; }
+  [ "$(ulimit -Hs)" = unlimited ] && ulimit -H -s "$want" 2>/dev/null
   soft=$(ulimit -Ss); hard=$(ulimit -Hs)
-  [ "$soft" = "$want" ] || { echo "soft stack is $soft, wanted $want; refusing"; exit 2; }
-  [ "$hard" != unlimited ] || { echo "hard stack is unlimited; refusing"; exit 2; }
-  [ "$hard" -ge "$want" ] || { echo "hard stack is $hard, under $want; refusing"; exit 2; }
+  [ "$soft" = "$want" ] || { echo "stack soft is $soft, want $want; refusing"; exit 2; }
+  [ "$hard" != unlimited ] && [ "$hard" -ge "$want" ] || { echo "stack hard is $hard; refusing"; exit 2; }
   ```
 
-  The soft limit must be what you asked for, and the hard limit must be finite and no lower —
-  a hard limit **above** your number is fine and a pod may hand you one, so do not refuse it.
-  Never `unlimited`, which reports `unlimited` and gives 8 MiB.
-  **Set the soft limit before the hard one.** A pod can start with both `unlimited`, and
-  lowering the hard limit below a soft `unlimited` is `EINVAL`: measured in `bash`, `ulimit -H
-  -s 131072` from that state fails with `cannot modify limit: Invalid argument`, and chained
-  with `&&` the soft set never runs, so the process keeps `unlimited` and gets 8 MiB — the
-  failure the rule exists to stop. Soft first succeeded from every starting state measured.
-  Do not rely on the single `ulimit -s <n>` either: it set both limits in a fresh shell here
-  and left the hard limit `unlimited` in a long-lived one, which is why the read-back is the
-  rule and the setting form is not. Both limits matter: a helper that raises the stack by
-  setting the soft limit to the hard limit otherwise lands on the pod's `unlimited` hard limit
-  and gets 8 MiB. The ceiling is 128 MiB whichever finite value you choose —
+  The soft limit must equal what you asked for, and the hard limit must be finite and no lower.
+  `unlimited` is refused by name, because it reports `unlimited` and gives 8 MiB.
+  Three things in that setter each answer a measured failure, and a simpler form breaks one of
+  them. **The soft limit is set first**, because lowering the hard limit below a soft
+  `unlimited` is `EINVAL` — `ulimit -H -s 131072` from that state fails with `cannot modify
+  limit: Invalid argument`, and chained with `&&` the soft set never runs, so the process keeps
+  `unlimited` and gets 8 MiB, the failure the rule exists to stop. **The hard limit is set only
+  when it reads `unlimited`**, because setting it unconditionally lowers a higher finite hard
+  limit the pod gave you, which is the headroom a tool with its own guard may need. And the
+  **fallback** covers a want above the current hard limit, where the soft set fails first.
+  Measured from three starting states: `unlimited/unlimited` and `8192/unlimited` both end at
+  `131072/131072`, and `131072/1048576` ends at `131072/1048576` with the higher hard limit
+  kept. Do not reduce it to a single `ulimit -s <n>`: that set both limits in a fresh shell
+  here and left the hard limit `unlimited` in a long-lived one, same binary and same starting
+  pair, cause unknown — which is why the read-back is the rule and the setter is not.
+  The ceiling is 128 MiB whichever finite value you choose —
   gVisor maps the whole stack at exec and caps it at `maxStackSize = 128 << 20` in `MapStack`
   (`pkg/sentry/mm/syscalls.go`), with `RLIM_INFINITY` falling back to the 8 MiB default — and a
   larger soft limit costs rather than buys, since glibc sizes a default thread stack from it and
