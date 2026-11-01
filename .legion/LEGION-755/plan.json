@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "LEGION-755",
+  "completed": "2026-11-01T00:11:00Z",
+  "plan": "dispatch://LEGION-755/artifact/plan-md",
+  "scope": "The root's pull request delivers R2, R3, R4 and R5 of dispatch://LEGION-755/spec v9 and is proven by A2-A6. R1, A1 and A7 are LEGION-776's and the integration child LEGION-828's (the architect's message of 2026-10-31T23:40Z). Nothing here touches record.Waiting, record.RankLess, record.Issue's columns or skills/legion-controller/references/admission.md.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase contract, the push with the handoff trailer, and the PR body's six-field proofs on the production-like surface (the booted daemon against a scratch Dispatch).",
+      "ce-simplify-code: the one behaviour-preserving simplify pass on the settled change, in the first implementing round.",
+      "asd-ste100: the R5 text in skills, AGENTS.md and the site is read by agents and people and must not be misread; plain-words for the same text."
+    ],
+    "test": [
+      "legion-worker: the tester's proof records (references/pr-body.md's six fields), re-running the scratch-rig tests and the A5/A6 greps at the head, and the CI-red interrupt rule; the pod recipe for the rig is in plan.md T6 'Where it runs'."
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md and references/review-threads.md for the approval of the head; the reviewer's pair thermonuclear-deep-review and thermonuclear-code-quality over a change that adds two event-driven status writes, a delivery guard and a per-gate skip."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "R2 turns the scratch rig's own labelled triage fixtures (created by the person `smoke`) into person handovers the daemon queues before the test's own todo write.", "answer": "D9/T6: createDispatchIssue sends the create as a session (agent bearer, body actor kind session), so the fixtures keep today's triage wake; the ten createBlockersIssue call sites are audited."},
+      {"finding": "R4's pending-row rule has nothing to tell an R2/R3 row from the workflow's dispatch_status rows (hand-over rows also write todo).", "answer": "D1/T1.5: StatusWrite gains a PersonHandover marker and record.Store.PersonHandoverPending reads payload->>'personHandover'; a store test shows a pending hand-over row does not count."},
+      {"finding": "R4's guard is status-only, so a label removed between queue and delivery writes todo on an unlabelled issue.", "answer": "D2/T5: delivery of a marked row also requires issue.HandedOver, with a unit test beside TestOutboxDropsSupersededStatusWrite; recorded as spec departure 1 and named for the architect."},
+      {"finding": "A3's session-approval exclusion cannot be exercised: Dispatch's review route is authHuman (403 HUMAN_ONLY), so no session approval event exists.", "answer": "D4/T4/T6: the rig asserts the 403 and no todo; the daemon's own Actor.Person() check stays and is proven by a workflow unit test with a session actor; named for the architect."},
+      {"finding": "R3's 'no live tree' must be judged per gate; TreeLive is false for a lingering root, so a blanket skip would change a reopen inside a linger.", "answer": "D3/T4: the skip is the queue decision (parked, labelled, primary, person, not a carry, no live tree) and applies to the root's own gate only; carried copies and a lingering unparked root keep today's behaviour; spec departure 2; named for the architect."},
+      {"finding": "A4's 'consumer positioned after that event' has two readings; a reboot resumes the durable consumer and delivers the event, so source=listing never appears.", "answer": "D6/T6: A4 is the daemon's first boot after the event (createConsumer uses DeliverNewPolicy with no stored position); the second boot is d.stop/rebindHeldPorts/startDaemon; D8 logs at Info and the test's JSON handler reads the `source` field."},
+      {"finding": "triage.md step 2 names the first label-carrying event as the setter; R2 uses the newest add transition.", "answer": "T7 rewrites step 2 to R2's rule and adds the check `grep -n 'The first .issue.created' triage.md` prints nothing."},
+      {"finding": "A5 deletes 'Post a triage note' for every root while R5 removes the note only for a person's handover.", "answer": "D7/T7: the assignee note stays for the controller's own filings, reworded without the phrase; named for the architect."},
+      {"finding": "Nothing warns about an unassigned root the daemon now queues.", "answer": "D7: accepted with the spec's decision 'The triage note goes with the write' cited; the person who labels reads Assignee in the same header; named for the architect as a residual."},
+      {"finding": "A2/A3's outbox assertions depend on the rig's unreachable Envoy URL keeping notice rows, 'with the daemon's actor' needs the event log, and each negative needs an anchor.", "answer": "T6: EnvoyURL left at the rig's default; the todo event's actor read from the event log with the agent token; each negative anchored by a later positive on the same ordered stream or by the triage notice row the same event produces."},
+      {"finding": "A2-A4 cannot run where the implementer works (no Docker in an issue pod).", "answer": "T6 'Where it runs': the embedded Postgres with pgvector and a go-run nats-server named by LEGION_TEST_NATS_URL/LEGION_TEST_NATS_MONITOR_URL, with the three solution docs; CI's test job runs the package whole."},
+      {"finding": "The boot catch-up replays artifact.approved outside the consumer's prepare chain, so such a fact carries no actor and no view.", "answer": "T1.2: DispatchArtifact.Issue nil queues nothing and is never an error; its doc comment says so; a T4 test applies a fact with Issue nil."},
+      {"finding": "Widening the boot listing must not start writing triage notices or queue a session-labelled root.", "answer": "T3.3: a listed triage row whose setter is not user returns as today (no wake, no row); a T3 test covers setter session at Reconcile."},
+      {"finding": "LabelSetter has an unspecified zero value.", "answer": "D5: the zero value is not a person and keeps today's triage wake; admit/label_test.go's facts stand unchanged."},
+      {"finding": "R5's deferral sentence lands in backlog-stewardship.md, whose line 22 LEGION-776 rewrites.", "answer": "T7: a new section at the end of the file, 'A root the plan defers', carrying 'says to defer'; nothing else in the file changes."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "R4: the row's delivery re-reads the issue and writes nothing when the status moved.",
+      "plan": "A marked (PersonHandover) row also writes nothing when the re-read issue no longer carries the legion label (D2, T5).",
+      "evidence": "daemon/outbox.go:508-515 compares statuses alone while the same GetIssue returns HandedOver (dispatch/types.go:117-134); admission treats an unlabelled todo as nobody's (admit/admit.go:198-216), so the daemon would move an issue a person un-labelled.",
+      "outcome": {"kind": "unchanged"}
+    },
+    {
+      "spec": "Design R3: an artifact.approved event whose gate belongs to a root with no live tree is not applied to that gate.",
+      "plan": "The gate is skipped exactly when R3 queues the root (parked, labelled, primary document, a person's non-carried approval, no live tree), for the root's own gate only; carried copies and a lingering unparked root's gate are applied as today (D3, T4).",
+      "evidence": "record.TreeLive is false for a lingering root (record/project.go:113-116); R3's trigger needs parked, so a lingering unparked root never queues, and applying its gate as today keeps a reopen inside the linger seeing its approvals; dispatchArtifact loops over carried copies of other roots (workflow/gate.go:536-551).",
+      "outcome": {"kind": "unchanged"}
+    }
+  ],
+  "decisionsForArchitect": [
+    "D2: delivery of a person's-handover row also requires the label (recommended).",
+    "D3: the gate skip is tied to the queue decision, per gate; a lingering unparked root keeps today's behaviour (recommended).",
+    "D4: the session-approval exclusion of A3 is proven as Dispatch's 403 plus a daemon unit test (recommended).",
+    "D7: the assignee note stays for the controller's own filings, reworded; no new warning for an unassigned root a person labels."
+  ]
+}
