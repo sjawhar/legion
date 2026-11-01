@@ -1069,3 +1069,58 @@ func awaitAccessLineOfRoute(t *testing.T, logged *logBuffer, route string) strin
 	}
 	return accessLineOfRoute(t, logged, route)
 }
+
+// A reader that keeps reading at several times the floor is answered in full over a real
+// connection, however large the answer: the rule is no silence longer than the idle bound and
+// the floor after the grace, and this reader is never silent and always above the floor. Over a
+// TCP connection the kernel takes a write's bytes into a send buffer of megabytes and wakes a
+// blocked writer only once much of that buffer has drained, so a slice's write can wait far
+// longer than the reader is ever silent, and a deadline armed per slice cuts the reader anyway.
+// On the real binary at a7d8b26b, a 4-8 MiB file version (one Write, serveFileVersion) read at
+// 40, 60, 100 and 150 KB/s was cut 20.0-20.2 s in, every time, after 1.7-6.3 MB.
+func TestAReaderSteadilyAboveTheFloorIsAnsweredInFullOverARealConnection(t *testing.T) {
+	const idle, answer, chunk, every = 2 * time.Second, 4 << 20, 16 << 10, 80 * time.Millisecond
+	_, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	served.transfer = transferBounds{idle: idle, grace: 2 * time.Second, floor: 32 << 10}
+	const pattern = "/api/v1/steady-reader-test"
+	route := apiRoute{routeRow: routeRow{Method: http.MethodGet, Pattern: pattern, Auth: authAny, Handler: func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(make([]byte, answer))
+	}}}
+	mux := http.NewServeMux()
+	mux.HandleFunc(route.Method+" "+pattern, served.serveRoute(route, admission.New(admission.DefaultLimits()), 5*time.Minute))
+	httpServer := httptest.NewServer(mux)
+	t.Cleanup(httpServer.Close)
+
+	connection, err := net.Dial("tcp", httpServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the server: %v", err)
+	}
+	t.Cleanup(func() { connection.Close() })
+	if err := connection.(*net.TCPConn).SetReadBuffer(chunk); err != nil {
+		t.Fatalf("size the reader's receive buffer: %v", err)
+	}
+	if _, err := fmt.Fprintf(connection, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", pattern, httpServer.Listener.Addr()); err != nil {
+		t.Fatalf("send the read: %v", err)
+	}
+	if err := connection.SetDeadline(time.Now().Add(2 * time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil {
+		t.Fatalf("read the answer's head: %v", err)
+	}
+	defer response.Body.Close()
+
+	// 16 KiB every 80 ms is 200 KiB/s, six times the 32 KiB/s floor, and the reader is never
+	// silent for more than 80 ms; the whole answer takes about 20 s, ten idle bounds.
+	started := time.Now()
+	block := make([]byte, chunk)
+	for read := 0; read < answer; {
+		time.Sleep(every)
+		n, err := io.ReadFull(response.Body, block)
+		read += n
+		if err != nil {
+			t.Fatalf("a reader at 200 KiB/s was cut %v in, after %d of %d bytes: %v", time.Since(started).Round(time.Millisecond), read, answer, err)
+		}
+	}
+}
