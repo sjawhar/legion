@@ -2042,9 +2042,10 @@ The peers are people, not the copy's agent: Dispatch admits only the identity se
 into a document room (sjawhar/legion#2541). Peer n of every document connects as the person
 `browsertype-<n>`, named in the `X-Dispatch-User` header, which the copy's Dispatch reads a
 person from and trusts (`manifests/dispatch.yaml`:
-`DISPATCH_IDENTITY=header:X-Dispatch-User`, `DISPATCH_IDENTITY_HEADER_TRUSTED=1`). The runner is
-given no credential of the copy for typing; it holds the step's document list under
-`/work/typing`, removed when typing stops. Just before `loadgen
+`DISPATCH_IDENTITY=header:X-Dispatch-User`, `DISPATCH_IDENTITY_HEADER_TRUSTED=1`). `browsertype`
+is given no token of the copy: the people the header names are its peers, and all it is given of
+the step is the document list under `/work/typing`, removed when typing stops. (The runner does
+hold the copy's tokens: `loadgen run` is given them on its command line.) Just before `loadgen
 run` starts, so the peers connect during its 30 s warm-up, the runner starts:
 
 ```bash

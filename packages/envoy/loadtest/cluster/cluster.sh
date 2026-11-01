@@ -139,8 +139,10 @@
 # keystroke updates per second, through Dispatch's document websocket as people: each peer is a
 # person of its own, browsertype-<peer>, named in the X-Dispatch-User header the copy's Dispatch
 # reads a person from (manifests/dispatch.yaml's DISPATCH_IDENTITY), since Dispatch admits only
-# a person into a document room (sjawhar/legion#2541). The runner holds no credential of the
-# copy for it, only each step's document list under /work/typing, removed when typing stops. A
+# a person into a document room (sjawhar/legion#2541). browsertype is given no token of the
+# copy: its peers are the people the header names, and all it holds of the step is the document
+# list under /work/typing, removed when typing stops. (The runner does hold the copy's tokens:
+# loadgen run is given them on its command line.) A
 # replay's documents are the artifacts with the most agent
 # writes (artifact.version events the replay sends) in the bundle's window.jsonl over the
 # sub-window, mapped to the copy's ids through loadtest.replay_ids; a load step's are the K
@@ -195,29 +197,34 @@
 #
 # Every name the copy answers to is fixed -- the pods runner and postgres-0, the deployments
 # dispatch and listener, the lock ConfigMap -- so each of them reaches whatever run holds the
-# namespace now. Everything that writes into, kills in or removes from them goes through five
+# namespace now. Everything that writes into, kills in or removes from them goes through six
 # helpers, each of which reads the lock first (copy_is_ours) and does nothing unless that read
 # names this run or finds no lock: runner_exec and postgres_exec (every kubectl exec that
 # writes, kills or removes in the runner or in postgres-0, the replay's two long streams among
 # them, which carry the bound kube's 300 s would cut them at: runner_exec -t and postgres_exec
-# -t), psql_write (through postgres_exec), runner_put (the kubectl cp into the runner) and
-# scale_to (the deployments dispatch and listener). The guard fails closed: a read of the lock
+# -t), psql_write (through postgres_exec), runner_put (the kubectl cp into the runner), scale_to
+# (the deployments dispatch and listener) and runner_stop (the TERM to a runner job, which it
+# sends through runner_term). The guard fails closed: a read of the lock
 # that fails is tried LOCK_READ_TRIES times, LOCK_READ_RETRY_SECONDS apart, and once every try
 # has failed the caller stops and removes nothing, since a lock no read answered may name
 # another run; the note that says so carries kubectl's own words for that last failed read.
 # Failing closed is to act on nothing this time, not to stop watching: copy_is_ours tells a lock
 # that names another run (1) from one no read answered (2), and the two pollers that come back,
 # a step's disk watcher and its wait on a runner job at the deadline, record nothing and stop
-# nothing at such a poll and read the lock again at the next one, while a lock that names
-# another run ends them.
+# nothing at a poll that answered 2 and read the lock again at the next one, while a lock that
+# names another run ends them. Each poll of either reads the lock at most once, and what it does
+# after that read -- the kill, and the kill again at the next poll when kubectl itself failed --
+# goes through runner_term, which reads no lock of its own.
 # Reads are unguarded, the retried ones (psql_at, the kube_read execs that cat, test or
 # sha256sum) and the streams that read a pod (a step's files and its heap.txt copied back, the
 # bundle verified, the stored-order check, loadgen replay-checksum) alike, and so is every path
 # that is this run's by construction: up before and at kube_lock_take, down's label-scoped
 # delete and its refusal of another run's lock, the heartbeat's JSON-patch test op, the
 # sampler's and stop_daemon's own processes, nats_box, which picks its pod by the run label,
-# and apply_manifest, whose three callers run after kube_lock_take (up_run), after stop_copy
-# (resize_postgres) and after scale_to dispatch 0 (redeploy). A command
+# apply_manifest, whose three callers run after kube_lock_take (up_run), after stop_copy
+# (resize_postgres) and after scale_to dispatch 0 (redeploy), and runner_term, the kill of a
+# runner job by its recorded pid, which runs only directly after its own caller's copy_is_ours
+# answered 0 (runner_stop, the disk watcher, and the wait at its deadline). A command
 # whose --run names a run other than the one the lock names is refused outright, naming both;
 # status (which reads), collect (which reads this pod's run directory) and down (whose deletes
 # are scoped to the run's label) run then.
@@ -251,6 +258,11 @@ STALE_SECONDS=900
 # stops, since a lock that cannot be read may name another run.
 LOCK_READ_TRIES=3
 LOCK_READ_RETRY_SECONDS=2
+# How long runner_wait gives a runner job to record an exit status after the SIGTERM it sent at
+# its deadline, before it sends one SIGKILL and goes on polling: a job that ends on the TERM
+# (loadgen's drain, browsertype's summary) is well inside it, and a job that ignores it leaves
+# the wait with the load still running, which is what the KILL ends.
+RUNNER_STOP_GRACE_SECONDS=120
 RUN_LABEL=dispatch-loadtest/run
 ROLE_LABEL=dispatch-loadtest/role
 LEGION_REPO=sjawhar/legion
@@ -279,10 +291,17 @@ PG_DISK_MIN_FREE_PCT=${LOADTEST_PG_DISK_MIN_FREE_PCT:-15}
 [[ $PG_DISK_MIN_FREE_PCT =~ ^[1-9][0-9]?$ ]] ||
   { printf 'cluster.sh: LOADTEST_PG_DISK_MIN_FREE_PCT must be a whole percent from 1 to 99, not %s\n' "$PG_DISK_MIN_FREE_PCT" >&2; exit 2; }
 PG_DISK_POLL_SECONDS=30
+# How long pg_disk_watch_stop waits for the watcher to leave after the TERM it sends, before it
+# kills it outright. A watcher that is acting takes the TERM as a flag (so it never stops half
+# way through recording the failure or stopping the job), and that act is the longest wait here:
+# the guard's 3 tries, the failure record, the kill in the runner and typing_stop's wait of up
+# to 120 s. Past this bound the watcher is stuck, and no path out of a step may hang on it.
+PG_DISK_STOP_SECONDS=300
 # The last reading of the volume (pg_disk_sample), in bytes, each empty when that read failed,
-# and the pid of the step's watcher while one runs (pg_disk_watch_stop ends it).
+# and the pid of the step's watcher while one runs, with the step it watches, for the line
+# pg_disk_watch_stop writes when it has to kill it.
 PG_DISK_SIZE="" PG_DISK_USED="" PG_DISK_FREE=""
-PG_DISK_WATCHER=""
+PG_DISK_WATCHER="" PG_DISK_WATCH_STEP=""
 # The LINUX replay: INFRA-639's manifest, the template database replay-prepare makes,
 # where the dump goes in the Postgres pod (on its claim), and the outage's Dispatch figures that
 # loadgen codepaths sets a replay beside (production profile §5: 11.1-13.8 cores, 13.8 GiB).
@@ -321,7 +340,7 @@ STORED_ORDER_START_TABLES=(doc_checkpoints:artifact_id artifact_versions:artifac
 # every document is <prefix>-<n>), the header the copy's Dispatch reads a person from -- the one
 # manifests/dispatch.yaml's DISPATCH_IDENTITY=header:X-Dispatch-User names, trusted there
 # (DISPATCH_IDENTITY_HEADER_TRUSTED=1) -- and the runner's directory, which holds each step's
-# document list and no credential of the copy.
+# document list. browsertype is given no token of the copy: the header's people are its peers.
 TYPING_PERSON=browsertype
 TYPING_IDENTITY_HEADER=X-Dispatch-User
 TYPING_DIR=/work/typing
@@ -834,10 +853,12 @@ kube_lock_get() {
 #      told about a lock that could not be read.
 #
 # Every guarded helper refuses on either (copy_exec, through it runner_exec, postgres_exec and
-# psql_write, runner_put and scale_to, which the header lists). The two pollers that come back --
-# pg_disk_watch and runner_wait's stop at its deadline -- end on 1 and act on nothing at a poll
-# that answered 2, reading again at the next one: no answer is no reason to stop watching a step
-# that still runs.
+# psql_write, runner_put, scale_to and runner_stop, which the header lists). The two pollers
+# that come back -- pg_disk_watch and runner_wait's stop at its deadline -- end on 1 and act on
+# nothing at a poll that answered 2, reading again at the next one: no answer is no reason to
+# stop watching a step that still runs. Each of their polls asks this once and no more: what
+# they do with a 0 is runner_term, which reads no lock of its own, so a second read can never
+# fail where the first answered and leave the job running.
 copy_is_ours() {
   local lock try rc err ans=2 errs
   # kubectl's own words for a read that failed, kept through a file: one command substitution
@@ -1327,15 +1348,28 @@ pg_disk_write() {
 #
 # PID and START are the step shell's pid and its start time (proc_start): each poll ends the
 # watch, recording nothing and stopping nothing, once step_gone says that shell is gone, which
-# step_gone explains; and the lock, which costs an exec, is read only when the watcher is about
-# to act, never once a poll. A lock that names another run ends the watch there; a lock no read
-# answered (copy_is_ours 2) ends nothing: that poll records nothing and stops no job, and the
-# next one reads again, since the volume is still filling and the job is still this run's to
-# stop once a read answers.
+# step_gone explains; and the lock, which costs an exec, is read only once the watcher is
+# committed, never once a poll before that.
+#
+# The first reading under the threshold commits the watcher: from that poll on it reads the
+# volume no more (the reading it records is the one that committed it) and, step_gone asked
+# first, reads the lock once at every poll, no more and no less. A lock that names another run
+# ends the watch there. A lock no read answered (copy_is_ours 2) ends nothing: that poll records
+# nothing and stops no job, and the next one reads again, since the volume is still filling and
+# the job is still this run's to stop once a read answers. A read that answers 0 records the
+# failure (once, however many polls the stop takes) and sends the job its TERM through
+# runner_term, which reads no lock of its own: the one read of the poll decided it already, and
+# a second read that failed would leave the load running. A kill kubectl itself refused is said
+# and tried again at the next poll, with its own single read of the lock.
+#
+# While it is committed a TERM from pg_disk_watch_stop only sets stopped, so the watcher never
+# stops half way through recording the failure or stopping the job; it leaves at the next point
+# where it would have waited, recording nothing more. Everywhere else its TERM ends the nap it
+# is in and the watcher with it (pg_disk_watch_trap), so the step leaves no sleep of its own
+# behind.
 pg_disk_watch() {
-  local name=$1 dir=$2 job=$3 file=$4 pid=$5 start=$6 nap="" guard
-  # Its own TERM ends the nap it is in, so the step leaves no sleep of its own behind.
-  trap '[ -z "$nap" ] || kill -- "$nap" 2>/dev/null; exit 0' TERM
+  local name=$1 dir=$2 job=$3 file=$4 pid=$5 start=$6 nap="" guard stopped=0 committed=0 recorded=0
+  pg_disk_watch_trap
   while :; do
     sleep "$PG_DISK_POLL_SECONDS" &
     nap=$!
@@ -1345,16 +1379,20 @@ pg_disk_watch() {
       note "step $name: the step that started this disk watcher is gone; it stops, recording nothing and stopping no job"
       return 0
     fi
-    pg_disk_sample "$file" || continue
-    pg_disk_low || continue
-    # From here the watcher records and stops; a TERM of a step that ends at this moment
-    # (pg_disk_watch_stop) waits for that instead of cutting it in half.
-    trap '' TERM
+    if ((committed == 0)); then
+      pg_disk_sample "$file" || continue
+      pg_disk_low || continue
+      committed=1
+    fi
+    # From here the watcher records and stops, and its TERM waits for that instead of cutting it
+    # in half.
+    trap 'stopped=1' TERM
     guard=0
     copy_is_ours "the runner job $job of step $name" || guard=$?
     if ((guard == 2)); then
       note "step $name: the disk watcher records nothing and stops no job at this poll; it reads the lock again at the next one"
-      trap '[ -z "$nap" ] || kill -- "$nap" 2>/dev/null; exit 0' TERM
+      ((stopped == 0)) || return 0
+      pg_disk_watch_trap
       continue
     fi
     # The lock names another run, so the job that name reaches is that run's: this run's watcher
@@ -1363,20 +1401,49 @@ pg_disk_watch() {
       note "step $name: the disk watcher stops, recording nothing and stopping no job"
       return 0
     fi
-    record_failure "$dir" pg_disk postgres "$(pg_disk_detail); the step's loadgen run was stopped before Postgres filled the volume"
-    runner_stop "$job" || return 0
+    if ((recorded == 0)); then
+      record_failure "$dir" pg_disk postgres "$(pg_disk_detail); the step's loadgen run was stopped before Postgres filled the volume"
+      recorded=1
+    fi
+    if ! runner_term "$job"; then
+      note "step $name: kubectl could not send the runner job $job its SIGTERM; the disk watcher tries again at its next poll"
+      ((stopped == 0)) || return 0
+      pg_disk_watch_trap
+      continue
+    fi
     typing_stop "$name" "$dir" || note "step $name: stopping browser typing after the disk watcher fired failed"
     return 0
   done
 }
 
+# pg_disk_watch_trap: the disk watcher's TERM everywhere but inside an act of its own -- the nap
+# it is in ended, and the watcher with it. Set at the top of the watch and again at every point
+# where the watcher, having acted on nothing, goes back to polling.
+pg_disk_watch_trap() {
+  trap '[ -z "$nap" ] || kill -- "$nap" 2>/dev/null; exit 0' TERM
+}
+
 # pg_disk_watch_stop: the step's disk watcher ended and reaped, with the nap it is in; nothing
-# when none runs, so every path out of a step may call it.
+# when none runs, so every path out of a step may call it. A watcher that is acting takes the
+# TERM as a flag and leaves at the end of that act, so this waits PG_DISK_STOP_SECONDS for it --
+# longer than the longest act -- and then kills it, and the children of its act with it, so no
+# path out of a step hangs on a watcher that is stuck. The line it writes names the step, since
+# a watcher killed there left whatever it was doing in the copy half done.
 pg_disk_watch_stop() {
-  local pid=$PG_DISK_WATCHER
+  local pid=$PG_DISK_WATCHER name=$PG_DISK_WATCH_STEP deadline kids=()
   [ -n "$pid" ] || return 0
-  PG_DISK_WATCHER=""
+  PG_DISK_WATCHER="" PG_DISK_WATCH_STEP=""
   kill -- "$pid" 2>/dev/null || true
+  deadline=$((EPOCHSECONDS + PG_DISK_STOP_SECONDS))
+  while kill -0 -- "$pid" 2>/dev/null; do
+    if ((EPOCHSECONDS >= deadline)); then
+      read -ra kids <"/proc/$pid/task/$pid/children" 2>/dev/null || true
+      kill -KILL -- "$pid" "${kids[@]}" 2>/dev/null || true
+      note "step $name: the disk watcher did not end within $PG_DISK_STOP_SECONDS s of its SIGTERM, so it was killed"
+      break
+    fi
+    sleep 1
+  done
   wait "$pid" 2>/dev/null || true
 }
 
@@ -1578,18 +1645,34 @@ runner_start() {
     sh "$name" "$@" || die "$name was not started in the runner pod of $NS"
 }
 
-# runner_stop NAME: the runner job NAME sent SIGTERM, by the pid it recorded, so a job that ends
-# on it (browsertype writes its summary) does. A job that ended already is no failure: whatever
-# the kill does, the runner's sh exits 0. It returns 1 only when the TERM never left this pod --
-# the lock names another run or no read of it answered, so runner_exec ran nothing, or kubectl
-# itself failed -- and job names repeat across runs, so the disk watcher, runner_wait's deadline
-# and typing_stop all learn from that one answer that they stopped nothing. The two that go on
-# polling ask copy_is_ours themselves first, since this one answer does not say whether the lock
-# gave the job away or went unread.
-runner_stop() {
-  # shellcheck disable=SC2016 # expanded by the runner's sh
-  runner_exec sh -c 'pid=$(cat "/work/logs/$1.pid" 2>/dev/null); kill -TERM "$pid" 2>/dev/null; exit 0' sh "$1" >/dev/null ||
+# runner_term NAME [SIGNAL]: the runner job NAME sent SIGNAL (default TERM) in the runner pod, by
+# the pid it recorded, so a job that ends on it (loadgen drains, browsertype writes its summary)
+# does. A job that ended already is no failure: whatever the kill does, the runner's sh exits 0.
+# It returns 1 only when kubectl itself failed.
+#
+# It reads no lock of its own, and the header lists it with the other paths exempt from the
+# guard: it runs only directly after its own caller's copy_is_ours answered 0 (runner_stop
+# below, the disk watcher and the wait at its deadline), and that one answer is the whole
+# guard. A read of its own could fail where the caller's answered and leave the job running,
+# which is what a kill by a poller that has decided must never do.
+runner_term() {
+  # The signal is this shell's, everything else the runner's sh expands.
+  kube_for 300 exec runner -c runner -- \
+    sh -c "pid=\$(cat \"/work/logs/\$1.pid\" 2>/dev/null); kill -${2:-TERM} \"\$pid\" 2>/dev/null; exit 0" sh "$1" >/dev/null ||
     return 1
+}
+
+# runner_stop NAME: runner_term's SIGTERM, guarded by the lock: the runner pod carries the same
+# name in every run, so the job that name reaches is this run's only while the lock says so. It
+# returns 1 only when the TERM never left this pod -- the lock names another run or no read of
+# it answered, or kubectl itself failed -- and job names repeat across runs, so typing_stop
+# learns from that one answer that it stopped nothing. The two callers that go on polling (the
+# disk watcher and the wait at its deadline) read the lock themselves and then call runner_term,
+# since this one answer does not say whether the lock gave the job away, went unread, or reached
+# a kubectl that failed.
+runner_stop() {
+  copy_is_ours "the runner job $1 in the runner pod" || return 1
+  runner_term "$1"
 }
 
 # runner_wait NAME SECONDS [LOG_DIR [PID START]]: NAME's exit status once it has one; past SECONDS
@@ -1606,34 +1689,58 @@ runner_stop() {
 # ...)) ends there under errexit instead of taking the empty output for the job's exit status: a
 # step whose shell was killed has no reader left.
 #
-# The stop at the deadline is this run's only while the lock says so, and runner_stop's own read
-# (through runner_exec) cannot tell the two refusals apart, so the wait reads the lock itself
-# first (copy_is_ours, which costs an exec and is read nowhere else in the wait). A lock that
-# names another run ends the wait non-zero, stopping nothing, whether or not the caller passed a
-# pid: a step whose run the lock no longer names has nothing left to measure. A lock no read
-# answered ends nothing: the wait says so, stops no job at that poll, keeps polling NAME's .rc
-# and tries the stop again at the next poll, where a read that answers decides it.
+# The stop at the deadline is this run's only while the lock says so, so the wait reads the lock
+# itself (copy_is_ours, which costs an exec) and then kills through runner_term, which reads no
+# lock again: once per poll, and no more. A lock that names another run ends the wait non-zero,
+# stopping nothing, whether or not the caller passed a pid: a step whose run the lock no longer
+# names has nothing left to measure. A lock no read answered ends nothing: the wait says so,
+# stops no job at that poll, keeps polling NAME's .rc and tries the stop again at the next poll,
+# where a read that answers decides it; a kill kubectl itself refused is the same.
+#
+# A TERM that left this pod does not end the wait: it keeps polling NAME's .rc and prints
+# timeout only once the job has recorded an exit status, so a step never goes on to its
+# after-work with its own load still running. RUNNER_STOP_GRACE_SECONDS bounds that: a job that
+# has recorded nothing that long after the TERM is sent one SIGKILL (the lock read once more
+# first, the same way), which the runner's sh wrapper answers with the job's .rc, and the wait
+# goes on polling for it.
 runner_wait() {
   local name=$1 deadline=$((EPOCHSECONDS + $2)) log_dir=${3:-$RUN_DIR/logs} pid=${4:-} start=${5:-} rc guard
+  local termed=0 killed=0
   while :; do
     if [ -n "$pid" ] && step_gone "$pid" "$start"; then
       note "job $name: the step that started this wait is gone; the wait ends, stopping no job"
       return 1
     fi
     if rc=$(kube_read exec runner -c runner -- cat "/work/logs/$name.rc" 2>/dev/null) && [[ $rc =~ ^[0-9]+$ ]]; then
+      ((termed == 0)) || rc=timeout
       break
     fi
-    if ((EPOCHSECONDS >= deadline)); then
+    if ((termed == 0)) && ((EPOCHSECONDS >= deadline)); then
       guard=0
       copy_is_ours "the runner job $name" || guard=$?
       if ((guard == 2)); then
         note "job $name: the wait is past its deadline and stops no job at this poll; it tries the stop again at the next one"
-      elif ((guard == 0)) && runner_stop "$name"; then
-        rc=timeout
-        break
-      else
+      elif ((guard != 0)); then
         note "job $name: the wait ends at its deadline, stopping no job and giving no exit status"
         return 1
+      elif runner_term "$name"; then
+        termed=$EPOCHSECONDS
+      else
+        note "job $name: kubectl could not send the runner job its SIGTERM at the deadline; the wait tries again at its next poll"
+      fi
+    elif ((termed != 0)) && ((killed == 0)) && ((EPOCHSECONDS - termed >= RUNNER_STOP_GRACE_SECONDS)); then
+      guard=0
+      copy_is_ours "the runner job $name" || guard=$?
+      if ((guard == 2)); then
+        note "job $name: no read of the lock answered, so the wait sends no SIGKILL at this poll; it reads the lock again at the next one"
+      elif ((guard != 0)); then
+        note "job $name: the wait ends, sending no SIGKILL and giving no exit status"
+        return 1
+      elif runner_term "$name" KILL; then
+        killed=1
+        note "job $name: no exit status within $RUNNER_STOP_GRACE_SECONDS s of the SIGTERM at its deadline, so the wait sent SIGKILL; it keeps polling for the job's exit status"
+      else
+        note "job $name: kubectl could not send the runner job its SIGKILL; the wait tries again at its next poll"
       fi
     fi
     sleep 15
@@ -2250,8 +2357,8 @@ typing_chosen() {
 # (which the step and the replay create in the runner), then browsertype for SECONDS, the
 # stored-order check's bound and 600 s more, which outlasts loadgen's window, grace, the
 # after-work and the check; typing_stop ends it before that. Its peers are people, not the copy's
-# agent: each connects as TYPING_PERSON-<peer> in the TYPING_IDENTITY_HEADER header, so the
-# runner is given no credential of the copy. A step that dies before typing_stop
+# agent: each connects as TYPING_PERSON-<peer> in the TYPING_IDENTITY_HEADER header, so
+# browsertype is given no token of the copy. A step that dies before typing_stop
 # stops it on its way out (step_at_exit, the EXIT trap run_in_runner sets), so no browsertype
 # types into a later step.
 #
@@ -2298,7 +2405,9 @@ typing_summary() {
 }
 
 # typing_stop NAME DIR: when the step runs browser typing and has not stopped it yet (no
-# DIR/browsertype.json): SIGTERM to browsertype, its exit status (at most 120 s later), its output
+# DIR/browsertype.json): SIGTERM to browsertype, then its exit status, which the wait gives it
+# 120 s for and, past that, a TERM of its own and a SIGKILL after the grace, so no record of a
+# typing job that still types is written (browsertype.json's exit is null then), its output
 # into DIR/browsertype.txt and typing_summary into DIR/browsertype.json, the step's document
 # list removed from the runner, and one line naming the sums. A peer error or a non-zero exit is
 # said, never a step
@@ -2307,11 +2416,11 @@ typing_summary() {
 #
 # It stops, waits for and removes nothing once the lock names another run: the job typing-NAME
 # and the document list under TYPING_DIR are in the pod named runner, which is that run's now, so
-# runner_stop (through runner_exec) stops nothing and this function writes no record of a job it
+# runner_stop (its own read of the lock) stops nothing and this function writes no record of a job it
 # never stopped. The step shell's EXIT trap comes through here (step_at_exit,
 # typing_stop_at_exit), and a step ends on that path exactly when its wait on the runner job
-# found the lock renamed. The removal, which the wait above it leaves up to 120 s of room, reads
-# the lock again through runner_exec.
+# found the lock renamed. The removal, which the wait above it leaves 120 s or more of room,
+# reads the lock again through runner_exec.
 typing_stop() {
   local name=$1 dir=$2 job=typing-$1 rc
   { [ -n "$TYPING" ] && [ ! -f "$dir/browsertype.json" ]; } || return 0
@@ -2621,7 +2730,7 @@ run_in_runner() {
   typing_start "$name" "$dir" "$seconds"
   runner_start "$job" "$@"
   pg_disk_watch "$name" "$dir" "$job" "$readings" "$shell_pid" "$shell_start" &
-  PG_DISK_WATCHER=$!
+  PG_DISK_WATCHER=$! PG_DISK_WATCH_STEP=$name
   rc=$(runner_wait "$job" "$seconds" "$dir" "$shell_pid" "$shell_start")
   pg_disk_watch_stop
   pg_disk_sample "$readings" || true
