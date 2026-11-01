@@ -139,9 +139,9 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 // ready or idle, the delivery is neither confirmed nor already on its way, the issue is still in
 // the phase the task was queued for, the claim's connection is registered, and — for a task that
 // adopts the working copy the issue's roles share (adopts) — no other claim of the issue is in a
-// turn. A missing connection is not a failure — the shim's next hello sends it. A delivery an
-// earlier daemon may have sent is sent again only after the agent says it is not already in a
-// turn; if it is, that turn is taken as the delivery's.
+// turn or has a prompt on its way to one. A missing connection is not a failure — the shim's next
+// hello sends it. A delivery an earlier daemon may have sent is sent again only after the agent
+// says it is not already in a turn; if it is, that turn is taken as the delivery's.
 func (m *Machine) sendPending(ctx context.Context) error {
 	// A claim holding a suspension is handed nothing (holdSuspension).
 	if state := m.claim.State; (state != StateReady && state != StateIdle) || m.held != nil {
@@ -207,6 +207,17 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	// trigger sends the task. It cannot be sent twice either, because every one of those triggers
 	// comes back through here, where a delivery already on its way (m.send), one waiting for its
 	// turn (TimerTurn), and a confirmed one each stop the send.
+	//
+	// The hold stays a check followed by an act, and counting a send in flight narrows that
+	// window rather than closing it: this machine holds its own lock across both halves, but the
+	// claim it asked about is another machine, free to start a send of its own the instant after
+	// it answered. What changes is how long such a send stays invisible. It used to be invisible
+	// for the whole of itself — an adoption of the working copy and a prompt RPC, seconds of it
+	// — because only StateWorking counted and no turn had started yet, so the miss was the rule
+	// rather than a race. Now it is invisible only from where startSend records it to where that
+	// machine's decision publishes (ClaimView.SendInFlight), a tail of its own locked section
+	// with no agent round trip in it. Two sends that start inside each other's tail are what
+	// remains, and no answer read outside the other machine's lock can rule that out.
 	if m.adopts(*p) {
 		if other, inTurn := m.issueInTurn(); inTurn {
 			m.log.Info("supervise: a claim of this issue is in a turn; the phase task waits rather than adopt the working copy they share",
@@ -298,15 +309,15 @@ func (m *Machine) streaming(ctx context.Context, conn runtime.Conn) (streaming, 
 
 // startSend runs one prompt on its own goroutine and posts its outcome back to the machine. The
 // task is marked as put to the agent before the goroutine starts (Delivery.Prompted), whatever
-// the agent then answers: from here on, a prompt of it has gone out. Whether the send adopts the
+// the agent then answers: from here on, a prompt of it has gone out. The abandoned session's
+// sentence the prompt may carry is not marked told here, because this says only that a prompt
+// went out, not that one arrived (AbandonedSession.Told, acked). Whether the send adopts the
 // working copy first is decided here, under the machine's lock, so the goroutine acts on the
 // claim the hold in sendPending was decided against.
 func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 	token, generation, role, loc := m.claim.Token, m.claim.Generation, m.claim.Role, m.claim.Locator
 	adopting := m.adopts(d)
 	prompt := d.message(m.claim)
-	// The sentence goes out with this prompt, so no later task of this claim repeats it.
-	m.claim.Abandoned.Told = true
 	if p := m.claim.Pending; p != nil && p.ID == d.ID {
 		p.Prompted = true
 	}
@@ -351,10 +362,11 @@ func (m *Machine) adopts(d Delivery) bool {
 	return m.deps.Identity != nil && m.claim.Role != claim.RoleController && d.Phase != ""
 }
 
-// issueInTurn names another claim of this claim's issue whose agent is in a turn now, when there
-// is one. The answer is the state those claims' machines keep (Deps.IssueInTurn reads
-// StateWorking, which a turn's start sets and its end clears) rather than a second record of who
-// is in a turn kept beside them: the machines' own state is the only account that moves with
+// issueInTurn names another claim of this claim's issue whose agent is in a turn now, or whose
+// prompt is on its way to one, when there is such a claim. The answer is the state those claims'
+// machines keep (Deps.IssueInTurn reads StateWorking, which a turn's start sets and its end
+// clears, and the send in flight those machines publish beside it) rather than a second record of
+// who is in a turn kept beside them: the machines' own state is the only account that moves with
 // everything that ends a turn — the agent's own end of it, a process found dead, a suspension, a
 // close — where a record of turn times would have to be told of each of those again.
 func (m *Machine) issueInTurn() (claim.Token, bool) {

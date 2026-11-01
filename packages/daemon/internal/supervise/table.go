@@ -861,11 +861,22 @@ func reprobe(m *Machine, ctx context.Context, _ Event) error {
 	return m.probe(ctx, nothing, TimerProbe, m.deps.Timeouts.Probe)
 }
 
+// acked is the agent taking the prompt: the task is marked read and the wait for its turn armed.
+// It is also where the abandoned session's sentence becomes told, since this is the first word
+// the daemon has that a prompt carrying it reached the agent at all (AbandonedSession.Told): a
+// prompt the agent refused, or one the transport lost, goes back in the queue and must carry the
+// sentence again. The claim then goes in the delivery's own write, so a restart between the two
+// cannot read a claim that has told the sentence beside a task no prompt of which was ever
+// acknowledged, or the other way about.
 func acked(m *Machine, ctx context.Context, _ Event) error {
 	m.helloDuringSend = false
 	p := m.claim.Pending
 	m.markRead(p)
 	m.arm(TimerTurn, m.deps.Timeouts.RPC, p.ID)
+	if m.claim.Abandoned.Tells() {
+		m.claim.Abandoned.Told = true
+		return m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p))
+	}
 	return m.putPending(ctx)
 }
 

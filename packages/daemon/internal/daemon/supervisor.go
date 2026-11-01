@@ -77,23 +77,33 @@ func (s *supervisor) Machine(token claim.Token) (*supervise.Machine, bool) {
 	return m.machine, true
 }
 
-// claimInTurn names a claim of issue other than except whose agent is in a turn now, for the
-// adoption a phase task makes of the working copy an issue's roles share (supervise's
-// Deps.IssueInTurn). It reads each machine's published claim — StateWorking is a turn in flight —
-// rather than any record of turns kept beside them, and View never waits on the decision a machine
-// is making, so answering this can never be held up by another claim's launch or stop.
+// claimInTurn names a claim of issue other than except whose agent is in a turn now, or is about
+// to be, for the adoption a phase task makes of the working copy an issue's roles share
+// (supervise's Deps.IssueInTurn). A claim counts when its published state is StateWorking, a turn
+// in flight, and when its machine has a send in flight (supervise.ClaimView.SendInFlight): the
+// prompt that starts that turn is on its way and the adoption it goes behind may be rewriting the
+// shared working copy at this moment, which is the very thing this answer guards. Without it two
+// phase tasks to two roles of one issue each read the other as idle and adopt together
+// (dispatch://INFRA-314), and a turn's end wakes a held claim whose own next send has already
+// started.
+//
+// It reads each machine's published claim rather than any record of turns kept beside them, and
+// it iterates the lock-free snapshot of the machines (supervised) rather than taking s.mu:
+// publishing takes a machine's own lock, OnTerminal takes s.mu and then every machine's, and a
+// reader here holding s.mu while a machine decides would be those two locks taken in both orders.
+// View never waits on the decision a machine is making either, so answering this can never be
+// held up by another claim's launch or stop.
 func (s *supervisor) claimInTurn(issue string, except claim.Token) (claim.Token, bool) {
 	if issue == "" {
 		return "", false
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for token, m := range s.machines {
-		if token == except || m.issue != issue {
+	for _, machine := range s.supervised() {
+		view := machine.View()
+		if view.Token == except || view.Issue != issue {
 			continue
 		}
-		if m.machine.View().State == supervise.StateWorking {
-			return token, true
+		if view.State == supervise.StateWorking || view.SendInFlight {
+			return view.Token, true
 		}
 	}
 	return "", false

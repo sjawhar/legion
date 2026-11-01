@@ -226,6 +226,16 @@ type ClaimView struct {
 	// shows the state it is leaving. A process retired and relaunched in one decision
 	// (chargePrompt, the registration deadline) is not stopping: its claim keeps its role.
 	Stopping bool
+	// SendInFlight is whether a prompt of the claim's pending task is on its way to the agent:
+	// the send's own goroutine is running, between startSend and the outcome that ends it
+	// (fenceOutcome), so its adoption of the working copy or its prompt frame may be running
+	// right now. The claim still reads ready or idle meanwhile, because the turn that prompt asks
+	// for has not started — but the agent is about to be in one, and the adoption the prompt goes
+	// behind is already rewriting the working copy the issue's roles share. So a reader deciding
+	// who may adopt that working copy counts a send in flight as a turn (the daemon's
+	// claimInTurn, supervise's Deps.IssueInTurn): two roles of one issue that each read the other
+	// as idle would otherwise adopt it at the same moment (dispatch://INFRA-314).
+	SendInFlight bool
 }
 
 // treeRoot is whether the claim is its tree's root claim (claim.IsTreeArchitect), which ends only
@@ -327,14 +337,15 @@ type Deps struct {
 	// before the task (adopts). nil, for a daemon with no workflow or no GitHub Apps, adopts
 	// nothing.
 	Identity func(ctx context.Context, role claim.Role, issue string) (runtime.GitIdentity, error)
-	// IssueInTurn names a claim of issue other than except whose agent is in a turn now, and
-	// reports whether there is one. The roles of an issue work one jj workspace, so the adoption a
-	// phase task makes of its working copy is not a private act: one run while another role is in
-	// a turn moves that role's worker onto a commit of this role's (dispatch://INFRA-714), and a
-	// task that would adopt waits instead (sendPending). The daemon answers it from the state its
-	// machines publish — a claim is StateWorking from its turn's start to its turn's end — which
-	// is read without waiting on any decision in flight (Machine.View). nil holds no delivery
-	// back.
+	// IssueInTurn names a claim of issue other than except whose agent is in a turn now, or is
+	// about to be, and reports whether there is one. The roles of an issue work one jj workspace,
+	// so the adoption a phase task makes of its working copy is not a private act: one run while
+	// another role is in a turn moves that role's worker onto a commit of this role's
+	// (dispatch://INFRA-714), and a task that would adopt waits instead (sendPending). The daemon
+	// answers it from the state its machines publish — a claim is StateWorking from its turn's
+	// start to its turn's end, and carries a send in flight from the moment its own prompt and
+	// that prompt's adoption go out (ClaimView.SendInFlight) — which is read without waiting on
+	// any decision in flight (Machine.View). nil holds no delivery back.
 	IssueInTurn func(issue string, except claim.Token) (claim.Token, bool)
 	// PhaseHolds says whether issue is still in phase p on run generation: the workflow enqueues a
 	// task for the phase and run its issue was in, and the outbox refuses to start a role for a
@@ -524,7 +535,8 @@ type Machine struct {
 	// view is the claim View reports: published under mu as every locked section that can change
 	// the claim ends (unlock) and at every write of the claim (persist), and read without mu, so a
 	// reader never waits on a decision in flight. stopping is whether that decision is stopping
-	// the claim's process for good (ClaimView.Stopping).
+	// the claim's process for good (ClaimView.Stopping); the send in flight is read from send
+	// itself, which only a locked section changes (ClaimView.SendInFlight).
 	view     atomic.Pointer[ClaimView]
 	stopping bool
 	// deciding is the event the decision in flight handles, nil between decisions (Deciding). It
@@ -782,7 +794,7 @@ func (m *Machine) current() Claim {
 
 // publish makes the claim as the machine holds it now the one View reports. The caller holds mu.
 func (m *Machine) publish() {
-	m.view.Store(&ClaimView{Claim: m.current(), Stopping: m.stopping})
+	m.view.Store(&ClaimView{Claim: m.current(), Stopping: m.stopping, SendInFlight: m.send != nil})
 }
 
 // stoppingProcess marks the claim's process as being stopped for good, for View, until the runtime
@@ -1295,10 +1307,14 @@ type AbandonedSession struct {
 	SessionFile string    `json:"sessionFile,omitempty"`
 	Why         string    `json:"why"`
 	At          time.Time `json:"at"`
-	// Told is set once a prompt carrying the sentence has gone out (startSend), so the agent that
-	// replaced the session is told of it in the first task it is given and in no later one. It
-	// rides the claim's next write, as the delivery's own Prompted mark does: a send the store
-	// never heard of is one the fresh agent may be told of twice, which is the harmless way round.
+	// Told is set once the agent has acknowledged a prompt carrying the sentence (acked), so the
+	// agent that replaced the session is told of it in the first task it actually takes and in no
+	// later one. It is written where that acknowledgement is, rather than where its send started,
+	// because a prompt the agent refused reached nobody: the task goes back in the queue, and the
+	// fresh session still has to be told of its predecessor in whatever prompt does reach it
+	// (dispatch://INFRA-714). A turn whose start overtook its own acknowledgement leaves it
+	// unset, which costs the next task of that claim a sentence it repeats — the harmless way
+	// round, where losing it strands a worker reading an empty transcript as a fresh start.
 	Told bool `json:"told,omitempty"`
 }
 
