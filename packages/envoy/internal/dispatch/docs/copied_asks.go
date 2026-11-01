@@ -156,8 +156,9 @@ type copiedSource struct {
 // hashtext.
 const projectCopiesLock = `select pg_advisory_xact_lock($1, hashtext($2))`
 
-// copiedAsksLockNamespace is the first key of every copy lock ("COPY"). No other lock of this
-// module is taken in the two-key form.
+// copiedAsksLockNamespace is the first key of every copy lock ("COPY"). The server's other two-key
+// namespaces are the loop leases' (duty.leaseNamespace, "LOOP") and the test hooks' (the api
+// package's testHookLockNamespace, "HOOK"), each a first key of its own.
 const copiedAsksLockNamespace int32 = 0x434F5059
 
 // lockProjectCopies serialises, for a project document, its project's copy bookkeeping: a
@@ -176,20 +177,21 @@ const copiedAsksLockNamespace int32 = 0x434F5059
 // other advisory lock here - a document's room (lockDocumentRoom), a project's rank allocation, an
 // agent's artifacts, the migration runner's - is a single key, so a copy lock never waits on one of
 // those, whatever the project's name hashes to. Within the two-key space only the copy locks take
-// copiedAsksLockNamespace: the one other namespace of it anywhere in the server is
-// internal/dispatch/duty's (duty.leaseNamespace), under which a background loop holds the lease
-// that keeps one process at a time running its periodic pass, so a copy lock cannot collide with a
-// lease either. hashtext is 32 bits wide, so two projects can still share the second key. They
-// then take turns on their copy bookkeeping and on nothing else, and cannot deadlock: a holder
-// takes the copy lock before any doc_settlements_pending row and before any event append
-// (TestCopyLockComesBeforeEveryPendingRowAndEvent), and an append locks only its event owner's row,
-// which for the holder's appends is the owner row it took before the copy lock, so the
-// transaction waiting on it holds nothing the holder goes on to take. A settlement takes it right
-// after its owner row and room lock, an answer or a resolution after its owner row and ask row. The
-// copy-source read is the next statement, so under READ COMMITTED its snapshot holds every ask a
-// sibling's settlement committed while this one waited, and the ask createAskBlock opens commits
-// in this transaction, which holds the lock until then. A settlement whose blocks all have asks
-// of their own and that retracts none takes none.
+// copiedAsksLockNamespace: the server's other namespaces of it are internal/dispatch/duty's
+// (duty.leaseNamespace), under which a background loop holds the lease that keeps one process at a
+// time running its periodic pass, and the test hooks' (the api package's testHookLockNamespace,
+// under DISPATCH_TEST_HOOKS alone), under which each process marks itself as one a hook call must
+// reach, so a copy lock cannot collide with either. hashtext is 32 bits wide, so two projects can
+// still share the second key. They then take turns on their copy bookkeeping and on nothing else,
+// and cannot deadlock: a holder takes the copy lock before any doc_settlements_pending row and
+// before any event append (TestCopyLockComesBeforeEveryPendingRowAndEvent), and an append locks
+// only its event owner's row, which for the holder's appends is the owner row it took before the
+// copy lock, so the transaction waiting on it holds nothing the holder goes on to take. A
+// settlement takes it right after its owner row and room lock, an answer or a resolution after its
+// owner row and ask row. The copy-source read is the next statement, so under READ COMMITTED its
+// snapshot holds every ask a sibling's settlement committed while this one waited, and the ask
+// createAskBlock opens commits in this transaction, which holds the lock until then. A settlement
+// whose blocks all have asks of their own and that retracts none takes none.
 func lockProjectCopies(ctx context.Context, tx pgx.Tx, owner artifactOwner) error {
 	if owner.IssueKey != nil || owner.Project == "" {
 		return nil

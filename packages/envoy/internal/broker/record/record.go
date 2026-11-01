@@ -40,6 +40,7 @@ var (
 	hostnamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?)*$`)
 	servicePattern  = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
 	slotPattern     = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	idPattern       = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // ValidSlot reports whether slot may name a pod enrollment's slot: one of several independent
@@ -55,6 +56,12 @@ func ValidService(service string) bool {
 	return servicePattern.MatchString(service)
 }
 
+// ValidID reports whether id has a credential-request record id's form, the lowercase-hex SHA-256
+// Body.ID answers, so a caller can refuse anything else before it reads the database with it.
+func ValidID(id string) bool {
+	return idPattern.MatchString(id)
+}
+
 // CanonicalLogin lowercases and trims the name Dispatch signs a person in with, their email (a
 // record created before people were named by email keeps the GitHub login it was decided under).
 // Every login comparison in the module goes through this form on both sides.
@@ -62,8 +69,9 @@ func CanonicalLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
 }
 
-// HumanActor is the audit actor of a change a person made in Dispatch: "human:" and their
-// canonical login, the person Dispatch's server vouches for from its own signed-in session.
+// HumanActor is the audit actor of a change a person made: "human:" and their canonical login,
+// the person signed in to the broker's own approval page, or, for a machine login's decision or a
+// revoke, the person Dispatch's server vouches for from its own signed-in session.
 func HumanActor(login string) string {
 	return "human:" + CanonicalLogin(login)
 }

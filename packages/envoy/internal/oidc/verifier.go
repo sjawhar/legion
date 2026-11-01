@@ -162,6 +162,15 @@ func newVerifier(provider *gooidc.Provider, issuer, audience string) *Verifier {
 	}
 }
 
+// Issues reports whether raw's iss claim, read without verifying anything, names this verifier's
+// issuer. A caller that trusts several issuers picks with it the one verifier a token is for, so
+// a token of one issuer never makes another's verifier fetch its keys; Verify still checks the
+// issuer with everything else.
+func (v *Verifier) Issues(raw string) bool {
+	claims, err := decodeClaims(raw)
+	return err == nil && claims.Issuer == v.issuer
+}
+
 // Verify checks raw against the issuer's published keys, the configured
 // audience, and the token's expiry. Every error wraps exactly one of
 // ErrMalformed, ErrIssuer, ErrAudience, ErrExpired, ErrCancelled,

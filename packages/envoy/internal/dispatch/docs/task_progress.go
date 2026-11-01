@@ -67,48 +67,65 @@ const latestPrimaryVersion = `(
 
 // taskProgressDrift is the issues whose stored task count is not the count of their primary
 // document's latest version: never counted (every row the migration that added these columns
-// found), versioned by a server that wrote no count (the task a deploy replaces, until it stops),
-// or whose latest version was written while the row was locked by another writer. The row's own
-// lock is taken only by the batch that writes it, so the predicate reads nothing it would wait on.
+// found), versioned by a server that wrote no count (a build predating LEGION-542), or whose latest
+// version was written while the row was locked by another writer. The row's own lock is taken
+// only by the batch that writes it, so the predicate reads nothing it would wait on.
 const taskProgressDrift = `i.tasks_version is distinct from ` + latestPrimaryVersion
 
 // taskProgressBatch is how many issues one reconciliation transaction counts; between batches the
 // pool is free for requests.
 const taskProgressBatch = 50
 
-// TaskProgressReconcileInterval is how often the server reconciles the task counts after the pass
-// it runs at start. One pass after start would miss what a deploy's overlap leaves: the task being
-// replaced still writes versions through code that records no count until it stops, and a row
-// another writer holds during the pass is skipped (skip locked), so the count a reader sees is
-// stale for at most this long.
-const TaskProgressReconcileInterval = 5 * time.Minute
+// The boot retries: taskProgressBootRetries is how many more passes RunTaskProgressReconciliation
+// runs after the boot pass while drift it could not lock remains, the first
+// taskProgressBootRetryFirst after the boot pass, each later one waiting twice as long as the one
+// before, never more than taskProgressBootRetryCeiling.
+const (
+	taskProgressBootRetries      = 6
+	taskProgressBootRetryFirst   = time.Second
+	taskProgressBootRetryCeiling = time.Minute
+)
 
-// RunTaskProgressReconciliation counts the primary document of every issue whose stored task count
-// is not its latest version's (taskProgressDrift), in batches, at start and every
-// TaskProgressReconcileInterval until ctx ends, so an issue nobody has edited since the deploy
-// shows its progress, an issue the old task versioned during the deploy is counted again, and a
-// null `tasks` on the API means the spec holds no task list for longer than that interval only
-// while a row stays locked. Each pass runs until no drift it can lock remains; a batch that fails,
-// or that was short because rows were locked, is retried after a short wait, a bounded number of
-// times, so one bad batch ends the pass and not the loop. Each issue's latest version markdown is
-// read for its task items alone (pmdoc.CountTasksMarkdown), so a spec the Proof schema refuses
-// elsewhere - a table row wider than its header - is still counted; an issue whose spec the reader
-// cannot read at all is logged and counted as holding none, so one broken document does not hold
-// the rest back.
+// RunTaskProgressReconciliation counts, once at start, the primary document of every issue whose
+// stored task count is not its latest version's (taskProgressDrift), in batches, so an issue
+// nobody has edited since the columns were added shows its progress. It runs no timer after that:
+// every version write records its count in its own transaction (RecordTaskProgress,
+// RecordTaskProgressMarkdown), in this build and in the build a deploy replaces, so nothing makes
+// new drift while the process runs but a row another writer held while the pass ran (skip
+// locked). That drift is what the pass's own retries could not lock, and the boot pass leaves it
+// to up to taskProgressBootRetries more passes, one second after it and doubling, which return as
+// soon as one finds none; drift left after the last is logged and left to the next start. Each
+// issue's latest version markdown is read for its task items alone (pmdoc.CountTasksMarkdown),
+// so a spec the Proof schema refuses elsewhere - a table row wider than its header - is still
+// counted; an issue whose spec the reader cannot read at all is logged and counted as holding
+// none, so one broken document does not hold the rest back. It returns once no drift is left, the
+// retries are spent, or ctx ends.
 func (s *Service) RunTaskProgressReconciliation(ctx context.Context) {
-	for {
-		s.ReconcileTaskProgress(ctx)
+	s.runTaskProgressReconciliation(ctx, taskProgressBootRetryFirst)
+}
+
+func (s *Service) runTaskProgressReconciliation(ctx context.Context, firstRetry time.Duration) {
+	if !s.ReconcileTaskProgress(ctx) {
+		return
+	}
+	wait := firstRetry
+	for range taskProgressBootRetries {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(TaskProgressReconcileInterval):
+		case <-time.After(wait):
 		}
+		if !s.ReconcileTaskProgress(ctx) {
+			return
+		}
+		wait = min(2*wait, taskProgressBootRetryCeiling)
 	}
+	slog.Warn("dispatch: issue task progress reconciliation left drift it could not lock to the next start")
 }
 
 // taskProgressPassRetries is how many failed or short batches one reconciliation pass retries
-// before leaving the rest to the next pass, and taskProgressRetryBackoffStep the wait before the
-// first retry, multiplied by the retry's number.
+// before it gives up, and taskProgressRetryBackoffStep the wait before the first retry,
+// multiplied by the retry's number.
 const (
 	taskProgressPassRetries      = 5
 	taskProgressRetryBackoffStep = 200 * time.Millisecond
@@ -117,16 +134,16 @@ const (
 // ReconcileTaskProgress runs one reconciliation pass: batches until no drift it can lock remains.
 // A full batch with drift left goes straight to the next batch, as a backfill of more than one
 // batch does. A batch that errs, or that was short because the rows left were locked, is retried
-// after a backoff, up to taskProgressPassRetries times in the pass; drift still left is the next
-// pass's.
-func (s *Service) ReconcileTaskProgress(ctx context.Context) {
+// after a backoff, up to taskProgressPassRetries times in the pass. It reports whether it gave up
+// with drift left; a pass ctx ended reports none.
+func (s *Service) ReconcileTaskProgress(ctx context.Context) (driftLeft bool) {
 	ctx = store.WithTransactionTracking(ctx)
 	counted, retries := 0, 0
 	for ctx.Err() == nil {
 		n, remaining, err := s.reconcileTaskProgressBatch(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				return
+				return false
 			}
 			slog.Error("dispatch: reconcile issue task progress", "error", err)
 		}
@@ -139,19 +156,21 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) {
 		}
 		retries++
 		if retries > taskProgressPassRetries {
-			slog.Warn("dispatch: issue task progress reconciliation left drift to the next pass",
+			slog.Warn("dispatch: issue task progress reconciliation pass left drift",
 				"counted", counted)
+			driftLeft = true
 			break
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-time.After(time.Duration(retries) * taskProgressRetryBackoffStep):
 		}
 	}
 	if counted > 0 {
 		slog.Info("dispatch: reconciled issue task progress", "issues", counted)
 	}
+	return driftLeft
 }
 
 // reconcileTaskProgressBatch counts one batch of drifted issues in one transaction and returns how

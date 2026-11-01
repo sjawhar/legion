@@ -14675,6 +14675,7 @@ function dispatchDocumentSubject(project, slug, type) {
 function agentSubject(session) {
   return `${AGENT_TOPIC_PREFIX}${session}`;
 }
+var GHOSTWISPR_TOPIC_PREFIX = "notifications.ghostwispr.";
 
 // ../contracts/src/legion-roles.ts
 var LEGION_ROLES = [
@@ -20326,8 +20327,7 @@ function neutralConfig(env) {
 }
 var HARNESS_DIRECTORY_VARIABLE = {
   omp: "PI_CODING_AGENT_DIR",
-  claude: "CLAUDE_CONFIG_DIR",
-  opencode: "OPENCODE_CONFIG_DIR"
+  claude: "CLAUDE_CONFIG_DIR"
 };
 var PLUGIN_HARNESSES = Object.keys(HARNESS_DIRECTORY_VARIABLE);
 function namedDirectory(harness, env) {

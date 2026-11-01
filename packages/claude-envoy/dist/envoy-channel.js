@@ -37325,6 +37325,7 @@ function dispatchDocumentSubject(project, slug, type) {
 function agentSubject(session) {
   return `${AGENT_TOPIC_PREFIX}${session}`;
 }
+var GHOSTWISPR_TOPIC_PREFIX = "notifications.ghostwispr.";
 
 // ../contracts/src/legion-roles.ts
 var LEGION_ROLES = [
@@ -40248,24 +40249,2177 @@ ${trailer}`,
   };
 }
 
+// ../envoy-client/src/dispatch-subscribe.ts
+function followedAsk(details) {
+  if (typeof details !== "object" || details === null)
+    return null;
+  const { follows, issue, document } = details;
+  if (typeof follows !== "object" || follows === null)
+    return null;
+  const { ask } = follows;
+  if (typeof ask !== "string" || ask === "")
+    return null;
+  if (typeof issue === "string" && issue !== "")
+    return { ask, owner: issueTopic(issue) };
+  if (typeof document !== "string")
+    return null;
+  const [project, slug] = document.split("/", 2);
+  if (!project || !slug)
+    return null;
+  return { ask, owner: { label: document, topic: documentTopicOf(project, slug).topic } };
+}
+function followNoticeText({ ask, owner }, topics) {
+  const subscribe = ownerSubscribeLine(owner, topics);
+  return `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop).${subscribe === null ? "" : ` ${subscribe}.`}`;
+}
+function ownerSubscribeLine(owner, topics) {
+  if (topics == null || topics.some((topic) => subscriptionCovers(topic, owner)))
+    return null;
+  return `For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
+}
+function subscriptionCovers(topic, owner) {
+  const base = owner.topic.slice(0, -".>".length).split(".");
+  for (const [index, part] of topic.split(".").entries()) {
+    if (part === ">")
+      return true;
+    if (index >= base.length || part !== "*" && part !== base[index])
+      return false;
+  }
+  return false;
+}
+function subscriptionRemovedTopics(raw, sessionID) {
+  let envelope;
+  try {
+    envelope = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (typeof envelope !== "object" || envelope === null)
+    return;
+  const { source, payload } = envelope;
+  if (source !== "dispatch" || typeof payload !== "string")
+    return;
+  let event;
+  try {
+    event = JSON.parse(payload);
+  } catch {
+    return;
+  }
+  const parsedEvent = DispatchEventSchema.safeParse(event);
+  if (!parsedEvent.success || parsedEvent.data.type !== "subscription.removed")
+    return;
+  const parsedPayload = SubscriptionRemovedEventPayloadSchema.safeParse(parsedEvent.data.payload);
+  if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
+    return;
+  return parsedPayload.data.topics ?? [];
+}
+
+// ../envoy-client/src/stream-topics.ts
+var EXCEPTION_TOPIC_PREFIX = "notifications.envoy.exceptions.";
+var STREAM_SUBJECT_PREFIXES = [
+  AGENT_TOPIC_PREFIX,
+  DISPATCH_TOPIC_PREFIX,
+  "notifications.github.",
+  "notifications.slack.",
+  LEGION_NOTICE_TOPIC_PREFIX,
+  GHOSTWISPR_TOPIC_PREFIX,
+  "notifications.whatsapp.",
+  `${EXCEPTION_TOPIC_PREFIX}${AGENT_TOPIC_PREFIX}`
+];
+function streamStores(topic) {
+  return STREAM_SUBJECT_PREFIXES.some((prefix) => topic.length > prefix.length && topic.startsWith(prefix));
+}
+
+// ../envoy-client/src/envoy-config.ts
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync as readFileSync2,
+  readlinkSync,
+  rmSync,
+  statSync
+} from "fs";
+import { homedir, tmpdir } from "os";
+import * as path from "path";
+
+// ../envoy-client/src/json-position.ts
+function jsonErrorPosition(text) {
+  let at = 0;
+  const fail = () => {
+    throw new RangeError("not JSON");
+  };
+  const space = () => {
+    while (at < text.length && ` 	
+\r`.includes(text.charAt(at)))
+      at += 1;
+  };
+  const expect = (char) => {
+    if (text.charAt(at) !== char)
+      fail();
+    at += 1;
+  };
+  const string = () => {
+    expect('"');
+    while (at < text.length) {
+      const char = text.charAt(at);
+      if (char === '"') {
+        at += 1;
+        return;
+      }
+      if (char < " ")
+        fail();
+      at += char === "\\" ? 2 : 1;
+    }
+    fail();
+  };
+  const value = () => {
+    space();
+    const char = text.charAt(at);
+    if (char === "{" || char === "[") {
+      const close = char === "{" ? "}" : "]";
+      at += 1;
+      space();
+      if (text.charAt(at) === close) {
+        at += 1;
+        return;
+      }
+      for (;; ) {
+        if (close === "}") {
+          space();
+          string();
+          space();
+          expect(":");
+        }
+        value();
+        space();
+        if (text.charAt(at) === ",") {
+          at += 1;
+          continue;
+        }
+        expect(close);
+        return;
+      }
+    }
+    if (char === '"') {
+      string();
+      return;
+    }
+    for (const word of ["true", "false", "null"]) {
+      if (text.startsWith(word, at)) {
+        at += word.length;
+        return;
+      }
+    }
+    const number = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/.exec(text.slice(at));
+    if (number === null)
+      fail();
+    at += number?.[0].length ?? 0;
+  };
+  try {
+    value();
+    space();
+    if (at < text.length)
+      fail();
+    return;
+  } catch {
+    const before = text.slice(0, at).split(`
+`);
+    return `line ${before.length}, column ${(before.at(-1)?.length ?? 0) + 1}`;
+  }
+}
+
+// ../envoy-client/src/secret-file.ts
+import { readFileSync } from "fs";
+function sendable(value) {
+  return !/[\s\p{Cc}]/u.test(value);
+}
+function readSecretFile(variable, filePath) {
+  let contents;
+  try {
+    contents = readFileSync(filePath, "utf8");
+  } catch (error) {
+    throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error)}`);
+  }
+  const value = contents.trim();
+  if (value.length === 0)
+    throw new Error(`${variable} names ${filePath}, which is empty`);
+  if (!sendable(value)) {
+    throw new Error(`${variable} names ${filePath}, which holds whitespace or a control character`);
+  }
+  return value;
+}
+
+// ../envoy-client/src/envoy-config.ts
+var COMMAND_TIMEOUT_MS = 1e4;
+function nonEmpty(value) {
+  return value === undefined || value === "" ? undefined : value;
+}
+function absolute(name, value) {
+  if (value !== undefined && !path.isAbsolute(value)) {
+    throw new Error(`${name} is ${value}, which is not an absolute path`);
+  }
+  return value;
+}
+function neutralConfig(env) {
+  const xdgConfigHome = nonEmpty(env.XDG_CONFIG_HOME);
+  if (xdgConfigHome !== undefined && !path.isAbsolute(xdgConfigHome)) {
+    return { error: `XDG_CONFIG_HOME is ${xdgConfigHome}, which is not an absolute path` };
+  }
+  const configHome = xdgConfigHome ?? path.join(nonEmpty(env.HOME) ?? homedir(), ".config");
+  return { path: path.resolve(configHome, "legion", "envoy.json") };
+}
+var HARNESS_DIRECTORY_VARIABLE = {
+  omp: "PI_CODING_AGENT_DIR",
+  claude: "CLAUDE_CONFIG_DIR"
+};
+var PLUGIN_HARNESSES = Object.keys(HARNESS_DIRECTORY_VARIABLE);
+function namedDirectory(harness, env) {
+  if (harness === "omp") {
+    const profile = nonEmpty(env.OMP_PROFILE);
+    if (profile === undefined || profile === "default")
+      return;
+  }
+  return nonEmpty(env[HARNESS_DIRECTORY_VARIABLE[harness]]);
+}
+function harnessDirectory(harness, env) {
+  for (const plugin of harness === "command" ? PLUGIN_HARNESSES : [harness]) {
+    if (harness === "command" && plugin === "claude" && env.CLAUDE_CODE_CHILD_SESSION !== "1") {
+      continue;
+    }
+    const directory = namedDirectory(plugin, env);
+    if (directory !== undefined)
+      return absolute(HARNESS_DIRECTORY_VARIABLE[plugin], directory);
+  }
+  return;
+}
+function handedConfigPath(env) {
+  const handed = nonEmpty(env.ENVOY_CONFIG_FILE);
+  return handed === undefined ? undefined : path.resolve(absolute("ENVOY_CONFIG_FILE", handed));
+}
+function envoyConfigPath(harness, env) {
+  const handedFirst = harness === "command" ? handedConfigPath(env) : undefined;
+  if (handedFirst !== undefined)
+    return handedFirst;
+  const directory = harnessDirectory(harness, env);
+  if (directory !== undefined)
+    return path.resolve(directory, "envoy.json");
+  const handed = handedConfigPath(env);
+  if (handed !== undefined)
+    return handed;
+  const neutral = neutralConfig(env);
+  if ("error" in neutral)
+    throw new Error(neutral.error);
+  return neutral.path;
+}
+var httpUrlSchema = url({ protocol: /^https?$/, error: "must be an http or https URL" });
+var DispatchSectionSchema = strictObject({
+  enabled: boolean2().optional(),
+  serverUrl: httpUrlSchema.optional(),
+  token: string2().optional()
+});
+var EnvoySectionSchema = strictObject({
+  enabled: boolean2().optional(),
+  url: httpUrlSchema.optional(),
+  natsUrls: array(string2().trim().min(1, "must not be empty")).optional(),
+  token: string2().optional(),
+  natsSeed: string2().optional()
+});
+var EnvoyFileSchema = looseObject({
+  $schema: string2().optional(),
+  dispatch: DispatchSectionSchema.optional(),
+  envoy: EnvoySectionSchema.optional()
+});
+var CheckoutFileSchema = looseObject({
+  $schema: string2().optional(),
+  dispatch: DispatchSectionSchema.optional()
+});
+var AskgateSectionSchema = strictObject({ enabled: boolean2().optional() });
+function offWithNotice(notice) {
+  return { enabled: false, notice, error: null };
+}
+function offWithError(error) {
+  return { enabled: false, notice: null, error };
+}
+function httpUrl2(value) {
+  let url2;
+  try {
+    url2 = new URL(value);
+  } catch {
+    return;
+  }
+  return url2.protocol === "http:" || url2.protocol === "https:" ? url2 : undefined;
+}
+function describeSchemaIssue(filePath, error) {
+  const issue = error.issues[0];
+  if (!issue)
+    return `${filePath}: invalid envoy.json`;
+  if (issue.code === "unrecognized_keys") {
+    const section = issue.path.join(".");
+    const keys = issue.keys.map((key) => `${section}.${key}`).join(", ");
+    return `${filePath}: unrecognized ${section} key(s): ${keys}`;
+  }
+  return `${filePath}: ${issue.path.join(".")}: ${issue.message}`;
+}
+function danglingLink(filePath) {
+  try {
+    return lstatSync(filePath).isSymbolicLink() ? readlinkSync(filePath) : null;
+  } catch {
+    return null;
+  }
+}
+function parseFile(filePath, schema, checkout) {
+  let raw;
+  try {
+    raw = readFileSync2(filePath, "utf-8");
+  } catch (error) {
+    if (hasErrnoCode(error, "ENOENT") || hasErrnoCode(error, "ENOTDIR")) {
+      return { kind: "absent", link: danglingLink(filePath) };
+    }
+    return { kind: "invalid", reason: `${filePath}: could not be read (${messageFor(error)})` };
+  }
+  let parsedJson;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch {
+    const position = jsonErrorPosition(raw);
+    return {
+      kind: "invalid",
+      reason: `${filePath}: invalid JSON${position === undefined ? "" : ` at ${position}`}`
+    };
+  }
+  if (typeof parsedJson === "object" && parsedJson !== null && "natsUrls" in parsedJson) {
+    return {
+      kind: "invalid",
+      reason: checkout ? `${filePath}: the top-level natsUrls is not read, and a checkout's envoy.json holds only a dispatch section` : `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`
+    };
+  }
+  const parsed = schema.safeParse(parsedJson);
+  if (!parsed.success) {
+    return { kind: "invalid", reason: describeSchemaIssue(filePath, parsed.error) };
+  }
+  return { kind: "valid", settings: parsed.data };
+}
+var FAILURE_KEPT_MS = 60000;
+var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands.v1");
+var processGlobal = globalThis;
+var commandOutcomes = processGlobal[COMMAND_OUTCOMES] ?? new Map;
+processGlobal[COMMAND_OUTCOMES] = commandOutcomes;
+function runCommand(command, env, cwd) {
+  const childEnv = {};
+  for (const [name, variable] of Object.entries(env)) {
+    if (variable !== undefined)
+      childEnv[name] = variable;
+  }
+  const directory = mkdtempSync(path.join(tmpdir(), "envoy-command-"));
+  try {
+    chmodSync(directory, 448);
+    const output = path.join(directory, "stdout");
+    const fd = openSync(output, "wx", 384);
+    let result;
+    try {
+      result = Bun.spawnSync(["/bin/sh", "-c", command], {
+        cwd,
+        env: childEnv,
+        stdin: "ignore",
+        stdout: fd,
+        stderr: "ignore",
+        timeout: COMMAND_TIMEOUT_MS,
+        detached: true
+      });
+    } catch (error) {
+      return { failure: `could not start: ${messageFor(error)}`, timedOut: false };
+    } finally {
+      closeSync(fd);
+    }
+    try {
+      process.kill(-result.pid, "SIGKILL");
+    } catch {}
+    if (result.exitedDueToTimeout) {
+      return {
+        failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s, and does not run again in this process`,
+        timedOut: true
+      };
+    }
+    if (!result.success) {
+      return {
+        failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}`,
+        timedOut: false
+      };
+    }
+    const value = readFileSync2(output, "utf-8").trim();
+    if (value.length === 0)
+      return { failure: "printed nothing", timedOut: false };
+    if (!sendable(value)) {
+      return {
+        failure: "printed more than one line, or whitespace inside its value",
+        timedOut: false
+      };
+    }
+    return { value };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+function fileValue(value, field, filePath, env, commands = "run") {
+  if (!value.startsWith("!")) {
+    if (!sendable(value)) {
+      throw new Error(`${filePath}: ${field} holds whitespace or a control character`);
+    }
+    return value;
+  }
+  const command = value.slice(1);
+  const cwd = path.dirname(path.resolve(filePath));
+  const key = JSON.stringify([command, filePath, cwd]);
+  let outcome = commandOutcomes.get(key);
+  if (commands === "kept") {
+    if (outcome === undefined) {
+      throw new Error(`${filePath}: ${field}'s command has not run in this process yet, and this read does not run it`);
+    }
+  } else if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
+    outcome = { ...runCommand(command, env, cwd), at: Date.now() };
+    commandOutcomes.set(key, outcome);
+  }
+  if ("failure" in outcome)
+    throw new Error(`${filePath}: ${field}'s command ${outcome.failure}`);
+  return outcome.value;
+}
+function statDevice(directory) {
+  try {
+    return statSync(directory).dev;
+  } catch {
+    return;
+  }
+}
+function moveNotice(oldFile, newFile, move, deviceOf) {
+  const oldDevice = deviceOf(path.dirname(oldFile));
+  let ancestor = path.dirname(newFile);
+  let newDevice = deviceOf(ancestor);
+  while (newDevice === undefined && path.dirname(ancestor) !== ancestor) {
+    ancestor = path.dirname(ancestor);
+    newDevice = deviceOf(ancestor);
+  }
+  if (oldDevice !== undefined && newDevice !== undefined && oldDevice !== newDevice) {
+    return `${oldFile} is not read, and is on another filesystem than ${newFile} (a mount): create ${newFile}, and move ${oldFile} on the machine that owns it`;
+  }
+  return `${oldFile} is not read: ${move}`;
+}
+function oldUserFileNotice(filePath, env, deviceOf) {
+  const home = nonEmpty(env.HOME) ?? homedir();
+  const old = path.join(home, ".config", "opencode", "envoy.json");
+  if (!existsSync(old))
+    return;
+  const selected = path.resolve(filePath);
+  const userFile = path.resolve(home, ".config", "legion", "envoy.json");
+  if (selected === userFile) {
+    return moveNotice(old, userFile, "mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/", deviceOf);
+  }
+  const profileFile = PLUGIN_HARNESSES.map((harness) => namedDirectory(harness, env)).some((directory) => directory !== undefined && path.isAbsolute(directory) && selected === path.resolve(directory, "envoy.json"));
+  if (profileFile) {
+    return `${old} is not read for this profile; copy or link it to ${filePath}, or write that file`;
+  }
+  const configHome = nonEmpty(env.XDG_CONFIG_HOME);
+  const neutral = neutralConfig(env);
+  if (configHome !== undefined && path.isAbsolute(configHome) && "path" in neutral && selected === neutral.path) {
+    return `${old} is not read under XDG_CONFIG_HOME=${configHome}`;
+  }
+  return;
+}
+function missingConfigNotice(filePath, missing, off) {
+  const link = missing.link === null ? "" : ` (a link to ${missing.link}, which does not exist)`;
+  const old = missing.oldUserFileNotice === undefined ? "" : `; ${missing.oldUserFileNotice}`;
+  return `no envoy.json at ${filePath}${link}: ${off}${old}`;
+}
+function readEnvoyConfig(filePath, env, options) {
+  const deviceOf = options.deviceOf ?? statDevice;
+  const chosen = parseFile(filePath, EnvoyFileSchema, false);
+  if (chosen.kind === "invalid")
+    return { kind: "failed", path: filePath, error: chosen.reason };
+  const resolvedChosen = path.resolve(filePath);
+  const checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
+  const checkoutFile = checkoutPath === resolvedChosen ? { kind: "absent", link: null } : parseFile(checkoutPath, CheckoutFileSchema, true);
+  const own = chosen.kind === "valid" ? chosen.settings : {};
+  let checkout = null;
+  if (checkoutFile.kind === "invalid") {
+    checkout = { kind: "invalid", path: checkoutPath, error: checkoutFile.reason };
+  } else if (checkoutFile.kind === "valid") {
+    checkout = {
+      kind: "valid",
+      path: checkoutPath,
+      dispatch: checkoutFile.settings.dispatch ?? {},
+      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null,
+      askgateError: Object.hasOwn(checkoutFile.settings, "askgate") ? `askgate in ${checkoutPath} is not read; set it in ${filePath}` : null
+    };
+  }
+  const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
+  const warnings = oldCheckout !== resolvedChosen && !existsSync(checkoutPath) && existsSync(oldCheckout) ? [
+    moveNotice(oldCheckout, checkoutPath, `mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`, deviceOf)
+  ] : [];
+  const unreadOldUserFile = chosen.kind === "absent" ? oldUserFileNotice(filePath, env, deviceOf) : undefined;
+  return {
+    kind: "read",
+    path: filePath,
+    dispatch: own.dispatch ?? {},
+    envoy: own.envoy ?? {},
+    checkout,
+    missing: chosen.kind === "absent" ? {
+      link: chosen.link,
+      ...unreadOldUserFile === undefined ? {} : { oldUserFileNotice: unreadOldUserFile }
+    } : null,
+    warnings
+  };
+}
+
+// ../envoy-client/src/bearer.ts
+function bearerSource(env, section, written) {
+  const pointer = nonEmpty(env[`${section}_TOKEN_FILE`]);
+  if (pointer !== undefined) {
+    return { kind: "variable", token: readSecretFile(`${section}_TOKEN_FILE`, pointer) };
+  }
+  const plain = nonEmpty(env[`${section}_TOKEN`]);
+  if (plain !== undefined) {
+    if (!sendable(plain)) {
+      throw new Error(`${section}_TOKEN holds whitespace or a control character`);
+    }
+    return { kind: "variable", token: plain };
+  }
+  const bearer = written();
+  return bearer === undefined ? { kind: "none" } : { kind: "file", ...bearer };
+}
+function fileBearer(bearer, url, section, env, commands = "run") {
+  const named = httpUrl2(url)?.origin;
+  const paired = httpUrl2(bearer.server)?.origin;
+  if (named !== paired) {
+    throw new Error(`${section}_URL names ${named}, but ${bearer.path}'s ${bearer.field} is for ${paired}; set ${section}_TOKEN or ${section}_TOKEN_FILE for it`);
+  }
+  if (bearer.checkout && bearer.token.startsWith("!")) {
+    throw new Error(`${bearer.path}: ${bearer.field} is a command, which a checkout's envoy.json cannot run`);
+  }
+  if (bearer.token === "") {
+    throw new Error(`${bearer.field} in ${bearer.path} must be a non-empty bearer token`);
+  }
+  return fileValue(bearer.token, bearer.field, bearer.path, env, commands);
+}
+
+// ../envoy-client/src/envoy-settings.ts
+var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
+var DEFAULT_HEARTBEAT_MS = 90000;
+var MIN_PASS_DEADLINE_MS = 30000;
+var MIN_INTERVAL_MS = 25;
+var MAX_INTERVAL_MS = 2147483647;
+function namedInterval(raw) {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+function natsSeedFromEnvironment(env) {
+  const { NATS_NKEY_SEED_FILE: file, NATS_NKEY_SEED: plain } = env;
+  if (file !== undefined) {
+    if (file === "")
+      throw new Error("NATS_NKEY_SEED_FILE is set but empty");
+    return {
+      value: readSecretFile("NATS_NKEY_SEED_FILE", file),
+      source: `NATS_NKEY_SEED_FILE (${file})`
+    };
+  }
+  if (plain === undefined)
+    return;
+  const value = plain.trim();
+  if (value.length === 0)
+    throw new Error("NATS_NKEY_SEED is set but empty");
+  return { value, source: "NATS_NKEY_SEED" };
+}
+var NO_NATS_SERVER = "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)";
+var NO_NATS_CONNECTION = "this session opens no NATS connection";
+function natsServerKey(url) {
+  const match = /^([a-z][a-z0-9+.-]*):\/\/([^@/]*@)?(\[[^\]]*\]|[^:/]*)(?::(\d+))?(\/.*)?$/i.exec(url);
+  if (match === null)
+    return url;
+  const [, scheme = "", userinfo = "", host = "", port = "4222", rest = ""] = match;
+  return `${scheme.toLowerCase()}://${userinfo}${host.toLowerCase()}:${port}${rest.replace(/\/+$/, "")}`;
+}
+function natsCredential(env, section, namedNatsUrls, filePath) {
+  const fromEnvironment = natsSeedFromEnvironment(env);
+  if (fromEnvironment !== undefined || section.natsSeed === undefined)
+    return fromEnvironment;
+  if (namedNatsUrls.length > 0) {
+    const servers = new Set((section.natsUrls ?? []).map(natsServerKey));
+    const named = new Set(namedNatsUrls.map(natsServerKey));
+    if (named.size !== servers.size || ![...named].every((server) => servers.has(server))) {
+      throw new Error(`ENVOY_NATS_URL names other servers than ${filePath}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`);
+    }
+  }
+  return {
+    value: fileValue(section.natsSeed, "envoy.natsSeed", filePath, env),
+    source: `envoy.natsSeed in ${filePath}`
+  };
+}
+function envoySettings(env, config, options = {}) {
+  if (config.kind === "failed")
+    return offWithError(config.error);
+  const section = config.envoy;
+  if (section.enabled === false) {
+    return offWithNotice(`${config.path} sets envoy.enabled to false: Envoy is off`);
+  }
+  const namedUrl = nonEmpty(env.ENVOY_URL);
+  const namedNatsUrls = (env.ENVOY_NATS_URL ?? "").split(",").map((url) => url.trim()).filter((url) => url.length > 0);
+  const addressed = namedUrl !== undefined || namedNatsUrls.length > 0 || section.url !== undefined || (section.natsUrls ?? []).length > 0 || section.enabled === true;
+  if (!addressed) {
+    return offWithNotice(config.missing === null ? `${config.path} names no Envoy listener or NATS server, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off` : missingConfigNotice(config.path, config.missing, "Envoy is off"));
+  }
+  if (namedUrl !== undefined && httpUrl2(namedUrl) === undefined) {
+    return offWithError("ENVOY_URL must be an http or https URL");
+  }
+  const listener = section.url ?? DEFAULT_ENVOY_URL;
+  const url = namedUrl ?? listener;
+  let token;
+  try {
+    const source = bearerSource(env, "ENVOY", () => section.token === undefined ? undefined : {
+      token: section.token,
+      field: "envoy.token",
+      path: config.path,
+      server: listener,
+      checkout: false
+    });
+    token = source.kind === "none" ? undefined : source.kind === "variable" ? source.token : fileBearer(source, url, "ENVOY", env);
+  } catch (error) {
+    return offWithError(messageFor(error));
+  }
+  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : section.natsUrls ?? [];
+  let inbound;
+  if (options.nats === false)
+    inbound = { off: NO_NATS_CONNECTION };
+  else if (natsUrls.length === 0)
+    inbound = { off: NO_NATS_SERVER };
+  else {
+    try {
+      inbound = { natsUrls, natsSeed: natsCredential(env, section, namedNatsUrls, config.path) };
+    } catch (error) {
+      inbound = { off: messageFor(error) };
+    }
+  }
+  const namedHeartbeatMs = namedInterval(env.ENVOY_HEARTBEAT_MS);
+  const heartbeatMs = namedHeartbeatMs === undefined ? DEFAULT_HEARTBEAT_MS : Math.min(Math.max(namedHeartbeatMs, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
+  const namedPassDeadlineMs = namedInterval(env.ENVOY_PASS_DEADLINE_MS);
+  return {
+    enabled: true,
+    url: normalizeEnvoyUrl(url),
+    token,
+    inbound,
+    heartbeatMs,
+    passDeadlineMs: Math.min(Math.max(namedPassDeadlineMs ?? MIN_PASS_DEADLINE_MS, heartbeatMs), MAX_INTERVAL_MS),
+    passDeadlineRaisedFrom: namedPassDeadlineMs !== undefined && namedPassDeadlineMs < heartbeatMs ? namedPassDeadlineMs : undefined
+  };
+}
+function normalizeEnvoyUrl(value) {
+  return value.replace(/\/+$/, "");
+}
+
+// ../envoy-client/src/machine.ts
+import { hostname as hostname3 } from "os";
+function machineID() {
+  return process.env["ENVOY_MACHINE_ID"] || hostname3();
+}
+
+// ../envoy-client/src/transport.ts
+var DEFAULT_TIMEOUT_MS = 5000;
+var RETRY_DELAY_MS = 250;
+var REPLAY_TIMEOUT_MS = 1e4;
+var REPLAY_UNAVAILABLE_CODE = "REPLAY_UNAVAILABLE";
+var InterestWireSchema = object({
+  session_id: string2(),
+  machine_id: string2(),
+  dir: string2(),
+  topics: array(string2()),
+  updated_at: number2().int().optional(),
+  warnings: array(string2()).optional()
+});
+var DeliveryAnswerWireSchema = discriminatedUnion("mode", [
+  object({
+    mode: literal("consumer"),
+    subject: string2().min(1),
+    stream_id: string2(),
+    gap: boolean2()
+  }),
+  object({ mode: literal("core"), reason: string2() })
+]);
+var SessionWireSchema = object({
+  session_id: string2(),
+  machine_id: string2(),
+  host: string2().optional(),
+  dir: string2(),
+  port: number2().int(),
+  title: string2(),
+  topics: array(string2()),
+  roles: array(string2()).optional(),
+  capabilities: array(string2()).optional(),
+  self_subscribed: boolean2(),
+  last_seen: number2().int().optional(),
+  plugin: string2().optional(),
+  plugin_version: string2().optional()
+});
+var RoleWireSchema = object({
+  role: string2(),
+  holder: string2(),
+  host: string2().optional(),
+  last_seen: number2().int()
+});
+var RoleHeldWireSchema = object({
+  error: string2(),
+  role: string2(),
+  holder: string2()
+});
+var ErrorWireSchema = object({
+  error: string2(),
+  code: string2().optional(),
+  expected: array(string2()).optional()
+});
+var EnvelopeResponseSchema = EnvelopeSchema.extend({
+  recipient: string2().optional(),
+  holder: string2().optional()
+});
+var ReplayWireSchema = object({
+  stream: object({
+    id: string2().min(1).optional(),
+    created: string2(),
+    first_seq: number2().int().nonnegative(),
+    last_seq: number2().int().nonnegative()
+  }),
+  subjects: array(object({
+    subject: string2(),
+    messages: array(object({
+      seq: number2().int().positive(),
+      subject: string2(),
+      time: string2(),
+      data: string2()
+    })),
+    next_after: number2().int().nonnegative(),
+    more: boolean2(),
+    refused: string2().optional()
+  }))
+});
+var DELIVERY_NOT_ANSWERED = "not_answered";
+var DELIVERY_UNREADABLE = "unreadable_answer";
+function parseSubscribeAnswer(body) {
+  const interest = InterestWireSchema.parse(body);
+  const raw = typeof body === "object" && body !== null && "delivery" in body ? body.delivery : undefined;
+  if (raw === undefined || raw === null) {
+    return { ...interest, delivery: { mode: "core", reason: DELIVERY_NOT_ANSWERED } };
+  }
+  const delivery = DeliveryAnswerWireSchema.safeParse(raw);
+  return {
+    ...interest,
+    delivery: delivery.success ? delivery.data : { mode: "core", reason: DELIVERY_UNREADABLE }
+  };
+}
+function mergeInterestSources(registryTopics, liveTopics) {
+  const interests = new Map;
+  for (const topic of registryTopics) {
+    interests.set(topic, liveTopics.includes(topic) ? "both" : "registry");
+  }
+  for (const topic of liveTopics) {
+    if (!interests.has(topic))
+      interests.set(topic, "live");
+  }
+  return interests;
+}
+function newClientInstanceID() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+function expandSubscriptionTopics(topics) {
+  const expanded = new Set;
+  for (const topic of topics) {
+    const base = topic.endsWith(".>") ? topic.slice(0, -2) : undefined;
+    if (base === undefined || base.includes("*") || base.includes(">")) {
+      expanded.add(topic);
+      continue;
+    }
+    const segments = base.split(".");
+    if (segments.length < 2 || segments.some((segment) => segment.length === 0)) {
+      throw new TypeError(`cannot expand Envoy wildcard topic "${topic}": its concrete base must have at least two non-empty segments`);
+    }
+    expanded.add(base);
+    expanded.add(topic);
+  }
+  return [...expanded];
+}
+
+class EnvoyApiError extends Error {
+  details;
+  name = "EnvoyApiError";
+  expected;
+  code;
+  constructor(details) {
+    let parsed;
+    try {
+      const result = ErrorWireSchema.safeParse(JSON.parse(details.responseBody));
+      if (result.success)
+        parsed = result.data;
+    } catch {}
+    super(parsed === undefined ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}` : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`);
+    this.details = details;
+    this.expected = parsed?.expected;
+    this.code = parsed?.code;
+  }
+}
+function createEnvoyClient(config) {
+  const baseUrl = normalizeEnvoyUrl(config.baseUrl);
+  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const apiToken = config.token;
+  const request = async (path, init, options = {}) => {
+    const url = `${baseUrl}${path}`;
+    const attempts = config.retry === false ? 1 : 2;
+    const tries = options.retry === false ? 1 : attempts;
+    for (let attempt = 0;attempt < tries; attempt += 1) {
+      let response;
+      try {
+        const headers = new Headers(init.headers);
+        if (apiToken)
+          headers.set("Authorization", `Bearer ${apiToken}`);
+        response = await config.fetch(url, {
+          ...init,
+          headers,
+          signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs)
+        });
+      } catch (error) {
+        if (attempt + 1 < tries) {
+          await waitForRetry();
+          continue;
+        }
+        throw error;
+      }
+      const responseBody = await response.text();
+      if (response.ok)
+        return responseBody;
+      const error = new EnvoyApiError({
+        method: init.method ?? "GET",
+        url,
+        status: response.status,
+        responseBody
+      });
+      if (response.status >= 500 && attempt + 1 < tries) {
+        await waitForRetry();
+        continue;
+      }
+      throw error;
+    }
+    throw new Error("Envoy request exhausted retries");
+  };
+  const post = (path, body, options) => request(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  }, options);
+  return {
+    subscribe: async (input) => parseSubscribeAnswer(JSON.parse(await post("/v1/interests/subscribe", {
+      session_id: input.sessionID,
+      dir: input.directory,
+      topics: expandSubscriptionTopics(input.topics),
+      port: input.port,
+      title: input.title,
+      ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
+      driving: input.driving,
+      ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
+      ...input.delivery === undefined ? {} : { delivery: input.delivery },
+      ...input.clientInstanceID === undefined ? {} : { client_instance_id: input.clientInstanceID },
+      host: machineID(),
+      plugin: input.plugin.name,
+      plugin_version: input.plugin.version
+    }))),
+    unsubscribe: async (input) => {
+      await post("/v1/interests/unsubscribe", {
+        session_id: input.sessionID,
+        topics: expandSubscriptionTopics(input.topics)
+      });
+    },
+    getInterest: async (sessionID) => InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
+    send: async (input) => {
+      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
+      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/send", {
+        source: input.source ?? "agent",
+        ...sourceSession(input.sourceSessionID),
+        target_session: input.targetSessionID,
+        message: input.message,
+        idempotency_key: idempotencyKey,
+        ...messageMetadata(input)
+      })));
+      return {
+        envelope: response,
+        recipient: response.recipient ?? input.targetSessionID,
+        confirmed: response.recipient !== undefined
+      };
+    },
+    publish: async (input) => {
+      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
+      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/publish", {
+        source: input.source ?? "agent",
+        ...sourceSession(input.sourceSessionID),
+        topic: input.topic,
+        message: input.message,
+        ...input.payload === undefined ? {} : { payload: input.payload },
+        idempotency_key: idempotencyKey,
+        ...messageMetadata(input)
+      })));
+      return {
+        envelope: response,
+        ...response.holder === undefined ? {} : { holder: response.holder }
+      };
+    },
+    unregisterSession: async (input) => {
+      const query = input.clientInstanceID === undefined ? "" : `?client_instance_id=${encodeURIComponent(input.clientInstanceID)}`;
+      await request(`/v1/sessions/${encodeURIComponent(input.sessionID)}${query}`, {
+        method: "DELETE"
+      });
+    },
+    setRole: async (input) => {
+      const soft = input.soft === true;
+      const previous = soft ? input.previousSessionID ?? "" : "";
+      const body = {
+        session_id: input.sessionID,
+        role: input.role,
+        ...soft ? { soft: true } : {},
+        ...previous === "" ? {} : { previous_session_id: previous }
+      };
+      let raw;
+      try {
+        raw = await post("/v1/roles/set", body);
+      } catch (error) {
+        if (error instanceof EnvoyApiError && error.details.status === 409) {
+          const held = RoleHeldWireSchema.safeParse(JSON.parse(error.details.responseBody));
+          if (held.success)
+            return { claimed: false, holder: held.data.holder };
+        }
+        throw error;
+      }
+      return { claimed: true, interest: InterestWireSchema.parse(JSON.parse(raw)) };
+    },
+    getRole: async (role) => RoleWireSchema.parse(JSON.parse(await request(`/v1/roles/${encodeURIComponent(role)}`, { method: "GET" }))),
+    listSessions: async (input = {}) => {
+      const search = new URLSearchParams;
+      if (input.directory !== undefined)
+        search.set("dir", input.directory);
+      if (input.title !== undefined)
+        search.set("title", input.title);
+      const query = search.size === 0 ? "" : `?${search.toString()}`;
+      return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
+    },
+    replay: async (input) => ReplayWireSchema.parse(JSON.parse(await post("/v1/replay", {
+      session_id: input.sessionID,
+      subjects: input.subjects.map((cursor) => cursor.after === undefined ? { subject: cursor.subject } : { subject: cursor.subject, after: cursor.after }),
+      ...input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }
+    }, { timeoutMs: REPLAY_TIMEOUT_MS, retry: false })))
+  };
+}
+function waitForRetry() {
+  const { promise, resolve } = Promise.withResolvers();
+  setTimeout(resolve, RETRY_DELAY_MS);
+  return promise;
+}
+function messageMetadata(input) {
+  return {
+    ...input.inReplyTo === undefined ? {} : { in_reply_to: input.inReplyTo },
+    ...input.supersedes === undefined ? {} : { supersedes: input.supersedes },
+    ...input.urgency === undefined ? {} : { urgency: input.urgency },
+    ...input.expectsReply === undefined ? {} : { expects_reply: input.expectsReply },
+    ...input.expiresAt === undefined ? {} : { expires_at: input.expiresAt }
+  };
+}
+function sourceSession(sessionID) {
+  return sessionID === undefined || sessionID === "" ? {} : { source_session: sessionID };
+}
+
+// ../envoy-client/src/replay.ts
+var REPLAY_LEDGER_TTL_MS = DELIVERY_DUPLICATE_WINDOW_MS;
+var REPLAY_LEDGER_LIMIT = 20000;
+var REPLAY_PAGES_PER_SWEEP = 20;
+var REPLAY_FAILURES_BEFORE_NOTICE = 3;
+var REPLAY_STATE_REFRESH_MS = 60 * 60 * 1000;
+var REPLAY_MAX_SUBJECTS = 32;
+var ROLE_FORWARD_KEY_PREFIX = "envoy.role.forward.";
+var ReplayLedgerEntrySchema = object({
+  event_id: string2().min(1).optional(),
+  dedupe_key: string2().min(1).optional(),
+  at: number2()
+});
+var ReplayCursorSchema = object({
+  since: number2().int().nonnegative().optional(),
+  after: number2().int().nonnegative().optional()
+});
+var ReplayPendingNoticeSchema = _enum2([
+  "retention_gap",
+  "stream_moved_back",
+  "stream_recreated"
+]);
+var PENDING_NOTICE_MESSAGES = {
+  stream_recreated: "Envoy's notification stream was recreated, so messages published to this session while its connection was down before that may be lost.",
+  stream_moved_back: "Envoy's notification stream was restored to an earlier point, so messages published to this session while its connection was down may be shown again, and any published between that point and the restore are missing.",
+  retention_gap: "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing."
+};
+var ReplayStateSchema = object({
+  stream_id: string2().optional(),
+  stream_created: string2().optional(),
+  subjects: record(string2(), ReplayCursorSchema),
+  notices: array(string2()).optional()
+});
+var ReplaySnapshotSchema = object({
+  state: ReplayStateSchema.optional(),
+  ledger: array(ReplayLedgerEntrySchema)
+});
+function createReplayEngine(options) {
+  const { host, transport, dedupe } = options;
+  const now = options.now ?? Date.now;
+  const ledger = createLedger(now);
+  const cursors = new Map;
+  const cursorStarts = new Map;
+  let streamID;
+  let streamCreated;
+  const pending = new Set;
+  const failures = new Map;
+  let unwritten = [];
+  let writtenState;
+  let writtenShape;
+  let writtenAt;
+  let writes = Promise.resolve();
+  let epoch = 0;
+  let listenerNoticed;
+  const answered = new Set;
+  let running;
+  let rerun;
+  let consumerMode = false;
+  const safely = (what, call) => {
+    try {
+      call();
+    } catch (error) {
+      try {
+        host.log(`replay: ${what} failed`, error);
+      } catch {}
+    }
+  };
+  const log = (message, error) => safely("log", () => host.log(message, error));
+  const notify = (notice) => safely("notice", () => host.notify(notice));
+  const tell = (kind) => {
+    pending.delete(kind);
+    notify({ kind, message: PENDING_NOTICE_MESSAGES[kind] });
+  };
+  const sessionRead = (read) => () => {
+    try {
+      return read();
+    } catch {
+      return;
+    }
+  };
+  const currentSession = sessionRead(() => host.sessionID());
+  const writeSession = sessionRead(() => host.writeSessionID === undefined ? host.sessionID() : host.writeSessionID());
+  const bindTo = (sessionID, read) => {
+    if (sessionID === undefined || sessionID === "" || read() !== sessionID)
+      return;
+    const bound = epoch;
+    return { sessionID, alive: () => bound === epoch && read() === sessionID };
+  };
+  const bind = () => bindTo(currentSession(), currentSession);
+  const stateJSON = (afters = true) => {
+    const subjects = {};
+    for (const subject of [...cursors.keys()].sort()) {
+      const cursor = cursors.get(subject) ?? {};
+      subjects[subject] = {
+        ...cursor.since === undefined ? {} : { since: cursor.since },
+        ...!afters || cursor.after === undefined ? {} : { after: cursor.after }
+      };
+    }
+    return JSON.stringify({
+      ...streamID === undefined ? {} : { stream_id: streamID },
+      ...streamCreated === undefined ? {} : { stream_created: streamCreated },
+      subjects,
+      ...pending.size === 0 ? {} : { notices: [...pending].sort() }
+    });
+  };
+  const record2 = (identity) => {
+    const entry = ledger.record(identity);
+    if (entry !== undefined)
+      unwritten.push(entry);
+  };
+  const flush = (alive, atOnce = false) => {
+    writes = writes.then(async () => {
+      if (!alive())
+        return;
+      const json = stateJSON();
+      const delivered = unwritten;
+      if (json === writtenState && delivered.length === 0)
+        return;
+      const shape = stateJSON(false);
+      if (delivered.length === 0 && !atOnce && shape === writtenShape && writtenAt !== undefined && now() - writtenAt < REPLAY_STATE_REFRESH_MS) {
+        return;
+      }
+      unwritten = [];
+      const state = json === writtenState ? undefined : JSON.parse(json);
+      try {
+        await host.write({
+          delivered,
+          state,
+          snapshot: () => ({ state: JSON.parse(json), ledger: ledger.list() })
+        });
+        if (state !== undefined) {
+          writtenState = json;
+          writtenShape = shape;
+          writtenAt = now();
+        }
+      } catch (error) {
+        unwritten = [...delivered, ...unwritten];
+        log("replay: could not persist the replay state; the next write carries it", error);
+      }
+    });
+    return writes;
+  };
+  const syncFollowed = () => {
+    const followed = new Set(host.followedSubjects());
+    for (const subject of [...cursors.keys()]) {
+      if (!followed.has(subject)) {
+        cursors.delete(subject);
+        cursorStarts.delete(subject);
+      }
+    }
+    for (const subject of followed) {
+      if (!cursors.has(subject))
+        cursors.set(subject, {});
+    }
+  };
+  const failureNotice = (envelope, publishedAt, error, subject) => ({
+    eventId: envelope.event_id ?? "unknown",
+    sender: senderLabel(envelope),
+    summary: envelope.payload_summary ?? "unknown",
+    publishedAt,
+    error,
+    readWith: envelope.source === "dispatch" ? "dispatch read" : "envoy_inbox",
+    ...subject === undefined ? {} : { subject },
+    envelope
+  });
+  const showFailureNotice = async (notice, alive) => {
+    let queued;
+    try {
+      queued = await host.showFailureNotice(notice) === "queued";
+    } catch (error) {
+      if (!alive())
+        return "stopped";
+      safely("failure notice warning", () => host.failureNoticeFailed(notice, error));
+      return "hole";
+    }
+    if (!alive())
+      return "stopped";
+    if (queued)
+      return "hole";
+    record2(replayLedgerIdentity(notice.envelope));
+    await flush(alive);
+    return "done";
+  };
+  const handle = async (seq, buffered, alive) => {
+    const { message } = buffered;
+    const envelope = parseEnvelope(message.data);
+    if (envelope === undefined) {
+      log(`replay: skipping stored message ${seq} on ${message.subject}: not an Envoy envelope`);
+      return "done";
+    }
+    if (isRoleForward(envelope))
+      return "done";
+    const identity = replayLedgerIdentity(envelope);
+    if (ledger.has(identity)) {
+      failures.delete(seq);
+      return "done";
+    }
+    if (dedupe?.pending(envelope) === true)
+      return "hole";
+    if (!alive())
+      return "stopped";
+    const giveUp = async (error) => {
+      const handled = await showFailureNotice(failureNotice(envelope, message.time, error, message.subject), alive);
+      if (handled === "done")
+        failures.delete(seq);
+      return handled;
+    };
+    const failure = failures.get(seq);
+    if (failure !== undefined && failure.count >= REPLAY_FAILURES_BEFORE_NOTICE) {
+      return giveUp(failure.error);
+    }
+    const followed = buffered.subjects[0] ?? message.subject;
+    let outcome;
+    let error = "the host could not show it";
+    try {
+      outcome = await host.deliver({
+        envelope,
+        data: message.data,
+        seq,
+        subject: message.subject,
+        followed,
+        time: message.time,
+        since: cursors.get(followed)?.since
+      });
+    } catch (thrown) {
+      outcome = "failed";
+      error = messageFor(thrown);
+    }
+    if (!alive())
+      return "stopped";
+    if (outcome === "shown") {
+      failures.delete(seq);
+      record2(identity);
+      await flush(alive);
+      return "done";
+    }
+    if (outcome === "suppressed") {
+      failures.delete(seq);
+      return "done";
+    }
+    if (outcome === "queued") {
+      failures.delete(seq);
+      return "hole";
+    }
+    const count = (failure?.count ?? 0) + 1;
+    failures.set(seq, { count, error });
+    if (count >= REPLAY_FAILURES_BEFORE_NOTICE)
+      return giveUp(error);
+    log(`replay: could not show stored message ${seq} (${envelope.event_id}): ${error}`);
+    return "hole";
+  };
+  const listenerFailed = (error) => {
+    if (error instanceof EnvoyApiError) {
+      const status = error.details.status;
+      if (status === 404) {
+        if (listenerNoticed === "not_served")
+          return;
+        listenerNoticed = "not_served";
+        notify({
+          kind: "not_served",
+          message: "This session's Envoy listener does not serve replay (POST /v1/replay answered 404), so messages published while its connection is down are not recovered."
+        });
+        return;
+      }
+      if (status === 503 && error.code === REPLAY_UNAVAILABLE_CODE || status === 401 || status === 403) {
+        const key = `unavailable:${status}:${error.message}`;
+        if (listenerNoticed === key)
+          return;
+        listenerNoticed = key;
+        notify({
+          kind: "unavailable",
+          status,
+          error: error.message,
+          message: `Envoy replay is unavailable (${status}: ${error.message}), so messages published while this session's connection is down are not recovered until it answers.`
+        });
+        return;
+      }
+    }
+    log("replay: the listener's replay failed; the next trigger tries again", error);
+  };
+  const streamReplaced = (stream) => {
+    if (stream.id === undefined) {
+      return streamCreated !== undefined && streamCreated !== "" && stream.created !== streamCreated;
+    }
+    return streamID !== undefined && streamID !== "" && stream.id !== streamID;
+  };
+  const streamMovedBack = (stream) => {
+    for (const cursor of cursors.values()) {
+      if (cursor.after !== undefined && cursor.after > stream.last_seq)
+        return true;
+    }
+    return false;
+  };
+  const sweepOnce = async () => {
+    const binding = bind();
+    if (binding === undefined)
+      return;
+    const { sessionID, alive } = binding;
+    syncFollowed();
+    const readings = new Map;
+    for (const [subject, cursor] of cursors) {
+      readings.set(subject, { read: cursor.after, more: true });
+    }
+    const buffer = new Map;
+    const holes = new Map;
+    let gapNoticed = false;
+    if (pending.size > 0) {
+      for (const kind of [...pending].sort()) {
+        if (kind === "retention_gap")
+          gapNoticed = true;
+        tell(kind);
+      }
+      await flush(alive);
+      if (!alive())
+        return;
+    }
+    if (consumerMode)
+      return;
+    for (let page = 0;page < REPLAY_PAGES_PER_SWEEP; page += 1) {
+      let handledAny = false;
+      const asking = [...readings].filter(([, reading]) => reading.more).sort(([, a], [, b]) => (a.read ?? -1) - (b.read ?? -1)).slice(0, REPLAY_MAX_SUBJECTS);
+      if (asking.length === 0)
+        break;
+      let response;
+      try {
+        response = await transport.replay({
+          sessionID,
+          subjects: asking.map(([subject, reading]) => reading.read === undefined ? { subject } : { subject, after: reading.read }),
+          ...options.maxMessages === undefined ? {} : { maxMessages: options.maxMessages }
+        });
+      } catch (error) {
+        if (alive()) {
+          answered.clear();
+          listenerFailed(error);
+        }
+        return;
+      }
+      if (!alive())
+        return;
+      listenerNoticed = undefined;
+      for (const result of response.subjects) {
+        if (result.refused === undefined)
+          answered.add(result.subject);
+        else
+          answered.delete(result.subject);
+      }
+      const { stream } = response;
+      const replaced = streamReplaced(stream);
+      streamID = stream.id ?? (replaced ? undefined : streamID);
+      streamCreated = stream.created;
+      if (replaced) {
+        const at = now();
+        for (const subject of cursors.keys()) {
+          cursors.set(subject, { since: stream.last_seq, after: stream.last_seq });
+          cursorStarts.set(subject, at);
+        }
+        failures.clear();
+        pending.add("stream_recreated");
+        await flush(alive);
+        if (!alive())
+          return;
+        tell("stream_recreated");
+        await flush(alive);
+        return;
+      }
+      if (streamMovedBack(stream)) {
+        const from = Math.max(0, stream.first_seq - 1);
+        for (const [subject, cursor] of cursors) {
+          if (cursor.after === undefined)
+            continue;
+          cursors.set(subject, { ...cursor, after: from });
+          const reading = readings.get(subject);
+          if (reading !== undefined) {
+            reading.read = from;
+            reading.more = true;
+          }
+        }
+        buffer.clear();
+        holes.clear();
+        failures.clear();
+        pending.add("stream_moved_back");
+        await flush(alive, true);
+        if (!alive())
+          return;
+        tell("stream_moved_back");
+        await flush(alive);
+        if (!alive())
+          return;
+        continue;
+      }
+      for (const [, reading] of asking)
+        reading.more = false;
+      let gapped = false;
+      for (const result of response.subjects) {
+        const reading = readings.get(result.subject);
+        if (reading?.read === undefined || result.refused !== undefined)
+          continue;
+        if (reading.read >= stream.first_seq - 1)
+          continue;
+        gapped = true;
+        reading.read = stream.first_seq - 1;
+        const cursor = cursors.get(result.subject);
+        if (cursor?.after !== undefined && cursor.after < reading.read) {
+          cursors.set(result.subject, { ...cursor, after: reading.read });
+        }
+      }
+      if (gapped) {
+        if (!gapNoticed)
+          pending.add("retention_gap");
+        await flush(alive, true);
+        if (!alive())
+          return;
+        if (pending.has("retention_gap")) {
+          gapNoticed = true;
+          tell("retention_gap");
+          await flush(alive);
+        }
+      }
+      for (const result of response.subjects) {
+        const reading = readings.get(result.subject);
+        if (reading === undefined || result.refused !== undefined)
+          continue;
+        if (reading.read === undefined) {
+          const cursor = cursors.get(result.subject);
+          if (cursor !== undefined && cursor.after === undefined) {
+            cursors.set(result.subject, { since: result.next_after, after: result.next_after });
+            cursorStarts.set(result.subject, now());
+          }
+          reading.read = result.next_after;
+          continue;
+        }
+        for (const message of result.messages) {
+          if (message.seq <= reading.read)
+            continue;
+          const buffered = buffer.get(message.seq);
+          if (buffered === undefined) {
+            buffer.set(message.seq, { message, subjects: [result.subject] });
+          } else if (!buffered.subjects.includes(result.subject)) {
+            buffered.subjects.push(result.subject);
+          }
+        }
+        reading.read = Math.max(reading.read, result.next_after);
+        reading.more = result.more;
+      }
+      let bound = Number.POSITIVE_INFINITY;
+      for (const reading of readings.values()) {
+        if (reading.more && reading.read !== undefined)
+          bound = Math.min(bound, reading.read);
+      }
+      const ready = [...buffer.keys()].filter((seq) => seq <= bound).sort((a, b) => a - b);
+      for (const seq of ready) {
+        const buffered = buffer.get(seq);
+        if (buffered === undefined)
+          continue;
+        buffer.delete(seq);
+        if (!buffered.subjects.some((subject) => cursors.has(subject)))
+          continue;
+        const handled = await handle(seq, buffered, alive);
+        if (handled === "stopped")
+          return;
+        if (handled === "done")
+          handledAny = true;
+        if (handled === "hole") {
+          for (const subject of buffered.subjects) {
+            if (!holes.has(subject))
+              holes.set(subject, seq);
+          }
+        }
+      }
+      if (!alive())
+        return;
+      for (const [subject, reading] of readings) {
+        const cursor = cursors.get(subject);
+        if (cursor?.after === undefined || reading.read === undefined)
+          continue;
+        let after = Math.min(reading.read, bound);
+        const hole = holes.get(subject);
+        if (hole !== undefined)
+          after = Math.min(after, hole - 1);
+        if (after > cursor.after)
+          cursors.set(subject, { ...cursor, after });
+      }
+      await flush(alive, handledAny);
+      if (![...readings.values()].some((reading) => reading.more))
+        break;
+    }
+  };
+  const runSweep = async () => {
+    try {
+      await sweepOnce();
+    } catch (error) {
+      log("replay: a sweep failed", error);
+    }
+  };
+  const sweep = () => {
+    if (running === undefined) {
+      running = runSweep().finally(() => {
+        running = undefined;
+      });
+      return running;
+    }
+    rerun ??= running.then(() => {
+      rerun = undefined;
+      return sweep();
+    });
+    return rerun;
+  };
+  return {
+    sweep,
+    setConsumerMode(on) {
+      consumerMode = on;
+    },
+    async followedChanged() {
+      const alive = bind()?.alive;
+      if (alive === undefined)
+        return;
+      try {
+        syncFollowed();
+        await flush(alive);
+      } catch (error) {
+        log("replay: could not take the followed subjects", error);
+      }
+    },
+    delivered: (frame) => ledger.has(replayLedgerIdentity(frame)),
+    async recordDelivered(frame) {
+      const alive = bind()?.alive;
+      if (alive === undefined)
+        return;
+      record2(replayLedgerIdentity(frame));
+      await flush(alive);
+    },
+    async recordDeliveredFor(sessionID, frame) {
+      const alive = bindTo(sessionID, writeSession)?.alive;
+      if (alive === undefined)
+        return;
+      record2(replayLedgerIdentity(frame));
+      await flush(alive);
+    },
+    async liveFailed(followed, envelope, error, receivedAt) {
+      const started = cursorStarts.get(followed);
+      if (!isRoleForward(envelope) && answered.has(followed) && cursors.get(followed)?.after !== undefined && (started === undefined || started <= receivedAt)) {
+        return;
+      }
+      const alive = bind()?.alive;
+      if (alive === undefined)
+        return;
+      try {
+        await showFailureNotice(failureNotice(envelope, inboundTimestamp(envelope.issued_at), messageFor(error)), alive);
+      } catch (thrown) {
+        log("replay: could not report a failed live frame", thrown);
+      }
+    },
+    followedBefore: (topic, seq) => {
+      const since = cursors.get(topic)?.since;
+      return since !== undefined && seq > since;
+    },
+    restore(snapshot) {
+      epoch += 1;
+      ledger.restore(snapshot.ledger);
+      cursors.clear();
+      cursorStarts.clear();
+      streamID = snapshot.state?.stream_id;
+      streamCreated = snapshot.state?.stream_created;
+      pending.clear();
+      for (const kind of snapshot.state?.notices ?? []) {
+        const known = ReplayPendingNoticeSchema.safeParse(kind);
+        if (known.success)
+          pending.add(known.data);
+      }
+      for (const [subject, cursor] of Object.entries(snapshot.state?.subjects ?? {})) {
+        cursors.set(subject, { ...cursor });
+      }
+      writtenState = snapshot.state === undefined ? undefined : stateJSON();
+      writtenShape = snapshot.state === undefined ? undefined : stateJSON(false);
+      writtenAt = undefined;
+      unwritten = [];
+      failures.clear();
+      listenerNoticed = undefined;
+      answered.clear();
+    },
+    state: () => JSON.parse(stateJSON())
+  };
+}
+function replaySuppressed(rendered) {
+  return rendered.skip || rendered.malformedDelivery === true;
+}
+var REPLAYED_SUFFIX = "while this session's connection was down.";
+function replayedText(content, publishedAt) {
+  return `${content}
+Published at ${publishedAt} ${REPLAYED_SUFFIX}`;
+}
+function failureNoticeFields(notice) {
+  const readWith = notice.readWith === "dispatch read" ? "Read it with the `dispatch read` command on the issue or ask it concerns." : "Read it with the envoy_inbox tool.";
+  return {
+    notice: "message not shown",
+    event_id: notice.eventId,
+    from: notice.sender,
+    summary: notice.summary,
+    published_at: notice.publishedAt,
+    ...notice.subject === undefined ? {} : { subject: notice.subject },
+    error: notice.error,
+    detail: `This session could not be shown this message, so it is not coming back on its own. ${readWith}`
+  };
+}
+var REPLAY_NOTICE_NAMES = {
+  stream_recreated: "stream recreated",
+  stream_moved_back: "stream moved back"
+};
+function replayNoticeFields(notice) {
+  return {
+    notice: REPLAY_NOTICE_NAMES[notice.kind] ?? "messages may be missing",
+    detail: notice.message
+  };
+}
+function envoyNoticeText(fields) {
+  return encode3({ envoy: fields });
+}
+var PRIVATE_STREAM_SUBJECTS = [
+  `${AGENT_TOPIC_PREFIX}>`,
+  `${LEGION_NOTICE_TOPIC_PREFIX}>`,
+  `${EXCEPTION_TOPIC_PREFIX}${AGENT_TOPIC_PREFIX}>`
+];
+function subjectsOverlap(a, b) {
+  const aTokens = a.split(".");
+  const bTokens = b.split(".");
+  for (let index = 0;index < aTokens.length && index < bTokens.length; index += 1) {
+    const aToken = aTokens[index];
+    const bToken = bTokens[index];
+    if (aToken === ">" || bToken === ">")
+      return true;
+    if (aToken !== "*" && bToken !== "*" && aToken !== bToken)
+      return false;
+  }
+  return aTokens.length === bTokens.length;
+}
+function reachesPrivateStreamSubject(ownAgentSubject, topic) {
+  if (!PRIVATE_STREAM_SUBJECTS.some((subject) => subjectsOverlap(topic, subject)))
+    return false;
+  return topic !== ownAgentSubject || /[*>]/.test(ownAgentSubject);
+}
+function replayFollowedSubjects(ownAgentSubject, topics, heldForRole = () => false) {
+  const followed = [...topics].filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !reachesPrivateStreamSubject(ownAgentSubject, topic) && !heldForRole(topic));
+  return [...new Set([ownAgentSubject, ...followed])];
+}
+function rememberedTopics(state) {
+  return Object.keys(state?.subjects ?? {}).filter((topic) => !topic.startsWith(AGENT_TOPIC_PREFIX) && !topic.startsWith(ROLE_TOPIC_PREFIX));
+}
+async function closeReplayedRemoval(frame, host) {
+  const closed = (subscriptionRemovedTopics(frame.data, host.sessionID) ?? []).filter((topic) => host.engine.followedBefore(topic, frame.seq) && host.close(topic));
+  if (closed.length === 0)
+    return closed;
+  const unregistering = host.unregister(closed);
+  await host.followedChanged();
+  await unregistering;
+  return closed;
+}
+function routeReplayNotice(notice, routes) {
+  if (notice.kind === "not_served" || notice.kind === "unavailable") {
+    routes.warn(notice.message);
+    return;
+  }
+  routes.card(envoyNoticeText(replayNoticeFields(notice)));
+}
+function isRoleForward(envelope) {
+  return envelope.dedupe_key?.startsWith(ROLE_FORWARD_KEY_PREFIX) === true || envelope.topic?.startsWith(ROLE_TOPIC_PREFIX) === true;
+}
+function replayLedgerIdentity(frame) {
+  return {
+    ...frame.event_id === undefined || frame.event_id === "" ? {} : { event_id: frame.event_id },
+    ...frame.dedupe_key === undefined || !dedupeKeyNamesItsEvent(frame) ? {} : { dedupe_key: frame.dedupe_key }
+  };
+}
+function parseEnvelope(data) {
+  let parsed;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return;
+  }
+  const result = EnvelopeSchema.safeParse(parsed);
+  return result.success ? result.data : undefined;
+}
+function createLedger(now) {
+  let entries = new Set;
+  const byEvent = new Map;
+  const byKey = new Map;
+  const drop = (entry) => {
+    entries.delete(entry);
+    if (entry.event_id !== undefined && byEvent.get(entry.event_id) === entry) {
+      byEvent.delete(entry.event_id);
+    }
+    if (entry.dedupe_key !== undefined && byKey.get(entry.dedupe_key) === entry) {
+      byKey.delete(entry.dedupe_key);
+    }
+  };
+  const add = (entry) => {
+    if (entries.size >= REPLAY_LEDGER_LIMIT) {
+      const oldest = entries.values().next();
+      if (oldest.done !== true)
+        drop(oldest.value);
+    }
+    entries.add(entry);
+    if (entry.event_id !== undefined)
+      byEvent.set(entry.event_id, entry);
+    if (entry.dedupe_key !== undefined)
+      byKey.set(entry.dedupe_key, entry);
+  };
+  const expire = () => {
+    const at = now();
+    for (const entry of entries) {
+      if (at - entry.at < REPLAY_LEDGER_TTL_MS)
+        break;
+      drop(entry);
+    }
+  };
+  const has = (identity) => {
+    expire();
+    return identity.event_id !== undefined && byEvent.has(identity.event_id) || identity.dedupe_key !== undefined && byKey.has(identity.dedupe_key);
+  };
+  return {
+    has,
+    record(identity) {
+      if (identity.event_id === undefined && identity.dedupe_key === undefined)
+        return;
+      if (has(identity))
+        return;
+      const entry = { ...identity, at: now() };
+      add(entry);
+      return entry;
+    },
+    restore(restored) {
+      entries = new Set;
+      byEvent.clear();
+      byKey.clear();
+      const at = now();
+      const kept = restored.filter((entry) => at - entry.at < REPLAY_LEDGER_TTL_MS && (entry.event_id !== undefined || entry.dedupe_key !== undefined)).sort((a, b) => a.at - b.at);
+      for (const entry of kept)
+        add({ ...entry });
+    },
+    list() {
+      expire();
+      return [...entries];
+    }
+  };
+}
+
+// ../envoy-client/src/consumer-delivery.ts
+var DELIVER_SUBJECT_PREFIX = "notifications.envoy.deliver.";
+function deliverSubject(sessionID) {
+  return `${DELIVER_SUBJECT_PREFIX}${sessionID}`;
+}
+var RelayHeader = {
+  subject: "Envoy-Subject",
+  streamSeq: "Envoy-Stream-Seq",
+  streamID: "Envoy-Stream-Id",
+  delivered: "Envoy-Delivered",
+  storedAt: "Envoy-Stored-At",
+  gap: "Envoy-Gap"
+};
+var RELAY_PROGRESS_INTERVAL_MS = 20000;
+var FOLLOW_CLOCK_ALLOWANCE_MS = 2000;
+var RELAY_ATTEMPTS_BEFORE_FAILED = 3;
+var decoder = new TextDecoder;
+var DECIMAL = /^[0-9]+$/;
+var RFC3339 = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/;
+function positiveInteger(text) {
+  if (text === null || text === undefined || !DECIMAL.test(text))
+    return;
+  const value = Number(text);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+function parseStoredAt(text) {
+  const match = RFC3339.exec(text);
+  if (match === null)
+    return;
+  const fraction = (match[2] ?? "").padEnd(3, "0").slice(0, 3);
+  const ms = Date.parse(`${match[1]}.${fraction}${match[3]}`);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+function decodeRelayFrame(message) {
+  const reply = message.reply ?? "";
+  if (reply === "")
+    return { error: "no reply subject" };
+  const headers = message.headers;
+  if (headers === undefined)
+    return { error: "no headers" };
+  const subject = headers.get(RelayHeader.subject) ?? "";
+  if (subject === "")
+    return { error: `no ${RelayHeader.subject}` };
+  const streamSeq = positiveInteger(headers.get(RelayHeader.streamSeq));
+  if (streamSeq === undefined)
+    return { error: `bad ${RelayHeader.streamSeq}` };
+  const streamID = headers.get(RelayHeader.streamID) ?? "";
+  if (streamID === "")
+    return { error: `no ${RelayHeader.streamID}` };
+  const delivered = positiveInteger(headers.get(RelayHeader.delivered));
+  if (delivered === undefined)
+    return { error: `bad ${RelayHeader.delivered}` };
+  const storedAt = headers.get(RelayHeader.storedAt) ?? "";
+  const storedAtMs = parseStoredAt(storedAt);
+  if (storedAtMs === undefined)
+    return { error: `bad ${RelayHeader.storedAt}` };
+  return {
+    frame: {
+      subject,
+      streamSeq,
+      streamID,
+      delivered,
+      storedAt,
+      storedAtMs,
+      gap: headers.get(RelayHeader.gap) === "true",
+      data: typeof message.data === "string" ? message.data : decoder.decode(message.data),
+      reply
+    }
+  };
+}
+function newEpoch() {
+  return crypto.randomUUID();
+}
+var GAP_MESSAGES = {
+  retention_gap: "The notification stream no longer holds some messages published to this session while it was away: messages older than 72 hours may be missing.",
+  stream_recreated: "Envoy's notification stream was recreated, so messages published to this session before that may be lost."
+};
+var ConsumerDeliverySnapshotSchema = object({
+  resume: object({ stream_id: string2().min(1), seq: number2().int().nonnegative() }).optional(),
+  follows: record(string2(), number2()).default({})
+});
+function parseIdentity(data) {
+  let parsed;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return;
+  }
+  const identity = DedupeIdentitySchema.safeParse(parsed);
+  if (!identity.success)
+    return;
+  const { event_id, dedupe_key } = identity.data;
+  return event_id === undefined && dedupe_key === undefined ? undefined : identity.data;
+}
+function reaches(topic, subject) {
+  return expandSubscriptionTopics([topic]).some((pattern) => subjectsOverlap(pattern, subject));
+}
+function every(ms, callback) {
+  const timer = setInterval(callback, ms);
+  return () => clearInterval(timer);
+}
+function createConsumerDelivery(options) {
+  const { host, ledger, sessionID } = options;
+  const now = options.now ?? Date.now;
+  const repeat = options.every ?? every;
+  const ownSubject = agentSubject(sessionID);
+  let currentEpoch = { id: newEpoch(), startedAt: now() };
+  let follows = new Map;
+  let streamID;
+  let held = new Set;
+  let written;
+  let registeredResume;
+  let gapTold = false;
+  let closed = false;
+  let relayed;
+  let persisted = JSON.stringify({ follows: {} });
+  const entries = new Map;
+  const queue = [];
+  let blocking;
+  let pumping = false;
+  const safely = (what, call) => {
+    try {
+      call();
+    } catch (error) {
+      try {
+        host.log(`consumer delivery: ${what} failed`, error);
+      } catch {}
+    }
+  };
+  const log = (message, error) => safely("log", () => host.log(`consumer delivery: ${message}`, error));
+  const send = (reply, body) => safely(`reply ${body}`, () => options.publish(reply, body));
+  const tellGap = (kind) => safely("gap notice", () => host.gap({ kind, message: GAP_MESSAGES[kind] }));
+  const switchStream = (id) => {
+    if (streamID === id)
+      return;
+    streamID = id;
+    held = new Set;
+    written = undefined;
+  };
+  const tellReplacedResume = (id) => {
+    const asked = resumePoint() ?? registeredResume;
+    if (asked === undefined || asked.stream_id === id)
+      return;
+    registeredResume = undefined;
+    tellGap("stream_recreated");
+  };
+  const followedAt = (subject) => {
+    if (subject === ownSubject)
+      return Number.NEGATIVE_INFINITY;
+    let earliest;
+    for (const [topic, at] of follows) {
+      if (!reaches(topic, subject))
+        continue;
+      if (earliest === undefined || at < earliest)
+        earliest = at;
+    }
+    return earliest;
+  };
+  const followedOnCorePath = (frame) => {
+    const state = ledger.state();
+    if (state.stream_id !== frame.streamID)
+      return false;
+    for (const [topic, cursor] of Object.entries(state.subjects)) {
+      if (cursor.since === undefined || frame.streamSeq <= cursor.since)
+        continue;
+      if (reaches(topic, frame.subject))
+        return true;
+    }
+    return false;
+  };
+  const settle = (entry, body) => {
+    if (entry.settled)
+      return;
+    entry.settled = true;
+    entry.stopProgress();
+    entries.delete(entry.key);
+    for (const reply of entry.replies)
+      send(reply, body);
+    if (body === "done" && entry.frame.streamID === streamID) {
+      held.delete(entry.frame.streamSeq);
+      written = Math.max(written ?? 0, entry.frame.streamSeq);
+    }
+    release(entry);
+  };
+  const release = (entry) => {
+    if (blocking !== entry)
+      return;
+    blocking = undefined;
+    pump();
+  };
+  const alreadyWritten = (identity) => identity !== undefined && ledger.delivered(identity);
+  const failed = (entry, error) => {
+    if (entry.settled)
+      return;
+    if (entry.frame.delivered < RELAY_ATTEMPTS_BEFORE_FAILED) {
+      log(`frame ${entry.frame.streamSeq} failed; it comes again`, error);
+      settle(entry, "nak");
+      return;
+    }
+    safely("failure notice", () => {
+      const { subject, data } = entry.frame;
+      const { envelope } = renderInbound(data, sessionID, subject);
+      if (envelope !== undefined)
+        ledger.liveFailed(subject, envelope, error, now());
+    });
+    settle(entry, "done");
+  };
+  const handOff = (entry) => {
+    const handle = {
+      ...entry.frame,
+      late: entry.late,
+      done: () => settle(entry, "done"),
+      nak: () => settle(entry, "nak"),
+      release: () => release(entry)
+    };
+    blocking = entry;
+    let result;
+    try {
+      result = host.deliver(handle);
+    } catch (error) {
+      failed(entry, error);
+      release(entry);
+      return;
+    }
+    if (!(result instanceof Promise)) {
+      release(entry);
+      return;
+    }
+    result.then(() => release(entry), (error) => {
+      failed(entry, error);
+      release(entry);
+    });
+  };
+  function pump() {
+    if (pumping)
+      return;
+    pumping = true;
+    try {
+      while (blocking === undefined && !closed) {
+        const entry = queue.shift();
+        if (entry === undefined)
+          return;
+        if (entry.settled)
+          continue;
+        if (alreadyWritten(entry.identity)) {
+          settle(entry, "done");
+          continue;
+        }
+        handOff(entry);
+      }
+    } finally {
+      pumping = false;
+    }
+  }
+  const receive = (message) => {
+    const decoded = decodeRelayFrame(message);
+    if ("error" in decoded) {
+      log(`dropping an undecodable relay frame: ${decoded.error}`);
+      if (message.reply !== undefined && message.reply !== "")
+        send(message.reply, "done");
+      return;
+    }
+    const { frame } = decoded;
+    if (closed) {
+      send(frame.reply, "nak");
+      return;
+    }
+    send(frame.reply, "received");
+    if (frame.gap && !gapTold)
+      tellGap("retention_gap");
+    gapTold = false;
+    if (frame.streamID !== streamID) {
+      if (streamID !== undefined && (written !== undefined || held.size > 0)) {
+        tellGap("stream_recreated");
+      } else if (streamID === undefined) {
+        tellReplacedResume(frame.streamID);
+      }
+      switchStream(frame.streamID);
+    }
+    const key = `${frame.streamID}:${frame.streamSeq}`;
+    const first = entries.get(key);
+    if (first !== undefined) {
+      first.replies.push(frame.reply);
+      return;
+    }
+    const since = followedAt(frame.subject);
+    const unfollowed = (since === undefined || frame.storedAtMs < since - FOLLOW_CLOCK_ALLOWANCE_MS) && !followedOnCorePath(frame);
+    const identity = unfollowed ? undefined : parseIdentity(frame.data);
+    if (unfollowed || alreadyWritten(identity)) {
+      send(frame.reply, "done");
+      written = Math.max(written ?? 0, frame.streamSeq);
+      return;
+    }
+    held.add(frame.streamSeq);
+    const entry = {
+      frame,
+      identity,
+      late: frame.delivered > 1 || frame.storedAtMs < currentEpoch.startedAt,
+      replies: [frame.reply],
+      key,
+      stopProgress: () => {
+        return;
+      },
+      settled: false
+    };
+    entry.stopProgress = repeat(RELAY_PROGRESS_INTERVAL_MS, () => {
+      if (entry.settled)
+        return;
+      for (const reply of entry.replies)
+        send(reply, "progress");
+    });
+    entries.set(key, entry);
+    queue.push(entry);
+    pump();
+  };
+  const resumePoint = () => {
+    if (streamID === undefined)
+      return;
+    if (held.size > 0)
+      return { stream_id: streamID, seq: Math.min(...held) - 1 };
+    return written === undefined ? undefined : { stream_id: streamID, seq: written };
+  };
+  const seededResume = () => {
+    const state = ledger.state();
+    const stream = state.stream_id;
+    if (stream === undefined)
+      return;
+    let lowest;
+    for (const [subject, cursor] of Object.entries(state.subjects)) {
+      if (cursor.after === undefined || !streamStores(subject))
+        continue;
+      if (lowest === undefined || cursor.after < lowest)
+        lowest = cursor.after;
+    }
+    return lowest === undefined ? undefined : { stream_id: stream, seq: lowest };
+  };
+  const snapshot = () => {
+    const resume = resumePoint();
+    return {
+      ...resume === undefined ? {} : { resume },
+      follows: Object.fromEntries(follows)
+    };
+  };
+  const persist = () => {
+    const current = snapshot();
+    const serialized = JSON.stringify(current);
+    if (serialized === persisted)
+      return;
+    if (!options.persist(current))
+      return;
+    persisted = serialized;
+  };
+  return {
+    subject: deliverSubject(sessionID),
+    receive,
+    epoch: () => currentEpoch,
+    beginEpoch() {
+      currentEpoch = { id: newEpoch(), startedAt: now() };
+      return currentEpoch;
+    },
+    registration() {
+      const resume = resumePoint() ?? seededResume();
+      registeredResume = resume;
+      return {
+        consumer: true,
+        epoch: currentEpoch.id,
+        ...resume === undefined ? {} : { resume }
+      };
+    },
+    answered(answer, topics) {
+      if (answer.mode === "consumer") {
+        if (answer.stream_id !== "" && answer.stream_id !== streamID) {
+          tellReplacedResume(answer.stream_id);
+          switchStream(answer.stream_id);
+        }
+        if (answer.gap) {
+          tellGap("retention_gap");
+          gapTold = true;
+        }
+        relayed = new Set([...topics].filter(streamStores));
+      } else {
+        relayed = undefined;
+      }
+      ledger.setConsumerMode(relayed !== undefined);
+      persist();
+      return answer.mode;
+    },
+    relays: (topic) => relayed?.has(topic) === true,
+    relaying: () => relayed !== undefined,
+    setFollowed(topics) {
+      const at = now();
+      const next = new Map;
+      for (const topic of topics) {
+        if (topic === ownSubject)
+          continue;
+        next.set(topic, follows.get(topic) ?? at);
+      }
+      follows = next;
+      persist();
+    },
+    persist,
+    resumePoint,
+    snapshot,
+    restore(restored) {
+      const merged = new Map(Object.entries(restored.follows));
+      for (const [topic, at] of follows)
+        if (!merged.has(topic))
+          merged.set(topic, at);
+      follows = merged;
+      streamID = restored.resume?.stream_id;
+      held = new Set;
+      written = restored.resume?.seq;
+      persisted = JSON.stringify(snapshot());
+    },
+    close() {
+      closed = true;
+      relayed = undefined;
+      ledger.setConsumerMode(false);
+      queue.length = 0;
+      for (const entry of [...entries.values()])
+        settle(entry, "nak");
+      blocking = undefined;
+    }
+  };
+}
+
 // ../envoy-client/src/dispatch-session-directory.ts
 import { randomUUID } from "crypto";
-import { renameSync, rmSync, writeFileSync } from "fs";
-import { homedir } from "os";
-import { join } from "path";
+import { renameSync, rmSync as rmSync2, writeFileSync } from "fs";
+import { homedir as homedir2 } from "os";
+import { join as join2 } from "path";
 var SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
 var PRIVATE_FILE = 384;
 function sessionStateRoot(env) {
   const stateDir = env["DISPATCH_STATE_DIR"];
   if (stateDir)
     return stateDir;
-  return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "dispatch");
+  return join2(env["XDG_STATE_HOME"] || join2(homedir2(), ".local", "state"), "dispatch");
 }
 function sessionDirectory(env, sessionId) {
   if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
     throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
   }
-  return join(sessionStateRoot(env), "sessions", sessionId);
+  return join2(sessionStateRoot(env), "sessions", sessionId);
 }
 function writeAtomically(path, text) {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -40273,7 +42427,7 @@ function writeAtomically(path, text) {
     writeFileSync(temporary, text, { mode: PRIVATE_FILE });
     renameSync(temporary, path);
   } catch (error) {
-    rmSync(temporary, { force: true });
+    rmSync2(temporary, { force: true });
     throw error;
   }
 }
@@ -40282,35 +42436,35 @@ function writeAtomically(path, text) {
 import { createHash as createHash2 } from "crypto";
 import {
   appendFileSync,
-  closeSync as closeSync2,
+  closeSync as closeSync3,
   fstatSync,
   mkdirSync as mkdirSync3,
-  openSync as openSync2,
+  openSync as openSync3,
   readdirSync as readdirSync2,
-  readFileSync as readFileSync3,
+  readFileSync as readFileSync5,
   readSync,
-  rmSync as rmSync3,
-  statSync as statSync2,
+  rmSync as rmSync4,
+  statSync as statSync3,
   writeFileSync as writeFileSync3
 } from "fs";
-import { join as join4 } from "path";
+import { join as join5 } from "path";
 
 // ../envoy-client/src/askgate-marker.ts
 import { createHash, randomBytes } from "crypto";
 import {
-  closeSync,
+  closeSync as closeSync2,
   constants,
   mkdirSync,
-  openSync,
+  openSync as openSync2,
   readdirSync,
-  readFileSync,
+  readFileSync as readFileSync3,
   renameSync as renameSync2,
-  rmSync as rmSync2,
-  statSync,
+  rmSync as rmSync3,
+  statSync as statSync2,
   unlinkSync,
   writeFileSync as writeFileSync2
 } from "fs";
-import { isAbsolute, join as join2, resolve } from "path";
+import { isAbsolute as isAbsolute2, join as join3, resolve as resolve2 } from "path";
 var ASKGATE_RECORD = "askgate";
 var MARKER_MAX_AGE_MS = 2 * 60 * 60000;
 var MARKERS = "markers";
@@ -40363,15 +42517,15 @@ function fileOperands(argv) {
 }
 function operandPath(cwd, file) {
   if (file.flag === "--path")
-    return resolve(cwd, file.operand);
-  return isAbsolute(file.operand) ? file.operand : `${cwd}/${file.operand}`;
+    return resolve2(cwd, file.operand);
+  return isAbsolute2(file.operand) ? file.operand : `${cwd}/${file.operand}`;
 }
 function bytesDigest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 function processStart(pid) {
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    const stat = readFileSync3(`/proc/${pid}/stat`, "utf-8");
     return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null;
   } catch {
     return null;
@@ -40411,9 +42565,9 @@ function parseOwner(text) {
 var OWNER_FILE = ".json";
 var STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+))?$/;
 function storeTouched(store) {
-  const own = statSync(store).mtimeMs;
+  const own = statSync2(store).mtimeMs;
   try {
-    return Math.max(own, statSync(join2(store, MARKERS)).mtimeMs);
+    return Math.max(own, statSync2(join3(store, MARKERS)).mtimeMs);
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT"))
       return own;
@@ -40421,7 +42575,7 @@ function storeTouched(store) {
   }
 }
 function sweepStores(root, now) {
-  const parent = join2(root, "askgate");
+  const parent = join3(root, "askgate");
   let names;
   try {
     names = readdirSync(parent);
@@ -40432,18 +42586,18 @@ function sweepStores(root, now) {
     const match = STORE_NAME.exec(name);
     if (match === null)
       continue;
-    const store = join2(parent, name);
+    const store = join3(parent, name);
     try {
       if (ownerLive({ pid: Number(match[1]), start: match[2] ?? null, store }))
         continue;
       if (now - storeTouched(store) <= MARKER_MAX_AGE_MS)
         continue;
-      rmSync2(store, { recursive: true, force: true });
+      rmSync3(store, { recursive: true, force: true });
     } catch {}
   }
 }
 function askgateState(dir) {
-  const record = join2(dir, ASKGATE_RECORD);
+  const record = join3(dir, ASKGATE_RECORD);
   let names;
   try {
     names = readdirSync(record);
@@ -40456,10 +42610,10 @@ function askgateState(dir) {
   for (const name of names) {
     if (!name.endsWith(OWNER_FILE))
       continue;
-    const file = join2(record, name);
+    const file = join3(record, name);
     let text;
     try {
-      text = readFileSync(file, "utf-8");
+      text = readFileSync3(file, "utf-8");
     } catch (error) {
       if (hasErrnoCode(error, "ENOENT"))
         continue;
@@ -40475,7 +42629,7 @@ function askgateState(dir) {
     return { kind: "off" };
   for (const { file, store } of live) {
     try {
-      if (!statSync(join2(store, MARKERS)).isDirectory())
+      if (!statSync2(join3(store, MARKERS)).isDirectory())
         throw new Error("not a directory");
     } catch (error) {
       return {
@@ -40494,11 +42648,11 @@ var isFileDigest = (value) => typeof value === "object" && value !== null && typ
 function readMarker(file) {
   let text;
   try {
-    const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const fd = openSync2(file, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
-      text = readFileSync(fd, "utf-8");
+      text = readFileSync3(fd, "utf-8");
     } finally {
-      closeSync(fd);
+      closeSync2(fd);
     }
   } catch {
     return;
@@ -40527,17 +42681,17 @@ function consumeMarker(stores, argv, args, files, now) {
   let expired = false;
   const usable = [];
   for (const store of stores) {
-    const dir = join2(store, MARKERS);
+    const dir = join3(store, MARKERS);
     for (const name of readdirSync(dir)) {
       if (!name.startsWith(`${key}.`))
         continue;
-      const file = join2(dir, name);
+      const file = join3(dir, name);
       const marker = readMarker(file);
       if (marker === undefined || marker.argv !== key)
         continue;
       if (now - marker.createdAt > MARKER_MAX_AGE_MS) {
         expired = true;
-        rmSync2(file, { force: true });
+        rmSync3(file, { force: true });
         continue;
       }
       if (marker.args !== null) {
@@ -40591,14 +42745,6 @@ function actorText(actor) {
 // ../envoy-client/src/dispatch-cwd.ts
 import { execFile } from "child_process";
 import { promisify } from "util";
-
-// ../envoy-client/src/machine.ts
-import { hostname as hostname3 } from "os";
-function machineID() {
-  return process.env["ENVOY_MACHINE_ID"] || hostname3();
-}
-
-// ../envoy-client/src/dispatch-cwd.ts
 var execFileAsync = promisify(execFile);
 var defaultExec = (file, args, { cwd, signal }) => {
   const call = execFileAsync(file, args, { cwd, signal });
@@ -41079,71 +43225,6 @@ async function readPictures(client, addresses, shown) {
   return { lines, images, shown: showing };
 }
 
-// ../envoy-client/src/dispatch-subscribe.ts
-function followedAsk(details) {
-  if (typeof details !== "object" || details === null)
-    return null;
-  const { follows, issue, document } = details;
-  if (typeof follows !== "object" || follows === null)
-    return null;
-  const { ask } = follows;
-  if (typeof ask !== "string" || ask === "")
-    return null;
-  if (typeof issue === "string" && issue !== "")
-    return { ask, owner: issueTopic(issue) };
-  if (typeof document !== "string")
-    return null;
-  const [project, slug] = document.split("/", 2);
-  if (!project || !slug)
-    return null;
-  return { ask, owner: { label: document, topic: documentTopicOf(project, slug).topic } };
-}
-function followNoticeText({ ask, owner }, topics) {
-  const subscribe = ownerSubscribeLine(owner, topics);
-  return `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop).${subscribe === null ? "" : ` ${subscribe}.`}`;
-}
-function ownerSubscribeLine(owner, topics) {
-  if (topics == null || topics.some((topic) => subscriptionCovers(topic, owner)))
-    return null;
-  return `For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
-}
-function subscriptionCovers(topic, owner) {
-  const base = owner.topic.slice(0, -".>".length).split(".");
-  for (const [index, part] of topic.split(".").entries()) {
-    if (part === ">")
-      return true;
-    if (index >= base.length || part !== "*" && part !== base[index])
-      return false;
-  }
-  return false;
-}
-function subscriptionRemovedTopics(raw, sessionID) {
-  let envelope;
-  try {
-    envelope = JSON.parse(raw);
-  } catch {
-    return;
-  }
-  if (typeof envelope !== "object" || envelope === null)
-    return;
-  const { source, payload } = envelope;
-  if (source !== "dispatch" || typeof payload !== "string")
-    return;
-  let event;
-  try {
-    event = JSON.parse(payload);
-  } catch {
-    return;
-  }
-  const parsedEvent = DispatchEventSchema.safeParse(event);
-  if (!parsedEvent.success || parsedEvent.data.type !== "subscription.removed")
-    return;
-  const parsedPayload = SubscriptionRemovedEventPayloadSchema.safeParse(parsedEvent.data.payload);
-  if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
-    return;
-  return parsedPayload.data.topics ?? [];
-}
-
 // ../envoy-client/src/search-answer.ts
 function pageSummaryText(offset, count, total) {
   return `showing ${offset + 1}-${offset + count} of ${total}`;
@@ -41360,8 +43441,8 @@ function notMadeLine(reason, context, searchQuery) {
 }
 
 // ../envoy-client/src/session-answers.ts
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "fs";
-import { join as join3 } from "path";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync4 } from "fs";
+import { join as join4 } from "path";
 var SESSION_ANSWERS_WINDOW_MS = 72 * 3600000;
 var SESSION_ANSWERS_MAX_CHARS = 8000;
 var SESSION_ANSWERS_DEADLINE_MS = 800;
@@ -41458,16 +43539,16 @@ function sessionAnswersFailureLine(reason) {
   return `${FAILURE_MARKER}${reason.replace(/\s+/g, " ").trim()}); run \`dispatch answers\`.]`;
 }
 var STATE_KEY = Symbol.for("legion.pi-envoy.session-answers.v3");
-var processGlobal = globalThis;
-var state = processGlobal[STATE_KEY] ?? {
+var processGlobal2 = globalThis;
+var state = processGlobal2[STATE_KEY] ?? {
   sessions: new Map,
   noRouteUntil: new Map
 };
-processGlobal[STATE_KEY] = state;
+processGlobal2[STATE_KEY] = state;
 var CACHE_FILE = "answers.json";
 function readCacheFile(directory, url) {
   try {
-    const value = JSON.parse(readFileSync2(join3(directory, CACHE_FILE), "utf-8"));
+    const value = JSON.parse(readFileSync4(join4(directory, CACHE_FILE), "utf-8"));
     if (typeof value === "object" && value !== null && "dispatch_url" in value && typeof value.dispatch_url === "string" && value.dispatch_url === url && "read_at" in value && typeof value.read_at === "string" && "total" in value && typeof value.total === "number" && "items" in value && Array.isArray(value.items)) {
       return {
         dispatch_url: value.dispatch_url,
@@ -41577,7 +43658,7 @@ async function readSessionAnswers(options) {
       if (directory !== undefined) {
         try {
           mkdirSync2(directory, { recursive: true, mode: 448 });
-          writeAtomically(join3(directory, CACHE_FILE), JSON.stringify(cache));
+          writeAtomically(join4(directory, CACHE_FILE), JSON.stringify(cache));
         } catch {}
       }
       return { cache };
@@ -44380,7 +46461,7 @@ function ensureDirectory(dir) {
 }
 function readIfPresent(path) {
   try {
-    return readFileSync3(path, "utf-8");
+    return readFileSync5(path, "utf-8");
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT"))
       return;
@@ -44391,7 +46472,7 @@ function stringList(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
 }
 function loadSessionMemory(dir, sessionId) {
-  const path = join4(dir, "state.json");
+  const path = join5(dir, "state.json");
   const text = readIfPresent(path);
   if (text === undefined)
     return new Set;
@@ -44415,7 +46496,7 @@ function writeMemory(dir, sessionId, follows) {
     pictures: [...shownPictures(sessionId)],
     follows: [...follows]
   };
-  writeAtomically(join4(dir, "state.json"), `${JSON.stringify(state)}
+  writeAtomically(join5(dir, "state.json"), `${JSON.stringify(state)}
 `);
 }
 function appendResult(dir, entry) {
@@ -44424,7 +46505,7 @@ function appendResult(dir, entry) {
 }
 function writeResult(dir, entry) {
   const line = { at: new Date().toISOString(), ...entry };
-  appendFileSync(join4(dir, "results.jsonl"), `${JSON.stringify(line)}
+  appendFileSync(join5(dir, "results.jsonl"), `${JSON.stringify(line)}
 `, { mode: PRIVATE_FILE2 });
 }
 function recordOutcome(dir, sessionId, follows, entry) {
@@ -44435,8 +46516,8 @@ function recordOutcome(dir, sessionId, follows, entry) {
 function writePicture(dir, image) {
   const bytes = Buffer.from(image.data, "base64");
   const name = createHash2("sha256").update(bytes).digest("hex").slice(0, 16);
-  const pictures = join4(dir, "pictures");
-  const path = join4(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
+  const pictures = join5(dir, "pictures");
+  const path = join5(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
   ensureDirectory(pictures);
   try {
     writeFileSync3(path, bytes, { mode: PRIVATE_FILE2, flag: "wx" });
@@ -44447,29 +46528,29 @@ function writePicture(dir, image) {
   return { path, bytes: bytes.length };
 }
 function writeLongOutput(dir, text) {
-  const out = join4(dir, "out");
+  const out = join5(dir, "out");
   ensureDirectory(out);
-  const path = join4(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
+  const path = join5(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
   writeFileSync3(path, text, { mode: PRIVATE_FILE2 });
   return path;
 }
 function writeSessionTitle(dir, title) {
   ensureDirectory(dir);
-  writeAtomically(join4(dir, "title"), title);
+  writeAtomically(join5(dir, "title"), title);
 }
 function readSessionTitle(dir) {
-  return readIfPresent(join4(dir, "title")) || undefined;
+  return readIfPresent(join5(dir, "title")) || undefined;
 }
 function pruneSessions(root, now) {
-  const stamp = join4(root, PRUNED_STAMP);
+  const stamp = join5(root, PRUNED_STAMP);
   try {
-    if (now - statSync2(stamp).mtimeMs < PRUNE_INTERVAL_MS)
+    if (now - statSync3(stamp).mtimeMs < PRUNE_INTERVAL_MS)
       return;
   } catch (error) {
     if (!hasErrnoCode(error, "ENOENT"))
       throw error;
   }
-  const sessions = join4(root, "sessions");
+  const sessions = join5(root, "sessions");
   let entries = [];
   try {
     entries = readdirSync2(sessions, { withFileTypes: true });
@@ -44480,10 +46561,10 @@ function pruneSessions(root, now) {
   for (const entry of entries) {
     if (!entry.isDirectory())
       continue;
-    const dir = join4(sessions, entry.name);
+    const dir = join5(sessions, entry.name);
     try {
-      if (now - statSync2(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
-        rmSync3(dir, { recursive: true, force: true });
+      if (now - statSync3(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
+        rmSync4(dir, { recursive: true, force: true });
       }
     } catch (error) {
       if (!hasErrnoCode(error, "ENOENT"))
@@ -44527,1618 +46608,6 @@ function natsConnectionOptions(input) {
     reconnectTimeWait: 2000,
     pingInterval: NATS_PING_INTERVAL_MS,
     maxPingOut: NATS_MAX_PINGS_OUT
-  };
-}
-
-// ../envoy-client/src/envoy-config.ts
-import {
-  chmodSync,
-  closeSync as closeSync3,
-  existsSync,
-  lstatSync,
-  mkdtempSync,
-  openSync as openSync3,
-  readFileSync as readFileSync5,
-  readlinkSync,
-  rmSync as rmSync4,
-  statSync as statSync3
-} from "fs";
-import { homedir as homedir2, tmpdir } from "os";
-import * as path from "path";
-
-// ../envoy-client/src/json-position.ts
-function jsonErrorPosition(text) {
-  let at = 0;
-  const fail = () => {
-    throw new RangeError("not JSON");
-  };
-  const space = () => {
-    while (at < text.length && ` 	
-\r`.includes(text.charAt(at)))
-      at += 1;
-  };
-  const expect = (char) => {
-    if (text.charAt(at) !== char)
-      fail();
-    at += 1;
-  };
-  const string = () => {
-    expect('"');
-    while (at < text.length) {
-      const char = text.charAt(at);
-      if (char === '"') {
-        at += 1;
-        return;
-      }
-      if (char < " ")
-        fail();
-      at += char === "\\" ? 2 : 1;
-    }
-    fail();
-  };
-  const value = () => {
-    space();
-    const char = text.charAt(at);
-    if (char === "{" || char === "[") {
-      const close = char === "{" ? "}" : "]";
-      at += 1;
-      space();
-      if (text.charAt(at) === close) {
-        at += 1;
-        return;
-      }
-      for (;; ) {
-        if (close === "}") {
-          space();
-          string();
-          space();
-          expect(":");
-        }
-        value();
-        space();
-        if (text.charAt(at) === ",") {
-          at += 1;
-          continue;
-        }
-        expect(close);
-        return;
-      }
-    }
-    if (char === '"') {
-      string();
-      return;
-    }
-    for (const word of ["true", "false", "null"]) {
-      if (text.startsWith(word, at)) {
-        at += word.length;
-        return;
-      }
-    }
-    const number = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/.exec(text.slice(at));
-    if (number === null)
-      fail();
-    at += number?.[0].length ?? 0;
-  };
-  try {
-    value();
-    space();
-    if (at < text.length)
-      fail();
-    return;
-  } catch {
-    const before = text.slice(0, at).split(`
-`);
-    return `line ${before.length}, column ${(before.at(-1)?.length ?? 0) + 1}`;
-  }
-}
-
-// ../envoy-client/src/secret-file.ts
-import { readFileSync as readFileSync4 } from "fs";
-function sendable(value) {
-  return !/[\s\p{Cc}]/u.test(value);
-}
-function readSecretFile(variable, filePath) {
-  let contents;
-  try {
-    contents = readFileSync4(filePath, "utf8");
-  } catch (error) {
-    throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error)}`);
-  }
-  const value = contents.trim();
-  if (value.length === 0)
-    throw new Error(`${variable} names ${filePath}, which is empty`);
-  if (!sendable(value)) {
-    throw new Error(`${variable} names ${filePath}, which holds whitespace or a control character`);
-  }
-  return value;
-}
-
-// ../envoy-client/src/envoy-config.ts
-var COMMAND_TIMEOUT_MS = 1e4;
-function nonEmpty(value) {
-  return value === undefined || value === "" ? undefined : value;
-}
-function absolute(name, value) {
-  if (value !== undefined && !path.isAbsolute(value)) {
-    throw new Error(`${name} is ${value}, which is not an absolute path`);
-  }
-  return value;
-}
-function neutralConfig(env) {
-  const xdgConfigHome = nonEmpty(env.XDG_CONFIG_HOME);
-  if (xdgConfigHome !== undefined && !path.isAbsolute(xdgConfigHome)) {
-    return { error: `XDG_CONFIG_HOME is ${xdgConfigHome}, which is not an absolute path` };
-  }
-  const configHome = xdgConfigHome ?? path.join(nonEmpty(env.HOME) ?? homedir2(), ".config");
-  return { path: path.resolve(configHome, "legion", "envoy.json") };
-}
-var HARNESS_DIRECTORY_VARIABLE = {
-  omp: "PI_CODING_AGENT_DIR",
-  claude: "CLAUDE_CONFIG_DIR",
-  opencode: "OPENCODE_CONFIG_DIR"
-};
-var PLUGIN_HARNESSES = Object.keys(HARNESS_DIRECTORY_VARIABLE);
-function namedDirectory(harness, env) {
-  if (harness === "omp") {
-    const profile = nonEmpty(env.OMP_PROFILE);
-    if (profile === undefined || profile === "default")
-      return;
-  }
-  return nonEmpty(env[HARNESS_DIRECTORY_VARIABLE[harness]]);
-}
-function harnessDirectory(harness, env) {
-  for (const plugin of harness === "command" ? PLUGIN_HARNESSES : [harness]) {
-    if (harness === "command" && plugin === "claude" && env.CLAUDE_CODE_CHILD_SESSION !== "1") {
-      continue;
-    }
-    const directory = namedDirectory(plugin, env);
-    if (directory !== undefined)
-      return absolute(HARNESS_DIRECTORY_VARIABLE[plugin], directory);
-  }
-  return;
-}
-function handedConfigPath(env) {
-  const handed = nonEmpty(env.ENVOY_CONFIG_FILE);
-  return handed === undefined ? undefined : path.resolve(absolute("ENVOY_CONFIG_FILE", handed));
-}
-function envoyConfigPath(harness, env) {
-  const handedFirst = harness === "command" ? handedConfigPath(env) : undefined;
-  if (handedFirst !== undefined)
-    return handedFirst;
-  const directory = harnessDirectory(harness, env);
-  if (directory !== undefined)
-    return path.resolve(directory, "envoy.json");
-  const handed = handedConfigPath(env);
-  if (handed !== undefined)
-    return handed;
-  const neutral = neutralConfig(env);
-  if ("error" in neutral)
-    throw new Error(neutral.error);
-  return neutral.path;
-}
-var httpUrlSchema = url({ protocol: /^https?$/, error: "must be an http or https URL" });
-var DispatchSectionSchema = strictObject({
-  enabled: boolean2().optional(),
-  serverUrl: httpUrlSchema.optional(),
-  token: string2().optional()
-});
-var EnvoySectionSchema = strictObject({
-  enabled: boolean2().optional(),
-  url: httpUrlSchema.optional(),
-  natsUrls: array(string2().trim().min(1, "must not be empty")).optional(),
-  token: string2().optional(),
-  natsSeed: string2().optional()
-});
-var EnvoyFileSchema = looseObject({
-  $schema: string2().optional(),
-  dispatch: DispatchSectionSchema.optional(),
-  envoy: EnvoySectionSchema.optional()
-});
-var CheckoutFileSchema = looseObject({
-  $schema: string2().optional(),
-  dispatch: DispatchSectionSchema.optional()
-});
-var AskgateSectionSchema = strictObject({ enabled: boolean2().optional() });
-function offWithNotice(notice) {
-  return { enabled: false, notice, error: null };
-}
-function offWithError(error) {
-  return { enabled: false, notice: null, error };
-}
-function httpUrl2(value) {
-  let url2;
-  try {
-    url2 = new URL(value);
-  } catch {
-    return;
-  }
-  return url2.protocol === "http:" || url2.protocol === "https:" ? url2 : undefined;
-}
-function describeSchemaIssue(filePath, error) {
-  const issue = error.issues[0];
-  if (!issue)
-    return `${filePath}: invalid envoy.json`;
-  if (issue.code === "unrecognized_keys") {
-    const section = issue.path.join(".");
-    const keys = issue.keys.map((key) => `${section}.${key}`).join(", ");
-    return `${filePath}: unrecognized ${section} key(s): ${keys}`;
-  }
-  return `${filePath}: ${issue.path.join(".")}: ${issue.message}`;
-}
-function danglingLink(filePath) {
-  try {
-    return lstatSync(filePath).isSymbolicLink() ? readlinkSync(filePath) : null;
-  } catch {
-    return null;
-  }
-}
-function parseFile(filePath, schema, checkout) {
-  let raw;
-  try {
-    raw = readFileSync5(filePath, "utf-8");
-  } catch (error) {
-    if (hasErrnoCode(error, "ENOENT") || hasErrnoCode(error, "ENOTDIR")) {
-      return { kind: "absent", link: danglingLink(filePath) };
-    }
-    return { kind: "invalid", reason: `${filePath}: could not be read (${messageFor(error)})` };
-  }
-  let parsedJson;
-  try {
-    parsedJson = JSON.parse(raw);
-  } catch {
-    const position = jsonErrorPosition(raw);
-    return {
-      kind: "invalid",
-      reason: `${filePath}: invalid JSON${position === undefined ? "" : ` at ${position}`}`
-    };
-  }
-  if (typeof parsedJson === "object" && parsedJson !== null && "natsUrls" in parsedJson) {
-    return {
-      kind: "invalid",
-      reason: checkout ? `${filePath}: the top-level natsUrls is not read, and a checkout's envoy.json holds only a dispatch section` : `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`
-    };
-  }
-  const parsed = schema.safeParse(parsedJson);
-  if (!parsed.success) {
-    return { kind: "invalid", reason: describeSchemaIssue(filePath, parsed.error) };
-  }
-  return { kind: "valid", settings: parsed.data };
-}
-var FAILURE_KEPT_MS = 60000;
-var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands.v1");
-var processGlobal2 = globalThis;
-var commandOutcomes = processGlobal2[COMMAND_OUTCOMES] ?? new Map;
-processGlobal2[COMMAND_OUTCOMES] = commandOutcomes;
-function runCommand(command, env, cwd) {
-  const childEnv = {};
-  for (const [name, variable] of Object.entries(env)) {
-    if (variable !== undefined)
-      childEnv[name] = variable;
-  }
-  const directory = mkdtempSync(path.join(tmpdir(), "envoy-command-"));
-  try {
-    chmodSync(directory, 448);
-    const output = path.join(directory, "stdout");
-    const fd = openSync3(output, "wx", 384);
-    let result;
-    try {
-      result = Bun.spawnSync(["/bin/sh", "-c", command], {
-        cwd,
-        env: childEnv,
-        stdin: "ignore",
-        stdout: fd,
-        stderr: "ignore",
-        timeout: COMMAND_TIMEOUT_MS,
-        detached: true
-      });
-    } catch (error) {
-      return { failure: `could not start: ${messageFor(error)}`, timedOut: false };
-    } finally {
-      closeSync3(fd);
-    }
-    try {
-      process.kill(-result.pid, "SIGKILL");
-    } catch {}
-    if (result.exitedDueToTimeout) {
-      return {
-        failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s, and does not run again in this process`,
-        timedOut: true
-      };
-    }
-    if (!result.success) {
-      return {
-        failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}`,
-        timedOut: false
-      };
-    }
-    const value = readFileSync5(output, "utf-8").trim();
-    if (value.length === 0)
-      return { failure: "printed nothing", timedOut: false };
-    if (!sendable(value)) {
-      return {
-        failure: "printed more than one line, or whitespace inside its value",
-        timedOut: false
-      };
-    }
-    return { value };
-  } finally {
-    rmSync4(directory, { recursive: true, force: true });
-  }
-}
-function fileValue(value, field, filePath, env, commands = "run") {
-  if (!value.startsWith("!")) {
-    if (!sendable(value)) {
-      throw new Error(`${filePath}: ${field} holds whitespace or a control character`);
-    }
-    return value;
-  }
-  const command = value.slice(1);
-  const cwd = path.dirname(path.resolve(filePath));
-  const key = JSON.stringify([command, filePath, cwd]);
-  let outcome = commandOutcomes.get(key);
-  if (commands === "kept") {
-    if (outcome === undefined) {
-      throw new Error(`${filePath}: ${field}'s command has not run in this process yet, and this read does not run it`);
-    }
-  } else if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
-    outcome = { ...runCommand(command, env, cwd), at: Date.now() };
-    commandOutcomes.set(key, outcome);
-  }
-  if ("failure" in outcome)
-    throw new Error(`${filePath}: ${field}'s command ${outcome.failure}`);
-  return outcome.value;
-}
-function statDevice(directory) {
-  try {
-    return statSync3(directory).dev;
-  } catch {
-    return;
-  }
-}
-function moveNotice(oldFile, newFile, move, deviceOf) {
-  const oldDevice = deviceOf(path.dirname(oldFile));
-  let ancestor = path.dirname(newFile);
-  let newDevice = deviceOf(ancestor);
-  while (newDevice === undefined && path.dirname(ancestor) !== ancestor) {
-    ancestor = path.dirname(ancestor);
-    newDevice = deviceOf(ancestor);
-  }
-  if (oldDevice !== undefined && newDevice !== undefined && oldDevice !== newDevice) {
-    return `${oldFile} is not read, and is on another filesystem than ${newFile} (a mount): create ${newFile}, and move ${oldFile} on the machine that owns it`;
-  }
-  return `${oldFile} is not read: ${move}`;
-}
-function oldUserFileNotice(filePath, env, deviceOf) {
-  const home = nonEmpty(env.HOME) ?? homedir2();
-  const old = path.join(home, ".config", "opencode", "envoy.json");
-  if (!existsSync(old))
-    return;
-  const selected = path.resolve(filePath);
-  const userFile = path.resolve(home, ".config", "legion", "envoy.json");
-  if (selected === userFile) {
-    return moveNotice(old, userFile, "mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/", deviceOf);
-  }
-  const profileFile = PLUGIN_HARNESSES.map((harness) => namedDirectory(harness, env)).some((directory) => directory !== undefined && path.isAbsolute(directory) && selected === path.resolve(directory, "envoy.json"));
-  if (profileFile) {
-    return `${old} is not read for this profile; copy or link it to ${filePath}, or write that file`;
-  }
-  const configHome = nonEmpty(env.XDG_CONFIG_HOME);
-  const neutral = neutralConfig(env);
-  if (configHome !== undefined && path.isAbsolute(configHome) && "path" in neutral && selected === neutral.path) {
-    return `${old} is not read under XDG_CONFIG_HOME=${configHome}`;
-  }
-  return;
-}
-function missingConfigNotice(filePath, missing, off) {
-  const link = missing.link === null ? "" : ` (a link to ${missing.link}, which does not exist)`;
-  const old = missing.oldUserFileNotice === undefined ? "" : `; ${missing.oldUserFileNotice}`;
-  return `no envoy.json at ${filePath}${link}: ${off}${old}`;
-}
-function readEnvoyConfig(filePath, env, options) {
-  const deviceOf = options.deviceOf ?? statDevice;
-  const chosen = parseFile(filePath, EnvoyFileSchema, false);
-  if (chosen.kind === "invalid")
-    return { kind: "failed", path: filePath, error: chosen.reason };
-  const resolvedChosen = path.resolve(filePath);
-  const checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
-  const checkoutFile = checkoutPath === resolvedChosen ? { kind: "absent", link: null } : parseFile(checkoutPath, CheckoutFileSchema, true);
-  const own = chosen.kind === "valid" ? chosen.settings : {};
-  let checkout = null;
-  if (checkoutFile.kind === "invalid") {
-    checkout = { kind: "invalid", path: checkoutPath, error: checkoutFile.reason };
-  } else if (checkoutFile.kind === "valid") {
-    checkout = {
-      kind: "valid",
-      path: checkoutPath,
-      dispatch: checkoutFile.settings.dispatch ?? {},
-      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null,
-      askgateError: Object.hasOwn(checkoutFile.settings, "askgate") ? `askgate in ${checkoutPath} is not read; set it in ${filePath}` : null
-    };
-  }
-  const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
-  const warnings = oldCheckout !== resolvedChosen && !existsSync(checkoutPath) && existsSync(oldCheckout) ? [
-    moveNotice(oldCheckout, checkoutPath, `mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`, deviceOf)
-  ] : [];
-  const unreadOldUserFile = chosen.kind === "absent" ? oldUserFileNotice(filePath, env, deviceOf) : undefined;
-  return {
-    kind: "read",
-    path: filePath,
-    dispatch: own.dispatch ?? {},
-    envoy: own.envoy ?? {},
-    checkout,
-    missing: chosen.kind === "absent" ? {
-      link: chosen.link,
-      ...unreadOldUserFile === undefined ? {} : { oldUserFileNotice: unreadOldUserFile }
-    } : null,
-    warnings
-  };
-}
-
-// ../envoy-client/src/bearer.ts
-function bearerSource(env, section, written) {
-  const pointer = nonEmpty(env[`${section}_TOKEN_FILE`]);
-  if (pointer !== undefined) {
-    return { kind: "variable", token: readSecretFile(`${section}_TOKEN_FILE`, pointer) };
-  }
-  const plain = nonEmpty(env[`${section}_TOKEN`]);
-  if (plain !== undefined) {
-    if (!sendable(plain)) {
-      throw new Error(`${section}_TOKEN holds whitespace or a control character`);
-    }
-    return { kind: "variable", token: plain };
-  }
-  const bearer = written();
-  return bearer === undefined ? { kind: "none" } : { kind: "file", ...bearer };
-}
-function fileBearer(bearer, url, section, env, commands = "run") {
-  const named = httpUrl2(url)?.origin;
-  const paired = httpUrl2(bearer.server)?.origin;
-  if (named !== paired) {
-    throw new Error(`${section}_URL names ${named}, but ${bearer.path}'s ${bearer.field} is for ${paired}; set ${section}_TOKEN or ${section}_TOKEN_FILE for it`);
-  }
-  if (bearer.checkout && bearer.token.startsWith("!")) {
-    throw new Error(`${bearer.path}: ${bearer.field} is a command, which a checkout's envoy.json cannot run`);
-  }
-  if (bearer.token === "") {
-    throw new Error(`${bearer.field} in ${bearer.path} must be a non-empty bearer token`);
-  }
-  return fileValue(bearer.token, bearer.field, bearer.path, env, commands);
-}
-
-// ../envoy-client/src/envoy-settings.ts
-var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
-var DEFAULT_HEARTBEAT_MS = 90000;
-var MIN_PASS_DEADLINE_MS = 30000;
-var MIN_INTERVAL_MS = 25;
-var MAX_INTERVAL_MS = 2147483647;
-function namedInterval(raw) {
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-}
-function natsSeedFromEnvironment(env) {
-  const { NATS_NKEY_SEED_FILE: file, NATS_NKEY_SEED: plain } = env;
-  if (file !== undefined) {
-    if (file === "")
-      throw new Error("NATS_NKEY_SEED_FILE is set but empty");
-    return {
-      value: readSecretFile("NATS_NKEY_SEED_FILE", file),
-      source: `NATS_NKEY_SEED_FILE (${file})`
-    };
-  }
-  if (plain === undefined)
-    return;
-  const value = plain.trim();
-  if (value.length === 0)
-    throw new Error("NATS_NKEY_SEED is set but empty");
-  return { value, source: "NATS_NKEY_SEED" };
-}
-var NO_NATS_SERVER = "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)";
-var NO_NATS_CONNECTION = "this session opens no NATS connection";
-function natsServerKey(url) {
-  const match = /^([a-z][a-z0-9+.-]*):\/\/([^@/]*@)?(\[[^\]]*\]|[^:/]*)(?::(\d+))?(\/.*)?$/i.exec(url);
-  if (match === null)
-    return url;
-  const [, scheme = "", userinfo = "", host = "", port = "4222", rest = ""] = match;
-  return `${scheme.toLowerCase()}://${userinfo}${host.toLowerCase()}:${port}${rest.replace(/\/+$/, "")}`;
-}
-function natsCredential(env, section, namedNatsUrls, filePath) {
-  const fromEnvironment = natsSeedFromEnvironment(env);
-  if (fromEnvironment !== undefined || section.natsSeed === undefined)
-    return fromEnvironment;
-  if (namedNatsUrls.length > 0) {
-    const servers = new Set((section.natsUrls ?? []).map(natsServerKey));
-    const named = new Set(namedNatsUrls.map(natsServerKey));
-    if (named.size !== servers.size || ![...named].every((server) => servers.has(server))) {
-      throw new Error(`ENVOY_NATS_URL names other servers than ${filePath}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`);
-    }
-  }
-  return {
-    value: fileValue(section.natsSeed, "envoy.natsSeed", filePath, env),
-    source: `envoy.natsSeed in ${filePath}`
-  };
-}
-function envoySettings(env, config, options = {}) {
-  if (config.kind === "failed")
-    return offWithError(config.error);
-  const section = config.envoy;
-  if (section.enabled === false) {
-    return offWithNotice(`${config.path} sets envoy.enabled to false: Envoy is off`);
-  }
-  const namedUrl = nonEmpty(env.ENVOY_URL);
-  const namedNatsUrls = (env.ENVOY_NATS_URL ?? "").split(",").map((url) => url.trim()).filter((url) => url.length > 0);
-  const addressed = namedUrl !== undefined || namedNatsUrls.length > 0 || section.url !== undefined || (section.natsUrls ?? []).length > 0 || section.enabled === true;
-  if (!addressed) {
-    return offWithNotice(config.missing === null ? `${config.path} names no Envoy listener or NATS server, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off` : missingConfigNotice(config.path, config.missing, "Envoy is off"));
-  }
-  if (namedUrl !== undefined && httpUrl2(namedUrl) === undefined) {
-    return offWithError("ENVOY_URL must be an http or https URL");
-  }
-  const listener = section.url ?? DEFAULT_ENVOY_URL;
-  const url = namedUrl ?? listener;
-  let token;
-  try {
-    const source = bearerSource(env, "ENVOY", () => section.token === undefined ? undefined : {
-      token: section.token,
-      field: "envoy.token",
-      path: config.path,
-      server: listener,
-      checkout: false
-    });
-    token = source.kind === "none" ? undefined : source.kind === "variable" ? source.token : fileBearer(source, url, "ENVOY", env);
-  } catch (error) {
-    return offWithError(messageFor(error));
-  }
-  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : section.natsUrls ?? [];
-  let inbound;
-  if (options.nats === false)
-    inbound = { off: NO_NATS_CONNECTION };
-  else if (natsUrls.length === 0)
-    inbound = { off: NO_NATS_SERVER };
-  else {
-    try {
-      inbound = { natsUrls, natsSeed: natsCredential(env, section, namedNatsUrls, config.path) };
-    } catch (error) {
-      inbound = { off: messageFor(error) };
-    }
-  }
-  const namedHeartbeatMs = namedInterval(env.ENVOY_HEARTBEAT_MS);
-  const heartbeatMs = namedHeartbeatMs === undefined ? DEFAULT_HEARTBEAT_MS : Math.min(Math.max(namedHeartbeatMs, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
-  const namedPassDeadlineMs = namedInterval(env.ENVOY_PASS_DEADLINE_MS);
-  return {
-    enabled: true,
-    url: normalizeEnvoyUrl(url),
-    token,
-    inbound,
-    heartbeatMs,
-    passDeadlineMs: Math.min(Math.max(namedPassDeadlineMs ?? MIN_PASS_DEADLINE_MS, heartbeatMs), MAX_INTERVAL_MS),
-    passDeadlineRaisedFrom: namedPassDeadlineMs !== undefined && namedPassDeadlineMs < heartbeatMs ? namedPassDeadlineMs : undefined
-  };
-}
-function normalizeEnvoyUrl(value) {
-  return value.replace(/\/+$/, "");
-}
-
-// ../envoy-client/src/transport.ts
-var DEFAULT_TIMEOUT_MS = 5000;
-var RETRY_DELAY_MS = 250;
-var REPLAY_TIMEOUT_MS = 1e4;
-var REPLAY_UNAVAILABLE_CODE = "REPLAY_UNAVAILABLE";
-var InterestWireSchema = object({
-  session_id: string2(),
-  machine_id: string2(),
-  dir: string2(),
-  topics: array(string2()),
-  updated_at: number2().int().optional(),
-  warnings: array(string2()).optional()
-});
-var SessionWireSchema = object({
-  session_id: string2(),
-  machine_id: string2(),
-  host: string2().optional(),
-  dir: string2(),
-  port: number2().int(),
-  title: string2(),
-  topics: array(string2()),
-  roles: array(string2()).optional(),
-  capabilities: array(string2()).optional(),
-  self_subscribed: boolean2(),
-  last_seen: number2().int().optional(),
-  plugin: string2().optional(),
-  plugin_version: string2().optional()
-});
-var RoleWireSchema = object({
-  role: string2(),
-  holder: string2(),
-  host: string2().optional(),
-  last_seen: number2().int()
-});
-var RoleHeldWireSchema = object({
-  error: string2(),
-  role: string2(),
-  holder: string2()
-});
-var ErrorWireSchema = object({
-  error: string2(),
-  code: string2().optional(),
-  expected: array(string2()).optional()
-});
-var EnvelopeResponseSchema = EnvelopeSchema.extend({
-  recipient: string2().optional(),
-  holder: string2().optional()
-});
-var ReplayWireSchema = object({
-  stream: object({
-    id: string2().min(1).optional(),
-    created: string2(),
-    first_seq: number2().int().nonnegative(),
-    last_seq: number2().int().nonnegative()
-  }),
-  subjects: array(object({
-    subject: string2(),
-    messages: array(object({
-      seq: number2().int().positive(),
-      subject: string2(),
-      time: string2(),
-      data: string2()
-    })),
-    next_after: number2().int().nonnegative(),
-    more: boolean2(),
-    refused: string2().optional()
-  }))
-});
-function mergeInterestSources(registryTopics, liveTopics) {
-  const interests = new Map;
-  for (const topic of registryTopics) {
-    interests.set(topic, liveTopics.includes(topic) ? "both" : "registry");
-  }
-  for (const topic of liveTopics) {
-    if (!interests.has(topic))
-      interests.set(topic, "live");
-  }
-  return interests;
-}
-function newClientInstanceID() {
-  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-function expandSubscriptionTopics(topics) {
-  const expanded = new Set;
-  for (const topic of topics) {
-    const base = topic.endsWith(".>") ? topic.slice(0, -2) : undefined;
-    if (base === undefined || base.includes("*") || base.includes(">")) {
-      expanded.add(topic);
-      continue;
-    }
-    const segments = base.split(".");
-    if (segments.length < 2 || segments.some((segment) => segment.length === 0)) {
-      throw new TypeError(`cannot expand Envoy wildcard topic "${topic}": its concrete base must have at least two non-empty segments`);
-    }
-    expanded.add(base);
-    expanded.add(topic);
-  }
-  return [...expanded];
-}
-
-class EnvoyApiError extends Error {
-  details;
-  name = "EnvoyApiError";
-  expected;
-  code;
-  constructor(details) {
-    let parsed;
-    try {
-      const result = ErrorWireSchema.safeParse(JSON.parse(details.responseBody));
-      if (result.success)
-        parsed = result.data;
-    } catch {}
-    super(parsed === undefined ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}` : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`);
-    this.details = details;
-    this.expected = parsed?.expected;
-    this.code = parsed?.code;
-  }
-}
-function createEnvoyClient(config) {
-  const baseUrl = normalizeEnvoyUrl(config.baseUrl);
-  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const apiToken = config.token;
-  const request = async (path, init, options = {}) => {
-    const url = `${baseUrl}${path}`;
-    const attempts = config.retry === false ? 1 : 2;
-    const tries = options.retry === false ? 1 : attempts;
-    for (let attempt = 0;attempt < tries; attempt += 1) {
-      let response;
-      try {
-        const headers = new Headers(init.headers);
-        if (apiToken)
-          headers.set("Authorization", `Bearer ${apiToken}`);
-        response = await config.fetch(url, {
-          ...init,
-          headers,
-          signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs)
-        });
-      } catch (error) {
-        if (attempt + 1 < tries) {
-          await waitForRetry();
-          continue;
-        }
-        throw error;
-      }
-      const responseBody = await response.text();
-      if (response.ok)
-        return responseBody;
-      const error = new EnvoyApiError({
-        method: init.method ?? "GET",
-        url,
-        status: response.status,
-        responseBody
-      });
-      if (response.status >= 500 && attempt + 1 < tries) {
-        await waitForRetry();
-        continue;
-      }
-      throw error;
-    }
-    throw new Error("Envoy request exhausted retries");
-  };
-  const post = (path, body, options) => request(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  }, options);
-  return {
-    subscribe: async (input) => InterestWireSchema.parse(JSON.parse(await post("/v1/interests/subscribe", {
-      session_id: input.sessionID,
-      dir: input.directory,
-      topics: expandSubscriptionTopics(input.topics),
-      port: input.port,
-      title: input.title,
-      ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
-      driving: input.driving,
-      ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
-      ...input.clientInstanceID === undefined ? {} : { client_instance_id: input.clientInstanceID },
-      host: machineID(),
-      plugin: input.plugin.name,
-      plugin_version: input.plugin.version
-    }))),
-    unsubscribe: async (input) => {
-      await post("/v1/interests/unsubscribe", {
-        session_id: input.sessionID,
-        topics: expandSubscriptionTopics(input.topics)
-      });
-    },
-    getInterest: async (sessionID) => InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
-    send: async (input) => {
-      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
-      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/send", {
-        source: input.source ?? "agent",
-        ...sourceSession(input.sourceSessionID),
-        target_session: input.targetSessionID,
-        message: input.message,
-        idempotency_key: idempotencyKey,
-        ...messageMetadata(input)
-      })));
-      return {
-        envelope: response,
-        recipient: response.recipient ?? input.targetSessionID,
-        confirmed: response.recipient !== undefined
-      };
-    },
-    publish: async (input) => {
-      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
-      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/publish", {
-        source: input.source ?? "agent",
-        ...sourceSession(input.sourceSessionID),
-        topic: input.topic,
-        message: input.message,
-        ...input.payload === undefined ? {} : { payload: input.payload },
-        idempotency_key: idempotencyKey,
-        ...messageMetadata(input)
-      })));
-      return {
-        envelope: response,
-        ...response.holder === undefined ? {} : { holder: response.holder }
-      };
-    },
-    unregisterSession: async (input) => {
-      const query = input.clientInstanceID === undefined ? "" : `?client_instance_id=${encodeURIComponent(input.clientInstanceID)}`;
-      await request(`/v1/sessions/${encodeURIComponent(input.sessionID)}${query}`, {
-        method: "DELETE"
-      });
-    },
-    setRole: async (input) => {
-      const soft = input.soft === true;
-      const previous = soft ? input.previousSessionID ?? "" : "";
-      const body = {
-        session_id: input.sessionID,
-        role: input.role,
-        ...soft ? { soft: true } : {},
-        ...previous === "" ? {} : { previous_session_id: previous }
-      };
-      let raw;
-      try {
-        raw = await post("/v1/roles/set", body);
-      } catch (error) {
-        if (error instanceof EnvoyApiError && error.details.status === 409) {
-          const held = RoleHeldWireSchema.safeParse(JSON.parse(error.details.responseBody));
-          if (held.success)
-            return { claimed: false, holder: held.data.holder };
-        }
-        throw error;
-      }
-      return { claimed: true, interest: InterestWireSchema.parse(JSON.parse(raw)) };
-    },
-    getRole: async (role) => RoleWireSchema.parse(JSON.parse(await request(`/v1/roles/${encodeURIComponent(role)}`, { method: "GET" }))),
-    listSessions: async (input = {}) => {
-      const search = new URLSearchParams;
-      if (input.directory !== undefined)
-        search.set("dir", input.directory);
-      if (input.title !== undefined)
-        search.set("title", input.title);
-      const query = search.size === 0 ? "" : `?${search.toString()}`;
-      return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
-    },
-    replay: async (input) => ReplayWireSchema.parse(JSON.parse(await post("/v1/replay", {
-      session_id: input.sessionID,
-      subjects: input.subjects.map((cursor) => cursor.after === undefined ? { subject: cursor.subject } : { subject: cursor.subject, after: cursor.after }),
-      ...input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }
-    }, { timeoutMs: REPLAY_TIMEOUT_MS, retry: false })))
-  };
-}
-function waitForRetry() {
-  const { promise, resolve } = Promise.withResolvers();
-  setTimeout(resolve, RETRY_DELAY_MS);
-  return promise;
-}
-function messageMetadata(input) {
-  return {
-    ...input.inReplyTo === undefined ? {} : { in_reply_to: input.inReplyTo },
-    ...input.supersedes === undefined ? {} : { supersedes: input.supersedes },
-    ...input.urgency === undefined ? {} : { urgency: input.urgency },
-    ...input.expectsReply === undefined ? {} : { expects_reply: input.expectsReply },
-    ...input.expiresAt === undefined ? {} : { expires_at: input.expiresAt }
-  };
-}
-function sourceSession(sessionID) {
-  return sessionID === undefined || sessionID === "" ? {} : { source_session: sessionID };
-}
-
-// ../envoy-client/src/replay.ts
-var REPLAY_LEDGER_TTL_MS = DELIVERY_DUPLICATE_WINDOW_MS;
-var REPLAY_LEDGER_LIMIT = 20000;
-var REPLAY_PAGES_PER_SWEEP = 20;
-var REPLAY_FAILURES_BEFORE_NOTICE = 3;
-var REPLAY_STATE_REFRESH_MS = 60 * 60 * 1000;
-var REPLAY_MAX_SUBJECTS = 32;
-var ROLE_FORWARD_KEY_PREFIX = "envoy.role.forward.";
-var ReplayLedgerEntrySchema = object({
-  event_id: string2().min(1).optional(),
-  dedupe_key: string2().min(1).optional(),
-  at: number2()
-});
-var ReplayCursorSchema = object({
-  since: number2().int().nonnegative().optional(),
-  after: number2().int().nonnegative().optional()
-});
-var ReplayPendingNoticeSchema = _enum2([
-  "retention_gap",
-  "stream_moved_back",
-  "stream_recreated"
-]);
-var PENDING_NOTICE_MESSAGES = {
-  stream_recreated: "Envoy's notification stream was recreated, so messages published to this session while its connection was down before that may be lost.",
-  stream_moved_back: "Envoy's notification stream was restored to an earlier point, so messages published to this session while its connection was down may be shown again, and any published between that point and the restore are missing.",
-  retention_gap: "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing."
-};
-var ReplayStateSchema = object({
-  stream_id: string2().optional(),
-  stream_created: string2().optional(),
-  subjects: record(string2(), ReplayCursorSchema),
-  notices: array(string2()).optional()
-});
-var ReplaySnapshotSchema = object({
-  state: ReplayStateSchema.optional(),
-  ledger: array(ReplayLedgerEntrySchema)
-});
-function createReplayEngine(options) {
-  const { host, transport, dedupe } = options;
-  const now = options.now ?? Date.now;
-  const ledger = createLedger(now);
-  const cursors = new Map;
-  const cursorStarts = new Map;
-  let streamID;
-  let streamCreated;
-  const pending = new Set;
-  const failures = new Map;
-  let unwritten = [];
-  let writtenState;
-  let writtenShape;
-  let writtenAt;
-  let writes = Promise.resolve();
-  let epoch = 0;
-  let listenerNoticed;
-  const answered = new Set;
-  let running;
-  let rerun;
-  const safely = (what, call) => {
-    try {
-      call();
-    } catch (error) {
-      try {
-        host.log(`replay: ${what} failed`, error);
-      } catch {}
-    }
-  };
-  const log = (message, error) => safely("log", () => host.log(message, error));
-  const notify = (notice) => safely("notice", () => host.notify(notice));
-  const tell = (kind) => {
-    pending.delete(kind);
-    notify({ kind, message: PENDING_NOTICE_MESSAGES[kind] });
-  };
-  const sessionRead = (read) => () => {
-    try {
-      return read();
-    } catch {
-      return;
-    }
-  };
-  const currentSession = sessionRead(() => host.sessionID());
-  const writeSession = sessionRead(() => host.writeSessionID === undefined ? host.sessionID() : host.writeSessionID());
-  const bindTo = (sessionID, read) => {
-    if (sessionID === undefined || sessionID === "" || read() !== sessionID)
-      return;
-    const bound = epoch;
-    return { sessionID, alive: () => bound === epoch && read() === sessionID };
-  };
-  const bind = () => bindTo(currentSession(), currentSession);
-  const stateJSON = (afters = true) => {
-    const subjects = {};
-    for (const subject of [...cursors.keys()].sort()) {
-      const cursor = cursors.get(subject) ?? {};
-      subjects[subject] = {
-        ...cursor.since === undefined ? {} : { since: cursor.since },
-        ...!afters || cursor.after === undefined ? {} : { after: cursor.after }
-      };
-    }
-    return JSON.stringify({
-      ...streamID === undefined ? {} : { stream_id: streamID },
-      ...streamCreated === undefined ? {} : { stream_created: streamCreated },
-      subjects,
-      ...pending.size === 0 ? {} : { notices: [...pending].sort() }
-    });
-  };
-  const record2 = (identity) => {
-    const entry = ledger.record(identity);
-    if (entry !== undefined)
-      unwritten.push(entry);
-  };
-  const flush = (alive, atOnce = false) => {
-    writes = writes.then(async () => {
-      if (!alive())
-        return;
-      const json = stateJSON();
-      const delivered = unwritten;
-      if (json === writtenState && delivered.length === 0)
-        return;
-      const shape = stateJSON(false);
-      if (delivered.length === 0 && !atOnce && shape === writtenShape && writtenAt !== undefined && now() - writtenAt < REPLAY_STATE_REFRESH_MS) {
-        return;
-      }
-      unwritten = [];
-      const state = json === writtenState ? undefined : JSON.parse(json);
-      try {
-        await host.write({
-          delivered,
-          state,
-          snapshot: () => ({ state: JSON.parse(json), ledger: ledger.list() })
-        });
-        if (state !== undefined) {
-          writtenState = json;
-          writtenShape = shape;
-          writtenAt = now();
-        }
-      } catch (error) {
-        unwritten = [...delivered, ...unwritten];
-        log("replay: could not persist the replay state; the next write carries it", error);
-      }
-    });
-    return writes;
-  };
-  const syncFollowed = () => {
-    const followed = new Set(host.followedSubjects());
-    for (const subject of [...cursors.keys()]) {
-      if (!followed.has(subject)) {
-        cursors.delete(subject);
-        cursorStarts.delete(subject);
-      }
-    }
-    for (const subject of followed) {
-      if (!cursors.has(subject))
-        cursors.set(subject, {});
-    }
-  };
-  const failureNotice = (envelope, publishedAt, error, subject) => ({
-    eventId: envelope.event_id ?? "unknown",
-    sender: senderLabel(envelope),
-    summary: envelope.payload_summary ?? "unknown",
-    publishedAt,
-    error,
-    readWith: envelope.source === "dispatch" ? "dispatch read" : "envoy_inbox",
-    ...subject === undefined ? {} : { subject },
-    envelope
-  });
-  const showFailureNotice = async (notice, alive) => {
-    let queued;
-    try {
-      queued = await host.showFailureNotice(notice) === "queued";
-    } catch (error) {
-      if (!alive())
-        return "stopped";
-      safely("failure notice warning", () => host.failureNoticeFailed(notice, error));
-      return "hole";
-    }
-    if (!alive())
-      return "stopped";
-    if (queued)
-      return "hole";
-    record2(replayLedgerIdentity(notice.envelope));
-    await flush(alive);
-    return "done";
-  };
-  const handle = async (seq, buffered, alive) => {
-    const { message } = buffered;
-    const envelope = parseEnvelope(message.data);
-    if (envelope === undefined) {
-      log(`replay: skipping stored message ${seq} on ${message.subject}: not an Envoy envelope`);
-      return "done";
-    }
-    if (isRoleForward(envelope))
-      return "done";
-    const identity = replayLedgerIdentity(envelope);
-    if (ledger.has(identity)) {
-      failures.delete(seq);
-      return "done";
-    }
-    if (dedupe?.pending(envelope) === true)
-      return "hole";
-    if (!alive())
-      return "stopped";
-    const giveUp = async (error) => {
-      const handled = await showFailureNotice(failureNotice(envelope, message.time, error, message.subject), alive);
-      if (handled === "done")
-        failures.delete(seq);
-      return handled;
-    };
-    const failure = failures.get(seq);
-    if (failure !== undefined && failure.count >= REPLAY_FAILURES_BEFORE_NOTICE) {
-      return giveUp(failure.error);
-    }
-    const followed = buffered.subjects[0] ?? message.subject;
-    let outcome;
-    let error = "the host could not show it";
-    try {
-      outcome = await host.deliver({
-        envelope,
-        data: message.data,
-        seq,
-        subject: message.subject,
-        followed,
-        time: message.time,
-        since: cursors.get(followed)?.since
-      });
-    } catch (thrown) {
-      outcome = "failed";
-      error = messageFor(thrown);
-    }
-    if (!alive())
-      return "stopped";
-    if (outcome === "shown") {
-      failures.delete(seq);
-      record2(identity);
-      await flush(alive);
-      return "done";
-    }
-    if (outcome === "suppressed") {
-      failures.delete(seq);
-      return "done";
-    }
-    if (outcome === "queued") {
-      failures.delete(seq);
-      return "hole";
-    }
-    const count = (failure?.count ?? 0) + 1;
-    failures.set(seq, { count, error });
-    if (count >= REPLAY_FAILURES_BEFORE_NOTICE)
-      return giveUp(error);
-    log(`replay: could not show stored message ${seq} (${envelope.event_id}): ${error}`);
-    return "hole";
-  };
-  const listenerFailed = (error) => {
-    if (error instanceof EnvoyApiError) {
-      const status = error.details.status;
-      if (status === 404) {
-        if (listenerNoticed === "not_served")
-          return;
-        listenerNoticed = "not_served";
-        notify({
-          kind: "not_served",
-          message: "This session's Envoy listener does not serve replay (POST /v1/replay answered 404), so messages published while its connection is down are not recovered."
-        });
-        return;
-      }
-      if (status === 503 && error.code === REPLAY_UNAVAILABLE_CODE || status === 401 || status === 403) {
-        const key = `unavailable:${status}:${error.message}`;
-        if (listenerNoticed === key)
-          return;
-        listenerNoticed = key;
-        notify({
-          kind: "unavailable",
-          status,
-          error: error.message,
-          message: `Envoy replay is unavailable (${status}: ${error.message}), so messages published while this session's connection is down are not recovered until it answers.`
-        });
-        return;
-      }
-    }
-    log("replay: the listener's replay failed; the next trigger tries again", error);
-  };
-  const streamReplaced = (stream) => {
-    if (stream.id === undefined) {
-      return streamCreated !== undefined && streamCreated !== "" && stream.created !== streamCreated;
-    }
-    return streamID !== undefined && streamID !== "" && stream.id !== streamID;
-  };
-  const streamMovedBack = (stream) => {
-    for (const cursor of cursors.values()) {
-      if (cursor.after !== undefined && cursor.after > stream.last_seq)
-        return true;
-    }
-    return false;
-  };
-  const sweepOnce = async () => {
-    const binding = bind();
-    if (binding === undefined)
-      return;
-    const { sessionID, alive } = binding;
-    syncFollowed();
-    const readings = new Map;
-    for (const [subject, cursor] of cursors) {
-      readings.set(subject, { read: cursor.after, more: true });
-    }
-    const buffer = new Map;
-    const holes = new Map;
-    let gapNoticed = false;
-    if (pending.size > 0) {
-      for (const kind of [...pending].sort()) {
-        if (kind === "retention_gap")
-          gapNoticed = true;
-        tell(kind);
-      }
-      await flush(alive);
-      if (!alive())
-        return;
-    }
-    for (let page = 0;page < REPLAY_PAGES_PER_SWEEP; page += 1) {
-      let handledAny = false;
-      const asking = [...readings].filter(([, reading]) => reading.more).sort(([, a], [, b]) => (a.read ?? -1) - (b.read ?? -1)).slice(0, REPLAY_MAX_SUBJECTS);
-      if (asking.length === 0)
-        break;
-      let response;
-      try {
-        response = await transport.replay({
-          sessionID,
-          subjects: asking.map(([subject, reading]) => reading.read === undefined ? { subject } : { subject, after: reading.read }),
-          ...options.maxMessages === undefined ? {} : { maxMessages: options.maxMessages }
-        });
-      } catch (error) {
-        if (alive()) {
-          answered.clear();
-          listenerFailed(error);
-        }
-        return;
-      }
-      if (!alive())
-        return;
-      listenerNoticed = undefined;
-      for (const result of response.subjects) {
-        if (result.refused === undefined)
-          answered.add(result.subject);
-        else
-          answered.delete(result.subject);
-      }
-      const { stream } = response;
-      const replaced = streamReplaced(stream);
-      streamID = stream.id ?? (replaced ? undefined : streamID);
-      streamCreated = stream.created;
-      if (replaced) {
-        const at = now();
-        for (const subject of cursors.keys()) {
-          cursors.set(subject, { since: stream.last_seq, after: stream.last_seq });
-          cursorStarts.set(subject, at);
-        }
-        failures.clear();
-        pending.add("stream_recreated");
-        await flush(alive);
-        if (!alive())
-          return;
-        tell("stream_recreated");
-        await flush(alive);
-        return;
-      }
-      if (streamMovedBack(stream)) {
-        const from = Math.max(0, stream.first_seq - 1);
-        for (const [subject, cursor] of cursors) {
-          if (cursor.after === undefined)
-            continue;
-          cursors.set(subject, { ...cursor, after: from });
-          const reading = readings.get(subject);
-          if (reading !== undefined) {
-            reading.read = from;
-            reading.more = true;
-          }
-        }
-        buffer.clear();
-        holes.clear();
-        failures.clear();
-        pending.add("stream_moved_back");
-        await flush(alive, true);
-        if (!alive())
-          return;
-        tell("stream_moved_back");
-        await flush(alive);
-        if (!alive())
-          return;
-        continue;
-      }
-      for (const [, reading] of asking)
-        reading.more = false;
-      let gapped = false;
-      for (const result of response.subjects) {
-        const reading = readings.get(result.subject);
-        if (reading?.read === undefined || result.refused !== undefined)
-          continue;
-        if (reading.read >= stream.first_seq - 1)
-          continue;
-        gapped = true;
-        reading.read = stream.first_seq - 1;
-        const cursor = cursors.get(result.subject);
-        if (cursor?.after !== undefined && cursor.after < reading.read) {
-          cursors.set(result.subject, { ...cursor, after: reading.read });
-        }
-      }
-      if (gapped) {
-        if (!gapNoticed)
-          pending.add("retention_gap");
-        await flush(alive, true);
-        if (!alive())
-          return;
-        if (pending.has("retention_gap")) {
-          gapNoticed = true;
-          tell("retention_gap");
-          await flush(alive);
-        }
-      }
-      for (const result of response.subjects) {
-        const reading = readings.get(result.subject);
-        if (reading === undefined || result.refused !== undefined)
-          continue;
-        if (reading.read === undefined) {
-          const cursor = cursors.get(result.subject);
-          if (cursor !== undefined && cursor.after === undefined) {
-            cursors.set(result.subject, { since: result.next_after, after: result.next_after });
-            cursorStarts.set(result.subject, now());
-          }
-          reading.read = result.next_after;
-          continue;
-        }
-        for (const message of result.messages) {
-          if (message.seq <= reading.read)
-            continue;
-          const buffered = buffer.get(message.seq);
-          if (buffered === undefined) {
-            buffer.set(message.seq, { message, subjects: [result.subject] });
-          } else if (!buffered.subjects.includes(result.subject)) {
-            buffered.subjects.push(result.subject);
-          }
-        }
-        reading.read = Math.max(reading.read, result.next_after);
-        reading.more = result.more;
-      }
-      let bound = Number.POSITIVE_INFINITY;
-      for (const reading of readings.values()) {
-        if (reading.more && reading.read !== undefined)
-          bound = Math.min(bound, reading.read);
-      }
-      const ready = [...buffer.keys()].filter((seq) => seq <= bound).sort((a, b) => a - b);
-      for (const seq of ready) {
-        const buffered = buffer.get(seq);
-        if (buffered === undefined)
-          continue;
-        buffer.delete(seq);
-        if (!buffered.subjects.some((subject) => cursors.has(subject)))
-          continue;
-        const handled = await handle(seq, buffered, alive);
-        if (handled === "stopped")
-          return;
-        if (handled === "done")
-          handledAny = true;
-        if (handled === "hole") {
-          for (const subject of buffered.subjects) {
-            if (!holes.has(subject))
-              holes.set(subject, seq);
-          }
-        }
-      }
-      if (!alive())
-        return;
-      for (const [subject, reading] of readings) {
-        const cursor = cursors.get(subject);
-        if (cursor?.after === undefined || reading.read === undefined)
-          continue;
-        let after = Math.min(reading.read, bound);
-        const hole = holes.get(subject);
-        if (hole !== undefined)
-          after = Math.min(after, hole - 1);
-        if (after > cursor.after)
-          cursors.set(subject, { ...cursor, after });
-      }
-      await flush(alive, handledAny);
-      if (![...readings.values()].some((reading) => reading.more))
-        break;
-    }
-  };
-  const runSweep = async () => {
-    try {
-      await sweepOnce();
-    } catch (error) {
-      log("replay: a sweep failed", error);
-    }
-  };
-  const sweep = () => {
-    if (running === undefined) {
-      running = runSweep().finally(() => {
-        running = undefined;
-      });
-      return running;
-    }
-    rerun ??= running.then(() => {
-      rerun = undefined;
-      return sweep();
-    });
-    return rerun;
-  };
-  return {
-    sweep,
-    async followedChanged() {
-      const alive = bind()?.alive;
-      if (alive === undefined)
-        return;
-      try {
-        syncFollowed();
-        await flush(alive);
-      } catch (error) {
-        log("replay: could not take the followed subjects", error);
-      }
-    },
-    delivered: (frame) => ledger.has(replayLedgerIdentity(frame)),
-    async recordDelivered(frame) {
-      const alive = bind()?.alive;
-      if (alive === undefined)
-        return;
-      record2(replayLedgerIdentity(frame));
-      await flush(alive);
-    },
-    async recordDeliveredFor(sessionID, frame) {
-      const alive = bindTo(sessionID, writeSession)?.alive;
-      if (alive === undefined)
-        return;
-      record2(replayLedgerIdentity(frame));
-      await flush(alive);
-    },
-    async liveFailed(followed, envelope, error, receivedAt) {
-      const started = cursorStarts.get(followed);
-      if (!isRoleForward(envelope) && answered.has(followed) && cursors.get(followed)?.after !== undefined && (started === undefined || started <= receivedAt)) {
-        return;
-      }
-      const alive = bind()?.alive;
-      if (alive === undefined)
-        return;
-      try {
-        await showFailureNotice(failureNotice(envelope, inboundTimestamp(envelope.issued_at), messageFor(error)), alive);
-      } catch (thrown) {
-        log("replay: could not report a failed live frame", thrown);
-      }
-    },
-    followedBefore: (topic, seq) => {
-      const since = cursors.get(topic)?.since;
-      return since !== undefined && seq > since;
-    },
-    restore(snapshot) {
-      epoch += 1;
-      ledger.restore(snapshot.ledger);
-      cursors.clear();
-      cursorStarts.clear();
-      streamID = snapshot.state?.stream_id;
-      streamCreated = snapshot.state?.stream_created;
-      pending.clear();
-      for (const kind of snapshot.state?.notices ?? []) {
-        const known = ReplayPendingNoticeSchema.safeParse(kind);
-        if (known.success)
-          pending.add(known.data);
-      }
-      for (const [subject, cursor] of Object.entries(snapshot.state?.subjects ?? {})) {
-        cursors.set(subject, { ...cursor });
-      }
-      writtenState = snapshot.state === undefined ? undefined : stateJSON();
-      writtenShape = snapshot.state === undefined ? undefined : stateJSON(false);
-      writtenAt = undefined;
-      unwritten = [];
-      failures.clear();
-      listenerNoticed = undefined;
-      answered.clear();
-    },
-    state: () => JSON.parse(stateJSON())
-  };
-}
-function replaySuppressed(rendered) {
-  return rendered.skip || rendered.malformedDelivery === true;
-}
-var REPLAYED_SUFFIX = "while this session's connection was down.";
-function replayedText(content, publishedAt) {
-  return `${content}
-Published at ${publishedAt} ${REPLAYED_SUFFIX}`;
-}
-function failureNoticeFields(notice) {
-  const readWith = notice.readWith === "dispatch read" ? "Read it with the `dispatch read` command on the issue or ask it concerns." : "Read it with the envoy_inbox tool.";
-  return {
-    notice: "message not shown",
-    event_id: notice.eventId,
-    from: notice.sender,
-    summary: notice.summary,
-    published_at: notice.publishedAt,
-    ...notice.subject === undefined ? {} : { subject: notice.subject },
-    error: notice.error,
-    detail: `This session could not be shown this message, so it is not coming back on its own. ${readWith}`
-  };
-}
-var REPLAY_NOTICE_NAMES = {
-  stream_recreated: "stream recreated",
-  stream_moved_back: "stream moved back"
-};
-function replayNoticeFields(notice) {
-  return {
-    notice: REPLAY_NOTICE_NAMES[notice.kind] ?? "messages may be missing",
-    detail: notice.message
-  };
-}
-function envoyNoticeText(fields) {
-  return encode3({ envoy: fields });
-}
-var EXCEPTION_TOPIC_PREFIX = "notifications.envoy.exceptions.";
-var PRIVATE_STREAM_SUBJECTS = [
-  `${AGENT_TOPIC_PREFIX}>`,
-  `${LEGION_NOTICE_TOPIC_PREFIX}>`,
-  `${EXCEPTION_TOPIC_PREFIX}${AGENT_TOPIC_PREFIX}>`
-];
-function subjectsOverlap(a, b) {
-  const aTokens = a.split(".");
-  const bTokens = b.split(".");
-  for (let index = 0;index < aTokens.length && index < bTokens.length; index += 1) {
-    const aToken = aTokens[index];
-    const bToken = bTokens[index];
-    if (aToken === ">" || bToken === ">")
-      return true;
-    if (aToken !== "*" && bToken !== "*" && aToken !== bToken)
-      return false;
-  }
-  return aTokens.length === bTokens.length;
-}
-function reachesPrivateStreamSubject(ownAgentSubject, topic) {
-  if (!PRIVATE_STREAM_SUBJECTS.some((subject) => subjectsOverlap(topic, subject)))
-    return false;
-  return topic !== ownAgentSubject || /[*>]/.test(ownAgentSubject);
-}
-function replayFollowedSubjects(ownAgentSubject, topics, heldForRole = () => false) {
-  const followed = [...topics].filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !reachesPrivateStreamSubject(ownAgentSubject, topic) && !heldForRole(topic));
-  return [...new Set([ownAgentSubject, ...followed])];
-}
-function rememberedTopics(state) {
-  return Object.keys(state?.subjects ?? {}).filter((topic) => !topic.startsWith(AGENT_TOPIC_PREFIX) && !topic.startsWith(ROLE_TOPIC_PREFIX));
-}
-async function closeReplayedRemoval(frame, host) {
-  const closed = (subscriptionRemovedTopics(frame.data, host.sessionID) ?? []).filter((topic) => host.engine.followedBefore(topic, frame.seq) && host.close(topic));
-  if (closed.length === 0)
-    return closed;
-  const unregistering = host.unregister(closed);
-  await host.followedChanged();
-  await unregistering;
-  return closed;
-}
-function routeReplayNotice(notice, routes) {
-  if (notice.kind === "not_served" || notice.kind === "unavailable") {
-    routes.warn(notice.message);
-    return;
-  }
-  routes.card(envoyNoticeText(replayNoticeFields(notice)));
-}
-function isRoleForward(envelope) {
-  return envelope.dedupe_key?.startsWith(ROLE_FORWARD_KEY_PREFIX) === true || envelope.topic?.startsWith(ROLE_TOPIC_PREFIX) === true;
-}
-function replayLedgerIdentity(frame) {
-  return {
-    ...frame.event_id === undefined || frame.event_id === "" ? {} : { event_id: frame.event_id },
-    ...frame.dedupe_key === undefined || !dedupeKeyNamesItsEvent(frame) ? {} : { dedupe_key: frame.dedupe_key }
-  };
-}
-function parseEnvelope(data) {
-  let parsed;
-  try {
-    parsed = JSON.parse(data);
-  } catch {
-    return;
-  }
-  const result = EnvelopeSchema.safeParse(parsed);
-  return result.success ? result.data : undefined;
-}
-function createLedger(now) {
-  let entries = new Set;
-  const byEvent = new Map;
-  const byKey = new Map;
-  const drop = (entry) => {
-    entries.delete(entry);
-    if (entry.event_id !== undefined && byEvent.get(entry.event_id) === entry) {
-      byEvent.delete(entry.event_id);
-    }
-    if (entry.dedupe_key !== undefined && byKey.get(entry.dedupe_key) === entry) {
-      byKey.delete(entry.dedupe_key);
-    }
-  };
-  const add = (entry) => {
-    if (entries.size >= REPLAY_LEDGER_LIMIT) {
-      const oldest = entries.values().next();
-      if (oldest.done !== true)
-        drop(oldest.value);
-    }
-    entries.add(entry);
-    if (entry.event_id !== undefined)
-      byEvent.set(entry.event_id, entry);
-    if (entry.dedupe_key !== undefined)
-      byKey.set(entry.dedupe_key, entry);
-  };
-  const expire = () => {
-    const at = now();
-    for (const entry of entries) {
-      if (at - entry.at < REPLAY_LEDGER_TTL_MS)
-        break;
-      drop(entry);
-    }
-  };
-  const has = (identity) => {
-    expire();
-    return identity.event_id !== undefined && byEvent.has(identity.event_id) || identity.dedupe_key !== undefined && byKey.has(identity.dedupe_key);
-  };
-  return {
-    has,
-    record(identity) {
-      if (identity.event_id === undefined && identity.dedupe_key === undefined)
-        return;
-      if (has(identity))
-        return;
-      const entry = { ...identity, at: now() };
-      add(entry);
-      return entry;
-    },
-    restore(restored) {
-      entries = new Set;
-      byEvent.clear();
-      byKey.clear();
-      const at = now();
-      const kept = restored.filter((entry) => at - entry.at < REPLAY_LEDGER_TTL_MS && (entry.event_id !== undefined || entry.dedupe_key !== undefined)).sort((a, b) => a.at - b.at);
-      for (const entry of kept)
-        add({ ...entry });
-    },
-    list() {
-      expire();
-      return [...entries];
-    }
   };
 }
 
@@ -46637,6 +47106,7 @@ function allowedAPIURL(value) {
 
 // ../envoy-client/src/tool-contract.ts
 var DELIVERY_CONTRACT = "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
+var STORED_DELIVERY = "Stored topics (agent, dispatch, github, slack, legion, ghostwispr, whatsapp; a role message " + "reaches its holder as a stored copy on the holder's agent topic) reach each subscribed session " + "once from the durable consumer its listener relays to it, also one that was away or restarted. " + "Team and other ad-hoc topics are live only.";
 var TOPIC_GUIDE = "Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> " + "(publish-to; holders claim via envoy_role_set). > matches one or more trailing tokens and does not " + "match the base subject. Envoy registers the concrete base when you subscribe to <subject>.>, so " + "the recommended default remains github.<owner>.<repo>.pr.<n>.>. <owner> and <repo> are one token " + "each, with every dot in the name written _ (sjawhar/.github is github.sjawhar._github; " + "acme/site.io is github.acme.site_io), and a topic spelled with the dot receives nothing. " + "Default PR subscription: " + "github.<owner>.<repo>.pr.<n>.> (it receives the quiet PR family): pr.<n> (lifecycle: " + "opened/synchronize/closed; closed carries merged, merge_commit_sha, merged_by, head_sha), " + "pr.<n>.comment, pr.<n>.review, pr.<n>.mention, pr.<n>.checks (one settlement event per commit whose checks settle, the head or not, naming its sha: " + 'passed/failed/cancelled/skipped with failing names and URLs; re-fires with superseded_settlement: "true" ' + "when new runs appear for the same commit). Other GitHub: issue.<n>, issue.<n>.comment, " + "issue.<n>.mention, mention, push.branch.<name>, push.tag.<name>, workflow.<file>.<action> (only " + "runs without an associated PR); slack.<team>.<channel>.message|mention and " + "slack.<team>.<channel>.thread.<ts>.message|mention; ghostwispr.<session>.<kind>; " + "whatsapp.<phone>.<jid>.<kind>; envoy.exceptions.<original-topic>.";
 var URGENCY_VALUES = EnvelopeSchema.shape.urgency.unwrap().options;
 var EXPECTS_REPLY_VALUES = EnvelopeSchema.shape.expects_reply.unwrap().options;
@@ -46678,7 +47148,7 @@ var EnvoyToolOperation = {
 var envoyToolSpecs = [
   {
     name: "envoy_subscribe",
-    description: `Subscribe this session to Envoy notification topics. ${TOPIC_GUIDE}`,
+    description: `Subscribe this session to Envoy notification topics. ${STORED_DELIVERY} ${TOPIC_GUIDE}`,
     arguments: (schema) => ({
       topics: schema.array(schema.string()).describe("NATS-style topic patterns to subscribe to.")
     }),
@@ -46713,7 +47183,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. Any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives such a live topic directly, yours included; a session the listener delivers to over a serve port is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish
   },
@@ -46758,6 +47228,11 @@ var envoyToolSpecs = [
 ];
 function sendConfirmationText(result) {
   return `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
+}
+function sessionsOnMachine(sessions, machine) {
+  if (machine === undefined || machine === "")
+    return sessions;
+  return sessions.filter((session) => session.host === machine || session.machine_id === machine);
 }
 var envoyToolSchemas = new Map;
 
@@ -49873,7 +50348,7 @@ var DeliveryIdentity = DedupeIdentitySchema.extend({
   source_event_id: DedupeIdentitySchema.shape.source_event_id.catch(undefined),
   topic: string2().min(1).optional().catch(undefined)
 });
-var decoder = new TextDecoder;
+var decoder2 = new TextDecoder;
 var DEFAULT_DRAIN_TIMEOUT_MS = 1000;
 function deliveryIdentity(raw) {
   let parsed;
@@ -49896,9 +50371,9 @@ function createChannelForwarder(connection, options) {
   const deliver = async (topic, subscription) => {
     try {
       for await (const { message, receivedAt } of readArrivals(subscription)) {
-        const raw = decoder.decode(message.data);
+        const raw = decoder2.decode(message.data);
         const identity = deliveryIdentity(raw);
-        let claim = dedupe.claim(identity);
+        let claim = options.relayed?.(topic) === true ? undefined : dedupe.claim(identity);
         if (claim !== undefined && identity !== undefined && options.ledger?.delivered(identity)) {
           claim.settle();
           claim = undefined;
@@ -51690,6 +52165,9 @@ async function executeLegionTool(runtime, input, signal) {
 // src/replay-state.ts
 import { readFile as readFile2 } from "fs/promises";
 import { join as join11 } from "path";
+var ReplayStateFileSchema = ReplaySnapshotSchema.extend({
+  consumer: ConsumerDeliverySnapshotSchema.optional()
+});
 function replayStateFile(stateDirectory, sessionId) {
   return join11(stateDirectory, `replay-${encodeURIComponent(sessionId)}.json`);
 }
@@ -51708,14 +52186,31 @@ async function readReplayState(file) {
   } catch {
     throw new Error(`${file} is not JSON`);
   }
-  const snapshot = ReplaySnapshotSchema.safeParse(parsed);
+  const snapshot = ReplayStateFileSchema.safeParse(parsed);
   if (!snapshot.success)
     throw new Error(`${file} holds no replay state`);
   return snapshot.data;
 }
-async function writeReplayState(file, snapshot) {
-  await writeAtomicStateFile(file, `${JSON.stringify(snapshot)}
+async function writeReplayState(file, state) {
+  await writeAtomicStateFile(file, `${JSON.stringify(state)}
 `);
+}
+function replayStateWriter(file, restored) {
+  let current = restored;
+  let writing = Promise.resolve();
+  const write = (next) => {
+    current = next;
+    const run = writing.then(() => writeReplayState(file, current));
+    writing = run.catch(() => {
+      return;
+    });
+    return run;
+  };
+  return {
+    replay: (snapshot) => write(current.consumer === undefined ? snapshot : { ...snapshot, consumer: current.consumer }),
+    consumer: (snapshot) => write({ ...current, consumer: snapshot }),
+    idle: () => writing
+  };
 }
 
 // src/session-title.ts
@@ -51846,6 +52341,7 @@ var CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel";
 var CHANNEL_INSTRUCTIONS = "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is how soon the sender asks you to act (it does not change when or in what order deliveries arrive), from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.";
 var CHANNEL_INBOX_LIMIT = 50;
 var EMPTY_RECEIPT = new Uint8Array;
+var encoder2 = new TextEncoder;
 var ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/;
 var HANDOFF_POLL_MS = 250;
 var HANDOFF_FLUSH_TIMEOUT_MS = 1e4;
@@ -51957,8 +52453,15 @@ function createChannelDelivery(input) {
       }
     });
   };
+  const passOverBtw = (rendered, how) => {
+    if (rendered.delivery?.mode !== "btw")
+      return false;
+    process.stderr.write(`envoy-channel: passing over ${how} BTW ${rendered.envelope?.event_id ?? "unknown"}: a BTW never starts a turn
+`);
+    return true;
+  };
   return {
-    enqueue({ subject, raw }) {
+    enqueue({ subject, raw, late }) {
       const rendered = renderInbound(raw, input.identity.id, subject);
       if (rendered.skip)
         return tail.then(() => false);
@@ -51979,17 +52482,16 @@ function createChannelDelivery(input) {
 `);
         return tail.then(() => false);
       }
+      if (late === true && passOverBtw(rendered, "late"))
+        return tail.then(() => false);
       return show(rendered, subject, rendered.content).then(() => true);
     },
     async replay(frame) {
       const rendered = renderInbound(frame.data, input.identity.id, frame.subject);
       if (replaySuppressed(rendered))
         return "suppressed";
-      if (rendered.delivery?.mode === "btw") {
-        process.stderr.write(`envoy-channel: passing over replayed BTW ${rendered.envelope?.event_id ?? "unknown"}: a BTW never starts a turn
-`);
+      if (passOverBtw(rendered, "replayed"))
         return "suppressed";
-      }
       await show(rendered, frame.subject, replayedText(rendered.content, frame.time));
       return "shown";
     },
@@ -52039,15 +52541,43 @@ async function startChannelSession(options) {
   const dedupe = createDeliveryDedupe();
   let replayBound;
   const showReplayed = async (frame) => {
-    await closeReplayedRemoval(frame, {
-      sessionID: identity.id,
-      engine: replay,
-      close: (topic) => userTopics.delete(topic),
-      unregister: unfollowRemovedTopics,
-      followedChanged: () => replay.followedChanged()
-    });
-    return delivery.replay(frame);
+    const identityOf = deliveryIdentity(frame.data);
+    const claim = dedupe.claim(identityOf);
+    if (claim === undefined && identityOf !== undefined && dedupe.pending(identityOf)) {
+      return "queued";
+    }
+    try {
+      await closeReplayedRemoval(frame, {
+        sessionID: identity.id,
+        engine: replay,
+        close: (topic) => userTopics.delete(topic),
+        unregister: unfollowRemovedTopics,
+        followedChanged: () => replay.followedChanged()
+      });
+      const outcome = await delivery.replay(frame);
+      if (outcome === "shown")
+        claim?.settle();
+      else
+        claim?.release();
+      return outcome;
+    } catch (error) {
+      claim?.release();
+      throw error;
+    }
   };
+  const tellNotice = (notice) => {
+    routeReplayNotice(notice, {
+      warn: (message) => process.stderr.write(`envoy-channel: ${message}
+`),
+      card: (content) => {
+        delivery.notice(content).catch((error) => {
+          process.stderr.write(`envoy-channel: ${notice.message} (the session could not be told \u2014 ${messageFor(error)})
+`);
+        });
+      }
+    });
+  };
+  let stateWriter;
   const replay = createReplayEngine({
     host: {
       sessionID: () => shuttingDown || replayBound !== identity.id ? undefined : identity.id,
@@ -52058,35 +52588,27 @@ async function startChannelSession(options) {
         process.stderr.write(`envoy-channel: message ${notice.eventId} from ${notice.sender} was not shown, nor was the notice naming it \u2014 ${messageFor(error)}
 `);
       },
-      notify: (notice) => {
-        routeReplayNotice(notice, {
-          warn: (message) => process.stderr.write(`envoy-channel: ${message}
-`),
-          card: (content) => {
-            delivery.notice(content).catch((error) => {
-              process.stderr.write(`envoy-channel: ${notice.message} (the session could not be told \u2014 ${messageFor(error)})
-`);
-            });
-          }
-        });
-      },
+      notify: tellNotice,
       log: (message, error) => {
         process.stderr.write(`envoy-channel: ${message}${error === undefined ? "" : ` \u2014 ${messageFor(error)}`}
 `);
       },
-      write: (change) => writeReplayState(replayStateFile(options.stateDirectory, identity.id), change.snapshot())
+      write: (change) => stateWriter?.replay(change.snapshot())
     },
     transport: options.client,
     dedupe
   });
   const restoreReplay = async () => {
     const sessionId = identity.id;
-    const snapshot = await readReplayState(replayStateFile(options.stateDirectory, sessionId)).catch((error) => {
+    const file = replayStateFile(options.stateDirectory, sessionId);
+    const snapshot = await readReplayState(file).catch((error) => {
       process.stderr.write(`envoy-channel: could not read the replay state (${messageFor(error)}); this session's replay starts over
 `);
       return { ledger: [] };
     });
     replay.restore(snapshot);
+    stateWriter = replayStateWriter(file, snapshot);
+    openRelay(sessionId, stateWriter, snapshot.consumer);
     replayBound = sessionId;
     return rememberedTopics(snapshot.state);
   };
@@ -52094,21 +52616,129 @@ async function startChannelSession(options) {
     if (!shuttingDown)
       replay.sweep();
   };
+  const takeRemovals = (raw) => {
+    const removedTopics = subscriptionRemovedTopics(raw, identity.id);
+    if (removedTopics !== undefined && removedTopics.length > 0) {
+      for (const topic of removedTopics)
+        userTopics.delete(topic);
+      dropRemovedTopics(removedTopics);
+    }
+  };
+  let relay;
+  const relaysCoreTopic = (topic) => relay?.sessionID === identity.id && relay.delivery.relays(topic);
+  const deliverRelayed = async (owner, frame) => {
+    if (shuttingDown || relay !== owner || owner.sessionID !== identity.id) {
+      frame.nak();
+      return;
+    }
+    takeRemovals(frame.data);
+    const identityOf = deliveryIdentity(frame.data);
+    const claim = dedupe.claim(identityOf);
+    if (claim === undefined) {
+      frame.done();
+      return;
+    }
+    let shown;
+    try {
+      const queued = delivery.enqueue({ subject: frame.subject, raw: frame.data, late: frame.late });
+      frame.release();
+      shown = await queued;
+    } catch (error) {
+      claim.release();
+      throw error;
+    }
+    if (!shown) {
+      claim.release();
+      frame.done();
+      return;
+    }
+    if (identityOf !== undefined)
+      await replay.recordDelivered(identityOf);
+    claim.settle();
+    frame.done();
+    owner.delivery.persist();
+  };
+  const openRelay = (sessionID, state, restored) => {
+    closeRelay();
+    const consumer = createConsumerDelivery({
+      sessionID,
+      ledger: replay,
+      host: {
+        deliver: (frame) => deliverRelayed(owner, frame),
+        gap: tellNotice,
+        log: (message, error) => {
+          process.stderr.write(`envoy-channel: ${message}${error === undefined ? "" : ` \u2014 ${messageFor(error)}`}
+`);
+        }
+      },
+      publish: (reply, body) => options.connection.publish(reply, encoder2.encode(body)),
+      persist: (snapshot) => {
+        if (relay !== owner)
+          return false;
+        state.consumer(snapshot).catch((error) => {
+          process.stderr.write(`envoy-channel: could not persist the consumer delivery state \u2014 ${messageFor(error)}
+`);
+        });
+        return true;
+      }
+    });
+    if (restored !== undefined)
+      consumer.restore(restored);
+    const owner = {
+      sessionID,
+      delivery: consumer,
+      state,
+      subscription: undefined
+    };
+    relay = owner;
+    const subscription = options.connection.subscribe(consumer.subject);
+    owner.subscription = subscription;
+    pumpRelay(owner, subscription);
+  };
+  const pumpRelay = async (owner, subscription) => {
+    try {
+      for await (const message of subscription) {
+        owner.delivery.receive(message);
+      }
+    } catch (error) {
+      process.stderr.write(`envoy-channel: the relay subscription of ${owner.sessionID} stopped \u2014 ${messageFor(error)}
+`);
+    }
+  };
+  function closeRelay() {
+    const owner = relay;
+    if (owner === undefined)
+      return;
+    relay = undefined;
+    owner.delivery.close();
+    owner.subscription?.unsubscribe();
+    owner.subscription = undefined;
+  }
+  const renewRelayEpoch = () => {
+    if (shuttingDown || relay === undefined)
+      return;
+    relay.delivery.beginEpoch();
+    serialized(register).catch((error) => {
+      process.stderr.write(`envoy-channel: could not register again after a reconnect (${messageFor(error)}); the next heartbeat retries
+`);
+    });
+  };
+  const takeDeliveryAnswer = (sessionID, topics, asked, result) => {
+    if (sessionID !== identity.id || relay !== asked)
+      return;
+    asked?.delivery.answered(result.delivery, topics);
+  };
   const forwarder = createChannelForwarder(options.connection, {
     dedupe,
     ledger: replay,
+    relayed: relaysCoreTopic,
     failed: (message, topic, error, receivedAt) => {
       const envelope = renderInbound(message.raw, identity.id, message.subject).envelope;
       if (envelope !== undefined)
         replay.liveFailed(topic, envelope, error, receivedAt);
     },
     deliver: async (message) => {
-      const removedTopics = subscriptionRemovedTopics(message.raw, identity.id);
-      if (removedTopics !== undefined && removedTopics.length > 0) {
-        for (const topic of removedTopics)
-          userTopics.delete(topic);
-        dropRemovedTopics(removedTopics);
-      }
+      takeRemovals(message.raw);
       return enqueueChannelMessage(delivery, options.connection, directSubject, message);
     }
   });
@@ -52128,10 +52758,16 @@ async function startChannelSession(options) {
     });
   }
   function dropFromForwarderAndRegistry(topics) {
+    const dropping = forwarder.unfollow(topics);
+    if (relay?.sessionID === identity.id)
+      relay.delivery.setFollowed(registeredTopics());
     return {
-      dropping: forwarder.unfollow(topics),
+      dropping,
       unsubscribing: serialized(() => options.client.unsubscribe({ sessionID: identity.id, topics }))
     };
+  }
+  function registeredTopics() {
+    return forwarder.topics().filter((topic) => !reachesPrivateStreamSubject(directSubject, topic));
   }
   let stampedTitle;
   let stampFailureReported = false;
@@ -52150,18 +52786,24 @@ async function startChannelSession(options) {
         }
       }
     }
-    await options.client.subscribe({
-      sessionID: identity.id,
+    const sessionID = identity.id;
+    const topics = registeredTopics();
+    const asking = relay?.sessionID === identity.id ? relay : undefined;
+    asking?.delivery.setFollowed(topics);
+    const result = await options.client.subscribe({
+      sessionID,
       directory: identity.directory,
-      topics: forwarder.topics().filter((topic) => !reachesPrivateStreamSubject(directSubject, topic)),
+      topics,
       port: 0,
       title,
       capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true,
       clientInstanceID: options.clientInstanceID,
-      plugin: { name, version: options.pluginVersion }
+      plugin: { name, version: options.pluginVersion },
+      ...asking === undefined ? {} : { delivery: asking.delivery.registration() }
     });
+    takeDeliveryAnswer(sessionID, topics, asking, result);
   };
   const restoreRole = async (previousSessionID = identity.id) => {
     const previousFile = roleStateFile(options.stateDirectory, previousSessionID);
@@ -52275,6 +52917,10 @@ async function startChannelSession(options) {
     forwarder.unfollow([previousSubject]);
     await restoreReplay();
     roleTransferFrom ??= previous;
+    await withTimeout(options.connection.flush(), options.handoffFlushTimeoutMs ?? HANDOFF_FLUSH_TIMEOUT_MS, "flushing NATS").catch((error) => {
+      process.stderr.write(`envoy-channel: could not confirm the relay subscription of ${next} \u2014 ${messageFor(error)}
+`);
+    });
     await register();
     await transferRole();
     process.stderr.write(`envoy: session id changed ${previous} -> ${next}; re-registered
@@ -52400,8 +53046,10 @@ async function startChannelSession(options) {
   (async () => {
     try {
       for await (const status of options.connection.status()) {
-        if (status.type === "reconnect")
-          triggerReplay();
+        if (status.type !== "reconnect")
+          continue;
+        renewRelayEpoch();
+        triggerReplay();
       }
     } catch (error) {
       process.stderr.write(`envoy-channel: the NATS connection's status reader failed \u2014 ${messageFor(error)}
@@ -52458,6 +53106,7 @@ async function startChannelSession(options) {
       clearInterval(heartbeatTimer);
       if (handoffFile !== undefined)
         unwatchFile(handoffFile, handoffFileChanged);
+      closeRelay();
       await forwarder.close();
       await serialized(() => options.client.unregisterSession({
         sessionID: identity.id,
@@ -52466,6 +53115,7 @@ async function startChannelSession(options) {
         process.stderr.write(`envoy-channel: session deregistration failed \u2014 ${messageFor(error)}
 `);
       });
+      await stateWriter?.idle();
     }
   };
 }
@@ -52529,7 +53179,7 @@ async function executeEnvoyTool(runtime, name, input) {
         ...args.dir === undefined ? {} : { directory: args.dir },
         ...args.title === undefined ? {} : { title: args.title }
       });
-      return args.machine ? sessions.filter((session) => (session.host ?? session.machine_id) === args.machine) : sessions;
+      return sessionsOnMachine(sessions, args.machine);
     }
     case EnvoyToolOperation.setRole: {
       const args = parseArguments(spec, input);

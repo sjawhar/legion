@@ -15626,6 +15626,7 @@ function dispatchDocumentSubject(project, slug, type) {
 function agentSubject(session) {
   return `${AGENT_TOPIC_PREFIX}${session}`;
 }
+var GHOSTWISPR_TOPIC_PREFIX = "notifications.ghostwispr.";
 
 // ../contracts/src/legion-roles.ts
 var LEGION_ROLES = [
@@ -21394,8 +21395,7 @@ function neutralConfig(env) {
 }
 var HARNESS_DIRECTORY_VARIABLE = {
   omp: "PI_CODING_AGENT_DIR",
-  claude: "CLAUDE_CONFIG_DIR",
-  opencode: "OPENCODE_CONFIG_DIR"
+  claude: "CLAUDE_CONFIG_DIR"
 };
 var PLUGIN_HARNESSES = Object.keys(HARNESS_DIRECTORY_VARIABLE);
 function namedDirectory(harness, env) {
@@ -22053,6 +22053,15 @@ var InterestWireSchema = object({
   updated_at: number2().int().optional(),
   warnings: array(string2()).optional()
 });
+var DeliveryAnswerWireSchema = discriminatedUnion("mode", [
+  object({
+    mode: literal("consumer"),
+    subject: string2().min(1),
+    stream_id: string2(),
+    gap: boolean2()
+  }),
+  object({ mode: literal("core"), reason: string2() })
+]);
 var SessionWireSchema = object({
   session_id: string2(),
   machine_id: string2(),
@@ -22108,6 +22117,20 @@ var ReplayWireSchema = object({
     refused: string2().optional()
   }))
 });
+var DELIVERY_NOT_ANSWERED = "not_answered";
+var DELIVERY_UNREADABLE = "unreadable_answer";
+function parseSubscribeAnswer(body) {
+  const interest = InterestWireSchema.parse(body);
+  const raw = typeof body === "object" && body !== null && "delivery" in body ? body.delivery : undefined;
+  if (raw === undefined || raw === null) {
+    return { ...interest, delivery: { mode: "core", reason: DELIVERY_NOT_ANSWERED } };
+  }
+  const delivery = DeliveryAnswerWireSchema.safeParse(raw);
+  return {
+    ...interest,
+    delivery: delivery.success ? delivery.data : { mode: "core", reason: DELIVERY_UNREADABLE }
+  };
+}
 function mergeInterestSources(registryTopics, liveTopics) {
   const interests = new Map;
   for (const topic of registryTopics) {
@@ -22207,7 +22230,7 @@ function createEnvoyClient(config) {
     body: JSON.stringify(body)
   }, options);
   return {
-    subscribe: async (input) => InterestWireSchema.parse(JSON.parse(await post("/v1/interests/subscribe", {
+    subscribe: async (input) => parseSubscribeAnswer(JSON.parse(await post("/v1/interests/subscribe", {
       session_id: input.sessionID,
       dir: input.directory,
       topics: expandSubscriptionTopics(input.topics),
@@ -22216,6 +22239,7 @@ function createEnvoyClient(config) {
       ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
       driving: input.driving,
       ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
+      ...input.delivery === undefined ? {} : { delivery: input.delivery },
       ...input.clientInstanceID === undefined ? {} : { client_instance_id: input.clientInstanceID },
       host: machineID(),
       plugin: input.plugin.name,
@@ -22327,7 +22351,7 @@ function sourceSession(sessionID) {
 var OK = 0;
 var REFUSED = 1;
 var USAGE = 2;
-var HOSTS = ["omp", "claude", "opencode"];
+var HOSTS = ["omp", "claude"];
 var CLAUDE_OUTPUT_MAX = 25000;
 var SAME_MESSAGE = "AskGate reviews the calls of a message before any of them runs, so it did not review that change.";
 var STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's state";
@@ -22409,7 +22433,7 @@ async function runDispatchCli(argv, rawEnv, io) {
   const hostName = env.DISPATCH_HOST ?? (env.CLAUDE_CODE_CHILD_SESSION === "1" ? "claude" : undefined);
   const host = HOSTS.find((name) => name === hostName);
   if (host === undefined) {
-    return refuse(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell. From an agent's session, send the command as a bash call. To run dispatch by hand, set DISPATCH_HOST, and set DISPATCH_SESSION_ID to the id of your own session." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`, USAGE, parsed.tool);
+    return refuse(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell. From an agent's session, send the command as a bash call. To run dispatch by hand, set DISPATCH_HOST, and set DISPATCH_SESSION_ID to the id of your own session." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp or claude.`, USAGE, parsed.tool);
   }
   const sessionVariable = host === "claude" ? "CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID";
   const sessionId = env[sessionVariable];

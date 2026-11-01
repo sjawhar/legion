@@ -1162,6 +1162,48 @@ describe("replay sweep", () => {
   });
 });
 
+describe("consumer mode", () => {
+  test("a sweep makes no replay call while the listener relays the stream", async () => {
+    const { stream, host, engine } = setup();
+    await engine.sweep();
+    const callsBefore = stream.calls.length;
+    stream.publish(AGENT, envelope());
+
+    engine.setConsumerMode(true);
+    await engine.sweep();
+
+    expect(stream.calls).toHaveLength(callsBefore);
+    expect(host.shown).toEqual([]);
+  });
+
+  test("a core answer sweeps again from where the cursors stand", async () => {
+    const { stream, host, engine } = setup();
+    await engine.sweep();
+    engine.setConsumerMode(true);
+    const missed = envelope();
+    stream.publish(AGENT, missed);
+    await engine.sweep();
+
+    engine.setConsumerMode(false);
+    await engine.sweep();
+
+    expect(ids(host.shown)).toEqual([missed.event_id]);
+  });
+
+  test("a notice a restore brought back is still told", async () => {
+    const { host, engine } = setup();
+    engine.restore({
+      state: { subjects: { [AGENT]: {} }, notices: ["retention_gap"] },
+      ledger: [],
+    });
+    engine.setConsumerMode(true);
+
+    await engine.sweep();
+
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["retention_gap"]);
+  });
+});
+
 describe("failed frames", () => {
   test("the third failure shows one notice instead, and no other after a restore", async () => {
     const { clock, stream, host, engine, make } = setup();

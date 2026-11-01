@@ -413,9 +413,16 @@ func (s *Service) storedVersionTree(ctx context.Context, tx pgx.Tx, artifactID s
 // answerApprovalAsk answers the open approval request ask with Approve in actor's name, giving
 // reason as the answer's text, as a human's answer through the answer route is written, and
 // appends its ask.answered event on the ask's owner. The write names the open state it answers
-// from: a request that is no longer open is an error, not a second answer.
+// from: a request that is no longer open is an error, not a second answer. The answer's time is
+// the transaction's now(), as the answer route's is: each process's host keeps its own clock, and
+// this one is the created_at of the ask.answered event appended here and of the review the carry
+// writes beside it.
 func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, ask *model.Ask, actor model.Actor, reason string) (model.Event, error) {
-	answer := model.AskAnswer{User: actor.ID, Selected: []string{ApprovalOptionApprove}, Text: &reason, At: time.Now().UTC()}
+	var answeredAt time.Time
+	if err := tx.QueryRow(ctx, `select now()`).Scan(&answeredAt); err != nil {
+		return model.Event{}, fmt.Errorf("read the approval answer's time: %w", err)
+	}
+	answer := model.AskAnswer{User: actor.ID, Selected: []string{ApprovalOptionApprove}, Text: &reason, At: answeredAt.UTC()}
 	encoded, err := json.Marshal(answer)
 	if err != nil {
 		return model.Event{}, fmt.Errorf("encode approval answer: %w", err)

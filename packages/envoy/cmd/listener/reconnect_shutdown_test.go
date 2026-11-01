@@ -194,8 +194,11 @@ func TestListenerReconnectWithBindInFlightShutsDownAfterForwardingRoles(t *testi
 		t.Fatal("the listener's durable bind never reached the controlled relay")
 	}
 	relay.drop()
-	waitFor(t, 10*time.Second, "the listener to reconnect", func() bool {
-		return strings.Contains(listener.Output.String(), "envoy nats reconnected")
+	// The role lane holds a connection of its own (bus.ConnectRoleLane), which reconnects, and sends
+	// its subscription again, beside the main client's.
+	waitFor(t, 10*time.Second, "the listener and its role lane to reconnect", func() bool {
+		output := listener.Output.String()
+		return strings.Contains(output, "envoy nats reconnected name=envoy ") && strings.Contains(output, "envoy nats reconnected name=envoy-role-lane ")
 	})
 	waitFor(t, 10*time.Second, "the restore to report the bind in flight", func() bool {
 		output := listener.Output.String()

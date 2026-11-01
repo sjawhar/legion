@@ -7,8 +7,8 @@
 // guarded by state='pending' inside one transaction that also writes the audit row, so a duplicate
 // or late decision changes nothing. A request that needs approval also freezes an append-only
 // credential-request record (internal/broker/record): the requester's signed request object plus
-// the broker's decision fields. The record is decided by a Dispatch login, which Dispatch's server
-// sends on the UI routes and its listed ServiceAccount (BROKER_API_ACCOUNTS) vouches for: its
+// the broker's decision fields. The record is decided by a person signed in to the broker's own
+// approval page (internal/broker/approval), whose session names the login that decides it: its
 // approver's, or anyone's for a record whose approver is record.AnyoneApprover. Every release of a
 // grant it produced re-verifies the whole chain — record hash, requester signature, one approval
 // by a login the record allows — so a row written by anyone but the broker releases nothing.
@@ -20,9 +20,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path"
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unicode"
@@ -170,6 +172,14 @@ type Machine struct {
 	// the service a pod whose projected token proved it runs as that account proves, when its
 	// launcher's service is that one (requester).
 	ServicesByAccount map[string]string
+	// VMServicesByAccount, VMProjects and VMInstancePatterns are BROKER_VM_SERVICES,
+	// BROKER_VM_PROJECTS and BROKER_VM_INSTANCES, each keyed by a Google service-account email: the
+	// service a VM whose identity token proved it runs as that account proves, when its launcher's
+	// service is that one, while the VM is still in that project and its instance name still matches
+	// that glob (requester).
+	VMServicesByAccount map[string]string
+	VMProjects          map[string]string
+	VMInstancePatterns  map[string]string
 	// Minters maps each policy kind (policy.Kinds) to its Minter. A release never returns the
 	// stored value of a kind secret.
 	Minters map[string]Minter
@@ -200,20 +210,23 @@ type enrollmentRow struct {
 	ID, Kind, Thumbprint string
 	// Operator is the person the session acts for, nil for a pod; Service is the service of the
 	// launcher credential that enrolled it, nil for a person's machine; Subject is a pod's verified
-	// service account, nil for a session.
-	Operator, Service, Subject *string
-	RuntimeID, Slot            string
+	// service account, or a VM's verified service-account email, nil for a session; Host is that
+	// credential's host, which for a VM's own login is <project>/<zone>/<instance name>.
+	Operator, Service, Subject, Host *string
+	RuntimeID, Slot                  string
 }
 
-// requester is the enrollment as the policy sees it, read through q: the person it acts for (none
-// for a pod), its service, and the names that person withheld from it (RevokeByApprover's
-// withhold). Its service is its launcher credential's only when it is a pod and services maps the
-// pod's verified service account to that same service: a machine login's service name is the
-// machine's own claim, which anyone signed in to Dispatch may approve, so the account is what
-// proves the service. Any other session has none. A caller that decides for the
-// session reads it after locking the session's row, which RevokeByApprover holds while it
+// requester is enrollment e as the policy sees it, read through q: the person it acts for (none
+// for a pod or a VM), its service, and the names that person withheld from it (RevokeByApprover's
+// withhold). Its service is its launcher credential's only when it is a pod and ServicesByAccount
+// maps the pod's verified service account to that same service, or a VM whose fleet still allows
+// it (vmAllowed): a machine login's service name is the machine's own claim, which anyone signed in
+// to Dispatch may approve, so the account is what proves the service. Any other session has none.
+// It is read on every request, decision and release, so a fleet narrowed in the configuration stops
+// an enrolled VM's service secrets at its next call, not at its lease's end. A caller that decides
+// for the session reads it after locking the session's row, which RevokeByApprover holds while it
 // withholds, so a withhold either committed before the read or waits for the caller.
-func (e enrollmentRow) requester(ctx context.Context, q querier, services map[string]string) (policy.Requester, error) {
+func (m *Machine) requester(ctx context.Context, q querier, e enrollmentRow) (policy.Requester, error) {
 	rows, err := q.Query(ctx, `select name from withheld_secrets where enrollment_id=$1`, e.ID)
 	if err != nil {
 		return policy.Requester{}, err
@@ -223,10 +236,48 @@ func (e enrollmentRow) requester(ctx context.Context, q querier, services map[st
 		return policy.Requester{}, err
 	}
 	var service string
-	if e.Kind == "pod" && e.Subject != nil && e.Service != nil && services[*e.Subject] == *e.Service {
-		service = *e.Service
+	if e.Subject != nil && e.Service != nil {
+		switch e.Kind {
+		case "pod":
+			if bound, ok := m.ServicesByAccount[*e.Subject]; ok && bound == *e.Service {
+				service = *e.Service
+			}
+		case "vm":
+			if m.vmAllowed(*e.Subject, *e.Service, deref(e.Host)) {
+				service = *e.Service
+			}
+		}
 	}
 	return policy.Requester{Operator: deref(e.Operator), Service: service, Withheld: withheld}, nil
+}
+
+// vmAllowed reports whether a VM running as account, logged in as service, whose credential's host
+// is <project>/<zone>/<instance name>, is still its fleet's: BROKER_VM_SERVICES binds account to
+// service, BROKER_VM_PROJECTS names that project, and the BROKER_VM_INSTANCES glob matches that
+// name, the check enroll.Service.VMService makes at the VM's login, enrollment and renewal.
+func (m *Machine) vmAllowed(account, service, host string) bool {
+	if bound, ok := m.VMServicesByAccount[account]; !ok || bound != service {
+		return false
+	}
+	project, rest, ok := strings.Cut(host, "/")
+	if !ok || project != m.VMProjects[account] {
+		return false
+	}
+	_, instance, ok := strings.Cut(rest, "/")
+	if !ok {
+		return false
+	}
+	matched, err := path.Match(m.VMInstancePatterns[account], instance)
+	return err == nil && matched
+}
+
+// vmRemoved reports whether e is a vm enrollment its fleet no longer allows (vmAllowed): such a VM
+// has no identity left, so Create treats it as an enrollment that is not live (pgx.ErrNoRows),
+// Values releases nothing to it (ErrGrantNotLive), and ApplyDecision's approval of its pending
+// request grants nothing, as for an ended session. enroll.Service.Lookup already refuses its
+// session proofs; this keeps the decision and the release refused whatever calls them.
+func (m *Machine) vmRemoved(e enrollmentRow) bool {
+	return e.Kind == "vm" && (e.Subject == nil || e.Service == nil || !m.vmAllowed(*e.Subject, *e.Service, deref(e.Host)))
 }
 
 // Create verifies the request object (record.VerifyRequestObject, jti replay through the Replay
@@ -304,7 +355,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	if err := lockLiveEnrollment(ctx, tx, enrollmentID); err != nil {
 		return Request{}, err
 	}
-	requester, err := enr.requester(ctx, tx, m.ServicesByAccount)
+	requester, err := m.requester(ctx, tx, enr)
 	if err != nil {
 		return Request{}, err
 	}
@@ -591,19 +642,20 @@ func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]store.End
 	return expired, nil
 }
 
-// ApplyDecision decides a pending agent_secret record by login, the Dispatch login of the human
-// deciding it. approve=true mints the grant while the requesting enrollment is still live;
-// otherwise the request is denied. It re-reads the record body, recomputes its id, refuses any
-// login but the record's own approver (record.ErrNotApprover) whatever the record's state, and an
-// approval by any login the current policy would not have approve one of the request's names
-// (currentPolicyAdmits). A denial releases nothing, so the record's approver may still deny a
-// request an owner change left them unable to approve. It re-verifies the embedded request
-// object, and writes the event (naming that login), the request transition and the audit row in
-// one transaction. For its approver, a record that expired undecided — expired by the sweeper, or
-// past its pending_expires_at before the sweeper got to it — is ErrExpired, and any other
-// non-pending record ErrTerminal: a duplicate or late decision changes nothing. The enrollment row
-// is locked before the request row — the same order every other enrollment-then-request writer in
-// this package takes them in, so none of them deadlock.
+// ApplyDecision decides a pending agent_secret record by login, the login of the person deciding
+// it on the broker's own approval page (approval.Page.decide, its one caller). approve=true mints
+// the grant while the requesting enrollment is still live; otherwise the request is denied. It
+// re-reads the record body, recomputes its id, refuses any login but the record's own approver
+// (record.ErrNotApprover) whatever the record's state, and an approval by any login the current
+// policy would not have approve one of the request's names (currentPolicyAdmits). A denial
+// releases nothing, so the record's approver may still deny a request an owner change left them
+// unable to approve. It re-verifies the embedded request object, and writes the event (naming
+// that login), the request transition and the audit row in one transaction. For its approver, a
+// record that expired undecided — expired by the sweeper, or past its pending_expires_at before
+// the sweeper got to it — is ErrExpired, and any other non-pending record ErrTerminal: a
+// duplicate or late decision changes nothing. The enrollment row is locked before the request row
+// — the same order every other enrollment-then-request writer in this package takes them in, so
+// none of them deadlock.
 func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bool, login string) (Decision, error) {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -619,9 +671,9 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 	var live bool
 	enr := enrollmentRow{ID: enrollmentID}
-	if err := tx.QueryRow(ctx, `select e.revoked_at is null and enrollment_lease_live(e.lease_expires_at), e.kind, e.operator, e.subject, c.service from enrollments e
+	if err := tx.QueryRow(ctx, `select e.revoked_at is null and enrollment_lease_live(e.lease_expires_at), e.kind, e.operator, e.subject, c.service, c.host from enrollments e
 		left join launcher_credentials c on c.id = e.launcher_credential_id where e.id=$1 for share of e`, enrollmentID).
-		Scan(&live, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service); err != nil {
+		Scan(&live, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service, &enr.Host); err != nil {
 		return Decision{}, err
 	}
 	var requestID, state string
@@ -639,7 +691,7 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return Decision{}, err
 	}
 	if approve {
-		requester, err := enr.requester(ctx, tx, m.ServicesByAccount)
+		requester, err := m.requester(ctx, tx, enr)
 		if err != nil {
 			return Decision{}, err
 		}
@@ -665,8 +717,10 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	next, detail := "denied", ""
 	if approve {
 		event = "approved"
-		if live {
+		if live && !m.vmRemoved(enr) {
 			next = "granted"
+		} else if live {
+			detail = "the requesting VM is no longer one its fleet's settings allow"
 		} else {
 			detail = "the requesting enrollment is no longer live"
 		}
@@ -924,13 +978,17 @@ func mayRevoke(login string, approver, operator *string) (allowed, asOperator bo
 	return false, false
 }
 
-// enrollment reads a live enrollment (not revoked, lease not lapsed); pgx.ErrNoRows otherwise.
+// enrollment reads a live enrollment (not revoked, lease not lapsed, and, for a VM, one its fleet
+// still allows: vmRemoved); pgx.ErrNoRows otherwise.
 func (m *Machine) enrollment(ctx context.Context, id string) (enrollmentRow, error) {
 	var e enrollmentRow
-	err := m.Store.Pool.QueryRow(ctx, `select e.id, e.kind, e.operator, c.service, e.subject, e.thumbprint, e.runtime_id, e.slot from enrollments e
+	err := m.Store.Pool.QueryRow(ctx, `select e.id, e.kind, e.operator, c.service, c.host, e.subject, e.thumbprint, e.runtime_id, e.slot from enrollments e
 		left join launcher_credentials c on c.id = e.launcher_credential_id
 		where e.id=$1 and e.revoked_at is null and enrollment_lease_live(e.lease_expires_at)`, id).
-		Scan(&e.ID, &e.Kind, &e.Operator, &e.Service, &e.Subject, &e.Thumbprint, &e.RuntimeID, &e.Slot)
+		Scan(&e.ID, &e.Kind, &e.Operator, &e.Service, &e.Host, &e.Subject, &e.Thumbprint, &e.RuntimeID, &e.Slot)
+	if err == nil && m.vmRemoved(e) {
+		return enrollmentRow{}, pgx.ErrNoRows
+	}
 	return e, err
 }
 
