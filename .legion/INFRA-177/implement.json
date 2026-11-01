@@ -2,66 +2,65 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-177",
-  "previousHandoff": "fa59a830b3f3f41580992cde74de7d42a87e1058",
+  "previousHandoff": "9d51502c2bc9865db7819ae14d3e124ae99c0656",
   "filesChanged": [
-    "packages/dispatch/e2e/live.e2e.ts",
-    "packages/pi-legion/extensions/legion-phase-stall-omp.test.ts",
-    "packages/daemon/internal/store/migrations/20261101144900_handoff_records.up.sql (renamed from 0065_handoff_records.up.sql)",
-    "packages/envoy/internal/dispatch/store/migrations/20261101144901_handoffs.up.sql (renamed from 0151_handoffs.up.sql)",
-    "packages/envoy/internal/dispatch/store/migrations/20261101144901_handoffs.census.sql (renamed from 0151_handoffs.census.sql)",
-    "three forward merges with main: f4a8e6f7db59, 9e3fe8631ca3 (#2585), 91ab50e03e8a (#2411)"
+    ".github/e2e-scripts.json (conflict: main's envoy-session-delivery.sh row beside this change's handoff-cutover-github.sh row, both kept)",
+    "scripts/e2e/README.md (conflict: main's envoy-session-delivery.sh entry and section beside this change's handoff-records.sh and handoff-cutover-github.sh entries and sections, both kept; main's own edit of the lib/port-file.sh sentence taken as main wrote it)",
+    "one forward merge with main@origin 0642a37a (#2633): fe131b9406fc7b76ee85a2b37d86e7fe830de0b5"
   ],
   "proof": [
     {
-      "criterion": "The Conversation's handoffs read is inside the page's request budget, so the dispatch e2e lane is green on both projects",
-      "surface": "Dispatch's own Chromium browser suite against the real server (packages/dispatch/e2e)",
-      "command": "cd packages/dispatch && DATABASE_URL=postgres://legion_test@127.0.0.1:5433/dispatch_e2e_infra177 bun run e2e:deployed -- --project=chromium -g 'a fresh page load opens the socket at the current head and stays within a bounded request budget' (and again with --project=iphone)",
-      "observed": "chromium: 1 passed (8.7s); iphone: 1 passed (8.0s). Both assert the exact count (21 desktop / 19 phone) and exactly one /api/v1/issues/<key>/handoffs request.",
-      "headSha": "91ab50e03e8a55338cf4a89dad7d31f7b6852632",
-      "negativeControl": "The same spec at the pushed head fa59a830, which asserted 20/18, failed in CI run 41177359220 job 124475084987 on both projects (live.e2e.ts:529, 2 failed) because the Conversation now makes that handoffs read."
+      "criterion": "The forward merge changes no line of this pull request's own diff, so the change under review is the one already approved",
+      "surface": "the fingerprint of skill://legion-worker/references/conflicts-and-rewrites.md, over all 558 files of the pull request's diff",
+      "command": "jj diff --from \"fork_point(\\\"main\\\"@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at 9d51502c and at fe131b94",
+      "observed": "1cf097aeb6b1fc58de8b5428aa330e6591e4772943b7a1c384fa4a04650d264c on both sides: unchanged. A per-file comparison of the two diffs reports no file whose added or removed lines differ.",
+      "headSha": "fe131b9406fc7b76ee85a2b37d86e7fe830de0b5",
+      "negativeControl": "The same per-file comparison across the previous round (fa59a830 -> 9d51502c) reports 58 files moved, among them live.e2e.ts and the two renamed migrations, so the comparison does detect a moved line."
     },
     {
-      "criterion": "A WAITING reply still buys its quiet wait: no request the pane did not have to make arrives between the WAITING turn and the reminder",
-      "surface": "the real Oh My Pi binary driven by the pi-legion extension harness",
-      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test ./extensions/legion-phase-stall-omp.test.ts",
-      "observed": "10 pass, 0 fail, 76 expect() calls in 183 s, 'a WAITING reply buys its quiet wait, and the reminder comes again when the wait is over' among them; the assertion now allows pi-envoy's per-model-request answers read and pins it to the reminder's own turn (>= 1400 ms after the WAITING turn).",
-      "headSha": "91ab50e03e8a55338cf4a89dad7d31f7b6852632",
-      "negativeControl": "The same test at the pushed head fa59a830 failed in CI run 41177359220 job 124475085043 ('1 fail', expect(received).toEqual(expected)) because the stand-in's /api/v1/agents/<id>/answers read was counted as an outside arrival."
+      "criterion": "GitHub reports the pull request mergeable again",
+      "surface": "GitHub's own mergeability for pull request 2354",
+      "command": "gh pr view 2354 --repo sjawhar/legion --json headRefOid,mergeable,mergeStateStatus",
+      "observed": "headRefOid fe131b9406fc7b76ee85a2b37d86e7fe830de0b5, mergeable MERGEABLE, mergeStateStatus BLOCKED (the base's required checks have not settled on this head yet). Before the merge the same read answered CONFLICTING / DIRTY at 9d51502c.",
+      "headSha": "fe131b9406fc7b76ee85a2b37d86e7fe830de0b5",
+      "negativeControl": "The same command at 9d51502c, before the push, answered mergeable CONFLICTING and mergeStateStatus DIRTY."
     },
     {
-      "criterion": "The whole handoff-record mechanism still holds after the three forward merges: the Dispatch write, the daemon's read-back and each refusal",
+      "criterion": "The whole handoff-record mechanism still holds over main's new tree: the Dispatch write, the daemon's read-back and each refusal",
       "surface": "the whole daemon against a real Dispatch server and the real dispatch CLI",
-      "command": "LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/handoff_records_infra177 bash scripts/e2e/handoff-records.sh",
-      "observed": "PASS in 58 s, every check ok, including HANDOFF_NOT_NEW on a reused round-1 record and A10's 502 DISPATCH_READ_FAILED with the phase unchanged, then the retried write and completion landing after Dispatch restarts.",
-      "headSha": "91ab50e03e8a55338cf4a89dad7d31f7b6852632",
-      "negativeControl": "Within the same run, with Dispatch stopped the handoff write exits 1 and POST /legion/v1/handoff/complete answers 502 DISPATCH_READ_FAILED with HR2D60F0-5 still in planning."
+      "command": "LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/hr2_infra177 bash scripts/e2e/handoff-records.sh",
+      "observed": "PASS in 84 s, every check ok, HANDOFF_NOT_NEW and A10 among them.",
+      "headSha": "fe131b9406fc7b76ee85a2b37d86e7fe830de0b5",
+      "negativeControl": "Within the same run, with Dispatch stopped the write exits 1 and POST /legion/v1/handoff/complete answers 502 DISPATCH_READ_FAILED with the issue still in planning."
     },
     {
-      "criterion": "The Conversation and Activity surfaces of a handoff record still work after the merges",
-      "surface": "Chromium against the real Dispatch server",
-      "command": "cd packages/dispatch && DATABASE_URL=postgres://legion_test@127.0.0.1:5433/dispatch_e2e2_infra177 bun run e2e:deployed -- --project=chromium e2e/handoffs.e2e.ts",
-      "observed": "3 passed (16.6s): the Conversation lists each version and expands one; a handoff written while the Conversation is open arrives without a reload; Activity has one line per version.",
-      "headSha": "91ab50e03e8a55338cf4a89dad7d31f7b6852632",
-      "negativeControl": "Recorded in round 12 at 14f6fdc9: against a build of 8a4d97bf (before the Conversation change) the Conversation spec fails with 'Expected: 2, Received: 0' cards while the Activity spec passes."
+      "criterion": "The two checks the conflicted files feed still pass, so neither resolution broke the proof selector or the CI filters",
+      "surface": "the repository's own gate scripts",
+      "command": "bash .github/scripts/select-e2e-proofs.test.sh; bash .github/scripts/check-ci-filters.sh",
+      "observed": "select-e2e-proofs.test.sh: 100 passed, 0 failed, PASS. check-ci-filters.sh: exit 0. python3 -c 'json.load(...)' on .github/e2e-scripts.json: ok. scripts/semantic-line-breaks.ts on scripts/e2e/README.md: exit 0, and the guides layout test's e2e-README case passes.",
+      "headSha": "fe131b9406fc7b76ee85a2b37d86e7fe830de0b5",
+      "negativeControl": "The union merge first left no blank line before main's `## envoy-session-delivery.sh` heading, which the per-file diff comparison caught as the one line of this change's diff that had moved; restoring it brought the fingerprint back to 1cf097ae."
     },
     {
-      "criterion": "Main's #2411 renaming of migrations after the numbered series to UTC timestamps is applied to both of this change's migrations, and the stores still migrate",
-      "surface": "the two Go modules' own migration runners",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test ./internal/dispatch/store/ -count=1; cd packages/daemon && go test ./internal/store/...",
-      "observed": "The daemon's store package is ok; Dispatch's store package runs its whole suite and migrates 20261101144901_handoffs.up.sql with it. Its only failure is this pod's Postgres: the legion_test role may not pg_terminate_backend, so storetest's drop of its isolated database fails (TestTheLockAuditRefusesAMissedTableAndAMisreadOne, 'permission denied to terminate process'), which is teardown, not a migration.",
-      "headSha": "91ab50e03e8a55338cf4a89dad7d31f7b6852632",
-      "negativeControl": "Before the rename, this branch carried 0065_handoff_records.up.sql and 0151_handoffs.up.sql, numbers main's #2411 commit retired; the envoy-go lane's TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries was red at fa59a830 (CI job 124475084956) against main's claim list and is ok at this head."
+      "criterion": "This change's reader-facing surface and its numbers still hold over main's new tree",
+      "surface": "Chromium against the real Dispatch server, the real omp, and the two modules' sources",
+      "command": "cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone -g 'a fresh page load opens the socket at the current head and stays within a bounded request budget'; bun run e2e:deployed -- --project=chromium e2e/handoffs.e2e.ts; cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test ./extensions/legion-phase-stall-omp.test.ts",
+      "observed": "The budget spec 2 passed (chromium and iphone) on a fresh web build; handoffs.e2e.ts 3 passed; the stall suite 10 pass. Numbers read against main@origin 0642a37a just before the push: contract 45 against main's 44, pinned 45 in packages/pi-legion/package.json and packages/claude-envoy/package.json; migrations 20261101144900_handoff_records and 20261101144901_handoffs, both after main's 0161_delivery_run_warnings and 20261101144855_block_pointer_links.",
+      "headSha": "fe131b9406fc7b76ee85a2b37d86e7fe830de0b5",
+      "negativeControl": "Recorded in round 12 at 14f6fdc9: against a build of 8a4d97bf, before the Conversation change, the Conversation spec fails with 'Expected: 2, Received: 0' cards while the Activity spec passes."
     }
   ],
   "trickyParts": [
-    "The three failing CI jobs at the pushed head fa59a830 had two causes: the branch's Conversation handoffs read pushing the live.e2e.ts request budget over its exact count (dispatch), the stand-in's answers read reaching the stall test's quiet window (pi-legion), and main's broker claim list having moved ahead of the branch (envoy-go, fixed by the forward merge alone). ci-ok is the roll-up of the three.",
-    "This round re-adds .legion/INFRA-177/implement.json after retro removed it at fa59a830, so previousHandoff is retro's removal commit and the next retro removes the directory again.",
-    "The merge commit 91ab50e0 was already on origin as legion/INFRA-177-rescue-jj-91ab50e03e8a, a rescue bookmark an earlier turn of this role left when its turn ended before the real push; legion/INFRA-177 is moved onto it in this round's push and the rescue bookmark is deleted."
+    "The conflict arrived while the issue was in testing. The merge, the resolution, the checks and both fingerprints were prepared in the working copy and reported; the tester moved the issue back with request_backward_move, and only then was anything pushed (docs/solutions/legion/a-conflict-that-arrives-while-another-role-holds-the-phase-...-LEGION-663.md).",
+    "Both conflicts were two sides inserting at one point, so the resolution is a union: git merge-file --union driven through jj resolve --tool, then the one blank line it swallowed restored by hand and folded into the merge commit. The per-file fingerprint comparison is what found that blank line.",
+    "The tester reports that it ran no round at 9d51502c, so the next round is a full one measured from round 21's head d29a6a04, not from the unchanged fingerprint of this merge."
   ],
   "deviations": [],
-  "openQuestions": [],
+  "openQuestions": [
+    "packages/envoy/cmd/dispatch/README.md fails scripts/semantic-line-breaks.ts at 11 lines of main's own 'Stored-order check' and migration-numbering text. It fails identically on main alone, that layout test is deliberately kept out of CI, and --write moves 74 lines of main's prose, so it was reported to the architect rather than widened into an approved pull request on its way to the merge. The architect decides whether it is fixed here or in a change of its own."
+  ],
   "discoveredComplexity": [
-    "This pod cannot run four of the repository's lanes, and none of the four is this change's: the daemon's internal/workflow NATS cases and cmd/legion's Docker cases need a container runtime the pod has no Docker for; TestSessionsImportRefusesSymlinkedSessionDirectory (cmd/legion, untouched by this change) does not refuse a symlinked directory under gVisor; and pi-legion's eight judge-omp cases in scripts/skill-scenarios/rig.test.ts refuse to start without Docker. CI run 41177359220 shows the test and typecheck jobs green at fa59a830, so all four are environment-bound here.",
-    "packages/dispatch's e2e harness needs DATABASE_URL to name a database the caller owns (the pod's LEGION_TEST_PG_DSN names postgres, where legion_test may not create in schema public), @legion/contracts built (bun run build), and `bunx playwright install chromium`."
+    "This pod's PostgreSQL limits three Go lanes without touching their assertions: legion_test may not pg_terminate_backend, so storetest's drop of its isolated database fails in the daemon's internal/store and Dispatch's internal/dispatch/store and api; it may not create an event trigger (TestCensusDoesNotExemptACatalogMigrationAnEventTriggerRunsOn); and the server runs max_wal_senders=0, so the census's replication connection is refused. Every test itself passes.",
+    "The stray branches legion/INFRA-177-rescue (2055bbbe, a tree byte-identical to 91ab50e0), legion/INFRA-177-wip (9e3fe863) and legion/INFRA-177-rescue-jj-91ab50e03e8a are deleted on the architect's instruction; legion/INFRA-177 is the only branch this issue leaves."
   ]
 }
