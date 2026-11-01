@@ -1,0 +1,11 @@
+kind: Fixed
+body: |-
+  A subscription is confirmed by the NATS server before the session is registered on it. Opening a
+  subject only wrote SUB into the connection's out buffer, so a message published between that
+  write and the connection's next flush was dropped by core NATS while the listener and the daemon
+  already routed to the session: a Legion notice on the controller topic, a card on a session's
+  agent subject, or a viewer's first ping could be lost with nothing reported. Every open now ends
+  with the connection's round trip, bounded at 10 seconds, and a subject whose round trip failed is
+  confirmed by the next open rather than skipped as already open.
+custom:
+  Issue: pr2625
