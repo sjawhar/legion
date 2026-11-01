@@ -373,6 +373,11 @@ type server struct {
 	// the deployment builds leaves it, calls nothing. Only a test sets it, to send the rest of a
 	// body it held back once the repeat is waiting on it.
 	repeatFoundInFlight func()
+	// beforePublish is called when a handler is about to publish what it committed (publish),
+	// before the first of its events goes out; nil, which every server the deployment builds
+	// leaves it, calls nothing. Only a test sets it, to hold a write between its commit and its
+	// events and watch what another writer of the same document may do meanwhile.
+	beforePublish func()
 	// slowWrites is the slow-write test hook's delay for each keyed method and path it was armed
 	// for (POST /api/v1/writes/_test/slow), by "METHOD path"; it holds nothing on a server without
 	// TestHooksEnabled, which mounts no hook.
@@ -598,9 +603,10 @@ const defaultReadDeadline = 20 * time.Second
 // read's admission unit is. A refused request never reaches the keyed layer, so it claims no key -
 // and the drain is outside admission so that admission's own 429 waits for the body as every other
 // early answer does (drainBeforeAnswer), rather than draining it a second way. The drain is also
-// where a write's body gets the bounds it arrives under (drainedBody), and where it parks the
-// units the request was admitted with while its client is still sending, so a body a client
-// trickles holds none of them. A test hook is neither admitted nor bounded: it is a test's own.
+// where a write's body gets the bounds it arrives under (drainedBody): a write with no room to
+// run in reads its body there before it waits for room (admitted), and one admitted at once
+// parks its units at that body's first read, so a body a client trickles holds none of them
+// either way. A test hook is neither admitted nor bounded: it is a test's own.
 func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline time.Duration) http.HandlerFunc {
 	handler := route.Handler
 	if keyedMethod(route.Method) {
@@ -639,7 +645,7 @@ func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline
 		// own response keeps (go1.27's response.ecReader and reqBody), not from the request's
 		// Body, so it is not that trackTransactions hands this layer a copy of the request: the
 		// handling holds with the drain's body put on net/http's own request. What keeps the body
-		// unread is the drain's guard (drainingWriter.askedContinue) and the keyed layer's
+		// unread is the drain's guard (drainedBody.askedContinue) and the keyed layer's
 		// (answerDrainedRepeat), which TestAnEarlyAnswerToAClientWaitingToContinueAsksForNoBody
 		// pins: without either, the client is told to continue and the answer waits on its body.
 		handler = s.drainBeforeAnswer(route, handler)
@@ -652,25 +658,44 @@ func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline
 
 // admitted runs handler once limiter admits the request at weight, with the ticket on the
 // request's context so a wait elsewhere can park it (admission.Ticket.Park), and answers a
-// refusal 429 OVERLOADED. The refused request's body is read off the connection before that
-// answer goes out, by the drain this sits inside (serveRoute, drainBeforeAnswer). The ticket
-// goes to that drain's body as well as to the context: the body parks it while it arrives, so a
-// client still sending holds none of the units (drainedBody.park).
+// refusal 429 OVERLOADED.
+//
+// The request takes its place in admission's arrival order first (admission.Limiter.Arrive) and
+// is admitted there and then where the server has room for it. Where it has none, a write whose
+// client is already sending reads its whole body off the connection before it joins the queue
+// (drainedBody.readWhole) and waits holding no unit: with the body off the connection net/http's
+// own read of it runs, so a client that hangs up while its write is queued cancels the request
+// there and then and is recorded as the 499 it is, where a queued write with an unread body held
+// its slot for its whole wait and was answered a 429 nobody read. The queue serves the write at
+// the place it arrived, ahead of every write that arrived while its body did, and the wait it
+// then has is the one wait the queue costs it, so no write is refused for waiting twice.
+//
+// The ticket goes to the drain's body as well as to the context: a body still arriving after its
+// request was admitted parks it, so a client still sending holds none of the units
+// (drainedBody.park). A body that did not arrive is answered by the drain
+// (drainingWriter.refuseUnreadBody) and asks for no room at all.
 //
 // A request whose client went away while it waited is answered nothing, since nobody is left to
 // read it, and its line carries 499 rather than the 200 of a handler that wrote nothing: under
 // load a client that gives up while queued is the most frequent way a request ends unanswered.
 func admitted(limiter *admission.Limiter, weight int, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ticket, err := limiter.Admit(r.Context(), admission.ClassOf(r.Method), weight)
-		if err != nil {
-			var refusal *admission.Refusal
-			if errors.As(err, &refusal) {
-				admission.WriteRefused(w, refusal)
+		arrival := limiter.Arrive(admission.ClassOf(r.Method), weight)
+		ticket := arrival.AdmitNow()
+		if ticket == nil {
+			if body, drained := r.Body.(*drainedBody); drained && !body.readWhole() {
 				return
 			}
-			accesslog.ClientGone(r.Context())
-			return
+			var err error
+			if ticket, err = arrival.Admit(r.Context()); err != nil {
+				var refusal *admission.Refusal
+				if errors.As(err, &refusal) {
+					admission.WriteRefused(w, refusal)
+					return
+				}
+				accesslog.ClientGone(r.Context())
+				return
+			}
 		}
 		defer ticket.Release()
 		if body, drained := r.Body.(*drainedBody); drained {
@@ -1350,7 +1375,13 @@ func (s *server) appendEvent(ctx context.Context, tx pgx.Tx, event model.Event) 
 	return s.deps.Events.Append(ctx, tx, event)
 }
 
+// publish fans out what a handler committed, after its transaction committed and while it still
+// holds whatever it took to write - a document's writer gate among them, which ends only once
+// these events are out (editArtifact, storeArtifact).
 func (s *server) publish(events ...model.Event) {
+	if s.beforePublish != nil {
+		s.beforePublish()
+	}
 	for _, event := range events {
 		s.deps.Events.Publish(event)
 	}

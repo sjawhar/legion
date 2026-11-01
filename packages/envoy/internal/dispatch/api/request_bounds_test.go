@@ -887,3 +887,72 @@ func TestAQueuedWriteWhoseClientHangsUpIsLoggedClientGone(t *testing.T) {
 		t.Fatalf("the held write: status=%d body=%s, want 200", response.Code, response.Body.String())
 	}
 }
+
+// A write that finds no room reads its whole body off the connection before it waits for that
+// room (drainedBody.readWhole), so the time its body takes is none of its wait: a body sent for
+// three times the whole admission wait is still admitted once the room comes free, and the
+// write is never refused after it was admitted. It holds no unit and no queue slot while its
+// body arrives, and the writes that arrive while it does are ahead of it in neither.
+//
+// A write admitted before its body, which parked its units at the body's first read and queued
+// for them again once the body ended, waited for room twice: the second wait began behind
+// everything that had arrived meanwhile, and refused writes the server had already admitted.
+func TestAWriteWhoseBodyOutlastsItsWaitIsAdmittedAfterIt(t *testing.T) {
+	const wait, sending = 500 * time.Millisecond, 1500 * time.Millisecond
+	limiter := admission.New(admission.Limits{Read: 4, Write: 1, Wait: wait})
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{admission: limiter})
+	served.transfer = transferBounds{idle: 5 * time.Second}
+	issue := createInteractionIssue(t, handler, "TEST", "Slow write bodies", "A spec")
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	release := holdIssueRow(t, database, issue.Key)
+	defer release()
+	held := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		held <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"title": "Renamed"}, "alice")
+	}()
+	waitForWritesInFlight(t, limiter, 1)
+
+	header := http.Header{}
+	header.Set("Content-Type", "application/json")
+	header.Set("X-Dispatch-User", "alice")
+	body := []byte(`{"body":"sent while the server has no room for it"}`)
+	slow := sendPartOfBody(t, httpServer.Listener.Addr().String(),
+		"/api/v1/issues/"+issue.Key+"/comments", header, len(body), body[:10])
+	type answered struct {
+		response *http.Response
+		body     []byte
+	}
+	answers := make(chan answered, 1)
+	started := time.Now()
+	go func() {
+		response, read := slow.sendSteadily(body[10:], 6, sending/6)
+		answers <- answered{response, read}
+	}()
+
+	time.Sleep(2 * wait) // past its whole wait, with its body still arriving
+	if stats := limiter.Stats()[admission.Write]; stats.Queued != 0 || stats.InFlight != 1 {
+		t.Fatalf("while the slow body arrived the writes were %+v, want the held write alone in flight and nothing queued", stats)
+	}
+	waitForQueuedWrites(t, limiter, 1) // it asks for room once its body is off the connection
+	release()
+
+	select {
+	case taken := <-answers:
+		if taken.response.StatusCode != http.StatusCreated {
+			t.Fatalf("the write whose body outlasted its wait: status=%d body=%s, want 201",
+				taken.response.StatusCode, taken.body)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the write whose body outlasted its wait was never answered")
+	}
+	if elapsed := time.Since(started); elapsed < sending {
+		t.Fatalf("the body was sent in %v, want it sent for longer than the %v wait of the queue it then joined", elapsed, wait)
+	}
+	if stats := limiter.Stats()[admission.Write]; stats.WaitExceeded != 0 || stats.QueueFull != 0 {
+		t.Fatalf("the writes were %+v, want none refused: the slow body's own write waited for room once, after its body", stats)
+	}
+	if response := awaitResponse(t, held); response.Code != http.StatusOK {
+		t.Fatalf("the held write: status=%d body=%s, want 200", response.Code, response.Body.String())
+	}
+}

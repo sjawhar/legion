@@ -869,7 +869,7 @@ func TestAMultipartRetryUnderANewBoundaryIsARepeat(t *testing.T) {
 		}
 		WriteJSON(w, http.StatusCreated, map[string]any{"run": run, "bytes": len(data)})
 	})
-	content := bytes.Repeat([]byte("0123456789abcdef"), (keyedBodyInMemory/16)*2)
+	content := bytes.Repeat([]byte("0123456789abcdef"), (spooledBodyInMemory/16)*2)
 	upload := func(boundary string, file []byte) *httptest.ResponseRecorder {
 		t.Helper()
 		var body bytes.Buffer

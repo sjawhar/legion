@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -415,5 +416,69 @@ func TestAnIssueCloseWhoseDocumentsMovedWhileItWaitedIsGatedAgain(t *testing.T) 
 	if response := <-closed; response.Code != http.StatusOK {
 		t.Errorf("a close whose issue gained a document while it waited for the writer gate: status=%d body=%s, want 200",
 			response.Code, response.Body.String())
+	}
+}
+
+// An edit holds its document's writer gate until its events are published, not until its
+// transaction commits: a writer let in between the two would publish its own events ahead of
+// this edit's, and every reader of the stream - the page, the delivery hub - would be told the
+// later write first. So a second writer of the document waits at the gate for as long as the
+// first edit's publish is held (1f2f572d; the same holds for storeArtifact).
+func TestAnEditHoldsItsDocumentsGateUntilItsEventsArePublished(t *testing.T) {
+	handler, _, deps, served := newRegisteredTestServer(t, testServerOptions{})
+	service, documents := deps.Docs.(*docs.Service)
+	if !documents {
+		t.Fatalf("the test server's document service is a %T, want the service whose gate queue this reads", deps.Docs)
+	}
+	issue := createInteractionIssue(t, handler, "TEST", "Gated publish", "A spec")
+	publishing, holdPublish := make(chan struct{}), make(chan struct{})
+	// Only the first edit's publish is held, and no later one waits on it: a second writer that
+	// the gate let in too early must be free to answer, which is what this test watches for.
+	var holding atomic.Bool
+	served.beforePublish = func() {
+		if holding.CompareAndSwap(false, true) {
+			close(publishing)
+			<-holdPublish
+		}
+	}
+
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		first <- editDocument(t, handler, issue.PrimaryArtifactID, insertAtEnd("The first edit."))
+	}()
+	select {
+	case <-publishing:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the first edit never reached its publish")
+	}
+	second := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		second <- editDocument(t, handler, issue.PrimaryArtifactID, insertAtEnd("The second edit."))
+	}()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for service.QueuedDocumentWriters() == 0 {
+		select {
+		case response := <-second:
+			t.Fatalf("a second writer of the document answered %d while the first edit's events were still unpublished, want it held at the gate until they are out",
+				response.Code)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the second edit never reached the document's writer gate")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(holdPublish)
+
+	for name, answers := range map[string]chan *httptest.ResponseRecorder{"first": first, "second": second} {
+		select {
+		case response := <-answers:
+			if response.Code != http.StatusOK {
+				t.Fatalf("the %s edit: status=%d body=%s, want 200", name, response.Code, response.Body.String())
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatalf("the %s edit was never answered", name)
+		}
 	}
 }

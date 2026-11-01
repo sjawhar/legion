@@ -5,8 +5,16 @@ body: |-
   ends either, and so does an average below 32 KB/s once it has had a minute's grace. An upload
   over a slow uplink is therefore taken however long it needs - a 26 MiB file at 1 Mbit/s takes
   about three and a half minutes - and a large answer read over a slow downlink is written in full.
-  While a body is still arriving its request holds none of the admission units it was admitted
-  with: they go back for as long as the body takes and are taken again once it has arrived, so
+  A write whose client is already sending now reads its whole body off the connection before it
+  asks admission for room, where the server has none for it: it waits for room holding no unit,
+  with nothing of its request left on the wire, so the time its body takes is none of its wait
+  and a client that hangs up while the write is queued is noticed at once - the write leaves the
+  queue there and then and is recorded as `status=499`, where it held its place for its whole
+  wait and was then answered a `429 OVERLOADED` nobody read. A write admitted before its body -
+  one the server had room for, and one whose client asked to be told to continue
+  (`Expect: 100-continue`) and has therefore sent nothing, which the layers that refuse such a
+  request early still ask no body of - gives its admission units back while the body arrives and
+  takes them again once it has arrived, at the place in the queue where it arrived. Either way,
   clients trickling bodies, which are unauthenticated at that point because every layer reads the
   body before a handler resolves its caller, can no longer hold every write unit of a process and
   have every other write answered `429 OVERLOADED`. A body that arrives to find no room left is

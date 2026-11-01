@@ -15,7 +15,6 @@ import (
 	"maps"
 	"mime"
 	"net/http"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -82,10 +81,6 @@ const (
 	// keyedAnswerKept is the largest answer a key keeps. A larger one is still answered in full, but
 	// stored as its status alone, and its replay says so (IdempotencyAnswerNotKept).
 	keyedAnswerKept = 1 << 20
-	// keyedBodyInMemory is how much of a keyed request's body is held in memory while its digest is
-	// judged; the rest of an upload's body waits in a temporary file, as the multipart parser's own
-	// spill does, so a keyed 25 MiB upload costs no more memory than an unkeyed one.
-	keyedBodyInMemory = 1 << 20
 	// keyedBodyMax is the largest body an upload route reads: an upload's file and a megabyte of
 	// fields (uploadArtifactFor), which is what the table gives those routes
 	// (apiRoute.BodyLimit, upload). Every other route reads a JSON body of at most
@@ -271,7 +266,7 @@ func (s *server) keyedWrites(route apiRoute, handler http.HandlerFunc) http.Hand
 		writeRequestFields(digest, r, method, pattern, wildcards)
 		body, err := readKeyedBody(r.Body, digest, r.Header.Get("Content-Type"), bodyLimit)
 		defer body.close()
-		var spill *keyedSpillError
+		var spill *spillError
 		switch {
 		case errors.As(err, &spill):
 			// Dispatch's own failure, not the request's: answered as a 5xx under the key, which
@@ -491,66 +486,14 @@ func writeRequestFields(digest hash.Hash, r *http.Request, method, pattern strin
 	field(contentType)
 }
 
-// keyedBody is a keyed request's body, read whole before its handler runs so its digest can be
-// judged: its first keyedBodyInMemory bytes in memory, and the rest, if any, in a temporary file.
-type keyedBody struct {
-	head  []byte
-	spill *os.File
-	size  int64
-}
-
-// keyedSpillError is a keyed body's spill to its temporary file failing: Dispatch's own fault (a
-// full disk, a temporary directory it cannot write), answered as a 5xx, where a body the client
-// did not finish sending is the request's and answered 400.
-type keyedSpillError struct{ err error }
-
-func (e *keyedSpillError) Error() string {
-	return "spool a keyed request's body to a temporary file: " + e.err.Error()
-}
-
-func (e *keyedSpillError) Unwrap() error { return e.err }
-
-// spillWriter is a keyed body's temporary file, whose write failures are keyedSpillErrors.
-type spillWriter struct{ file *os.File }
-
-func (w spillWriter) Write(p []byte) (int, error) {
-	n, err := w.file.Write(p)
-	if err != nil {
-		return n, &keyedSpillError{err: err}
-	}
-	return n, nil
-}
-
-// readKeyedBody reads body into a keyedBody, at most one byte past limit, the route's own
-// (apiRoute.bodyLimit), writing it to digest as it goes (bodyDigest). A body that fits in
-// keyedBodyInMemory never touches the disk: a route whose limit is no more than that holds even its
-// one byte past the limit in memory.
-func readKeyedBody(body io.Reader, digest io.Writer, contentType string, limit int64) (*keyedBody, error) {
-	read := &keyedBody{}
+// readKeyedBody reads body into a spooledBody, at most one byte past limit, the route's own
+// (apiRoute.bodyLimit), writing it to digest as it goes (bodyDigest), so the handler reads the
+// same body the digest judged.
+func readKeyedBody(body io.Reader, digest io.Writer, contentType string, limit int64) (*spooledBody, error) {
 	target, flush := bodyDigest(digest, contentType)
-	source := io.TeeReader(io.LimitReader(body, limit+1), target)
-	inMemory := int64(keyedBodyInMemory)
-	if limit <= inMemory {
-		inMemory = limit + 1
-	}
-	var head bytes.Buffer
-	n, err := io.CopyN(&head, source, inMemory)
-	read.head, read.size = head.Bytes(), n
-	switch {
-	case err != nil && !errors.Is(err, io.EOF):
+	read, err := spoolBody(io.TeeReader(body, target), limit)
+	if err != nil {
 		return read, err
-	case err == nil && n <= limit:
-		// The head is full and the limit not reached: the rest waits in a temporary file.
-		spill, err := os.CreateTemp("", "dispatch-keyed-body-*")
-		if err != nil {
-			return read, &keyedSpillError{err: err}
-		}
-		read.spill = spill
-		rest, err := io.Copy(spillWriter{file: spill}, source)
-		read.size += rest
-		if err != nil {
-			return read, err
-		}
 	}
 	flush()
 	return read, nil
@@ -579,27 +522,6 @@ func bodyDigest(digest io.Writer, contentType string) (target io.Writer, flush f
 		return mask, mask.flush
 	}
 	return digest, func() {}
-}
-
-// reader is the body again, from its first byte.
-func (b *keyedBody) reader() (io.Reader, error) {
-	if b.spill == nil {
-		return bytes.NewReader(b.head), nil
-	}
-	if _, err := b.spill.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-	return io.MultiReader(bytes.NewReader(b.head), b.spill), nil
-}
-
-// close removes the body's temporary file, if it has one.
-func (b *keyedBody) close() {
-	if b == nil || b.spill == nil {
-		return
-	}
-	name := b.spill.Name()
-	_ = b.spill.Close()
-	_ = os.Remove(name)
 }
 
 // boundaryMask writes what it is given to w with every occurrence of boundary replaced by

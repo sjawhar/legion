@@ -309,6 +309,102 @@ func TestAParkedTicketGivesItsUnitsBackUntilItResumes(t *testing.T) {
 	}
 }
 
+// A request that took its place in the arrival order and only then asked for room - a write
+// reading its body off the connection first - is queued where it arrived: the requests that
+// arrived while it was busy, and are queued already, do not overtake it.
+func TestAnEarlierArrivalIsQueuedAheadOfLaterOnesAlreadyWaiting(t *testing.T) {
+	l := newLimiter(1, 1, patient)
+	held := admit(t, l, Write, 1)
+	early := l.Arrive(Write, 1)
+	if ticket := early.AdmitNow(); ticket != nil {
+		t.Fatal("a write was admitted at once while the only unit was held")
+	}
+	later := admitInBackground(t, l, context.Background(), Write, 1)
+
+	earliest := make(chan admitted, 1)
+	go func() {
+		ticket, err := early.Admit(context.Background())
+		earliest <- admitted{ticket, err}
+	}()
+	waitForQueued(t, l, Write, 2)
+	held.Release()
+
+	first := receive(t, earliest)
+	if first.err != nil {
+		t.Fatalf("the write that arrived first: %v, want it admitted first", first.err)
+	}
+	assertPending(t, later)
+	first.ticket.Release()
+	if result := receive(t, later); result.err != nil {
+		t.Fatalf("the write that arrived second: %v, want it admitted after the first", result.err)
+	}
+}
+
+// A parked ticket takes its units back at the place its request arrived, ahead of the writes
+// that arrived after it and are queued already: a write that waits for a document's writer gate
+// gave its units back, and the writes that took them meanwhile are not ahead of it in the queue.
+func TestAResumedTicketIsGrantedAheadOfLaterArrivals(t *testing.T) {
+	l := newLimiter(1, 1, patient)
+	parked := admit(t, l, Write, 1)
+	parked.Park()
+	holder := admit(t, l, Write, 1)
+	later := admitInBackground(t, l, context.Background(), Write, 1)
+
+	resumed := make(chan error, 1)
+	go func() { resumed <- parked.Resume(context.Background()) }()
+	waitForQueued(t, l, Write, 2)
+	holder.Release()
+
+	select {
+	case err := <-resumed:
+		if err != nil {
+			t.Fatalf("resume once the unit came free: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the parked ticket never resumed, though it arrived before the queued write")
+	}
+	assertPending(t, later)
+	parked.Release()
+	if result := receive(t, later); result.err != nil {
+		t.Fatalf("the write that arrived after the parked one: %v, want it admitted after it", result.err)
+	}
+}
+
+// The queue costs a request one wait however often it asks for room: a write queued for most of
+// its wait, admitted, parked at a document's writer gate and refused on resuming is refused
+// within what is left of that one wait, not given a whole second one. Twice the wait is what had
+// a write refused long after it was admitted.
+func TestAQueuedThenParkedRequestWaitsOnceOverAll(t *testing.T) {
+	const wait = time.Second
+	const queued = 600 * time.Millisecond
+	l := newLimiter(1, 1, wait)
+	held := admit(t, l, Write, 1)
+	outcome := admitInBackground(t, l, context.Background(), Write, 1)
+	time.Sleep(queued)
+	held.Release()
+	admittedAfterWaiting := receive(t, outcome)
+	if admittedAfterWaiting.err != nil {
+		t.Fatalf("the write queued for %v: %v, want it admitted", queued, admittedAfterWaiting.err)
+	}
+
+	admittedAfterWaiting.ticket.Park()
+	other := admit(t, l, Write, 1)
+	defer other.Release()
+	resuming := time.Now()
+	err := admittedAfterWaiting.ticket.Resume(context.Background())
+	waited := time.Since(resuming)
+	if refusalReason(err) != WaitExceeded {
+		t.Fatalf("resume with the unit held: %v, want a wait_exceeded refusal", err)
+	}
+	if rest := wait - queued; waited > rest+250*time.Millisecond {
+		t.Fatalf("the parked write waited %v more after %v in the queue, want no more than the %v left of its %v wait",
+			waited, queued, rest, wait)
+	}
+	if longest := classStats(l, Write).LongestRefusedWait; longest < wait-250*time.Millisecond || longest > wait+250*time.Millisecond {
+		t.Fatalf("the refused write is recorded as having waited %v, want its whole %v wait over both asks", longest, wait)
+	}
+}
+
 func TestTheTicketRidesOnTheContext(t *testing.T) {
 	l := newLimiter(1, 1, patient)
 	ticket := admit(t, l, Read, 1)

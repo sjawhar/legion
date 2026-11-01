@@ -213,9 +213,9 @@ func DefaultLimits() Limits {
 // Limiter admits requests per class under Limits. A read is admitted while its class and both
 // classes together are under their limits; a write while its class is and its units fit under
 // Limits.Total beside the read units Limits.ReservedReads still keeps for waiting reads. One
-// that finds no room waits in its class's queue, first come first served, for at most
-// Limits.Wait, and one that finds that queue already holding queueFactor times the class's
-// limit is refused at once. A Limiter is safe for concurrent use.
+// that finds no room waits in its class's queue, in the order the requests arrived (Arrive),
+// for at most Limits.Wait over the whole request, and one that finds that queue already holding
+// queueFactor times the class's limit is refused at once. A Limiter is safe for concurrent use.
 type Limiter struct {
 	// mu guards every count and queue below: the combined cap is one number over both
 	// classes, so granting reads and moves the two together.
@@ -249,17 +249,64 @@ func New(limits Limits) *Limiter {
 	return l
 }
 
-// Admit takes weight units of class for the caller, waiting in the class's queue when it has no
-// room. It returns a *Refusal when the queue is full or the wait runs out, and ctx's error when
-// ctx ends first. A weight below one is one, and one above the class's limit or above the
-// combined cap is that cap, so a heavy route can still run alone. The caller releases the Ticket
-// once it is done.
-func (l *Limiter) Admit(ctx context.Context, class Class, weight int) (*Ticket, error) {
-	units := min(max(weight, 1), l.classes[class].limit, l.total)
-	if err := l.acquire(ctx, class, units); err != nil {
+// Arrive gives the request arriving now its place in the order requests reach the Limiter, with
+// the class and weight it will ask room for: a weight below one is one, and one above the
+// class's limit or above the combined cap is that cap, so a heavy route can still run alone.
+//
+// A request that must do something before it asks for room - a write reading its body off the
+// connection, which it does holding no unit (the API's drain) - takes its place here first and
+// is then queued where it arrived, ahead of everything that arrived while it read, rather than
+// behind it.
+func (l *Limiter) Arrive(class Class, weight int) *Arrival {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.arrived++
+	return &Arrival{
+		limiter: l, class: class, seq: l.arrived,
+		units: min(max(weight, 1), l.classes[class].limit, l.total),
+	}
+}
+
+// Arrival is the place one request holds in a Limiter's arrival order, with the class and units
+// it asks for and how long it has waited for them so far. A request asks for room more than
+// once when it gives its units back to wait for something else (Ticket.Park) and takes them back
+// after (Ticket.Resume): each ask queues it at the place it arrived, and the Limiter's wait is
+// its wait over all of them, so the queue costs it one wait however often it asks.
+type Arrival struct {
+	limiter *Limiter
+	class   Class
+	units   int
+	seq     uint64
+	// waited is how long the request has spent in the queue so far. Only the request's own
+	// goroutine touches it: a request is in the queue once at a time.
+	waited time.Duration
+}
+
+// Admit takes the arrival's units, waiting in its class's queue, at the place it arrived, for
+// what is left of the Limiter's wait. It returns a *Refusal when the queue is full or the wait
+// runs out, and ctx's error when ctx ends first. The caller releases the Ticket once it is done.
+func (a *Arrival) Admit(ctx context.Context) (*Ticket, error) {
+	if err := a.limiter.acquire(ctx, a); err != nil {
 		return nil, err
 	}
-	return &Ticket{limiter: l, class: class, units: units, held: true}, nil
+	return &Ticket{arrival: a, held: true}, nil
+}
+
+// AdmitNow takes the arrival's units while the Limiter has room for them and nobody is queued
+// for its class, and answers nil where the request would have to wait for them - which is where
+// its caller has something to do before it waits, a write its body to read off the connection.
+func (a *Arrival) AdmitNow() *Ticket {
+	if !a.limiter.acquireNow(a) {
+		return nil
+	}
+	return &Ticket{arrival: a, held: true}
+}
+
+// Admit takes weight units of class for a request arriving now, waiting in the class's queue
+// when it has no room: Arrive and Arrival.Admit in one, for a caller with nothing to do between
+// the two.
+func (l *Limiter) Admit(ctx context.Context, class Class, weight int) (*Ticket, error) {
+	return l.Arrive(class, weight).Admit(ctx)
 }
 
 // ClassStats is what one class of a Limiter holds and has refused.
@@ -272,9 +319,10 @@ type ClassStats struct {
 	// was made.
 	QueueFull, WaitExceeded uint64
 	// LongestRefusedWait is the longest a request refused for waiting (WaitExceeded) was queued
-	// before the limiter refused it: from its arrival in the queue to the time its wait's timer
-	// reports firing. It is the admission's own share of a refusal's time, without the time the
-	// refused request's goroutine then waits to run, which a loaded machine stretches.
+	// before the limiter refused it: its whole time in the queue, over every time it asked for
+	// room, up to the time its wait's timer reports firing. It is the admission's own share of a
+	// refusal's time, without the time the refused request's goroutine then waits to run, which
+	// a loaded machine stretches.
 	LongestRefusedWait time.Duration
 }
 
@@ -310,9 +358,9 @@ func (l *Limiter) Totals() Totals {
 // waits (Park) and take them back after (Resume). The methods of a nil Ticket do nothing, so a
 // caller need not ask whether its request was admitted at all.
 type Ticket struct {
-	limiter *Limiter
-	class   Class
-	units   int
+	// arrival is the place the request holds in the Limiter's arrival order, which it keeps
+	// for as long as it lives: a ticket that parks its units asks for them again there.
+	arrival *Arrival
 
 	mu       sync.Mutex
 	held     bool
@@ -331,14 +379,15 @@ func (t *Ticket) Park() {
 	defer t.mu.Unlock()
 	if t.held {
 		t.held = false
-		t.limiter.release(t.class, t.units)
+		t.arrival.limiter.release(t.arrival.class, t.arrival.units)
 	}
 }
 
-// Resume takes a parked ticket's units back, under the same queue and wait bounds Admit applies,
-// and returns Admit's refusal or ctx's error when it cannot; the ticket then stays parked, and
-// its holder answers the refusal as a refused request. Resuming a ticket that is not parked does
-// nothing.
+// Resume takes a parked ticket's units back, waiting in its class's queue at the place the
+// request arrived - ahead of every request that arrived after it - for what is left of the one
+// wait the queue costs it, and returns Admit's refusal or ctx's error when it cannot; the ticket
+// then stays parked, and its holder answers the refusal as a refused request. Resuming a ticket
+// that is not parked does nothing.
 func (t *Ticket) Resume(ctx context.Context) error {
 	if t == nil {
 		return nil
@@ -349,14 +398,14 @@ func (t *Ticket) Resume(ctx context.Context) error {
 	if !parked {
 		return nil
 	}
-	if err := t.limiter.acquire(ctx, t.class, t.units); err != nil {
+	if err := t.arrival.limiter.acquire(ctx, t.arrival); err != nil {
 		return err
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.released {
 		// Released while it waited: the units it took are nobody's.
-		t.limiter.release(t.class, t.units)
+		t.arrival.limiter.release(t.arrival.class, t.arrival.units)
 		return nil
 	}
 	t.held = true
@@ -377,7 +426,7 @@ func (t *Ticket) Release() {
 	t.released = true
 	if t.held {
 		t.held = false
-		t.limiter.release(t.class, t.units)
+		t.arrival.limiter.release(t.arrival.class, t.arrival.units)
 	}
 }
 
@@ -416,13 +465,44 @@ type waiter struct {
 	ready chan struct{}
 }
 
-// acquire takes units of class, waiting in that class's queue for at most l.wait.
-func (l *Limiter) acquire(ctx context.Context, class Class, units int) error {
-	g := l.classes[class]
+// queue puts queued in g's waiters, behind every waiter that arrived before it and ahead of
+// every waiter that arrived after. A request joins the queue out of arrival order where it had
+// something to do before it asked for room - a write reading its body off the connection
+// (Limiter.Arrive) - or where it gave its units back and asked for them again (Ticket.Resume):
+// either way the queue serves it where it arrived, so the requests that arrived while it was
+// busy do not overtake it. l.mu is held.
+func (g *gate) queue(queued *waiter) *list.Element {
+	for element := g.waiters.Back(); element != nil; element = element.Prev() {
+		if element.Value.(*waiter).seq < queued.seq {
+			return g.waiters.InsertAfter(queued, element)
+		}
+	}
+	return g.waiters.PushFront(queued)
+}
+
+// acquireNow takes a's units if they fit with nobody queued for its class, and reports whether
+// it did: the caller of a request that would have to wait does something else first.
+func (l *Limiter) acquireNow(a *Arrival) bool {
+	g := l.classes[a.class]
 	l.mu.Lock()
-	if g.waiters.Len() == 0 && l.fits(g, units) {
-		g.used += units
-		l.used += units
+	defer l.mu.Unlock()
+	if g.waiters.Len() != 0 || !l.fits(g, a.units) {
+		return false
+	}
+	g.used += a.units
+	l.used += a.units
+	return true
+}
+
+// acquire takes a's units, waiting in its class's queue at the place a arrived for what is left
+// of l.wait: a request that queues more than once - it parked its units and asked for them
+// again (Ticket.Resume) - waits one wait over all of its asks.
+func (l *Limiter) acquire(ctx context.Context, a *Arrival) error {
+	g := l.classes[a.class]
+	l.mu.Lock()
+	if g.waiters.Len() == 0 && l.fits(g, a.units) {
+		g.used += a.units
+		l.used += a.units
 		l.mu.Unlock()
 		return nil
 	}
@@ -430,26 +510,31 @@ func (l *Limiter) acquire(ctx context.Context, class Class, units int) error {
 	if g.waiters.Len() >= queueFactor*g.limit {
 		l.mu.Unlock()
 		g.queueFull.Add(1)
-		return &Refusal{Class: class, Reason: QueueFull}
+		return &Refusal{Class: a.class, Reason: QueueFull}
 	}
-	l.arrived++
-	queued := &waiter{units: units, seq: l.arrived, ready: make(chan struct{})}
-	element := g.waiters.PushBack(queued)
+	queued := &waiter{units: a.units, seq: a.seq, ready: make(chan struct{})}
+	element := g.queue(queued)
+	if element == g.waiters.Front() {
+		// It arrived before the waiters it found queued, so the room the queues were last
+		// offered was offered to a head that is no longer the head.
+		l.grant()
+	}
 	l.mu.Unlock()
 
 	queuedAt := time.Now()
-	timer := time.NewTimer(l.wait)
+	timer := time.NewTimer(max(l.wait-a.waited, 0))
 	defer timer.Stop()
 	var failure error
-	var waited time.Duration
 	select {
 	case <-queued.ready:
+		a.waited += time.Since(queuedAt)
 		return nil
 	case <-ctx.Done():
+		a.waited += time.Since(queuedAt)
 		failure = ctx.Err()
 	case fired := <-timer.C:
-		failure = &Refusal{Class: class, Reason: WaitExceeded}
-		waited = fired.Sub(queuedAt)
+		a.waited += fired.Sub(queuedAt)
+		failure = &Refusal{Class: a.class, Reason: WaitExceeded}
 	}
 
 	l.mu.Lock()
@@ -461,8 +546,8 @@ func (l *Limiter) acquire(ctx context.Context, class Class, units int) error {
 		if ctx.Err() == nil {
 			return nil
 		}
-		g.used -= units
-		l.used -= units
+		g.used -= a.units
+		l.used -= a.units
 		l.grant()
 		return ctx.Err()
 	default:
@@ -476,8 +561,8 @@ func (l *Limiter) acquire(ctx context.Context, class Class, units int) error {
 	}
 	if _, refused := failure.(*Refusal); refused {
 		g.waitExceeded.Add(1)
-		if int64(waited) > g.longestRefusedWait.Load() {
-			g.longestRefusedWait.Store(int64(waited))
+		if int64(a.waited) > g.longestRefusedWait.Load() {
+			g.longestRefusedWait.Store(int64(a.waited))
 		}
 	}
 	return failure
