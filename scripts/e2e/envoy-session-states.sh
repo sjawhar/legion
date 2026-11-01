@@ -281,6 +281,7 @@ claude_session=
 opencode_session=
 claude_bin=
 opencode_bin=
+opencode_plugin=
 claude_version=
 # pg_dsn is read at the top, before the sweep.
 # The windows every reader of this run judges a record's age against; the header says why each is
@@ -408,10 +409,20 @@ wait_until() {
   refuse "timed out after ${limit}s waiting for $what"
 }
 
+# log_count FILE PATTERN is how many lines of FILE match PATTERN: 0 for a file holding none, and 0
+# for one that is not there yet. `grep -c` prints the count and still exits 1 when it is 0, so a
+# `… || printf 0` fallback prints that 0 and another after it and leaves a number no arithmetic
+# can read.
+log_count() {
+  local count
+  count=$(grep -c -- "$2" "$1" 2>/dev/null) || count=0
+  printf '%s\n' "$count"
+}
+
 # log_count_at_least FILE PATTERN N: FILE holds at least N lines matching PATTERN. The wait for a
 # server that has been restarted, and the wait for one more settled agent turn, are the same
 # question asked of a log.
-log_count_at_least() { [ "$(grep -c -- "$2" "$1" 2>/dev/null || printf 0)" -ge "$3" ]; }
+log_count_at_least() { [ "$(log_count "$1" "$2")" -ge "$3" ]; }
 
 # ---- the listener's HTTP surface ------------------------------------------------------------------
 # Every call names the listener it asks, because half this proof is that two listeners answer the
@@ -685,17 +696,34 @@ if [ -n "$needs_claude" ]; then
 fi
 if [ -n "$needs_opencode" ]; then
   # OpenCode, the release this checkout's plugin pins its @opencode-ai/plugin to, installed under
-  # $TMPDIR, with the plugin built from this checkout and loaded from the checkout by path.
-  mkdir -p "$work/opencode" "$work/npm-cache"
+  # $TMPDIR, with the plugin packed from this checkout and unpacked beside it, as pi-envoy is
+  # (lib/pack-plugin.sh). The pack is what makes it load: the plugin reads the Legion skills from
+  # beside its own bundle, its tarball stages them there at prepack
+  # (`skillsDirectory`, packages/envoy-plugin/src/server.ts), and a plain `bun run build` leaves
+  # dist/ in the checkout with no skills/ next to it — with Dispatch configured the plugin then
+  # refuses to load at all, OpenCode serves on with no Envoy tools, and no session ever registers.
+  # The unpacked tarball's one external import, @opencode-ai/plugin, is resolved through the
+  # checkout's own node_modules, which the `bun install --frozen-lockfile` above holds the pinned
+  # release in; the bundle inlines everything else.
+  mkdir -p "$work/opencode" "$work/npm-cache" "$work/opencode-pack" "$work/opencode-plugin"
   printf '{"name":"envoy-session-states-opencode","private":true}\n' >"$work/opencode/package.json"
   (cd "$work/opencode" && npm install --no-audit --no-fund --cache "$work/npm-cache" "opencode-ai@$opencode_version") \
     >"$evidence/logs/npm-opencode.log" 2>&1 ||
     fail "installing opencode-ai@$opencode_version failed; see $evidence/logs/npm-opencode.log"
   opencode_bin=$work/opencode/node_modules/.bin/opencode
   [ -x "$opencode_bin" ] || fail "the install left no executable at $opencode_bin"
-  (cd "$root/packages/envoy-plugin" && bun run build) >"$evidence/logs/build-opencode-plugin.log" 2>&1 ||
-    fail "packages/envoy-plugin did not build; see $evidence/logs/build-opencode-plugin.log"
-  note "OpenCode $("$opencode_bin" --version) with this checkout's @sjawhar/opencode-legion-envoy"
+  (cd "$root/packages/envoy-plugin" && bun pm pack --destination "$work/opencode-pack") \
+    >"$evidence/logs/build-opencode-plugin.log" 2>&1 ||
+    fail "packages/envoy-plugin did not pack; see $evidence/logs/build-opencode-plugin.log"
+  opencode_tarballs=("$work"/opencode-pack/*.tgz)
+  { [ "${#opencode_tarballs[@]}" -eq 1 ] && [ -f "${opencode_tarballs[0]}" ]; } ||
+    fail "packing packages/envoy-plugin left ${#opencode_tarballs[@]} entries matching $work/opencode-pack/*.tgz; expected one tarball"
+  opencode_plugin=$work/opencode-plugin
+  tar xzf "${opencode_tarballs[0]}" -C "$opencode_plugin" --strip-components=1
+  ln -sfT "$root/packages/envoy-plugin/node_modules" "$opencode_plugin/node_modules"
+  [ -d "$opencode_plugin/skills/dispatch-first" ] ||
+    fail "the packed plugin in $opencode_plugin carries no skills/dispatch-first, and refuses to load without it"
+  note "OpenCode $("$opencode_bin" --version) with this checkout's @sjawhar/opencode-legion-envoy, packed as the release packs it"
 fi
 echo "ok build"
 
@@ -918,15 +946,64 @@ omp_ask() {
   rpc_answer "$work/omp.out" "$id"
 }
 
-# omp_typed TEXT runs TEXT as typed at the session's terminal — a slash command, or a prompt the
-# model answers — and waits for that turn to settle.
+# omp_typed TEXT types TEXT at the session's terminal — a slash command, or a prompt the model
+# answers — and answers when the host has taken it. The `prompt` request is answered the moment
+# the text is taken, not when whatever it starts is over.
 omp_typed() { omp_ask prompt "$(jq -cn --arg m "$1" '{message:$m}')" "${2:-600}"; }
+
+# omp_turn TEXT types TEXT and waits for the model turn it starts to end, the way claude_turn
+# waits for Claude Code's own `result`. A check that reads what the model did — its tool calls and
+# their results, which the host writes to the session file — has to read it after the turn, and
+# `prompt`'s own answer comes before the turn has even started.
+omp_turn() {
+  local after
+  after=$(($(log_count "$work/omp.out" '"type":"agent_end"') + 1))
+  omp_typed "$1" "${2:-600}" || return 1
+  wait_until "${2:-600}" "Oh My Pi to finish its turn" \
+    log_count_at_least "$work/omp.out" '"type":"agent_end"' "$after"
+}
+
 omp_session_id() { omp_ask get_state | jq -r '.data.sessionId'; }
 omp_session_file() { omp_ask get_state | jq -r '.data.sessionFile'; }
 
+# delivery_cards FILE TEXT counts the Envoy deliveries an Oh My Pi session file holds whose card
+# names TEXT. A card the extension hands the host is written as one entry carrying both
+# `"custom_message"` and the `"envoy-message"` type, which is how
+# packages/pi-envoy/extensions/card-delivery-omp.test.ts counts the same entries. Counting every
+# line that merely names a delivery's text would count the model's own reply quoting it back, a
+# tool call it made with it and that call's result, and read one delivery as several.
+delivery_cards() {
+  local count
+  count=$(grep -F -e "$2" -- "$1" | grep -F -e '"custom_message"' | grep -c -F -e '"envoy-message"') ||
+    count=0
+  printf '%s\n' "$count"
+}
+
+# stored_cards_landed FILE MARKER: the mention and the direct message naming MARKER have both
+# reached that session file.
+stored_cards_landed() {
+  [ "$(delivery_cards "$1" "mention $2")" -ge 1 ] && [ "$(delivery_cards "$1" "direct $2")" -ge 1 ]
+}
+
+# shows_state FILE: FILE shows a session row carrying both `state` and `last_seen`. Each host
+# hands its model the listener's rows as JSON, and each of the three files this is asked of — an
+# Oh My Pi session file, Claude Code's stream-json and OpenCode's answer — carries that JSON
+# inside a JSON string, where every quote is written `\"`. The backslashes are dropped before the
+# keys are looked for, because `"state"` is not a substring of `\"state\"` and a check that
+# looked for it would read every host as showing nothing.
+# shellcheck disable=SC1003 # '\\' is tr's own spelling of one backslash, not an escaped quote
+shows_state() {
+  tr -d '\\' <"$1" | grep -q '"state"' || return 1
+  tr -d '\\' <"$1" | grep -q '"last_seen"'
+}
+
 # ---- Claude Code ----------------------------------------------------------------------------------------
 # Headless in stream-json both ways, the shape a Legion worker's bridge runs it in
-# (claudelaunch.Argv), with this checkout's claude-envoy as its one MCP server.
+# (claudelaunch.Argv), with this checkout's claude-envoy as its one MCP server. CLAUDE_PLUGIN_DATA
+# is in the launch's own environment, not just the MCP server's: the SessionStart hook writes the
+# id Claude Code mints on `/clear` to `$CLAUDE_PLUGIN_DATA/sessions/<pid>/session-id` and the
+# channel server polls that file, so a hook left on Claude Code's own per-plugin directory and a
+# server told another one never meet and the `/clear` is never adopted.
 claude_start() { # claude_start SESSION [--resume]
   local session=$1 flag=--session-id
   [ "${2:-}" != --resume ] || flag=--resume
@@ -935,6 +1012,7 @@ claude_start() { # claude_start SESSION [--resume]
   touch "$work/claude.out"
   own_session "$work/claude.pid" \
     env -i PATH="$PATH" HOME="$work/home" TMPDIR="$work/tmp" CLAUDE_CONFIG_DIR="$work/claude-config" \
+    CLAUDE_PLUGIN_DATA="$work/claude-config/envoy-plugin-data" \
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 ANTHROPIC_BASE_URL="$model_base_url" \
     ANTHROPIC_MODEL="$claude_model" ANTHROPIC_API_KEY="$(cat "$work/model-key")" \
     DISPATCH_URL="$dispatch_url" DISPATCH_TOKEN_FILE="$work/dispatch-token" \
@@ -952,7 +1030,7 @@ claude_start() { # claude_start SESSION [--resume]
 # claude_turn TEXT sends one user turn and waits for that turn's result line.
 claude_turn() {
   local after
-  after=$(($(grep -c '"type":"result"' "$work/claude.out" 2>/dev/null || printf 0) + 1))
+  after=$(($(log_count "$work/claude.out" '"type":"result"') + 1))
   jq -cn --arg t "$1" '{type:"user",message:{role:"user",content:[{type:"text",text:$t}]}}' >&"$claude_fd"
   wait_until "${2:-600}" "Claude Code to finish its turn" \
     log_count_at_least "$work/claude.out" '"type":"result"' "$after"
@@ -982,7 +1060,7 @@ s.close()'
 opencode_start() {
   mkdir -p "$work/opencode-config/opencode" "$work/opencode-data" "$work/opencode-cwd"
   jq -n --arg url "$model_base_url/v1" --arg key "$(cat "$work/model-key")" \
-    --arg id "${model_id#*/}" --arg plugin "file://$root/packages/envoy-plugin" \
+    --arg id "${model_id#*/}" --arg plugin "file://$opencode_plugin" \
     '{"$schema":"https://opencode.ai/config.json",plugin:[$plugin],
       provider:{anthropic:{options:{baseURL:$url,apiKey:$key},models:{($id):{}}}},
       model:("anthropic/" + $id)}' >"$work/opencode-config/opencode/opencode.json"
@@ -1161,7 +1239,7 @@ check_send_to_stalled_session_is_stored() {
 # deferred or given up, and nothing may land on the exceptions topic: a stored delivery is not a
 # failed one.
 check_stored_deliveries_arrive_once() {
-  local role=ess-stored-$$ issue marker transcript seen
+  local role=ess-stored-$$ issue marker transcript mention direct published
   [ -n "$omp_pid" ] || omp_start || return 1
   [ -n "$omp_session" ] || omp_session=$(omp_session_id)
   wait_until 180 "the Oh My Pi session to be live" state_is "$port_a" "$omp_session" '' live || return 1
@@ -1175,9 +1253,14 @@ check_stored_deliveries_arrive_once() {
   marker=ess-stored-$RANDOM$RANDOM
   kill -STOP "$omp_pid" || refuse "could not stop Oh My Pi" || return 1
   wait_until 180 "the session to read unresponsive" state_is "$port_a" "$omp_session" unresponsive unresponsive || return 1
+  # Dispatch routes a mention from the comment's `mentions` field, each target a route
+  # (`session:<id>` or `role:<name>`, model.ParseRoute), never from an `@…` written in the body:
+  # a body naming the session and no mentions is a comment on the issue's topic alone, which this
+  # session is not subscribed to, so nothing is sent to it and nothing is stored for it.
   dispatch_api POST "/api/v1/issues/$issue/comments" \
     "$(jq -cn --arg s "$omp_session" --arg m "$marker" \
-      '{body:("@" + $s + " mention " + $m),actor:{id:"ess-peer",kind:"session"}}')" ||
+      '{body:("mention " + $m),mentions:[{target:("session:" + $s)}],delivery:"steer",
+        actor:{id:"ess-peer",kind:"session"}}')" ||
     refuse "the mention was refused $api_status: $(head -c 300 "$answer")" || return 1
   api "$port_a" POST /v1/messages/send \
     "$(jq -cn --arg t "$omp_session" --arg m "$marker" \
@@ -1193,11 +1276,18 @@ check_stored_deliveries_arrive_once() {
   kill -CONT "$omp_pid" || refuse "could not continue Oh My Pi" || return 1
   wait_until 180 "the session to be live again" state_is "$port_a" "$omp_session" '' live || return 1
   wait_until 600 "the stored deliveries to reach the session's transcript" \
-    grep -q -- "$marker" "$transcript" || return 1
+    stored_cards_landed "$transcript" "$marker" || return 1
+  # A second copy of a stored delivery would land behind the first, so the count is taken a
+  # settling period after both arrived, and the transcript it was taken from is kept as evidence.
   sleep 30
-  seen=$(grep -c -- "$marker" "$transcript")
-  [ "$seen" -eq 2 ] ||
-    refuse "the transcript holds $seen lines naming $marker; the mention and the direct message are one each" || return 1
+  cp -f "$transcript" "$evidence/answers/$check.transcript.jsonl"
+  mention=$(delivery_cards "$transcript" "mention $marker")
+  direct=$(delivery_cards "$transcript" "direct $marker")
+  published=$(delivery_cards "$transcript" "role $marker")
+  { [ "$mention" -eq 1 ] && [ "$direct" -eq 1 ]; } ||
+    refuse "the session's transcript holds $mention delivery cards for the mention naming $marker and $direct for the direct message; each stored delivery arrives exactly once" || return 1
+  [ "$published" -eq 0 ] ||
+    refuse "the transcript holds $published delivery cards for the role publish naming $marker, which the listener refused" || return 1
   ! grep -qE 'agent delivery failed|deferred|given up' "$evidence/logs/listener_a.log" ||
     refuse "the listener's log names a failed, deferred or given-up delivery for a stored message" || return 1
   [ ! -s "$work/exceptions.jsonl" ] ||
@@ -1218,7 +1308,11 @@ check_send_to_serving_port_is_refused() {
   api "$port_a" GET "/v1/registry/$opencode_session" || true
   jq -e --argjson p "$opencode_port" '.port == $p' "$answer" >/dev/null ||
     refuse "the OpenCode session registered port $(jq -r .port "$answer"), not its serve's $opencode_port" || return 1
-  kill -STOP "$opencode_pid" || refuse "could not stop the OpenCode serve" || return 1
+  # The serve is reached through opencode-ai's bin/opencode, a Node launcher that runs the
+  # platform binary as a child of its own and forwards the signals it can catch; SIGSTOP is not
+  # one, so stopping the launcher's pid alone leaves the serve heartbeating. The stall goes to
+  # the whole process group, which own_session gave this launcher as its session leader.
+  kill -STOP -- -"$opencode_pid" || refuse "could not stop the OpenCode serve" || return 1
   wait_until 180 "the OpenCode session to read unresponsive" \
     state_is "$port_a" "$opencode_session" unresponsive unresponsive || return 1
   ! api "$port_a" POST /v1/messages/send \
@@ -1229,7 +1323,7 @@ check_send_to_serving_port_is_refused() {
   jq -e --arg s "$opencode_session" \
     '(.error | startswith("no live session " + $s)) and .state == "unresponsive" and (.last_seen | numbers)' "$answer" >/dev/null ||
     refuse "the refusal does not name the session's unresponsive state and last_seen: $(head -c 300 "$answer")" || return 1
-  kill -CONT "$opencode_pid" || true
+  kill -CONT -- -"$opencode_pid" || true
   note "a send to the stalled OpenCode session on port $opencode_port was refused 404 naming unresponsive"
 }
 
@@ -1364,7 +1458,10 @@ check_gone_only_past_the_horizon() {
   note "SIGKILL-to-gone latency: ${measured_kill_latency}s (gone horizon 90s, a reaper pass every 10s)"
   [ "$measured_kill_latency" -ge 90 ] ||
     refuse "the killed session read gone ${measured_kill_latency}s after the kill, inside its own 90s horizon" || return 1
-  wait_until 120 "the role reaper to release the gone holder's claim" \
+  # The role claim reaper has a period of its own, a fixed five minutes that
+  # ENVOY_SESSION_REAP_INTERVAL does not move (StartRoleClaimReaper, cmd/listener/main.go), so the
+  # release waits longer than one of its passes, not the ten seconds the session reaper runs at.
+  wait_until 420 "the role reaper to release the gone holder's claim" \
     role_reason_is "$short_port" "$role" unclaimed || return 1
   note "the role claim was released only once its holder was gone"
   stop_pid "$shortlistener_pid"
@@ -1411,14 +1508,20 @@ check_gone_only_past_the_horizon() {
 # when the list dropped a live session, which is the failure this issue is about.
 check_every_plugin_shows_the_state() {
   local peer=ses_ess_peer_$$ transcript deleted ask
-  ask="Call the envoy_sessions tool with include set to unresponsive, then reply with the raw JSON row it gave for the session $peer and nothing else."
+  # The tool takes no `include`: it lists the unresponsive sessions by name on every call, which
+  # is the behaviour this check reads. An ask that named one would have every host refuse the call
+  # on its arguments (parseEnvoyToolArguments) before it reached the listener.
+  ask="Call the envoy_sessions tool, then reply with the raw JSON row it gave for the session $peer and nothing else."
   registered "$peer" 0 true "notifications.agent.$peer" || return 1
   wait_until 180 "the peer to read unresponsive" state_is "$port_a" "$peer" unresponsive unresponsive || return 1
   [ -n "$omp_pid" ] || omp_start || return 1
-  omp_typed "$ask" >"$evidence/answers/$check.omp.json" ||
+  # omp_turn, not omp_typed: the transcript is read for what the tool answered, and the host takes
+  # the text well before the turn that calls the tool has run.
+  omp_turn "$ask" >"$evidence/answers/$check.omp.json" ||
     refuse "Oh My Pi would not answer the envoy_sessions turn" || return 1
   transcript=$(omp_session_file)
-  { grep -q '"state"' "$transcript" && grep -q '"last_seen"' "$transcript"; } ||
+  cp -f "$transcript" "$evidence/answers/$check.transcript.jsonl"
+  shows_state "$transcript" ||
     refuse "Oh My Pi's transcript shows no state and last_seen from envoy_sessions" || return 1
   grep -q "$peer" "$transcript" ||
     refuse "Oh My Pi's envoy_sessions answer does not name the unresponsive peer $peer" || return 1
@@ -1427,7 +1530,7 @@ check_every_plugin_shows_the_state() {
     claude_start "$claude_session"
   fi
   claude_turn "$ask" || return 1
-  { grep -q '"state"' "$work/claude.out" && grep -q '"last_seen"' "$work/claude.out"; } ||
+  shows_state "$work/claude.out" ||
     refuse "Claude Code's envoy_sessions answer shows no state and last_seen" || return 1
   grep -q "$peer" "$work/claude.out" ||
     refuse "Claude Code's envoy_sessions answer does not name the unresponsive peer $peer" || return 1
@@ -1435,7 +1538,7 @@ check_every_plugin_shows_the_state() {
   [ -n "$opencode_session" ] || opencode_session=$(opencode_new_session) ||
     refuse "OpenCode would not open a session" || return 1
   opencode_turn "$opencode_session" "$ask" || return 1
-  { grep -q '"state"' "$answer" && grep -q '"last_seen"' "$answer"; } ||
+  shows_state "$answer" ||
     refuse "OpenCode's envoy_sessions answer shows no state and last_seen: $(head -c 300 "$answer")" || return 1
   grep -q "$peer" "$answer" ||
     refuse "OpenCode's envoy_sessions answer does not name the unresponsive peer $peer" || return 1
