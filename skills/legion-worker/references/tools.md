@@ -475,8 +475,8 @@ figure came from
 Some tests fail in a Kubernetes issue pod whatever your change, because of the pod, not the branch.
 A tmux pane runs on its host, and none of this holds there. Their proof is CI's run at the head:
 cite that run, and name in your handoff each package the pod could not run. The cases below are
-the known ones, not every one: a failure they do not name is yours to explain. Two of them are
-about any work a pod runs, a test or a tool of your own, and not about a test suite alone.
+the known ones, not every one: a failure they do not name is yours to explain. Several of them
+reach any work a pod runs, a test or a tool of your own, not a test suite alone.
 
 - **Check your own output, never the job's phase.** A Kubernetes Job that reports `Succeeded`
   says its container exited 0, and nothing more: read the artefact your work was to produce, or
@@ -502,6 +502,21 @@ about any work a pod runs, a test or a tool of your own, and not about a test su
   later release may have it. A timing test can fail too: `internal/dispatch/pmdoc`'s linearity
   tests time a call by the process's CPU time, which gVisor counts in 10 ms ticks, so a call under
   10 ms can measure 0 s and the test reports `+Inf times`.
+- **`O_NOFOLLOW` guards a leaf and not a component under gVisor.** A lane measured this on
+  2026-11-01, in a pod under gVisor (`uname` 4.19.0-gvisor) against the same probe on an ordinary
+  kernel, on two filesystems. Almost everything matches: `O_RDONLY|O_NOFOLLOW` on a symlink to a
+  file refuses `ELOOP`, `O_CREAT|O_EXCL|O_NOFOLLOW` on one refuses `EEXIST`, `O_PATH|O_NOFOLLOW`
+  opens the link itself, and the controls (a regular file, a real directory, a free name) succeed
+  on both. One call differs: `openat(dirfd, <a link to a directory>,
+  O_DIRECTORY|O_NOFOLLOW|O_RDONLY|O_CLOEXEC)`, which the ordinary kernel refuses `ENOTDIR` and
+  gVisor follows with no error. So code that walks a path one component at a time and opens each
+  with `O_NOFOLLOW` is defeated there while every leaf check still passes, and its tests stay
+  green on a developer's kernel. A whole block of such tests failing in a pod is that one
+  property of the environment, not one defect per test. The fix shape holds on both kernels: the
+  walk cannot trust the flag, so `lstat` the component, `fstat` the descriptor it opened, compare
+  `st_dev` and `st_ino`, and refuse when they differ or when the `lstat` says `S_IFLNK`. The
+  probe used plain `openat` with `O_NOFOLLOW`; `openat2` with `RESOLVE_NO_SYMLINKS` was out of
+  scope and is untested.
 - **Compare durations within one pod, never across pods.** A gVisor sandbox runs syscall-heavy
   work 2.2 to 3.8 times slower than the same work outside it, and a pod lands on whatever node
   the autoscaler provisions, so two pods are two machines, two sets of neighbours and two
