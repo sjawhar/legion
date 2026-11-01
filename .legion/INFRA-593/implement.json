@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-593",
+  "previousHandoff": "43a1c5f68a4dca962b0226f79f4ab0406d1794c0",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2444",
+  "round": "Forward merge of main after #2391 (225f2bea) on the INFRA-514 architect's instruction of 2026-11-01T09:22:40Z, with migration 0151_doc_compaction_owed renumbered to 0160 after #2395's 0158-0159. Full round by round-shape.py (main.go, pool.go, gcp/dispatch.go among the runtime files).",
+  "proof": [
+    {
+      "criterion": "The merge keeps the pull request's change and main's #2391 together: one compaction sweep beside main's woken loops, the connection count summed, and the migration renumbered",
+      "surface": "jj merge, round-shape.py, go build/vet, and the store, duty, docs and cmd/dispatch suites on a local Postgres 16.2 (GOMAXPROCS=4, GOMEMLIMIT=12GiB)",
+      "command": "jj new 43a1c5f6 main@origin; python3 /legion/scratch/tmp/rev593/round-shape.py 43a1c5f6 b0fa30f7 2444; go test -p 1 -parallel 4 -count=1 -timeout 58m ./internal/dispatch/docs ./cmd/dispatch ./internal/dispatch/store/... ./internal/dispatch/duty/... ./internal/pgmigrate/...; go test -tags multiprocess -run TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses ./cmd/dispatch; (cd infra && go test ./gcp/ -run TestDispatchConnectionsPerPodIsTheServers)",
+      "observed": "Eight files conflicted (main.go, pool.go, gcp/dispatch.go, multiprocess_test.go, two duty tests, two docs); resolved as the diff-check comment says (https://github.com/sjawhar/legion/pull/2444#issuecomment-6556569848). docs, cmd/dispatch, duty and pgmigrate pass; store passes on a fresh database but for TestMigrationSetIsNumberedOneToN ('0160 ... where 158 comes next'), the failure the architect ordered until #2395 lands. TestMigrate0160NamesEveryDocumentOfMoreThanOneRow passes. The two-process test logs document-compaction ran once (A ran 1, B skipped 1). TestDispatchConnectionsPerPodIsTheServers passes at 92. Sampled peak 10.68 of 19 GiB over 893 samples; the leftover-sampler ps check printed 0 lines.",
+      "headSha": "b0fa30f7a84bd3e424306bb5948dc53b0f4da34d",
+      "negativeControl": "Run against the old local test database, which had applied this branch's previous 0151, the store tests that migrate the URL's own database failed with 'relation doc_compaction_owed already exists' at migration 160; on a fresh database they pass, so only a database that ran the unmerged 0151 meets it (none outside test databases)."
+    },
+    {
+      "criterion": "A restarted process's first sweep folds a document's old rows and leaves rows younger than 2 minutes as written, the text unchanged",
+      "surface": "real envoy-dispatch built from the head on a local Postgres 16.2, DISPATCH_NATS_DISABLED=1",
+      "command": "bash $TMPDIR/infra593/e2e.sh (script and output: dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 21)",
+      "observed": "30 uploads made 41 rows; after the stop and backdate, the restarted process's first sweep tick logged candidates=1 compacted=1 rows_deleted=37, leaving 4 rows; the 3 young rows unchanged in version, xmin and md5; text sha256 db68d573... identical before and after; a 31st upload reads back. The first process's start tick logged candidates=0 (dispatch-1.log).",
+      "headSha": "b0fa30f7a84bd3e424306bb5948dc53b0f4da34d",
+      "negativeControl": "The 3 rows younger than 2 minutes are not folded; the first process's start-tick sweep, before any row was old, folded nothing (candidates=0)."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/cmd/dispatch/main.go",
+    "packages/envoy/cmd/dispatch/multiprocess_test.go",
+    "packages/envoy/internal/dispatch/store/pool.go",
+    "packages/envoy/infra/gcp/dispatch.go",
+    "packages/envoy/internal/dispatch/duty/ticker_test.go",
+    "packages/envoy/internal/dispatch/duty/run_leased_period_test.go",
+    "packages/envoy/internal/dispatch/docs/compaction_sweep_test.go",
+    "packages/envoy/internal/dispatch/store/migrations/0160_doc_compaction_owed.up.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0160_doc_compaction_owed.census.sql",
+    "packages/envoy/internal/dispatch/store/doc_compaction_owed_migration_test.go",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/cmd/dispatch/README.md",
+    "packages/envoy/.changes/unreleased/pr2444-document-load-and-compaction.yaml",
+    "docs/site/src/content/docs/dispatch/running-dispatch.md",
+    ".dispatch/architecture/dispatch-docs.md"
+  ],
+  "deviations": [
+    "TestMigrationSetIsNumberedOneToN fails at this head by design (the INFRA-514 architect's chained order: #2395 0158-0159, #2444 0160, #2406 0161). Once #2395 merges, main is merged forward again for a fresh run. If #2411 (timestamp migration names) lands first, the next merge renames this migration to its scheme instead.",
+    "The -race 300-run lanes were not repeated: no conflict of this merge was in the docs package's runtime code, and the full docs suite passes at the head.",
+    "This retro's removal of .legion/INFRA-593/ is undone by this handoff; the next retro removes it again."
+  ]
+}
