@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -64,7 +65,7 @@ func TestRebuildArtifactRouteIsHumanOnlyAndRefusesADocumentThatLoads(t *testing.
 }
 
 // invalidLoadOnceStore loads a document failNextLoad names once, for a room or a cold read, as a
-// history that does not decode.
+// history that does not decode, at the head it stands at.
 type invalidLoadOnceStore struct {
 	docs.VersionedStore
 	mu      sync.Mutex
@@ -88,7 +89,11 @@ func (s *invalidLoadOnceStore) takeInvalid(room string) bool {
 
 func (s *invalidLoadOnceStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
 	if s.takeInvalid(room) {
-		return persistence.LoadResult{Update: []byte{0xff}}, nil
+		head, err := s.VersionedStore.Head(ctx, room)
+		if err != nil {
+			return persistence.LoadResult{}, err
+		}
+		return persistence.LoadResult{Update: []byte{0xff}, Version: head}, nil
 	}
 	return s.VersionedStore.Load(ctx, room)
 }
@@ -224,8 +229,20 @@ func TestRebuildArtifactVersionsSuppliedMarkdownButNotTheLatestVersionSource(t *
 	}
 }
 
+// The close's settlement loads the document's room, and the close's commit closes it on every
+// process (migration 0158's trigger, which room sync hears), so the rebuild that follows meets no
+// live room and is refused for the closed issue alone.
 func TestClosedIssueRebuildRefusesBeforeChangingTheDocument(t *testing.T) {
-	handler, _, broken := newBrokenTestServer(t)
+	var broken *invalidLoadOnceStore
+	handler, database, deps := newTestServer(t, testServerOptions{
+		settle: time.Hour,
+		persistence: func(database *store.Store) docs.VersionedStore {
+			broken = &invalidLoadOnceStore{VersionedStore: docs.NewPgVersioned(database), invalid: make(map[string]bool)}
+			return broken
+		},
+	})
+	documentService := deps.Docs.(*docs.Service)
+	runDocumentRoomSync(t, database, documentService)
 	issue := createArtifactIssue(t, handler)
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
 		"name": "closed.md", "content": "before\n",
@@ -235,6 +252,11 @@ func TestClosedIssueRebuildRefusesBeforeChangingTheDocument(t *testing.T) {
 	}](t, created).Artifact
 	if closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice"); closed.Code != http.StatusOK {
 		t.Fatalf("close issue: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	for deadline := time.Now().Add(10 * time.Second); slices.Contains(documentService.ResidentRooms(), artifact.ID); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the closed issue's document room stayed resident after the close")
+		}
 	}
 	broken.failNextLoad(artifact.ID)
 	rebuilt := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifact.ID+"/rebuild", map[string]any{"markdown": "changed\n"}, "alice")

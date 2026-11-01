@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-556",
+  "completed": "2026-11-01T00:36:30Z",
+  "round": 10,
+  "decision": "changes_requested",
+  "reviewedCodeHead": "09524d5c992d0943b57470dd132f44bcc845cd37",
+  "critical": 0,
+  "important": 2,
+  "minor": 2,
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/room_behind_head_test.go", "description": "TestARoomIsReloadedOnceAKeystrokeLandsOnAHistoryACompactionFolded (this PR's round-2 test, fc2de439) is red in CI run 41247951473 attempt 1, jobs 124681324918 (envoy-go) and 124681324748 (envoy-go-race-docs): ':1963: 2 appends were admitted on the folded history, want alice's first keystroke's alone'. Reproduced on the pod's Postgres at 09524d5c: 2 of 80 (-count=40 -cpu=1,2) and 1 of 10 under -race (':1972: the reloaded room holds the document through update 4, the stored head is 5'); the same at the pre-merge commit 641d8ce0, so it is this PR's. Decide from evidence whether the test's timing or the code is wrong; a code fix comes with a failing-first proof, a test fix must still fail on the bug it guards."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/issue_open_test.go", "description": "TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenItsAppendReachesTheGateAfter is red in job 124681324748 (envoy-go-race-docs): ':207: the close was meant to take effect while task A held alice's keystroke unstored, but the head moved from 1 to 2 or the hold ran out first', beside a WARN 'read the document's stored updates past its room: this caller already holds a connection of the pool: a second one would deadlock it'. Reproduced at 09524d5c: 0 of 60 plain, 2 of 10 under -race. Same rule as above. Architect's pass bar for both: 200 runs at -count=100 -cpu=1,2 and 50 under -race on the pod's Postgres, counts in the PR body."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/awareness_relay.go", "description": "Notes, not blocking under the stopping rule: the comment at :671-672 ('the state read here is no lower than the return') is not always true (entry is read before mu); the lock-order comment at :261-262 names only record as reading the room under mu, resolve does too."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/awareness_relay_schedule_test.go", "description": "Notes, not blocking: dropping the waiting removal in the live branch is invisible to every invariant (keeping it also passes 100k); the listing half has no pinned seed (caught by seed 3569 inside the default count); 7c2de26f's resolve raise has no pinned seed (caught by seed 739 inside the default count)."}
+  ],
+  "verified": [
+    "Per-step check of invariant (b): takesAway runs as each removal lands on the away room, before the apply (schedule_test.go:640-687).",
+    "Browser stand-in: an awareness per room applied every update the room applies, never purged; the end check requires it to show every live client at the same state and clock and none that left (schedule_test.go:155-163, 332, 730-782).",
+    "Failing first: ae660532's lift restored fails pinned seed 3047 on both checks; ae660532's production code with the new test file fails seed 3047; each check alone catches it (per-step (b) 41 of 41 seeds in 100k, browser 37).",
+    "Repaired lift (641d8ce09): live under r.mu -> drop the old removal and list the client at the sent clock; else raise. Deep review traced every departure and return order, the pending-batch deletion and the lock order: no defect. Pinned seeds {21, 3047, 14360, 23434} each fail with their own fix removed.",
+    "Stronger checker runs: 10,000 and 100,000 schedules pass; 1,000,000 schedules pass at 09524d5c (468 s, pod).",
+    "Merge 09524d5c with main efed4e4d: resolution deltas against the automatic merge are a merged marks.go comment, the websocket.go import union, a test helper rename and updated ygo line citations; migrations 0150-0152 after main's 0149; dispatchConnectionsPerPod 91 = main 89 + 2; merges cleanly with main f699b131."
+  ],
+  "threads": {"accepted": ["PRRT_kwDORFy7ds6yTVpf", "PRRT_kwDORFy7ds6yTVpi"]},
+  "thermonuclear": {
+    "deepReview": "Verdict: APPROVE at 09524d5c (repaired lift correct; two Minor comments)",
+    "checkerAudit": "both checks catch seed 3047; no missed schedule or operation"
+  },
+  "ci": "Required (rulesets): lint, typecheck, test, pr-title; the architect requires ci-ok. CI head 09524d5c: CI run 41247951473 attempt 1 red: envoy-go (124681324918) and envoy-go-race-docs (124681324748) on this PR's docs tests, pi-legion (124681324829) on a 150 s timeout outside this PR; dispatch still running at 00:26Z. PR Title runs 41248011101 and 41248041574 success. Not re-run (architect agreed). compare 09524d5c...80792cb8 handoffsOnly true (2 files)."
+}

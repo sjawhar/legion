@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-556",
+  "previousHandoff": "80792cb8ed84a62ec0a08ccae6c45d5f3a107d1b",
+  "round": 17,
+  "testedCodeHead": "d72d8f428b40",
+  "scope": "INFRA-63 architect, 2026-11-01T00:38Z and 05:27Z: (1) fingerprint, the merge adding only main's changes and the renumber to 0151-0153, migration SQL byte-identical apart from numbers, no reference to the old numbers left; (2) each fixed test failing with the behaviour it guards removed; (3) each fixed test 200 runs and 50 under -race on the pod's Postgres; (4) the migration guard tests, the docs package, 1,000,000 schedules and the browser coedit spec; (5) ci-ok and pr-title at the code head. A red ci-ok only on TestEditNoticeRestart or a full runner disk is recorded and passed.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran both fixed tests at d72d8f42: 200 of 200 plain and 50 of 50 under -race on the pod's Postgres. Showed each fails in a scratch copy with its guarded behaviour removed."
+  },
+  "failures": [
+    {
+      "criterion": "ci-ok is green at the code head, red only on TestEditNoticeRestart or a full runner disk; the PR's docs tests do not fail intermittently",
+      "evidence": "CI run 41270926848 at d72d8f42: envoy-go-race-docs failed (job 124744850285) on this PR's TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenACompactionFoldedTheHistoryItsRoomHeld, issue_open_test.go:270 'write the document as task B: ERROR: duplicate key value violates unique constraint \"doc_updates_pkey\" (SQLSTATE 23505)'. Reproduced on the pod's Postgres at d72d8f42: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test -count=100 -cpu=1,2 -run '^TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenACompactionFoldedTheHistoryItsRoomHeld$' ./internal/dispatch/docs fails 1 of 200, and the same with CGO_ENABLED=1 -race -count=25 -cpu=1,2 fails 3 of 50, each at :270. Cause, in the test: head is read with storedHead (:252) right after alice connects, and foldHistoryPastRoom inserts at head+1 (:307), but the connect's own content-free append can land after head is read and take head+1 first. That is the race 2c1d2ec0 fixed in the folded-history test. A scratch copy that logged the newest stored row just before that insert showed, in each of the 4 failures out of 50 race runs, 'read 1, the store holds version 2 (content_changed=false)'. Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6554482621"
+    }
+  ],
+  "failed": 1,
+  "proof": [
+    {
+      "criterion": "Each fixed test fails when the behaviour it guards is removed",
+      "surface": "the docs package's Services on the pod's test PostgreSQL, in scratch copies of d72d8f42",
+      "command": "go test -count=3 -run '^TestARoomIsReloadedOnceAKeystrokeLandsOnAHistoryACompactionFolded$' (markReplaced removed from persistence.go); go test -count=3 -run '^TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenItsAppendReachesTheGateAfter$' (observedBeforeClose returning false)",
+      "observed": "The folded-history test fails 3 of 3 (:1978 timed out waiting for the room whose history was folded under it to be closed). The close-margin test fails 3 of 3 (:220 the keystroke alice typed while the issue was open was dropped by its close).",
+      "headSha": "d72d8f428b40",
+      "negativeControl": "Unmodified at head, both pass 200 of 200 plain and 50 of 50 under -race."
+    },
+    {
+      "criterion": "Each fixed test passes 200 runs and 50 under -race",
+      "surface": "the pod's test PostgreSQL (LEGION_TEST_PG_DSN)",
+      "command": "go test -count=100 -cpu=1,2 -run '^<test>$' ./internal/dispatch/docs; CGO_ENABLED=1 go test -race -count=25 -cpu=1,2 -run '^<test>$' ./internal/dispatch/docs",
+      "observed": "Folded-history: 200 of 200, then 50 of 50 under -race, no data race reported. Close-margin: 200 of 200, then 50 of 50 under -race, no data race reported. Each go test exits 1 only because storetest's 'drop database … with (force)' fails 'permission denied to terminate process' on the non-superuser login. storetest is main's, and main's TestBackfillAnchorBlocksPinsResolvableLegacyRowsOnce shows the same failure on 200 passing runs at d09b46d7.",
+      "headSha": "d72d8f428b40",
+      "negativeControl": "The scratch copies above fail."
+    },
+    {
+      "criterion": "The merge adds only main's changes and the renumber to 0151-0153; migration SQL byte-identical apart from numbers; no old-number references",
+      "surface": "the commits' diffs",
+      "command": "the six migration files at cc7905af against d72d8f42; per file, the branch's changed lines on top of main before (efed4e4d to cc7905af) and after (d09b46d7 to d72d8f42) the merge, with 0150-0152 mapped to 0151-0153; grep for 015[0-3] in every file the branch changes",
+      "observed": "Each renumbered .up.sql and .census.sql differs only in its first line's number. 123 of 131 files are byte-identical once mapped. The rest are the three .legion handoffs and five files re-based on main's #2541: the three mutating _test routes are routeRow rows classed scopeProject in writeClasses, as #2541's register requires; main.go sets TestHooks in #2541's struct literal; the README and changelog drop X-Dispatch-Actor, which #2541 removed; the /ws/doc row of cmd/dispatch/AGENTS.md sits on main's cookie-only text. Every 0151-0153 mention names the right migration, and the 0150 mentions are main's dpop_proofs.",
+      "headSha": "d72d8f428b40",
+      "negativeControl": "Unmapped, the same comparison flags 21 more files; each of those differs only in the renumbered numbers."
+    },
+    {
+      "criterion": "The migration guards, the docs package, 1,000,000 schedules and the browser coedit spec pass",
+      "surface": "the store and docs packages on the pod's test PostgreSQL; Chromium on main's two-process harness",
+      "command": "go test -run 'Migration|Census' ./internal/dispatch/store; go test -count=1 ./internal/dispatch/docs; DISPATCH_RELAY_SCHEDULES=1000000 go test -run TestEveryInterleavingOfARoomsAwarenessSettlesOnBothProcesses ./internal/dispatch/docs; bun run e2e:multiprocess -- coedit.multiprocess --repeat-each=2",
+      "observed": "These migration guards pass: TestMigrationSetIsNumberedOneToN, TestEveryMigrationFileIsEmbedded, TestEveryMigrationFromTheCensusRuleOnDeclaresACensus, TestTouchedTablesOfEveryMigrationAreTablesTheSetCreates, TestTouchedTablesOfEveryMigrationAreTheTablesItLocks (3 of 3 on a rerun, after one cleanup drop failure), TestEveryShippedCensus… and TestCensusOnAMigratedDatabaseHasNothingPending. The three superuser census tests fail as on main. Docs package: 747 passed, 3 skipped, 1 failed: TestMarkQuoteWritesMarkAndReturnsCoveredText hit 'connection reset by peer' from the pod's Postgres while connecting, then passed 20 of 20 (the branch changes only a comment in marks.go). 1,000,000 schedules pass in 443.93 s. coedit.multiprocess passed 2 of 2.",
+      "headSha": "d72d8f428b40",
+      "negativeControl": "coedit.multiprocess fails on a0f877c5, the harness without this change (round 1)."
+    }
+  ],
+  "ci": "Run 41270926848 at d72d8f42, read 2026-11-01T06:32Z: envoy-go-race-docs failure (the test above); lint and test success; typecheck skipped; dispatch in progress; ci-ok not posted yet and will be red. pr-title success in runs 41270926716, 41276879372 and 41276923767, one cancelled. The 0151-0154 overlap with #2387 is not counted, as the architect said."
+}

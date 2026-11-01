@@ -30,11 +30,12 @@ func withdrawnReason(issueKey string) string {
 // author, for the close to withdraw with a record: no settlement runs once the issue is closed. It
 // holds no transaction or lock, so it cannot meet the close's. A settlement that stops short is
 // run again a few times within a short budget (docs.SettleIssueDocuments): one that met updates
-// the room had not stored yet, one a write superseded, and one refused on a room another process's
-// append left behind its durable head, whose room is reloaded at the head first, each settle on a
-// later attempt. A settlement still short after those is logged and the close proceeds; its blocks
-// are not asks yet, and the close's sweep marks them resolved (sweepClosedIssueAsks). An issue
-// already closed, or none, settles nothing: its close is refused.
+// the room had not stored yet, one a write superseded (another process's append among them, which
+// the settlement catches its room up with first), and one whose room held a stored history that
+// was replaced under it, which is reloaded at the head, each settle on a later attempt. A
+// settlement still short after those is logged and the close proceeds; its blocks are not asks
+// yet, and the close's sweep marks them resolved (sweepClosedIssueAsks). An issue already closed,
+// or none, settles nothing: its close is refused.
 //
 // ctx must not end when the client goes away (outlivingTheClient): a settlement runs to its end
 // whether or not the client waits for the close, as the settlement it stands in for would. On a
@@ -180,15 +181,19 @@ func (s *server) restoreIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey str
 }
 
 // sweepClosedIssueAsks is the close's last pass over its issue's documents, run once the close
-// has committed and SetIssueClosed has closed the issue's rooms, when no browser of this process
-// can write to them any more. In a transaction of its own, holding the issue's row, it writes the
-// blocks of withdrawn - the asks the close withdrew - and of every other resolved block ask of the
-// issue, and their copies, again, from their rows as they now stand, writes the copies of every
-// answered block ask of the issue from its row with the answer left out (docs.WriteIssueAskStates),
-// and writes resolved every readable ask block no settlement has indexed: one a browser wrote into
-// the room after the close forked it, or one whose settlement failed before the close. Each such
-// block is logged. An issue reopened in the meantime is left alone. The sweep never fails the
-// close: an error is logged.
+// has committed. The commit's notification (migration 0158's trigger) closes the issue's rooms on
+// every process, so a room stops taking a browser's ask block within moments of it; the sweep
+// catches the blocks written before then. In a transaction of its own, holding the issue's row, it
+// writes the blocks of withdrawn - the asks the close withdrew - and of every other resolved block
+// ask of the issue, and their copies, again, from their rows as they now stand, writes the copies
+// of every answered block ask of the issue from its row with the answer left out
+// (docs.WriteIssueAskStates), and writes resolved every readable ask block no settlement has
+// indexed: one a browser wrote into the room after the close forked it, or one whose settlement
+// failed before the close. Each such block is logged. An issue reopened in the meantime is left
+// alone. The sweep never fails the close: an error is logged. A block a room stores after the
+// sweep, before its process has heard of the close, leaves its document owing a settlement no
+// settlement runs while the issue is closed, which the repair's interval pass sweeps
+// (RunIssueAskRepair).
 //
 // ctx must not end when the client goes away (outlivingTheClient), and no transaction is open.
 func (s *server) sweepClosedIssueAsks(ctx context.Context, issueKey string, withdrawn []model.Ask, actor model.Actor) {

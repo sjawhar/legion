@@ -581,7 +581,7 @@ What the two processes share, and what each keeps to itself:
 
 - No leased background loop runs a pass beside another process's pass of the same loop.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a process whose attempt lands inside another's pass finds it held and logs a skip.
-  The nine timer loops — the delivery reconcile, the architecture import, the webhook redelivery sweep, the outbox's daily document compaction, the block index reconciliation, the term-statistics refresh, the repair of closed and reopened issues' asks, the keyed writes' maintenance sweep (lease `suggestion-outcomes`) and the prune of the registry of live server processes
+  The ten timer loops — the delivery reconcile, the architecture import, the webhook redelivery sweep, the outbox's daily document compaction, the block index reconciliation, the term-statistics refresh, the repair of closed and reopened issues' asks, the keyed writes' maintenance sweep (lease `suggestion-outcomes`), the document settlement resumption and the prune of the registry of live server processes
   — also record each pass in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick lands between another's passes
   — the ordinary case, since each ticker draws its phase at boot and a rolling update starts the second process minutes after the first
   — finds the period already served and logs the same skip: each runs once per period across the processes.
@@ -589,7 +589,8 @@ What the two processes share, and what each keeps to itself:
   a process that finds it held tries again until a pass of its own runs, since the other process's pass may have read before the change that woke this one.
   The suggestion outcome sweep takes no lease at all:
   each of its pages holds the `suggestion_outcome_cursor` row `for update`, which serialises two processes by itself (Background loops, below).
-  The settlement resumption, the delivery live hub, the event-stream relay, the stale-room evictor, the shared wake listener and the document rooms' timers stay per-process by design, and the embedding queue, the task progress reconciliation and the outbox's own scan claim their own work;
+  The settlement resumption is leased because a settlement reads the store under the document's lock whichever process runs it, so one process per minute arms every owed settlement.
+  The delivery live hub, the event-stream relay, the process's shared listener connection, with the document rooms' room sync and the woken loops' wakes on it, and the document rooms' timers stay per-process by design, and the embedding queue, the task progress reconciliation and the outbox's own scan claim their own work;
   the embedding queue's coverage pass runs in every process with no lease, each of its steps safe beside another process's, and drops every vector its own embedder did not make, so every process takes the same embedder settings (Search, below);
   `cmd/dispatch/main.go` says at the call site which loop is which and why.
 
@@ -628,14 +629,130 @@ What the two processes share, and what each keeps to itself:
   The prune after each publish keeps every build a live server process serves and the 20 builds started most recently;
   a failed prune is logged and the boot goes on.
 
-**Two processes do not share a live document session.**
-Durable convergence is unconditional: every edit is appended under the document's advisory lock, Yjs updates commute, and the stored history is the union of them, so no edit is lost whichever process took it, no process writes a settlement or an ask retraction from a document state it does not hold (`ErrRoomBehindHead`), and a version whose room is behind the head is rendered from the stored document (`storedTree`).
-What is per-process is the live room: while a room is resident in one process it does not receive the other's updates, so presence and cursors show only the peers on that process.
-A write committed elsewhere closes the room within a notification round trip (`dispatch_doc_changed`, `docs/stale_room.go`), unless that room was evicted less than `staleRoomEvictInterval` (two seconds) ago, in which case its notification is refused and the room is re-examined when that window ends
-— the case the trailing write of an editing burst meets, since the last notification of a burst is one of the refused ones.
-Either way the browser reconnects, re-syncs and shows the current text.
-A reader sees a brief reconnect, never stale text they can act on.
-Cross-process live co-editing of one document — two rooms with text streaming between them — is a follow-up issue, out of scope here.
+**Two processes share a live document session through Postgres.**
+Durable convergence does not depend on it:
+every edit is appended under the document's advisory lock, Yjs updates commute, and the stored history is the union of them, so no edit is lost whichever process took it.
+Each process holds its own room for a document.
+Postgres is the only channel between the rooms (`docs/room_sync.go`), so the message bus can be down and the rooms still sync:
+
+- **Edits.**
+  Every durable change notifies `dispatch_doc_head` (`{"r": artifact id, "v": head,
+  "p": process id}`) and `dispatch_doc_changed` (the bare artifact id, which the earlier build reads) from inside the transaction that wrote it.
+  Every other process that holds a room of the document reads the stored rows its room does not hold from `doc_updates` and applies them as one batch.
+  The room stays open, and its browsers see the edit on the socket they already have.
+
+- **Closes.**
+  Room sync closes and reloads a room only when its stored history is replaced:
+  a rebuild, a prune, a delete, or a compaction that folds rows the room has not taken in yet.
+  A compaction keeps the head row, so it closes only a room that is behind at that moment.
+  A browser's append that such a fold lets through closes its room at once in the same way (below).
+  The service also closes a room in three other cases:
+  its issue closes or reopens, the room fails and its eviction closes it (`failRoom`), or the process shuts down with an editor connected to the room.
+  No other close disconnects a browser.
+  After a close, the browser reconnects and syncs a reloaded room.
+
+- **Appends from a room that is behind.**
+  A browser's edit is accepted: it is stored at the head, and the room's cursor takes it in when the catch-up fills the gap.
+  It is accepted too when a compaction folded the rows the room holds, because the fold keeps every item the edit builds on.
+  The append that stored the edit then closes the room at once (`closeRoomOnReplacedHistory`), and its browsers reconnect to a room reloaded at the head.
+  A write computed from the room's content (a settlement's repair, a live write's fork, a version's capture) still needs a room at the head (`ErrRoomBehindHead`).
+  A settlement catches its room up under the document's lock and then continues.
+  A version whose room is behind is rendered from the stored document (`storedTree`).
+
+- **Cursors and presence.**
+  Each process relays its rooms' awareness on `dispatch_doc_awareness` through its NOTIFY connection.
+  It sends the changes of one room once per 50 ms at most, and each send carries every reader who moved within that window, at the state the room holds when it ends, so readers moving at the same moment all cross rather than the last of them:
+  the relay reads each room's awareness itself (`watchRoomAwareness`) rather than taking ygo's outbound lane, which keeps one awareness blob per room.
+  A room that loads for a reader, and a reader that joins a loaded room, ask the other processes for their readers' states, so a reader who opens second sees the first reader's cursor at once.
+  A room forgets a client it hears nothing from for 30 seconds (`AwarenessExpiry`), so a cursor relayed from a process that stopped without a word goes away.
+  A document socket may hold at most four awareness clients at once (`maxAwarenessClientsPerSocket`).
+  A tab sends its own client first, and then echoes the room's other readers back on the same socket, so the other three places hold echoes:
+  `@hocuspocus/provider` 2.15.3 sends every client that an awareness change touched, and applying the room's other readers makes such a change.
+  The clients a frame names past the four are taken out of it before ygo applies it (`awareness_limit.go`), and a dropped echo tells the room nothing it does not hold already.
+  So a tab claiming thousands of client ids neither fills a room's memory, nor shows the room's other readers thousands of cursors, nor becomes thousands of notifications.
+  A socket's clients go when it does, and a client that leaves gives its entry back at once rather than two expiries later (`reclaimAwarenessSlots`), so a reader who joins after such a frame is taken in and relayed at once.
+  A client's removal is relayed at the clock the relay recorded for that client, so the other processes take it rather than drop it as older than the state they hold.
+  A socket whose message names neither a document nor a message type - a three-byte message as much as one that has said nothing by 512 bytes (`maxDocumentMessageHeader`) - is closed rather than read on:
+  nothing this service reads looks like that.
+  A room also holds about 31 MB of its clients' states (`MaxAwarenessBytesPerRoom`) and, as a last resort, `maxAwarenessClientsPerRoom` client entries - 4,000, the connections one process admits (`maxRoomConnections`, 1,000) each holding the four clients a socket may, which is the same bound another process's relayed clients passed before they crossed - so it stands above every client real readers can put in a room and refuses none of them, here or on another process.
+
+- **Issue close and reopen.**
+  Migration `0158`'s trigger notifies `dispatch_issue_open_changed` when an issue's `closed_at` changes, whichever process or build wrote it.
+  Every process of this build then closes its rooms of the issue's documents, and their browsers reconnect read-only or read-write as the issue now allows.
+  A browser's append also reads the issue's state in its own transaction.
+  The append is refused when its room took the edit more than 2 seconds (`closeMargin`) after the close committed.
+  An edit that the room took before then is stored, even when its append reaches the database after the close, and the document settles it when the issue reopens.
+  A close through `PATCH` stamps `closed_at` again as its last statement before it commits, so the 2 seconds count from the commit.
+  An edit typed while the close's transaction runs is stored, however long the close takes to withdraw the issue's open asks.
+  The `issue.closed` event carries the earlier stamp, from the start of the close's transaction.
+  The response and every later read carry the stored one.
+  A close made through the earlier build stamps `closed_at` only at the start of its transaction, so for that close the 2 seconds count from that start.
+
+- **Questions about a room.**
+  A process asks the other members about a room on `dispatch_doc_query`, and each member answers on `dispatch_doc_answer`.
+  For each question, the asker waits 500 ms at most.
+  Then it continues without the members that did not answer, and logs a WARN that names them.
+  An agent's write asks up to three questions, so it can wait up to 1.5 seconds in all:
+
+  1. Before the write forks, every member that holds the room stores its updates, so the write sees what a person on another process typed.
+
+  2. Before the commit, the lost-edit check has every member share its room's unstored updates and its connected people.
+     `409 EDIT_LOST_TO_CONCURRENT_CHANGE` names the people connected on this process and on every member that answered.
+
+  3. After the commit, every member that holds the room stores its updates again, and `lost_ops` is judged on the document at the stored head.
+
+  A rebuild asks whether any member holds the room.
+  It answers `409 DOCUMENT_LIVE` when this process holds one, or when a member that answered holds one.
+
+- **Reads.**
+  A read compares the room with the stored head.
+  When the room is behind, the read takes the stored document and does not wait for the catch-up, so no read returns text older than the store.
+
+- **Ask authors and the edit queue.**
+  The author of an ask block is stored (`doc_ask_block_authors`, migration `0159`), so a settlement on any process names who wrote it.
+  The cap of 32 queued conditional edits of one document counts the queue of this process and of every other member (`doc_conditional_edit_queue`, migration `0160`).
+  Each process first queues a document's conditional edits in memory and admits them one at a time, and the admitted edits take turns.
+  On each process, at most three of a document's conditional edits hold a database connection at once:
+  the edit being admitted holds one for its short admission transaction, the edit whose turn it is holds its write transaction, and an edit that has just left holds one to write this process's count, which it does after it hands the turn on (`releaseConditionalEdit`).
+  An edit that waits for its admission, or for its turn, holds none.
+
+- **Which process served a socket.**
+  Every answer that the document service's handler sends to a `/ws/doc/{room}` request carries `X-Dispatch-Process: <host name>`: the pod's name in production.
+  That includes the `101` upgrade and the handler's `401`, `404` and `503` answers.
+  A check that opens sockets through a load balancer reads it to record which process each socket reached.
+  A host name the process cannot read, or one that holds bytes a header cannot carry, sends no header.
+  The `400` answers sent before that handler carry no header.
+  They refuse a room id or a query parameter that holds U+0000 or bytes that are not UTF-8.
+
+The processes a question waits for are the members: the processes whose listener connection is named `dispatch-listener <process id>` in `pg_stat_activity`.
+Each process makes its id when it starts.
+A process that stops loses that connection, and with it its membership, so nothing has to be cleaned up.
+A process of the earlier build has no such connection, so it is no member.
+Room sync does not take its members from the registry of live server processes (above):
+a member must be a process whose LISTEN connection is up now, since only such a process can hear a question and answer it.
+The registry counts a process by its heartbeat, for 15 seconds after the last one and through its listener's redials and its shutdown drain, so it would count processes that cannot hear, and each question would wait 500 ms on them.
+
+While a process's listener connection redials, live sync to that process pauses.
+The wait between attempts doubles from 1 second to 30 seconds, plus up to half again, so one wait can last 45 seconds (`pglisten.RedialBackoff`).
+In that time its rooms do not catch up and do not receive the other processes' awareness, and it is not a member, so no question waits for it.
+Reads stay fresh, because a read compares with the stored head.
+Appends stay correct, because the append gate reads the head and the issue's state under the document's lock.
+When the LISTEN stands again, the process catches up every room it holds and reads the issue state of each one again.
+
+During the roll that releases this behaviour, processes of the earlier build behave as before:
+
+- They still close a room that falls behind, and its browsers reconnect.
+
+- They relay no awareness and apply none, so they show no other process's cursors.
+
+- They do not listen on `dispatch_issue_open_changed`, so they do not act on a close or reopen made through this build.
+  Their open rooms of the issue's documents keep the scope that their browsers connected with, unless the close or reopen writes the document.
+  A close writes the resolved state of the issue's open asks into the blocks that show them, and a reopen writes them open again (`WriteIssueAskStates`).
+  That write moves the document's head, so an earlier-build room of the document closes as a room that falls behind, and its browsers reconnect with the scope the issue now allows.
+
+- They are not members, so no question waits for them.
+
+Every change this build writes still notifies `dispatch_doc_changed`, which the earlier build reads, and an issue that the earlier build closes still closes this build's rooms through the trigger.
 
 **A connection is closed after its next response once it is 60 seconds old** (`maxConnAge`, `cmd/dispatch/conn_age.go`):
 the server stamps each connection's accept time and answers the first request it reads at that age or later with `Connection: close`, and a request carrying an `Upgrade` header, a websocket handshake, keeps its connection.
@@ -729,10 +846,10 @@ A process that finds it held tries again
   a key passes its window by the clock alone, and a delivery is owed because the process holding it died, which commits nothing to announce.
   It keeps the lease name the suggestion outcome sweep carried this work under, so during a roll the earlier release's pass and this one still exclude each other on it.
 
-Outside these classes, the outbox still scans on a 5 s retry ticker and compacts daily, the settlement resumption still runs every minute, the block index reconciliation (lease `block-index`) runs every 30 s (every 2 s while a batch is full) and the repair of closed and reopened issues' asks (lease `issue-ask-repair`, Database migrations below) every 10 minutes after its boot pass, each recording its passes in `duty_passes` with its period, and the per-feature listeners (the delivery live hub, the event stream relay, the stale-room evictor) keep their own connections and keep-alive pings.
+Outside these classes, the outbox still scans on a 5 s retry ticker and compacts daily, the settlement resumption still runs every minute, the block index reconciliation (lease `block-index`) runs every 30 s (every 2 s while a batch is full) and the repair of closed and reopened issues' asks (lease `issue-ask-repair`, Database migrations below) every 10 minutes after its boot pass, each recording its passes in `duty_passes` with its period, and the per-feature listeners (the delivery live hub, the event stream relay) keep their own connections and keep-alive pings.
 
 **One shared listener per process.**
-Every woken loop waits on one `pglisten.Hub` (owner `dispatch background wakes` in its log lines), which holds one connection from the store's listener pool and LISTENs on every loop's channel.
+Every woken loop waits on the process's one `pglisten.Hub`, the shared LISTEN connection the document rooms' room sync is registered on too (named `dispatch-listener <process id>` in `pg_stat_activity`, logged under the owner `dispatch`), which holds one connection from the store's listener pool and LISTENs on every loop's channel beside the room-sync channels.
 A channel is registered only for a loop that will run:
 `dispatch_embeddings` only with an embedder, and `dispatch_delivery_settings` only with NATS and the GitHub App.
 No loop waits for the listener: each runs its boot pass whether or not it has connected, and keeps its due-time timers while it has no connection.
@@ -1896,9 +2013,45 @@ Each item below names a path with its method and identity, then its purpose.
 
   Close every live document and wait for the settlements in flight; not mounted otherwise.
 
+- `/api/v1/artifacts/_test/rooms` (GET; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  List the documents this process holds a room of now: `{"rooms": [artifact id, ...]}`.
+  Not mounted otherwise.
+
 - `/api/v1/artifacts/{id}/_test/outside-schema` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
 
   Write the crafted malformed tree e2e uses; not mounted otherwise.
+
+- `/api/v1/artifacts/{id}/_test/room-counters` (GET; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  What this process did with the document since the process started, and what its room holds now:
+  `{"room_failures": n, "lock_waiting_compactions": n, "room_closes": n, "settlement_resumptions": [RFC 3339 time, ...], "awareness_clients": n}` - its room failures, lock-waiting compactions, closes of a room of the document by the service (a replaced history, an issue's close or reopen, a failed room's eviction, shutdown;
+  not ygo's idle retirement), the time of each settlement-resumption pass that armed the document's owed settlement, and the awareness client entries its room of the document holds now (0 with no room here), which `maxAwarenessClientsPerRoom` bounds.
+  Not mounted otherwise.
+
+- `/api/v1/artifacts/{id}/_test/hold-persistence` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  Take `{"duration": "<Go duration>"}` and hold every append of a browser update that this process's rooms of the document make, for that long from now;
+  `204` once the hold is set, `400 DURATION_INPUT` for a duration that is not positive.
+  Not mounted otherwise.
+
+- `/api/v1/artifacts/{id}/_test/live-write-pauses/{point}` (PUT; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  Park the document's next live write on this process at `{point}`: `after-first-append` (it holds the document's lock) or `after-commit` (before its publish).
+  `204` once armed, `409 PAUSE_ARMED` when a pause is armed already, `400 PAUSE_POINT_INPUT` for another point.
+  Not mounted otherwise.
+
+- `/api/v1/artifacts/{id}/_test/live-write-pauses/{point}` (GET; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  Wait up to `?wait` (a Go duration, 10 s when absent) for a write to park at the armed pause: `{"parked": true}`, or `{"parked": false}` when none did.
+  `404 PAUSE_NOT_ARMED` when no pause is armed.
+  Not mounted otherwise.
+
+- `/api/v1/artifacts/{id}/_test/live-write-pauses/{point}` (DELETE; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  Disarm the pause and let the write parked there continue: `{"parked": bool}`, whether a write had parked.
+  `404 PAUSE_NOT_ARMED` when no pause is armed.
+  Not mounted otherwise.
 
 - `/api/v1/live/_test/disconnect` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
 
@@ -2687,9 +2840,11 @@ Each item below names a status and code, then its meaning.
 
 - `409 DOCUMENT_LIVE`
 
-  A rebuild found the document resident in this server:
+  A rebuild found the document resident in this server or in another server process on the database (it asks every member, and waits 500 ms at most for the answers):
   open in an editor, or left by its last editor less than 90 seconds ago (a room stays resident a minute after its last peer leaves, and the sweep that evicts it runs every 30 seconds).
   Close its editors and retry two minutes later, or repair a schema-invalid tree by replacing it from markdown.
+  A rebuild also answers this code when the document's head moved while it ran, because of another rebuild or an edit:
+  read the document again before you rebuild it.
 
 - `409 DOCUMENT_LOADS`
 

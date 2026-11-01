@@ -1,0 +1,890 @@
+package docs
+
+// The races the awareness relay settles, each driven from a hook the service keeps for them
+// (beforeAwarenessWatch, beforeAwarenessRecord, beforeAwarenessAnswerRecord): a reader leaving
+// while a purge races the relay's encode of its removal, a reader back in the room before its
+// removal is sent, a removal recorded over the read an answer to another process's query stands
+// on, a removal and that client's own heartbeat recorded in either order, a removal of a client
+// a flush has just sent at a later clock, and the one lock order the relay's record and a
+// room's observers share. What crosses between two processes when nothing races is in
+// awareness_relay_test.go, whose readers and conditions the tests here are built from; the
+// process pair they run on is in process_pair_test.go.
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"slices"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/reearth/ygo/awareness"
+)
+
+// A reader leaving is relayed at the clock its awareness client stood at, whatever else the room
+// is doing in that moment. ygo fires a room's update observers with the awareness unlocked, and
+// every inbound apply and every other removal purges the room's tombstones as it goes
+// (reclaimAwarenessSlots, a grace of one nanosecond), so a purge can free the departing client's
+// entry between the removal's apply and the relay's encode of it. Read from the room's awareness
+// then, the removal would name the client at a clock of 0, which task B drops as older than the
+// state it holds, and alice's cursor would sit in bob's reader until it expired (awarenessExpiry,
+// 30 s). Here the purge is put ahead of the relay's own observer, so it lands in that window
+// every time.
+func TestAReaderLeavingIsRelayedAtItsClientsClockThoughAPurgeRacesTheEncode(t *testing.T) {
+	pair := newSeededProcessPair(t, "First.\n\nSecond.\n")
+	var purged atomic.Int64
+	pair.taskA.beforeAwarenessWatch = func(room string, aw *awareness.Awareness) {
+		aw.OnUpdate(func(event awareness.UpdateEvent) {
+			if len(event.Removed) == 0 {
+				return
+			}
+			purged.Add(1)
+			reclaimAwarenessSlots(room, aw)
+		})
+	}
+	runAwareness(t, pair.taskA)
+	handledB := runAwareness(t, pair.taskB)
+	alice := pair.openReader(t, pair.serverA, "alice")
+	bob := pair.openReader(t, pair.serverB, "bob")
+	setAwareness(t, alice, aliceClient, cursorOf("alice", 1))
+	requireAwareness(t, bob, holdsAwareness(aliceClient, cursorOf("alice", 1)), "alice's cursor on task A reaching bob on task B")
+	clock := awarenessClockOf(t, pair.taskA, pair.artifactID, aliceClient)
+
+	alice.Close()
+	relayed := relayedRemovalClock(t, handledB, pair.artifactID, aliceClient)
+	if purged.Load() == 0 {
+		t.Fatal("no purge ran ahead of the relay's observer on task A's room, so the race this test is about never happened")
+	}
+	if relayed < clock {
+		t.Errorf("alice's removal was relayed at clock %d, want at least the %d her client stood at: task B holds her at %d and drops a lower clock, so her cursor stays in its room until it expires",
+			relayed, clock, clock)
+	}
+	requireAwareness(t, bob, lacksAwareness(aliceClient),
+		"alice leaving task A, with a tombstone purge between the removal and the relay's encode of it, removing her from bob's reader on task B")
+}
+
+// A removal the relay sends stands at the clock the departing client held, raised to the clock
+// the room's own snapshot of that client stands at (touched) and settled against the room once
+// more as it is recorded (record). That is right for the tombstone a departure leaves and wrong
+// for a client that is in the room: what ygo holds of a live client is its state, at the clock
+// it is live at. A client can be both in one moment - removed at clock c by one path (a
+// disconnecting tab whose frame echoed another reader's clients, an expiry) and announcing
+// itself again at c+1 before the relay has sent the removal. Sent at c+1, the removal stands at
+// the clock of the state the client is live at: every other process takes it, since it is no
+// older than what it holds, and drops the cursor of a reader who is in the room, while this
+// process takes that client off the list it relays and answers queries from (local), so nothing
+// but the reader's own next announcement brings it back. Its own entry, recorded by the
+// announcement, is overwritten by the removal in the same batch.
+//
+// Each test below puts alice's return in one of the windows between her removal's apply and its
+// send, and aReturnRacingARemoval is their one body: her removal must be dropped and her own
+// entry must carry her state.
+
+// returnRace is the wiring of one such test: where alice's return is put, and what the test
+// holds open across it.
+type returnRace struct {
+	// wire installs the hook that puts alice's return in the test's window, on task A, before
+	// its room sync runs. back announces her again - once, at the clock after the one she was
+	// taken away at - and the body fails the test when nothing ever called it.
+	wire func(service *Service, back func(aw *awareness.Awareness))
+	// ready runs once alice's cursor has reached both processes and before her removal is
+	// applied: a read a test holds open across the removal starts here. Nil when the test needs
+	// nothing there.
+	ready func(t *testing.T, pair processPair)
+	// window is the window alice's return lands in, as the test's failures name it.
+	window string
+}
+
+// aReturnRacingARemoval runs race: alice announces a cursor on task A, which reaches bob on task
+// B; a path of task A's own removes her client at the clock it stands at; and her own next frame
+// lands in the window race names. Her removal must reach neither process: task A's relay must
+// still list her, at the clock of her return, and bob must still hold her cursor.
+func aReturnRacingARemoval(t *testing.T, race returnRace) {
+	t.Helper()
+	pair := newSeededProcessPair(t, "First.\n\nSecond.\n")
+	returned := cursorOf("alice", 2)
+	state, err := json.Marshal(returned)
+	if err != nil {
+		t.Fatalf("encode alice's next state: %v", err)
+	}
+	var announced atomic.Int64
+	race.wire(pair.taskA, func(aw *awareness.Awareness) {
+		if announced.Add(1) > 1 {
+			return
+		}
+		meta, known := aw.Meta(aliceClient)
+		if !known {
+			t.Errorf("task A's room holds nothing of alice's client to announce her again from")
+			return
+		}
+		// Alice's next frame, at the clock after the one she was taken away at.
+		if err := aw.ApplyUpdate(awarenessStates(aliceClient, 1, meta.Clock+1, string(state)), "alice's next frame"); err != nil {
+			t.Errorf("announce alice again at clock %d: %v", meta.Clock+1, err)
+		}
+	})
+	runAwareness(t, pair.taskA)
+	runAwareness(t, pair.taskB)
+	alice := pair.openReader(t, pair.serverA, "alice")
+	bob := pair.openReader(t, pair.serverB, "bob")
+	setAwareness(t, alice, aliceClient, cursorOf("alice", 1))
+	requireAwareness(t, bob, holdsAwareness(aliceClient, cursorOf("alice", 1)), "alice's cursor on task A reaching bob on task B")
+	clock := awarenessClockOf(t, pair.taskA, pair.artifactID, aliceClient)
+	aw, resident := pair.taskA.srv.GetAwareness(pair.artifactID)
+	if !resident {
+		t.Fatal("task A's room is not resident, so nothing holds alice's client")
+	}
+	if race.ready != nil {
+		race.ready(t, pair)
+	}
+
+	// The removal another of the room's paths makes while alice's own tab is still open, as a
+	// disconnecting tab's echoed clients and an expiry do: applied to the room's awareness
+	// directly, the way those paths reach it.
+	if err := aw.ApplyUpdate(awarenessStates(aliceClient, 1, clock, "null"), "a removal of task A's own"); err != nil {
+		t.Fatalf("remove alice's client at clock %d: %v", clock, err)
+	}
+	if announced.Load() == 0 {
+		t.Fatalf("alice was never announced again %s, so the race this test is about never happened", race.window)
+	}
+	if !roomHoldsClient(pair.taskA, pair.artifactID, aliceClient) {
+		t.Fatal("task A's room does not hold alice's client after her return, so nothing here is tested")
+	}
+
+	if relayed, listed := relayedClientClock(pair.taskA, pair.artifactID, aliceClient); !listed {
+		t.Errorf("task A's relay no longer lists alice among the clients it relays, though she is in its room: its answer to another process's query leaves her out")
+	} else if relayed <= clock {
+		t.Errorf("task A's relay holds alice at clock %d, want the %d her return stands at", relayed, clock+1)
+	}
+	requireAwareness(t, bob, holdsAwareness(aliceClient, returned),
+		fmt.Sprintf("alice, back in task A's room %s, keeping her cursor on bob's reader on task B", race.window))
+}
+
+// removesAlice reports whether entries carry a removal of alice's awareness client.
+func removesAlice(entries []awarenessEntry) bool {
+	return slices.ContainsFunc(entries, func(entry awarenessEntry) bool {
+		return entry.client == aliceClient && entry.removed
+	})
+}
+
+// announcesAlice reports whether entries carry a state of alice's awareness client at clock or
+// later; a clock of 0 takes any of them.
+func announcesAlice(entries []awarenessEntry, clock uint64) bool {
+	return slices.ContainsFunc(entries, func(entry awarenessEntry) bool {
+		return entry.client == aliceClient && !entry.removed && entry.clock >= clock
+	})
+}
+
+// Alice is announced again from an observer ahead of the relay's own, so her return lands
+// between her removal's apply and the relay hearing of it every time.
+func TestAReaderInTheRoomAgainKeepsItsStateThoughARemovalRacesItsReturn(t *testing.T) {
+	aReturnRacingARemoval(t, returnRace{
+		window: "before the relay's own observer heard of her removal",
+		wire: func(service *Service, back func(aw *awareness.Awareness)) {
+			service.beforeAwarenessWatch = func(room string, aw *awareness.Awareness) {
+				aw.OnUpdate(func(event awareness.UpdateEvent) {
+					if slices.Contains(event.Removed, aliceClient) {
+						back(aw)
+					}
+				})
+			}
+		},
+	})
+}
+
+// A removal the relay built is settled against the room again as it is recorded (record): what
+// the observer decided and what the relay records are two moments, and a return of that client
+// recorded in between is the later state. Recorded over it, the removal takes the client off the
+// list this process relays and answers queries from and replaces the client's own entry in the
+// batch, so every other process drops the cursor of a reader who is in the room.
+//
+// Here alice is announced again from the window between the relay's observer deciding her
+// removal and recording it, so her return - and the record of it, which the announcement runs
+// through - lands in it every time.
+func TestAReaderBackBeforeItsRemovalIsRecordedKeepsItsState(t *testing.T) {
+	aReturnRacingARemoval(t, returnRace{
+		window: "between her removal being decided and being recorded",
+		wire: func(service *Service, back func(aw *awareness.Awareness)) {
+			service.beforeAwarenessRecord = func(room string, aw *awareness.Awareness, entries []awarenessEntry) {
+				if removesAlice(entries) {
+					back(aw)
+				}
+			}
+		},
+	})
+}
+
+// The answer to another process's query reads the states of this process's clients and records
+// them, and those are two moments too (answer): a client the room moved on from in between is
+// read at the clock it stood at then. Recorded as that clock, it would lower the clock the relay
+// holds for a client that is in the room at a later one - and then the removal that took her
+// away at the older clock, recorded after it, is no longer older than the list and is taken for
+// that state's own removal. Every other process accepts a null at the clock it holds a state at
+// (awareness/awareness.go:566-581), so the cursor of a reader who is in the room goes from all
+// of them.
+//
+// Here task A answers a query while alice is live at c, and the answer's record is held until
+// her return at c+1 and its record have run, with her removal at c recorded after both: the
+// clock the relay holds for her must stay c+1, so the removal is settled against the room and
+// dropped.
+func TestAReaderBackWhileAnOlderStateOfHersIsAnsweredToAQueryKeepsItsState(t *testing.T) {
+	// The bound every wait below runs on, taken here: roomWait reads the binary's deadline
+	// through t, and the hooks run on the goroutines of the room's own changes.
+	wait := roomWait(t)
+	var answering, holding, settling atomic.Bool
+	read := make(chan struct{})     // the answer has read alice at the clock she stood at
+	record := make(chan struct{})   // the answer may record what it read
+	recorded := make(chan struct{}) // the answer has recorded it
+	aReturnRacingARemoval(t, returnRace{
+		window: "with an answer to another process's query recorded over her older state before her removal",
+		wire: func(service *Service, back func(aw *awareness.Awareness)) {
+			service.beforeAwarenessAnswerRecord = func(room string, aw *awareness.Awareness, entries []awarenessEntry) {
+				if !answering.Load() || !announcesAlice(entries, 0) || !holding.CompareAndSwap(false, true) {
+					return
+				}
+				close(read)
+				<-record
+			}
+			service.beforeAwarenessRecord = func(room string, aw *awareness.Awareness, entries []awarenessEntry) {
+				// Her own socket's close removes her client again as the test ends; only the
+				// removal this test is about is held.
+				if !removesAlice(entries) || !settling.CompareAndSwap(false, true) {
+					return
+				}
+				// Alice's return, recorded first, and then the answer's record of the state
+				// she stood at before it. Her removal's own record follows both.
+				back(aw)
+				close(record)
+				select {
+				case <-recorded:
+				case <-time.After(wait):
+					t.Error("the answer to another process's query never recorded what it read")
+				}
+			}
+		},
+		ready: func(t *testing.T, pair processPair) {
+			answering.Store(true)
+			go func() {
+				defer close(recorded)
+				// The query another process sends when a reader of its own opens the document
+				// (query, received), answered from here while alice is still live at c.
+				pair.taskA.awarenessRelay.answer(pair.artifactID)
+			}()
+			select {
+			case <-read:
+			case <-time.After(wait):
+				t.Fatal("the answer to another process's query never read alice's state")
+			}
+		},
+	})
+}
+
+// The answer to another process's query is a read of the clients the relay's list held when it
+// read them, and a removal recorded between that read and its record moves the list past it:
+// alice is off the list, and her removal, at the clock she stood at, is in the room's pending
+// batch. Recorded as it stands, the answer's older state would put her back on the list this
+// process relays and answers queries from and replace her removal in the batch - and every
+// other process drops a state at the clock it already holds
+// (awareness/awareness.go:566-581), so the removal would reach none of them and alice's cursor
+// would sit in their rooms until it expired (awarenessExpiry, 30 s). Flushed before the answer
+// records, the removal does reach them - and the stale state is no safer behind it: every
+// process purges its room's tombstones as it applies what it is sent (received,
+// reclaimAwarenessSlots, a grace of one nanosecond), so her state at the older clock reaches a
+// room that holds nothing of her at all and is taken for a reader who has just joined, which
+// puts the cursor of a reader who is gone back until it expires. The list, too, would be left
+// holding her - the reader the next query would be answered with.
+//
+// anAnswerRecordedOverARemoval runs both: alice announces a cursor on task A, which reaches bob
+// on task B; an answer to another process's query reads her at the clock she stands at and is
+// held there; her removal is recorded, and sent before the answer records when flushed is true;
+// and the answer then records what it read. Her removal must stand: task A's relay must no
+// longer list her, and bob must lose her cursor well before it expires.
+func anAnswerRecordedOverARemoval(t *testing.T, flushed bool) {
+	t.Helper()
+	pair := newSeededProcessPair(t, "First.\n\nSecond.\n")
+	cursor := cursorOf("alice", 1)
+	// The bound the hook's wait runs on, taken here: roomWait reads the binary's deadline
+	// through t, and the hook runs on the goroutine that answers.
+	wait := roomWait(t)
+	var answering, holding atomic.Bool
+	read := make(chan struct{})     // the answer has read alice at the clock she stands at
+	record := make(chan struct{})   // her removal is recorded, so the answer may record its read
+	recorded := make(chan struct{}) // the answer has recorded it
+	pair.taskA.beforeAwarenessAnswerRecord = func(room string, aw *awareness.Awareness, entries []awarenessEntry) {
+		// Task B's own query is answered as bob opens the document; only the answer this test
+		// drives is held.
+		if !answering.Load() || !announcesAlice(entries, 0) || !holding.CompareAndSwap(false, true) {
+			return
+		}
+		close(read)
+		select {
+		case <-record:
+		case <-time.After(wait):
+			t.Error("alice's removal was never recorded while the answer's read was held")
+		}
+	}
+	runAwareness(t, pair.taskA)
+	runAwareness(t, pair.taskB)
+	alice := pair.openReader(t, pair.serverA, "alice")
+	bob := pair.openReader(t, pair.serverB, "bob")
+	setAwareness(t, alice, aliceClient, cursor)
+	requireAwareness(t, bob, holdsAwareness(aliceClient, cursor), "alice's cursor on task A reaching bob on task B")
+	clock := awarenessClockOf(t, pair.taskA, pair.artifactID, aliceClient)
+	aw, resident := pair.taskA.srv.GetAwareness(pair.artifactID)
+	if !resident {
+		t.Fatal("task A's room is not resident, so nothing holds alice's client")
+	}
+
+	// The query another process sends when a reader of its own opens the document (query,
+	// received), answered from here while alice is still live at the clock she announced.
+	answering.Store(true)
+	go func() {
+		defer close(recorded)
+		pair.taskA.awarenessRelay.answer(pair.artifactID)
+	}()
+	select {
+	case <-read:
+	case <-time.After(wait):
+		t.Fatal("the answer to another process's query never read alice's state")
+	}
+
+	// Alice leaves, at the clock she stands at: the room's own removal, which is recorded while
+	// the answer's read waits.
+	if err := aw.ApplyUpdate(awarenessStates(aliceClient, 1, clock, "null"), "a removal of task A's own"); err != nil {
+		t.Fatalf("remove alice's client at clock %d: %v", clock, err)
+	}
+	if roomHoldsClient(pair.taskA, pair.artifactID, aliceClient) {
+		t.Fatal("task A's room still holds alice's client after her removal, so nothing here is tested")
+	}
+	if flushed {
+		requireAwareness(t, bob, lacksAwareness(aliceClient),
+			"alice leaving task A reaching bob on task B before the answer records the older state it read of her")
+	}
+	close(record)
+	<-recorded
+
+	if relayed, listed := relayedClientClock(pair.taskA, pair.artifactID, aliceClient); listed {
+		t.Errorf("task A's relay lists alice at clock %d among the clients it relays, though she left its room: its next answer to another process's query puts her cursor back",
+			relayed)
+	}
+	requireAwareness(t, bob, lacksAwareness(aliceClient),
+		"alice leaving task A, her removal recorded while an answer to another process's query held an older state of her, removing her from bob's reader on task B")
+}
+
+// The answer records the state it read after the removal, and before the batch carrying the
+// removal is sent: the removal is what that batch must carry.
+func TestAReaderLeavingWhileAnOlderStateOfHersIsAnsweredToAQueryStillLeaves(t *testing.T) {
+	anAnswerRecordedOverARemoval(t, false)
+}
+
+// The same with her removal already sent, which the other processes have taken and purged her
+// tombstone behind (received, reclaimAwarenessSlots): the stale state the answer records then
+// would reach rooms that hold nothing of her and be taken for a reader who has just joined, so
+// it must not be sent at all, and task A's own list must be left without a reader who is gone.
+func TestAReaderLeavingBeforeAnOlderStateOfHersIsAnsweredToAQueryIsNotRelisted(t *testing.T) {
+	anAnswerRecordedOverARemoval(t, true)
+}
+
+// A heartbeat of a client and a removal of that same client - its own entry one clock later,
+// and the null that takes it away - can be decided in one order and recorded in the other:
+// deciding a change and recording it are two moments on the relay's own path too (touched,
+// record). Either order must leave the departed reader gone from every process, and the two
+// are the two tests below, with aHeartbeatRacingARemoval as their one body.
+//
+// Recorded after the heartbeat, the removal is older than the clock the list holds, which is
+// what a client that came back looks like, and the clocks alone do not tell the two apart.
+// Dropped as a return, the departure is never sent at all: the heartbeat left a nil in the
+// batch, and the flush reads a room that holds nothing of the client and drops it (resolve), so
+// the departed reader's cursor sits in the other processes' rooms until it expires
+// (awarenessExpiry, 30 s). Settled against the room as it is recorded, the removal is sent at
+// the clock the list holds, which every process takes.
+//
+// Recorded after the removal, the heartbeat is a state of a client the list no longer holds,
+// which puts her back on it and leaves a nil in the batch over her removal - and that nil is
+// the one the flush drops, so the removal reaches no other process at all and task A answers
+// the next query with a reader who is gone. Settled against the room as it is recorded, the
+// heartbeat is dropped whole and her removal stands (record).
+//
+// A purge is what leaves a removal standing at the clock the relay's list holds rather than at
+// her tombstone's: it frees the departing client's entry before the relay's snapshot reads it
+// (reclaimAwarenessSlots runs after every inbound apply and after every other removal of the
+// room's own), so the snapshot finds nothing of her. It is what leaves the removal older than
+// the heartbeat in the first order, and it is put ahead of the relay's own observer here, so it
+// lands in that window every time.
+
+// aHeartbeatRacingARemoval runs one of those two orders: alice announces a cursor on task A,
+// which reaches bob on task B; her heartbeat at the next clock and a removal of task A's own at
+// that same clock are applied, one on a goroutine of its own; and the record of one is held
+// until the other has run - her removal's when removalLast, her heartbeat's otherwise. Her
+// removal must stand either way: task A's relay must no longer list her, and bob must lose her
+// cursor well before it would expire.
+func aHeartbeatRacingARemoval(t *testing.T, removalLast bool) {
+	t.Helper()
+	pair := newSeededProcessPair(t, "First.\n\nSecond.\n")
+	cursor := cursorOf("alice", 1)
+	state, err := json.Marshal(cursor)
+	if err != nil {
+		t.Fatalf("encode alice's state: %v", err)
+	}
+	// The bound the hooks' waits run on, taken here: roomWait reads the binary's deadline
+	// through t, and the hooks run on the goroutines of the room's own changes.
+	wait := roomWait(t)
+	var purged, removals atomic.Int64
+	var beating atomic.Bool
+	var heartbeatClock atomic.Uint64
+	held := make(chan struct{})     // the heartbeat has been decided and its record waits
+	decided := make(chan struct{})  // the removal has been decided, at the clock before it
+	gone := make(chan struct{})     // the removal has been recorded, so the heartbeat may record
+	recorded := make(chan struct{}) // the heartbeat's apply has returned, its record run
+	pair.taskA.beforeAwarenessWatch = func(room string, aw *awareness.Awareness) {
+		aw.OnUpdate(func(event awareness.UpdateEvent) {
+			if !slices.Contains(event.Removed, aliceClient) {
+				return
+			}
+			purged.Add(1)
+			reclaimAwarenessSlots(room, aw)
+		})
+	}
+	// Her own socket's close removes her client again as the test ends, and a frame of the room
+	// can name her once more; only the heartbeat and the removal this test is about are held.
+	pair.taskA.beforeAwarenessRecord = func(room string, aw *awareness.Awareness, entries []awarenessEntry) {
+		switch beat := heartbeatClock.Load(); {
+		case removesAlice(entries):
+			if removals.Add(1) > 1 || !removalLast {
+				return
+			}
+			close(decided)
+			select {
+			case <-recorded:
+			case <-time.After(wait):
+				t.Error("alice's heartbeat was never recorded, so her removal was never recorded late")
+			}
+		case beat != 0 && announcesAlice(entries, beat) && beating.CompareAndSwap(false, true):
+			close(held)
+			// What the removal's own goroutine must reach before this record runs: the removal
+			// recorded where the heartbeat is the one recorded last, and the removal decided -
+			// at the clock before the heartbeat - where it is not.
+			waking, missing := gone, "alice's removal was never recorded while her heartbeat's record waited"
+			if removalLast {
+				waking, missing = decided, "alice's removal was never decided while her heartbeat's record waited"
+			}
+			select {
+			case <-waking:
+			case <-time.After(wait):
+				t.Error(missing)
+			}
+		}
+	}
+	runAwareness(t, pair.taskA)
+	runAwareness(t, pair.taskB)
+	alice := pair.openReader(t, pair.serverA, "alice")
+	bob := pair.openReader(t, pair.serverB, "bob")
+	setAwareness(t, alice, aliceClient, cursor)
+	requireAwareness(t, bob, holdsAwareness(aliceClient, cursor), "alice's cursor on task A reaching bob on task B")
+	clock := awarenessClockOf(t, pair.taskA, pair.artifactID, aliceClient)
+	aw, resident := pair.taskA.srv.GetAwareness(pair.artifactID)
+	if !resident {
+		t.Fatal("task A's room is not resident, so nothing holds alice's client")
+	}
+
+	// Alice's heartbeat: the state she already stands at, one clock later, as a browser's
+	// provider re-announces every 15 s. Its record waits where the relay has read the clock the
+	// room holds her at and not yet recorded it.
+	heartbeatClock.Store(clock + 1)
+	go func() {
+		defer close(recorded)
+		if err := aw.ApplyUpdate(awarenessStates(aliceClient, 1, clock+1, string(state)), "alice's heartbeat"); err != nil {
+			t.Errorf("announce alice's heartbeat at clock %d: %v", clock+1, err)
+		}
+	}()
+	select {
+	case <-held:
+	case <-time.After(wait):
+		t.Fatal("alice's heartbeat never reached the relay's record")
+	}
+
+	// Alice leaves, at the clock her heartbeat stands at: the room's own removal, applied on
+	// this goroutine, so its record - and, where her heartbeat's record is the one held, the
+	// release of it - has run before this returns.
+	if err := aw.ApplyUpdate(awarenessStates(aliceClient, 1, clock+1, "null"), "a removal of task A's own"); err != nil {
+		t.Fatalf("remove alice's client at clock %d: %v", clock+1, err)
+	}
+	if removals.Load() == 0 {
+		t.Fatal("alice's removal never reached the relay's record, so the race this test is about never happened")
+	}
+	if !removalLast {
+		close(gone)
+	}
+	<-recorded
+	if purged.Load() == 0 {
+		t.Fatal("no purge ran ahead of the relay's observer on task A's room, so the race this test is about never happened")
+	}
+	if roomHoldsClient(pair.taskA, pair.artifactID, aliceClient) {
+		t.Fatal("task A's room still holds alice's client after her removal, so nothing here is tested")
+	}
+
+	if relayed, listed := relayedClientClock(pair.taskA, pair.artifactID, aliceClient); listed {
+		t.Errorf("task A's relay lists alice at clock %d among the clients it relays, though she left its room: its next answer to another process's query puts her cursor back",
+			relayed)
+	}
+	// Her removal, sent, reaches bob within a coalesce window; one dropped or replaced in the
+	// batch reaches him never, and his room holds her cursor until it expires (awarenessExpiry,
+	// 30 s), which is the failure these tests are about - so the wait ends well short of that
+	// expiry, whatever roomWait allows.
+	order := "her heartbeat recorded after her removal"
+	if removalLast {
+		order = "her removal recorded after her heartbeat"
+	}
+	prompt := min(wait, awarenessExpiry/3)
+	if err := bob.WaitForAwareness(prompt, lacksAwareness(aliceClient)); err != nil {
+		t.Fatalf("alice leaving task A over her own heartbeat, %s, did not remove her from bob's reader on task B within %v: %v",
+			order, prompt, err)
+	}
+}
+
+// The removal recorded last: her heartbeat is decided and its record held, her removal is
+// decided at the clock the relay's list still holds her at, her heartbeat records, and her
+// removal records over it.
+func TestAReaderLeavingOverItsOwnHeartbeatStillLeavesTheOtherProcess(t *testing.T) {
+	aHeartbeatRacingARemoval(t, true)
+}
+
+// The mirror of it, the same pair of changes in the other order: alice stands on the relay's
+// list at c, her heartbeat at c+1 is decided and its record held there, her removal at c+1 is
+// recorded first - which takes her off the list this process relays and answers queries from
+// and puts her removal in the room's pending batch - and her heartbeat's record follows it.
+func TestAReadersHeartbeatRecordedOverItsOwnRemovalStillLeavesTheOtherProcess(t *testing.T) {
+	aHeartbeatRacingARemoval(t, false)
+}
+
+// What a flush sends is what the other processes hold, so the relay's list must stand where the
+// flush left it. Deciding what to send and sending it are two moments as well: the flush reads
+// each pending client's state from the room as it stands then (resolve), which can be a clock
+// later than any record of the list's has seen - a heartbeat applied while the batch waited,
+// its own record not yet run. A removal of that client built from the list, as one is whenever
+// a purge has freed her tombstone before the relay's snapshot reads it (touched), is then older
+// than the state every other process holds, which drops it
+// (awareness/awareness.go:566-581) and keeps the departed reader's cursor until it expires
+// (awarenessExpiry, 30 s).
+//
+// Alice beats twice here. The first beat's record is held until the second has been decided, so
+// the batch the first arms is sent with the clock of the second, which no record has put on the
+// list and none ever will: her removal, her tombstone purged before the relay reads it, is
+// recorded while the second beat's record still waits, and that record, settled against a room
+// that holds nothing of her, is dropped whole. Her removal is the last word on her, and it has
+// to stand at the clock the flush sent her at.
+//
+// It drives three records where the two orders above drive two - two beats and a removal, with
+// a send between them - so it keeps a body of its own.
+func TestAReaderLeavingAfterAFlushSentALaterClockStillLeavesTheOtherProcess(t *testing.T) {
+	pair := newSeededProcessPair(t, "First.\n\nSecond.\n")
+	cursor := cursorOf("alice", 1)
+	state, err := json.Marshal(cursor)
+	if err != nil {
+		t.Fatalf("encode alice's state: %v", err)
+	}
+	// The bound the hooks' waits run on, taken here: roomWait reads the binary's deadline
+	// through t, and the hooks run on the goroutines of the room's own changes.
+	wait := roomWait(t)
+	var purged atomic.Int64
+	var arming, beating atomic.Bool
+	var firstBeat, secondBeat atomic.Uint64
+	armed := make(chan struct{})    // the first beat has been decided and its record waits
+	beaten := make(chan struct{})   // the second beat has been decided and its record waits
+	sending := make(chan struct{})  // the first beat may record, which arms the batch's send
+	gone := make(chan struct{})     // her removal has been recorded, so the second may record
+	recorded := make(chan struct{}) // the second beat's apply has returned, its record run
+	pair.taskA.beforeAwarenessWatch = func(room string, aw *awareness.Awareness) {
+		aw.OnUpdate(func(event awareness.UpdateEvent) {
+			if !slices.Contains(event.Removed, aliceClient) {
+				return
+			}
+			purged.Add(1)
+			reclaimAwarenessSlots(room, aw)
+		})
+	}
+	// Her own socket's close removes her client again as the test ends, and a frame of the room
+	// can name her once more; only the two beats this test is about are held. The second is
+	// matched first: its clock is the later, and the first beat's record has already run by the
+	// time that clock is stored.
+	pair.taskA.beforeAwarenessRecord = func(room string, aw *awareness.Awareness, entries []awarenessEntry) {
+		switch second, first := secondBeat.Load(), firstBeat.Load(); {
+		case second != 0 && announcesAlice(entries, second) && beating.CompareAndSwap(false, true):
+			close(beaten)
+			select {
+			case <-gone:
+			case <-time.After(wait):
+				t.Error("alice's removal was never recorded while her second heartbeat's record waited")
+			}
+		case first != 0 && announcesAlice(entries, first) && arming.CompareAndSwap(false, true):
+			close(armed)
+			select {
+			case <-sending:
+			case <-time.After(wait):
+				t.Error("alice's second heartbeat was never decided while her first's record waited")
+			}
+		}
+	}
+	runAwareness(t, pair.taskA)
+	handledB := runAwareness(t, pair.taskB)
+	alice := pair.openReader(t, pair.serverA, "alice")
+	bob := pair.openReader(t, pair.serverB, "bob")
+	setAwareness(t, alice, aliceClient, cursor)
+	requireAwareness(t, bob, holdsAwareness(aliceClient, cursor), "alice's cursor on task A reaching bob on task B")
+	clock := awarenessClockOf(t, pair.taskA, pair.artifactID, aliceClient)
+	aw, resident := pair.taskA.srv.GetAwareness(pair.artifactID)
+	if !resident {
+		t.Fatal("task A's room is not resident, so nothing holds alice's client")
+	}
+
+	// Alice's first heartbeat: the state she already stands at, one clock later, as a browser's
+	// provider re-announces every 15 s. Its record is held, so the batch it puts her nil in -
+	// and the send that batch is armed for - waits for her second beat.
+	firstBeat.Store(clock + 1)
+	go func() {
+		if err := aw.ApplyUpdate(awarenessStates(aliceClient, 1, clock+1, string(state)), "alice's first heartbeat"); err != nil {
+			t.Errorf("announce alice's heartbeat at clock %d: %v", clock+1, err)
+		}
+	}()
+	select {
+	case <-armed:
+	case <-time.After(wait):
+		t.Fatal("alice's first heartbeat never reached the relay's record")
+	}
+
+	// Her second, decided while the first's record waits: the clock the flush below reads her
+	// at, and the one the relay's list would be left behind by.
+	secondBeat.Store(clock + 2)
+	go func() {
+		defer close(recorded)
+		if err := aw.ApplyUpdate(awarenessStates(aliceClient, 1, clock+2, string(state)), "alice's second heartbeat"); err != nil {
+			t.Errorf("announce alice's heartbeat at clock %d: %v", clock+2, err)
+		}
+	}()
+	select {
+	case <-beaten:
+	case <-time.After(wait):
+		t.Fatal("alice's second heartbeat never reached the relay's record")
+	}
+
+	// The first beat's record, which arms the batch's send; the send a coalesce window later
+	// reads her at the clock of her second beat and task B takes her at it.
+	close(sending)
+	if relayed := relayedStateClock(t, handledB, pair.artifactID, aliceClient, clock+2); relayed != clock+2 {
+		t.Fatalf("the flush sent alice's state at clock %d, want the %d her second heartbeat stands at: the race this test is about never happened",
+			relayed, clock+2)
+	}
+
+	// Alice leaves, at the clock both her second beat and task B's room hold her at: the room's
+	// own removal, with the tombstone it leaves purged before the relay reads it, so what the
+	// removal stands at is the clock the relay's list holds for her.
+	if err := aw.ApplyUpdate(awarenessStates(aliceClient, 1, clock+2, "null"), "a removal of task A's own"); err != nil {
+		t.Fatalf("remove alice's client at clock %d: %v", clock+2, err)
+	}
+	if purged.Load() == 0 {
+		t.Fatal("no purge ran ahead of the relay's observer on task A's room, so the race this test is about never happened")
+	}
+	close(gone)
+	<-recorded
+	if roomHoldsClient(pair.taskA, pair.artifactID, aliceClient) {
+		t.Fatal("task A's room still holds alice's client after her removal, so nothing here is tested")
+	}
+
+	if relayed, listed := relayedClientClock(pair.taskA, pair.artifactID, aliceClient); listed {
+		t.Errorf("task A's relay lists alice at clock %d among the clients it relays, though she left its room: its next answer to another process's query puts her cursor back",
+			relayed)
+	}
+	// Her removal, at the clock the flush sent her at, reaches bob within a coalesce window;
+	// one below it he drops, and his room holds her cursor until it expires (awarenessExpiry,
+	// 30 s), which is the failure this test is about - so the wait ends well short of that
+	// expiry, whatever roomWait allows.
+	prompt := min(wait, awarenessExpiry/3)
+	if err := bob.WaitForAwareness(prompt, lacksAwareness(aliceClient)); err != nil {
+		t.Fatalf("alice leaving task A at the clock a flush had just sent her state at did not remove her from bob's reader on task B within %v: %v",
+			prompt, err)
+	}
+}
+
+// The relay reads a room's awareness while it holds its own lock (record,
+// awarenessClientStanding), and a room's awareness tells the relay what each change touched -
+// which takes that same lock - from inside ygo's own write paths. The one order is safe only
+// while ygo fires its observers with its awareness released: fired under it, an observer would
+// take the relay's lock behind ygo's where the relay takes ygo's behind its own, and a removal
+// recorded while another goroutine wrote the room would deadlock it. ygo keeps that lock
+// private, so nothing of this package can hold it other than by being inside one of these
+// calls, and an observer is the one place the order can invert.
+//
+// Each write below runs with an observer that reads the awareness every way the relay does and
+// then waits for a write of another goroutine's, queued from inside the observer itself. An
+// awareness still locked when its observer runs never returns from those reads; one fired under
+// the read side of its lock alone (sync.RWMutex, awareness/awareness.go:135) returns from them
+// only while no writer is queued - Go's RWMutex holds a further read lock behind a waiting
+// writer - and never from the wait, since that queued writer is what a room's record would
+// deadlock against. Either hang leaves the write itself unfinished, which is the one deadline
+// here: the observer waits without one of its own, since a deadline of the observer's would
+// fire on the write's goroutine after the subtest it belongs to had already failed and ended.
+func TestARoomsAwarenessFiresItsObserversWithItsLockReleased(t *testing.T) {
+	const cursor = `{"user":{"name":"alice"}}`
+	live := func(aw *awareness.Awareness) {
+		if err := aw.ApplyUpdate(awarenessStates(aliceClient, 1, 1, cursor), "a peer of this process"); err != nil {
+			t.Fatalf("announce alice's client: %v", err)
+		}
+	}
+	writes := []struct {
+		what  string
+		seed  func(aw *awareness.Awareness)
+		write func(aw *awareness.Awareness) error
+	}{
+		{what: "a client's state", write: func(aw *awareness.Awareness) error {
+			return aw.ApplyUpdate(awarenessStates(aliceClient, 1, 1, cursor), "a peer of this process")
+		}},
+		{what: "a client's heartbeat", seed: live, write: func(aw *awareness.Awareness) error {
+			return aw.ApplyUpdate(awarenessStates(aliceClient, 1, 2, cursor), "a peer of this process")
+		}},
+		{what: "a client's removal", seed: live, write: func(aw *awareness.Awareness) error {
+			return aw.ApplyUpdate(awarenessStates(aliceClient, 1, 2, "null"), "a peer of this process")
+		}},
+		{what: "the local client's own state", write: func(aw *awareness.Awareness) error {
+			aw.SetLocalState(cursorOf("bob", 1))
+			return nil
+		}},
+		{what: "the local client's heartbeat", seed: func(aw *awareness.Awareness) { aw.SetLocalState(cursorOf("bob", 1)) },
+			write: func(aw *awareness.Awareness) error {
+				aw.Heartbeat()
+				return nil
+			}},
+		{what: "an expiry", seed: live, write: func(aw *awareness.Awareness) error {
+			aw.RemoveExpired(time.Nanosecond)
+			return nil
+		}},
+	}
+	for _, write := range writes {
+		t.Run(write.what, func(t *testing.T) {
+			aw := awareness.New(bobClient)
+			if write.seed != nil {
+				write.seed(aw)
+			}
+			// The bound the subtest's one deadline runs on, taken here: roomWait reads the
+			// binary's deadline through t, and the observer below runs on the write's
+			// goroutine.
+			wait := roomWait(t)
+			var fired atomic.Int64
+			// The one write the observer below queues, which its own firing - on the goroutine
+			// that write runs on - must not queue again.
+			var queueing atomic.Bool
+			aw.OnUpdate(func(event awareness.UpdateEvent) {
+				fired.Add(1)
+				var queued chan struct{}
+				if queueing.CompareAndSwap(false, true) {
+					queued = make(chan struct{})
+					// A write of this same awareness, from another goroutine: it takes the
+					// write side of the awareness's lock, which neither side held by this
+					// observer ever lets go of. It is the local client's own state, the one
+					// write that touches no client a subtest reads.
+					go func() {
+						defer close(queued)
+						aw.SetLocalState(cursorOf("bob", 2))
+					}()
+				}
+				// Every read the relay makes from inside an observer: the clock a change
+				// stands at (touched), what the room holds of one client (record,
+				// awarenessClientStanding), and the states a query is answered from
+				// (localClients).
+				aw.Meta(aliceClient)
+				aw.EncodeUpdate([]uint64{aliceClient})
+				aw.GetStates()
+				if queued != nil {
+					<-queued
+				}
+			})
+			done := make(chan error, 1)
+			go func() { done <- write.write(aw) }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("apply %s: %v", write.what, err)
+				}
+			case <-time.After(wait):
+				t.Fatalf("a room's awareness was still locked while its observer ran: reading it from inside the observer %s fires, or the write of another goroutine's queued there, did not finish within %v",
+					write.what, wait)
+			}
+			if fired.Load() == 0 {
+				t.Fatalf("%s fired no update observer, so nothing here is tested", write.what)
+			}
+			if !queueing.Load() {
+				t.Fatalf("no write of another goroutine's was queued from inside the observer %s fires, so the lock it would wait on is untested", write.what)
+			}
+		})
+	}
+}
+
+// relayedClientClock is the clock service's relay holds for client among room's clients it
+// relays to the other processes (awarenessRelay.local), and whether it lists the client at all.
+func relayedClientClock(service *Service, room string, client uint64) (uint64, bool) {
+	relay := service.awarenessRelay
+	relay.mu.Lock()
+	defer relay.mu.Unlock()
+	clock, listed := relay.local[room][client]
+	return clock, listed
+}
+
+// awarenessClockOf is the clock service's resident room of artifactID holds client's state at.
+func awarenessClockOf(t *testing.T, service *Service, artifactID string, client uint64) uint64 {
+	t.Helper()
+	aw, resident := service.srv.GetAwareness(artifactID)
+	if !resident {
+		t.Fatalf("no resident room of %s to read client %d's clock from", artifactID, client)
+	}
+	state, held := aw.GetStates()[client]
+	if !held {
+		t.Fatalf("the resident room of %s holds no state of client %d", artifactID, client)
+	}
+	return state.Clock
+}
+
+// relayedRemovalClock is the clock of the removal of client that reaches handled for artifactID,
+// the first one relayed within roomWait.
+func relayedRemovalClock(t *testing.T, handled <-chan awarenessMessage, artifactID string, client uint64) uint64 {
+	t.Helper()
+	return relayedEntryClock(t, handled, artifactID, client, fmt.Sprintf("removal of client %d", client),
+		func(entry awarenessEntry) bool { return entry.removed })
+}
+
+// relayedStateClock is the clock of the first state of client at clock or later that reaches
+// handled for artifactID, within roomWait.
+func relayedStateClock(t *testing.T, handled <-chan awarenessMessage, artifactID string, client, clock uint64) uint64 {
+	t.Helper()
+	return relayedEntryClock(t, handled, artifactID, client, fmt.Sprintf("state of client %d at clock %d or later", client, clock),
+		func(entry awarenessEntry) bool { return !entry.removed && entry.clock >= clock })
+}
+
+// relayedEntryClock is the clock of the first entry of client that reaches handled for
+// artifactID and that takes accepts, within roomWait; what names the entry the test waited for.
+func relayedEntryClock(t *testing.T, handled <-chan awarenessMessage, artifactID string, client uint64, what string, takes func(awarenessEntry) bool) uint64 {
+	t.Helper()
+	wait := roomWait(t)
+	deadline := time.After(wait)
+	for {
+		select {
+		case message := <-handled:
+			if message.Room != artifactID || message.Query {
+				continue
+			}
+			update, err := base64.StdEncoding.DecodeString(message.Data)
+			if err != nil {
+				t.Fatalf("decode a relayed awareness update: %v", err)
+			}
+			entries, err := decodeAwarenessEntries(update)
+			if err != nil {
+				t.Fatalf("read a relayed awareness update: %v", err)
+			}
+			for _, entry := range entries {
+				if entry.client == client && takes(entry) {
+					return entry.clock
+				}
+			}
+		case <-deadline:
+			t.Fatalf("no %s was relayed for %s within %v", what, artifactID, wait)
+		}
+	}
+}

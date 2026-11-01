@@ -1097,8 +1097,9 @@ the one headless Markdown engine cached per schema version; the connection carri
 cannot make it editable: `ProofDocument` shows the line only for a read-only admission that came
 while the issue was open (`closedAdmission` records whether it was closed then), while the issue
 is open and the socket is connected. The admission and the connection decide the line, not the
-close or the reopen: each drops the socket only on the server process that served it
-(`SetIssueClosed`), and where it does, the reconnect's admission decides again. Typed blocks use
+close or the reopen. A close drops the socket on every server process that holds a room of the
+document. Migration `0158`'s trigger announces the change, and each process closes its rooms of
+the issue (`issueOpenChanged`). The reconnect's admission decides again. Typed blocks use
 `:::name{#block-id key="value"}` container directives. The server owns their schema and version,
 while Dispatch owns host rendering for `render: "host"` types; the SPA must not invent node schemas
 or parse a second directive grammar.

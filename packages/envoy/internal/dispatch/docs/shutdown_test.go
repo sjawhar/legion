@@ -40,7 +40,9 @@ func TestShutdownSettlesARoomWithAnEditorConnectedBeforeClosingIt(t *testing.T) 
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
 	editor := connectPeer(t, httpServer.URL, artifactID, "alice")
-	waitForPeerDocument(t, editor, "before\n")
+	if err := editor.WaitForText(peerMarkdown, "before\n", 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 	typeOver(t, editor, "before", "after")
 	waitForSettlementOwed(t, service, artifactID)
 
@@ -64,6 +66,41 @@ func TestShutdownSettlesARoomWithAnEditorConnectedBeforeClosingIt(t *testing.T) 
 	}
 }
 
+// An agent's write to a document no room holds loads no room (audit finding 11); it arms the
+// document's settlement, whose timer loads the room when it fires. A deploy that stops the process
+// inside that delay stops the timer, and Shutdown's own settlement of the document loads the room
+// in its place, so the write is versioned before the process exits rather than left to resume.
+func TestShutdownSettlesTheDocumentAColdWriteLeftOwing(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	service := newShutdownTestService(t, database, nil)
+	seedServiceText(t, service, artifactID, "before")
+	settleCurrentGeneration(t, service, artifactID)
+	closeDocumentRoom(t, service, artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, alice, nil); err != nil {
+		t.Fatalf("apply the cold write: %v", err)
+	}
+	if service.roomHeld(artifactID) {
+		t.Fatal("the cold write loaded a room of the document")
+	}
+	waitForSettlementOwed(t, service, artifactID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := service.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown with a cold write's settlement owed: %v", err)
+	}
+	if number, markdown, authors := latestDocumentVersion(t, database, artifactID); number != 2 || markdown != "after\n" ||
+		len(authors) != 1 || authors[0] != alice {
+		t.Fatalf("the document's latest version is %d holding %q by %v, want version 2 holding the cold write, %q, credited to alice",
+			number, markdown, authors, "after\n")
+	}
+	if owed, err := settlementPending(context.Background(), database.Pool, artifactID); err != nil || owed {
+		t.Fatalf("the document still owes its settlement (%v) after the shutdown that ran it", err)
+	}
+}
+
 // A browser leaving a room settles what it was owed at once (settleLastPeer), on ygo's disconnect
 // goroutine, in place of the timer it stops. Shutdown joins that settlement as it joins a timer's:
 // it reports which documents settled, and stops ygo, only once the settlement has returned, and the
@@ -79,7 +116,9 @@ func TestShutdownJoinsTheSettlementItsLastBrowserLeavingStarted(t *testing.T) {
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
 	browser := connectPeer(t, httpServer.URL, artifactID, "alice")
-	waitForPeerDocument(t, browser, "before\n")
+	if err := browser.WaitForText(peerMarkdown, "before\n", 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 	// A block with no id arms the room's settlement, which has to stamp one.
 	editLiveTree(t, service, artifactID, appendUnidentifiedBlocks(t, "added"))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -198,9 +237,9 @@ func TestShutdownSettlesEveryOtherRoomWhileOneRoomsQueuedAppendIsHeld(t *testing
 func TestShutdownSettlesABurstOfAppendsIncludingOneRecordedAfterItsScan(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
-	first := &appendGate{entered: make(chan struct{}), release: make(chan struct{})}
-	second := &appendGate{entered: make(chan struct{}), release: make(chan struct{})}
-	appends := &burstStore{VersionedStore: NewPgVersioned(database), room: artifactID, gates: []*appendGate{first, second}}
+	first := &burstGate{entered: make(chan struct{}), release: make(chan struct{})}
+	second := &burstGate{entered: make(chan struct{}), release: make(chan struct{})}
+	appends := &burstStore{VersionedStore: NewPgVersioned(database), room: artifactID, gates: []*burstGate{first, second}}
 	t.Cleanup(func() {
 		first.let()
 		second.let()
@@ -211,7 +250,9 @@ func TestShutdownSettlesABurstOfAppendsIncludingOneRecordedAfterItsScan(t *testi
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
 	editor := connectPeer(t, httpServer.URL, artifactID, "alice")
-	waitForPeerDocument(t, editor, "before\n")
+	if err := editor.WaitForText(peerMarkdown, "before\n", 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 
 	appends.armed.Store(true)
 	editLiveTree(t, service, artifactID, replaceRun("before", "first"))
@@ -220,7 +261,9 @@ func TestShutdownSettlesABurstOfAppendsIncludingOneRecordedAfterItsScan(t *testi
 	case <-time.After(10 * time.Second):
 		t.Fatal("the first append never reached the store")
 	}
-	waitForPeerDocument(t, editor, "first\n")
+	if err := editor.WaitForText(peerMarkdown, "first\n", 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancelShutdown()
@@ -384,24 +427,6 @@ func newShutdownTestService(t *testing.T, database *store.Store, appends Version
 	return service
 }
 
-// waitForPeerDocument asks the room for its document until the peer's copy renders want.
-func waitForPeerDocument(t *testing.T, peer *docstest.Peer, want string) {
-	t.Helper()
-	deadline := time.After(10 * time.Second)
-	for peerMarkdown(peer) != want {
-		if err := peer.AskForDocument(); err != nil {
-			t.Fatalf("ask the room for the document: %v", err)
-		}
-		select {
-		case <-peer.Answers:
-		case <-peer.Ended:
-			t.Fatal("the peer's connection closed before the room sent the document")
-		case <-deadline:
-			t.Fatalf("the peer's copy renders %q, want %q", peerMarkdown(peer), want)
-		}
-	}
-}
-
 // peerMarkdown renders the peer's copy of the document, read under its lock while the room's
 // updates apply, or "" while the copy holds no document it can render.
 func peerMarkdown(peer *docstest.Peer) string {
@@ -481,23 +506,23 @@ type heldStore struct {
 
 func (s *heldStore) let() { s.once.Do(func() { close(s.release) }) }
 
-func (s *heldStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+func (s *heldStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
 	if room == s.room && s.armed.CompareAndSwap(true, false) {
 		close(s.entered)
 		<-s.release
 	}
-	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
+	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit, browser)
 }
 
-// appendGate pairs the channel a burstStore closes once an append reaches it with the channel a
+// burstGate pairs the channel a burstStore closes once an append reaches it with the channel a
 // test closes, at most once, to let that append complete.
-type appendGate struct {
+type burstGate struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
 }
 
-func (g *appendGate) let() { g.once.Do(func() { close(g.release) }) }
+func (g *burstGate) let() { g.once.Do(func() { close(g.release) }) }
 
 // burstStore holds a room's durable appends one at a time, in the order they reach the store,
 // against the gates a test supplies - standing in for a burst of writes that keeps landing while
@@ -513,14 +538,14 @@ type burstStore struct {
 	room  string
 	armed atomic.Bool
 	mu    sync.Mutex
-	gates []*appendGate
+	gates []*burstGate
 	next  int
 }
 
-func (s *burstStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+func (s *burstStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
 	if room == s.room && s.armed.Load() {
 		s.mu.Lock()
-		var gate *appendGate
+		var gate *burstGate
 		if s.next < len(s.gates) {
 			gate = s.gates[s.next]
 			s.next++
@@ -531,5 +556,5 @@ func (s *burstStore) AppendUpdateWithCredit(ctx context.Context, room string, up
 			<-gate.release
 		}
 	}
-	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
+	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit, browser)
 }

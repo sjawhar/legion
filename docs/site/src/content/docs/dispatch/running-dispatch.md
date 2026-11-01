@@ -386,31 +386,56 @@ one. Three things have to be true first; Dispatch checks the first for you.
   rather than rolling it (Kubernetes `strategy: Recreate`), until a single-publisher lock lands.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
-to 64 connections for requests, up to 13 for the periodic work it runs once across the servers, up
-to 4 for loading documents, one for the health check, one for the events outbox, and up to 2 for
-reading where the event log is safe to stream from (the event horizon), and it holds
-five more open for as long as it runs: one each for the four things that wait on Postgres
-notifications, which are delivery, the live socket's event-feed relay, closing a document session
-another server has written to, and waking its background work when the rows that work reads
-change, and one for its entry in the list of running servers, which it renews every five seconds.
-That is 90 connections for one server at its ceiling, and twice that for two, past a default
-Postgres's limit of 100. Check the database's connection limit before you start the second server:
-a limit sized for one server, with whatever else uses that database counted in, is the thing that
-runs out.
+to 64 connections for requests, up to 14 for the periodic work it runs once across the servers,
+up to 4 for loading documents, one for the health check, one for the events outbox, up to 2 for
+reading where the event log is safe to stream from (the event horizon), and one for its entry in
+the list of running servers, which it renews every five seconds. It also holds up to four more
+open for as long as it runs. Three of them wait on Postgres notifications: one for delivery, one
+for the live socket's event-feed relay, and one that the server shares for everything else,
+its document sessions and the waking of its background work when the rows that work reads change
+included. The other servers on the same database find each server by the name of that shared
+connection. The fourth sends the cursors of the server's document sessions and its questions and
+answers to the other servers about a document. It opens the first time the server has one to
+send. A document edit's own notification goes out in the transaction that writes the edit, and
+needs no connection of its own. That is 91 connections for one server at its ceiling, and twice
+that for two, past a default Postgres's limit of 100. Check the database's connection limit
+before you start the second server: a limit sized for one server, with whatever else uses that
+database counted in, is the thing that runs out.
 
 What a reader sees while two servers are serving:
 
 - Nothing they write is lost, whichever server takes it. Every edit of a document is appended
   under that document's lock, edits made at the same time merge rather than overwrite, and the
-  stored history holds all of them. A server whose copy of a document is not the current one
-  writes no version from it and settles nothing on it; it reloads the document instead.
-- A document's live session belongs to one server. While someone has a document open on one
-  server, that session does not carry the other server's edits, so the people shown as present,
-  and their cursors, are the ones editing on that server. A write that lands on the other server
-  closes the session within a moment; their browser reconnects, re-syncs and shows the current
-  text. They see a brief reconnect, never stale text they can act on.
-- Live co-editing of one document across two servers — two live sessions with the typing flowing
-  between them — is not there yet; it is a separate piece of work.
+  stored history holds all of them.
+- Two people on one document see each other's typing, cursors and presence, whichever server each
+  one is on. Each server tells the others through Postgres, so this works while the message bus
+  is down. A read never returns text older than what is stored. An agent's edit sees what a
+  person on another server just typed, when that server answers within half a second.
+- A document session stays open while the other servers write. The server closes it, and its
+  browsers reconnect, in these cases only:
+  - The document's stored history is replaced, for example by a rebuild.
+  - Its issue closes or reopens. The editors on every server reconnect read-only or editable to
+    match.
+  - The session fails on its server, which then reloads it.
+  - Its server shuts down while an editor is connected.
+- A server keeps an edit that it took before an issue's close was saved, or up to 2 seconds after
+  that, even when the edit reaches the database after the close. An edit typed while the close is
+  still being saved is kept too, however long the close takes. The server refuses an edit that it
+  took later than that, and the session reconnects read-only.
+- When a server's listener connection to the database drops, the server reconnects. Its first
+  wait is 1 second, plus up to half again. Each next wait doubles, up to 30 seconds plus up to half
+  again, so one wait can last 45 seconds. Until it reconnects, the editors open on that server do
+  not receive the other servers' edits and cursors. They catch up when the connection is back. In
+  that time a read through the API still returns the stored text. Nothing anyone writes is lost,
+  except an edit to a document whose issue closed more than 2 seconds before (above).
+- During the rollout that brings this version, a server of the earlier version behaves as before.
+  It still closes a session that falls behind, and its browsers reconnect. It sends no cursors to
+  the other servers and shows none of theirs. It does not act when an issue is closed or reopened
+  through a server of this version, so its open sessions of that issue keep the access they had.
+  A document that the close or reopen writes is the exception. A close writes the issue's open
+  asks into their documents as resolved, and a reopen writes them open again. The earlier server's
+  session of such a document falls behind, so it closes, and its browsers reconnect with the
+  access the issue now allows.
 - A page of either version keeps loading. Each server stores its version of the dashboard's files
   in the database when it starts, before it takes traffic, and serves the other version's files
   from there, so a page one server sent finds its files whichever server answers next. A server

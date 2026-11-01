@@ -1,0 +1,24 @@
+kind: Changed
+body: |-
+  Closing or reopening an issue changes the document rooms of every process of this build, the
+  patching one included, and reopening now does too. Migration `0158`'s trigger notifies
+  `dispatch_issue_open_changed` when `closed_at` changes, whoever wrote it. Each process then closes
+  its rooms of the issue's documents, so their browsers reconnect read-only or editable to match. A
+  browser's append also reads the issue's state in its own transaction. An edit that the room took
+  before the close, or up to 2 s after the close committed, is stored even when its append reaches
+  the database after the close, and is settled when the issue reopens. An edit taken later is
+  refused. A close now stamps `closed_at` again as its last statement before it commits, so the
+  2 s count from the commit. An edit typed while the close runs is stored, however long the close
+  takes to withdraw the issue's asks. The stored `closed_at` is that much later than the one the
+  `issue.closed` event carries. Before, only the process that took the `PATCH` changed its rooms,
+  and only on a close.
+  During the roll that releases this, processes of the earlier build do not listen on the channel,
+  so they do not act on a close or reopen made through this build. Their open rooms of the issue's
+  documents keep the scope their browsers connected with. A document that the close or reopen
+  writes is the exception. A close writes the resolved state of the issue's open asks into the
+  blocks that show them, and a reopen writes them open again. That write moves the document's
+  head, so an earlier-build room of it closes as a room that falls behind, and its browsers
+  reconnect with the scope the issue now allows.
+time: 2026-10-28T12:12:13Z
+custom:
+  Issue: pr2414

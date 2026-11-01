@@ -331,6 +331,7 @@ func main() {
 		ServerURL:       serverURL,
 		Settle:          boot.SettleDelay,
 		EditNoticeQuiet: boot.EditNoticeQuiet,
+		TestHooks:       boot.TestHooksEnabled,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an
@@ -445,11 +446,12 @@ func main() {
 	//     statements whether or not anything is owed.
 	//
 	// The shared listener is one pglisten.Hub per process, on one held connection of the store's
-	// listener pool, carrying every woken loop's channel. Every wake is registered before it runs
-	// (a channel added later would never be LISTENed on), and no loop waits for it: each runs its
-	// boot pass whether or not the hub has connected. Postgres does not replay a notification sent
-	// while nothing listened, so the hub signals every wake after each successful LISTEN, and a
-	// change made while it was redialing (backing off up to 30 s) is caught up then.
+	// listener pool, carrying every woken loop's channel and the document rooms' room-sync
+	// channels alike. Every wake and handler is registered before it runs (a channel added later
+	// would never be LISTENed on), and no loop waits for it: each runs its boot pass whether or
+	// not the hub has connected. Postgres does not replay a notification sent while nothing
+	// listened, so the hub signals every wake after each successful LISTEN, and a change made
+	// while it was redialing (backing off up to 30 s) is caught up then.
 	//
 	// Deliberately NOT leased, in three classes:
 	//   - already claims its own work, so two processes never do one unit of it twice: the
@@ -458,13 +460,12 @@ func main() {
 	//     (its claim window) and the delivery intakes (NATS's push-durable exclusivity, which
 	//     delivery.StartIntakes takes).
 	//   - per-process by design, because each serves this process's own connections or memory:
-	//     the settlement resumption (it arms this process's rooms, and docs/resume.go says it
-	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
-	//     shared wake listener (each process's loops wait on their own), the delivery live hub
-	//     and its listener (migration 0107_events_notify.up.sql states that purpose), the event
-	//     stream relay, the document rooms' timers, and the stale-room evictor (it closes the
-	//     rooms resident in this process that the other process's writes left behind the
-	//     durable head, so it has to run wherever a room is resident).
+	//     the delivery live hub and its listener (migration 0107_events_notify.up.sql states that
+	//     purpose), the event stream relay, the document rooms' timers, the process's shared
+	//     listener hub (its connection is this process's membership and every loop above waits on
+	//     a wake of this process's own, so it has to run in every process) and the room sync
+	//     registered on it (it serves the rooms resident in this process: it catches them up with
+	//     the other processes' writes and answers their room queries).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
 	//     retirePlainRefreshTokens, restoreDecidedWordings, repairIssueAsks and SeedRepoProjects
 	//     above, and the embedding coverage pass (two processes' passes at once leave what one
@@ -514,30 +515,46 @@ func main() {
 		backgroundEmbedder = embed.NewRateLimitedEmbedder(embedder)
 	}
 
-	// The shared listener (see the loop comment above). A wake is registered only for a loop that
-	// will read it: with no embedder embedqueue.Run returns at once, and without NATS or the
-	// GitHub App no intake starts to route by the settings, so neither channel is LISTENed on.
-	wakes := &pglisten.Hub{Owner: "dispatch background wakes", Dial: database.Pool.Listener}
+	// This process's one shared LISTEN connection. Its name is what makes this process a member:
+	// the other envoy-dispatch processes read it in pg_stat_activity (docs/room_sync.go), and only
+	// one connection per process can answer for that, so the woken loops' wakes and the document
+	// rooms' room sync are registered on the one hub. The delivery hub and the event stream relay
+	// still hold listener connections of their own (store.Pool.Listener).
+	//
+	// A wake is registered only for a loop that will read it: with no embedder embedqueue.Run
+	// returns at once, and without NATS or the GitHub App no intake starts to route by the
+	// settings, so neither channel is LISTENed on.
+	listenerHub := &pglisten.Hub{
+		Owner: "dispatch",
+		Dial: func(ctx context.Context) (*pgx.Conn, error) {
+			return database.Pool.Dedicated(ctx, docs.ListenerApplicationPrefix+documentService.ProcessID())
+		},
+	}
 	var embeddingsWake, settingsWake <-chan struct{}
 	if backgroundEmbedder != nil {
-		embeddingsWake = wakes.Wake(embedqueue.WakeChannel)
+		embeddingsWake = listenerHub.Wake(embedqueue.WakeChannel)
 	}
-	excerptsWake := wakes.Wake(docs.ExcerptsOwedChannel)
-	editNoticesWake := wakes.Wake(docs.EditNoticesChannel)
-	eventsWake := wakes.Wake(api.EventsChannel)
+	excerptsWake := listenerHub.Wake(docs.ExcerptsOwedChannel)
+	editNoticesWake := listenerHub.Wake(docs.EditNoticesChannel)
+	eventsWake := listenerHub.Wake(api.EventsChannel)
 	if natsClient != nil && appCtx.GitHub() != nil {
-		settingsWake = wakes.Wake(delivery.SettingsChannel)
+		settingsWake = listenerHub.Wake(delivery.SettingsChannel)
 	}
-	go wakes.Run(ctx)
 
 	go embedqueue.Run(ctx, embedqueue.Deps{Store: database, Embedder: backgroundEmbedder, Wake: embeddingsWake})
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
-	// anyone opening its document.
-	go documentService.RunSettlementResumption(ctx)
-	// INFRA-66: a document written by the other envoy-dispatch process is announced over
-	// Postgres, and the room this process holds for it closes within that round trip, so its
-	// browsers reconnect and re-sync instead of reading text the store no longer holds.
-	go documentService.RunStaleRoomEviction(ctx)
+	// anyone opening its document. One process per period arms them (docs.RunSettlementResumption).
+	go documentService.RunSettlementResumption(ctx, leases)
+	// The document rooms' room sync, registered on the hub above and run beside it: a document
+	// written by another process is announced over Postgres, and the room this process holds for
+	// it catches up from the stored updates within that round trip, so its browsers see the write
+	// without a reconnect. The hub takes no registration once it runs, so every wake above and
+	// every room-sync handler is registered before the line that starts it. Both stop with ctx,
+	// like the loops beside them; the service's NOTIFY sender stays open until
+	// documentService.Shutdown has drained the rooms.
+	runRoomSync := documentService.RegisterRoomSync(listenerHub)
+	go runRoomSync(ctx)
+	go listenerHub.Run(ctx)
 	// The related-item check's keyword statistics (each project's df and N), rebuilt at
 	// boot and every ten minutes.
 	go api.RunSearchTermStatsRefresh(ctx, database.Pool, api.SearchTermStatsInterval, leases)

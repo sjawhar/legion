@@ -399,7 +399,7 @@ func requireLatestEditSource(t *testing.T, service *Service, artifactID string, 
 	}
 	state := service.lockState(artifactID)
 	latest := state.lastActor
-	credit := settlementAuthors(state, owedAuthors, durableLatest)
+	credit := settlementAuthors(state, owedAuthors, lastActor, durableLatest)
 	service.unlockState(artifactID, state)
 	if latest == nil || *latest != want {
 		t.Fatalf("the room's latest edit source = %+v, want %+v", latest, want)

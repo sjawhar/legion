@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -21,20 +22,24 @@ const SettlementResumeInterval = time.Minute
 // only at start.
 const settlementResumeAge = time.Minute
 
+// settlementResumptionLease names the lease each resumption pass runs under (duty.Exclusive). A
+// settlement reads what it settles from the store under the document's lock, whichever process
+// runs it, so one process arming the owed settlements is the whole of the work; every process
+// arming them each period would run each owed document's settlement once per process.
+const settlementResumptionLease = "settlement-resumption"
+
 // RunSettlementResumption arms the settlement of every document owing one past
-// settlementResumeAge, at start and every SettlementResumeInterval, until ctx ends. A document
-// nobody opens therefore settles too: its ask blocks reach the open asks without anyone loading it.
-func (s *Service) RunSettlementResumption(ctx context.Context) {
-	for {
+// settlementResumeAge, at start and every SettlementResumeInterval, until ctx ends. Each pass runs
+// under settlementResumptionLease for the period SettlementResumeInterval (duty.RunLeased), so one
+// of the envoy-dispatch processes serving the database runs it per period, in that process. A
+// document nobody opens therefore settles too: its ask blocks reach the open asks without anyone
+// loading it.
+func (s *Service) RunSettlementResumption(ctx context.Context, leases duty.Leases) {
+	duty.RunLeased(ctx, leases, settlementResumptionLease, SettlementResumeInterval, duty.TickAtStart, func(ctx context.Context) {
 		if err := s.resumeOwedSettlements(ctx, settlementResumeAge); err != nil && ctx.Err() == nil {
 			slog.Error("dispatch: resume owed document settlements", "error", err)
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(SettlementResumeInterval):
-		}
-	}
+	})
 }
 
 // resumeOwedSettlements arms the settlement of each document whose pending-settlement row is at
@@ -71,6 +76,7 @@ func (s *Service) resumeOwedSettlements(ctx context.Context, age time.Duration) 
 		s.scheduleSettle(room)
 	}
 	if len(rooms) > 0 {
+		s.hooks.countSettlementResumption(rooms, time.Now())
 		slog.Info("dispatch: resumed owed document settlements", "documents", len(rooms))
 	}
 	return nil

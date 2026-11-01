@@ -51,17 +51,18 @@ type roomState struct {
 	askBlocks         map[string]struct{}
 	askAuthors        map[string]model.Actor
 	pendingAskAuthors map[string]model.Actor
-	// lastActor is the most recent edit's source: the actor of a service mutation, or the sole
-	// connected peer of a browser edit. A version lists its authors, so a settlement that runs
-	// after an edit's own version was committed would otherwise attribute the block asks it
-	// indexes to nobody.
+	// lastActor is the most recent edit's source this process saw: the actor of a service
+	// mutation, or the sole connected peer of a browser edit. A settlement names the source the
+	// document's pending-settlement row holds, which every process's appends and commits write
+	// (settlementAuthors), not this one; the record keeps its own for what has not reached that row
+	// - closing an issue writes it there (setRoomIssueOpen) - and takes the row's when a room loads.
 	lastActor *model.Actor
 	// unsettled marks a lastActor no settlement has read since: the settlement it was recorded
 	// for names it, so the state holds it until one commits (settleRoomWithin). Closing persists
-	// it on the pending-settlement row before clearing it (SetIssueClosed), so that row carries it
+	// it on the pending-settlement row before clearing it (setRoomIssueOpen), so that row carries it
 	// through a room release or restart. The authors themselves are in F and R, never only here.
 	unsettled      bool
-	updateClasses  []documentUpdateClass
+	updateClasses  []*documentUpdateClass
 	pendingUpdates int
 	settle         *time.Timer
 	unrecorded     map[pmdoc.MarkRef]time.Time
@@ -111,14 +112,28 @@ type roomState struct {
 // documentUpdateClass is what the room's update observer recorded for one update, which its
 // persistence takes (consumeUpdateClass): whether it changed the content, whether it is durable
 // work the room's state waits on, the browser edit's in-flight credit, nil for an update no
-// browser edit credited, and cursor, the durable version the room instance the update was made in
-// stands at, which gates and then takes in the update's own append (StoreUpdateContext).
+// browser edit credited, cursor, the durable version the room instance the update was made in
+// stands at, which gates and then takes in the update's own append (StoreUpdateContext), and
+// observed, when the observer classified the update, on this process's monotonic clock, which
+// tells the gate an update the room took before its issue closed from one taken after
+// (observedBeforeClose); zero for a class no observer of the room's log classified.
+//
+// An update only the room holds - not a published live write's nor a catch-up's, which are stored
+// already - also names instance, the room instance it was made in, whose list of unstored updates
+// holds it from the moment the observer classified it until its append has returned
+// (roomInstance.unstored), and ahead, where it is stored once it is: a live write that forks the
+// room stores it in its own transaction ahead of its own row (storeRoomUpdatesAhead), and its
+// room's append then finds it there instead of storing it again (PgVersioned.appendUpdate).
+// Every field is set before the class is listed anywhere and never written after, but ahead.
 type documentUpdateClass struct {
 	update         []byte
 	contentChanged bool
 	durable        bool
 	credit         *UpdateCredit
 	cursor         *roomCursor
+	observed       time.Time
+	instance       *roomInstance
+	ahead          *storedAhead
 }
 
 // lockState returns room's state locked, creating it when the service holds none.
@@ -270,11 +285,14 @@ func (s *Service) unusedLocked(state *roomState) bool {
 // recordUpdateClass records what the room's update observer read off one update, for the
 // persistence that takes it next (consumeUpdateClass). Only a durable class is work the room's
 // state waits on: a repair's update is recorded for the room instance it names alone, and its
-// writer, not the room's persistence, is what makes it durable.
-func (s *Service) recordUpdateClass(room string, update []byte, class documentUpdateClass) {
+// writer, not the room's persistence, is what makes it durable. A class the observer made keeps the
+// copy of update it took then.
+func (s *Service) recordUpdateClass(room string, update []byte, class *documentUpdateClass) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
-	class.update = append([]byte(nil), update...)
+	if class.update == nil {
+		class.update = append([]byte(nil), update...)
+	}
 	state.updateClasses = append(state.updateClasses, class)
 	if class.durable {
 		state.pendingUpdates++
@@ -287,10 +305,10 @@ func (s *Service) recordUpdateClass(room string, update []byte, class documentUp
 // transaction's observers after the transaction has released the document's lock, so two peers'
 // updates reach persistence in the order their read loops hand them on, which need not be the
 // order the room recorded them in.
-func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdateClass, *roomState, bool) {
+func (s *Service) consumeUpdateClass(room string, update []byte) (*documentUpdateClass, *roomState, bool) {
 	state := s.lockExistingState(room)
 	if state == nil {
-		return documentUpdateClass{contentChanged: true}, nil, false
+		return &documentUpdateClass{contentChanged: true}, nil, false
 	}
 	defer s.unlockState(room, state)
 	for index, class := range state.updateClasses {
@@ -303,7 +321,7 @@ func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdate
 		}
 		return class, state, true
 	}
-	return documentUpdateClass{contentChanged: true}, nil, false
+	return &documentUpdateClass{contentChanged: true}, nil, false
 }
 
 func (s *Service) hasPendingUpdates(room string) bool {
@@ -334,33 +352,14 @@ func (s *Service) hasDurableAppend(room string) bool {
 	return state.durableAppends.Load() > 0
 }
 
-// hasOpenLiveWrite is whether an open live-write transaction of this process is writing room's
-// document (liveWrite). The stale-room evictor asks it before it closes a room another process's
-// write left behind, because that writer alone is out of reach of the confirmation the evictor
-// makes under the document's advisory lock (roomBehindDurableHead): an open write holds no lock
-// between its operations, and between its commit and its publish it has moved the cursor of the
-// room it forked past what that room holds (Ledger.takeRoomCursors, publish), so the room it
-// publishes into is the room the evictor would close.
-//
-// The other writers of this process take the document's lock and are ordered by that
-// confirmation instead, so they are not asked about here. A browser's append (appendUpdate,
-// under withRoomLock) and a settlement (settleRoomWithin, under lockSettlementCursor) each either
-// advance the instance's cursor before they drop the lock or are refused by the gate on a room
-// behind the head (ErrRoomBehindHead), and a cursor moves only by the version after the one it
-// stands at (advanceRoomCursor), so a room the confirmation finds behind is one none of them can
-// bring back to the head.
-func (s *Service) hasOpenLiveWrite(room string) bool {
-	state := s.lockExistingState(room)
-	if state == nil {
-		return false
-	}
-	defer s.unlockState(room, state)
-	return state.openLiveWriteLocked()
-}
-
-// openLiveWriteLocked is hasOpenLiveWrite for a state its caller holds state.mu on: the close of
-// a room behind the durable head reads it again under the hold that reserves the close, so no
-// write is admitted between the evictor's own unlocked read and the reservation.
+// openLiveWriteLocked is whether an open live-write transaction of this process is writing the
+// document of state (liveWrite), for a caller holding state.mu: the close of a room whose stored
+// history was replaced reads it under the hold that reserves the close (closeRoomBehindHead), so
+// no write is admitted between the check and the reservation. That writer alone is out of reach of
+// the document's advisory lock the catch-up confirms its verdict under (historyReplacedUnderLock):
+// an open write holds no lock between its operations, and between its commit and its publish it
+// has moved the cursor of the room it forked past what that room holds (Ledger.takeRoomCursors,
+// publish), so the room it publishes into is the room the close would retire.
 func (state *roomState) openLiveWriteLocked() bool {
 	return state.liveWriter != nil
 }

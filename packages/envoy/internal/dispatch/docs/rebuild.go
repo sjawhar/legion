@@ -26,9 +26,11 @@ type RebuildReport struct {
 // deliberately never a load fallback: a history that loads can contain unsettled edits newer than
 // its latest version and is refused unchanged.
 //
-// Every refusal comes before the first write: a room resident in this server, a history that
-// loads, a closed issue (for supplied markdown, which changes the document), and markdown that is
-// not a Proof document or drops an open ask block. Supplied markdown is caller text: it is parsed
+// Every refusal comes before the first write: a room resident in this server or in another
+// envoy-dispatch process (a holds query, roomQueries.ask), a history that loads, a history another
+// rebuild or an append moved past the one this rebuild loaded (RebuildTx), a closed issue (for
+// supplied markdown, which changes the document), and markdown that is not a Proof document or
+// drops an open ask block. Supplied markdown is caller text: it is parsed
 // as an upload is, and its rendering is weighed as a new document's is (SeedText). The latest
 // version is the server's own rendering of the document, read back as every stored rendering is
 // (pmdoc.ParseRendering), so a document whose version is past what one write may make - stored
@@ -62,14 +64,26 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	// fails on it, since it cannot load, or, once the rebuild commits, reads the rebuilt head:
 	// versions only increase, so its room holds the rebuilt update and none it would mistake for it.
 	//
-	// This refusal is this server's rooms alone, and that is all it can be: the other
-	// envoy-dispatch process's rooms are not in this server's. What covers them is the stale-room
-	// gate. RebuildTx replaces the whole history with one update at head+1, so an instance over
-	// there no longer stands at the head, and its next durable write is refused
-	// (ErrRoomBehindHead): its settlement closes the room (reloadRoomBehindHead), and its
-	// browser's append fails it outright, and either way the reload reads the rebuilt document.
+	// The other envoy-dispatch processes' rooms are asked the same through a holds query: a member
+	// that answers it holds a room of the document refuses the rebuild as this server's room does.
+	// A member that does not answer within the query's wait, or a room that loads there after it
+	// answered, is covered by room sync instead. RebuildTx replaces the whole history with one
+	// update at head+1 and announces it, so an instance over there finds its stored history
+	// replaced (historyReplaced): its catch-up closes and reloads the room
+	// (roomCatchUps.closeReplaced), and until then its settlement and its browser's append are
+	// refused (ErrRoomBehindHead) and lead to the same close, and the reload reads the rebuilt
+	// document.
 	if s.srv.GetDoc(artifactID) != nil {
 		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in this server; close its editors and retry two minutes later, or replace it from markdown instead", ErrDocumentLive, artifactID)
+	}
+	answers, _, err := s.roomQueries.ask(ctx, tx, artifactID, roomQueryHolds)
+	if err != nil {
+		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: ask the other processes whether they hold the document: %v", ErrServiceUnavailable, err)
+	}
+	for _, answer := range answers {
+		if answer.holds {
+			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in another server process; close its editors and retry two minutes later, or replace it from markdown instead", ErrDocumentLive, artifactID)
+		}
 	}
 	loaded, err := s.persistence.Load(ctx, artifactID)
 	if err != nil {
@@ -142,7 +156,11 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		return RebuildReport{}, VersionResult{}, fmt.Errorf("seed rebuilt document tree: %w", err)
 	}
 
-	report, err := s.persistence.RebuildTx(ctx, tx, artifactID, seed)
+	// RebuildTx replaces the history only if its head is still the one loaded above, which is the
+	// history validated as one that cannot load: a second rebuild of the document on another
+	// process that loaded the same history waits on the owner row above until this one commits,
+	// then finds the head moved and is refused.
+	report, err := s.persistence.RebuildTx(ctx, tx, artifactID, loaded.Version, seed)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}

@@ -9,64 +9,134 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Hub shares one Listener, and so one held Postgres connection, among every subscriber in a
-// process that registers on it, however many channels they name between them: a connection per
-// feature would cost a held backend and a keepalive each. Dispatch builds one for its
-// change-driven background loops, each of which waits on a Wake.
+// Hub is a process's one shared LISTEN connection: a subsystem that learns of another process's
+// work through a NOTIFY channel registers that channel here, and one Listener carries every
+// channel registered. In envoy-dispatch the document rooms' room sync registers on it
+// (internal/dispatch/docs, RegisterRoomSync) and so does every change-driven background loop
+// cmd/dispatch starts - the embedding queue, the reference excerpts, the edit notices, the
+// suggestion outcomes and the delivery settings - each of which waits on a Wake; the delivery hub
+// and the event stream relay (internal/dispatch/api) still hold a Listener of their own each.
+// Every subsystem given a Listener of its own holds one more connection for the life of the
+// process, one fewer for everything else on the database; and the hub's connection is also what
+// other processes read to learn which processes are listening (the caller names it through Dial),
+// which only one connection per process can answer.
 //
-// Postgres does not replay a notification sent while nothing listened, so every Wake is also
-// signalled after each successful LISTEN, the first one included: a subscriber catches up then
-// what it missed while the listener had no connection (the redial backoff, RedialBackoff). A
-// subscriber therefore needs no timer of its own for an outage, and must not gate its own start
-// on the hub - a loop runs its boot pass whether or not the listener has connected yet, and the
-// signal after the first LISTEN costs it one more pass at most.
+// Postgres does not replay a notification sent while nothing listened, so every Wake is signalled
+// and every OnConnected callback runs after each successful LISTEN, the first one included: a
+// subscriber catches up there what it missed while the hub had no connection (the redial backoff,
+// RedialBackoff). A subscriber therefore needs no timer of its own for an outage, and must not
+// gate its own start on the hub - a loop runs its boot pass whether or not the hub has connected
+// yet, and the signal after the first LISTEN costs it one more pass at most.
 //
-// Everything is registered before Run: Wake and OnConnected panic once Run has started, because
-// the listener's LISTEN statement and callbacks are fixed when it starts and a channel registered
-// later would never be heard.
+// Every registration - Handle, Wake, OnConnected, OnDisconnected - happens before Run is called.
+// One made after Run has started panics: the channels a Listener names are fixed when it dials,
+// so a channel registered late would never be listened on, and a handler registered late would
+// race the goroutine that reads the registrations without a lock. A misordered start is a
+// programming error, the kind that should fail the first time it runs rather than drop
+// notifications without a word.
+//
+// Every handler and callback runs on Run's goroutine, the one that reads the connection and
+// pings it, and must not block: a handler that waits delays every notification behind it on
+// every channel of the process, and a long enough wait holds off the ping that finds a half-open
+// connection. A handler with slow work queues it for a goroutine of its own.
 type Hub struct {
-	// Owner names the subsystem in the listener's log line (Listener.Owner).
-	Owner string
-	// Dial opens the listener's connection (Listener.Dial): store.Pool.Listener in the server.
+	// Dial opens the connection the hub listens on. The caller names it - the connection is the
+	// process's membership, read by the other processes on the database - and owns its pool.
 	Dial func(ctx context.Context) (*pgx.Conn, error)
-	// ListenIdle, PingTimeout and Backoff pass through to the Listener; zero or nil is its
-	// default. A test sets them.
-	ListenIdle  time.Duration
-	PingTimeout time.Duration
-	Backoff     func(attempt int) time.Duration
+	// Owner names the process's subsystem in the listener's one log line (Listener.Owner); empty
+	// is "dispatch".
+	Owner string
 
-	mu        sync.Mutex
-	started   bool
-	channels  []string
-	wakes     map[string][]chan struct{}
-	connected []func()
+	mu           sync.Mutex
+	started      bool
+	channels     []string
+	handlers     map[string][]func(payload string)
+	wakes        map[string][]chan struct{}
+	connected    []func()
+	disconnected []func()
+	// established is whether a LISTEN stands on the current connection. Only Run's goroutine
+	// touches it.
+	established bool
+
+	// listenIdle, pingTimeout and backoff are the Listener's; zero or nil is its default. A test
+	// of this package sets them before Run.
+	listenIdle, pingTimeout time.Duration
+	backoff                 func(attempt int) time.Duration
 }
 
-// Wake returns a channel of its own, with a buffer of one, that is signalled on each notification
-// on channel and after every successful LISTEN. The send never blocks, so any number of signals
-// before the subscriber reads collapse into one, and a signal that arrives while the subscriber is
-// busy waits in the buffer. Each call is a separate subscriber. channel is spliced into the LISTEN
-// statement as written (Listener.Channels): a package constant, never a value read from a request.
+// Handle registers onNotify for channel: the hub LISTENs on channel and calls onNotify with the
+// payload of each notification on it, in arrival order, on Run's goroutine (it must not block).
+// Several handlers may register for one channel; each is called, in registration order. channel
+// is spliced into the LISTEN statement as written (Listener.Channels): a package constant, never
+// a value read from a request. It panics once Run has started.
+func (h *Hub) Handle(channel string, onNotify func(payload string)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.register("Handle", channel)
+	if h.handlers == nil {
+		h.handlers = map[string][]func(string){}
+	}
+	h.handlers[channel] = append(h.handlers[channel], onNotify)
+}
+
+// Wake registers channel, as Handle does, and returns a channel of its own with a buffer of one.
+// It is signalled, without blocking, after each notification on channel and after each LISTEN
+// that succeeds, so a caller that reads its state again on each wake catches up on what the
+// connection missed while it had none. A signal while one is already buffered is folded into
+// it: a wake says "look again", never how many times. Each call returns a new channel. It panics
+// once Run has started.
 func (h *Hub) Wake(channel string) <-chan struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.register("Wake", channel)
+	if h.wakes == nil {
+		h.wakes = map[string][]chan struct{}{}
+	}
 	wake := make(chan struct{}, 1)
-	h.register(func() {
-		h.listenOn(channel)
-		if h.wakes == nil {
-			h.wakes = make(map[string][]chan struct{})
-		}
-		h.wakes[channel] = append(h.wakes[channel], wake)
-	})
+	h.wakes[channel] = append(h.wakes[channel], wake)
 	return wake
 }
 
-// OnConnected adds fn to what runs after every successful LISTEN, on the listener's goroutine,
-// after every Wake has been signalled.
-func (h *Hub) OnConnected(fn func()) {
-	h.register(func() { h.connected = append(h.connected, fn) })
+// OnConnected registers callback to run after each LISTEN succeeds on a new connection, the
+// first included: where a caller catches up on the notifications sent while the hub had no
+// connection, which reached nobody. It runs on Run's goroutine and must not block. It panics once
+// Run has started.
+func (h *Hub) OnConnected(callback func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.refuseStarted("OnConnected")
+	h.connected = append(h.connected, callback)
 }
 
-// Run runs one Listener on every registered channel until ctx ends. A hub with no channel
-// registered opens no connection, and Run only waits for ctx.
+// OnDisconnected registers callback to run when a connection whose LISTEN succeeded is lost -
+// after the hub has closed it and before it redials - and when Run returns having held one. It
+// runs on Run's goroutine and must not block. It panics once Run has started.
+func (h *Hub) OnDisconnected(callback func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.refuseStarted("OnDisconnected")
+	h.disconnected = append(h.disconnected, callback)
+}
+
+// register adds channel to the channels the hub LISTENs on, once; h.mu is held.
+func (h *Hub) register(method, channel string) {
+	h.refuseStarted(method)
+	if slices.Contains(h.channels, channel) {
+		return
+	}
+	h.channels = append(h.channels, channel)
+}
+
+// refuseStarted panics once Run has started; h.mu is held.
+func (h *Hub) refuseStarted(method string) {
+	if h.started {
+		panic("pglisten: Hub." + method + " called after Run started; register before Run")
+	}
+}
+
+// Run listens on every registered channel until ctx ends, redialing on any failure as Listener
+// does, and returns once its connection is closed. A hub nobody registered a channel on opens no
+// connection, and Run only waits for ctx. It panics if called twice.
 func (h *Hub) Run(ctx context.Context) {
 	h.mu.Lock()
 	if h.started {
@@ -79,56 +149,63 @@ func (h *Hub) Run(ctx context.Context) {
 		<-ctx.Done()
 		return
 	}
+
 	listener := &Listener{
 		Owner:       h.Owner,
 		Dial:        h.Dial,
 		Channels:    h.channels,
-		ListenIdle:  h.ListenIdle,
-		PingTimeout: h.PingTimeout,
-		Backoff:     h.Backoff,
+		ListenIdle:  h.listenIdle,
+		PingTimeout: h.pingTimeout,
 		OnConnected: h.onConnected,
 		OnNotify:    h.onNotify,
+		// Listener asks for the backoff once per failure, on this goroutine, right after it has
+		// closed the connection that failed and before it waits to redial - which is the moment
+		// an established connection is lost.
+		Backoff: func(attempt int) time.Duration {
+			h.lost()
+			if h.backoff != nil {
+				return h.backoff(attempt)
+			}
+			return RedialBackoff(attempt)
+		},
 	}
 	listener.Run(ctx)
-}
-
-// register runs add under the hub's lock, or panics once Run has started. After that nothing
-// writes the registrations, so the listener's goroutine reads them without the lock.
-func (h *Hub) register(add func()) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.started {
-		panic("pglisten: Hub registration after Run")
-	}
-	add()
-}
-
-// listenOn adds channel to the LISTEN statement once, however many subscribers name it.
-func (h *Hub) listenOn(channel string) {
-	if !slices.Contains(h.channels, channel) {
-		h.channels = append(h.channels, channel)
-	}
+	h.lost()
 }
 
 func (h *Hub) onConnected() {
+	h.established = true
+	for _, callback := range h.connected {
+		callback()
+	}
 	for _, wakes := range h.wakes {
 		for _, wake := range wakes {
-			signalWake(wake)
+			signal(wake)
 		}
 	}
-	for _, fn := range h.connected {
-		fn()
-	}
 }
 
-// onNotify signals the channel's wakes.
-func (h *Hub) onNotify(channel, _ string) {
+func (h *Hub) onNotify(channel, payload string) {
+	for _, handler := range h.handlers[channel] {
+		handler(payload)
+	}
 	for _, wake := range h.wakes[channel] {
-		signalWake(wake)
+		signal(wake)
 	}
 }
 
-func signalWake(wake chan struct{}) {
+// lost runs the OnDisconnected callbacks if a LISTEN stood on the connection just closed.
+func (h *Hub) lost() {
+	if !h.established {
+		return
+	}
+	h.established = false
+	for _, callback := range h.disconnected {
+		callback()
+	}
+}
+
+func signal(wake chan struct{}) {
 	select {
 	case wake <- struct{}{}:
 	default:

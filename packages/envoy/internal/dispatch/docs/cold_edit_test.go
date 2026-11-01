@@ -14,9 +14,11 @@ import (
 )
 
 // A write to a document no room holds forks the stored document and loads no room while it runs:
-// a room beside the fork would hold a second copy of a heavy document until the write commits
-// (LEGION-504). Once committed and published, the room holds the write and the write keeps no fork.
-func TestAColdWriteLoadsNoRoomUntilItCommits(t *testing.T) {
+// a room beside the fork would hold a second copy of a heavy document until the write commits.
+// Its publish loads none either, which would hold the document with no reader in it
+// (audit finding 11): the write keeps no fork, its verdict on what it inserted is judged on the
+// store (nothing was lost), and the next read loads the room from the store, holding the write.
+func TestAColdWriteLoadsNoRoom(t *testing.T) {
 	for _, conditional := range []bool{false, true} {
 		name := "unconditional"
 		if conditional {
@@ -44,6 +46,7 @@ func TestAColdWriteLoadsNoRoomUntilItCommits(t *testing.T) {
 				precondition = &model.EditPrecondition{Document: token}
 			}
 			var write *liveWrite
+			var ledger *Ledger
 			err := joinedWrite(service, func(ctx context.Context) error {
 				if _, err := service.ApplyOps(ctx, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, precondition); err != nil {
 					return err
@@ -51,7 +54,7 @@ func TestAColdWriteLoadsNoRoomUntilItCommits(t *testing.T) {
 				if service.srv.GetDoc(artifactID) != nil {
 					t.Error("the write loaded the document's room before it committed")
 				}
-				write = joinedLiveWrite(ctx, artifactID)
+				write, ledger = joinedLiveWrite(ctx, artifactID), ledgerFrom(ctx)
 				if write == nil || write.fork == nil || !write.cold {
 					t.Errorf("the write's fork is not the stored document's: %+v", write)
 				}
@@ -63,8 +66,11 @@ func TestAColdWriteLoadsNoRoomUntilItCommits(t *testing.T) {
 			if write.fork != nil || write.tree != nil || write.updates != nil || write.renderings != nil || write.forkMarkdown != nil {
 				t.Error("the committed write kept its fork, its rendering, its updates or the renderings beside them")
 			}
-			if service.srv.GetDoc(artifactID) == nil {
-				t.Fatal("the published write left no room holding it")
+			if service.roomHeld(artifactID) {
+				t.Fatal("the published write loaded a room of the document")
+			}
+			if lost, verdict := ledger.LostOps(artifactID); !verdict || len(lost) != 0 {
+				t.Fatalf("the write's lost operations = %v (verdict %t), want none, judged on the store", lost, verdict)
 			}
 			got, err := service.Text(context.Background(), artifactID)
 			if err != nil {

@@ -508,9 +508,11 @@ func TestARoomThatFailsWhileASettlementCommitsIntoItRecovers(t *testing.T) {
 // close all return, whichever of the service's closes it is: each waits for the repair's commit to
 // reach the room's persistence (roomServer). The second writer's update reaches that persistence
 // ahead of the repair's, and is stored whether the settlement finishes its repair (Evict's
-// close, after which the settlement is superseded) or discards it (an issue's close). Shutdown's
-// settlement is refused its broadcast once the room is shutting down and fails the room, whose
-// unstored updates its browsers send again when they reconnect.
+// close, after which the settlement is superseded) or discards it (an issue's close). The issue's
+// close is the room's part of it alone (setRoomIssueOpen), with the issue's row left open: the
+// settlement holds that row (lockArtifactOwner), so a close of the issue itself commits only after
+// the settlement has. Shutdown's settlement is refused its broadcast once the room is shutting
+// down and fails the room, whose unstored updates its browsers send again when they reconnect.
 func TestASecondWriterIntoARoomClosingUnderASettlementsRepairReturns(t *testing.T) {
 	for _, closer := range []struct {
 		name  string
@@ -523,8 +525,8 @@ func TestASecondWriterIntoARoomClosingUnderASettlementsRepairReturns(t *testing.
 		{"Evict", func(service *Service, artifactID string) error {
 			return service.Evict(context.Background(), artifactID)
 		}, "before, edited\n\nadded\n", true},
-		{"SetIssueClosed", func(service *Service, _ string) error {
-			service.SetIssueClosed(context.Background(), "DOC-1", true)
+		{"an issue's close", func(service *Service, artifactID string) error {
+			service.setRoomIssueOpen(context.Background(), artifactID, false, true)
 			return nil
 		}, "before, edited\n\nadded\n", false},
 		{"Shutdown with an editor connected", func(service *Service, artifactID string) error {
