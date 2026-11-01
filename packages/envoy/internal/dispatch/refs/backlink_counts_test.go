@@ -631,7 +631,7 @@ func TestTheGraphViewGainsNoArmTheBacklinkCountDoesNotKnow(t *testing.T) {
 		}
 	}
 	mentionTables := map[string]bool{}
-	for _, arm := range mentionBacklinkArms("issue", func(string) string { return "" }) {
+	for _, arm := range mentionBacklinkArms("issue", nil) {
 		match := regexp.MustCompile(`\bfrom (\w+)`).FindStringSubmatch(arm)
 		if match == nil {
 			t.Fatalf("a mention arm names no table: %s", arm)

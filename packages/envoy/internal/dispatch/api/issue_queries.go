@@ -561,6 +561,30 @@ func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Is
 	return issue, err
 }
 
+// issueWithProgressQuery is the one read behind an issue page: the issue's own columns, its
+// claim, its progress, its components and its repository, resolved for that one key. The text is
+// built once, at start, rather than on every read: its component and repository terms are
+// package-level values of their own, so the concatenation is work a request would repeat for a
+// statement that never differs, and pgx caches a prepared plan per statement text.
+var issueWithProgressQuery = `
+		with recursive subjects as (select $1::text as key),
+		` + issueComponentsTerms + `,
+		` + issueRepoTerms + `
+		select i.key, i.project_key, i.number, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key,
+		       coalesce((select array_agg(l.target_key order by l.target_key) from issue_links l where l.issue_key = i.key and l.kind = 'blocked_by'), '{}'),
+		       i.assignee, i.route, i.created_by, i.created_at, i.updated_at, i.closed_at,
+		       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and a.is_primary), ''),
+		       i.last_seq, ` + issueClaimColumns + `,
+		       ` + issueProgressColumns + `,
+		       ` + issueComponentsColumns + `,
+		       ` + issueRepoColumns + `
+		from issues i
+		` + issueProgressLateral + `
+		` + issueComponentsJoin + `
+		` + issueRepoJoin + `
+		where i.key = $1
+	`
+
 // loadIssueWithProgress is loadIssue together with the issue's progress, which the read response
 // carries beside the issue (model.IssueProgress says why it is not a field of it).
 func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key string) (model.Issue, model.IssueProgress, error) {
@@ -578,24 +602,7 @@ func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key strin
 	targets = append(targets, claim.targets()...)
 	targets = append(targets, progress.targets()...)
 	targets = append(targets, components.targets()...)
-	if err := q.QueryRow(ctx, `
-		with recursive subjects as (select $1::text as key),
-		`+issueComponentsTerms+`,
-		`+issueRepoTerms+`
-		select i.key, i.project_key, i.number, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key,
-		       coalesce((select array_agg(l.target_key order by l.target_key) from issue_links l where l.issue_key = i.key and l.kind = 'blocked_by'), '{}'),
-		       i.assignee, i.route, i.created_by, i.created_at, i.updated_at, i.closed_at,
-		       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and a.is_primary), ''),
-		       i.last_seq, `+issueClaimColumns+`,
-		       `+issueProgressColumns+`,
-		       `+issueComponentsColumns+`,
-		       `+issueRepoColumns+`
-		from issues i
-		`+issueProgressLateral+`
-		`+issueComponentsJoin+`
-		`+issueRepoJoin+`
-		where i.key = $1
-	`, key).Scan(append(targets, repo.targets()...)...); err != nil {
+	if err := q.QueryRow(ctx, issueWithProgressQuery, key).Scan(append(targets, repo.targets()...)...); err != nil {
 		return model.Issue{}, model.IssueProgress{}, err
 	}
 	own, resolvedRepo, err := repo.resolve(issue.Key)

@@ -75,11 +75,7 @@ func backlinkCountSQL(toKind string, excludeKinds []string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	exclude := func(string) string { return "" }
-	if len(excludeKinds) > 0 {
-		exclude = func(alias string) string { return " and not (" + alias + ".kind = any($3))" }
-	}
-	arms := mentionBacklinkArms(toKind, exclude)
+	arms := mentionBacklinkArms(toKind, excludeKinds)
 	for _, arm := range structural {
 		// A structural arm emits one edge kind, written as a literal, so excluding that kind
 		// excludes every row the arm can produce: the arm is dropped rather than filtered.
@@ -183,10 +179,16 @@ var backlinkArms = map[string][]backlinkArm{
 // mentionBacklinkArms is the four arms of graph_edges whose edge kind and target kind are columns
 // rather than literals: refs and the three tables of block references. Every node kind gets all
 // four, since a mention can name any node. The target kind is written as a literal (see
-// BacklinkCounts); exclude is the edge-kind exclusion for an alias, empty when the caller passed
-// none - on these arms the edge kind is a column, so an exclusion is a predicate and never drops
-// an arm.
-func mentionBacklinkArms(toKind string, exclude func(alias string) string) []string {
+// BacklinkCounts), and excludeKinds the caller's excluded edge kinds, bound as $3 - on these arms
+// the edge kind is a column, so an exclusion is a predicate and never drops an arm, and an empty
+// list adds nothing.
+func mentionBacklinkArms(toKind string, excludeKinds []string) []string {
+	exclude := func(alias string) string {
+		if len(excludeKinds) == 0 {
+			return ""
+		}
+		return " and not (" + alias + ".kind = any($3))"
+	}
 	kind := `'` + toKind + `'`
 	return []string{
 		// refs_to (to_kind, to_id). heldByABlock belongs on this arm alone: it is gated on

@@ -788,19 +788,24 @@ type deliveryIssue struct {
 	components []string
 }
 
+// deliveryIssueFactsQuery is the pull-request timeline's read of the issues a delivery names,
+// with their components. The text is built once, at start, for the reason
+// issueWithProgressQuery gives.
+var deliveryIssueFactsQuery = `
+		with recursive subjects as (select i.key from issues i where i.key = any($1)),
+		` + issueComponentsTerms + `
+		select i.key, i.project_key, i.title, i.priority, coalesce(comp.ids, '{}'::text[])
+		from issues i
+		` + issueComponentsJoin + `
+		where i.key = any($1)
+	`
+
 func (s *server) deliveryIssueFacts(ctx context.Context, keys []string) (map[string]deliveryIssue, error) {
 	issues := make(map[string]deliveryIssue, len(keys))
 	if len(keys) == 0 {
 		return issues, nil
 	}
-	rows, err := s.deps.Store.Pool.Query(ctx, `
-		with recursive subjects as (select i.key from issues i where i.key = any($1)),
-		`+issueComponentsTerms+`
-		select i.key, i.project_key, i.title, i.priority, coalesce(comp.ids, '{}'::text[])
-		from issues i
-		`+issueComponentsJoin+`
-		where i.key = any($1)
-	`, keys)
+	rows, err := s.deps.Store.Pool.Query(ctx, deliveryIssueFactsQuery, keys)
 	if err != nil {
 		return nil, err
 	}

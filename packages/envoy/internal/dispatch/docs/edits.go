@@ -774,7 +774,10 @@ var tableAnchorRecordsQuery = `
 		where ` + commentsAnchorTarget.anchoredOn() + ` and anchor->>'mark_id' = any($2::text[])
 	`
 
-func (s *Service) rejectUnindexedTableMarks(ctx context.Context, artifactID, axis string, index int, marks []pmdoc.MarkRef) error {
+// tableAnchorMarkIDs are the ids of the marks a table anchor can record: an ask's, a comment's
+// and a suggestion's. A mark of any other type is recorded on no row, so it is left out and the
+// two readers below answer at once when nothing is left.
+func tableAnchorMarkIDs(marks []pmdoc.MarkRef) []string {
 	markIDs := make([]string, 0, len(marks))
 	for _, mark := range marks {
 		switch mark.Type {
@@ -782,6 +785,11 @@ func (s *Service) rejectUnindexedTableMarks(ctx context.Context, artifactID, axi
 			markIDs = append(markIDs, mark.ID)
 		}
 	}
+	return markIDs
+}
+
+func (s *Service) rejectUnindexedTableMarks(ctx context.Context, artifactID, axis string, index int, marks []pmdoc.MarkRef) error {
+	markIDs := tableAnchorMarkIDs(marks)
 	if len(markIDs) == 0 {
 		return nil
 	}
@@ -894,13 +902,7 @@ var activeTableAnchorsQuery = `
 	`
 
 func (s *Service) rejectLiveTableAnchors(ctx context.Context, artifactID, axis string, index int, marks []pmdoc.MarkRef) error {
-	markIDs := make([]string, 0, len(marks))
-	for _, mark := range marks {
-		switch mark.Type {
-		case string(MarkAsk), string(MarkComment), string(MarkSuggestion):
-			markIDs = append(markIDs, mark.ID)
-		}
-	}
+	markIDs := tableAnchorMarkIDs(marks)
 	if len(markIDs) == 0 {
 		return nil
 	}
