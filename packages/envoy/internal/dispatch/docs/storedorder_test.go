@@ -133,6 +133,16 @@ func (h *craftedHistory) version(markdown string, docUpdateVersion int64) {
 	}
 }
 
+// compactThrough ages the history's rows through version and folds them into that row under the
+// tail rule, as the compaction queue does once a room's rows have rested, leaving it the base.
+func (h *craftedHistory) compactThrough(version int64) {
+	h.t.Helper()
+	ageUpdatesThrough(h.t, h.database, h.artifactID, version, time.Hour)
+	if result := compactUnderTail(h.t, NewPgVersioned(h.database), h.artifactID); result.outcome != compactCompacted {
+		h.t.Fatalf("compaction through update %d = %+v, want the rows below it folded", version, result)
+	}
+}
+
 func (h *craftedHistory) check(since time.Time) StoredOrderReport {
 	h.t.Helper()
 	report, err := CheckStoredOrder(context.Background(), h.database.Pool, h.artifactID, since)
@@ -154,8 +164,9 @@ func onlyMismatch(t *testing.T, report StoredOrderReport, kind StoredOrderMismat
 // The checker reports each way a stored history fails to replay - a class its prefix does not
 // measure, a version at an update whose fold renders other text, an unrenderable prefix measured as
 // no change, an update stored before one it depends on - and refuses a history a prune rewrote; a
-// history that replays passes, a compacted base is folded as a state and not checked, and rows
-// created before the since time are folded unchecked.
+// history that replays passes, a compacted base is folded as a state and not checked, rows
+// created before the since time are folded unchecked, and a version inside the window recording
+// an update a compaction folded into the base is counted and compared with nothing.
 func TestStoredOrderChecker(t *testing.T) {
 	const seed = "First.\n\nSecond.\n"
 
@@ -249,6 +260,38 @@ func TestStoredOrderChecker(t *testing.T) {
 		wrong := history.store(history.edit(replaceRun("Second, edited.", "Second.")), false)
 		if mismatch := onlyMismatch(t, history.check(time.Time{}), StoredOrderClass); mismatch.Update != wrong {
 			t.Fatalf("mismatch = %+v, want update %d", mismatch, wrong)
+		}
+	})
+
+	t.Run("versions on both sides of a base compacted inside the window", func(t *testing.T) {
+		history := newCraftedHistory(t, seed)
+		since := time.Now().Add(-time.Minute)
+		history.version(history.markdown(), 1)
+		edited := history.store(history.edit(replaceRun("Second.", "Second, edited.")), true)
+		history.version(history.markdown(), edited)
+		again := history.store(history.edit(replaceRun("First.", "First, edited.")), true)
+		history.version(history.markdown(), again)
+		// The queue folds the rested rows into update 2 while the window runs, so the version
+		// at update 1 records an update the fold no longer reaches; the fixture version, which
+		// records no update at all, is skipped as it always was.
+		history.compactThrough(edited)
+		report := history.check(since)
+		if !report.Clean() || report.Base != edited || report.UpdatesChecked != 1 || report.VersionsChecked != 2 || report.VersionsCompacted != 1 || report.VersionsSkipped != 1 {
+			t.Fatalf("report = %+v, want a clean check from base %d of one update and the two versions at or above it, the one below it counted", report, edited)
+		}
+	})
+
+	t.Run("every version inside the window below the base", func(t *testing.T) {
+		history := newCraftedHistory(t, seed)
+		since := time.Now().Add(-time.Minute)
+		history.version(history.markdown(), 1)
+		folded := history.store(history.edit(replaceRun("Second.", "Second, edited.")), true)
+		history.store(history.edit(replaceRun("First.", "First, edited.")), true)
+		history.store(history.edit(replaceRun("Second, edited.", "Second, again.")), true)
+		history.compactThrough(folded)
+		report := history.check(since)
+		if report.Checked() || report.Clean() || report.UpdatesChecked != 2 || report.VersionsChecked != 0 || report.VersionsCompacted != 1 {
+			t.Fatalf("report = %+v, want two updates measured, no version compared, and the document unchecked: its only version inside the window is below base %d", report, folded)
 		}
 	})
 

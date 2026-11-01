@@ -120,7 +120,7 @@ func (f *answersFixture) publishOutbox(t *testing.T) {
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		outbox.Run(ctx, outbox.Deps{Store: f.database, Publisher: acceptingPublisher{}, Broker: events.NewBroker(), Docs: f.deps.Docs})
+		outbox.Run(ctx, outbox.Deps{Store: f.database, Publisher: acceptingPublisher{}, Broker: events.NewBroker()})
 	}()
 	defer func() {
 		cancel()

@@ -319,21 +319,27 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 	return snapshot, nil
 }
 
-// newDocumentCopy is a document to decode a document's state into: a snapshot or a write's fork of
-// a room this server holds, the document's stored history (loadTree, validateUpdate, and the
-// fold of its stored updates and its read-back, stateThrough), or one update the store appends
-// (appendUpdate, AppendUpdateTx), decoded alone. Its pending queue is maxUpdateItems, the queue
-// every decode of document bytes takes (see maxUpdateItems).
-//
-// It replays without ygo's format cleanup (crdt.WithFormatCleanup), which follows each remote
-// apply that changes formatted text with a commit of its own: every update a copy applies is one
-// the room committed, and every cleanup the room made is already among them (the room's own
-// repairs and sweeps are local commits, which never clean up; a write's publish and a browser's
-// update reach the room as remote applies, and the cleanup either makes is stored), so a copy
-// that cleaned up would hold a state the room never held. A write's fork commits its own writes
-// locally, which never clean up.
+// newDocumentCopy is newCappedDocumentCopy at maxUpdateItems, for a decode that runs for no
+// instance with a cap of its own below it.
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
-	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems), crdt.WithFormatCleanup(false))...)
+	return newCappedDocumentCopy(maxUpdateItems, options...)
+}
+
+// newCappedDocumentCopy builds every copy that replays a document's stored or room updates, and
+// is the one place a copy is built: at the pending queue of the instance the decode runs for -
+// PgVersioned.maxPendingItems or Service.maxPendingItems, both maxUpdateItems in production and
+// lowered only by a test (shrinkPendingItems) - so a copy decodes what that instance decodes and
+// no more, and refuses what it would refuse. See maxUpdateItems for what those caps hold.
+//
+// Every copy replays without ygo's format cleanup (crdt.WithFormatCleanup), which follows each
+// remote apply that changes formatted text with a commit of its own: every update a copy applies
+// is one the room committed, and every cleanup the room made is already among them (the room's own
+// repairs and sweeps are local commits, which never clean up; a write's publish and a browser's
+// update reach the room as remote applies, and the cleanup either makes is stored), so a copy that
+// cleaned up would hold a state the room never held - and a compaction that folded such a copy
+// would store it. A write's fork commits its own writes locally, which never clean up.
+func newCappedDocumentCopy(maxPending int, options ...crdt.DocOption) *crdt.Doc {
+	return crdt.New(append(options, crdt.WithMaxPendingItems(maxPending), crdt.WithFormatCleanup(false))...)
 }
 
 // renderedReplica is the copy of a room's document its update observer renders and the room's

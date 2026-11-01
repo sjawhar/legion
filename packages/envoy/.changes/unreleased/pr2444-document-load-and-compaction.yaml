@@ -1,0 +1,34 @@
+kind: Fixed
+body: |-
+  A document load no longer replays the document's whole history, and an edit no longer waits behind
+  its document's compaction. A room load or a cold read folded every stored
+  `doc_updates` row inside its transaction on the rooms pool, because compaction ran only as a room
+  closed, as the server shut down, and in the outbox's daily pass, which first ran 24 hours after
+  start and only with NATS configured; and a compaction folded while it held the document's lock, so
+  a browser's append waited for the whole fold. A load now reads the compacted row and the rows
+  since, buffers them up to 32 MiB and folds them after its transaction ends (past that it folds
+  them as it streams them; at most four such buffered folds, loads and compactions together, run at
+  once in a server), and a room's load decodes the stored state once, in the room's own load hook
+  under the server's pending cap (a folded log is also decoded by the fold's read-back), and a
+  history that does not load fails the room from that decode. Compaction runs on any process from
+  the log's length and age: a per-process queue, fed by every append and every load, compacts a
+  document once 16 rows after its first are older than 2 minutes or one is older than 15 minutes,
+  and an hourly sweep under the `document-compaction` lease, with or without NATS, ticks at start
+  and then hourly and compacts what the queues missed. The sweep reads only the documents a table of
+  documents with rows to fold names (`doc_compaction_owed`), written by each append in its own
+  statement and cleared by compaction; migration 20261028195714_doc_compaction_owed adds it and
+  backfills it. Compaction reads and folds on a two-connection pool of its own
+  (`dispatch-compaction`), so one server's stated connection ceiling rises by 2, to 92; it holds no
+  document lock while it folds, writes under the lock only when the rows it folded are unchanged,
+  and leaves rows younger than 2 minutes as
+  written. The guarantee that `doc_updates` and any backup of it hold no text a write deleted now
+  holds within about 75 minutes of the write (the 2-minute tail, the 15-minute age rule, the hourly
+  sweep) rather than as a room closes, as the server shuts down and daily. ygo's `CompactEvery`
+  setting and the outbox's daily compaction are removed. A stored history that does not decode is
+  refused naming ygo's reason once; with the pinned ygo, `v1.54.1-sami.3`, a truncated stored
+  history is usually refused as `crdt: invalid update` without the decoder's reason, until the next
+  fork release. `envoy-dispatch stored-order` counts the versions created inside the checked window
+  whose update a compaction has folded below the base (`versions_compacted`), compares nothing of
+  them, and reports a document whose window versions all sit below the base as unchecked.
+custom:
+    Issue: pr2444

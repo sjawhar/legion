@@ -1436,7 +1436,7 @@ func awaitLockWaits(t *testing.T, database *store.Store, decision *decided, wait
 // holdDocumentLock takes artifactID's document lock as a browser's append takes it, a session
 // lock on a connection of its own (withRoomLock), and returns what releases it, which the test's
 // end runs too.
-func holdDocumentLock(t *testing.T, database *store.Store, artifactID string) (unlock func()) {
+func holdDocumentLock(t testing.TB, database *store.Store, artifactID string) (unlock func()) {
 	t.Helper()
 	ctx := context.Background()
 	conn, err := database.Pool.Acquire(ctx)

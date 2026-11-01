@@ -216,10 +216,10 @@ func Exclusive(ctx context.Context, leases Leases, name string, due time.Time, p
 		// Shutdown cut this pass short, so what it did is a part of a pass and not one: the
 		// period is left unserved deliberately, and whichever process is up at the next tick
 		// makes the pass. A record here would be a period served by work that did not finish -
-		// for the webhook sweep, a window of failed deliveries nobody lists; for the daily
-		// compaction, a day - and a rolling update, which sends SIGTERM, is how that would
-		// ordinarily happen rather than rarely. The line says so, so the tick that looks like a
-		// skip is findable afterwards.
+		// for the webhook sweep, a window of failed deliveries nobody lists; for the document
+		// compaction sweep, an hour of documents no process's queue compacts - and a rolling
+		// update, which sends SIGTERM, is how that would ordinarily happen rather than rarely.
+		// The line says so, so the tick that looks like a skip is findable afterwards.
 		//
 		// A pass that finished microseconds before the cancellation arrived is read as cut short
 		// too, and costs one early pass next period. That is the safe direction of the two and

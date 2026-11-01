@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,7 +116,7 @@ func TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown(t *testing.T) {
 	}
 
 	// The reloaded room loaded its history with the cleanup off and turned it back on once that
-	// apply returned (applyLoadedState), so it cleans up after a browser's update again.
+	// apply returned (bootstrapLoadedState), so it cleans up after a browser's update again.
 	cleanups = 0
 	browserCommit(func(txn *crdt.Transaction) {
 		paragraph := crdt.NewYXmlElement("paragraph")
@@ -240,4 +242,101 @@ func roomMarkdown(t *testing.T, service *Service, artifactID string) string {
 		t.Fatalf("read the room: %v", err)
 	}
 	return markdown
+}
+
+// A compaction folds a document's stored rows into one row that holds the room's own state: with
+// formatted text the room wrote itself (a local commit, which runs no cleanup) and a browser wrote
+// (a remote apply, after which the room cleans up and stores the cleanup), the folded row decodes
+// to the room's markdown and the room's clocks. A fold that cleaned up after each row it applied
+// would store formatting the room never had, *xy* for the room's *x*y, under a client the room
+// never saw, for every later load to read.
+func TestACompactionStoresTheRoomsFormattedStateAsTheRoomHoldsIt(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "seed")
+	ctx := context.Background()
+
+	var text *crdt.YXmlText
+	roomCommit := func(change func(*crdt.Transaction)) {
+		t.Helper()
+		if err := service.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			if text == nil {
+				fragment := doc.GetXmlFragment(fragmentName)
+				transact(func(txn *crdt.Transaction) {
+					paragraph := crdt.NewYXmlElement("paragraph")
+					fragment.InsertElement(txn, fragment.Len(), paragraph)
+					text = crdt.NewYXmlText()
+					paragraph.InsertText(txn, 0, text)
+				})
+			}
+			transact(change)
+		}); err != nil {
+			t.Fatalf("commit in the room: %v", err)
+		}
+	}
+	writeItalicLeavingMarkers(func(change func(*crdt.YXmlText, *crdt.Transaction)) {
+		roomCommit(func(txn *crdt.Transaction) { change(text, txn) })
+	})
+
+	browser := crdt.New()
+	if err := crdt.ApplyUpdateV1(browser, encodedRoom(t, service, artifactID), nil); err != nil {
+		t.Fatalf("open the document in the browser: %v", err)
+	}
+	browserFragment := browser.GetXmlFragment(fragmentName)
+	var browserText *crdt.YXmlText
+	browserCommit := func(change func(*crdt.Transaction)) {
+		t.Helper()
+		before := browser.StateVector()
+		browser.Transact(change)
+		update := crdt.EncodeStateAsUpdateV1(browser, before)
+		err := service.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+			if err := crdt.ApplyUpdateV1(doc, update, &browserOrigin{}); err != nil {
+				t.Errorf("apply the browser's update: %v", err)
+			}
+		})
+		if err != nil && !errors.Is(err, ygws.ErrNoChanges) {
+			t.Fatalf("send the browser's update: %v", err)
+		}
+	}
+	browserCommit(func(txn *crdt.Transaction) {
+		paragraph := crdt.NewYXmlElement("paragraph")
+		browserFragment.InsertElement(txn, browserFragment.Len(), paragraph)
+		browserText = crdt.NewYXmlText()
+		paragraph.InsertText(txn, 0, browserText)
+	})
+	writeItalicLeavingMarkers(func(change func(*crdt.YXmlText, *crdt.Transaction)) {
+		browserCommit(func(txn *crdt.Transaction) { change(browserText, txn) })
+	})
+
+	waitForLandedAppends(t, service, artifactID)
+	want := roomMarkdown(t, service, artifactID)
+	room := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(room, encodedRoom(t, service, artifactID), nil); err != nil {
+		t.Fatalf("decode the room's state: %v", err)
+	}
+	if !strings.Contains(want, "*x*y") {
+		t.Fatalf("the room renders %q, want its *x*y, which a cleanup would make *xy*", want)
+	}
+
+	versioned := service.persistence.(*PgVersioned)
+	if before := storedRows(t, service.store, artifactID); len(before) < 3 {
+		t.Fatalf("the document stored %d rows, want several to fold", len(before))
+	}
+	if result := compactAged(t, versioned, service.store, artifactID); result.outcome != compactCompacted {
+		t.Fatalf("compaction = %+v, want the rows folded", result)
+	}
+	rows := storedRows(t, service.store, artifactID)
+	if len(rows) != 1 {
+		t.Fatalf("the compacted document holds %d rows, want the one folded row", len(rows))
+	}
+	folded := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(folded, rows[0].update, nil); err != nil {
+		t.Fatalf("decode the folded row: %v", err)
+	}
+	if got := docMarkdown(folded); got != want {
+		t.Fatalf("the folded row renders %q, want the room's %q", got, want)
+	}
+	if got, wantClocks := fmt.Sprint(folded.StateVector()), fmt.Sprint(room.StateVector()); got != wantClocks {
+		t.Fatalf("the folded row holds clocks %s, want the room's %s", got, wantClocks)
+	}
 }

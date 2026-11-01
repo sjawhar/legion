@@ -198,9 +198,28 @@ func (l *Ledger) commit(ctx context.Context) error {
 			l.service.scheduleSettleAfterAppend(flush.room)
 		}
 	}
+	l.noteAppended()
 	l.flushes = nil
 	l.creditRooms()
 	return nil
+}
+
+// noteAppended notes to the compaction queue (noteStoredUpdates) the last version each append of
+// the committed transaction made durable: each live write's own appends, and the room updates it
+// flushed ahead of them. A document the transaction both wrote and flushed is noted once for
+// each, which asks the queue for the one check a single note would (compactionQueue.note). A
+// seed's row is its document's first, which leaves nothing to fold.
+func (l *Ledger) noteAppended() {
+	for _, artifactID := range l.order {
+		if versions := l.live[artifactID].versions; len(versions) > 0 {
+			l.service.noteStoredUpdates(artifactID, int64(versions[len(versions)-1]))
+		}
+	}
+	for _, flush := range l.flushes {
+		if appended := flush.appended(nil); len(appended) > 0 {
+			l.service.noteStoredUpdates(flush.room, int64(appended[len(appended)-1]))
+		}
+	}
 }
 
 // takeRoomCursors records on each room instance a write was made on, and on the room instance its

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -312,12 +313,25 @@ func TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable(t *testing.T) {
 }
 
 // A cold socket's admission check hands the room's load the history it decoded, so the history
-// is read once - but only while it is still the stored one. An update appended in between raises
-// the head, and the load reads the store again rather than open the room without that update.
+// is read once and the room loads with that very state - but only while it is still the stored
+// one. An update appended in between raises the head, and the load reads the store again rather
+// than open the room without that update.
 func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
 	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	var mu sync.Mutex
+	var recording bool
+	var decoded [][]byte
+	service.bootstrapping = func(room string, state []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		if recording && room == artifactID {
+			decoded = append(decoded, state)
+		}
+	}
 	seedServiceText(t, service, artifactID, "before")
-	adapter := &servicePersistenceAdapter{store: service.persistence, service: service}
+	waitForLandedAppends(t, service, artifactID)
+	closeDocumentRoom(t, service, artifactID)
 	preload := func(t *testing.T) []byte {
 		t.Helper()
 		_, loaded, err := service.loadTree(context.Background(), artifactID)
@@ -327,32 +341,35 @@ func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
 		service.preloads.Store(artifactID, &preloadedDocument{loaded: *loaded})
 		return loaded.Update
 	}
-
-	// The load hands ygo nothing and keeps the state on its record for the room's load to apply
-	// (applyLoadedState).
-	loadedState := func(t *testing.T) []byte {
+	loadRoom := func(t *testing.T, want string) []byte {
 		t.Helper()
-		served, err := adapter.LoadDoc(artifactID)
-		if err != nil || len(served) != 0 {
-			t.Fatalf("LoadDoc handed ygo %d bytes (%v), want none", len(served), err)
+		mu.Lock()
+		recording, decoded = true, nil
+		mu.Unlock()
+		if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+			t.Fatalf("load the room: %v", err)
 		}
-		record, ok := service.roomLoads.Load(artifactID)
-		if !ok {
-			t.Fatal("LoadDoc recorded no load")
+		if text, err := service.Text(context.Background(), artifactID); err != nil || !strings.Contains(text, want) {
+			t.Fatalf("the loaded room reads %q (%v), want %q", text, err, want)
 		}
-		return record.(*roomLoad).takeState()
+		mu.Lock()
+		defer mu.Unlock()
+		if len(decoded) != 1 {
+			t.Fatalf("the room's load decoded %d states, want one", len(decoded))
+		}
+		return decoded[0]
 	}
 
 	held := preload(t)
-	served := loadedState(t)
-	if len(served) == 0 || &served[0] != &held[0] {
-		t.Fatalf("load with a current preload served %d bytes, want the preloaded history itself", len(served))
+	if served := loadRoom(t, "before"); &served[0] != &held[0] {
+		t.Fatalf("the room loaded a %d-byte state, want the preloaded history itself", len(served))
 	}
 	if _, kept := service.preloads.Load(artifactID); kept {
 		t.Fatal("a served preload stayed behind for a later load")
 	}
+	closeDocumentRoom(t, service, artifactID)
 
-	preload(t)
+	held = preload(t)
 	moved, err := encodeDocumentTree(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{{
 		Type: "paragraph", Children: []*pmdoc.Node{{Type: "text", Text: "appended"}},
 	}}})
@@ -362,13 +379,8 @@ func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
 	if _, err := service.persistence.AppendUpdate(context.Background(), artifactID, moved); err != nil {
 		t.Fatalf("append update after the check: %v", err)
 	}
-	served = loadedState(t)
-	doc := crdt.New()
-	if err := crdt.ApplyUpdateV1(doc, served, nil); err != nil {
-		t.Fatalf("decode the loaded history: %v", err)
-	}
-	if markdown, err := renderDocument(doc); err != nil || !strings.Contains(markdown, "appended") {
-		t.Fatalf("load after the history moved served %q (%v), want the appended update", markdown, err)
+	if served := loadRoom(t, "appended"); &served[0] == &held[0] {
+		t.Fatal("the room loaded the stale preload")
 	}
 }
 
@@ -498,10 +510,9 @@ func TestShutdownReturnsAtItsDeadlineWithAnEditorConnectedAndAnAppendLocked(t *t
 		t.Fatalf("release append lock: %v", err)
 	}
 	// Not waitForPersistedUpdates: Shutdown's CloseRoom evicts this room once the append lands
-	// (room.connected), and ygo compacts an evicted room's history to one row (compactKeep),
-	// so a row-count check here races the compaction that normally follows eviction. The
-	// durable-append signal alone proves the locked write reached the store; the content check
-	// below proves what it reached the store as.
+	// (room.connected), and the eviction compacts the rows it can (compactRoom), so a row count is
+	// not what says the append landed. The durable-append signal alone proves the locked write
+	// reached the store; the content check below proves what it reached the store as.
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Minute)
 	defer waitCancel()
 	if err := service.waitForDurableAppends(waitCtx, artifactID); err != nil {

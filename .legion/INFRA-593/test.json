@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-593",
+  "previousHandoff": "bf20433e34f67125d356c1f0d34dbfed6d513fd1",
+  "round": 22,
+  "headTested": "fccd461afa15311f91a9419defaaebd842e61924",
+  "prHead": "8a5243e6b16fd1fc902a36d9893e6877cdc54952",
+  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-22-txt",
+  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-22-tar-gz",
+  "previousRounds": [
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-2-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-3-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-4-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-5-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-6-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-7-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-8-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-9-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-10-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-11-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-12-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-13-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-14-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-15-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-16-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-17-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-18-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-19-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-20-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-21-txt"
+  ],
+  "roundShape": {
+    "tool": "dispatch://INFRA-592/artifact/round-shape-py version 1 (sanity: same head -> 0; f533f33c->95ef7808 -> round 21's 16)",
+    "oldHead": "95ef78087492a3b5090986869215f31cad567838",
+    "newHead": "fccd461afa15311f91a9419defaaebd842e61924",
+    "differs": "cmd/dispatch/README.md (the merge: the PR's sentences re-broken to main's lines; four sentences now main's own, so no longer additions) and docs/compaction_test.go (+188, the two tests)",
+    "fileSet": "81 -> 81 (merge) -> 81; nothing appears or disappears; changelog fragments: only pr2444-document-load-and-compaction.yaml",
+    "round": "narrow, on the architect's call"
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Reverted each fix on its own copy of the head and saw only its test fail; ran both tests 20x plain and 20x under CGO_ENABLED=1 -race; ran the compaction tests once under race."
+  },
+  "failed": 0,
+  "failures": [],
+  "memory": {
+    "cap": "go test -p 1, GOMAXPROCS=2, GOMEMLIMIT=12GiB, CGO_ENABLED=1 -race -timeout 30m/40m",
+    "sampler": "named job mem-sampler-infra-593-r22, bounded at 1,500 samples, stopped via proc://mem-sampler-infra-593-r22/kill",
+    "samples": 94,
+    "sampledPeakGiB": 4.25,
+    "leftoverCheck": "After the kill returned, ran ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|seq 1 1500|mem22' and it listed nothing."
+  },
+  "proof": [
+    {
+      "criterion": "Architect check 2: each new test fails with its fix reverted and passes 20 times, also under race; they pin what the probes did.",
+      "surface": "internal/dispatch/docs at fccd461a and at two copies of it with one fix reverted each, on Postgres 18.6",
+      "command": "go test ./internal/dispatch/docs -run '^(TestACompactionThatDoesNotWaitHoldsNoRoomLockWhileItWaitsForAConnection|TestAWaitingCompactionWhoseReadFailedStillWaitsForTheRoomsLock)$' -count=20 (and CGO_ENABLED=1 -race -count=20 -timeout 30m) (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-22-tar-gz)",
+      "observed": "Head: 20/20 each plain, 20/20 each under race, ok, 0 DATA RACE. The tests drive the probes' shapes (both compaction-pool connections held during the fold while a room append runs; doc_updates renamed while a held advisory lock is waited on) and wait on events bounded by roomWait rather than fixed sleeps.",
+      "headSha": "fccd461afa15311f91a9419defaaebd842e61924",
+      "negativeControl": "lockRoom reverted to the room lock before the connection: the first test fails at compaction_test.go:577 'the append never landed while the compaction waited for a compaction-pool connection'; passRoomLock skipped on a read error: the second fails at :605 'returned ... without waiting for the document's lock'. Each other test passes."
+    },
+    {
+      "criterion": "Architect check 3: the compaction tests once.",
+      "surface": "internal/dispatch/docs and cmd/dispatch at fccd461a on Postgres 18.6",
+      "command": "CGO_ENABLED=1 go test -race -p 1 -count=1 -timeout 40m ./internal/dispatch/docs ./cmd/dispatch -run 'Test.*Compaction.*|Test.*Compact.*|Test.*Sweep.*|<two format tests>'",
+      "observed": "67 PASS (both new tests included), both packages ok, 0 DATA RACE. Round 21's evidence stands for the rest.",
+      "headSha": "fccd461afa15311f91a9419defaaebd842e61924",
+      "negativeControl": "The two reverts above."
+    }
+  ],
+  "ci": "Read on GitHub at fccd461a at 22:34 UTC: run 41356973556 (created 22:24:29Z) queued; changes success, pr-title cancelled and pending; every other lane queued, ci-ok not posted. Every lane unread."
+}

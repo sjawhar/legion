@@ -416,7 +416,7 @@ func main() {
 	// whose loops would each run everywhere, so it ends here.
 	//
 	// The loops come in these shapes, so that a database nobody writes costs them nothing except
-	// where GitHub gives them nothing to wake on, and the four timers of the last shape:
+	// where GitHub gives them nothing to wake on, and the five timers of the last shape:
 	//   - woken loops, which run a pass at start and then only when a Postgres notification on the
 	//     shared listener below says their work may have changed, or when a due time their last
 	//     pass asked for comes round: the embedding queue (embedqueue.WakeChannel), the reference
@@ -448,9 +448,10 @@ func main() {
 	//     batch is full), the repair of closed and reopened issues' asks (api.RunIssueAskRepair,
 	//     every 10 minutes on a plain ticker, after the boot's own unleased pass), the prune of
 	//     the server process registry (processes.RunPrune, every minute, which joinRegistry starts
-	//     below) and the keyed writes' maintenance sweep (api.RunMaintenanceSweep, every minute),
-	//     each recording its passes in duty_passes like the timers above; each tick sends its
-	//     statements whether or not anything is owed.
+	//     below), the keyed writes' maintenance sweep (api.RunMaintenanceSweep, every minute) and
+	//     the document compaction sweep (docs.Service.RunCompactionSweep, every hour from a tick at
+	//     start, with or without NATS), each recording its passes in duty_passes like the timers
+	//     above; each tick sends its statements whether or not anything is owed.
 	//
 	// The shared listener is one pglisten.Hub per process, on one held connection of the store's
 	// listener pool, carrying every woken loop's channel. Every wake is registered before it runs
@@ -470,9 +471,12 @@ func main() {
 	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
 	//     shared wake listener (each process's loops wait on their own), the delivery live hub
 	//     and its listener (migration 0107_events_notify.up.sql states that purpose), the event
-	//     stream relay, the document rooms' timers, and the stale-room evictor (it closes the
-	//     rooms resident in this process that the other process's writes left behind the
-	//     durable head, so it has to run wherever a room is resident).
+	//     stream relay, the document rooms' timers, the document compaction queue (docs.New starts
+	//     it; it compacts the documents this process's own appends and loads noted, and the hourly
+	//     compaction sweep below is the leased pass over the documents doc_compaction_owed names,
+	//     those with rows to fold), and the stale-room evictor (it closes the rooms resident in
+	//     this process that the other process's writes left behind the durable head, so it has to
+	//     run wherever a room is resident).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
 	//     retirePlainRefreshTokens, restoreDecidedWordings, repairIssueAsks and SeedRepoProjects
 	//     above, and the embedding coverage pass (two processes' passes at once leave what one
@@ -501,8 +505,6 @@ func main() {
 			Store:           &store.Store{Pool: outboxPool},
 			Publisher:       natsClient,
 			Broker:          broker,
-			Docs:            documentService,
-			Leases:          leases,
 			PublishFailures: outboxPublishFailures,
 		})
 	}
@@ -559,6 +561,10 @@ func main() {
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531), woken by the refs trigger that announces each mention left owed.
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases, excerptsWake)
+	// Documents the compaction queues let go - every room a restart, a Shutdown or a Quiesce
+	// dropped from one - fold within an hour of coming due, whether or not NATS is configured
+	// (INFRA-593).
+	go documentService.RunCompactionSweep(ctx, leases)
 	// Each document's edit notice goes once its quiet window after a person's last
 	// settled version ends, as one artifact.human_edited event; the window is a row, so a notice
 	// still pending when this process stops is sent by the next sweep of either process. The sweep

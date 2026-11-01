@@ -33,11 +33,13 @@ func (a *artifactFlags) Set(value string) error {
 // checks the documents --artifact names, or every document, and with --since only the updates and
 // versions created at or after that time, folding the older ones unchecked. It reads in read-only
 // transactions, migrates nothing and writes nothing, and prints one line per document and one per
-// mismatch: counts, classes, versions, md5s and lengths, never document text. A document whose
-// check compared no update and no version is unchecked, never clean: one --artifact names fails
-// the run, and a run over every document fails when it checked none, so exit 0 always means the
-// check looked. Exit 0 when every document replays, 1 on any mismatch, refused document, failure to
-// check or unchecked named document, 2 on a usage error.
+// mismatch: counts, classes, versions, md5s and lengths, never document text. A version created
+// inside the window recording an update a compaction has folded into the base is counted
+// (versions_compacted) and compared with nothing. A document whose check compared no update and
+// no version, one whose window versions all record such updates included, is unchecked, never
+// clean: one --artifact names fails the run, and a run over every document fails when it checked
+// none, so exit 0 always means the check looked. Exit 0 when every document replays, 1 on any
+// mismatch, refused document, failure to check or unchecked named document, 2 on a usage error.
 func storedOrder(ctx context.Context, args []string, databaseURL string, out io.Writer) int {
 	flags := flag.NewFlagSet("stored-order", flag.ContinueOnError)
 	flags.SetOutput(out)
@@ -112,8 +114,13 @@ func storedOrder(ctx context.Context, args []string, databaseURL string, out io.
 }
 
 func writeStoredOrderReport(out io.Writer, report docs.StoredOrderReport) {
-	fmt.Fprintf(out, "stored-order: %s base=%d updates_checked=%d updates_skipped=%d versions_checked=%d versions_skipped=%d mismatches=%d",
-		report.ArtifactID, report.Base, report.UpdatesChecked, report.UpdatesSkipped, report.VersionsChecked, report.VersionsSkipped, len(report.Mismatches))
+	fmt.Fprintf(out, "stored-order: %s base=%d updates_checked=%d updates_skipped=%d versions_checked=%d versions_skipped=%d versions_compacted=%d mismatches=%d",
+		report.ArtifactID, report.Base, report.UpdatesChecked, report.UpdatesSkipped,
+		report.VersionsChecked, report.VersionsSkipped, report.VersionsCompacted, len(report.Mismatches))
+	if report.VersionsCompacted > 0 {
+		fmt.Fprintf(out, " compacted=%q", fmt.Sprintf("%d versions record updates below the compaction base %d and were not compared",
+			report.VersionsCompacted, report.Base))
+	}
 	if report.Refused != "" {
 		fmt.Fprintf(out, " refused=%q", report.Refused)
 	}
