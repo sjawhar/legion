@@ -517,18 +517,19 @@ reach any work a pod runs, a test or a tool of your own, not a test suite alone.
   `st_dev` and `st_ino`, and refuse when they differ or when the `lstat` says `S_IFLNK`. The
   probe used plain `openat` with `O_NOFOLLOW`; `openat2` with `RESOLVE_NO_SYMLINKS` was out of
   scope and is untested.
-- **Set `ulimit -s` to a finite 131072 or more under gVisor, never `unlimited`.** gVisor maps the
-  whole stack at exec and caps it at a constant, `maxStackSize = 128 << 20` in `MapStack`
-  (`pkg/sentry/mm/syscalls.go`), so 128 MiB is the main thread's ceiling and no setting raises
-  it; `RLIM_INFINITY` falls back to the 8 MiB default. A lane measured both on 2026-11-01 in
-  pods under gVisor (4.19.0-gvisor), with a C probe and a second probe in another language: under
-  `unlimited`, which `/proc/self/limits` reads back as `unlimited`, the fault came at 7 MiB and
-  524,150 frames; under two very different finite settings at or above 131072 (KiB), both probes
-  measured the same ceiling, a fault at 127 MiB and 8,388,470 frames. The same probes on an
-  ordinary kernel track the setting as expected, so this is the sandbox and not the probes. One
-  trap follows from it: a helper that raises the stack by setting the soft limit to the hard
-  limit gets 8 MiB in a pod, since the pod's hard limit is `unlimited`, and setting a finite
-  `ulimit -s` first makes that helper's own check pass.
+- **Set `ulimit -s` to exactly 131072 under gVisor, soft and hard, never `unlimited`.** gVisor
+  maps the whole stack at exec and caps it at a constant, `maxStackSize = 128 << 20` in
+  `MapStack` (`pkg/sentry/mm/syscalls.go`), so 128 MiB is the main thread's ceiling and nothing
+  raises it; `RLIM_INFINITY` falls back to the 8 MiB default. A lane measured both on 2026-11-01
+  in pods under gVisor (4.19.0-gvisor), with a C probe and a second probe in another language:
+  under `unlimited`, which `/proc/self/limits` reads back as `unlimited`, the fault came at 7 MiB
+  and 524,150 frames; at 131072 (KiB) both probes reached the ceiling, a fault at 127 MiB and
+  8,388,470 frames. The same probes on an ordinary kernel track the setting as expected, so this
+  is the sandbox and not the probes. 131072 is the number because a larger soft limit buys
+  nothing and costs: glibc sizes a default thread stack from the soft limit, so a tool that
+  creates a thread pool can fail to allocate one. Set the hard limit too (`ulimit -H -s 131072`
+  first, or `-H` and `-S` together): a helper that raises the stack by setting the soft limit to
+  the hard limit otherwise lands on the pod's `unlimited` hard limit and gets 8 MiB.
 - **Compare durations within one pod, never across pods.** A gVisor sandbox runs syscall-heavy
   work 2.2 to 3.8 times slower than the same work outside it, and a pod lands on whatever node
   the autoscaler provisions, so two pods are two machines, two sets of neighbours and two
