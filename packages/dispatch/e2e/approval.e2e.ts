@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { ASK_QUESTION_MAX } from "@legion/contracts/dispatch-tools";
 import { expect, type Page, test } from "@playwright/test";
 import type { Artifact } from "../web/src/api/types";
@@ -20,6 +21,7 @@ import {
 } from "./api";
 import { documentEditor, needsYouCards, openSpecAndAwaitHeadingIds } from "./editor";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { assertWhole } from "./unclipped";
 import { asUser } from "./users";
 
@@ -438,6 +440,13 @@ test("an approval ask's Inbox card shows a question carrying a long summary whol
   }
 });
 
+// A settlement that writes no version is proved by outlasting the window it would run in: the
+// harness holds it to 250 ms (`DISPATCH_TEST_SETTLE_DELAY`, `e2e/run-server.sh`), so a second of
+// real time covers four of them. It is the server's own timer, which no page clock reaches.
+const SETTLED_MS = 1_000;
+
+// SLOW(>=2s): Two users, two pages, and a settle window that must be outlasted to prove no
+// version was written.
 test("reading an approved spec and moving the caret through its numbered list leaves its approval current", async ({
   browser,
 }) => {
@@ -477,9 +486,10 @@ test("reading an approved spec and moving the caret through its numbered list le
       await reader.keyboard.press(key);
     }
     await expect.poll(async () => (await getArtifactText(artifactID)).token).not.toBe(opened);
-    // Settlement runs two seconds after the room's last update, and a version it wrote for
-    // either update would leave the approval pinned to an older one.
-    await reader.waitForTimeout(3000);
+    // Settlement runs 250 ms after the room's last update (`DISPATCH_TEST_SETTLE_DELAY`,
+    // `e2e/run-server.sh`), and a version it wrote for either update would leave the approval
+    // pinned to an older one. A second of real time is four of those windows.
+    await sleep(SETTLED_MS);
     const artifact = await getArtifact(artifactID, { login: "alice" });
     expect(artifact.versions).toHaveLength(1);
     expect(artifact.approval).toMatchObject({ latest_version: 1, state: "approved", version: 1 });
@@ -518,9 +528,10 @@ test("an agent's comment on part of an identifier in an approved spec leaves its
       { anchor: { artifact: "spec", quote: "id column" }, body: "Is this indexed?" },
       session
     );
-    // Settlement runs two seconds after the room's last update, and a version it wrote would
-    // leave the approval pinned to an older one.
-    await page.waitForTimeout(3000);
+    // Settlement runs 250 ms after the room's last update (`DISPATCH_TEST_SETTLE_DELAY`,
+    // `e2e/run-server.sh`), and a version it wrote would leave the approval pinned to an older
+    // one. A second of real time is four of those windows.
+    await sleep(SETTLED_MS);
     const artifact = await getArtifact(artifactID, { login: "alice" });
     expect(artifact.versions).toHaveLength(1);
     expect(artifact.approval).toMatchObject({ latest_version: 1, state: "approved", version: 1 });
@@ -564,9 +575,10 @@ test("rejecting a suggestion on part of an identifier in an approved spec leaves
     const approved = (await getArtifact(artifactID, { login: "alice" })).approval;
 
     await rejectSuggestion(suggestion.id, { login: "bob" });
-    // Settlement runs two seconds after the room's last update, and a version it wrote would
-    // leave the approval pinned to an older one.
-    await page.waitForTimeout(3000);
+    // Settlement runs 250 ms after the room's last update (`DISPATCH_TEST_SETTLE_DELAY`,
+    // `e2e/run-server.sh`), and a version it wrote would leave the approval pinned to an older
+    // one. A second of real time is four of those windows.
+    await sleep(SETTLED_MS);
     expect((await getArtifact(artifactID, { login: "alice" })).approval).toMatchObject({
       latest_version: approved?.version,
       state: "approved",
@@ -647,6 +659,8 @@ test("an approval request for an unassigned issue's non-primary document remains
   }
 });
 
+// SLOW(>=2s): Three cold routes a reader arrives on, because each bare ask URL must be resolved
+// from a fresh load, plus the Inbox landing they are compared against.
 test("an approval ask's Inbox row, drawer link and bare ask route land on the spec with the approve control in view, while an anchored ask and an unanchored question still land where they do today", async ({
   browser,
 }) => {
@@ -684,8 +698,9 @@ test("an approval ask's Inbox row, drawer link and bare ask route land on the sp
     await expect(page.getByRole("button", { name: "Approve", exact: true })).toBeVisible();
 
     // The drawer's card names the document and version it asks about, as a link; following it
-    // opens the spec and closes the drawer.
-    await page.goto("/agents");
+    // opens the spec and closes the drawer. The drawer rides the shell the reader is already in,
+    // so this leg needs no cold route of its own.
+    await navigateInApp(page, "/agents");
     await page.locator("body").focus();
     await page.keyboard.press("i");
     await expect(drawer(page)).toBeVisible();

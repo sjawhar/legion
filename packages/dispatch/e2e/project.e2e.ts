@@ -13,6 +13,7 @@ import {
 } from "./api";
 import { filterPicker, pickFilterOption } from "./filters";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { assertPageFits } from "./unclipped";
 import { asUser } from "./users";
 
@@ -56,10 +57,14 @@ test("project page groups issues by status in board order; filters narrow issues
   const bobs = await createIssue({ project: "CORE", title: "Bob's work" }, { login: "bob" });
   await patchIssue(bobs.key, { status: "in_progress" });
   await createAsk(bobs.key, { question: "Does Bob need to answer this?" }, session);
-  for (const issue of [triage, icebox, backlog, parent, needsYou, child, done]) {
-    const latest = await getIssue(issue.key);
-    await putIssueState(issue.key, { last_read_seq: latest.last_seq });
-  }
+  // Seven read marks, one round of round trips: the rows differ, the writes do not wait on
+  // each other.
+  await Promise.all(
+    [triage, icebox, backlog, parent, needsYou, child, done].map(async (issue) => {
+      const latest = await getIssue(issue.key);
+      await putIssueState(issue.key, { last_read_seq: latest.last_seq });
+    })
+  );
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -162,7 +167,7 @@ test("project page groups issues by status in board order; filters narrow issues
     await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
       "Design notes"
     );
-    await page.goto("/projects/CORE/documents");
+    await navigateInApp(page, "/projects/CORE/documents");
     await expect(page.getByRole("link", { name: "Design notes", exact: true })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("project-documents.png"), fullPage: true });
     await expect(page.getByText("Issue-only document", { exact: true })).toHaveCount(0);

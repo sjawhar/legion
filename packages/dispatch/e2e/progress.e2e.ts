@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { createIssue, createProject, getIssue, listIssues, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 
 test.beforeEach(async () => {
@@ -56,12 +57,12 @@ test("an issue shows its spec's task list and its children counted, on its page,
     await expect(page.getByTestId("issue-progress-children")).toHaveText("1/2 children");
     await shot("issue");
 
-    await page.goto(`/issues/${plain.key}`);
+    await navigateInApp(page, `/issues/${plain.key}`);
     await expect(page.getByRole("heading", { name: "Plain" })).toBeVisible();
     await expect(page.getByTestId("issue-progress-tasks")).toHaveCount(0);
     await expect(page.getByTestId("issue-progress-children")).toHaveCount(0);
 
-    await page.goto("/projects/CORE/issues");
+    await navigateInApp(page, "/projects/CORE/issues");
     const rootRow = page.getByRole("listitem", { name: `${root.key} Tracked work` });
     await expect(rootRow.getByTestId("issue-progress-tasks")).toHaveText("2/4 tasks");
     await expect(rootRow.getByTestId("issue-progress-children")).toHaveText("1/2 children");
@@ -70,7 +71,7 @@ test("an issue shows its spec's task list and its children counted, on its page,
     await expect(plainRow.getByTestId("issue-progress-tasks")).toHaveCount(0);
     await shot("list");
 
-    await page.goto("/projects/CORE");
+    // The board is one toggle away from the list this row is already on.
     await page.getByRole("button", { name: "Board" }).click();
     const rootCard = page.getByRole("article", { name: `${root.key} Tracked work` });
     await expect(rootCard.getByTestId("issue-progress-tasks")).toHaveText("2/4 tasks");

@@ -65,7 +65,9 @@ test("the issue scope reaches the header controls and the tab chords, and ? list
     await expect(status).toBeFocused();
     await leaveFocus(page);
 
-    // A digit sets P0–P3 through the same write the picker uses, and it survives a reload.
+    // A digit sets P0–P3 through the same write the picker uses, and Shift+P pins through the
+    // header's own control. Both are optimistic, so each write is waited for rather than raced,
+    // and one reload below carries both: a second one would prove nothing the first does not.
     const patch = page.waitForRequest(
       (request) =>
         request.method() === "PATCH" &&
@@ -75,20 +77,8 @@ test("the issue scope reaches the header controls and the tab chords, and ? list
     expect((await patch).postDataJSON()).toEqual({ priority: 2 });
     await expect(header.locator("span", { hasText: /^P2$/ })).toBeVisible();
     await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: 2 });
-    await page.reload();
-    await expect(header.locator("span", { hasText: /^P2$/ })).toBeVisible();
     await leaveFocus(page);
 
-    // l opens the labels popover - the listbox itself, not just its trigger.
-    await page.keyboard.press("l");
-    await expect(page.getByRole("listbox", { name: "Labels options" })).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Search or create label" })).toBeFocused();
-    await page.keyboard.press("Escape");
-    await expect(page.getByRole("listbox", { name: "Labels options" })).toHaveCount(0);
-    await leaveFocus(page);
-
-    // Shift+P pins through the header's own control. The pin is optimistic, so the reload
-    // below waits for the write itself rather than racing the navigation against it.
     const pinned = page.waitForResponse(
       (response) =>
         response.request().method() === "PUT" &&
@@ -97,8 +87,19 @@ test("the issue scope reaches the header controls and the tab chords, and ? list
     await page.keyboard.press("Shift+P");
     await expect(header.getByRole("button", { name: "Unpin issue" })).toBeVisible();
     expect((await pinned).ok()).toBe(true);
+    await leaveFocus(page);
+
     await page.reload();
+    await expect(header.locator("span", { hasText: /^P2$/ })).toBeVisible();
     await expect(header.getByRole("button", { name: "Unpin issue" })).toBeVisible();
+    await leaveFocus(page);
+
+    // l opens the labels popover - the listbox itself, not just its trigger.
+    await page.keyboard.press("l");
+    await expect(page.getByRole("listbox", { name: "Labels options" })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Search or create label" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("listbox", { name: "Labels options" })).toHaveCount(0);
     await leaveFocus(page);
 
     // e edits the title, where every single key is text again: typing "sp0" neither focused
@@ -555,7 +556,9 @@ test.describe("issue page", () => {
       await hold.click();
       await expect(hold).toBeFocused();
       await page.keyboard.press("2");
-      await page.waitForTimeout(500);
+      // The handler is synchronous, so a write it let through had left before a request the page
+      // issues next could be answered: that answer is the barrier, not a wall-clock wait.
+      await page.evaluate(() => fetch("/api/v1/auth/whoami").then(({ status }) => status));
       expect(patched).toBe(0);
       await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: null });
 
@@ -581,7 +584,7 @@ test.describe("issue page", () => {
       await hold.click();
       await expect(hold).toBeFocused();
       await page.keyboard.press("Shift+P");
-      await page.waitForTimeout(500);
+      await page.evaluate(() => fetch("/api/v1/auth/whoami").then(({ status }) => status));
       expect(pinned).toBe(0);
       await expect(page.getByRole("button", { name: "Pin issue" })).toBeVisible();
 

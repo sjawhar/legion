@@ -1,5 +1,6 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
+import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
 import {
   acceptSuggestion,
   createAsk,
@@ -91,13 +92,17 @@ test("an ask is a thread: replies before and after answering, then a live agent 
     bobSession
   );
   await expect
-    .poll(async () =>
-      (await getIssueEvents(issue.key)).some((event) => event.type === "ask.opened")
+    .poll(
+      async () => (await getIssueEvents(issue.key)).some((event) => event.type === "ask.opened"),
+      { intervals: [50, 50, 100, 200, 500] }
     )
     .toBe(true);
 
   const alice = await asUser(browser, "alice");
   const alicePage = await alice.newPage();
+  // The session's reply below reaches the open thread over the event feed, whose refetch the
+  // page holds to one per second (`MIN_REFETCH_INTERVAL_MS`): a page timer its own clock fires.
+  await alicePage.clock.install();
   await alicePage.goto(`/issues/${issue.key}`);
   await alicePage.getByRole("tab", { name: "Spec" }).click();
   await setSheet(alicePage, testInfo.project.name, true);
@@ -139,6 +144,7 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   // The asking session replies over the API (bearer auth, its own comment on
   // the ask). Alice's already-open page shows it live from the event feed, no reload.
   await createComment(issue.key, { ask_id: ask.id, body: "Thanks, merging." }, bobSession);
+  await alicePage.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
   await expect(threadAfterAnswer.getByText("Thanks, merging.")).toBeVisible();
   await expect(replies).toHaveCount(2);
   await expect(replies.nth(0)).toContainText("Thanks, merging.");
@@ -470,10 +476,6 @@ test("a session retraction leaves its reason on the card and removes the human's
   const inboxPage = await alice.newPage();
   await inboxPage.goto("/");
   await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toBeVisible();
-  await inboxPage.screenshot({
-    fullPage: true,
-    path: testInfo.outputPath("inbox-before-ask-retraction.png"),
-  });
 
   const issuePage = await alice.newPage();
   await issuePage.goto(`/issues/${issue.key}`);
@@ -498,10 +500,6 @@ test("a session retraction leaves its reason on the card and removes the human's
   );
 
   await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
-  await inboxPage.screenshot({
-    fullPage: true,
-    path: testInfo.outputPath("inbox-after-ask-retraction.png"),
-  });
   // A retracted ask is withdrawn history: hidden by default, behind the same toggle as
   // resolved comment threads.
   await expect(margin.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
