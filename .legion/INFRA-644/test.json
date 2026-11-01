@@ -2,73 +2,62 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-644",
-  "previousHandoff": "c6d8126d69f810c1ebb05c6d319774e957fbb2ed",
-  "completed": "2026-11-01T14:15:00Z",
-  "round": 2,
-  "testedHead": "a3f98f2efc0ac810cf0c117337575e91ae2d7bd0",
+  "previousHandoff": "39eb0986210c5187a0ba5d808b49fd516234316e",
+  "completed": "2026-11-01T21:05:00Z",
+  "round": 3,
+  "testedHead": "073590ff72029c345ead5b1c159f98aa7c41f584",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Each of the four entries was re-driven on this pod rather than replayed. (1) The replay pair: I ran one adjacent pair of my own with this branch's own loadtest, base main d09b46d7 against head a3f98f2e, back to back on one pod, and read 1293.67 against 1085.62 Dispatch CPU-s with the same end state 973d289e the implementer reports - the direction, the size and the end-state hash all hold. (2) The corpus differential: run at this head over 90 real LINUX specs I fetched myself rather than the implementer's 32, PASS with 4,913 of 5,405 edits spliced byte-identical. (3) The validated-render equivalence: TestValidDocumentRenderWithLayoutIsTheValidatingRender passes over 365 documents. (4) The formatting replay: its own negative control is the right one, and I extended it to the copy it did not cover (the stored fold a cold read renders), where the same defect is reader-visible and no test had pinned it. The editor load steps were not re-run: --editors lives only on INFRA-605's branch and the merge rule is stated on the replay, which I did run."
+    "how": "Round 3's own entry was re-driven, not read. Its negative control is the claim that the cold-read churn case, moved into format_replay_test.go and rewritten to interleave the room's own writes, now fails without crdt.WithFormatCleanup(false): I took the option out of newDocumentCopy and the case failed in all three seeds ('the cold read differs from what the room held at byte 70 of 1417' and two more), where the version of it this role wrote in round 2 passed either way. So the fold the review asked for kept the coverage and strengthened it, and dropping this role's duplicate C1 case lost nothing. TestARoomLoadsItsStoredHistoryAsItWasStored passes with and without the option, so it is not the discriminating case; the churn one is. The older entries (the replay and editor pairs at a3f98f2e and earlier) were verified in round 2 and are unchanged; this round re-ran the replay at the new head because round 3 changes a measured path."
   },
-  "failed": 0,
-  "failures": [],
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "CI green at the head, read on GitHub (the merge gate's static evidence: lint, typecheck, test and the race lanes the base branch requires)",
+      "evidence": "There is no CI at this head at all, green or red. gh pr view 2485 --json statusCheckRollup answers an empty list at the pull request's head ed340353, and repos/sjawhar/legion/commits/<sha>/check-runs answers nothing for ed340353, for the code head 073590ff and for ac4cff72. The newest CI run on legion/INFRA-644 is 41273220019 at a3f98f2e, round 2's head; every run after it is PR Title on e6c7ced2. [INFERENCE] The cause fits the push's shape: round 3's code commits (ac4cff72, 073590ff) were pushed under the handoff commit ed340353, whose message ends 'skip-checks: true', and GitHub starts no workflow run for a push whose head carries that line - the stall skill://legion-worker names, where the daemon classifies the push by its paths and carries no verdict to it. The remedy is one code push whose head carries no trailer; the INFRA-512 architect has already asked the implementer to merge main in its next code push (main was red on TestMigrationSetTakesNumbersThenTimestamps until 0642a37a and is green again), and that push starts the run. Nothing in the change itself is implicated: every check this role could run locally passed, and they are recorded as proof below."
+    }
+  ],
   "proof": [
     {
-      "criterion": "Not slower on LINUX's write window with the same end state (INFRA-512 spec v25), at ygo v1.54.1-sami.3",
-      "surface": "INFRA-639's replay of LINUX's 2026-10-26 write window: Dispatch, Postgres, a latency proxy, NATS and the Envoy listener built from each revision and run on this 2-vCPU issue pod, against the restored replay seed and bundle",
-      "command": "LOADTEST_REPLAY_ISSUE=INFRA-639 bash packages/envoy/loadtest/run-step.sh t1-replay-<side>-1 --replay --rate 0.15 --gomaxprocs 2 --uploads 0.25 --rng-seed 1 --dispatch-commit <rev>, base d09b46d7 then head a3f98f2e, back to back on pod legion-infra-infra-644 (boot id ba611b10-6c17-4d28-80d9-19827e83ca17), 2026-11-01 12:06Z-14:06Z; runs in dispatch://INFRA-644/artifact/infra644-tester-r2-replay-pair-tar-gz",
-      "observed": "Dispatch CPU-s 1293.67 at the base against 1085.62 at the head over an identical 2,340 s window, -16.1%; neither run saturated; both sent all 708 planned writes with none failed; both end in state sha256 973d289e9f26a917a85abf555faa8a3d8c3a3def6de257ce66b9e06131f82717, which is the hash the implementer's six round-5 runs report. docs.(*renderedReplica).observe fell from 35.15 to 18.91 cum-s and renderedReplica.start from 34.87 to 18.57. The box was idle before each step (2.6% and 2.2%). The two Dispatch binaries differ (sha256 255acce9 and b446a149), each built clean at migration 150 with go1.27.1, so the pair measured the two trees and not one.",
-      "headSha": "a3f98f2efc0ac810cf0c117337575e91ae2d7bd0",
-      "negativeControl": "The base side is the control and carries the cost this change removes: the whole-document render per committed update and the base encode-and-render at each replica start, 35.15 and 34.87 cum-s against 18.91 and 18.57."
+      "criterion": "Not slower on LINUX's write window with the same end state (INFRA-512 spec v25), at the round-3 head",
+      "surface": "INFRA-639's replay of LINUX's 2026-10-26 write window: Dispatch, Postgres, a latency proxy, NATS and the Envoy listener built from each revision on this 2-vCPU issue pod, against the restored replay seed and bundle",
+      "command": "LOADTEST_REPLAY_ISSUE=INFRA-639 bash packages/envoy/loadtest/run-step.sh t2-replay-<side>-<n> --replay --rate 0.15 --gomaxprocs 2 --uploads 0.25 --rng-seed 1 --dispatch-commit <rev>; two adjacent pairs, base d09b46d7 then head 073590ff each time, back to back on pod legion-infra-infra-644 (boot id ba611b10-6c17-4d28-80d9-19827e83ca17), 17:36Z-21:00Z, neither pair split by a restart; runs in dispatch://INFRA-644/artifact/infra644-tester-r3-replay-pairs-tar-gz",
+      "observed": "Dispatch CPU-s: base 1130.41 and 1139.31, head 1105.64 and 1139.60. The median head run is below the highest base run, which is the rule; pair 1 is -2.2% and pair 2 is a tie (+0.29 CPU-s, +0.03%). All four runs end in state 973d289e…, none saturated, each sent 708 of 708 writes with none failed. The mechanism moves the same way in every run: docs.(*renderedReplica).observe 29.67 and 29.91 at the base against 17.59 and 18.02 at the head, renderedReplica.start 29.49 and 29.71 against 17.41 and 17.78. Read with care: this pod's spread is of the same size as the effect here - the same base binary measured 1293.67 CPU-s in this role's round-2 pair and 1130.41 in pair 1 - and the replay drives no browser editor, so the only part of this change it exercises is the replica's catch-up. The editor workload, where the per-keystroke render is removed, is the implementer's own evidence.",
+      "headSha": "073590ff72029c345ead5b1c159f98aa7c41f584",
+      "negativeControl": "The base side is the control and carries the cost this change removes: the whole-document render per committed update and the base decode-and-render at each replica start, 29.7-29.9 and 29.5-29.7 cum-s against 17.6-18.0 and 17.4-17.8."
+    },
+    {
+      "criterion": "Every copy that replays a room's commits holds the formatting the room held, the fold of the stored updates a cold read renders included (round 3 moved and rewrote this role's round-2 case)",
+      "surface": "A live Dispatch room in the docs package's real-process harness against the pod's test Postgres, with the room then evicted and the document read cold over its stored updates",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 -run 'TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown|TestARoomLoadsItsStoredHistoryAsItWasStored|TestAColdReadReplaysAChurnOfFormattingToTheRoomsMarkdown' -v ./internal/dispatch/docs/",
+      "observed": "All three pass at this head. The churn case now interleaves the room's own writes with the browser's and checks the reload, which is what gives it teeth on the stored path.",
+      "headSha": "073590ff72029c345ead5b1c159f98aa7c41f584",
+      "negativeControl": "With crdt.WithFormatCleanup(false) taken out of newDocumentCopy, TestAColdReadReplaysAChurnOfFormattingToTheRoomsMarkdown fails in all three seeds (byte 70 of 1417, byte 233 of 1480, byte 172 of 1433) and TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown fails too; TestARoomLoadsItsStoredHistoryAsItWasStored passes either way, so it is not the discriminating case. tree.go was restored byte for byte afterwards."
     },
     {
       "criterion": "Equivalence of the observer's output: the replica's markdown and each update's content_changed are what a whole render of the same state gives, with the touched blocks found by the replica's own change finder",
-      "surface": "A live Dispatch room in the docs package's real-process harness against the pod's test Postgres, two connected browser peers on one document (roomPeer), the shadow rendering an independent copy after every commit",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 -run TestRenderReuseARandomisedEditStorm -v ./internal/dispatch/docs/",
-      "observed": "PASS, 8 seeds, 2,775 commits at this head. After every commit the replica's markdown equalled the shadow's independent whole render and every update's recorded content_changed equalled what the shadow measured. Paths: 1,800 incremental splices, 867 whole renders, 281 untouched, 31 recovers, catchUpFromLoad and catchUpRendered both exercised. The same test is green under -race in CI's envoy-go-race-docs lane at this head.",
-      "headSha": "a3f98f2efc0ac810cf0c117337575e91ae2d7bd0",
-      "negativeControl": "Recorded in round 1 and unchanged: one line in noteChangedTypes so the finder records no block after the first makes the storm fail at commit 1 of seed 1 ('the replica renders 6976 bytes and the shadow 6990'). This round's control is the cold-read entry below, whose break is in code this round added."
+      "surface": "A live Dispatch room in the docs package's real-process harness, two connected browser peers on one document (roomPeer), the shadow rendering an independent copy after every commit",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 -run TestRenderReuseARandomisedEditStorm ./internal/dispatch/docs/",
+      "observed": "ok in 75.9 s at this head: 8 seeds, 2,775 commits, the replica's markdown equal to the shadow's independent whole render after every one and every update's recorded content_changed equal to what the shadow measured.",
+      "headSha": "073590ff72029c345ead5b1c159f98aa7c41f584",
+      "negativeControl": "Unchanged from round 1 and still the discriminating one for the finder: a line in noteChangedTypes that records no block makes the storm fail at commit 1 of seed 1."
     },
     {
-      "criterion": "A copy that replays the room's commits holds the formatting the room held - including the fold of the stored updates a cold read renders, which this round's newDocumentCopy change also covers",
-      "surface": "A live Dispatch room, then the room evicted and the document read cold (service.Text / TextWithToken over the stored updates, loadTree), in the docs package's real-process harness against the pod's test Postgres",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 -run TestColdReadReplaysTheRoomsFormatting -v ./internal/dispatch/docs/ (the two cases this round adds, cold_formatting_test.go)",
-      "observed": "PASS. On sjawhar/legion#2496's own shape - four of the service's own writes leaving the room holding a marked run, a plain one and a marked one - the cold read is byte-identical to the rendering the room held. Under a randomised churn of 40 rounds of marking and unmarking overlapping runs by a browser peer, interleaved with the service's own writes and with typing, 3 seeds, the cold read is byte-identical too. Race-clean.",
-      "headSha": "a3f98f2efc0ac810cf0c117337575e91ae2d7bd0",
-      "negativeControl": "With crdt.WithFormatCleanup(false) taken out of newDocumentCopy (docs/tree.go), the review's-shape case fails and names the difference: the cold read renders '# Formatting\\n\\n**xx****xxy**' where the room held '# Formatting\\n\\n**x**x**xxy**' - the plain character between the two bold runs is swallowed, so a reader who opens the document after the room is evicted gets text the room never held. tree.go was restored byte for byte afterwards (jj diff empty, the option back). The implementer's own TestRenderReuseAReplicaReplaysTheRoomsFormattingExactly pins the same defect in the replica and the shadow; nothing pinned it in the stored fold until now."
-    },
-    {
-      "criterion": "The per-block splice equals the whole render byte for byte on real documents, and a validated tree's RenderWithLayout is the validating render (the #2522 merge's new path)",
-      "surface": "pmdoc's splice differential over a corpus of real LINUX specs this round fetched itself, and the validated-render equivalence over the package's fixtures and corpus",
-      "command": "cd packages/envoy && DISPATCH_RENDER_CORPUS=/legion/scratch/tmp/infra644r/corpus go test -count=1 -run 'TestIncrementalRenderCorpus|TestValidDocumentRenderWithLayoutIsTheValidatingRender' -v ./internal/dispatch/pmdoc/ (corpus: 90 LINUX specs read with dispatch doc-read, rebuilt on 2026-11-01, independent of the implementer's 32-document list)",
-      "observed": "PASS in 112.9 s. Corpus: 90 documents, 0 unparsed, 5,405 trials, 4,913 spliced (90.9%) each byte-identical to RenderWithLayout of the edited document with an equal layout; paragraph, heading and list text edits spliced 1,257 of 1,259. By edit kind: anchor 616/616, attribute 633/633, break 603/603, delete 665/665, insert 676/678, mark 649/649, several 753/900, empty 318/661. Validated render: 365 documents rendered through both paths, each identical.",
-      "headSha": "a3f98f2efc0ac810cf0c117337575e91ae2d7bd0",
-      "negativeControl": "The implementer records that with the validated render recording no layout, TestValidDocumentRenderWithLayoutIsTheValidatingRender fails on every fixture. For the splice itself the discriminating control is the finder break above; a declined splice is the fallback the design rests on, and 492 of the 5,405 trials took it."
+      "criterion": "The per-block splice equals the whole render byte for byte on real documents, and a validated tree's RenderWithLayout is the validating render",
+      "surface": "pmdoc's splice differential over a corpus of 90 real LINUX specs this role fetched itself, and the validated-render equivalence over the package's fixtures and corpus",
+      "command": "cd packages/envoy && DISPATCH_RENDER_CORPUS=/legion/scratch/tmp/infra644r/corpus go test -count=1 -run 'TestIncrementalRenderCorpus|TestValidDocumentRenderWithLayoutIsTheValidatingRender' -v ./internal/dispatch/pmdoc/",
+      "observed": "PASS. Corpus: 90 documents, 0 unparsed, 5,405 trials, 4,913 spliced (90.9%) each byte-identical to RenderWithLayout of the edited document with an equal layout; paragraph, heading and list text edits 1,257 of 1,259. Validated render: 365 documents through both paths, each identical.",
+      "headSha": "073590ff72029c345ead5b1c159f98aa7c41f584",
+      "negativeControl": "The finder break above is the discriminating control for the splice; a declined splice is the fallback the design rests on, and 492 of the 5,405 trials took it."
     }
   ],
   "suites": {
-    "note": "Regression locks run here because this pod can run them; CI's own lanes are read on GitHub and re-run nowhere.",
-    "docs": "go test -count=1 ./internal/dispatch/docs/ - 2325.87 s, no test failed. The package's FAIL line is storetest's teardown alone: 'drop isolated database …: ERROR: permission denied to terminate process (SQLSTATE 42501)', the pod's test Postgres role lacking pg_signal_backend, which the implementer has already sent to the controller and the merge lane. CI's dispatch and envoy-go-race-docs lanes, on their own Postgres, are green at this head.",
-    "pmdoc": "go test -count=1 ./internal/dispatch/pmdoc/ - ok, 1092.96 s",
-    "race": "CGO_ENABLED=1 go test -race -run TestColdReadReplaysTheRoomsFormatting ./internal/dispatch/docs/ - ok, 5.85 s, no data race"
+    "note": "Run here because this pod can run them; no CI lane was re-run and none was waited for.",
+    "docs": "go test -count=1 ./internal/dispatch/docs/ - 1737.16 s, no test failed. The package's FAIL line is storetest's teardown alone ('permission denied to terminate process'), the pod's test Postgres role lacking pg_signal_backend, already reported by the implementer.",
+    "pmdoc": "go test -count=1 ./internal/dispatch/pmdoc/ - ok, 1127.88 s"
   },
-  "ci": {
-    "readAt": "a3f98f2efc0ac810cf0c117337575e91ae2d7bd0 (the code head; the handoff commit 3b282aed carries skip-checks and so has no run of its own)",
-    "observed": "Run 41273220019 concluded success. Every lane that ran is green, the required set among them: lint, typecheck, test, dispatch, envoy-go, envoy-go-race, envoy-go-race-docs, envoy-go-race-pmdoc, envoy-go-race-api, ci-filters, ci-ok and the rest. The ci-filters failure and the cmd/listener flake this role recorded at round 1 are gone.",
-    "rule": "No CI lane was re-run as evidence and none was waited for."
-  },
-  "reviewFindingsChecked": [
-    "important, go.mod: the pin is no longer sami.8. go.mod reads sjawhar/ygo v1.54.1-sami.3, a line that does not carry the checkParkedDeletes defect of sami.6-sami.9, and the parked-delete behaviour has its own test (the replica applies what each commit parked). The blocker this role recorded in round 1 is closed.",
-    "important, the ask fallback: spliceTouched's ask walk now logs the read error and returns nil rather than an empty map (replica.go:713-724), so a failed read records nothing instead of wiping the room's ask baseline.",
-    "important, two ask walks: pmdoc.WalkAskBlocks is now the one walk, and docs/ask_authors.go calls it (addAskBlockIDs, askBlockOrder).",
-    "important, markdown and layout nil together: the two are one replicaRendering held by pointer, so the invariant is structural and the copy-the-string workarounds are gone.",
-    "minor, the replica in its own file: replica.go now holds it; tree.go is 458 lines smaller.",
-    "minor, the duplicated peer helper: roomPeer (peer_test.go) is the one peer, and both the typing script and the edit storm drive it. The storm this role wrote in round 1 reads 292 lines rather than 429 for that reason."
-  ],
-  "notRerun": [
-    "The editor load steps (1x and editors-10x). --editors lives only on INFRA-605's branch (#2445), the merge rule is stated on LINUX's replay, and the replay is now in this branch, so the pair I ran is the rule's own measurement. The implementer's editor figures stand as its own evidence; this round neither confirms nor disputes them."
-  ],
   "observationsNotFailures": [
-    "meta.json's build_commit reads 3b282aed with build_dirty true for both runs: that is the checkout the loadgen binary was built from, with this round's new test file in the working copy. The Dispatch binaries under test are dispatch_build, each clean and at the revision the step named."
+    "Round 3 takes the nil-origin rule out of observeAskBlocksForUpdate and leaves it in creditContentChange alone (websocket.go). The two rules are not the same: creditContentChange decides who a content change is credited to, and the ask walk decides who an ask block newly seen on an update is attributed to. After this round, an ask block first seen on ygo's own cleanup transaction would be attributed to the sole connected browser rather than to nobody. I could not construct a reachable case - a cleanup transaction deletes redundant format markers and adds no block, so it cannot make an ask id newly visible, and in every path I tried the ask was already recorded by the update before it - so this is an observation, not a failure. It is recorded because nothing now pins it.",
+    "The replay's margin-publish change is the only production change of round 3 on a measured path, and the pairs above cover it: both pairs ran at 073590ff."
   ]
 }
