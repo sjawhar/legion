@@ -353,22 +353,49 @@ if ! IFS= read -r -t 5 subscriber_ready <"$subscriber_ready_fifo" || [[ "$subscr
   exit 3
 fi
 
+# Every registration below asks for the session's own consumer, as a plugin does: a registration
+# that asks for none and names no serving port is refused 409 not_requested, and nothing at all is
+# written for it (dispatch://INFRA-771). The epoch is the random string a plugin mints for one NATS
+# connection, and one run of this script is one such connection, so both registrations send the
+# same one: the second is the first session's heartbeat, not another connection's.
+delivery_request="$(jq -nc --arg epoch "e2e-local-$$" '{consumer:true,epoch:$epoch}')"
+readonly delivery_request
+
 subscribe_body="$(jq -nc \
   --arg session_id "$session_id" \
   --arg dir "/tmp/envoy-e2e-local" \
   --arg title "Envoy local acceptance" \
   --arg topic "notifications.github.example-org.example-repo.>" \
   --argjson port "$session_port" \
-  '{session_id:$session_id,dir:$dir,title:$title,topics:[$topic],port:$port,driving:true}')"
+  --argjson delivery "$delivery_request" \
+  '{session_id:$session_id,dir:$dir,title:$title,topics:[$topic],port:$port,driving:true,delivery:$delivery}')"
 curl -fsS -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/interests/subscribe" -d "$subscribe_body" >/dev/null
 
+# The same session's heartbeat, naming one more topic: a repository the stream holds no event of.
+# The answer is read for that repository's wiring warning, which is what this step exists for. It
+# carries everything the registration above did -- the serving port the fake session answers on,
+# its directory, title and driving flag -- because each registration's own body is the whole of the
+# session entry it writes (sessionEntryFromSubscribe), and the assertions below read that entry.
+# The relay subject the answer names is nothing this rig reads: the fake session is pushed to its
+# port by the relay of its own consumer, and every assertion below reads those pushes, this run's
+# capture of the bus, or the listener's log.
 unwired_subscribe_body="$(jq -nc \
   --arg session_id "$session_id" \
+  --arg dir "/tmp/envoy-e2e-local" \
+  --arg title "Envoy local acceptance" \
   --arg topic "notifications.github.never-seen.e2e-repository.>" \
-  '{session_id:$session_id,topics:[$topic]}')"
+  --argjson port "$session_port" \
+  --argjson delivery "$delivery_request" \
+  '{session_id:$session_id,dir:$dir,title:$title,topics:[$topic],port:$port,driving:true,delivery:$delivery}')"
 curl -fsS -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/interests/subscribe" -d "$unwired_subscribe_body" >"$unwired_response_file"
+jq -e --arg session_id "$session_id" \
+  '.delivery.mode == "consumer" and .delivery.subject == ("notifications.envoy.deliver." + $session_id)' \
+  "$unwired_response_file" >/dev/null || {
+  printf 'ERR: the registration was not answered the session consumer it asked for.\n' >&2
+  exit 1
+}
 jq -e \
   '.warnings | length == 1 and .[0] == "no GitHub event for never-seen/e2e-repository in the stream'\''s retention window; is the App installed there?"' \
   "$unwired_response_file" >/dev/null || {

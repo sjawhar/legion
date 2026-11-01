@@ -145,6 +145,68 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 	}
 }
 
+// A recipient the fan-out read an entry for and can push nothing to -- a portless entry with no
+// consumer of its own (session.ErrNoPushTarget), the record a build before dispatch://INFRA-771
+// left for a session on the core path -- has its attempt recorded before the exception of its
+// refusal is published, so a redelivery of the identical message inside the attempt window is the
+// attempt-dedupe skip judgeFollowedTopic makes of it and raises no second exception. This path is
+// that recipient's one report (fanoutDelivery), so without the record each stored copy of one
+// event, and each redelivery of every copy, would raise an exception of its own.
+//
+// The two recipients beside it record nothing and give that dedupe up, each for its own reason: a
+// session whose entry is gone was never read, so a record would name a push that could not have
+// been made (the rows above with no entry), and a session whose own consumer holds the message is
+// pushed by that consumer's relay, which a record would make hold its copy, the session's later
+// messages behind it (TestThePortlessRelaySendsAFollowedTopicTheDurablePathAlsoReads).
+func TestTheFanoutRecordsARecipientItCanPushNothingToBeforeItsException(t *testing.T) {
+	var pushes atomic.Int32
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
+		pushes.Add(1)
+		return listenerDeliveryResponse(http.StatusNoContent), nil
+	}))
+	sessionID := "ses_fanout_no_push_" + id.New()
+	topic := "notifications.github.acme.fanout-no-push-" + id.New() + ".mention"
+	if _, err := harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{topic}); err != nil {
+		t.Fatalf("register %s's interest: %v", sessionID, err)
+	}
+	// The entry of a session on no delivery path at all: no serving port, and no consumer of its
+	// own holding its messages, so the fan-out's one resolution of it is session.ErrNoPushTarget.
+	if err := harness.sessions.Put(sessionID, session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register %s's entry: %v", sessionID, err)
+	}
+	probe := exceptionProbe(t, harness.client)
+
+	// The refusal: a delivery mode this entry does not advertise. The core lane carries it, as it
+	// carries every message such a session is fanned out, the durable path acknowledging a stored
+	// one unread (durableNeedsDelivery).
+	item := listenerTestEnvelope(topic, "fanout-no-push-"+id.New())
+	item.Payload = `{"delivery":{"mode":"btw"}}`
+	message := marshalListenerEnvelope(t, item)
+	harness.coreHandler(&natsgo.Msg{Data: message})
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush the exception the fan-out published: %v", err)
+	}
+	if recipient := exceptionRecipient(t, assertDeliveryException(t, probe, item, "delivery_failed")); recipient != sessionID {
+		t.Fatalf("the exception names recipient %q, want %q", recipient, sessionID)
+	}
+	if !harness.config.attemptCache.Seen(item.DedupeKey, sessionID) {
+		t.Fatalf("the fan-out published the exception of %s and recorded no attempt for it: every redelivery inside the window raises another", sessionID)
+	}
+
+	// The identical message again, as a redelivery of the same stored copy reaches this listener.
+	harness.coreHandler(&natsgo.Msg{Data: message})
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush the redelivery: %v", err)
+	}
+	noException(t, probe)
+	if logs := harness.logs.String(); !strings.Contains(logs, "listener attempt-dedupe skip") {
+		t.Fatalf("the redelivery of %s was not the attempt-dedupe skip:\n%s", sessionID, logs)
+	}
+	if got := pushes.Load(); got != 0 {
+		t.Fatalf("the fan-out pushed %s %d times, want none", sessionID, got)
+	}
+}
+
 // A message on a followed topic that a portless session on consumer delivery cannot be given --
 // its targeted delivery mode is one the session does not advertise, or one no session can be
 // shown to advertise because it cannot be read unambiguously -- is reported by the durable path's
