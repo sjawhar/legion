@@ -2,56 +2,81 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-771",
-  "completed": "2026-11-01T03:05:00Z",
-  "round": 5,
-  "headTested": "cbf80d94156b48e6ead5dc0adee0c3dce3f843d4",
-  "codeHeadTested": "2035ccf374bb",
-  "previousHandoff": "219796d8cf9f",
+  "completed": "2026-11-01T07:05:00Z",
+  "round": 6,
+  "headTested": "27c6c9afd1a31d391d3482eb1869ce9568729b7e",
+  "codeHeadTested": "306ad1b104fa",
+  "previousHandoff": "46928987aa8d",
   "implementerProof": {
-    "verdict": "verified",
-    "how": "A narrow round, as the architect scoped it: round 4's other evidence stands, and what this round added is checked here. Round 4's two failures are answered and I verified each on the surface it broke on - packages/envoy/scripts/e2e-local.sh runs to exit 0 against a listener built from this head with its unwired-repository probe still asserted (proof entry 1), and the session-settings rig's registration is answered 200 with a consumer on the session's own relay subject, which GET /v1/sessions then reports (proof entry 2). The new fan-out case is a real pin, not a restatement: it fails with the fix's expression reverted and passes with it (proof entry 3). The pull request body's census of every POST /v1/interests/subscribe caller matches my own grep of the repository, with nothing missing (proof entry 4)."
+    "verdict": "rejected",
+    "how": "Everything the round claims about the code holds where I could drive it: the live proof passes at this head, the three real-session suites pass, the interest write's compare-and-swap is pinned by a test that goes red without it, and the load test now takes a receipt from a relay frame alone. The proof is rejected on one thing it records as answered: review round 2's important 1 was answered by filtering in the client alone, and the architect's decision on that finding was the listener dropping an uncaptured topic with a warning, as it drops a private one, so that a session on an OLD plugin build still registers during the rollout. Driven against a listener built from this head, that older plugin's registration is still refused 400 (failure 1). The round also did not produce the load test's corrected numbers anywhere a reader of the pull request can see them (failure 2)."
   },
-  "failed": 0,
-  "failures": [],
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "The architect's decision on review round 2's important 1: an uncaptured topic in a registration is dropped with a warning, as a private one is, so a session on an older plugin build whose stored row holds such a topic still registers during the rollout. The listener of this head still refuses that registration 400.",
+      "evidence": "Driven against an envoy-listener and nats-server built from this head (machine tester, 127.0.0.1:36300). A registration as an older plugin sends it - {\"session_id\":\"ses_old_build\",\"topics\":[\"notifications.team\",\"notifications.team.deploy-squad\"],\"delivery\":{\"consumer\":true,\"epoch\":\"e1\"}}, one stale uncaptured topic beside a valid one - is answered 400 {\"error\":\"no stream subject captures notifications.team, so nothing would be delivered to ses_old_build on it; follow a notifications.team.<name> topic instead\",\"expected\":[\"topics\"]}, and so is the same registration carrying the stale topic alone. The comparison the decision names is in the same answer set: a PRIVATE topic in that position, {\"topics\":[\"notifications.agent.someone_else\",\"notifications.team.deploy-squad\"]}, is answered 200 with the topic dropped and one warning ('notifications.agent.someone_else was not registered: it reaches a private stream subject …'). So the listener already has the behaviour the decision asks for and applies it to one class of topic and not the other. The client-side half the implementer built is real and works - @legion/envoy-client's registrationTopics drops both classes (stream-topics.ts:154-169) and its tests pass (12 pass, 0 fail) - but it is the half that only protects a session already running this release's plugin, which is not the rollout case the decision is about: cmd/listener/api.go's refusal is what an older plugin meets."
+    },
+    {
+      "criterion": "The architect's item 3, second half: the load test's corrected numbers in the pull request body.",
+      "evidence": "The change itself is in place and I read it: packages/envoy/loadtest/sessions.go:67 subscribes bus.DeliverSubject(s.id) and nothing else, relay.go's header says 'a relay frame is the only copy of a message it ever sees, so every receipt the run counts is one', and coreCopy and the core handler branch are gone. What is missing is a run: the pull request body carries no load-test numbers at all (grep -i load over the body at this head finds only the census row for loadtest/sessions.go and the resolved thread line for finding 7), and the implementer's handoff records no proof entry for the load test. So the corrected numbers the architect asked to see do not exist yet, and nobody can tell from the pull request whether the corrected counting changed them."
+    }
+  ],
   "proof": [
     {
-      "criterion": "Round 4's failure 1 answered, and the architect's item 1: e2e-local.sh runs to exit 0 against a listener of this head, and still proves what it proved - the unwired-repository probe is asserted, not skipped.",
-      "surface": "packages/envoy/scripts/e2e-local.sh in this issue's pod: the script builds its own natsd and envoy-listener from this checkout, starts them on ports the OS chooses, and drives the webhook, delivery and renderer path against a fake session on a serving port.",
-      "command": "cd packages/envoy && bash scripts/e2e-local.sh",
-      "observed": "exit 0, 31.37s. Its passes: 'PASS: topic set, structured payloads, checks settlement, and both renderers match the local acceptance contract' and 'PASS: an absent destination, the listener request records and a bus that did not answer are each refused by name', with the bus-down answers read at the end (HTTP 503, and the client's EnvoyApiError 503). The unwired probe is stronger than it was, not skipped: :393-404 now assert both that the answer carries .delivery.mode == \"consumer\" with .delivery.subject == \"notifications.envoy.deliver.<session id>\" and, as before, that .warnings is exactly one entry reading \"no GitHub event for never-seen/e2e-repository in the stream's retention window; is the App installed there?\" - each with its own exit 1 - so a run that reached exit 0 passed both. Both registrations now carry {consumer:true,epoch:…} beside the serving port, the second being the same session's heartbeat under one epoch.",
-      "headSha": "cbf80d94156b48e6ead5dc0adee0c3dce3f843d4",
-      "negativeControl": "Round 4's own measurement is the control: the body this script sent before this round, {session_id, topics} with no port and no delivery, is answered 409 not_requested by the same listener build and makes the script's curl -fsS print 'curl: (22) The requested URL returned error: 409' and exit 22 - the line CI printed at 3c48f4a0, which this run no longer produces."
+      "criterion": "The architect's item 5 and acceptance 3 and 5: the live proof passes at this head after the base merged forward.",
+      "surface": "scripts/e2e/envoy-session-delivery.sh in this issue's pod: natsd with JetStream, two Envoy listeners, envoy-dispatch on the pod's test Postgres, a real Oh My Pi session on this checkout's packed pi-envoy and a real Claude Code session under legion claude-bridge, each reaching NATS through a cuttable socat proxy.",
+      "command": "SESSION_DELIVERY_EVIDENCE_DIR=/legion/scratch/tmp/tester-e2e/run6 bash scripts/e2e/envoy-session-delivery.sh",
+      "observed": "exit 0, 'ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)', all six windows, every count 1, both sessions 'delivery':'consumer', and the order comparison naming the twelve comments it compared in each transcript.",
+      "headSha": "27c6c9afd1a31d391d3482eb1869ce9568729b7e",
+      "negativeControl": "The run's own counts and its hold window after each marker: a second copy of any marker fails the step, and every cell read 1."
     },
     {
-      "criterion": "Round 4's failure 2 answered, and the architect's item 2: the session-settings rig's registration is answered 200 with a consumer, and the listener reports that session as consumer.",
-      "surface": "An envoy-listener and a nats-server with JetStream, both built from this head, driven with the exact body scripts/e2e/lib/session-settings-services.ts now sends.",
-      "command": "curl -X POST http://127.0.0.1:35300/v1/interests/subscribe with {delivery:{consumer:true,epoch:<uuid>}, dir, self_subscribed:true, session_id, title:\"INFRA-195 rig sender\", topics:[\"notifications.agent.<id>\"]}; then GET /v1/sessions",
-      "observed": "200, with \"delivery\":{\"mode\":\"consumer\",\"subject\":\"notifications.envoy.deliver.ses_infra195\",\"stream_id\":…,\"gap\":false}, and GET /v1/sessions reporting that session with \"delivery\":\"consumer\" and port 0. The rig mints one DELIVERY_REQUEST at module scope ({consumer:true, epoch: crypto.randomUUID()}), so every client it registers shares one epoch, which is one NATS connection's worth - the same shape a plugin sends.",
-      "headSha": "cbf80d94156b48e6ead5dc0adee0c3dce3f843d4",
-      "negativeControl": "The body the rig sent before this round, the same object without its delivery field, is answered 409 {\"reason\":\"not_requested\"} by this listener (round 4's measurement, repeated there), so the 200 is the new field's doing."
+      "criterion": "The architect's item 2: the interest write's compare-and-swap, red without it.",
+      "surface": "packages/envoy/internal/store against a real nats-server in the test process (internal/testnats), which is where the reviewers reproduced the race.",
+      "command": "cd packages/envoy && go test -count=1 -run TestUpsertPlannedKeepsAnUnsubscribeThatOutranItsPlan ./internal/store/ ; then the same with kv.go's putInterestAt(ctx, …, plan.Revision) replaced by an unconditional putInterest",
+      "observed": "PASS in 0.40s as the head stands. With the CAS replaced by an unconditional put the case fails by name: 'the write answered topics [notifications.agent.ses_unsubscribe_race notifications.dispatch.issue.KEY-1.>]; the unsubscribe removed notifications.dispatch.issue.KEY-1.>, so the registration must not write it back' - the reviewers' race exactly: a row {own, X}, a plan over {own}, a Remove(X) in the window, and the write bringing X back. The edit was reverted (jj restore, jj status clean, the CAS call present once).",
+      "headSha": "27c6c9afd1a31d391d3482eb1869ce9568729b7e",
+      "negativeControl": "The reverted run above is the control: the test is pinned on the one call the fix changed, not on the plan's shape."
     },
     {
-      "criterion": "The architect's item 3: the new fan-out case pins the fix rather than restating it.",
-      "surface": "The listener's own package built from this head.",
-      "command": "cd packages/envoy && go test -count=1 -run TestTheFanoutRecordsARecipientItCanPushNothingToBeforeItsException ./cmd/listener/ ; then the same with delivery.go's recorded expression reverted to 'err == nil && !delivery.Relayed'",
-      "observed": "ok github.com/sjawhar/envoy/cmd/listener 0.665s as the head stands. With the expression reverted the case fails by name: '--- FAIL: TestTheFanoutRecordsARecipientItCanPushNothingToBeforeItsException', 'the fan-out published the exception of ses_fanout_no_push_… and recorded no attempt for it: every redelivery inside the window raises another', with the listener's own line beside it ('listener subscriber does not advertise delivery mode', delivery_status failed, mode btw). So the case is pinned on the one expression the fix changed.",
-      "headSha": "cbf80d94156b48e6ead5dc0adee0c3dce3f843d4",
-      "negativeControl": "The reverted run above is the control, and the edit was undone: jj restore on packages/envoy/cmd/listener/delivery.go, jj status clean, and the file holds the fix's expression once."
+      "criterion": "The architect's item 3, first half: the load test counts receipts from relay frames alone.",
+      "surface": "packages/envoy/loadtest read at this head.",
+      "command": "grep for the subscriptions and the receipt path in loadtest/sessions.go, relay.go and delivery.go",
+      "observed": "sessions.go:67 opens one subscription per session, bus.DeliverSubject(s.id), and no agent-subject or issue-topic core subscription remains; relay.go's header states the contract ('The session subscribes nothing else, as the plugin does not: a relay frame is the only copy of a message it ever sees, so every receipt the run counts is one') and its handler counts a first frame of each stream sequence as a receipt; coreCopy and the handler's core branch are gone, and relay.go:314's one remaining prefix subscribe is the run's own capture of the bus, not a session's.",
+      "headSha": "27c6c9afd1a31d391d3482eb1869ce9568729b7e",
+      "negativeControl": "None run, and that is failure 2: without a load run there is no number to compare with the old counting."
     },
     {
-      "criterion": "The architect's item 4: the pull request body's census of every POST /v1/interests/subscribe caller, against my own grep.",
-      "surface": "The repository at this head.",
-      "command": "grep -rln 'interests/subscribe' --include=*.ts --include=*.go --include=*.sh --include=*.py . (node_modules excluded), each hit read for whether it sends a registration or reads one",
-      "observed": "49 files hit; every one that sends a registration is in the census, and the census names no caller that does not. The senders are the two plugins through @legion/envoy-client, envoy-plugin through subscribeServingPort, packages/envoy/loadtest/sessions.go, packages/envoy/scripts/e2e-local.sh and probe-webhook-e2e.sh, scripts/e2e/lib/session-settings-services.ts, scripts/e2e/envoy-session-delivery.sh through the real plugins, and the live and smoke tests. The rest are the listener's own package, the client, the contracts doc comment, test stand-ins that read a registration rather than send one (packages/pi-envoy/scripts/stall-fixture.ts:25 and smoke-role-takeover.sh:421 and :430 both match a recorded request), and bus and store comments naming the route. Two of the census's rows I drove this round (e2e-local.sh and the settings rig) and one in round 4 (probe-webhook-e2e.sh's body, 200 on its serving port).",
-      "headSha": "cbf80d94156b48e6ead5dc0adee0c3dce3f843d4",
-      "negativeControl": "The grep is the control on the census and the census on the grep: a caller in one and not the other would show as a file I had to classify by hand, and the only files needing that were the two stand-ins, which read a registration and send none."
+      "criterion": "The architect's item 4: the forward merge of legion/INFRA-594, and whether it cost this pull request any of its own work.",
+      "surface": "The branch's history read at the merge commit and at both its parents.",
+      "command": "jj diff -r 306ad1b104fa --stat; then a count of test( calls and lines in packages/pi-envoy/extensions/envoy.test.ts at each parent and at the merge, and across every .test.ts of packages/pi-envoy; then a read of the merged file for acceptance 2's own pin",
+      "observed": "The merge resolves five files: cmd/listener/delivery.go, pi-envoy's AGENTS.md, envoy.test.ts, envoy.ts and src/card-age.test.ts. envoy.test.ts reads 376 test( calls at the base parent (062391a5), 430 at ours (705f0032) and 379 at the merge, and the package as a whole 1093 at ours against 1042 at the merge. That is the base's own rewrite being adopted, not this pull request's work being dropped: the 64 titles our side had and the merge does not are the replay-route and receipt tests the base deleted and this change removes anyway ('a listener without the replay route shows nothing and says so once', 'a JetStream publish to the direct subject gets no receipt in its reply inbox'), and no commit of this branch outside the base's ancestry changes that file at all (the revset (::705f0032 ~ ::062391a5) & files(envoy.test.ts) lists only merges from main). Acceptance 2's own pin survives the merge: envoy.test.ts:16315 'holds exactly its relay subject and its agent-stream control subject, and no other'.",
+      "headSha": "27c6c9afd1a31d391d3482eb1869ce9568729b7e",
+      "negativeControl": "The count was taken three ways rather than trusted once - per file at each parent, across every test file of the package, and by reading the one test the plan names as acceptance 2's pin - so a loss hidden by a rename or a move between files would have shown in the package total, which fell by exactly the file's own 51."
+    },
+    {
+      "criterion": "The architect's item 5: the three real-session suites at this head.",
+      "surface": "The packages' own real-process suites: a real Oh My Pi binary against stand-in gateways, listeners and Dispatch, and a real nats-server for the two that take one.",
+      "command": "cd packages/pi-envoy && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:36222 bun test extensions/card-delivery-omp.test.ts; cd packages/pi-legion && the same for extensions/controller-start-omp.test.ts; cd packages/claude-envoy && bun test",
+      "observed": "card-delivery-omp.test.ts 10 pass, 0 fail, 116 expect() calls (9 cases before this round, so the merge brought one more and it passes); controller-start-omp.test.ts 17 pass, 0 fail, 81 expect() calls; claude-envoy 263 pass, 13 skip, 0 fail across 38 files.",
+      "headSha": "27c6c9afd1a31d391d3482eb1869ce9568729b7e",
+      "negativeControl": "Round 4's control stands for the card suite and I did not repeat it: with the plugin subscribing the wrong relay subject the same file fails in 38s, which is how it read before the fix."
+    },
+    {
+      "criterion": "The client half of failure 1, recorded as working so the fix is not rebuilt: a registration from a session on THIS release's plugin that restores a row holding an uncaptured topic registers, with that topic dropped.",
+      "surface": "@legion/envoy-client's registrationTopics, the one filter both registration builders use, and its own suite.",
+      "command": "read packages/envoy-client/src/stream-topics.ts:154-169; cd packages/envoy-client && bun test src/__tests__/stream-topics.test.ts",
+      "observed": "registrationTopics keeps the session's own agent subject and every followed topic that is neither private (reachesPrivateStreamSubject) nor undeliverable (streamDeliversNothing), so a restored notifications.team never reaches the registration; 12 pass, 0 fail, 76 expect() calls.",
+      "headSha": "27c6c9afd1a31d391d3482eb1869ce9568729b7e",
+      "negativeControl": "The listener's answer to the same topic sent raw, which failure 1 records: 400 by name. The two together are the gap - the client that has the filter is the one that no longer needs it."
     }
   ],
   "notes": [
-    "What the pod cannot run, as the architect asked me to say: the session-settings rig's full proof, scripts/e2e/dispatch-session-settings.sh, needs the caller's own ANTHROPIC_API_KEY (and OPENAI_API_KEY) - it hands each key to the Oh My Pi sessions it starts and offers no gateway route (no ANTHROPIC_BASE_URL anywhere in the script or its library). This pod holds no provider key: ANTHROPIC_API_KEY is unset and /var/run/model-gateway-key/key is a model-gateway key, not an Anthropic one. So the registration is what I could drive, and I drove it; the rest of that rig is unrun here by anyone.",
-    "Lanes: every lane at this head is unread. The head's code is 2035ccf374bb (cbf80d94 is the handoff commit and carries skip-checks: true, so GitHub starts no run for it), and run 41267115926 at 2035ccf3 was queued with its first job ('changes') still queued when the round ended; I waited for none of it. The run at d290298a was cancelled when this head superseded it, so the newest settled CI remains 41242872501 at 3c48f4a0, whose red lanes rounds 3 and 4 answered. envoy-e2e-local, envoy-infra-go, pi-envoy and pi-legion are all unread at this head; what I can say of them is what I drove here and in round 4, not what GitHub says.",
+    "Lanes: round 5's head is now settled and green, which closes the lanes I could only drive then. Run 41267115926 at code 2035ccf3 concluded success with no job anything but success or skipped - envoy-e2e-local, envoy-infra-go, envoy-smoke, pi-envoy, pi-legion and ci-ok among them - so rounds 3 and 4's findings are confirmed fixed by GitHub and not only by me. At THIS head every lane is unread: cbf80d94's successor 27c6c9af is the handoff commit and carries skip-checks, so the code head is 306ad1b1, whose run 41281402680 was queued with its first job queued when the round ended. I waited for none of it.",
     "No -race run in this round or any earlier one; any future one goes as CGO_ENABLED=1 go test -race -timeout <bound> …, since these pods default CGO_ENABLED=0.",
     "Leftover check: `ps -eo pid,args | grep -v grep | grep -E 'envoy-session-delivery|natsd|envoy-listener|envoy-dispatch|omp --mode rpc|claude-bridge|socat|held-port|testerprobe|sleep 2'` read by its lines and not its status; every process it listed was ended by exact pid and the last read listed nothing.",
+    "The workspace was recreated before this round with the pod; nothing of mine was unpushed, my round-5 handoff is 46928987 on the branch, and jj status is clean before this handoff with both reverted edits restored.",
     "Still open from round 1, not a failure: a session may register the wildcard interest notifications.team.> and the listener puts that wildcard into its consumer filter, so one session durably receives every team topic."
   ]
 }
