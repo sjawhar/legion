@@ -524,6 +524,46 @@ func TestInterestSubscribeLeavesOutEveryPrivateStreamSubject(t *testing.T) {
 	}
 }
 
+// Every presence subject is left out of a registration, the registering session's own included: a
+// plugin subscribes to its own presence subject on its own NATS connection and never registers it
+// as an interest, and a session registered on another session's would be handed the listener's
+// check for that session, which could make a stopped session read connected while every session
+// shares one NATS user. A team topic and the session's own agent subject are stored, and the
+// answer stays 200.
+func TestInterestSubscribeLeavesOutEveryPresenceSubject(t *testing.T) {
+	rig := newReplayRig(t)
+	own := contracts.AgentSubject(replaySession)
+	const teamTopic = "notifications.team.x.>"
+	refused := []string{
+		bus.PresenceSubject(replaySession),
+		bus.PresenceSubject("ses_other"),
+		bus.PresenceSubjectPrefix + ">",
+	}
+	answer := subscribeInterest(t, rig.mux, append([]string{teamTopic}, refused...))
+
+	// Stored topics are kept sorted.
+	want := []string{own, teamTopic}
+	if !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	stored, err := rig.deps.registry.Get(context.Background(), replaySession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+	notRegistered := make([]string, 0, len(refused))
+	for _, warning := range answer.Warnings {
+		if topic, _, found := strings.Cut(warning, " was not registered"); found {
+			notRegistered = append(notRegistered, topic)
+		}
+	}
+	if !slices.Equal(notRegistered, refused) {
+		t.Fatalf("warnings = %q, want exactly %v named as not registered", answer.Warnings, refused)
+	}
+}
+
 // A row an earlier build stored with topics reaching a private stream subject loses them at the
 // session's next registration, not only the topics that registration names: after one heartbeat
 // the row holds the session's own agent subject, the issue topic it followed and the topic it

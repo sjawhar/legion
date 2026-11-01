@@ -75,7 +75,7 @@ func sessionConsumerNameOf(sessionID string) (string, error) {
 // (SessionConsumerName), and pulls their messages, on a connection of its own (ConnectSessionConsumers).
 //
 // Each consumer's info, create and delete are requests the bus confirms as RequestCoreTo confirms its
-// forward (requestConfirmed), so a call the NATS user may not make returns ErrConsumerNotGranted as
+// forward (RequestCore), so a call the NATS user may not make returns ErrConsumerNotGranted as
 // soon as the server refuses it; the jetstream package's own requests wait out their whole timeout
 // for an answer a refused request never gets. The configuration and the answers are the jetstream
 // package's types. A pull (SessionPull) sends its own pull requests, so starting one costs no API
@@ -597,7 +597,7 @@ func (s *SessionConsumers) consumerRequest(ctx context.Context, subject string, 
 			return err
 		}
 	}
-	reply, err := s.client.requestConfirmed(ctx, subject, data)
+	reply, err := s.client.RequestCore(ctx, subject, data)
 	if errors.Is(err, ErrPublishDenied) {
 		return fmt.Errorf("%w: %w", ErrConsumerNotGranted, err)
 	}

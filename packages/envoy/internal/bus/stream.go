@@ -107,6 +107,21 @@ func DeliverSubject(sessionID string) string {
 	return DeliverSubjectPrefix + sessionID
 }
 
+// PresenceSubjectPrefix begins the presence subject of one session, PresenceSubject. No stream
+// subject captures it (StreamCaptures), and none ever may: a captured subject would hand every
+// presence request to the stream and so to the live-topics lane, which would answer for every
+// session rather than leave the question to the one session's own plugin
+// (TestNoStreamSubjectCapturesThePresenceSubject).
+const PresenceSubjectPrefix = NotificationTopicPrefix + "envoy.presence."
+
+// PresenceSubject is the presence subject of session sessionID: the subject that session's own
+// plugin subscribes to on its own NATS connection, and the subject the listener asks on whether a
+// plugin of that session holds an open NATS connection. A reply means the session is connected;
+// no reply, and a no-responders status (nats.ErrNoResponders), mean no plugin of it is listening.
+func PresenceSubject(sessionID string) string {
+	return PresenceSubjectPrefix + sessionID
+}
+
 // ListenerLiveQueue is the queue group the listener of machine machineID subscribes its live lane in
 // (every notifications topic, over core NATS), so NATS hands each message to one of the machine's
 // listeners while a rolling deploy runs two. It must differ from ListenerQueue: NATS merges

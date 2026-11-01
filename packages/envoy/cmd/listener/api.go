@@ -746,6 +746,10 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
 			return
 		}
+		if strings.HasPrefix(request.Topic, bus.PresenceSubjectPrefix) {
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to presence subjects; "+bus.PresenceSubjectPrefix+" is the listener's own check of whether a session's plugin holds a NATS connection, not a topic to publish on")
+			return
+		}
 		if message, field := validateMessageBody(request.messageBody); message != "" {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, message, field)
 			return
@@ -1474,9 +1478,20 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// open, a fork parent's agent subject and any topic its envoy_subscribe took included. The
 		// registry drops such a topic from the stored row too (`store.Registry.Upsert`), so a row an
 		// earlier build stored with one is cleaned by this registration.
+		// A topic under bus.PresenceSubjectPrefix is left out the same way, whichever session's it
+		// is: a plugin subscribes to its own presence subject on its own NATS connection and never
+		// registers it as an interest, while a session registered on another session's presence
+		// subject would answer the listener's check for it and make a stopped session read
+		// connected, since every session shares one NATS user until dispatch://INFRA-840 gives each
+		// its own.
 		warnings := make([]string, 0)
 		topics := make([]string, 0, len(body.Topics)+1)
 		for _, topic := range append(body.Topics, contracts.AgentSubject(body.SessionID)) {
+			if strings.HasPrefix(topic, bus.PresenceSubjectPrefix) {
+				warnings = append(warnings, fmt.Sprintf("%s was not registered: it is a session's presence subject, which that session's own plugin subscribes to on its own NATS connection and no session registers as an interest",
+					topic))
+				continue
+			}
 			if bus.ReachesPrivateStreamSubject(body.SessionID, topic) {
 				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches a private stream subject (another session's inbox, a failed-delivery lane, or the Legion controller lane), and of those a session registers only its own agent subject, %s",
 					topic, contracts.AgentSubject(body.SessionID)))
@@ -1485,7 +1500,7 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			topics = append(topics, topic)
 		}
 		if len(warnings) > 0 {
-			logger.Warn("listener subscribe refused topics reaching private stream subjects",
+			logger.Warn("listener subscribe refused topics",
 				slog.String("session_id", body.SessionID), slog.Any("refused", warnings))
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
