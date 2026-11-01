@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
@@ -43,8 +44,8 @@ const SourceColumns = `project_key, id, repo, branch, enabled, installation_id, 
 	(select count(*) from components where components.project_key = architecture_sources.project_key and components.source_id = architecture_sources.id)`
 
 // syncTimeout bounds one whole sync — every GitHub call plus the projection —
-// so a slow upstream cannot hold the per-project lock (and every queued
-// Refresh behind it) indefinitely.
+// so a slow upstream ends one source's shared flight (and so every caller
+// waiting on it) instead of hanging on indefinitely.
 var syncTimeout = 2 * time.Minute
 
 // errSourceMoved is a sync that found the source's repo or branch changed
@@ -76,33 +77,105 @@ type loadedSource struct {
 // row: each write takes its lock and commits only while the row's version
 // (xmin) is still the one the sync loaded before its fetch, so a sync another
 // write overtook never records the older head, files or failure it read
-// (errSuperseded). The per-project mutex only keeps one process from fetching
-// one project twice at once.
+// (errSuperseded). Within one process, the callers of one source share one
+// flight instead of each making its own set of GitHub calls, no lock is held
+// across a GitHub call, and two sources — of one project or of two — never
+// wait on each other here; the source row still orders what every process
+// writes.
 type Importer struct {
 	store  *store.Store
 	github *githubapp.Client
 	events *events.Broker
 
-	mu    sync.Mutex
-	locks map[string]*sync.Mutex
+	// owner outlives every caller: the process stopping (Close) is the only
+	// thing that cancels a flight, since a flight runs on behalf of callers
+	// that have since left.
+	owner   context.Context
+	abandon context.CancelFunc
+	running syncCount
+	// syncs is keyed on the source, project and repository both, not on the
+	// project: Sync answers that source's row, and SyncProject needs one
+	// result per repository. Two sources of one project cannot corrupt each
+	// other without a mutex here, because every projection takes
+	// lockProjectSources (`order by id for update`) and judges heldElsewhere
+	// inside that lock.
+	syncs singleflight.Group
+}
+
+// syncCount counts the flights running and waits for none to be left. It has
+// the shape of backgroundWork in api/server.go, and for its reason: a
+// sync.WaitGroup is not it, because a flight may start while a wait is
+// already waiting, and Add after Wait began is what a WaitGroup forbids.
+// begin refuses once Close has begun, so a flight whose goroutine starts
+// after Close took its decision does nothing rather than write into a
+// closing pool.
+type syncCount struct {
+	mu      sync.Mutex
+	closing bool
+	running int
+	// idle is closed when running last fell to zero, and replaced when a
+	// flight starts again.
+	idle chan struct{}
+}
+
+func (c *syncCount) begin() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closing {
+		return false
+	}
+	if c.running == 0 {
+		c.idle = make(chan struct{})
+	}
+	c.running++
+	return true
+}
+
+func (c *syncCount) done() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.running--
+	if c.running == 0 {
+		close(c.idle)
+	}
+}
+
+// stop refuses every later flight and waits for the running ones to end.
+func (c *syncCount) stop() {
+	c.mu.Lock()
+	c.closing = true
+	c.mu.Unlock()
+	for {
+		c.mu.Lock()
+		running, idle := c.running, c.idle
+		c.mu.Unlock()
+		if running == 0 {
+			return
+		}
+		<-idle
+	}
 }
 
 // NewImporter wires the importer to the database, the GitHub App client (nil
 // is the "no app credentials" state: every sync answers ErrNoAppKey), and the
 // event broker.
 func NewImporter(database *store.Store, github *githubapp.Client, broker *events.Broker) *Importer {
-	return &Importer{store: database, github: github, events: broker, locks: map[string]*sync.Mutex{}}
+	owner, abandon := context.WithCancel(context.Background())
+	return &Importer{store: database, github: github, events: broker, owner: owner, abandon: abandon}
 }
 
-func (i *Importer) lock(project string) *sync.Mutex {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	lock, ok := i.locks[project]
-	if !ok {
-		lock = &sync.Mutex{}
-		i.locks[project] = lock
+// Close ends the importer's flights and waits for them: architecture.Run is
+// not among the waits shutdown takes (cmd/dispatch/shutdown.go waits
+// background.Wait and waitIntakes, then waitUntilIdle and pool.Close), and a
+// flight runs on a context the caller's cancellation no longer reaches, so
+// without this a sync still fetching when the process stops would write into
+// a closing pool. It is safe to call twice, and on a nil importer.
+func (i *Importer) Close() {
+	if i == nil {
+		return
 	}
-	return lock
+	i.abandon()
+	i.running.stop()
 }
 
 // HasApp reports whether the App credentials needed to sync are configured.
@@ -168,6 +241,11 @@ func (i *Importer) SyncProject(ctx context.Context, project string) ([]SyncResul
 	}
 	results := make([]SyncResult, 0, len(repos))
 	for _, repo := range repos {
+		// A caller that has hung up starts no further flight, which would
+		// outlive it: syncAll breaks on the same test.
+		if ctx.Err() != nil {
+			break
+		}
 		source, err := i.Sync(ctx, project, repo)
 		if errors.Is(err, ErrNoSource) {
 			continue
@@ -204,27 +282,118 @@ func (i *Importer) SyncProject(ctx context.Context, project string) ([]SyncResul
 // (errSuperseded: another process's sync, or a settings save, committed first)
 // starts again from the load inside the same deadline; each retry follows
 // another committed write, and usually ends in the unchanged-head refresh.
+//
+// Callers of one source share one flight in this process: the first makes the
+// GitHub calls and runs the retry chain, and the others read its answer, so a
+// Refresh clicked twice over costs one fetch. A flight older than its caller
+// does not serve it, though — the caller stamps the moment it asked and takes
+// an answer only from a flight that issued its head lookup no earlier, so a
+// person who pushes and then asks for a Refresh is never told the pre-push
+// commit with a fresh last_sync_at.
 func (i *Importer) Sync(ctx context.Context, project, repo string) (model.ArchitectureSource, error) {
-	lock := i.lock(project)
-	lock.Lock()
-	defer lock.Unlock()
-	// A sync opens its own transactions on the shared pool, so it is marked like an API
-	// request: a read it makes while one is open must come from that transaction, never from a
-	// second connection (store.ErrNestedAcquire). The scheduled sync has no request to inherit
-	// the mark from.
-	parent := store.WithTransactionTracking(ctx)
-	ctx, cancel := context.WithTimeout(parent, syncTimeout)
-	defer cancel()
+	// A caller that has already hung up, and an importer whose process is
+	// stopping, start no flight: the work would outlive both of them.
+	if err := ctx.Err(); err != nil {
+		return model.ArchitectureSource{}, err
+	}
+	if err := i.owner.Err(); err != nil {
+		return model.ArchitectureSource{}, err
+	}
+	// calledAt is stamped once, before any join: what a flight has to be
+	// newer than is the moment this caller asked, not the moment it last
+	// looked.
+	calledAt := time.Now()
+	key := project + "\x00" + repo
 	for {
-		source, err := i.syncOnce(ctx, parent, project, repo)
-		if !errors.Is(err, errSuperseded) {
-			return source, err
+		answered := i.syncs.DoChan(key, func() (any, error) { return i.flight(ctx, project, repo) })
+		select {
+		case <-ctx.Done():
+			return model.ArchitectureSource{}, ctx.Err()
+		case result := <-answered:
+			flight := result.Val.(*syncFlight)
+			// Not Before rather than After: two readings of the clock that
+			// land on the same instant must end the loop, not spin it.
+			if !flight.servedAt().Before(calledAt) {
+				return flight.source, result.Err
+			}
+			// That flight looked the head up before this caller existed, so
+			// its row may predate a push the caller already knows about: join
+			// the next one. This is the last round, because singleflight
+			// deletes the key before it sends a result, so the flight joined
+			// or created now necessarily began after calledAt.
 		}
 	}
 }
 
-// syncOnce is one attempt of Sync, from the load of the source row to its write.
-func (i *Importer) syncOnce(ctx, parent context.Context, project, repo string) (model.ArchitectureSource, error) {
+// syncFlight is one shared sync of one source: what the flight hands every
+// caller that joined it, beside the flight's error. Every write to it happens
+// in the flight's goroutine before the result is sent and every read after
+// that receive, so the channel orders them: no mutex is needed, and -race is
+// quiet.
+type syncFlight struct {
+	// startedAt is when the flight began, its very first act, so that even a
+	// flight which does nothing answers a time no earlier than its callers'
+	// and so ends their loop.
+	startedAt time.Time
+	// headAt is when the flight issued its branch-head lookup — the moment the
+	// lookup went out, never the moment it answered, because the head may have
+	// moved in between. A retry round stamps it again.
+	headAt time.Time
+	source model.ArchitectureSource
+}
+
+// servedAt is how fresh the flight's answer is: when it asked GitHub for the
+// head, or, for a flight that failed before asking, when it began.
+func (f *syncFlight) servedAt() time.Time {
+	if f.headAt.IsZero() {
+		return f.startedAt
+	}
+	return f.headAt
+}
+
+// flight is the shared sync singleflight runs for one source: one set of
+// GitHub calls and one errSuperseded retry chain, however many callers joined
+// it. ctx is whichever caller started it, and only its values are kept.
+func (i *Importer) flight(ctx context.Context, project, repo string) (*syncFlight, error) {
+	flight := &syncFlight{startedAt: time.Now()}
+	if !i.running.begin() {
+		return flight, i.owner.Err()
+	}
+	defer i.running.done()
+	// The starter is one of several callers and may leave before the others,
+	// so its cancellation is dropped: one hang-up fails nobody else's sync.
+	detached := context.WithoutCancel(ctx)
+	// A sync opens its own transactions on the shared pool, so it is marked like an API
+	// request: a read it makes while one is open must come from that transaction, never from a
+	// second connection (store.ErrNestedAcquire). The mark has to be the flight's own, because
+	// WithoutCancel keeps the starter's values: sharing an HTTP request's mark would make
+	// SyncProject's next Sync a nested acquire, and WithTransactionTracking, a no-op when a
+	// mark is already present, would hand that shared one back.
+	marked, err := store.ForConcurrentRead(detached)
+	if err != nil {
+		return flight, err
+	}
+	base, abandon := context.WithCancel(marked)
+	defer abandon()
+	// Nothing but the process stopping ends a flight early.
+	stop := context.AfterFunc(i.owner, abandon)
+	defer stop()
+	// The deadline is the flight's own, counted from when it began rather than
+	// from when its first caller arrived.
+	syncCtx, cancel := context.WithTimeout(base, syncTimeout)
+	defer cancel()
+	for {
+		source, err := i.syncOnce(syncCtx, base, project, repo, flight)
+		if !errors.Is(err, errSuperseded) {
+			flight.source = source
+			return flight, err
+		}
+	}
+}
+
+// syncOnce is one attempt of Sync, from the load of the source row to its write. It stamps the
+// flight's head lookup, which is how fresh the answer every caller of the flight reads is.
+func (i *Importer) syncOnce(ctx, parent context.Context, project, repo string, flight *syncFlight) (model.ArchitectureSource, error) {
 	source, err := i.loadSourceByRepo(ctx, project, repo)
 	if err != nil {
 		return model.ArchitectureSource{}, err
@@ -233,6 +402,7 @@ func (i *Importer) syncOnce(ctx, parent context.Context, project, repo string) (
 	if importErr != nil {
 		return i.failed(ctx, parent, source, importErr)
 	}
+	flight.headAt = time.Now()
 	commit, importErr := i.github.Ref(ctx, token, owner, name, source.Branch)
 	if importErr != nil {
 		return i.failed(ctx, parent, source, importErr)
@@ -271,10 +441,12 @@ func (i *Importer) syncOnce(ctx, parent context.Context, project, repo string) (
 }
 
 // failed records importErr on the source row and hands both back: the Sync
-// contract for every import failure. When the sync's own deadline is what
-// failed (the caller is still alive), the short record write runs on a
-// cancel-free context so the timeout lands on the row like any other failure;
-// a caller that has gone away (shutdown, client hang-up) records nothing.
+// contract for every import failure. The sync's own deadline is always
+// recorded, on a cancel-free context so that the timeout lands on the row
+// like any other failure; only the process stopping (parent, the flight's
+// context, is done) suppresses the record. Which caller is still listening
+// does not come into it: a flight has no single caller, and nobody being
+// there was never a reason to lose the fact that GitHub timed out.
 func (i *Importer) failed(ctx, parent context.Context, source loadedSource, importErr error) (model.ArchitectureSource, error) {
 	recordCtx := ctx
 	if ctx.Err() != nil && parent.Err() == nil {

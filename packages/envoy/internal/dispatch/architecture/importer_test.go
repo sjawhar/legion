@@ -96,10 +96,22 @@ type fakeSource struct {
 	// blobHold makes every blob read block until the request is cancelled: a
 	// GitHub that never answers, for the sync deadline.
 	blobHold bool
+	// holdArchBlobs is fakeRepo.holdBlobs for archRepo, whose repository repo
+	// builds from the fields above.
+	holdArchBlobs bool
 
-	mu        sync.Mutex
-	treeReads int
-	blobReads int
+	mu                sync.Mutex
+	installationReads int
+	headReads         int
+	treeReads         int
+	blobReads         int
+	// held is closed by the first blob read a hold stops and release by
+	// releaseBlobs; holds makes both, because a test writes fakeSource as a
+	// literal and there is no constructor to make them in.
+	held     chan struct{}
+	release  chan struct{}
+	heldOnce sync.Once
+	released sync.Once
 }
 
 // fakeRepo is one repository of the fake GitHub other than archRepo: its
@@ -109,13 +121,19 @@ type fakeRepo struct {
 	files         map[string]string
 	branchMissing bool
 	treeFailure   bool
+	// holdBlobs holds this repository's blob reads until the test releases
+	// them, so one source can be the slow one while another answers at once.
+	holdBlobs bool
 }
 
 // repo answers the repository the request's route names, as it stands now.
 func (f *fakeSource) repo(r *http.Request) (fakeRepo, bool) {
 	name := r.PathValue("owner") + "/" + r.PathValue("repo")
 	if name == archRepo {
-		return fakeRepo{commit: f.commit, files: f.files, branchMissing: f.branchMissing, treeFailure: f.treeFailure}, true
+		return fakeRepo{
+			commit: f.commit, files: f.files, branchMissing: f.branchMissing,
+			treeFailure: f.treeFailure, holdBlobs: f.holdArchBlobs,
+		}, true
 	}
 	repo, ok := f.repos[name]
 	if !ok {
@@ -130,9 +148,60 @@ func (f *fakeSource) reads() (trees, blobs int) {
 	return f.treeReads, f.blobReads
 }
 
+// lookups counts what a sync asks for before it reads any content: the
+// repository's installation, and its branch's head.
+func (f *fakeSource) lookups() (installations, heads int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.installationReads, f.headReads
+}
+
+// holds answers the hold's two channels, making them on first use: either
+// side may come first, the test's waitHeld or the blob read it waits for.
+func (f *fakeSource) holds() (held, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.held == nil {
+		f.held, f.release = make(chan struct{}), make(chan struct{})
+		// A test that fails with a read still held must not hang the package.
+		f.t.Cleanup(f.releaseBlobs)
+	}
+	return f.held, f.release
+}
+
+// waitHeld returns once a held blob read has arrived.
+func (f *fakeSource) waitHeld(t *testing.T) {
+	t.Helper()
+	held, _ := f.holds()
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no blob read reached the hold within 10s")
+	}
+}
+
+// releaseBlobs lets every held blob read answer.
+func (f *fakeSource) releaseBlobs() {
+	_, release := f.holds()
+	f.released.Do(func() { close(release) })
+}
+
+// wait blocks a held blob read until the release or the request's end.
+func (f *fakeSource) wait(r *http.Request) {
+	held, release := f.holds()
+	f.heldOnce.Do(func() { close(held) })
+	select {
+	case <-release:
+	case <-r.Context().Done():
+	}
+}
+
 func (f *fakeSource) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.installationReads++
+		f.mu.Unlock()
 		if _, ok := f.repo(r); !ok {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -157,6 +226,9 @@ func (f *fakeSource) handler() http.Handler {
 		}
 	})
 	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.headReads++
+		f.mu.Unlock()
 		repo, ok := f.repo(r)
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
@@ -217,6 +289,9 @@ func (f *fakeSource) handler() http.Handler {
 			return
 		}
 		repo, _ := f.repo(r)
+		if repo.holdBlobs {
+			f.wait(r)
+		}
 		content, ok := repo.files[strings.TrimPrefix(r.PathValue("sha"), "blob-")]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
@@ -1159,9 +1234,12 @@ func TestComponentFactsRecordWhenAComponentWasMadeAndChanged(t *testing.T) {
 	}
 }
 
-// The sync's own deadline is an import failure like any other: it lands on
-// the row (and emits one sync_failed) while the caller is still alive, so the
-// Settings row and the ticker's next tick both see why nothing imported.
+// The sync's own deadline is an import failure like any other, and it is
+// recorded whoever is still listening: the caller that hangs up is answered
+// at once with its own cancellation, while the flight it started runs on and
+// lands the deadline on the row (and emits one sync_failed), so the Settings
+// row and the ticker's next tick both see why nothing imported. Only the
+// process stopping suppresses the record.
 func TestSyncDeadlineIsRecordedOnTheRow(t *testing.T) {
 	previous := syncTimeout
 	syncTimeout = 300 * time.Millisecond
@@ -1181,21 +1259,45 @@ func TestSyncDeadlineIsRecordedOnTheRow(t *testing.T) {
 		t.Fatalf("events = %#v, want one sync_failed", got)
 	}
 
-	// A caller that has gone away records nothing: shutdown-cancel stays off the row.
+	// A caller that goes away is answered at once with its own cancellation,
+	// and the flight it left behind still records the deadline it meets.
 	fake2 := &fakeSource{t: t, files: validFiles(), blobHold: true}
 	importer2, database2 := newImporterFixture(t, fake2)
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { time.Sleep(100 * time.Millisecond); cancel() }()
-	if _, err := importer2.Sync(ctx, "CORE", archRepo); err == nil {
-		t.Fatal("cancelled caller: expected an error")
+	cancelled := make(chan time.Time, 1)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+		cancelled <- time.Now()
+	}()
+	_, err = importer2.Sync(ctx, "CORE", archRepo)
+	returned := time.Now()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled caller: err=%v, want its own cancellation", err)
 	}
+	if waited := returned.Sub(<-cancelled); waited > time.Second {
+		t.Fatalf("the cancelled caller returned %v after the cancel; want it answered at once", waited)
+	}
+	// Close would cancel the flight, which is the one thing that suppresses
+	// the record, so wait for the record first and let Close wait the flight
+	// out before reading what it wrote.
 	var lastError *string
+	for until := time.Now().Add(10 * time.Second); lastError == nil && time.Now().Before(until); time.Sleep(10 * time.Millisecond) {
+		if err := database2.Pool.QueryRow(context.Background(),
+			`select last_error from architecture_sources where project_key = 'CORE'`).Scan(&lastError); err != nil {
+			t.Fatalf("read row: %v", err)
+		}
+	}
+	importer2.Close()
 	if err := database2.Pool.QueryRow(context.Background(),
 		`select last_error from architecture_sources where project_key = 'CORE'`).Scan(&lastError); err != nil {
 		t.Fatalf("read row: %v", err)
 	}
-	if lastError != nil {
-		t.Fatalf("cancelled caller wrote last_error %q", *lastError)
+	if lastError == nil || !strings.Contains(*lastError, "deadline") {
+		t.Fatalf("last_error = %v, want the deadline the abandoned flight met", lastError)
+	}
+	if got := projectEvents(t, database2); len(got) != 1 || !strings.HasPrefix(got[0], "architecture.sync_failed") {
+		t.Fatalf("events = %#v, want one sync_failed", got)
 	}
 }
 
