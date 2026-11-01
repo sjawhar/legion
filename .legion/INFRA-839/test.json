@@ -2,85 +2,81 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-839",
-  "round": 8,
+  "round": 9,
   "verdict": "pass",
-  "codeHead": "a4b9ededf432",
-  "prHead": "26031b08dd63c1080d413eda4205b7c936e5c6ce",
+  "codeHead": "9c02143e3c9d",
+  "fixCommit": "628cb287a5ae",
+  "prHead": "30a92b6432b510656f42bd798498c83c6dadab1c",
   "implementerProof": {
     "verdict": "verified",
-    "how": "e2e-local.sh at this head: exit 0, both kept windows exactly once carrying kept_at, the held role 200 with no kept field, the keep-false control 404. claude-envoy's typecheck is silent and its suite is 305 tests, 0 fail, 15 skip. The round's own tests were then driven, the race lane re-run with the command CI uses rather than a subset, and round 7's real-stack set re-driven."
+    "how": "e2e-local.sh at this head: exit 0, both kept windows exactly once carrying kept_at, the held role 200 with no kept field, the keep-false control 404. The three new tests were each shown red against the previous head or by mutation, the retry rule driven on the real stack over 200 keeps, the envoy-go-race lane re-run with its own whole-package command, and round 8's real-stack set re-driven."
   },
-  "correctionToMyOwnEarlierRounds": {
-    "what": "My round 6 and round 7 handoffs recorded CI as 'queued, every lane unread'. Both runs have since drained and BOTH FAILED, and I never saw it: run 41212135030 (round 6's head 5593037ddf83) failed envoy-go-race and ci-ok with 26 lanes green, and run 41254878038 (round 7's head e19f161c) failed envoy-go-race, claude-envoy and ci-ok with 25 green.",
-    "why it matters": "My 'unread' readings were true when taken and wrong by the time the reviewer read them. More to the point, at round 7 I passed the round having run -race over a SUBSET of tests, and the lane that went red runs whole packages. A subset race run is not envoy-go-race, and I should not have let 'my -race was clean' sit next to 'envoy-go-race unread' without saying they are not the same measurement. This round I ran the lane's own command.",
-    "whatThisRoundFixes": "Both failures are exactly what review round 5 sent back, and both are fixed here (claude-envoy below, envoy-go-race below)."
+  "pinVerification": {
+    "twoByTheOldHead": "A scratch clone at a4b9ededf432 with this round's role_keep_handover_test.go copied in, production code left old. TestAHandoverForAnUnclaimedRoleEndsOnACursorNoReadCanDecode FAILS in 3.40 s, which is the retry window the handoff names (about 3.29 s of retries); TestAHandoverOfAClaimedRoleRetriesAHolderResolutionThatFailed FAILS in 0.04 s. Both pass here.",
+    "oneByMutation": "TestAKeptLaneGuardStopsWaitingWhenTheHandoversContextEnds cannot be run at the old head at all: it calls the new hold(ctx, role), and the old file does not compile against it (`too many arguments in call to guards.hold`). I removed only that one test from the copied file so the other two could run, and pinned this one by mutation at the new head instead: reverting hold to a plain blocking send that ignores ctx makes it FAIL in 10.10 s, the wait never giving up.",
+    "note": "The signature change is the fix, so 'red at the old head' is not available for it. I say so rather than leaving the criterion looking met by a test that never compiled."
   },
   "proof": [
     {
-      "criterion": "claude-envoy's typecheck and suite are clean (the lane that failed at round 7).",
-      "surface": "The package's own gates.",
+      "criterion": "An unclaimed role's handover over a cursor no read can decode ends at once, reports nothing at Error, and leaves nothing behind (item 2, first half).",
+      "surface": "A real listener process on a real NATS; an undecodable cursor written straight onto notifications.envoy.kept.cursor.<role>, which is a stored subject of the listener's own, then 200 keeps against that role.",
+      "command": "bash $TMPDIR/tester/r9.sh (section A)",
+      "observed": "200 keeps took 9243 ms in total, 46 ms each, which is the publish's own cost and no retry window; 0 ERROR lines across the whole run; the listener's threads went 7 -> 8 and its RSS 28176 -> 34524 kB, which is 200 stream publishes rather than accumulation. At the old head one such handover alone costs 3.40 s of retries.",
+      "headSha": "9c02143e3c9d",
+      "negativeControl": "The same binary retries and reports for a role whose cached claim names a session, which is the other half of the rule; and the old head's 3.40 s failure is the before-measurement for this same cursor.",
+      "limitOfThisMeasurement": "The listener exposes no go_goroutines metric and no pprof endpoint, so I could not count goroutines directly and do not claim to have. What I measured is what a parked handover would show from outside: it holds the role's guard, so the keeps behind it would slow or stall, and a process collecting them would grow threads and RSS. None of the three moved. The guard's give-up itself is pinned by the unit test above."
+    },
+    {
+      "criterion": "A claimed role whose holder resolution fails retries and reports at Error (item 2, second half).",
+      "surface": "The unit test TestAHandoverOfAClaimedRoleRetriesAHolderResolutionThatFailed, red at a4b9ededf432 and green here.",
+      "command": "go test -run TestAHandoverOfAClaimedRoleRetriesAHolderResolutionThatFailed ./cmd/listener, at both heads",
+      "observed": "FAIL 0.04 s at a4b9ededf432 with the handoff's message (a resolution that did not answer read as a role nobody holds); passes here.",
+      "headSha": "9c02143e3c9d",
+      "negativeControl": "The unclaimed half above, which must NOT retry, measured live at 46 ms a keep: the same rule read from both sides.",
+      "notDrivenLive": "I did not drive this half on the real stack and did not pretend to. Making a holder resolution FAIL live needs the session bucket read to error, which means stopping NATS under the listener - and that stops the keeps that start the handover too, so the rig cannot isolate the failing resolution from a dead bus. The unit test is the isolation."
+    },
+    {
+      "criterion": "The envoy-go-race lane is green with its own whole-package command (item 3).",
+      "surface": "The lane's step, run here minus the two Dispatch packages that need a Postgres of their own.",
+      "command": "DISPATCH_TEST_DATABASE_URL=… CGO_ENABLED=1 GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -race -timeout 30m ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...",
+      "observed": "internal/bus ok 355.501s, cmd/listener ok 761.421s, internal/store ok (cached), internal/session ok 12.734s, internal/kvwatch ok (cached). 0 DATA RACE in the whole log.",
+      "headSha": "9c02143e3c9d",
+      "negativeControl": "This lane failed at both 5593037ddf83 and e19f161c (runs 41212135030 and 41254878038), so a green read is the fix and not a lane that never fails."
+    },
+    {
+      "criterion": "claude-envoy's typecheck and suite are clean (item 3).",
+      "surface": "The package's own gates, and CI's own lane.",
       "command": "cd packages/claude-envoy && bun run typecheck && bun test",
-      "observed": "tsc --noEmit prints nothing; the suite is 305 tests across 39 files, 0 fail, 15 skip, 1002 expect() calls.",
-      "headSha": "a4b9ededf432",
-      "negativeControl": "The same lane is one of the two that failed run 41254878038 at e19f161c, so this is the fix read back rather than a state that was always green."
+      "observed": "tsc --noEmit silent; 306 tests across 39 files, 0 fail, 16 skip. CI's claude-envoy lane at this head has also concluded success.",
+      "headSha": "9c02143e3c9d",
+      "negativeControl": "This lane failed at e19f161c in run 41254878038."
     },
     {
-      "criterion": "The envoy-go-race failure is fixed, measured with the command that lane runs rather than a subset.",
-      "surface": "The CI lane's own step, `go test -race -timeout 30m` over its package list, run here minus the two Dispatch packages that need a Postgres I did not stand up.",
-      "command": "CGO_ENABLED=1 GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -race -timeout 30m ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/... ; then ./cmd/listener/ again with DISPATCH_TEST_DATABASE_URL set",
-      "observed": "internal/bus ok 340.701s, internal/store ok 35.403s, internal/session ok 12.742s, internal/kvwatch ok 65.576s, and cmd/listener ok 733.684s with DISPATCH_TEST_DATABASE_URL set. 0 DATA RACE in every log. The first pass of cmd/listener FAILED, and it was my environment, not the product: `--- FAIL: TestDispatchMentionResolvesASessionTheCacheHasNotRefilled` followed by `panic: rootless Docker not found` from testcontainers — the trap the implementer recorded in round 3, where a Postgres-backed listener test panics instead of skipping when no DSN is set. With the pod's Postgres named it passes.",
-      "headSha": "a4b9ededf432",
-      "negativeControl": "The same lane failed at both of the previous two code heads (runs 41212135030 and 41254878038), so a green read here is the fix and not a lane that never fails."
+      "criterion": "The base merge's two resolutions are right (item 4).",
+      "surface": "The merge commit's own diff, and the build.",
+      "command": "jj diff -r 9c02143e3c9d --git; go build ./...; gofmt -l",
+      "observed": "The merge touches exactly two files and each keeps the right side of its conflict. packages/envoy-client/src/tool-contract.ts keeps THIS branch's three-answer envoy_publish description, which is the branch's own contract change. skills/envoy/references/deliveries.md keeps BOTH sides: the base's reworded serve-port line, which drops the OpenCode plugin the base stopped releasing, and this branch's added sentence that a role message no live holder can take is kept for the next claimant. No conflict marker survives anywhere in packages/, skills/ or docs/; go build ./... and gofmt -l are clean.",
+      "headSha": "9c02143e3c9d",
+      "negativeControl": "A resolution that had taken only one side would have dropped either the OpenCode removal or the kept-lane sentence; both are present in the merged text."
     },
     {
-      "criterion": "The race-prone tests hold under repetition: CGO_ENABLED=1 -race -count=20 with a timeout.",
-      "surface": "The five tests the architect named.",
-      "command": "CGO_ENABLED=1 GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -race -count=20 -timeout 3000s -run 'TestRoleHolderStateIsNamedByEachRoutesAnswer|TestADispatchRoleRoutedEventToAnUnheldRoleReachesTheNextHolder|TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim|TestAHandover|TestTheSweep' ./cmd/listener",
-      "observed": "ok github.com/sjawhar/envoy/cmd/listener 674.006s, 0 DATA RACE.",
-      "headSha": "a4b9ededf432",
-      "negativeControl": "Run without CGO_ENABLED=1 the same command exits 2 with `-race requires cgo` having tested nothing, which is why the variable is named in the command rather than assumed."
-    },
-    {
-      "criterion": "A failed first lane-head read is retried with backoff (blocking 3).",
-      "surface": "The test against the previous code head, production code left old.",
-      "command": "scratch clone at e19f161c with this round's role_keep_handover_test.go copied in; go test -run TestAHandoverRetriesALaneHeadReadThatFailedOnItsFirstPass ./cmd/listener",
-      "observed": "--- FAIL at e19f161c (0.29s); passes at this head.",
-      "headSha": "a4b9ededf432",
-      "negativeControl": "The copy carries only the test file, so the failure is the production behaviour the round added and not the test's own compilation."
-    },
-    {
-      "criterion": "One lane-head read per pass, and the sweep reads no head of its own (item 4), counted on the real stack.",
-      "surface": "The JetStream API at the wire: a subscriber on $JS.API.STREAM.MSG.GET.> records every stream-message get the listener makes, with the subject it asked for.",
-      "command": "bash $TMPDIR/tester/r8-reads.sh",
-      "observed": "A claim of a role with an EMPTY lane: 1 lane-head read, 0 cursor reads — the pass reads the head once and resolves no holder, which is round 7's fix still holding. A claim of a role with one kept copy: 1 lane-head read, 1 cursor read, the copy delivered once. Across 45 idle seconds with no claim and no publish: 0 stream-message gets at all, so the sweep reads no head of its own for a lane nobody claims.",
-      "headSha": "a4b9ededf432",
-      "negativeControl": "The counter reads the wire rather than the listener's own logs, so a read the listener made and did not log would still be counted; the empty-lane case reading 1 and not 2 is what distinguishes one head read per pass from the sweep adding its own."
-    },
-    {
-      "criterion": "Round 7's real-stack set and e2e-local still pass.",
-      "surface": "Real listener processes on a real NATS with real session processes; and the implementer's rig.",
+      "criterion": "Round 8's real-stack set and e2e-local still pass (item 4).",
+      "surface": "Real listener processes on a real NATS with real session processes, the shortened-window build rebuilt from THIS head, and the implementer's rig.",
       "command": "bash $TMPDIR/tester/r8.sh ; bash packages/envoy/scripts/e2e-local.sh",
-      "observed": "SIGKILL mid-handover with 14 of 40 delivered and the holder live, restarted under the same machine id with no new claim: 40 of 40, 0 more than once. 30 expired then 5 fresh: 5 of 5 fresh, 0 of 30 expired forwarded, expired counter 30. A Dispatch role-routed event to an unheld role: the next holder got it exactly once, and no copy carries a keep key. 25 copies over the walk budget on one claim: 25 of 25. e2e-local exit 0 with both kept windows and the 404 control.",
-      "headSha": "a4b9ededf432",
-      "negativeControl": "The keep-false control in e2e-local still answers 404 with nothing stored and its claimant handed nothing."
+      "observed": "SIGKILL mid-handover with 7 of 40 delivered and the holder live, restarted under the same machine id with no new claim: 40 of 40, 0 more than once. 30 expired then 5 fresh: 5 of 5 fresh, 0 of 30 expired forwarded, expired counter 30. A Dispatch role-routed event to an unheld role: next holder exactly once, no keep key on any copy. 25 over the walk budget on one claim: 25 of 25. e2e-local exit 0.",
+      "headSha": "9c02143e3c9d",
+      "negativeControl": "e2e-local's keep-false control still answers 404 with nothing stored and its claimant handed nothing."
     }
   ],
-  "judgement": {
-    "question": "The architect asked whether holding the role's handover guard for the whole of TestRoleHolderStateIsNamedByEachRoutesAnswer is right, and whether a handover can release a lapsed claim while a route still answers about it as held — that is, whether a client could see a wrong answer.",
-    "answer": "The guard-hold is right, and no client can see a wrong answer. The interleaving is real: a keep starts a handover in a goroutine and that handover resolves the role's holder, which releases a lapsed claim, while the routes answer about the same role.",
-    "measured": "On the real stack, 12 rounds of one publish racing a burst of 8 lookups of a role whose holder had claimed it and then had its registration deleted (the e2e rig's lapsed claim). First attempt measured nothing, and I say so because it is the trap: I polled with lookups while waiting for the claim to lapse, and a LOOKUP RELEASES A LAPSED CLAIM TOO, so every answer read `unclaimed` and the race never happened. With the poll removed the race is genuine: 3 of 12 publishes saw `holder_lapsed` naming ses_r8_race and 9 saw `unclaimed`; of 96 lookups, 9 answered 404 holder_lapsed with claim_released true and 87 answered 404 unclaimed.",
-    "theDecidingNumbers": "0 of 96 lookups answered 200, so no route ever named the lapsed holder as live, before or after the release. 12 of 12 publishes answered 202 kept, so no message was lost to the race whichever side won.",
-    "soWhat": "The only thing the race decides is WHICH of two truthful 404 reasons a client sees — holder_lapsed with claim_released true if it got there before the release, unclaimed if after — and each answer is true of the moment the request resolved it. That is nondeterminism in the reported reason, not a wrong answer. The test is about the reason each route names, so without the guard the background handover would flip that reason underneath it: the hold removes a flake, it does not mask a defect. I would have reported it as masking one if any lookup had answered 200."
-  },
   "ci": {
-    "state": "Run 41286410318 (CI, head a4b9ededf432, created 07:50:57Z) was still QUEUED at 08:45Z with only `changes` queued. No lane has a conclusion at this head and there is no ci-ok result.",
-    "unreadLanes": ["ci-ok", "lint", "typecheck", "test", "envoy-go", "envoy-go-race", "envoy-go-race-pmdoc", "dispatch", "envoy-smoke", "envoy-e2e-local", "pi-envoy", "claude-envoy", "pi-shared", "pi-legion", "contracts", "envoy-client", "listener-server-change", "docs", "pr-title"],
-    "history": "The two previous code heads' runs both FAILED rather than being cancelled: 41212135030 (5593037ddf83) on envoy-go-race and ci-ok, 41254878038 (e19f161c) on envoy-go-race, claude-envoy and ci-ok. Those are the two failures this round fixes, and I have re-run both lanes' work locally and found them green.",
-    "notRunByMe": "Of the envoy-go-race lane's package list I did not run ./internal/dispatch/delivery/... or ./internal/dispatch/store/..., which need a Postgres of their own and are Dispatch-side rather than this change's; and I ran no envoy-go, envoy-smoke, dispatch or envoy-e2e-local. Those stay CI's to report."
+    "state": "Run 41306087031 (CI, head 9c02143e3c9d, created 12:21:17Z) is RUNNING and further along than any round before it. At 12:53Z: 8 lanes concluded success - changes, ci-filters, claude-envoy, contracts, docs/build, test, typecheck, worker-image/build; 8 in progress - dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race-api, envoy-infra-go, envoy-session-stall, listener-server-change; 8 queued - dispatch-browser-multiprocess, envoy-client, envoy-e2e-local, envoy-go-race, envoy-go-race-docs, envoy-smoke, lint, pi-envoy, pi-legion, pi-shared; 4 skipped. There is no ci-ok result yet.",
+    "readSoFar": "claude-envoy, one of the two lanes that failed at e19f161c, has concluded SUCCESS in CI at this head - the first time CI itself has confirmed one of this round's fixes rather than my local run alone.",
+    "unreadLanes": ["ci-ok", "envoy-go-race", "envoy-go", "dispatch", "envoy-smoke", "envoy-e2e-local", "lint", "pi-envoy", "pi-legion", "pi-shared", "envoy-client", "listener-server-change", "envoy-session-stall", "envoy-infra-go", "envoy-go-race-api", "envoy-go-race-docs", "dispatch-memory", "dispatch-multiprocess", "dispatch-browser-multiprocess"],
+    "notRunByMe": "Of the envoy-go-race lane's package list I did not run ./internal/dispatch/delivery/... or ./internal/dispatch/store/..., which need a Postgres of their own and are Dispatch-side rather than this change's. I ran no envoy-go, envoy-smoke, dispatch or envoy-e2e-local; those stay CI's."
   },
   "memory": {
-    "caps": "-p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB throughout, one package at a time; the three -race runs were the heaviest and none overlapped another suite.",
-    "sampled": "1511 samples of /sys/fs/cgroup/memory/memory.usage_in_bytes over about 3022 s; min 1.55, max 2.32 GiB of the pod's 19. Pod-wide and spanning the whole round, so attributable to no single run; a floor at 2 s.",
-    "leftoverCheck": "Ran `ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|mem-r8.samples|natsd|listener-*|e2e-local|go test'` after proc://mem-sampler-r8/kill returned, judged by printed lines: 0 matching lines out of 6 processes, nothing ended by pid."
+    "caps": "-p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB throughout, one package at a time; the race lane run was the heaviest and overlapped no other suite.",
+    "sampled": "866 samples of /sys/fs/cgroup/memory/memory.usage_in_bytes over about 1732 s; min 1.65, max 3.01 GiB of the pod's 19. Pod-wide and spanning the whole round, so attributable to no single run; a floor at 2 s.",
+    "leftoverCheck": "Ran `ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|mem-r9.samples|natsd|listener-*|e2e-local|go test'` after proc://mem-sampler-r9/kill returned, judged by printed lines: 0 matching lines out of 6 processes, nothing ended by pid."
   }
 }
