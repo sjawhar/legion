@@ -24,15 +24,16 @@ import (
 // change, credits to every browser connected at the time (creditContentChange). Nobody typed it,
 // so it must be credited to no one.
 //
-// The first test here is the scenario itself: a browser deletes exactly the text another browser's
-// bold run covers, which leaves the markers covering nothing. Whether ygo commits a cleanup for it
-// is the pinned version's answer - a fork before its v1.54 line commits none, one that carries
-// reearth/ygo #284 commits one - so the test holds what the room does with however many updates
-// the delete leaves, and logs the count rather than asserting it. The second test is the path on
-// which a room credits such a commit at all, and is deterministic on any ygo: a replica that
-// cannot place an update hands it to recover, which classifies every update it could not place as
-// a content change (renderedReplica.recover), so a nil-origin commit made while a browser is
-// connected is the one that would credit that browser for an edit it never made.
+// The first test here is the scenario itself, on the pinned ygo (v1.54.1-sami.3, which carries
+// reearth/ygo #284): a browser deletes exactly the text another browser's bold run covers, which
+// leaves the markers covering nothing, and the room logs two updates for it - the browser's own
+// and the cleanup, committed with no origin. The cleanup takes no text away, so the room
+// classifies it as no content change and never reaches the credit path for it; the test holds
+// both. The second test is the path on which a room credits such a commit at all, and is
+// deterministic on any ygo: a replica that cannot place an update hands it to recover, which
+// classifies every update it could not place as a content change (renderedReplica.recover), so a
+// nil-origin commit made while a browser is connected is the one that would credit that browser
+// for an edit it never made.
 
 const (
 	nilOriginParagraph = "Paragraph 0 opens"
@@ -374,10 +375,11 @@ func TestRenderReuseANilOriginCommitCreditsNoOne(t *testing.T) {
 // testADeleteThatDanglesABoldRun is the scenario: two browsers are connected, a third bolded a
 // word and left, and one of the connected browsers deletes exactly that word. Its own document
 // never held the markers, so it cannot tombstone them, and the room is left holding markers that
-// cover no text - which the ygo that carries reearth/ygo #284 answers with a cleanup transaction
-// of its own, committed with no origin. The browser's own update is credited to the browsers
-// connected while it landed, as it always was; any further logged update is the cleanup's, and is
-// credited to no one.
+// cover no text - which the pinned ygo answers with a cleanup transaction of its own, committed
+// with no origin. The room therefore logs two updates for the delete: the browser's own,
+// credited to the browsers connected while it landed, as it always was, and the cleanup, which
+// takes no text away and is classified as no content change, so the room credits nothing for it
+// and no second row is owed.
 func testADeleteThatDanglesABoldRun(t *testing.T) {
 	service, artifactID, sh := newRenderReuseService(t)
 	watch := watchNilOriginCredits(t, service, artifactID)
@@ -441,11 +443,10 @@ func testADeleteThatDanglesABoldRun(t *testing.T) {
 		t.Fatalf("apply the browser's update to the room: %v", err)
 	}
 	logged, seen := loggedSince(sh, m), watch.since(mark)
-	// How many updates the delete leaves is the pinned ygo's answer, not this test's: one without
-	// reearth/ygo #284, two with it.
 	reportLogged(t, logged, seen)
-	if len(seen) == 0 {
-		t.Fatal("the room logged nothing for the browser's delete")
+	if len(logged) != 2 || len(seen) != 2 {
+		t.Fatalf("the browser's delete left %d logged update(s) and %d observed commit(s), want two of each: the browser's own and ygo's cleanup of the markers it left covering nothing (reearth/ygo #284)",
+			len(logged), len(seen))
 	}
 
 	// The browser's own update, credited to the browsers connected while it landed, as ever.
@@ -462,26 +463,18 @@ func testADeleteThatDanglesABoldRun(t *testing.T) {
 			browserCommit.authors, browserCommit.credited, want)
 	}
 
-	// Every further logged update is ygo's own cleanup, which names no one and credits no one: no
-	// in-flight credit is taken for it (creditSeq counts every one the room ever took), and it
-	// leaves the room's latest edit source where the browser's update left it.
-	for index, commit := range seen[1:] {
-		if commit.origin != "nil" {
-			t.Errorf("logged update %d has origin %s, want the cleanup's nil: nothing else commits on the room here",
-				index+1, commit.origin)
-			continue
-		}
-		if commit.credited {
-			t.Errorf("the cleanup credited %v: a commit ygo made for itself is nobody's edit", commit.authors)
-		}
-		if commit.after.creditSeq != browserCommit.after.creditSeq {
-			t.Errorf("the cleanup took in-flight credit #%d; the browser's update left the room at #%d",
-				commit.after.creditSeq, browserCommit.after.creditSeq)
-		}
-		if commit.after.lastActor != browserCommit.after.lastActor {
-			t.Errorf("the cleanup left the room's latest edit source %s, the browser's update left it %s",
-				commit.after.lastActor, browserCommit.after.lastActor)
-		}
+	// The second is ygo's own cleanup: a commit with no origin, which takes no text away, so the
+	// room classifies it as no content change and never weighs who to credit for it
+	// (creditContentChange runs for a content change alone). The recover subtest below drives
+	// the path that does reach it.
+	cleanup := seen[1]
+	if cleanup.origin != "nil" {
+		t.Errorf("the second logged update has origin %s, want the cleanup's nil: nothing else commits on the room here", cleanup.origin)
+	}
+	if cleanup.classes != 1 {
+		t.Errorf("the room recorded %d classes for the cleanup, want one: with none, what it was classified as says nothing", cleanup.classes)
+	} else if cleanup.changed {
+		t.Error("the cleanup was classified as a content change: it deletes the formatting markers the delete left covering no text, which no rendering carries")
 	}
 
 	waitForLandedAppends(t, service, artifactID)

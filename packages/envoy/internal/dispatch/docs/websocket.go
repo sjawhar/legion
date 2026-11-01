@@ -573,7 +573,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			}
 			classified = true
 			if asks != nil {
-				s.observeAskBlocksForUpdate(room, logged.Origin, asks())
+				s.observeAskBlocksForUpdate(room, asks())
 			}
 			// The cursor is this instance's, taken here rather than looked up when the update
 			// reaches the store: a room evicted and reloaded in between is a different instance,
@@ -637,12 +637,7 @@ func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, am
 // real change, so the no-op path, the common one, pays for neither. A nil askBlocks is that
 // walk's answer when it could not read the document, never a document holding no ask block
 // (askBlockIDs): the room's record is left as it is.
-//
-// origin is the committed update's, which says whether a connected browser may be named the author
-// of an ask block the update left newly seen: a nil origin is ygo's own cleanup transaction, which
-// no browser made (creditContentChange), so its ids are recorded with no author at all, as the
-// room records the ones it loaded holding.
-func (s *Service) observeAskBlocksForUpdate(room string, origin any, askBlocks map[string]struct{}) {
+func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]struct{}) {
 	if askBlocks == nil {
 		// The walk could not read the document it had to walk, and logged that
 		// (renderedReplica.spliceTouched): the room keeps the ask blocks and the authors it
@@ -653,12 +648,10 @@ func (s *Service) observeAskBlocksForUpdate(room string, origin any, askBlocks m
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	var author *model.Actor
-	if origin != nil {
-		if sole, ambiguous := soleConnectedActor(state.connected); ambiguous {
-			author = new(SettlementActor)
-		} else {
-			author = sole
-		}
+	if sole, ambiguous := soleConnectedActor(state.connected); ambiguous {
+		author = new(SettlementActor)
+	} else {
+		author = sole
 	}
 	state.observeAskBlocks(askBlocks, author)
 }

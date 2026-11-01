@@ -64,9 +64,9 @@ var stormMarks = []string{"strong", "emphasis", "inlineCode", "strike_through", 
 // deleting, marking, inserting, deleting, moving and replacing top-level blocks, several blocks in
 // one transaction, attribute changes, margin writes, and two peers editing one state concurrently
 // - and holds the replica's rendering and every update's class to the shadow's independent whole
-// render after every commit. The touched blocks each update's splice is given come from the
-// replica's own change finder here, not from the test, which is what the pmdoc differential cannot
-// reach.
+// render after every commit. The touched blocks each update's splice is given come from
+// noteChangedTypes, the replica's own record of what its document's transactions changed, not
+// from the test, which is what the pmdoc differential cannot reach.
 func TestRenderReuseARandomisedEditStorm(t *testing.T) {
 	seeds, edits := []uint64{1, 2, 3, 4, 5, 6, 7, 8}, 320
 	if stormRaceEnabled || testing.Short() {

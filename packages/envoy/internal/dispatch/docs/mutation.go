@@ -418,10 +418,11 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 //   - It records beside its update the room its fork was warm-built from (liveWrite.marginRooms),
 //     so the room's update observer, which would render the publish only to find the same
 //     markdown, keeps its rendering instead when the update reaches that same room
-//     (liveWriteOrigin.marginOnly says why that is exact). For a warm fork it also records, as
-//     applyLive does, its rendering of the fork with the fork read's replica counters
-//     (publishedRendering): the rendering it records, which the margin write leaves as it was, with
-//     no ask blocks, since it changes no rendered markdown. A cold fork records neither.
+//     (liveWriteOrigin.marginOnly says why that is exact). It records no rendering of its own,
+//     where applyLive records a warm operation's (publishedRendering): the margin-only path
+//     answers before the observer would look at a rendering (renderedReplica.changedBy), and a
+//     publish that path does not answer - into a room the fork was not built from, or onto a
+//     replica that holds no rendering - the observer measures itself. A cold fork names no room.
 //
 // A marks-map Set always adds an item, so the write always changes the fork: unlike applyLive it
 // never answers websocket.ErrNoChanges. A panic in it is its error (recoverMutation), as there.
@@ -456,19 +457,14 @@ func (s *Service) applyMargin(ctx context.Context, artifactID string, actor mode
 		return err
 	}
 	// The room the fork was warm-built from, which the publish tags the update against
-	// (liveWriteOrigin.marginOnly), and the rendering the observer may take in its place
-	// (publishedRendering). A cold fork was built from the stored document, with no room behind
-	// it, so it names neither; write.cold says so directly rather than leaving it to coldFork to
-	// have cleared forkedFrom and forkLive the fork read's counters.
+	// (liveWriteOrigin.marginOnly). A cold fork was built from the stored document, with no room
+	// behind it, so it names none; write.cold says so directly rather than leaving it to coldFork
+	// to have cleared forkedFrom and forkLive the fork read's counters.
 	var room weak.Pointer[crdt.Doc]
-	var rendering publishedRendering
 	if !op.write.cold {
 		room = op.write.forkedFrom
-		if op.read.warm {
-			rendering = publishedRendering{forkReadMark: op.read, rendered: &replicaRendering{markdown: rendered.markdown}}
-		}
 	}
-	return s.recordLiveOperation(ctx, &op, actor, rendered, false, rendering, room)
+	return s.recordLiveOperation(ctx, &op, actor, rendered, false, publishedRendering{}, room)
 }
 
 // joinedSchemaError is the error a joined operation answers for err, a failure it met after it

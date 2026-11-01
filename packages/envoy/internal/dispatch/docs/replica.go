@@ -15,7 +15,7 @@ import (
 
 // renderedReplica is the copy of a room's document its update observer renders and the room's
 // reads walk (readLive). ygo fires the observer after the transaction has released the document's
-// lock (sjawhar/ygo v1.51.3-sami.4, crdt/doc.go, transactInternal), and a walk of the live tree
+// lock (sjawhar/ygo v1.54.1-sami.3, crdt/doc.go, transactInternal), and a walk of the live tree
 // takes no lock (crdt/yxml.go), so a render or read of the live tree can walk it while another
 // transaction writes it: a torn walk reads a healthy document as one outside the schema, logs a
 // false WARN and counts the update as a content change. Only a holder of mu writes or walks the
@@ -147,8 +147,7 @@ type renderedReplica struct {
 // (onLoadDocument, renderedReplica.start), and a published live write's operation offers the
 // room's update observer one of the state its update leaves (publishedRendering). A rendering is
 // never written in place once made, so every holder of one reads the markdown and the layout of
-// one render. Only a rendering no observer ever takes carries no layout: a margin write's
-// publish, whose markdown the observer compares and nothing more (renderedReplica.changedBy).
+// one render.
 type replicaRendering struct {
 	markdown string
 	layout   *pmdoc.Layout
@@ -453,7 +452,7 @@ func (r *renderedReplica) renderingAt(mark forkReadMark) *string {
 //
 //   - base is the room's whole state as of just before the first transaction to run on it after
 //     its log opened: ygo encodes it under the document's lock before that transaction's fn runs,
-//     for each open log still waiting for one (sjawhar/ygo v1.51.3-sami.4, crdt/update_log.go,
+//     for each open log still waiting for one (sjawhar/ygo v1.54.1-sami.3, crdt/update_log.go,
 //     OpenUpdateLog and recordUpdateLogBases; crdt/doc.go, transactInternal), and only a
 //     transaction changes the state, so base is the state the log opened on;
 //   - the load renders the room's tree before it opens the log (onLoadDocument), and nothing
@@ -631,9 +630,10 @@ func (r *renderedReplica) hold() *crdt.Doc {
 //     recorded, so pmdoc.Layout.Splice renders just the touched blocks into the markdown, read
 //     by pmdoc.ReadBlockForRendering, unless one of its guards declines;
 //   - whole: anything else - the fragment itself changed, more blocks were touched than the
-//     replica records, the replica holds no rendering, a touched block is no longer
-//     among the fragment's children, or Splice declined - renders the replica whole through
-//     renderDocumentForUpdate, recording a fresh layout from the same render.
+//     replica records, the replica holds no rendering, the fragment holds a different number of
+//     children than the layout records or one that is not an element, a touched block is no
+//     longer among the fragment's children, or Splice declined - renders the replica whole
+//     through renderDocumentForUpdate, recording a fresh layout from the same render.
 //
 // renderedReplica says why the first two answer exactly what the whole render would. The trees
 // read never outlive the caller's turn with the replica, so they carry none of pmdoc.Read's copy.

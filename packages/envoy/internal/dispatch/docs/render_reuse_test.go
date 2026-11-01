@@ -1634,9 +1634,9 @@ func TestRenderReuseAnUnreadableAskBlockKeepsTheRoomsAskAuthors(t *testing.T) {
 	}
 
 	// The replica's own ask block is given a chain deeper than a document in the schema nests, so
-	// pmdoc.ReadBlockForRendering refuses it. The replica's next update resets what this
-	// transaction's finder recorded (renderedReplica.observe), so the keystroke below is still
-	// measured as touching its own block alone.
+	// pmdoc.ReadBlockForRendering refuses it. The replica's next update resets what
+	// noteChangedTypes recorded for this transaction (renderedReplica.observe), so the keystroke
+	// below is still measured as touching its own block alone.
 	replica := service.replicaOf(service.srv.GetDoc(artifactID))
 	replica.mu.Lock()
 	ask := topLevelAskElement(t, replica.fragment)
