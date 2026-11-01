@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-593",
-  "previousHandoff": "f79ff53845afe5e6e9c891f65861103e4a631726",
-  "round": 16,
-  "headTested": "e22b1dfa74632c1efaee2314f2c676fe93f6068b",
-  "prHead": "7e53fc8a6621c7ee7d56003b827a79fd57c705fd",
-  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-16-txt",
-  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-16-tar-gz",
+  "previousHandoff": "a21f658d12c4d7a94b30d2536ec7b8931c41d17a",
+  "round": 17,
+  "headTested": "a50f4960c8a2a66995fa55d81c1c9d850049f187",
+  "prHead": "db69eca22a523cd381d5d65d98a26678306a8a7a",
+  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-17-txt",
+  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-17-tar-gz",
   "previousRounds": [
     "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-2-txt",
@@ -23,71 +23,66 @@
     "dispatch://INFRA-593/artifact/infra-593-tester-round-12-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-13-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-14-txt",
-    "dispatch://INFRA-593/artifact/infra-593-tester-round-15-txt"
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-15-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-16-txt"
   ],
   "roundShape": {
-    "tool": "dispatch://INFRA-598/artifact/round-shape-py version 3",
-    "oldHead": "6bc39af6e5ddde93cc87659549136006300aaf61",
-    "newHead": "e22b1dfa74632c1efaee2314f2c676fe93f6068b",
+    "tool": "dispatch://INFRA-598/artifact/round-shape-py version 3, run by the tester",
+    "oldHead": "e22b1dfa74632c1efaee2314f2c676fe93f6068b",
+    "newHead": "a50f4960c8a2a66995fa55d81c1c9d850049f187",
     "differs": [
-      ".changes/unreleased/pr2444-document-load-and-compaction.yaml",
-      "AGENTS.md",
-      "docs/format_replay_test.go",
-      "docs/pending_authors.go",
-      "docs/tree.go",
-      "docs/websocket.go",
-      "docs/websocket_test.go"
+      "store/doc_compaction_owed_migration_test.go (number only)",
+      ".changes/unreleased/pr2444-document-load-and-compaction.yaml (0151, sami.3)",
+      "go.mod (comment lines only, reviewer 3590d0f6)",
+      "docs/websocket.go (comment lines only, reviewer 3590d0f6)"
     ],
-    "round": "full (the architect's call: the adaptation to #2604)"
+    "equalOnlyAfterMigrationNormalisation": [
+      "AGENTS.md",
+      "cmd/dispatch/README.md",
+      "migrations/NNNN_doc_compaction_owed.census.sql",
+      "migrations/NNNN_doc_compaction_owed.up.sql"
+    ],
+    "round": "narrow, on the architect's call (merge of main d09b46d7, migration 0150 -> 0151)"
   },
-  "rig_note": "The pod was recreated during the round: the rig was restored from the round 13-15 artifacts, the cut finder and the compacted harness variant rewritten, every binary rebuilt; 2 CPUs; the pod's test Postgres 18.6 (LEGION_TEST_PG_DSN, role legion_test, no superuser).",
+  "rig_note": "The pod was recreated again: envoy-dispatch rebuilt from a50f4960; a superuser Postgres 18.6 of the tester's own on the issue volume (port 55532, /usr/lib/postgresql/18); 2 CPUs.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Read the PR's own diff of tree.go, websocket.go and pending_authors.go; ran the new test at head and with the option out; ran INFRA-707's harness and a compacted-room variant; probed bootstrapLoadedState on real Postgres; re-ran the five tests 300x under -race and round 15's real-binary checks on envoy-dispatch built from e22b1dfa."
+    "how": "Ran round-shape v3 from e22b1dfa myself (the implementer's stand-in was lost with its pod): the PR's own code diff changed only in the migration number and its test, with comment-only go.mod/websocket.go changes from the reviewer's 3590d0f6; ran the migration tests, a fresh database through 0151 on the head binary, and the docs tests under race."
   },
   "failed": 0,
   "failures": [],
   "memory": {
-    "cap": "go test -p 1, GOMAXPROCS=2, GOMEMLIMIT=12GiB, -race one test at a time",
-    "sampler": "named job mem-sampler-infra-593-r16b, bounded at 1,500 samples, stopped via proc://mem-sampler-infra-593-r16b/kill",
-    "samples": 242,
-    "sampledPeakGiB": 3.27,
-    "leftoverCheck": "After the kill returned, ran ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|seq 1 1500|mem16-race' and it listed nothing."
+    "cap": "go test -p 1, GOMAXPROCS=2, GOMEMLIMIT=12GiB, CGO_ENABLED=1 -race -timeout 40m",
+    "sampler": "named job mem-sampler-infra-593-r17, bounded at 600 samples, stopped via proc://mem-sampler-infra-593-r17/kill",
+    "samples": 28,
+    "sampledPeakGiB": 2.86,
+    "leftoverCheck": "After the kill returned, ran ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|seq 1 600|mem17-race' and it listed nothing; my one dispatch process was stopped by exact pid 2470."
   },
-  "outsideFinding": "storetest.go:114 'drop database <name> with (force)' fails on the pod's non-superuser test Postgres ('permission denied to terminate process', SQLSTATE 42501), 3 of 1,500 drops, turning two all-PASS -race runs to exit 1; not in this PR's diff; sent to the controller.",
   "proof": [
     {
-      "criterion": "Architect check 1: the new test fails with the option out; the replay harness gives 0 divergence on a compacted room.",
-      "surface": "internal/dispatch/docs at e22b1dfa on Postgres 18.6; INFRA-707's ygoexp harness at ygo v1.54.1-sami.3 and a compacted-room variant of it",
-      "command": "go test ./internal/dispatch/docs -run '^TestACompactionStoresTheRoomsFormattedStateAsTheRoomHoldsIt$' (head, and with WithFormatCleanup(false) out of newCappedDocumentCopy); GOFLAGS=-mod=mod go run . / ./localonly / ./compacted (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-16-tar-gz)",
-      "observed": "Head PASS; option out FAIL at format_replay_test.go:337 (folded row renders *xy* for the room's *x*y). Harness with head's copy options 0/0 both workloads; compacted variant over 120,000 loads (folded row plus newer rows, loaded with cleanup off) 0/0.",
-      "headSha": "e22b1dfa74632c1efaee2314f2c676fe93f6068b",
-      "negativeControl": "Harness as shipped 700/41 and 1243/329; compacted variant folding with cleanup on 413/38."
+      "criterion": "Architect check 2: no document #2522 adds is built outside newCappedDocumentCopy.",
+      "surface": "source tree at a50f4960, and the diff of main 3c78856b..d09b46d7",
+      "command": "grep -rn 'crdt\\.New(' --include=*.go packages/envoy (non-test); jj diff 3c78856b..d09b46d7 -- docs pmdoc | grep '^+.*crdt.New('",
+      "observed": "Non-test crdt.New: docs/tree.go:157 (encodeDocumentTree's local commit), tree.go:346 (newCappedDocumentCopy), docs/testhooks.go (5 *ForTest helpers), docstest.go:88 (test package). #2522 adds one, in pmdoc/update_text_equality_test.go.",
+      "headSha": "a50f4960c8a2a66995fa55d81c1c9d850049f187",
+      "negativeControl": "None needed for a read; InjectSchemaInvalidForTest, the one testhook a handler calls, builds no document (srv.Apply)."
     },
     {
-      "criterion": "Architect check 2: the load hook refuses past the cap, logs an undecodable state once, returns a panic as the load's error, and reloads a formatted room equal to itself.",
-      "surface": "package docs probes at e22b1dfa against Postgres 18.6; envoy-dispatch e22b1dfa process for the log line",
-      "command": "go test ./internal/dispatch/docs -run '^TestZZProbe' (zz_loadhook_probe_test.go in dispatch://INFRA-593/artifact/infra-593-tester-rig-round-16-tar-gz); CUTTER=bin16/cutter bash scenD.sh",
-      "observed": "A 100-item parked state loads at cap 1,048,576 and at cap 64 fails the room: 'OnLoadDocument for room <id>: crdt: invalid update', roomFailed=true, the next load the same, Text 'decode live document: crdt: invalid update'. A panicking OnUpdate gives 'decode room \"room-x\": panic: probe panic' and the doc takes a transaction afterwards. The formatted room 'seed / *x*y / *xy*' reloads with equal markdown and CaptureSnapshot from 12 rows, after compaction to 1 row, and again. The binary logs 'crdt: invalid update' once per line for a reasonless cut.",
-      "headSha": "e22b1dfa74632c1efaee2314f2c676fe93f6068b",
-      "negativeControl": "Option out: every reload reads *xy*, probe fails. Load hook's two SetFormatCleanup lines out: #2604's TestARoomLoadsItsStoredHistoryAsItWasStored fails (221 bytes, want 238)."
+      "criterion": "Architect check 3: the numbering test and the shared-version guard; a fresh database migrates through 0151 with the compaction table.",
+      "surface": "internal/dispatch/store and internal/pgmigrate at a50f4960 on a superuser Postgres 18.6; envoy-dispatch a50f4960 process on a fresh database through its HTTP API",
+      "command": "go test ./internal/dispatch/store -run '^(TestMigrationSetIsNumberedOneToN|TestEveryMigrationFileIsEmbedded|TestEveryMigrationFromTheCensusRuleOnDeclaresACensus|TestTouchedTablesOfEveryMigrationAre.*|TestMigrate0151NamesEveryDocumentOfMoreThanOneRow)$'; go test ./internal/pgmigrate/...; envoy-dispatch on database t593_fresh17",
+      "observed": "All PASS, pgmigrate's Load refusals and CheckNumberedOneToN tests PASS. Fresh database: max(version)=151, 151 rows, 150 and 151 recorded, doc_compaction_owed(artifact_id uuid) and dpop_proofs present; three uploads left 4 rows, the document owed, the text correct, no ERROR.",
+      "headSha": "a50f4960c8a2a66995fa55d81c1c9d850049f187",
+      "negativeControl": "Files moved back to 0150 beside 0150_dpop_proofs: TestMigrationSetIsNumberedOneToN FAIL at store_test.go:378 'migrations 0150_doc_compaction_owed.up.sql and 0150_dpop_proofs.up.sql share version 150'."
     },
     {
-      "criterion": "Architect check 3: a22f0f29, 7c35d610, the parked and history tests (and the new test) 300 times each under -race.",
-      "surface": "internal/dispatch/docs at e22b1dfa against Postgres 18.6",
-      "command": "GOMAXPROCS=2 GOMEMLIMIT=12GiB go test -race -p 1 -count=300 ./internal/dispatch/docs -run '^<test>$', one at a time",
-      "observed": "300 PASS, 0 FAIL, 0 DATA RACE for each of five; two package runs exited 1 only on storetest's cleanup drop (outsideFinding). Sampled peak 3.27 GiB of 19.",
-      "headSha": "e22b1dfa74632c1efaee2314f2c676fe93f6068b",
-      "negativeControl": "The new test fails with the option out (check 1)."
-    },
-    {
-      "criterion": "Architect check 4: round 15's real-binary checks once.",
-      "surface": "envoy-dispatch e22b1dfa, main 3c78856b and rc eb992560 (ygo a23bc871), real processes on Postgres 18.6, browser-style peers and a reconnecting typing client on the document websocket, HTTP API",
-      "command": "bash scenM.sh (head, rc); SHAPE=clock|client bash scenN.sh; MODE=sigterm bash scenK.sh (and NO_RESEND=1); bash scenD.sh; bash scenU4.sh; bash scenC2.sh (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-16-tar-gz)",
-      "observed": "#357: watcher parks the relayed 'xy', ends 'ok / Zxy / Seed paragraph.', equal to the cold read. #356: 503 for clock 2^53 and client 2^55, logged once. #343: 1,500/1,500 in order through two SIGTERMs. Unfoldable log: rows left as stored, 0.18 CPU-s in 200 s. Upgrade through 0150, rolling update with main killed folded 121 s after a read, 12 writers during a sweep exact. go build and go vet clean.",
-      "headSha": "e22b1dfa74632c1efaee2314f2c676fe93f6068b",
-      "negativeControl": "rc: watcher parks 0 and ends 'ok / Z / ...', cold read differs. Resend off: 539 of 1,500 stored, 961 missing."
+      "criterion": "Architect check 4: the round-16 compaction test and the format/refusal/peer tests once under race.",
+      "surface": "internal/dispatch/docs at a50f4960 on a superuser Postgres 18.6",
+      "command": "CGO_ENABLED=1 GOMAXPROCS=2 GOMEMLIMIT=12GiB go test -race -p 1 -count=1 -timeout 40m ./internal/dispatch/docs -run '<seven tests>'",
+      "observed": "exit 0, 'ok', 7 PASS (TestACompactionStoresTheRoomsFormattedStateAsTheRoomHoldsIt, TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown, TestARoomLoadsItsStoredHistoryAsItWasStored, TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce, TestAStoredLogThatDoesNotFoldIsRefusedNamingItsReasonOnce, TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt, TestTheStoredRowsOfARoomFoldToItsDocumentWhenAPeerUpdateParks), 0 DATA RACE, no 'requires cgo'. go build and go vet clean.",
+      "headSha": "a50f4960c8a2a66995fa55d81c1c9d850049f187",
+      "negativeControl": "Round 16: the compaction test fails with WithFormatCleanup(false) out of newCappedDocumentCopy."
     }
   ],
-  "ci": "Read on GitHub at e22b1dfa, run 41240771836 (created 20:50:27Z) at 21:47 UTC: still queued. changes and pr-title success; typecheck and ten others skipped by the change filter; lint, test, dispatch, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, envoy-go, envoy-go-race, envoy-go-race-api, envoy-go-race-docs, envoy-infra-go, envoy-session-stall, envoy-smoke, listener-server-change, ci-filters, pi-legion, docs / build and worker-image / build queued; ci-ok not posted. All of those unread."
+  "ci": "Read on GitHub at a50f4960 at 04:44 UTC: run 41273569149 (created 04:33:42Z) queued; only changes (queued) and pr-title (cancelled, queued) posted. Every lane, ci-ok included, unread."
 }
