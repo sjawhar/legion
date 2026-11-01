@@ -41,7 +41,7 @@ Which machines, files or people, the numbers, then "A happens to X, or B to Y?" 
 
 ## Issue status is yours to move
 
-Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. An issue with the `legion` label, or under one: never write its status with `dispatch` or route it, and claim it only as a role of its tree. An outside claim can take the tree out. A status write is set back or stands. Exception: nothing claims it, and `envoy_role_get` finds no holder for `legion-<project>-controller`.
+Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. An issue with the `legion` label, or under one: never write its status with `dispatch` or route it, and claim it only as a role of its tree. An outside claim can take the tree out. A status write is set back or stands. Exception: `Claimed by: nobody`, and no holder for `legion-<project>-controller` (`envoy_role_get`).
 
 A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`, which shows no event Dispatch marks quiet.
 
