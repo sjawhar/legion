@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-682",
+  "previousHandoff": "",
+  "plan": "dispatch://INFRA-682/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase worker's whole contract — the workspace binding, the handoff, the push and handoff_complete — and its references pr-body.md (what a proof is, the Fast-follow line, the simplify pass), default-branch-check.md (before each push), conflicts-and-rewrites.md (pull request #2612 also edits packages/dispatch/e2e/playwright.config.ts) and tools.md (the pod's own PostgreSQL for DISPATCH_TEST_DATABASE_URL, never the sessions database)",
+      "dispatch: every dispatch command this phase runs — the plan.md artifact, the page and data files A9 uploads, and the ask to the assignee for the grant",
+      "dispatch-first: search before filing or asking; a finding outside this issue goes to the controller, never to a new issue",
+      "ce-simplify-code: the simplify pass over the new renderer, the frame budget and the grants handlers before the implementer completes",
+      "plain-words: skills/dispatch-view/SKILL.md, the error lines a reader sees ('not granted to this page', 'the page moved away from its address', 'this view has no caption'), the two route descriptions and the pull request body",
+      "asd-ste100: the same prose, since a tool description and a skill are parsed without a person to resolve an ambiguity"
+    ],
+    "test": [
+      "legion-worker: the tester's phase, its handoff and its proof entries, with pr-body.md for what a proof must carry and tools.md for running the Go api and docs suites alone with budgets in an issue pod",
+      "dispatch: reading the issue and the handoffs, and reporting on the issue",
+      "dispatch-first: search before reporting anything the record may already hold"
+    ],
+    "review": [
+      "legion-worker: the reviewer's phase, with merge-gate.md (the order of the gate and what READY refuses), review-threads.md (replying to and resolving threads, judging a bot's finding) and pr-body.md (the evidence rules the body must meet)",
+      "thermonuclear-deep-review: this change adds a sandboxed execution surface, a CSP header set, a human-only write and a new event, so the security and correctness audit is the one that matters most",
+      "thermonuclear-code-quality: the splice in MarkdownBody, the module-level frame budget and the new web feature directory are exactly the structure-and-growth surface this audit covers",
+      "plain-words: the reviewer fixes a prose-only finding itself, so it needs the rule it is judging the new skill and the route descriptions against"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "R6's 16 MiB cap and the 'not UTF-8 text' line have no source of truth in the reads the Design names: GET /api/v1/issues/{key}/summary and the project document summary carry {id, slug, name, kind, latest_version, primary} and no size or content type (api/issue_summary.go:30-48), so the block cannot refuse over-16-MiB data before it has already fetched it.",
+        "answer": "Departure D1 and work item W2: the latest version's `size` joins both summary shapes, their two route descriptions and the two contract types. A HEAD per file per update was weighed and rejected: it costs one request per file per cycle against the spec's 'one summary read and one read of the new version's bytes'. A browser row asserts two 9 MiB files show the over-16-MiB line with no byte read of either."
+      },
+      {
+        "finding": "'The change makes the repaint keep a view block's frame container in place while its page stays the same' states no identity rule, and a view block can sit at any depth (callout's content rule is block+), while a body directive need not carry {#id}.",
+        "answer": "Decision D4: the slot is paired by (page, ordinal among view slots at that level) in a depth-recursive splice, never by block id, which is only what the author wrote (block-schema.ts:122, default null) and can repeat. Three browser rows: a paragraph inserted above keeps the marker, two blocks naming one page keep the right marker each after a swap, and a view block inside a callout keeps its frame."
+      },
+      {
+        "finding": "The decision 'The caption is required…' says the caption is the block's text in the block graph and in search. Measured false: the indexed excerpt is the whole directive source (api/block_references_test.go:213-225), mentions are cut by regexp from the markdown (text/refs.go:26), and the spec's own example block already made a backlink from dispatch://SANDBOX-2/artifact/kernel-loop-json.",
+        "answer": "Departure D2: accept the existing behaviour, as a picture reference does today; suppressing it would change text.ExtractAt for every directive attribute. One acceptance line (A1.6) asserts the mentions edge from the block to its page file and each data file. Reported to the architect; the spec is not edited."
+      },
+      {
+        "finding": "The new migration cannot take a number, and envoy-go is already red on main, so this pull request cannot merge on a green run without a repair.",
+        "answer": "Departure D3 and work item W0: the one-line migrationid.closings repair to {0161_delivery_run_warnings.up.sql, 161}, skipped when main already carries it. Renaming 0158-0161 is unsafe because schema_migrations is keyed by version (store/store.go:184,234,243). The grants migration takes a 14-digit UTC stamp with a census beside it, and artifact_grants joins e2e/seed.ts's truncation list."
+      },
+      {
+        "finding": "R9 puts the grants panel on an issue or project page file and not on an agent conversation file, but ArtifactBlobView receives only Artifact, whose kind is doc|image|file, so the panel appears to have no way to tell a page file.",
+        "answer": "Resolved without new contract: the plan review showed the artifact read the panel's own view performs already carries each version's mime and size (model/model.go:824-833, contracts/src/dispatch-api.ts:808-809; ArtifactBlobView already reads selected.size). The panel keys off that mime and the name suffix. D1 therefore adds size only. The browser rows cover a text/html file whose name has no suffix."
+      },
+      {
+        "finding": "A5's byte budget is not a check a machine can run as written: nothing in the suite sums response bytes, and the two-builds harness swaps only the web dist and runs one Go binary from the working tree, so it cannot host a base-commit comparison.",
+        "answer": "Work items W10 and W11: a chromium-only view-budget.e2e.ts sums request.sizes().responseBodySize for every .js response across one navigation and asserts sum <= BASE_JS_BYTES + 10,000 against a constant committed with the command that re-measures it; the base number comes from a separate run in a worktree of d8c67afc. The plan says the constant is a measurement a person refreshes, not a value the suite derives."
+      },
+      {
+        "finding": "'At most four frames run at once on a Dispatch page' has no owner: one body can be drawn twice, and the Inbox draws every ask question and reply through MarkdownBody.",
+        "answer": "Decision D5 and work item W5: one module, web/src/features/view/frame-budget.ts, keyed by the slot element, with two shared IntersectionObservers at rootMargin 100%/300%, the running set, the ranking pass and resetViewFrames(); the precedent is hooks/useDwell.ts:41-82. Per-component state is listed. A browser row scrolls a document of eight blocks and asserts the running set changes and never exceeds four."
+      },
+      {
+        "finding": "The data message's held memory and structured-clone cost is outside R6's 10,000-byte bound, against the phone work the Problem cites.",
+        "answer": "Decision D10: the text is held per block and never re-read; the worst case is four frames times 16 MiB, and the largest live set measured is LINUX-1227's four files at about 10 MB. A2's ten-upload row extends to a block of four files: at most two reads, and only of the file that changed."
+      },
+      {
+        "finding": "Schema 2 to 3 against hand-written fixtures and against a cached old bundle: web/src/__tests__/document-runtime.ts:58 and proof-document.tsx:31 hold hand-written schemas, and a reader on a pre-deploy bundle fetches version 3 and draws a view block through the generic typedBlockView with no frame and no error line.",
+        "answer": "Work item W1 lists both fixture edits. Decision D9 accepts the old-bundle drawing and records what it looks like; a page open across the deploy goes read-only with 'Reload to edit' (docs/websocket.go:343-345), the current behaviour of every schema change."
+      },
+      {
+        "finding": "A missing @vN is both 'a file that is not found' and 'a read that fails, with its status', so two implementers write two different lines; and the grants route's refusals do not say what a @vN the file does not have does.",
+        "answer": "Decision D6: a version the file does not have reads as 'not found' in the block, and POST …/grants with such a version is refused 400 VERSION_NOT_FOUND, because such a grant could never cover anything. Both are rows of the Go grants test."
+      },
+      {
+        "finding": "Nothing says whether a data entry equal to page, or a grant of a page file to itself, is allowed.",
+        "answer": "Decision D7: both allowed, no code and no new refusal; a Go row asserts a grant whose data file is the page file is stored and listed."
+      },
+      {
+        "finding": "The spec names the live editor and the version view and not the diff view or a pending suggestion.",
+        "answer": "Decision D8: a view block in a diff shows as its directive source, as every typed block does (ProofDocument.tsx:1036-1037), so a tester does not chase it; the implementer checks whether a view node inside a pending suggestion reaches the node view and starts a frame, and that is allowed, since a suggestion changes neither the page nor the grant."
+      },
+      {
+        "finding": "A9 cannot show that the merge is the running build, because nothing deploys Dispatch automatically yet.",
+        "answer": "No question is owed: A9 already says 'When the running build does not carry the merge, the record says which build runs', and the deployment instructions say to run the check anyway, record which build runs, and not ask a person to deploy for one change. The acceptance table gives the exact command, says the check passes only on a last line reading 'all N assertions passed' and never on its exit status, and says an empty grants list satisfies the --route clause."
+      },
+      {
+        "finding": "The three Dispatch skills hold exactly 1,999 words against a guard of fewer than 2,000, so no pointer sentence to dispatch-view can be added to any of them.",
+        "answer": "Decision D11: no pointer sentence; an agent finds the skill through its frontmatter name and description. Work item W8 lists the guard rules the new skill and minimal-page.html must meet: every staged file under 50 KiB, the body under 500 lines, relative links inside the partition."
+      },
+      {
+        "finding": "Two spec claims rest on measurements nobody re-ran: the 952,369-byte entry chunk at d8c67afc, and 'a caption is the block's text in the block graph and in search'.",
+        "answer": "The second is departure D2. The first is produced as evidence by the A5 base run of work item W11, not assumed; A5's base number is its own measurement and does not depend on the entry-chunk figure."
+      },
+      {
+        "finding": "Sec-Fetch-Dest reaches only potentially trustworthy URLs, so the page route answers attachment on the suite's plain-HTTP origin dispatch-e2e.test and on any plain-HTTP deployment that is not localhost.",
+        "answer": "Decision D12: the harness serves http://127.0.0.1:<port>, which is trustworthy, so all four engines send the header; the new spec stems stay out of plainHttpSpecs, and the skill says a view draws only over a trustworthy origin."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Live updates: 'The block resolves a reference to a file's id and newest version with summary reads that exist now and carry no list of versions', with no server change implied, while R6 caps a block's data at 16 MiB and says 'data that together pass 16 MiB, in which case Dispatch sends no data'.",
+      "plan": "Both summary reads gain the latest version's `size`: one term in each of two SQL selects, one field on each of issueSummaryDocument and documentSummary, the two route descriptions and the two contract types.",
+      "evidence": "api/issue_summary.go:30-48 carries {id, slug, name, kind, latest_version, primary} and summaryLatestVersion (:53) selects only max(number); the route descriptions at api/routes_table.go:248 and :332 say the same. Without a size the block can only learn a file's size by fetching it, so the 16 MiB refusal would arrive after the browser had already paid the transfer the limit exists to bound. The alternative, a HEAD per data file per update, costs one request per file per cycle against the spec's own 'one summary read and one read of the new version's bytes'.",
+      "outcome": { "kind": "unchanged" }
+    },
+    {
+      "spec": "Decision 'The caption is required, and attributes are checked when shown': 'A caption is the block's text in the block graph and in search.'",
+      "plan": "The whole directive source stays the indexed text, so a view block makes a mentions edge to its page file and to each data file and shows its attributes in a search snippet. One acceptance line (A1.6) asserts those edges.",
+      "evidence": "api/block_references_test.go:213-225 pins a callout's indexed excerpt as the whole directive source, fences and attributes included; text/refs.go:26 ExtractAt cuts mentions from the markdown by regexp, backticks included; search snippets come from ts_headline over the stored text (api/search.go:141-146). Measured live: `dispatch read --ref dispatch://SANDBOX-2/artifact/kernel-loop-json` already lists `mentions block dispatch://INFRA-682/spec#b-325c4776…` from the spec's own example block. Suppressing it would change ExtractAt for every directive attribute, picture references included.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A1.6 (R1, R2): a view block in a comment makes a mentions edge to its page file and to each data file, and each data file's referenced-by panel lists the block."
+        ]
+      }
+    },
+    {
+      "spec": "Design: 'This change needs nothing that is not on main.' The spec plans no change outside the view block, the page route, the grants and the skill.",
+      "plan": "This pull request also carries a one-line repair of packages/envoy/migrationid/migrationid.go's closings entry, to {file: 0161_delivery_run_warnings.up.sql, closedAt: 161}, skipped when main already carries it.",
+      "evidence": "At the base commit d8c67afc, `go test ./internal/dispatch/store -run TestMigrationSetTakesNumbersThenTimestamps -count=1` fails, naming 0158 through 0161 against a series recorded as closed at 157; main is red for it (CI runs 41324966579 and 41328954603 list envoy-go and envoy-go-race as failures) and no open pull request fixes it. This tree adds a migration to that same set and cannot merge on a green run without the repair. Renaming the four files is unsafe: schema_migrations is keyed by version (store/store.go:184,234,243), so renamed files would be applied a second time against every deployed database.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "One file outside the view feature, packages/envoy/migrationid/migrationid.go, is repaired in this pull request so the change can merge on a green machine run."
+      }
+    }
+  ]
+}
