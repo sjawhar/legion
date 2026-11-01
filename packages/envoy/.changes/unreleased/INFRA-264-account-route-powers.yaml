@@ -1,0 +1,16 @@
+kind: Changed
+body: |-
+    The broker: a caller's name in `BROKER_API_ACCOUNTS` now decides which of its named-caller
+    routes that ServiceAccount reaches, where being listed once reached all ten. Each such route
+    declares the power it needs — reading one of the broker's access tokens back
+    (`POST /v1/oauth/introspect`), or relaying a person's decisions (the nine approval, denial,
+    revocation and listing routes Dispatch's server calls) — and the broker's own table says which
+    powers each caller name carries: `dispatch` both, `listener` introspection alone. A listed
+    caller reaching a route its name does not carry is `403 ACCOUNT_LACKS_POWER`, naming the caller
+    and the route; an account the list does not name at all stays `403 ACCOUNT_NOT_LISTED`. A
+    `BROKER_API_ACCOUNTS` entry whose caller name the broker does not know refuses the boot, naming
+    that name and the names it knows, so a typo cannot quietly produce a caller that reaches
+    nothing.
+time: 2026-10-29T00:00:00.000000000Z
+custom:
+    Issue: INFRA-264
