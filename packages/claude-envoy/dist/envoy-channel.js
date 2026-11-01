@@ -44674,8 +44674,7 @@ function neutralConfig(env) {
 }
 var HARNESS_DIRECTORY_VARIABLE = {
   omp: "PI_CODING_AGENT_DIR",
-  claude: "CLAUDE_CONFIG_DIR",
-  opencode: "OPENCODE_CONFIG_DIR"
+  claude: "CLAUDE_CONFIG_DIR"
 };
 var PLUGIN_HARNESSES = Object.keys(HARNESS_DIRECTORY_VARIABLE);
 function namedDirectory(harness, env) {
@@ -46644,7 +46643,7 @@ function messageMetadataShape(schema) {
   return {
     in_reply_to: schema.string().optional(),
     supersedes: schema.string().optional(),
-    urgency: schema.enum(URGENCY_VALUES).describe("low | med | high | blocking").optional(),
+    urgency: schema.enum(URGENCY_VALUES).describe("low | med | high | blocking: how soon the recipient should act, shown on its card. It does not deliver the message sooner or ahead of others.").optional(),
     expects_reply: schema.enum(EXPECTS_REPLY_VALUES).describe("none | optional | required").optional(),
     expires_at: schema.number({ int: true }).optional()
   };
@@ -46713,7 +46712,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. Any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. Any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish
   },
@@ -49862,7 +49861,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 var name = "@sjawhar/claude-envoy";
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 43
+  daemonApiVersion: 44
 };
 
 // src/channel-forwarder.ts
@@ -50935,7 +50934,7 @@ function stepPhaseStall(state, input) {
     case "settle": {
       if (state.state !== "open")
         return { state };
-      if (WAITING_REPLY.test(input.lastAssistantText)) {
+      if (input.backgroundWork === true || WAITING_REPLY.test(input.lastAssistantText)) {
         return { state: { state: "waiting", count: state.count } };
       }
       return { state, reminder: reminderText(input.lastAssistantText) };
@@ -51194,7 +51193,11 @@ function createPhaseReminder(deps) {
       if (stall.state !== "closed")
         lastMessage = text.slice(0, LAST_MESSAGE_LIMIT);
       const before = stall.count;
-      const reminder = advance({ kind: "settle", lastAssistantText: text });
+      const reminder = advance({
+        kind: "settle",
+        lastAssistantText: text,
+        backgroundWork: options?.backgroundWork
+      });
       if (stall.state === "waiting") {
         continued = false;
         armReminder(reminderText(text), deps.limits.waitingMs);
@@ -51282,10 +51285,24 @@ var hookArguments = object({
   event: _enum2(HOOK_EVENTS),
   lastAssistantMessage: string2().optional(),
   stopHookActive: string2().optional(),
+  backgroundTasks: string2().optional(),
   toolName: string2().optional(),
   agentId: string2().optional(),
   prompt: string2().optional()
 });
+var backgroundTaskList = array(object({ status: string2() }).loose());
+function backgroundWorkRunning(tasks) {
+  if (tasks === undefined || tasks.trim() === "")
+    return false;
+  let parsed;
+  try {
+    parsed = JSON.parse(tasks);
+  } catch {
+    return false;
+  }
+  const list = backgroundTaskList.safeParse(parsed);
+  return list.success && list.data.some((task) => task.status === "running");
+}
 function phaseHookToolDefinition() {
   return {
     name: PHASE_HOOK_TOOL_NAME,
@@ -51459,12 +51476,16 @@ function createPhaseHookEndpoint(deps) {
         return {};
       switch (event.event) {
         case "Stop": {
+          const backgroundWork = backgroundWorkRunning(event.backgroundTasks);
           deps.log.debug("legion: a Claude Code phase worker's turn is settling", {
             issue: claim.issue,
             role: claim.role,
-            stopHookActive: event.stopHookActive ?? ""
+            stopHookActive: event.stopHookActive ?? "",
+            backgroundWork
           });
-          const reminded = await reminder.settle(event.lastAssistantMessage ?? "");
+          const reminded = await reminder.settle(event.lastAssistantMessage ?? "", {
+            backgroundWork
+          });
           return reminded === undefined ? {} : { decision: "block", reason: reminded };
         }
         case "StopFailure": {
@@ -51550,7 +51571,7 @@ var PHASE_OP_SENTENCES = {
   requestBackwardMove: "request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; " + "the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. "
 };
 function legionToolDescription(host) {
-  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " + "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " + "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " + "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " + "yet), `ready: true` for the merger's READY. A handoff is a committed " + "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " + "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " + "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " + "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " + "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " + "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff), the implementer's " + "completion of implementing with no open pull request on `legion/<issue>` and none recorded merged (HANDOFF_NO_PULL_REQUEST: open it; one " + "naming a closed pull request is the architect's to decide) and, for READY, each " + "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " + "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
+  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " + "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " + "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " + "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " + "yet), `ready: true` for the merger's READY. A handoff is a committed " + "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " + "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " + "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " + "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " + "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " + "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff), " + "HANDOFF_STALE_ASSIGNMENT (the issue left your phase and came back while your turn ran, so this completion is of the assignment before the one " + "the phase hands you now: end the turn without completing; the task of the assignment it hands you now is work of its own, so do that work and " + "complete it with a handoff of its own, never this commit or verdict again), the implementer's " + "completion of implementing with no open pull request on `legion/<issue>` and none recorded merged (HANDOFF_NO_PULL_REQUEST: open it; one " + "naming a closed pull request is the architect's to decide) and, for READY, each " + "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " + "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
 }
 async function mintClaimGrant(daemon, claim) {
   const { grantId } = await daemon.grant({
@@ -51821,7 +51842,7 @@ async function sessionTitle(environment, directory, sources = {}) {
 
 // src/envoy-channel-server.ts
 var CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel";
-var CHANNEL_INSTRUCTIONS = "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.";
+var CHANNEL_INSTRUCTIONS = "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is how soon the sender asks you to act (it does not change when or in what order deliveries arrive), from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.";
 var CHANNEL_INBOX_LIMIT = 50;
 var EMPTY_RECEIPT = new Uint8Array;
 var ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/;

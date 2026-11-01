@@ -95,7 +95,6 @@ jobs:
       docs: ${{ github.event_name != 'push' && steps.filter.outputs.docs || 'false' }}
       worker_image: ${{ steps.filter.outputs.worker_image }}
       contracts: ${{ steps.filter.outputs.contracts }}
-      envoy_plugin: ${{ steps.filter.outputs.envoy_plugin }}
       envoy_client: ${{ steps.filter.outputs.envoy_client }}
       pi_shared: ${{ steps.filter.outputs.pi_shared }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
@@ -164,7 +163,6 @@ jobs:
               - 'packages/pi-envoy/package.json'
               - 'packages/pi-legion/package.json'
               - 'packages/pi-shared/package.json'
-              - 'packages/envoy-plugin/package.json'
               - 'packages/claude-envoy/package.json'
               - 'packages/proof-editor/package.json'
               - 'packages/dispatch/package.json'
@@ -579,21 +577,6 @@ jobs:
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-text-references.json'
               - 'packages/envoy/internal/contracts/generated.go'
               - 'packages/daemon/internal/dispatch/generated.go'
-            envoy_plugin:
-              - '.github/workflows/ci.yaml'
-              - *bun_install
-              - *biome
-              - 'packages/envoy-plugin/**'
-              # Its tsconfig paths and bundle reach contracts' and envoy-client's sources, and its
-              # build and prepack (scripts/prepack.sh:14) build envoy-client's dispatch CLI.
-              - 'packages/contracts/src/**'
-              - 'packages/envoy-client/src/**'
-              - 'packages/envoy-client/bin/dispatch.ts'
-              - 'packages/envoy-client/scripts/build-dispatch-cli.sh'
-              # Its prepack writes dist/THIRD_PARTY_NOTICES (prepack.sh:15) and copies skills/
-              # (:17), which src/server.ts:25-28 also reads.
-              - 'scripts/third-party-notices.ts'
-              - 'skills/**'
             envoy_client:
               - '.github/workflows/ci.yaml'
               - *bun_install
@@ -1007,7 +990,6 @@ jobs:
               - 'packages/pi-envoy/package.json'
               - 'packages/pi-legion/package.json'
               - 'packages/pi-shared/package.json'
-              - 'packages/envoy-plugin/package.json'
               - 'packages/claude-envoy/package.json'
               - 'docs/site/package.json'
               - 'packages/contracts/**'
@@ -1101,7 +1083,6 @@ jobs:
               - 'package.json'
               - 'bun.lock'
               - 'patches/**'
-              - 'packages/envoy-plugin/package.json'
               - 'packages/claude-envoy/**'
               - 'packages/proof-editor/package.json'
               - 'packages/dispatch/package.json'
@@ -1764,38 +1745,6 @@ jobs:
       - name: Build contracts
         run: bun run build
         working-directory: packages/contracts
-
-  envoy-plugin:
-    needs: changes
-    if: needs.changes.outputs.envoy_plugin == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
-      - name: Lint envoy plugin
-        run: bun run lint
-        working-directory: packages/envoy-plugin
-      - name: Typecheck envoy plugin
-        run: bun run typecheck
-        working-directory: packages/envoy-plugin
-      - name: Test envoy plugin
-        run: bun run test
-        working-directory: packages/envoy-plugin
-      # prepack.sh writes dist/THIRD_PARTY_NOTICES, failing the pack on a bundled package whose
-      # license cannot be determined; the listing shows the tarball ships it.
-      - name: Pack envoy plugin
-        run: |
-          bun pm pack --destination ../../out/pr-artifacts
-          tar tzf ../../out/pr-artifacts/*.tgz | grep -x package/dist/THIRD_PARTY_NOTICES
-        working-directory: packages/envoy-plugin
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: opencode-legion-envoy-plugin-pr
-          path: out/pr-artifacts/*.tgz
 
   envoy-client:
     needs: changes
@@ -3150,7 +3099,6 @@ jobs:
       - test
       - docs
       - contracts
-      - envoy-plugin
       - envoy-client
       - pi-shared
       - pi-envoy
@@ -3191,7 +3139,6 @@ jobs:
               "test": "test",
               "docs": "docs",
               "contracts": "contracts",
-              "envoy-plugin": "envoy_plugin",
               "envoy-client": "envoy_client",
               "pi-shared": "pi_shared",
               "pi-envoy": "pi_envoy",
