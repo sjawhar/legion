@@ -17,7 +17,7 @@
 # describes the run.
 set -Eeuo pipefail
 
-checkpoints="prerequisites rig boot controller-up trees-wait-on-a-person trees-parked approval-readmits question-stays-parked foreign-park-stays controller-down walk-on-start verdict cleanup-is-complete"
+checkpoints="prerequisites rig boot controller-up trees-wait-on-a-person trees-parked answer-readmits question-stays-parked foreign-park-stays approval-queues controller-down walk-on-start verdict cleanup-is-complete"
 
 usage() {
   cat <<EOF
@@ -253,10 +253,12 @@ projects:
   $project: {}
 gates:
   design: root-issues
-admission_cap: 2
+# Three: trees 1 and 4 run again from answer-readmits and approval-queues, and tree 3 still needs a
+# slot in walk-on-start.
+admission_cap: 3
 review_round_cap: 3
 # A day: the one tick is the boot's, before any tree exists, so no tick walk races the notice of
-# approval-readmits, and the walk runs only at a controller's start (walk-on-start).
+# answer-readmits, and the walk runs only at a controller's start (walk-on-start).
 controller_wake_interval_seconds: 86400
 instructions: $work/instructions.md
 $(<"$work/github-apps.yaml")
@@ -452,6 +454,20 @@ has_mark() {
 }
 gate_artifact_of() { daemon_state | jq -er --arg k "$1" '.issues[$k].designGate.artifactId'; }
 approve() { dispatch_human POST "artifacts/$1/reviews" '{"state":"approved"}' >/dev/null; }
+# open_question ISSUE opens a question on ISSUE as the stand-in session, the shape of a question
+# the tree's architect asks, and prints its id.
+open_question() {
+  dispatch_agent POST "issues/$1/asks" \
+    '{"question":"Parked decision proof question: should the smoke file stay?","kind":"question","options":[{"label":"Keep"},{"label":"Drop"}]}' |
+    jq -er '.id // .ask.id'
+}
+# answer_question ASK answers ASK as the proof human, selecting its first option.
+answer_question() { dispatch_human POST "asks/$1/answer" '{"selected":["Keep"],"expected_edited_at":null}' >/dev/null; }
+# relayed_logged ISSUE DECISION: the workflow relayed a person's DECISION on ISSUE, a parked tree's
+# issue, to the controller (workflow's relayParkedDecision).
+relayed_logged() {
+  log_has ".msg == \"workflow: a person's decision on a parked tree goes to the controller\" and .issue == \"$1\" and .decision == \"$2\""
+}
 # file_quiet FILE SECONDS: FILE has not grown for SECONDS.
 file_quiet() { (($(date +%s) - $(stat -c %Y "$1") >= $2)); }
 since() { printf '%ss' "$((SECONDS - $1))"; }
@@ -650,10 +666,10 @@ done_with controller-up
 
 begin trees-wait-on-a-person
 waited=$SECONDS
-tree1=$(new_issue "Parked decision proof tree 1: approved after its park ($work)")
+tree1=$(new_issue "Parked decision proof tree 1: answered after its park ($work)")
 tree2=$(new_issue "Parked decision proof tree 2: questioned after its park ($work)")
-tree4=$(new_issue "Parked decision proof tree 4: parked by the person, then approved ($work)")
-tree5=$(new_issue "Parked decision proof tree 5: parked by another session, then approved ($work)")
+tree4=$(new_issue "Parked decision proof tree 4: parked by the person, answered, then approved ($work)")
+tree5=$(new_issue "Parked decision proof tree 5: parked by another session, then answered ($work)")
 for tree in $tree1 $tree2 $tree4 $tree5; do
   set_status "$tree" todo
 done
@@ -688,30 +704,36 @@ done
 [ "$(parked_by "$tree5")" = "session:$dispatch_agent_session" ] || fail "$tree5's park is by $(parked_by "$tree5"), want session:$dispatch_agent_session"
 has_mark "$tree1" || fail "$tree1 carries no hold mark from $session1"
 ! has_mark "$tree2" || fail "$tree2, the operator's park, carries a hold mark"
-note "$tree1 (the daemon's session, with the hold mark) and $tree2 (the daemon's session, no mark), $tree4 (by $proof_human_user) and $tree5 (by session $dispatch_agent_session) are phase done with no slot, each architect suspended ($(since "$waited"))"
+# Each parked tree gets a question the person answers later, opened by the stand-in session as the
+# tree's architect would have asked it: an answer to a question is the decision the daemon relays
+# (workflow's dispatchAskClosed), where a person's approval of a parked labelled root's spec is
+# queued by the daemon itself (#2619, approval-queues).
+declare -A question_of
+for tree in $tree1 $tree2 $tree4 $tree5; do
+  question_of[$tree]=$(open_question "$tree")
+done
+note "$tree1 (the daemon's session, with the hold mark) and $tree2 (the daemon's session, no mark), $tree4 (by $proof_human_user) and $tree5 (by session $dispatch_agent_session) are phase done with no slot, each architect suspended, each with an open question ($(since "$waited"))"
 pass
 done_with trees-parked
 
-begin approval-readmits
+begin answer-readmits
 waited=$SECONDS
-approval_seq=$(last_seq "$tree1")
-approve "$artifact1"
-until_true 300 "the outbox to finish $tree1's approval undelivered" undelivered_logged "$tree1"
-until_true 300 "the outbox to relay $tree1's approval to the controller" sent_logged "$tree1"
-note "the daemon log holds the undelivered line and the relay for $tree1 ($(since "$waited"))"
+answer_seq=$(last_seq "$tree1")
+answer_question "${question_of[$tree1]}"
+until_true 300 "the workflow to relay the person's answer on $tree1" relayed_logged "$tree1" ask-answered
+note "the daemon log holds the relay of the answer on $tree1 ($(since "$waited"))"
 needle1=$(notice_needle parked-decision "$tree1")
 until_true 600 "session 1 to receive '$needle1'" controller_delivered "$session1_file" "$needle1"
 until_true 900 "session 1 to set $tree1 todo after the notice" set_status_after "$session1_file" "$tree1" "$needle1"
-until_true 300 "Dispatch to show $tree1 todo by legion-daemon:$project" todo_by_daemon_after "$tree1" "$approval_seq"
+until_true 300 "Dispatch to show $tree1 todo by legion-daemon:$project" todo_by_daemon_after "$tree1" "$answer_seq"
 note "session 1 got the notice and set $tree1 todo; Dispatch records the write as the daemon's ($(since "$waited"))"
 until_true 600 "$tree1 to be admitted" active "$tree1"
-until_true 1800 "$tree1 to reach planning" issue_phase "$tree1" planning
-spec1="dispatch://$tree1/spec (design-approved by user:$proof_human_user)"
-until_true 300 "$tree1's architect to be told '$spec1'" architect_turn_holds "$tree1" "$spec1"
+answer1="dispatch://$tree1/ask/${question_of[$tree1]} (ask-answered by user:$proof_human_user)"
+until_true 300 "$tree1's architect to be told '$answer1'" architect_turn_holds "$tree1" "$answer1"
 until_true 600 "session 1 to post its Parked decision read: comment on $tree1" read_comment "$tree1" "$session1"
-note "$tree1 is admitted and planning; its architect's task names $spec1; session 1 commented on it ($(since "$waited"))"
+note "$tree1 is admitted; its architect's task names $answer1; session 1 commented on it ($(since "$waited"))"
 pass
-done_with approval-readmits
+done_with answer-readmits
 
 begin question-stays-parked
 waited=$SECONDS
@@ -765,12 +787,12 @@ for tree in $tree2 $tree4 $tree5; do
   before_of[$tree]=$(read_comment "$tree" "$session1" || true)
   told_of[$tree]=$(controller_deliveries "$session1_file" "$(notice_needle parked-decision "$tree")")
 done
-approve "$artifact2"
-approve "$artifact4"
-approve "$artifact5"
+for tree in $tree2 $tree4 $tree5; do
+  answer_question "${question_of[$tree]}"
+done
 later=0
 for tree in $tree2 $tree4 $tree5; do
-  until_true 300 "the outbox to relay $tree's approval to the controller" sent_logged "$tree"
+  until_true 300 "the workflow to relay the person's answer on $tree" relayed_logged "$tree" ask-answered
   needle=$(notice_needle parked-decision "$tree")
   until_true 600 "session 1 to receive another '$needle'" delivered_more "$session1_file" "$needle" "${told_of[$tree]}"
   until_true 900 "session 1 to post a new Parked decision read: comment on $tree" read_comment_after "$tree" "$session1" "${before_of[$tree]}"
@@ -793,12 +815,35 @@ for tree in $tree2 $tree4 $tree5; do
   dispatch_status_is "$tree" backlog >/dev/null || fail "$tree is $(dispatch_get "issues/$tree" | jq -r .status), want backlog"
   parked "$tree" || fail "$tree is no longer phase done with no slot and its architect suspended: $(daemon_state | jq -c --arg k "$tree" '.issues[$k] | {phase, slot, architect: .architect.state}')"
   dispatch_events "$tree" | jq -e --argjson seq "${seq_of[$tree]}" '[.[] | select(.seq > $seq and .type == "issue.updated" and .payload.status == "todo")] == []' >/dev/null ||
-    fail "Dispatch shows a status todo event on $tree after the approval"
+    fail "Dispatch shows a status todo event on $tree after the answer"
   read_of[$tree]=$(any_read_comment "$tree")
 done
-note "600 s on, $tree2, $tree4 and $tree5 are backlog, phase done, with no todo event after their approvals ($(since "$waited"))"
+note "600 s on, $tree2, $tree4 and $tree5 are backlog, phase done, with no todo event after their answers ($(since "$waited"))"
 pass
 done_with foreign-park-stays
+
+begin approval-queues
+waited=$SECONDS
+# A person's approval of a parked labelled root's spec is that person's handover (#2619): the
+# daemon queues the root itself, whoever parked it, and sends the controller no parked-decision.
+# Tree 4, which the person parked and whose answer the controller left parked, is that root.
+approval_seq=$(last_seq "$tree4")
+told4=$(controller_deliveries "$session1_file" "$(notice_needle parked-decision "$tree4")")
+approve "$artifact4"
+until_true 300 "the daemon to queue the person's approval of $tree4 as their handover" log_has \
+  ".msg == \"admission: queued a person's handover\" and .issue == \"$tree4\" and .source == \"approval\""
+until_true 300 "Dispatch to show $tree4 todo by legion-daemon:$project" todo_by_daemon_after "$tree4" "$approval_seq"
+until_true 600 "$tree4 to be admitted" active "$tree4"
+until_true 1800 "$tree4 to reach planning" issue_phase "$tree4" planning
+! sent_logged "$tree4" || fail "the outbox relayed a parked decision on $tree4 to the controller"
+! relayed_logged "$tree4" design-approved || fail "the workflow relayed $tree4's approval to the controller"
+! log_has ".issue == \"$tree4\" and (.msg | startswith(\"outbox notice finished undelivered: its architect\")) and (.kind | IN(\"design-approved\", \"design-changes-requested\", \"carried-gate-opened\"))" ||
+  fail "the outbox finished a spec notice of $tree4 undelivered: the root's own gate took the approval"
+[ "$(controller_deliveries "$session1_file" "$(notice_needle parked-decision "$tree4")")" = "$told4" ] ||
+  fail "session 1 received another parked-decision on $tree4 after the approval"
+note "the daemon queued $tree4 as the person's handover (source approval), it is admitted and planning, and no parked-decision was sent for the approval ($(since "$waited"))"
+pass
+done_with approval-queues
 
 begin controller-down
 waited=$SECONDS
@@ -809,18 +854,18 @@ done_with controller-down
 
 begin walk-on-start
 waited=$SECONDS
-tree3=$(new_issue "Parked decision proof tree 3: approved while no controller runs ($work)")
+tree3=$(new_issue "Parked decision proof tree 3: answered while no controller runs ($work)")
 set_status "$tree3" todo
 until_true 1800 "$tree3 to wait on its design gate" waits_on_gate "$tree3"
-artifact3=$(gate_artifact_of "$tree3")
 park "$tree3"
 controller_mark "$tree3" "the proof's hold of tree 3"
 until_true 300 "$tree3 to be parked" parked "$tree3"
-approve "$artifact3"
-until_true 300 "the outbox to relay $tree3's approval while no controller runs" sent_logged "$tree3"
+question3=$(open_question "$tree3")
+answer_question "$question3"
+until_true 300 "the workflow to relay the person's answer on $tree3 while no controller runs" relayed_logged "$tree3" ask-answered
 controller_runs && fail "a controller runs before ctl2 starts"
 start_seq=$(last_seq "$tree3")
-note "$tree3 was approved after its park; the daemon relayed it while no controller ran ($(since "$waited"))"
+note "$tree3 was answered after its park; the daemon relayed the answer while no controller ran ($(since "$waited"))"
 start_controller ctl2
 until_true 300 "controllerLocator to name a session other than $session1" sh -c \
   "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg s '$session1' '.controllerLocator.sessionId != null and .controllerLocator.sessionId != \$s' >/dev/null"
@@ -833,19 +878,20 @@ needle3=$(notice_needle parked-decision "$tree3")
 until_true 900 "session 2 to set $tree3 todo" set_status_after "$session2_file" "$tree3" ""
 ! controller_delivered "$session2_file" "$needle3" || fail "session 2 holds a '$needle3' delivery: the walk, not a notice, must re-admit $tree3"
 until_true 300 "Dispatch to show $tree3 todo by legion-daemon:$project" todo_by_daemon_after "$tree3" "$start_seq"
-until_true 1800 "$tree3 to reach planning" issue_phase "$tree3" planning
-spec3="dispatch://$tree3/spec (design-approved by user:$proof_human_user)"
-until_true 300 "$tree3's architect to be told '$spec3'" architect_turn_holds "$tree3" "$spec3"
+until_true 600 "$tree3 to be admitted" active "$tree3"
+answer3="dispatch://$tree3/ask/$question3 (ask-answered by user:$proof_human_user)"
+until_true 300 "$tree3's architect to be told '$answer3'" architect_turn_holds "$tree3" "$answer3"
 until_true 600 "session 2 to post its Parked decision read: comment on $tree3" read_comment "$tree3" "$session2"
-note "the walk re-admitted $tree3 with no notice; its architect's task names $spec3; session 2 commented on it ($(since "$waited"))"
+note "the walk re-admitted $tree3 with no notice; its architect's task names $answer3; session 2 commented on it ($(since "$waited"))"
 until_true 1800 "session 2's file to stay unchanged for 120 s" file_quiet "$session2_file" 120
-for tree in $tree2 $tree4 $tree5; do
+# Tree 4 runs since approval-queues; trees 2 and 5 stay parked.
+for tree in $tree2 $tree5; do
   dispatch_status_is "$tree" backlog >/dev/null || fail "$tree is $(dispatch_get "issues/$tree" | jq -r .status), want backlog"
   ! set_status_after "$session2_file" "$tree" "" || fail "session 2 set $tree, which is no hold of Legion's own, to todo"
-  [ "$(any_read_comment "$tree")" = "${read_of[$tree]}" ] || fail "$tree has a Parked decision read: comment newer than foreign-park-stays's: the walk judged its approval again"
+  [ "$(any_read_comment "$tree")" = "${read_of[$tree]}" ] || fail "$tree has a Parked decision read: comment newer than foreign-park-stays's: the walk judged its answer again"
 done
 ! controller_delivered "$session2_file" "$needle3" || fail "session 2 holds a '$needle3' delivery"
-note "$tree2, $tree4 and $tree5 are still backlog with no newer Parked decision read: comment ($(since "$waited"))"
+note "$tree2 and $tree5 are still backlog with no newer Parked decision read: comment ($(since "$waited"))"
 pass
 done_with walk-on-start
 
@@ -854,9 +900,15 @@ verdict=$(jq -R -s -c -f "$root/scripts/e2e/lib/parked-decision-verdict.jq" "$ev
 printf '%s\n' "$verdict" >"$evidence/parked-decision-verdict.json"
 jq -e '.unmatched == [] and .unrelayed == []' <<<"$verdict" >/dev/null ||
   fail "the verdict has unmatched or unrelayed rows: $(jq -c '{unmatched, unrelayed}' <<<"$verdict")"
-jq -e --arg a "$tree1" --arg b "$tree2" --arg c "$tree3" --arg d "$tree4" --arg e "$tree5" '[.sent[].issue] as $s | all($a, $b, $c, $d, $e; . as $k | $s | index($k) != null)' <<<"$verdict" >/dev/null ||
-  fail "the verdict's sent rows do not name $tree1, $tree2, $tree3, $tree4 and $tree5: $(jq -c .sent <<<"$verdict")"
-note "undelivered $(jq '.undelivered | length' <<<"$verdict"), sent $(jq -c '[.sent[].issue]' <<<"$verdict"), unrelayed 0, unmatched 0"
+# Every decision the run made on a parked tree is a person's ask answer or reply, which the workflow
+# relays itself; the one spec approval, tree 4's, was queued as a handover, so no spec decision
+# finished undelivered for the outbox to relay.
+jq -e '.undelivered == [] and .sent == []' <<<"$verdict" >/dev/null ||
+  fail "the verdict holds a spec decision the outbox relayed: $(jq -c '{undelivered, sent}' <<<"$verdict")"
+for tree in $tree1 $tree2 $tree3 $tree4 $tree5; do
+  relayed_logged "$tree" ask-answered || fail "the daemon log holds no relay of a person's answer on $tree"
+done
+note "undelivered 0, sent 0, unrelayed 0, unmatched 0; the workflow relayed a person's answer on each of $tree1, $tree2, $tree3, $tree4 and $tree5"
 pass
 done_with verdict
 

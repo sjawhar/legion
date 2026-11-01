@@ -37,6 +37,12 @@ A session's reply on an ask of a parked tree is no decision. The daemon sends no
 logs `workflow: a session's reply on a parked tree is not relayed`; the reply stays on the Dispatch
 ask for the person who asked, and the walk below skips it.
 
+A person's approval of a parked root's own spec (its primary document), when its tree is not
+live, is no notice either: it is that person's handover, and the daemon sets the root `todo`
+itself, whoever parked it (`admission: queued a person's handover`, `source=approval`). The spec
+notices that remain are a request for changes, a carried approval, and an approval of a document
+that is not the root's primary one.
+
 ## Deciding
 
 1. **Where the tree stands.** Read `issues.<root>` with `read_state`.
