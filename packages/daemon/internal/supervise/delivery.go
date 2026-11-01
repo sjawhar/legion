@@ -360,8 +360,10 @@ func (m *Machine) confirm(ctx context.Context) error {
 // A daemon suspension ends the claim's phase, so a task queued for a phase is the finished phase's
 // and goes with it; the next resume is handed its new phase's task, never that one. An operator
 // suspension is different: the operator resumes this same claim, so its pending phase task waits
-// through that suspension and is sent after the operator's resume. A task of no phase is likewise
-// not the workflow's to end.
+// through that suspension and is sent after the operator's resume. A released claim's is the same
+// — the daemon released an idle pod, not the phase, and the role's next wake resumes this session
+// in that phase with the task it kept. SuspendSource.RetiresPhaseTask is the one statement of
+// which sources end the phase. A task of no phase is likewise not the workflow's to end.
 func (m *Machine) settle(ctx context.Context) error {
 	p := m.claim.Pending
 	if p == nil {
@@ -373,7 +375,7 @@ func (m *Machine) settle(ctx context.Context) error {
 		}
 	}
 	turnOver := !p.ConfirmedAt.IsZero() && m.claim.State != StateWorking && !m.resultPending()
-	suspended := m.claim.State == StateSuspended && p.Phase != "" && m.claim.SuspendedBy != SuspendedByOperator
+	suspended := m.claim.State == StateSuspended && p.Phase != "" && m.claim.SuspendedBy.RetiresPhaseTask()
 	if !turnOver && !suspended {
 		return nil
 	}

@@ -132,6 +132,32 @@ test("ready and exit post the claim wire's requests and accept only the empty 20
   await expect(talkative.ready(ready)).rejects.toBeInstanceOf(LegionDaemonContractError);
 });
 
+test("activity posts the claim wire's report and accepts only the empty 204", async () => {
+  const { fetch, requests } = daemon(() => new Response(null, { status: 204 }));
+  const client = createLegionDaemonClient("http://daemon.test", fetch);
+  const report = {
+    claimToken: "legion-legion-legion-208-implementer",
+    sessionId: "ses_implementer_208",
+    secret: "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+    activity: {
+      at: "2026-11-01T12:00:00.000Z",
+      backgroundWork: { running: true, kinds: ["async-job"] },
+      phase: { open: true, nextReminderAt: "2026-11-01T12:05:00.000Z" },
+    },
+  };
+
+  await expect(client.activity(report)).resolves.toBeUndefined();
+  expect(requests).toEqual([
+    { method: "POST", url: "http://daemon.test/legion/v1/claims/activity", body: report },
+  ]);
+
+  const talkative = createLegionDaemonClient(
+    "http://daemon.test",
+    daemon(() => Response.json({})).fetch
+  );
+  await expect(talkative.activity(report)).rejects.toBeInstanceOf(LegionDaemonContractError);
+});
+
 test("a ready carrying the capability report is the daemon's golden ReadyRequest, field for field", async () => {
   // ready.json is what the daemon's golden test wrote of a `claim.ReadyRequest` with a report, so
   // sending it as the client's input and recording the body it posts pins both sides to it.

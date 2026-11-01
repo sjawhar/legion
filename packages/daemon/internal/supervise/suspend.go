@@ -12,12 +12,14 @@ import (
 // that keeps the request durably asks again, and the claim answers nil once it is suspended.
 var ErrSuspendHeld = wait.New("the suspension is held for the agent's turn to end")
 
-// suspend stops the process and keeps the session. A suspension ends the claim's phase (the
-// workflow suspends a worker only when its issue closes or its run is over), so a task
+// suspend stops the process and keeps the session. The daemon's own suspension ends the claim's
+// phase (the workflow suspends a worker only when its issue closes or its run is over), so a task
 // queued for a phase and still pending unconfirmed (acknowledged and then refused, or lost to the
 // transport) is retired with it (settle): the next resume is started with its new phase's task,
 // never handed the finished one's. A task of no phase — an operator's own, an architect's — is
-// not the workflow's to end, and goes on that resume.
+// not the workflow's to end, and neither is the phase task of a claim whose idle pod was released:
+// that suspension ends no phase, and the wake that brings the pod back resumes the claim with the
+// task it kept (SuspendSource.RetiresPhaseTask).
 func suspend(m *Machine, ctx context.Context, ev Event) error {
 	request, err := suspendRequest(m, ev)
 	if err != nil {
@@ -153,17 +155,17 @@ func suspendAtTimeout(m *Machine, ctx context.Context, _ Event) error {
 
 // suspendRequest is the event a suspension's row is handed. The table routes only RequestSuspend
 // there (kindOf's onSuspend); another event is a wiring error, and so is a suspension that names
-// neither the operator nor the daemon (a root's exit suspends it through RequestExit, never this),
-// since the source is what decides whether the daemon may resume the claim. Either is refused
-// before anything is stopped, rather than a panic, a journal line with no reason, or a claim
-// suspended by nobody.
+// none of the operator, the daemon and the idle pod's release (a root's exit suspends it through
+// RequestExit, never this), since the source is what decides whether the daemon may resume the
+// claim and what becomes of the phase's task. Either is refused before anything is stopped, rather
+// than a panic, a journal line with no reason, or a claim suspended by nobody.
 func suspendRequest(m *Machine, ev Event) (RequestSuspend, error) {
 	request, ok := ev.(RequestSuspend)
 	if !ok {
 		return RequestSuspend{}, fmt.Errorf("suspend %s: the suspend action was handed %T, not a RequestSuspend", m.claim.Token, ev)
 	}
-	if request.By != SuspendedByOperator && request.By != SuspendedByDaemon {
-		return RequestSuspend{}, fmt.Errorf("suspend %s: the suspension names source %q, not operator or daemon", m.claim.Token, request.By)
+	if request.By != SuspendedByOperator && request.By != SuspendedByDaemon && request.By != SuspendedByReleased {
+		return RequestSuspend{}, fmt.Errorf("suspend %s: the suspension names source %q, not operator, daemon or released", m.claim.Token, request.By)
 	}
 	// An operator's held suspension wins everywhere — launching, registered, ready while its
 	// stop retries, and working — until it completes. A later daemon linger/leave request must

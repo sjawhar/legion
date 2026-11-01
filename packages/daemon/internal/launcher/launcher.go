@@ -12,11 +12,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +39,14 @@ import (
 // child. The Legion plugin tells the agent so in a message it saves to the session at its start,
 // ahead of the next turn (pi-legion, src/workspace-recreated.ts).
 const WorkspaceRecreatedVariable = "LEGION_WORKSPACE_RECREATED"
+
+// WorkspaceRestoredVariable is how the same launcher tells that generation whether the pod's one
+// workspace-bundle restore put the released workspace's unpushed work back: "true" or "false",
+// set on every generation beside WorkspaceRecreatedVariable, so no value from the container's
+// environment reaches the child. A workspace recreated by a release and restored holds the work
+// its session remembers, where one recreated by anything else holds only what was pushed, and
+// the two are different notices (pi-shared, src/workspace-recreated.ts).
+const WorkspaceRestoredVariable = "LEGION_WORKSPACE_RESTORED"
 
 // Config is the launcher's configuration. The controller's pod names one role: Token, read from
 // its role-private projected Secret before Run is called, Role, and PrivateDir, that container's
@@ -136,10 +146,14 @@ func Run(ctx context.Context, cfg Config) error {
 // newManagers is one manager per role the launcher serves, each with its own token, private
 // directory, launcher id and, in an issue pod's container, its own prefix in the container's log.
 func newManagers(cfg Config) ([]*manager, error) {
+	// One restore per pod: the daemon sends the released workspace's bundle to whichever role's
+	// connection it reaches, and the first role to start applies it for the pod, with every other
+	// role's start waiting on that one restore.
+	restore := &bundleRestore{results: map[string]shimwire.LauncherBundleResult{}}
 	if cfg.RolesDir == "" {
 		return []*manager{{
 			cfg: cfg, role: cfg.Role, token: cfg.Token, private: cfg.PrivateDir, launcherID: randomID(),
-			stdout: cfg.Stdout, stderr: cfg.Stderr, requests: map[string]request{},
+			stdout: cfg.Stdout, stderr: cfg.Stderr, requests: map[string]request{}, restore: restore,
 		}}, nil
 	}
 	log := &roleLog{stdout: cfg.Stdout, stderr: cfg.Stderr}
@@ -160,7 +174,7 @@ func newManagers(cfg Config) ([]*manager, error) {
 		managers = append(managers, &manager{
 			cfg: cfg, role: role, token: strings.TrimSpace(string(token)), namespaced: true,
 			private: filepath.Join(cfg.RolesDir, role, RolePrivateDir), launcherID: randomID(),
-			log: log, stderr: own, requests: map[string]request{},
+			log: log, stderr: own, requests: map[string]request{}, restore: restore,
 		})
 	}
 	return managers, nil
@@ -244,6 +258,8 @@ func (m *manager) serve(ctx context.Context, address string) error {
 			answer = m.start(ctx, command)
 		case shimwire.LauncherStop:
 			answer = m.stop(command)
+		case shimwire.LauncherBundle:
+			answer = m.restore.receive(command)
 		default:
 			return fmt.Errorf("command: got %T", frame)
 		}
@@ -396,6 +412,10 @@ type manager struct {
 	child      *child
 	lastExit   *shimwire.LauncherExit
 	requests   map[string]request
+	// restore is the pod's one workspace-bundle restore, which every role manager of the
+	// container shares: the bundle a released pod's work was saved as arrives on one role's
+	// connection and is applied once, before the first role of the pod starts.
+	restore *bundleRestore
 }
 
 // state reports the actual child to the current daemon connection, if one is up. A state change
@@ -485,7 +505,18 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 	if err := keeper.open(ctx, sessions); err != nil {
 		return abandon(err.Error())
 	}
-	env = mergeEnv(env, []string{WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated)})
+	// The pod's one workspace-bundle restore, if a release saved one: after writeFiles, which
+	// clears the role's private directory, and before any role of the pod runs, so no role works
+	// a workspace that is half restored. Every other role's start waits here for this one. A
+	// restore that fails still starts the role, with a notice of what was lost in the log.
+	restored, notice := m.restore.apply(ctx, env)
+	if notice != "" {
+		m.logf("launcher: %s", notice)
+	}
+	env = mergeEnv(env, []string{
+		WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated),
+		WorkspaceRestoredVariable + "=" + strconv.FormatBool(restored),
+	})
 	process, err := m.command(command, env)
 	if err != nil {
 		return abandon(err.Error())
@@ -707,6 +738,294 @@ func (m *manager) writeFiles(command shimwire.LauncherStart) (string, error) {
 		}
 	}
 	return dir, nil
+}
+
+// restoreBudget bounds the pod's one restore: an unbundle of a pack of unpushed commits, one jj
+// import, a bookmark per saved bookmark and one jj edit. A restore that cannot finish in it is
+// one the roles start without, with a notice of what was lost, rather than one the pod waits
+// longer for.
+const restoreBudget = 5 * time.Minute
+
+// restoreRefPrefix is where the restore's temporary branches live. A bundle that only unbundles
+// leaves every saved head out of jj's view — jj's visible heads live in .jj/repo, which died with
+// the released pod — so each saved head is given a branch under refs/heads, which `jj git import`
+// makes a bookmark and a visible head, and the branches are dropped again through jj, which keeps
+// the heads visible where deleting the git refs under jj would abandon the commits with them.
+const restoreRefPrefix = "legion-restore-"
+
+// bundleRestore is the one workspace-bundle restore of a pod, shared by every role manager of its
+// container. The daemon sends the bundle in launcher_bundle slices before it starts any role;
+// this holds them in memory — never in a role's private directory, which each start clears — and
+// the first role's start applies the whole, digest-checked body once, before any role of the pod
+// runs. A pod the daemon sends no bundle to restores nothing and waits for nothing.
+type bundleRestore struct {
+	mu sync.Mutex
+	// sequence is the id of the slice sequence being assembled, with the count and digest its
+	// slices agree on, and slices what has arrived of it.
+	sequence string
+	count    int
+	digest   string
+	slices   [][]byte
+	// results answers a repeated slice as a repeated launcher_start id is answered: the same
+	// result for the same payload, a refusal for a different one under an id already used.
+	results map[string]shimwire.LauncherBundleResult
+	// body is the whole bundle, held until a start applies it; applied is the restore having run,
+	// and notice what it restored or could not.
+	body    []byte
+	applied bool
+	// restored is whether that run put the saved work back, which the generation is told so that
+	// the agent's own notice says what its workspace holds.
+	restored bool
+	notice   string
+}
+
+// receive takes one slice of the bundle. The sequence is rebuilt in memory and nothing is written
+// anywhere until its digest matches the one every slice declares, so a body that did not arrive
+// as it was sent reaches no workspace. The last slice of a whole sequence is answered Held: the
+// launcher holds the bundle and will restore it before the pod's first role starts, which is the
+// confirmation the daemon deletes its saved copy on.
+func (r *bundleRestore) receive(frame shimwire.LauncherBundle) shimwire.LauncherBundleResult {
+	if err := frame.Validate(); err != nil {
+		return shimwire.LauncherBundleResult{ID: frame.ID, Index: frame.Index, Error: err.Error()}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := frame.ID + "/" + strconv.Itoa(frame.Index)
+	if prior, ok := r.results[key]; ok {
+		if prior.OK && !bytes.Equal(r.sliceAt(frame.ID, frame.Index), frame.Payload) {
+			return shimwire.LauncherBundleResult{ID: frame.ID, Index: frame.Index,
+				Error: "launcher_bundle reused an id with a different payload"}
+		}
+		return prior
+	}
+	if frame.ID != r.sequence {
+		r.sequence, r.count, r.digest = frame.ID, frame.Count, frame.SHA256
+		r.slices = make([][]byte, frame.Count)
+		clear(r.results)
+	}
+	if frame.Count != r.count || frame.SHA256 != r.digest {
+		return shimwire.LauncherBundleResult{ID: frame.ID, Index: frame.Index,
+			Error: fmt.Sprintf("launcher_bundle %d of %d does not match its sequence's %d slices of %s", frame.Index, frame.Count, r.count, r.digest)}
+	}
+	r.slices[frame.Index] = frame.Payload
+	result := shimwire.LauncherBundleResult{ID: frame.ID, Index: frame.Index, OK: true}
+	if whole := r.whole(); whole != nil {
+		if got := shimwire.BundleDigest(whole); got != r.digest {
+			r.sequence, r.count, r.digest, r.slices = "", 0, "", nil
+			clear(r.results)
+			return shimwire.LauncherBundleResult{ID: frame.ID, Index: frame.Index,
+				Error: fmt.Sprintf("launcher_bundle sequence rebuilt to %s, not the %s its slices declared", got, frame.SHA256)}
+		}
+		r.body, r.applied, r.notice = whole, false, ""
+		result.Held = true
+	}
+	r.results[key] = result
+	return result
+}
+
+// sliceAt is the payload already held for one slice of id, nil when that is not the sequence
+// being assembled.
+func (r *bundleRestore) sliceAt(id string, index int) []byte {
+	if id != r.sequence || index >= len(r.slices) {
+		return nil
+	}
+	return r.slices[index]
+}
+
+// whole joins the sequence once every slice has arrived, and nil while one has not.
+func (r *bundleRestore) whole() []byte {
+	size := 0
+	for _, slice := range r.slices {
+		if slice == nil {
+			return nil
+		}
+		size += len(slice)
+	}
+	body := make([]byte, 0, size)
+	for _, slice := range r.slices {
+		body = append(body, slice...)
+	}
+	return body
+}
+
+// apply restores the held bundle into the workspace env names, once per pod, and answers the
+// notice of what was restored or what was lost and why; "" when no bundle was sent, when one was
+// already restored with nothing to say, or when the generation works no workspace. A second role
+// starting while the restore runs waits here for it and is given the same notice.
+func (r *bundleRestore) apply(ctx context.Context, env []string) (bool, string) {
+	// A manager built without one — a test's, which serves no daemon that could send a bundle —
+	// restores nothing and waits for nothing.
+	if r == nil {
+		return false, ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.body == nil {
+		return false, ""
+	}
+	if r.applied {
+		return r.restored, r.notice
+	}
+	workspace := envValue(env, "LEGION_WORKSPACE")
+	if workspace == "" {
+		return false, ""
+	}
+	r.applied = true
+	bundle, err := shimwire.ParseWorkspaceBundle(r.body)
+	if err != nil {
+		r.notice = fmt.Sprintf("the released workspace's saved work could not be read (%v); this workspace holds only what was pushed", err)
+		return false, r.notice
+	}
+	r.restored, r.notice = restoreWorkspace(ctx, workspace, env, bundle)
+	return r.restored, r.notice
+}
+
+// restoreWorkspace puts one saved bundle back into workspace and answers the notice of what it
+// restored, or of what was lost and why. A restore that fails leaves the workspace as
+// provisioning made it — what the issue's branch holds — and the roles start on that.
+func restoreWorkspace(ctx context.Context, workspace string, env []string, b shimwire.WorkspaceBundle) (bool, string) {
+	lost := func(reason string) (bool, string) {
+		return false, fmt.Sprintf("the released workspace's saved work was not restored (%s); this workspace holds only what was pushed,"+
+			" and the work of %d head(s) and %d bookmark(s) saved at %s is in the daemon's database alone",
+			reason, len(b.Tips), len(b.Bookmarks), b.At.UTC().Format(time.RFC3339))
+	}
+	gitDir, err := workspaceGitDir(workspace)
+	if err != nil {
+		return lost(err.Error())
+	}
+	file, err := os.CreateTemp("", "legion-restore-*.bundle")
+	if err != nil {
+		return lost(fmt.Sprintf("make the bundle's file: %v", err))
+	}
+	path := file.Name()
+	defer os.Remove(path)
+	_, err = file.Write(b.Bundle)
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return lost(fmt.Sprintf("write the bundle: %v", err))
+	}
+	ctx, cancel := context.WithTimeout(ctx, restoreBudget)
+	defer cancel()
+	run := func(stdin []byte, args ...string) (string, error) {
+		return runRestoreCommand(ctx, workspace, env, stdin, args)
+	}
+	// The bundle's own prerequisites are the commits the new pod's workspace fetch was expected
+	// to hold; one that is gone — a branch force-pushed away since the release — is what git
+	// refuses here, and it is the whole of what the notice has to name.
+	if _, err := run(nil, "git", "--git-dir="+gitDir, "bundle", "unbundle", path); err != nil {
+		return lost(err.Error())
+	}
+	if _, err := run(restoreRefUpdates("create", b.Tips), "git", "--git-dir="+gitDir, "update-ref", "--stdin"); err != nil {
+		return lost(err.Error())
+	}
+	if _, err := run(nil, "jj", "git", "import", "-R", workspace); err != nil {
+		return lost(err.Error())
+	}
+	for _, name := range slices.Sorted(maps.Keys(b.Bookmarks)) {
+		if _, err := run(nil, "jj", "bookmark", "set", "-R", workspace, "--ignore-working-copy", "--allow-backwards", name, "-r", b.Bookmarks[name]); err != nil {
+			return lost(err.Error())
+		}
+	}
+	if _, err := run(nil, "jj", "edit", "-R", workspace, b.Head); err != nil {
+		return lost(err.Error())
+	}
+	// The temporary branches go through jj, which keeps each head visible; deleting the git refs
+	// under it would have jj abandon the commits they made visible, taking the restored work with
+	// them. Whatever jj did not export is deleted after, so none is left in the repository.
+	for index := range b.Tips {
+		if _, err := run(nil, "jj", "bookmark", "delete", "-R", workspace, "--ignore-working-copy", restoreRefPrefix+strconv.Itoa(index)); err != nil {
+			return lost(err.Error())
+		}
+	}
+	if _, err := run(restoreRefUpdates("delete", b.Tips), "git", "--git-dir="+gitDir, "update-ref", "--stdin"); err != nil {
+		return lost(err.Error())
+	}
+	return true, fmt.Sprintf("the released workspace's saved work is restored: %d head(s), %d bookmark(s) and the working copy on %s, saved at %s",
+		len(b.Tips), len(b.Bookmarks), b.Head, b.At.UTC().Format(time.RFC3339))
+}
+
+// restoreRefUpdates is the `git update-ref --stdin` input that creates or deletes one temporary
+// branch per saved head, named by the head's place in the bundle.
+func restoreRefUpdates(verb string, tips []string) []byte {
+	var out strings.Builder
+	for index, tip := range tips {
+		out.WriteString(verb + " refs/heads/" + restoreRefPrefix + strconv.Itoa(index))
+		if verb == "create" {
+			out.WriteString(" " + tip)
+		}
+		out.WriteString("\n")
+	}
+	return []byte(out.String())
+}
+
+// runRestoreCommand runs one jj or git command of the restore in the workspace, under the
+// generation's own environment. Every one names the directory it runs in: jj searches upward from
+// there for the closest .jj and reads that repository's configuration before it applies -R, so a
+// command left standing wherever the launcher stands would read a repository nobody named
+// (docs/testing.md). A failure is returned with the command's own report.
+func runRestoreCommand(ctx context.Context, dir string, env []string, stdin []byte, args []string) (string, error) {
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Dir = dir
+	cmd.Env = env
+	if len(stdin) > 0 {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		report := strings.TrimSpace(stderr.String())
+		if report == "" {
+			report = err.Error()
+		}
+		return "", fmt.Errorf("%s: %s", strings.Join(args, " "), oneLine(report))
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// oneLine is report as a notice carries it: its lines joined with "; ", so a notice is one line
+// of the container's log however many lines git wrote.
+func oneLine(report string) string {
+	var kept []string
+	for line := range strings.SplitSeq(report, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "; ")
+}
+
+// workspaceGitDir is the git directory behind a jj workspace, read from jj's own files rather
+// than from a git that would search upward from wherever it was started: <workspace>/.jj/repo
+// names the repository (a directory in the repository's own workspace, a file holding its path in
+// every other), and <repo>/store/git_target names the git directory relative to <repo>/store.
+func workspaceGitDir(workspace string) (string, error) {
+	repo := filepath.Join(workspace, ".jj", "repo")
+	info, err := os.Stat(repo)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %v", repo, err)
+	}
+	if !info.IsDir() {
+		named, err := os.ReadFile(repo)
+		if err != nil {
+			return "", fmt.Errorf("read %s: %v", repo, err)
+		}
+		repo = absoluteUnder(filepath.Join(workspace, ".jj"), strings.TrimSpace(string(named)))
+	}
+	target, err := os.ReadFile(filepath.Join(repo, "store", "git_target"))
+	if err != nil {
+		return "", fmt.Errorf("read the workspace's git directory: %v", err)
+	}
+	return absoluteUnder(filepath.Join(repo, "store"), strings.TrimSpace(string(target))), nil
+}
+
+// absoluteUnder resolves path as jj writes it: absolute as it stands, relative to base otherwise.
+func absoluteUnder(base, path string) string {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(filepath.Join(base, path))
 }
 
 // roleLog is the one container log an issue pod's roles share: every line a role's launcher or

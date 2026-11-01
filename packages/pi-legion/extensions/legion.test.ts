@@ -34,6 +34,7 @@ import {
   restorePhaseStallEntry,
 } from "@legion/pi-shared/phase-stall";
 import type {
+  AsyncJobSnapshot,
   CommandContext,
   PiApi,
   RegisteredTool,
@@ -656,6 +657,9 @@ async function claimPane(options: {
   readonly title?: { readonly name: string; readonly source: "auto" | "user" };
   readonly bindEnvoy?: boolean;
   readonly envoyEntry?: typeof envoyExtension;
+  /** What `ctx.getAsyncJobSnapshot()` answers; absent leaves the host without the member, as a
+   * build that predates it is. */
+  readonly asyncJobs?: () => AsyncJobSnapshot | null;
 }): Promise<ClaimPane> {
   resetEnvoyPluginInterfaceForTests();
   const tree = options.tree ?? "REPO-42";
@@ -763,6 +767,7 @@ async function claimPane(options: {
     setInterval: (callback) => {
       intervals.push(callback);
     },
+    ...(options.asyncJobs === undefined ? {} : { getAsyncJobSnapshot: options.asyncJobs }),
     // The reminder's own timer: the host's `setTimeout` cannot be cancelled, so the pane keeps
     // every one armed and a test fires the one it means to.
     setTimeout: (callback, delayMs) => {
@@ -1608,6 +1613,8 @@ describe("Legion OMP extension", () => {
       /** The daemon's whole answer to `GET /legion/v1/state`, for a daemon that does not answer
        * with a record at all. */
       readonly stateAnswer?: () => Response;
+      /** What `ctx.getAsyncJobSnapshot()` answers this pane. */
+      readonly asyncJobs?: () => AsyncJobSnapshot | null;
     }) => {
       // Nothing in these panes reaches the architect: the notice a run of reminders earns is the
       // real binary's case (extensions/legion-phase-stall-omp.test.ts), so the threshold is put
@@ -1657,6 +1664,7 @@ describe("Legion OMP extension", () => {
         sessionId: "ses_stall",
         workspace,
         branch: options.branch,
+        asyncJobs: options.asyncJobs,
         extraRoutes: (url) => {
           if (url.pathname === "/legion/v1/state") {
             return options.stateAnswer?.() ?? Response.json(state);
@@ -1668,6 +1676,9 @@ describe("Legion OMP extension", () => {
             return options.complete?.() ?? Response.json({});
           }
           if (url.pathname === "/legion/v1/phase/backward") return Response.json({});
+          if (url.pathname === "/legion/v1/claims/activity") {
+            return new Response(null, { status: 204 });
+          }
           return undefined;
         },
       });
@@ -1726,6 +1737,88 @@ describe("Legion OMP extension", () => {
         .map((entry) => entry.data);
     /** A branch holding one phase-stall record, as a resumed worker's own transcript does. */
     const branchAt = (data: unknown) => [{ type: "custom", customType: PHASE_STALL_ENTRY, data }];
+    /** The body of each `POST /legion/v1/claims/activity` the pane made, in order. */
+    const activityReports = (pane: ClaimPane) =>
+      pane.requests
+        .filter((request) => request.path === "/legion/v1/claims/activity")
+        .map((request) => request.body);
+    /** Runs every interval callback the pane armed, as the host does when the period is up. */
+    const ticks = async (pane: ClaimPane) => {
+      for (const tick of pane.intervals) await tick();
+    };
+
+    // INFRA-945: the daemon releases no claim whose last report is older than its last turn, so
+    // every settle reports, and between turns only a change of what the report says does.
+    test("every settle reports what this session is doing, and a tick reports only a change", async () => {
+      let jobs: AsyncJobSnapshot | null = {
+        running: [
+          { id: "bg_1", type: "bash", status: "running", label: "sleep 8", startTime: 1 },
+          { id: "t_1", type: "task", status: "running", label: "deep-worker", startTime: 2 },
+        ],
+        recent: [],
+        delivery: { queued: 0, delivering: false, pendingJobIds: [] },
+      };
+      const worker = await bootStalling({ asyncJobs: () => jobs });
+      await worker.arrives(assignment);
+
+      await worker.settles("Pushed.");
+
+      expect(activityReports(worker)).toEqual([
+        {
+          claimToken: worker.claimToken,
+          sessionId: "ses_stall",
+          secret: worker.registration.secret,
+          activity: {
+            at: expect.any(String),
+            backgroundWork: { running: true, kinds: ["async-job", "subagent"] },
+            // The continuation is the first reminder of the run, so no timer is armed for it.
+            phase: { open: true, nextReminderAt: null },
+          },
+        },
+      ]);
+
+      // Nothing has changed, so the ticks between turns send nothing.
+      await ticks(worker);
+      expect(activityReports(worker)).toHaveLength(1);
+
+      // The jobs ended: the next tick says so, and the one after it sends nothing again.
+      jobs = {
+        running: [],
+        recent: [],
+        delivery: { queued: 0, delivering: false, pendingJobIds: [] },
+      };
+      await ticks(worker);
+      await ticks(worker);
+      expect(activityReports(worker)).toHaveLength(2);
+      expect(activityReports(worker).at(-1)).toMatchObject({
+        activity: { backgroundWork: { running: false, kinds: [] } },
+      });
+
+      // The second settle arms the ordinary reminder, and reports the wake it armed.
+      await worker.settles("Still pushing.");
+      expect(activityReports(worker)).toHaveLength(3);
+      const wake = activityReports(worker).at(-1) as {
+        activity: { phase: { open: boolean; nextReminderAt: string | null } };
+      };
+      expect(wake.activity.phase.open).toBeTrue();
+      expect(Date.parse(String(wake.activity.phase.nextReminderAt))).toBeGreaterThanOrEqual(
+        Date.now() + DEFAULT_STALL_LIMITS.reminderMs - 1_000
+      );
+    });
+
+    // A session that holds no claim is no claim's pod: it has nothing to report and no secret to
+    // report with.
+    test("a session with no claim sends no activity report", async () => {
+      const pane = await claimPane({ role: "implementer" });
+      const context = pane.context;
+      const stop = pane.handlers.get("session_stop");
+      if (stop === undefined) throw new Error("the pane registered no session_stop");
+
+      await stop(settlingOn("Pushed."), context);
+
+      expect(pane.requests).toEqual([]);
+      expect(pane.intervals).toEqual([]);
+    });
 
     test("the first settle after the assignment is answered by the run's own continuation: run the legion tool's handoff_complete, or reply WAITING", async () => {
       const worker = await bootStalling({});

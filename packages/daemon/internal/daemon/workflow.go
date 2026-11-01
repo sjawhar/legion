@@ -89,6 +89,16 @@ type workflowRuntime struct {
 	controllerWake time.Duration
 	// controllerFirstWake replaces firstControllerTick in a test; zero is the production delay.
 	controllerFirstWake time.Duration
+	// idlePeriod is how long an issue pod must have had no turn in progress and no turn due
+	// before the daemon releases it (runtime.kubernetes.idle_release.idle_minutes); zero turns
+	// release off, as `idle_minutes: 0` and every runtime but Kubernetes do. idleStore is the
+	// daemon's store, which holds the idle view and the release's mark, and idleImages the
+	// runtime's reading of an issue pod's image; both nil when release is off. idleTick is the
+	// tick's period, zero being idleTickInterval; a test shortens it.
+	idlePeriod time.Duration
+	idleStore  *store.Store
+	idleImages issuePodImages
+	idleTick   time.Duration
 	// holdWarnAfter and holdWarnEvery bound the watchdog log a hold that never releases gets: zero
 	// means the production defaults. A test shortens both to bound how long the warning takes to
 	// observe.
@@ -599,6 +609,23 @@ func (w *workflowRuntime) attach(supervision *supervision) {
 		supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnTerminal(w.terminal)
+	w.attachIdleRelease(supervision)
+}
+
+// attachIdleRelease wires the idle tick, and leaves it off unless the deployment releases pods:
+// `runtime: kubernetes` with a non-zero idle_minutes, over a runtime that can say whether an
+// issue's pod runs the image the configuration names.
+func (w *workflowRuntime) attachIdleRelease(supervision *supervision) {
+	k := supervision.cfg.Runtime.Kubernetes
+	if supervision.cfg.Runtime.Name != "kubernetes" || k == nil || !k.IdleRelease.Releases() {
+		return
+	}
+	images, ok := supervision.supervisor.deps.Runtime.(issuePodImages)
+	if !ok {
+		w.log.Warn("idle release: the runtime reads no pod image, so no pod is released")
+		return
+	}
+	w.idlePeriod, w.idleStore, w.idleImages = k.IdleRelease.Idle(), supervision.supervisor.store, images
 }
 
 // replayTerminal applies the ready or failure fact of every stored claim in either state that no
@@ -789,6 +816,10 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 	})
 	group.Go(func() error {
 		w.tickController(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.tickIdle(running)
 		return nil
 	})
 	group.Go(func() error {

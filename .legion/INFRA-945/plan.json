@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-945",
+  "previousHandoff": "",
+  "plan": {
+    "document": "dispatch://INFRA-945/artifact/plan-md",
+    "base": "main@origin 0642a37abdaa, not the 3d3fb96d this workspace was created on; that brings in sjawhar/legion#2446 (INFRA-594, merged), which R3 item 4 builds on",
+    "workPackages": [
+      "W0 base and numbering: branch from main@origin; DaemonAPIVersion 47 or above with a renumber step for that number alone; daemon migrations take UTC timestamp names and no renumber step",
+      "W1 the session report: getAsyncJobSnapshot typed in pi-shared, a shared session-activity module, sent by pi-legion at session_stop and on change and by claude-envoy at the Stop hook, a claim-authenticated POST /legion/v1/claims/activity, and the claim activity columns",
+      "W2 the released suspension source: the constant, the migration widening the suspended_by check, settle keeping the phase and the pending delivery, booted excluding it, the stranded rule, and the contracts enum",
+      "W3 the idle view and the release: the idle_release config block, retiring the worker_idle_retire_seconds refusal, reading the running pod's image, the per-issue view, R1's seven conditions as one pure function, the issue_release outbox act, store.IssueRelease, and R4's fence",
+      "W4 the bundle saved: a shimwire frame pair, the shim's jj and git bundle sequence, the 40 MiB bound, and the workspace_bundles table",
+      "W5 the bundle restored: a chunked launcher frame pair with reassembly the launcher lacks today, one per-pod restore before any role starts, the notice, and the delete on confirmation",
+      "W6 wakes: daemon deliveries, the CI settlement, the listener's report on notifications.legion.wake with the daemon's fourth durable consumer, the stored backstop row, R5's timings and warning, and every other path taking a released claim over",
+      "W7 records and the pod-readable API: the release, resume and hold tables, a claim-authenticated route a pod can read with the credential it holds, and legion state",
+      "W8 guidance (R9): every shipped sentence that says a role stays live until its issue closes, the wake and backstop lists, the WAITING and background-work rules, and docs/kubernetes.md's Idle release section with its rollback",
+      "W9 tests: A1's bullets plus the image fixture and R4's two-half delivery, A2 with real jj and git, A3's plugin tests including a pinned-binary one, and A3's rig built from the parts named in the plan",
+      "W10 deploy and the production check: the roll sequenced before sign-off, the first look's reads and its named next wake kind, R8's Cloud Monitoring and record numbers, and A4's verdict"
+    ],
+    "acceptanceCriteria": "Eleven rows in the plan document's table, C1 to C11, each naming the surface and the exact command: go test over the daemon packages for A1, --check-config for the loader refusal, go test over shim and launcher with real jj for A2, bun test in both plugins plus a LEGION_TEST_OMP real-binary test for A3's plugin half, go test ./internal/daemon -run TestIdleReleaseAndWake for A3's rig, go test ./cmd/legion for legion state, go test ./internal/api for the records route, four checks for A5's main clause and two commands for its docs clause, the repository's own lint, vet and suite, and the production check's own reads for A4."
+  },
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the implementer's own phase mechanics — the workspace binding, the handoff file, the push rules including the skip-checks trailer for a handoff-only push, and handoff_complete; its references carry the pull-request body, the proof shape, the merge gate and the production check this issue ends with",
+      "legion-retro: the implementer runs retro after the architect's acceptance, and this change earns a learning (docs/solutions/) about releasing a pod while its sessions live",
+      "ce-simplify-code: the simplify pass skill://legion-worker/references/pr-body.md requires over settled code, which matters here because the change touches supervise, workflow, store and two plugins at once",
+      "plain-words: R9 rewrites docs/kubernetes.md and the published concepts page, which people read",
+      "asd-ste100: R9 also rewrites four role prompts and skills/legion-worker/SKILL.md, which agents parse with no human to resolve an ambiguity",
+      "dispatch: the implementer writes on Dispatch for a finding that needs a decision and for the production check's record"
+    ],
+    "test": [
+      "legion-worker: the tester's phase mechanics, its handoff and its proof entries, and the rule that a criterion no surface reaches is reported to the architect rather than skipped",
+      "dispatch: the tester opens an ask for a finding that needs a decision rather than filing an issue"
+    ],
+    "review": [
+      "legion-worker: the reviewer's own rules — skill://legion-worker/references/review-threads.md for the threads, references/merge-gate.md for the approval and READY, and the rule that it fixes a prose-only finding itself",
+      "plain-words: this change's R9 half is prose a person reads, and the reviewer fixes a wording finding in its own commit",
+      "ce-simplify-code: the reviewer judges whether the simplify pass the implementer ran is enough across the four daemon packages this change touches"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "R6's previous-contract serving has no caller identity: suspendedBy is served only on the operator routes, which no plugin calls, and the repository has never served two shapes.",
+        "answer": "Recorded as departure 1 and as decision Q1 in the plan. The plan builds no contract gate and replaces A1's bullet with a guard that no session-facing response carries suspendedBy. The architect decides whether the spec follows."
+      },
+      {
+        "finding": "A4's verdict rides one production-check look; a pending spends the look, check.go:376 ignores a repeated issue.deployed wake, and the next look may be the bound's 336 hours later.",
+        "answer": "Decision D8 and task T10.1: the daemon, listener and worker-image roll and R10's claim pass complete before sign-off, since the daemon merges a signed-off issue by itself. T10.2 makes the first look name which wake kind it expects next if it must still answer pending."
+      },
+      {
+        "finding": "A3's rig does not exist in any form and gates five acceptance bullets.",
+        "answer": "Task T9.4 names each part and the in-tree file it is copied from, plus the socket-path and package-deadline rules of docs/testing.md. Risk R-3 names the repository's sanctioned fallback for the rig's shape, never for dropping a bullet."
+      },
+      {
+        "finding": "R2's bundle is not a jj operation: jj has no bundle command, and a restore needs the jj view rebuilt, not just git bundle unbundle.",
+        "answer": "Task T4.2 gives the save's revset, bases, bookmark map and git bundle create invocation; T5.2 gives the restore sequence that rebuilds the view. Risk R-5 records the measurement behind it."
+      },
+      {
+        "finding": "Neither bundle lane carries 40 MiB today: the launcher has no chunk reassembly, and an oversize line kills the child.",
+        "answer": "Decision D6 and tasks T4.1 and T5.1: the shim's lane reuses rpc_chunk, which reassembles to 64 MiB, and the daemon-to-launcher direction gets its own chunked pair with a digest and the reassembly the launcher lacks."
+      },
+      {
+        "finding": "The listener-to-daemon report channel does not exist in either direction, and R7's gate needs a positive liveness signal.",
+        "answer": "Decision D4 puts the report on notifications.legion.wake, a leaf under a subject the stream already carries, read by a fourth durable consumer. Decision D5 makes R7's gate a listener_ready heartbeat with a staleness bound."
+      },
+      {
+        "finding": "R1's background-work condition cannot be read from Oh My Pi as worded, and a report taken at turn end would always read idle.",
+        "answer": "Decision D3 sends the report on change as well as at turn end and makes no report mean not releasable. Decision D9 and departure 2 cover a named bash service; criterion C5 measures which kinds the pinned host reports."
+      },
+      {
+        "finding": "A4's reader has no gcloud and no credential for R6's records.",
+        "answer": "Task T10.3 gives the Cloud Monitoring REST read over the pod's own workload identity, which answered HTTP 200 during planning. Task T7.2 puts the records on a claim-authenticated route, the credential a pod actually holds."
+      },
+      {
+        "finding": "The merge depends on #2588, which is open and changes-requested, and the tree's base predates #2446, which did merge.",
+        "answer": "Task T0.1 branches from main@origin, which carries #2446. Risk R-1 and question Q2 state #2588's facts at its current head and recommend deciding the fallback at accepting."
+      },
+      {
+        "finding": "The architect's note 1 condition, no release while an INFRA-484 update round is open, has no code to read on main.",
+        "answer": "Task T3.5 carries it as R1's seventh condition against #2538's Claim.UpdateRound and InPodRound(), landed behind the field's presence, and question Q3 asks the architect to confirm that reading."
+      },
+      {
+        "finding": "The bundle restore must happen once per pod, but the launcher is one manager per role and the restore point sits inside a function that wipes the role's directory.",
+        "answer": "Decision D7 and task T5.2: the restore runs in the launcher's shared layer between writeFiles and m.command, with every other manager's start waiting on it, and a failed restore still starts the roles."
+      },
+      {
+        "finding": "R1's image condition is not observable today: the daemon never reads a running pod's image.",
+        "answer": "Task T3.3 adds the read and names imageDrift as the shape to follow; task T9.1 adds the fake-Kubernetes fixture A1's old-image bullet needs."
+      },
+      {
+        "finding": "R4's cancel window needs one serialization point, or a wake queued at the boundary is lost.",
+        "answer": "Task T3.8 names the fence: one transaction reads the view and marks the release in progress, the stop of the first role process is the boundary, and T9.1 queues a delivery in each half."
+      },
+      {
+        "finding": "R5's clock starts in two different processes, and pod-ready and first-turn are recorded nowhere.",
+        "answer": "Task T6.3 carries the listener's own timestamp in epoch milliseconds, matching Envelope.KeptAt's shape; task T6.7 adds the pod-ready and first-turn observation points and the stuck warning."
+      },
+      {
+        "finding": "A5 names one invariant test, but its sibling and the config refusal text pin the old behaviour too.",
+        "answer": "Task T9.1 rewrites both TestAnOpenIssuesClaimsNeverSuspend and TestOpenIssueSuspensionInvariantKeepsTheExceptions; task T3.2 rewrites the worker_idle_retire_seconds refusal and its pin and revisits the two superseded solution headers."
+      },
+      {
+        "finding": "One external consumer, sjawhar/dotfiles' dispatch_check, classifies claim states, and R6 adds a state word.",
+        "answer": "A released claim keeps claim state suspended by R1's own words, so that consumer's mapping is untouched; the new word is a suspendedBy value, which it does not read. Task T8.4's rollback section carries the one-line note for an older reader."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": [
+    {
+      "spec": "R6: the daemon serves a session on the previous contract the previous shape (suspendedBy: daemon), so that no older plugin reads a value it does not know; and A1's bullet 'a session on the previous contract reads a released claim as suspendedBy: daemon'.",
+      "plan": "No previous-contract gate is built. A1's bullet is replaced by a guard that holds the same property by construction: a test asserting that no session-facing response carries suspendedBy at all.",
+      "evidence": "suspendedBy is served on one surface, api/operator.go:64-67 and :135, on the operator routes at api/server.go:296-304, authenticated by an operator bearer. packages/pi-shared/src/daemon-client.ts:405-447 holds no operator route, so no plugin calls it. The unauthenticated GET /legion/v1/state carries claim state, not suspendedBy, and a released claim's state stays suspended by R1's own words, so legion-api.ts:274-278's strict enum is untouched. Every past contract change in this repository is a lockstep bump refused at boot (daemon/bootgate.go:406-428) and per call with 409 (api/claims.go:364); no channel exists on which a caller declares its contract to the operator route.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A1's bullet 'a session on the previous contract reads a released claim as suspendedBy: daemon' becomes 'no session-facing response carries suspendedBy'."
+        ]
+      }
+    },
+    {
+      "spec": "R1 requires each live role's session to report that it runs no background work, enumerated as an Oh My Pi async job or background bash command, a subagent, or a Claude Code background task.",
+      "plan": "The report covers the kinds the host can report. A named bash service is covered by guidance instead (R9): it does not keep the pod, and work to keep goes on the branch. Criterion C5 measures on the pinned binary which kinds the host reports, and the plan records which it was.",
+      "evidence": "omp://tools/bash.md routes a name:-ed service through the launch broker (packages/coding-agent/src/launch/services.ts) with modes persist, session and detached, while the session's async-job manager, the only thing ctx.getAsyncJobSnapshot() can report, holds async: true and auto-backgrounded runs. A persisted service outlives the session by design, so 'the pod stays while it runs' is not the right rule for it. packages/pi-shared/src/pi-types.ts:470-538 types no job enumeration today, and pi-legion passes no backgroundWork at extensions/legion.ts:385-389.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "R1's enumerated background-work kinds exclude an Oh My Pi named bash service, which R9's guidance covers instead."
+        ]
+      }
+    }
+  ],
+  "openQuestionsForArchitect": [
+    "Q1: the plan's guard test for departure 1, or a contract-declaration channel built for a route no plugin calls. Recommendation: the guard test.",
+    "Q2: whether this tree carries INFRA-839's listener design if sjawhar/legion#2588 has not merged at accepting, and who reviews that half. Recommendation: decide at accepting; T6.3 is planned against #2588's head either way.",
+    "Q3: that R1's update-round condition lands behind #2538's Claim.UpdateRound field and arrives with whichever tree merges second."
+  ],
+  "decomposition": "Planned as one sequence. The seams that cut cleanly with no shared file: W1 (the session report), W4 plus W5 (the bundle), W6 items 3 and 4 (the listener wake report and the daemon's fourth consumer), and the rest, which owns supervise, workflow and store and must stay together. The architect's call."
+}

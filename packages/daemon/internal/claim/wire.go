@@ -77,6 +77,42 @@ type ExitRequest struct {
 	Reason     string `json:"reason"`
 }
 
+// ActivityRequest is a live role's session reporting what it is doing, after each of its turns
+// and whenever the report's content changes, so the idle rule can decide whether the session's
+// pod may be released (INFRA-945). It carries no generation: it decides nothing about the claim,
+// and a relaunch mints a secret of its own, so the secret the registration issued is the whole
+// fence. A claim with no report after its last turn is never released, which is what makes a host
+// that cannot report safe.
+type ActivityRequest struct {
+	ClaimToken Token           `json:"claimToken"`
+	SessionID  string          `json:"sessionId"`
+	Secret     string          `json:"secret"`
+	Activity   SessionActivity `json:"activity"`
+}
+
+// SessionActivity is one reading of what a session is doing: when it read it, the background work
+// of its own that was running, and its phase reminder's armed wake.
+type SessionActivity struct {
+	At             time.Time      `json:"at"`
+	BackgroundWork BackgroundWork `json:"backgroundWork"`
+	Phase          PhaseActivity  `json:"phase"`
+}
+
+// BackgroundWork is whether work of the session's own was running and what kinds the session
+// found (`async-job`, `subagent`, `claude-background-task`), sorted and de-duplicated by the
+// session, so the reason a hold records reads the same every time.
+type BackgroundWork struct {
+	Running bool     `json:"running"`
+	Kinds   []string `json:"kinds"`
+}
+
+// PhaseActivity is whether the session's phase is open and when the reminder armed for it is due;
+// NextReminderAt is null when no armed reminder is still live.
+type PhaseActivity struct {
+	Open           bool       `json:"open"`
+	NextReminderAt *time.Time `json:"nextReminderAt"`
+}
+
 // Refusal is one of the ways a claim route says no: the status it answers with and the sentence
 // it puts in the body. Both halves are a contract with the plugins, whose shared claim boot stops
 // the agent on any 4xx from the registration (`bootLegionClaim` in

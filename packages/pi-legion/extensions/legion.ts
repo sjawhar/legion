@@ -31,6 +31,13 @@ import {
 } from "@legion/pi-shared/phase-stall";
 import type { CommandContext, PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { legionRoleClaimBridge } from "@legion/pi-shared/role-claim-bridge";
+import {
+  asyncJobKinds,
+  type SessionActivityReport,
+  sameSessionActivity,
+  sessionActivity,
+  sessionActivityRequest,
+} from "@legion/pi-shared/session-activity";
 import { stallLimits } from "@legion/pi-shared/stall-limits";
 import { clearStartupTurn } from "@legion/pi-shared/startup-turn";
 import { subagentSessionCheck } from "@legion/pi-shared/subagent-session";
@@ -185,6 +192,61 @@ export default function legionExtension(pi: PiApi): void {
     log: logger,
   });
 
+  /**
+   * INFRA-945: what this pane is doing, which the daemon reads to decide whether its issue pod
+   * may be released. A report is sent at every settle, change or no change — the daemon releases
+   * no claim whose last report predates its last turn, so a quiet turn that sent nothing would
+   * hold the pod for ever — and between turns only when the report's content changes.
+   *
+   * Oh My Pi fires no event for background work, so what it is running is read rather than
+   * waited for: `SESSION_ACTIVITY_PERIOD_MS` apart, the host's own managed interval reads
+   * `ctx.getAsyncJobSnapshot()`, which is an in-memory look at this session's own job manager,
+   * and compares the report it builds with the last one sent. Nothing leaves the pane unless
+   * that content changed, so the cost between turns is one object comparison, and five seconds
+   * bounds how stale the daemon's view of a job that just started can be against a release rule
+   * measured in minutes.
+   */
+  const SESSION_ACTIVITY_PERIOD_MS = 5_000;
+  let lastActivity: SessionActivityReport | undefined;
+  const reportActivity = async (
+    context: SessionContext,
+    options: { readonly onlyWhenChanged: boolean }
+  ): Promise<void> => {
+    const claim = claimSession.capability(context.sessionManager.getSessionId());
+    if (claim === undefined) return;
+    // An architect arms no phase reminder, so its phase reads closed and its pod waits on no
+    // reminder of its own; what it reports is its background work.
+    const report = sessionActivity(
+      asyncJobKinds(context.getAsyncJobSnapshot?.() ?? null),
+      phaseWorkerSession(context) ? phaseReminder.phaseWake() : { open: false, nextReminderAt: null }
+    );
+    if (
+      options.onlyWhenChanged &&
+      lastActivity !== undefined &&
+      sameSessionActivity(lastActivity, report)
+    ) {
+      return;
+    }
+    const request = sessionActivityRequest({
+      project: process.env.LEGION_PROJECT,
+      claim,
+      report,
+    });
+    if (request === undefined) return;
+    lastActivity = report;
+    try {
+      await roleDaemon().activity(request);
+    } catch (error) {
+      // The daemon did not take it, so it is not what the daemon holds: the next reading sends
+      // again whether or not its content moved.
+      lastActivity = undefined;
+      logger.warn("legion: this session's activity report did not reach the daemon", {
+        issue: claim.issue,
+        error: messageFor(error),
+      });
+    }
+  };
+
   let daemonClient: LegionDaemonClient | undefined;
   const roleDaemon = (): LegionDaemonClient => {
     daemonClient ??= createLegionDaemonClient(
@@ -288,11 +350,20 @@ export default function legionExtension(pi: PiApi): void {
         });
       }
       await claimSession.bootstrap(context);
-      // The claim is registered, so this is now known to be a phase worker: a relaunch into an
-      // open phase gets its reminder from a timer, since nothing else would wake it. The guard
-      // drops that timer when any turn started meanwhile, which is exactly the case to drop —
-      // the daemon re-sending an interrupted task arrives as a prompt.
+      // The claim is registered. A phase worker relaunched into an open phase gets its reminder
+      // from a timer, since nothing else would wake it. The guard drops that timer when any turn
+      // started meanwhile, which is exactly the case to drop — the daemon re-sending an
+      // interrupted task arrives as a prompt.
       if (phaseWorkerSession(context)) phaseReminder.armResumeReminder();
+      // Between turns, the host's own managed interval is the only sight of this session's
+      // background work; it sends nothing unless what it reads has changed. Every claimed
+      // session reports, an architect's as much as a phase worker's: the daemon releases a pod
+      // only when each of its live roles has said it runs nothing.
+      context.setInterval(() => {
+        if (paneContext !== undefined) {
+          void reportActivity(paneContext, { onlyWhenChanged: true });
+        }
+      }, SESSION_ACTIVITY_PERIOD_MS);
     }
     registerLegionTool();
     await activateLegionTool();
@@ -383,8 +454,17 @@ export default function legionExtension(pi: PiApi): void {
   // continuation, one more turn of this same session; every one after it is a timer, so the run
   // settles and the daemon sees the turn end (src/phase-reminder.ts).
   pi.on("session_stop", async (event, context) => {
-    if (event.signal.aborted || !phaseWorkerSession(context)) return undefined;
+    if (event.signal.aborted) return undefined;
+    if (!phaseWorkerSession(context)) {
+      // An architect has no phase of its own to settle, and its pod is released on the same rule
+      // as a worker's, so its turn ends with a report of its own.
+      await reportActivity(context, { onlyWhenChanged: false });
+      return undefined;
+    }
     const reminder = await phaseReminder.settle(assistantText(event.last_assistant_message));
+    // After the settle, so the report carries the wake that settle armed: the daemon releases no
+    // claim whose last report is older than its last turn, so this one goes whatever it says.
+    await reportActivity(context, { onlyWhenChanged: false });
     return reminder === undefined ? undefined : { continue: true, additionalContext: reminder };
   });
 

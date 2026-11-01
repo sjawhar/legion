@@ -12,6 +12,7 @@ import {
   reminderText,
   stepPhaseStall,
 } from "./phase-stall";
+import type { SessionActivityPhase } from "./session-activity";
 import type { StallLimits } from "./stall-limits";
 
 /**
@@ -91,6 +92,13 @@ export interface PhaseReminder {
   ) => Promise<string | undefined>;
   /** `session_switch`, `session_branch`, `session_tree`. */
   readonly sessionChanged: () => void;
+  /** The phase half of the session's activity report (`src/session-activity.ts`): whether this
+   * session's phase is open, and when the reminder it armed last is due. This is the one
+   * statement of that moment — the delay each arming picks comes from the limits here, so
+   * nothing outside recomputes it. `nextReminderAt` is null when no armed timer is still live:
+   * none was armed, the phase has closed, or something has happened since that made it stale,
+   * which is the same generation guard the armed callback applies to itself. */
+  readonly phaseWake: () => SessionActivityPhase;
 }
 
 /** How long the record check waits for the daemon. `createLegionDaemonClient` puts no deadline on
@@ -158,6 +166,10 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
   let lastMessage = "";
   /** The entry last saved or restored, so only a change of the recorded value is saved. */
   let recorded = "";
+  /** The wake the last `armReminder` set: the moment its timer is due, and the generation it was
+   * armed at, so a stale one is reported as no wake at all. The host's timer cannot be cancelled,
+   * so this is dropped by the same guard the callback is. */
+  let armed: { readonly at: number; readonly generation: number } | undefined;
 
   const entryOf = (): PhaseStallEntry => ({
     state: stall.state,
@@ -338,6 +350,7 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
    */
   const armReminder = (reminder: string, delayMs: number): void => {
     const armedAt = generation;
+    armed = { at: Date.now() + delayMs, generation: armedAt };
     deps.armTimer(async () => {
       if (generation !== armedAt || stall.state === "closed" || turnRunning) return;
       const check = await recordCheck();
@@ -417,6 +430,13 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
     },
     sessionChanged: () => {
       generation += 1;
+    },
+    phaseWake: () => {
+      const open = stall.state !== "closed";
+      if (!open || armed === undefined || armed.generation !== generation) {
+        return { open, nextReminderAt: null };
+      }
+      return { open, nextReminderAt: new Date(armed.at).toISOString() };
     },
   };
 }

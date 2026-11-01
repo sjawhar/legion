@@ -1,4 +1,5 @@
 import {
+  type LegionActivityRequest,
   LegionChildRequest,
   LegionControllerGrantRequest,
   LegionControllerRegisterResponse,
@@ -61,6 +62,10 @@ export interface ExitInput {
   readonly reason: string;
 }
 
+/** `claim.ActivityRequest`: what a live role's session is doing, which the daemon writes onto its
+ * claim and the idle rule reads (`src/session-activity.ts` builds it). */
+export type ActivityInput = z.input<typeof LegionActivityRequest>;
+
 export interface LegionDaemonClient {
   /** The daemon's whole state. `signal` aborts the request, its answer's body included: a caller
    * that stops waiting for a daemon that does not answer (the phase reminder's bounded record
@@ -72,6 +77,9 @@ export interface LegionDaemonClient {
   readonly registerController: (input: RegisterInput) => Promise<LegionControllerRegistration>;
   readonly ready: (input: ReadyInput) => Promise<void>;
   readonly exit: (input: ExitInput) => Promise<void>;
+  /** The session's report of what it is doing, after each of its turns and whenever the report's
+   * content changes. It is authenticated by the claim, as `ready` is, and answers 204. */
+  readonly activity: (input: ActivityInput) => Promise<void>;
   readonly grant: (
     input: z.input<typeof LegionGrantRequest>
   ) => Promise<z.output<typeof LegionGrantResponse>>;
@@ -416,6 +424,7 @@ export function createLegionDaemonClient(
       read("POST", "/legion/v1/claims/register", LegionControllerRegisterResponse, input),
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
     exit: (input) => acknowledge("/legion/v1/claims/exit", input),
+    activity: (input) => acknowledge("/legion/v1/claims/activity", input),
     grant: (input) => post("/legion/v1/grants", LegionGrantRequest, LegionGrantResponse, input),
     controllerGrant: (input) =>
       post("/legion/v1/grants", LegionControllerGrantRequest, LegionGrantResponse, input),

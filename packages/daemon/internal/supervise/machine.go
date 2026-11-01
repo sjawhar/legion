@@ -70,7 +70,8 @@ const (
 // triggers main had — its phase's start, a workflow delivery, the controller keeper
 // (RequestRuleResume) — unless an operator suspended it: that suspension holds until the operator
 // resumes the claim. The boot's resume by rule, which main did not have, acts only on a source
-// ByRule names, so it never overrides a drain recorded before the source existed.
+// ByRule names, so it never overrides a drain recorded before the source existed, and it leaves a
+// released claim to the wake that brings its pod back.
 type SuspendSource string
 
 const (
@@ -85,12 +86,29 @@ const (
 	SuspendedByDaemon SuspendSource = "daemon"
 	// SuspendedByExit: the tree root's agent reported its own exit, which suspends a root.
 	SuspendedByExit SuspendSource = "exit"
+	// SuspendedByReleased: the daemon released the claim's idle issue pod, whose disk and Sandbox
+	// went with it and whose unpushed work was saved as a git bundle. The claim keeps its phase and
+	// its pending task, and the next wake for its role resumes the same session; a daemon restart
+	// resumes no such claim, since only that wake brings the pod back (workflow's booted).
+	SuspendedByReleased SuspendSource = "released"
 )
 
-// ByRule is whether the source is one the daemon itself recorded, the daemon's own suspend or a
-// root's exit: the only sources the boot's resume by rule acts on, and the only suspended phase
-// workers the stranded report leaves out.
-func (s SuspendSource) ByRule() bool { return s == SuspendedByDaemon || s == SuspendedByExit }
+// ByRule is whether the source is one the daemon itself recorded — its own suspend, a root's exit,
+// or an idle pod's release: the sources a daemon rule resumes with no operator, and the only
+// suspended phase workers the stranded report leaves out. The boot's resume by rule acts on all of
+// them but the released one, which waits for its role's wake (workflow's booted).
+func (s SuspendSource) ByRule() bool {
+	return s == SuspendedByDaemon || s == SuspendedByExit || s == SuspendedByReleased
+}
+
+// RetiresPhaseTask is whether a suspension by this source ends the claim's phase, so a task queued
+// for that phase goes with it (settle). Every source does but two: an operator's, and a release.
+// Each of those resumes this same claim in the same phase — the operator's by hand, a released
+// claim's at its role's next wake — so the pending task waits through the suspension and is sent
+// on that resume.
+func (s SuspendSource) RetiresPhaseTask() bool {
+	return s != SuspendedByOperator && s != SuspendedByReleased
+}
 
 // Claim is one role claim as the supervisor holds and persists it.
 type Claim struct {
@@ -157,6 +175,18 @@ type Claim struct {
 	// records the daemon's own contract, so a registration that still differs while it equals the
 	// daemon's contract is the one that is charged rather than relaunched again uncharged.
 	PluginRelaunchFor int
+	// ActivityAt is when the claim's session last read what it was doing and reported it
+	// (api's claims/activity route, INFRA-945), zero for a claim that has reported nothing.
+	// ActivityBackground is whether that reading found background work of the session's own
+	// running and ActivityKinds what kinds it named, sorted and de-duplicated by the session;
+	// ActivityNextReminderAt is when the phase reminder armed in that session is due, zero when
+	// no armed reminder was live. The four are written only by that route, never by a machine's
+	// own claim write: a report that arrived since the machine read its claim must not be erased
+	// by the next state it persists.
+	ActivityAt             time.Time
+	ActivityBackground     bool
+	ActivityKinds          []string
+	ActivityNextReminderAt time.Time
 }
 
 // RuleMayResume says whether the rule may resume this suspended claim: every suspension but the

@@ -3800,6 +3800,9 @@ Every end of an issue pod is therefore the end of that pod's disk, and the ends 
   issue's Sandbox and the role Secrets it owned`.
   The pod's disk went with the pod before the Sandbox did;
 
+- **the pod is released**: no role of the issue has a turn in progress or a turn due for the idle period, so the daemon saves the workspace's unpushed work as a git bundle, suspends each live claim with the source `released` and runs the stop above's teardown ([Idle release](#idle-release)).
+  The issue stays in the workflow, and the next wake for one of its roles brings a new pod, which restores the bundle before any role starts;
+
 - **the tree closes**: at the linger's expiry its cleanup foreground-deletes every issue Sandbox of the tree, in any order (`CleanupTree`, `internal/runtime/sandbox/cleanup.go`), and hands none over
   — a child carried into a tree of its own gets a Sandbox of its own at its next launch, since there is no disk left to hand it;
 
@@ -3817,6 +3820,7 @@ What does reach it is what lives elsewhere
 — each role's session, a row in the session database ([Selecting the store](#selecting-the-store));
 the issue's branch on GitHub, `legion/<KEY>`, which every pushed turn is in;
 the issue's record in the daemon's own Postgres; and the repository's cache, which fills the next pod's feed.
+A release adds one thing to that list: the git bundle of the workspace's unpushed work, which the daemon holds in its own database until the next pod restores it ([Idle release](#idle-release)).
 
 A pod's lifetime is not a role's, and this paragraph is the one place that says how they differ.
 A pod is created by a launch — the issue's first, one that finds no live pod (after a suspension, say), or one that must replace the pod (the first end above)
@@ -3829,9 +3833,130 @@ In an issue's ordinary run that is five of its six roles: the first launch creat
 So only a new or replacement pod provisions afresh, and an agent resumed into a pod created after the one it last worked in finds a workspace newer than its session's last write;
 it is told so before its next turn, by `LEGION_WORKSPACE_RECREATED` and the message its plugin saves from it ([Selecting the store](#selecting-the-store)).
 An agent's unpushed work is lost with the pod, at one of the ends above and never at a role start into a live pod, which is why a phase pushes what it has done.
+The release is the one end that keeps it, as a bundle in the daemon's database and nowhere else ([Idle release](#idle-release)).
 
 A near-full disk slows jj's working-copy snapshot before a push, which is why `legion push`'s grant lives `credential.pushTTL` (5 minutes) in place of the usual 60 seconds (`internal/credential/grants.go`;
 `docs/solutions/legion/worker-pane-shell-gotchas.md` has the mechanics).
+
+### Idle release
+
+An issue pod that no role is using is released: the daemon ends it and starts another at the next wake for one of its roles.
+A pod qualifies once it has had no turn in progress and no turn due for the idle period, `runtime.kubernetes.idle_release.idle_minutes` (10 minutes by default).
+A turn is due when the next phase reminder of a phase worker whose phase is open falls inside the idle period.
+A phase worker whose phase is open is reminded five minutes after a turn that did not complete it, and fifteen minutes after one whose reply opened with a `WAITING` line or that ended with background work of its own still running (`reminderMs` and `waitingMs`, `packages/pi-shared/src/stall-limits.ts`), so of the workers in an open phase only one that said what it waits on is released.
+Each live claim of the pod must also have reported to the daemon, after its last turn, that it runs no background work, and the pod must run the image the daemon's configuration names with every live claim on the daemon's current contract.
+The pod of a root that waits on a person's answer in `awaiting_person` is kept until that answer comes; its children are not.
+A pod held past the idle period is held for one of those reasons, and the daemon records which one.
+
+A release is three acts, in this order:
+
+- the workspace's unpushed work is saved as a git bundle in the daemon's own database (below);
+
+- each live claim of the pod is suspended with a source of its own, `released` (`supervise.SuspendedByReleased`).
+  That source keeps the claim's phase, its place in that phase and the task it holds, which every other source but the operator's retires (`SuspendSource.RetiresPhaseTask`), and the boot's resume by rule passes it over (`booted`, `internal/workflow/resume.go`): only a wake brings a released claim back;
+
+- the issue's Sandbox is set `Suspended`, its pod is waited out, and the Sandbox and the six role Secrets it owns are deleted (`SuspendIssue`, `internal/runtime/sandbox/issue_suspend.go`), the teardown an issue's stop already runs ([The disk dies with its pod](#the-disk-dies-with-its-pod)).
+
+The pod's disk goes with the pod, as at every other end of a pod, and a released issue leaves nothing in the namespace: no Sandbox, no pod and no volume claim.
+Each role's session stays where it was, a row in the session database ([Selecting the store](#selecting-the-store)), and the wake resumes each role in its own session.
+A release moves no issue and ends no phase.
+
+A wake brings the pod back and resumes, in its own session, each role the wake is for.
+The wakes are these:
+
+- a phase start, task, backward move, notice, phase-ended message, production-check look or slot resume the daemon has for a role of the pod, a notice for a released sub-architect included, which stays that notice's owner;
+
+- a CI settlement the daemon records for the head of the issue's pull request, while a phase worker of the pod has its phase open (the Envoy listener's settlement fact, or the daemon's own two-minute read).
+  One head can settle more than once as its checks finish, and each settlement wakes a released pod at most once;
+
+- a message published to the role topic of a role of the pod, which the Envoy listener holds and reports to the daemon, one sent with `keep: false` included: that message is not kept, and it still wakes the role, so the sender's next try reaches a session that is running;
+
+- a message sent to the agent subject of a released session: an Envoy direct message, or a person's answer, comment or message that a Dispatch claim routes to that session;
+
+- the backstop, `runtime.kubernetes.idle_release.backstop_minutes` after the release (60 minutes by default), for each phase worker of the pod whose phase is open.
+  It stands in for a wait that raises no event of its own: a Dispatch topic the role subscribed to, CI of a repository that is not the issue's, a deploy run, a Kubernetes Job.
+  An architect gets no backstop, since every wake of an architect is a daemon task or notice or a message.
+
+A wake acts only on a claim that is still `released`, of an issue still in the workflow whose tree is live.
+Every other path that suspends, resumes, stops or closes a claim takes a released claim over, after which no wake acts on it: a linger, a park, a close, a hand-over, the production check, and the operator's `legion claims` commands.
+A daemon restart resumes no released claim, and a wake or a backstop that came due while the daemon was down acts once it has started.
+A wake that arrives while the release runs cancels it, up to the moment the first role process of the pod is stopped, and the roles go on in the same pod; after that moment the wake waits for the release to finish and then resumes the pod.
+Each woken role is given one task or message that names the wake, so an agent reads why its pod came back.
+From the wake to the woken role's first turn is 5 minutes or less for 90% of wakes and 10 minutes or less for each one; a resume with no first turn 10 minutes after its wake writes a warning naming the issue, the role and the step it waits on.
+
+What the saved bundle holds is every visible commit the remote does not already hold, on any head, the working copy's own change, and each local bookmark that points at such a commit.
+A commit a remote bookmark or a tag reaches is left out: the new pod's workspace fetch brings it back, and a clone of this repository holds thousands of tags, each of which jj makes a visible head.
+Its base commits are the ones a new pod's workspace fetch already has: the default branch and the issue's branch on the remote.
+It never reaches GitHub.
+sjawhar/legion is public and a working copy holds every file that is not ignored, so a save to a branch would publish files no agent chose to push and could start CI; the daemon's database is private and starts nothing.
+A bundle above 40 MiB, or a save that fails, stops the release, and the daemon records that reason.
+Only the pod's own launcher receives the bundle, over the launcher's authenticated connection, in `launcher_bundle` frames each under the 1 MiB frame limit (`shimwire.MaxFrameBytes`), and the launcher restores it in the roles container before any role starts, never in the token-holding `workspace-fetch` container.
+The daemon deletes the bundle once the launcher confirms the restore, and deletes it too when a wake cancels the release.
+A bundle stays through a linger and a park, and goes when its issue is done or its tree closes.
+Nothing else of the disk is kept: `$TMPDIR` and its contents, every ignored file, every file jj does not snapshot (above its `snapshot.max-new-file-size`), each role's home with the Oh My Pi state and `local://` files under it, a test Postgres with its databases, and the workspace's CodeGraph index all go with the pod.
+A restore whose base commit is gone writes a notice that names what it could not bring back.
+
+This is the release's own form of [Carrying unpushed work out of an issue's pod](#carrying-unpushed-work-out-of-an-issues-pod), which stays the operator's procedure for a pod the daemon is not releasing.
+The two answer the same question differently because one runs inside the pod and the other outside it: the shim builds the bundle as the role's own process, with the configuration and credentials that role already has, while an operator's `kubectl exec` shell would read every role's credentials and obey configuration any role can write, which is why that procedure runs `tar` alone.
+The release pushes nothing and brings no credential in.
+
+One setting governs both periods:
+
+```yaml
+runtime:
+  kubernetes:
+    idle_release:
+      idle_minutes: 10
+      backstop_minutes: 60
+```
+
+Those are the defaults, and release is on under `runtime: kubernetes` wherever the file says nothing: every deployment on GKE Autopilot pays for an idle pod's requests.
+`idle_minutes: 0` turns release off, and the deployment's pods then live as they did before, from an issue's first role start to its close.
+The loader refuses a `backstop_minutes` below `idle_minutes`, which would wake a pod the daemon has only just released.
+Whatever the setting says, the daemon releases nothing while the Envoy listener it uses does not report the role messages and direct messages of released sessions, since those two wakes would otherwise be lost.
+
+`legion state` shows a released claim apart from a suspended or a failed one, and the stranded-claim report counts one only when its wake is more than 10 minutes old with no resume.
+The daemon keeps a record of each release, each resume and each pod held past the idle period, and a claim reads the deployment's records on `GET /legion/v1/claims/release-records`.
+
+#### Rolling back idle release
+
+Re-pinning the earlier image is not the whole rollback: a released claim and its saved bundle are two things the earlier release cannot act on.
+An earlier daemon (`legion-v18.3.1`, or any release at daemon API contract 44 or below) knows four suspension sources and not `released`, and its `SuspendSource.ByRule` names `daemon` and `exit` alone (`internal/supervise/machine.go` at `legion-v18.3.1`), so:
+
+- its boot resumes no released claim either (`booted`, `internal/workflow/resume.go` at that tag, which acts on a `ByRule` source), and it has no idle-release loop and no listener report of its own, so nothing of its own ever wakes one: a released claim waits for a phase start or a delivery that may never come;
+
+- its stranded-claim report lists every released phase worker of a running tree, since that report passes over a suspended claim only for a `ByRule` source (`stranded.go` at that tag), so an operator reading it after the rollback meets one line per released claim;
+
+- its launcher knows neither `launcher_bundle` frame (they arrive at daemon API contract 47), so no pod it starts restores a saved bundle, and the work in that bundle reaches no workspace again.
+
+**Every released pod's unpushed work is lost in the rollback unless this release pushes it first.**
+That work is in the bundle and nowhere else, and no role can push it while its pod is gone, so the push needs a pod, which only this release can bring back.
+While this release still runs, list the released claims (`legion claims list --json`), resume each one (`legion claims resume --claim <token>`, or any wake of the list above), wait for each pod to be Ready and its restore to land, and ask each role with work in hand, through Dispatch, to push it to `legion/<KEY>`, confirming each push as the cutover does ([Cutting over to the pod-owned disk](#cutting-over-to-the-pod-owned-disk), step 1).
+For an issue whose push you cannot confirm, carry its work out of the resumed pod before you pin the earlier image ([Carrying unpushed work out of an issue's pod](#carrying-unpushed-work-out-of-an-issues-pod)).
+
+Then stop this release's daemon, and leave the claims in a state the earlier release acts on:
+
+```sh
+psql '<postgres_dsn>' -X -v ON_ERROR_STOP=1 <<'SQL'
+begin;
+update claims set suspended_by = 'daemon' where state = 'suspended' and suspended_by = 'released';
+delete from workspace_bundles;
+commit;
+SQL
+```
+
+It prints `UPDATE <n>` and `DELETE <n>`; a rerun prints `UPDATE 0` and `DELETE 0`.
+The `update` hands each released claim to the earlier release's own resume by rule, which starts a claim that owns its issue's current phase at the next boot and leaves the rest suspended until their next start, each on its own session.
+The `delete` removes the saved bundles, which are whole copies of a workspace in a table the earlier release never reads: leave none behind.
+
+The database needs no restore for this step.
+This release's migrations are forward-only and drop nothing: `20261101201850_claim_suspended_by_released.up.sql` only widens the `claims_suspended_by_check` constraint to allow `released`, which the earlier release never writes, and the bundle and record tables stay as tables it never reads.
+So a later upgrade back to this release needs no migration of its own, and the `schema_version` rows are left as they are.
+Nothing in the namespace is deleted for this rollback: a released issue has no Sandbox and no pod, and a resumed one has the pod this release gave it, which the earlier release treats as any other issue pod.
+
+An Envoy listener rolled back on its own, with this daemon left in place, stops two of the wakes: the daemon then releases nothing more, and a claim already released wakes only on a daemon task or notice, a CI settlement or its backstop.
+Roll the listener back with the daemon, or set `idle_minutes: 0` and wait out the released claims first.
+This section adds the released claims and the saved bundles to a rollback and replaces no step of another: this release changes neither the pod layout nor the volume layout, so [Rolling back this release](#rolling-back-this-release) and [Rolling back the upgrade](#rolling-back-the-upgrade) stand as written for the releases they name.
 
 ### Liveness rules
 

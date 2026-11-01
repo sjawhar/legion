@@ -65,6 +65,10 @@
       "types": "./src/phase-reminder.ts",
       "bun": "./src/phase-reminder.ts"
     },
+    "./session-activity": {
+      "types": "./src/session-activity.ts",
+      "bun": "./src/session-activity.ts"
+    },
     "./stall-limits": {
       "types": "./src/stall-limits.ts",
       "bun": "./src/stall-limits.ts"

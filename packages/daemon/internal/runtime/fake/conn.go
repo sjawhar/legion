@@ -3,6 +3,7 @@ package fake
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -28,6 +29,12 @@ type Adoption struct {
 	Timeout  time.Duration
 }
 
+// Bundling is one workspace bundle the daemon asked the agent's side to build.
+type Bundling struct {
+	Issue   string
+	Timeout time.Duration
+}
+
 // Conn is one agent's connection as a double: it records what was asked of the agent and answers
 // what the test told it to. The zero value is not usable; call NewConn.
 type Conn struct {
@@ -35,6 +42,8 @@ type Conn struct {
 	mu          sync.Mutex
 	prompts     []Prompt
 	adoptions   []Adoption
+	bundled     []Bundling
+	bundle      *runtime.WorkspaceBundle
 	enrollments []string
 	podToken    string
 	tokenReads  int
@@ -109,6 +118,40 @@ func (c *Conn) AdoptWorkingCopy(_ context.Context, id runtime.GitIdentity, timeo
 	c.adoptions = append(c.adoptions, Adoption{Identity: id, Timeout: timeout})
 	return c.failures["AdoptWorkingCopy"]
 }
+
+// BundleWorkspace answers the daemon asking the agent's side for its workspace's unpushed work:
+// the bundle SetWorkspaceBundle gave it, recorded with the issue asked about. With none given it
+// fails, so a test that never expected a release to bundle sees the request go unanswered rather
+// than an empty bundle.
+func (c *Conn) BundleWorkspace(_ context.Context, issue string, timeout time.Duration) (runtime.WorkspaceBundle, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.bundled = append(c.bundled, Bundling{Issue: issue, Timeout: timeout})
+	if err := c.failures["BundleWorkspace"]; err != nil {
+		return runtime.WorkspaceBundle{}, err
+	}
+	if c.bundle == nil {
+		return runtime.WorkspaceBundle{}, errors.New("fake: the shim was asked to bundle its workspace, and the test set none (SetWorkspaceBundle)")
+	}
+	return *c.bundle, nil
+}
+
+// SetWorkspaceBundle is the bundle the agent's side builds from now on.
+func (c *Conn) SetWorkspaceBundle(b runtime.WorkspaceBundle) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.bundle = &b
+}
+
+// Bundlings is every workspace bundle asked over this connection, in order.
+func (c *Conn) Bundlings() []Bundling {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.bundled)
+}
+
+// FailBundleWorkspace makes every later BundleWorkspace return err; nil clears it.
+func (c *Conn) FailBundleWorkspace(err error) { c.fail("BundleWorkspace", err) }
 
 // AgentSecretsEnrollment records the enrollment id the daemon asked the agent's shim to keep.
 func (c *Conn) AgentSecretsEnrollment(_ context.Context, enrollmentID string) error {

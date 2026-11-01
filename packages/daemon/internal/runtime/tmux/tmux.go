@@ -153,6 +153,7 @@ type Options struct {
 // Runtime is the tmux runtime. Build one with New.
 type Runtime struct {
 	socket           string
+	project          string
 	stateDir         string
 	streamAddress    string
 	daemonURL        string
@@ -300,6 +301,7 @@ func New(opts Options) (*Runtime, error) {
 	markers, agents := agentMarkers(opts.Launchers)
 	r := &Runtime{
 		socket:           "legion-" + opts.Project,
+		project:          opts.Project,
 		stateDir:         opts.StateDir,
 		streamAddress:    opts.StreamAddress,
 		daemonURL:        opts.DaemonURL,
@@ -755,4 +757,43 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 		return fmt.Errorf("adopt %s's working copy for %s <%s>: %w", loc.Claim, id.Name, id.Email, err)
 	}
 	return nil
+}
+
+var _ runtime.WorkspaceBundler = (*Runtime)(nil)
+
+// BundleWorkspace has role's shim bundle the unpushed work of the workspace every role of issue
+// shares, over that claim's connection. The pane the runtime watches for the claim must still
+// verify and have a connection: the shim builds the bundle in the workspace it already works in,
+// so a role with no live pane is a refusal rather than an empty bundle.
+func (r *Runtime) BundleWorkspace(ctx context.Context, issue string, role claim.Role) (runtime.WorkspaceBundle, error) {
+	token, err := claim.NewToken(r.project, issue, role)
+	if err != nil {
+		return runtime.WorkspaceBundle{}, fmt.Errorf("bundle %s's workspace: %w", issue, err)
+	}
+	watched := r.trackedProcesses()
+	index := slices.IndexFunc(watched, func(p trackedProcess) bool { return p.locator.Claim == token })
+	if index < 0 {
+		return runtime.WorkspaceBundle{}, fmt.Errorf("bundle %s's workspace: %s holds no watched pane to bundle it", issue, token)
+	}
+	loc := watched[index].locator
+	pane, inc, err := r.paneOf(loc)
+	if err != nil {
+		return runtime.WorkspaceBundle{}, fmt.Errorf("bundle %s's workspace: %w", issue, err)
+	}
+	v, err := r.verifyPane(ctx, pane, inc)
+	if err != nil {
+		return runtime.WorkspaceBundle{}, fmt.Errorf("bundle %s's workspace: %w", issue, err)
+	}
+	if !v.verified() {
+		return runtime.WorkspaceBundle{}, fmt.Errorf("bundle %s's workspace: %s", issue, describeVerdict(pane, inc, v))
+	}
+	conn, ok := r.conns.Conn(token)
+	if !ok {
+		return runtime.WorkspaceBundle{}, fmt.Errorf("bundle %s's workspace: %s has no connection to ask over", issue, token)
+	}
+	bundle, err := conn.BundleWorkspace(ctx, issue, runtime.WorkspaceBundleTimeout)
+	if err != nil {
+		return runtime.WorkspaceBundle{}, fmt.Errorf("bundle %s's workspace over %s: %w", issue, token, err)
+	}
+	return bundle, nil
 }
