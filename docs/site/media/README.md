@@ -62,6 +62,8 @@ Add an entry to a set's `shots`:
 - `alt`: what the image shows, for the page that embeds it.
 - `route`: the page to open, or a function of the seeded data.
 - `viewport`: `desktop` (1440x900) or `phone` (iPhone 13, 390x844); `theme`: `light` or `dark`.
+- `size` (optional): the desktop viewport's width and height, where the shot is of what another
+  width shows, such as the Inbox below the 1280 px its reading column starts at.
 - `ready`: waits for the page's own readiness: the content the shot is of, visible. Wait on that
   content with `expect(...)`, never on a fixed sleep.
 - `steps` (optional): clicks or keys that bring the page to the state the shot shows, ending on

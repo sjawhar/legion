@@ -4,11 +4,11 @@
 # dead — it keeps its role claim and its issue claim, messages are stored for it, no replacement is
 # started for it, and nothing but the gone horizon takes any of that away.
 #
-# It is not a CI job. It drives real agent sessions of all three plugin hosts — Oh My Pi on this
-# checkout's @sjawhar/pi-envoy, Claude Code on this checkout's packages/claude-envoy, and OpenCode
-# on this checkout's @sjawhar/opencode-legion-envoy — against an Envoy listener and a NATS server
-# built from this checkout, so it needs a model route, which a Legion pod has and a hosted runner
-# does not. Its row in .github/e2e-scripts.json is therefore under `elsewhere`.
+# It is not a CI job. It drives real agent sessions of both plugin hosts — Oh My Pi on this
+# checkout's @sjawhar/pi-envoy and Claude Code on this checkout's packages/claude-envoy — against
+# an Envoy listener and a NATS server built from this checkout, so it needs a model route, which a
+# Legion pod has and a hosted runner does not. Its row in .github/e2e-scripts.json is therefore
+# under `elsewhere`.
 #
 #   LEGION_E2E_MODEL_BASE_URL=… LEGION_E2E_MODEL_KEY_FILE=… LEGION_E2E_MODEL_ID=anthropic/… \
 #     LEGION_E2E_CLAUDE_MODEL=… ENVOY_SESSION_STATES_PG_DSN=… \
@@ -22,12 +22,12 @@
 # ---- inputs ---------------------------------------------------------------------------------------
 # - LEGION_E2E_MODEL_BASE_URL (required for every check that needs a model turn; an http:// or
 #   https:// URL with no credentials in it) is the Anthropic-compatible endpoint this pod's own
-#   model route answers on. The three runtimes call it, so no Anthropic key is needed.
+#   model route answers on. Both runtimes call it, so no Anthropic key is needed.
 # - LEGION_E2E_MODEL_KEY_FILE (same) names a file holding that endpoint's key. It is copied once
 #   (0600) into the run's work directory and preflighted (lib/model-endpoint.sh) before anything
 #   starts: the endpoint must accept it, and must refuse a call with no key.
-# - LEGION_E2E_MODEL_ID (same) is the `anthropic/<id>` Oh My Pi and OpenCode run; both reach the
-#   endpoint through their Anthropic provider.
+# - LEGION_E2E_MODEL_ID (same) is the `anthropic/<id>` Oh My Pi runs; it reaches the endpoint
+#   through its Anthropic provider.
 # - LEGION_E2E_CLAUDE_MODEL (same) is the model id Claude Code runs (ANTHROPIC_MODEL).
 # - ENVOY_SESSION_STATES_PG_DSN (required for every check that reads an issue claim) is a loopback
 #   PostgreSQL with pgvector the run creates its own database in and drops on exit. This script
@@ -41,8 +41,6 @@
 #   The image carries the pin and no Claude Code, so the run installs that exact release under
 #   $TMPDIR with `npm ci` and holds its --version to the pin, as a pod's own launch does
 #   (claudeCodeBlock, packages/daemon/internal/runtime/sandbox/plugins.go).
-# - LEGION_E2E_OPENCODE_VERSION (default the version packages/envoy-plugin/package.json pins for
-#   @opencode-ai/plugin) is the opencode-ai release the run installs under $TMPDIR.
 # - ENVOY_SESSION_STATES_CHECKS, or --checks <names>, is the comma-separated list of named checks
 #   to run; unset, every check runs. --list prints every name with what it needs. A selection is an
 #   operator's explicit choice and the summary line says which selection ran: no check ever skips
@@ -51,9 +49,9 @@
 # - ENVOY_SESSION_STATES_EVIDENCE_DIR (default a fresh directory under $TMPDIR, kept and printed)
 #   holds the run's transcript, every service's log, every agent's log and each check's answers.
 #
-# Everything the run installs — the Go binaries, Claude Code, OpenCode and the three plugin builds
-# — goes under $TMPDIR, never /tmp and never the home directory: a pod's own disk is small, and
-# filling it evicts the pod with every role in it.
+# Everything the run installs — the Go binaries, Claude Code and the two plugin builds — goes
+# under $TMPDIR, never /tmp and never the home directory: a pod's own disk is small, and filling
+# it evicts the pod with every role in it.
 #
 # ---- the windows, and why they are these numbers ------------------------------------------------
 # The two running listeners judge every record with
@@ -91,11 +89,11 @@
 # ---- what the run starts, and what stops it ------------------------------------------------------
 # A NATS server (internal/testnats/cmd/natsd), two Envoy listeners on ports held from the kernel's
 # choice until each serves on it (lib/held-port.py through lib/rig.sh), a Dispatch server, up to
-# three agent processes and two short-lived listeners of the run's own. Every one of them is
+# two agent processes and two short-lived listeners of the run's own. Every one of them is
 # stopped on any exit, by the pid it was started as; the run's database is dropped and its work
 # directory removed. The run is re-runnable: it takes a work directory of its own each time and
-# inherits no DISPATCH_*, ENVOY_*, NATS_*, OMP*, PI_*, ANTHROPIC_*, CLAUDE_* or OPENCODE_* variable
-# of the caller's.
+# inherits no DISPATCH_*, ENVOY_*, NATS_*, OMP*, PI_*, ANTHROPIC_* or CLAUDE_* variable of the
+# caller's.
 set -Eeuo pipefail
 
 # This script's own three ENVOY_SESSION_STATES_* inputs are read first: the sweep below drops every
@@ -106,7 +104,7 @@ wanted=${ENVOY_SESSION_STATES_CHECKS:-}
 evidence=${ENVOY_SESSION_STATES_EVIDENCE_DIR:-}
 for variable in $(compgen -e); do
   case $variable in
-    DISPATCH_* | ENVOY_* | NATS_* | OMP* | PI_* | ANTHROPIC_* | OPENCODE_* | CLAUDE_*) unset "$variable" ;;
+    DISPATCH_* | ENVOY_* | NATS_* | OMP* | PI_* | ANTHROPIC_* | CLAUDE_*) unset "$variable" ;;
   esac
 done
 
@@ -127,19 +125,19 @@ measured_kill_latency=
 
 # ---- the check table ----------------------------------------------------------------------------
 # Each row is `<name>[ <need>…]`: what the check needs beyond the listener and NATS the run always
-# builds. `omp`, `claude` and `opencode` are agent runtimes it starts; `model` is a check that has
-# an agent take a model turn, and is the one need that makes the model route required; `dispatch`
-# is a check that reads or writes an issue claim.
+# builds. `omp` and `claude` are agent runtimes it starts; `model` is a check that has an agent
+# take a model turn, and is the one need that makes the model route required; `dispatch` is a
+# check that reads or writes an issue claim.
 checks=(
   "stalled-session-reads-unresponsive omp"
   "bus-outage-keeps-claims dispatch"
   "send-to-stalled-session-is-stored"
   "stored-deliveries-arrive-once omp dispatch model"
-  "send-to-serving-port-is-refused opencode model"
+  "send-to-serving-port-is-refused"
   "role-claim-survives-lookups"
   "issue-claim-refuses-the-stalled-holder dispatch"
-  "gone-only-past-the-horizon omp claude opencode model"
-  "every-plugin-shows-the-state omp claude opencode model"
+  "gone-only-past-the-horizon omp claude model"
+  "every-plugin-shows-the-state omp claude model"
   "max-age-change-reaches-both-listeners"
 )
 
@@ -238,12 +236,10 @@ for name in "${selected[@]}"; do
 done
 needs_omp=
 needs_claude=
-needs_opencode=
 needs_dispatch=
 needs_model=
 case " $needs " in *" omp "*) needs_omp=1 ;; esac
 case " $needs " in *" claude "*) needs_claude=1 ;; esac
-case " $needs " in *" opencode "*) needs_opencode=1 ;; esac
 case " $needs " in *" dispatch "*) needs_dispatch=1 ;; esac
 case " $needs " in *" model "*) needs_model=1 ;; esac
 # Dispatch is reached by the `dispatch` command the pi-envoy pack ships, and every agent needs that
@@ -265,7 +261,6 @@ omp_pid=
 omp_fd=
 claude_pid=
 claude_fd=
-opencode_pid=
 database=
 nats_port=
 nats_url=
@@ -275,13 +270,9 @@ short_port=
 maxage_port=
 dispatch_port=
 dispatch_url=
-opencode_port=
 omp_session=
 claude_session=
-opencode_session=
 claude_bin=
-opencode_bin=
-opencode_plugin=
 claude_version=
 # pg_dsn is read at the top, before the sweep.
 # The windows every reader of this run judges a record's age against; the header says why each is
@@ -340,7 +331,6 @@ cleanup() {
   set +e
   stop_agent "$omp_pid"
   stop_agent "$claude_pid"
-  stop_agent "$opencode_pid"
   stop_pid "$exceptions_pid"
   stop_pid "$dispatch_pid"
   stop_pid "$shortlistener_pid"
@@ -437,6 +427,17 @@ api() { # api PORT METHOD PATH [BODY]
   [ -z "$body" ] || args+=(-H 'content-type: application/json' --data "$body")
   api_status=$(curl "${args[@]}" "http://127.0.0.1:$port$path" 2>>"$evidence/logs/curl.log") || api_status=000
   [ "$api_status" = 200 ]
+}
+
+# free_port prints a loopback port the kernel has just handed out and nothing is listening on. It
+# is what a serving port the rig registers is picked from, so the registration names a real port
+# and a push to it would reach nothing.
+free_port() {
+  python3 -c 'import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()'
 }
 
 # registered SESSION PORT SELF TOPICS… writes one session's registration straight onto the wire:
@@ -558,7 +559,6 @@ model_id=${LEGION_E2E_MODEL_ID:-}
 claude_model=${LEGION_E2E_CLAUDE_MODEL:-}
 omp_bin=${LEGION_E2E_OMP_PATH:-}
 claude_pin=${LEGION_E2E_CLAUDE_CODE_PIN:-/opt/legion/claude-code}
-opencode_version=${LEGION_E2E_OPENCODE_VERSION:-}
 
 note "selection: $selection (${#selected[@]} checks)"
 for tool in bun curl go jq npm od openssl python3 tar; do
@@ -567,7 +567,7 @@ done
 
 if [ -n "$needs_model" ]; then
   [ -n "$model_base_url" ] ||
-    fail "LEGION_E2E_MODEL_BASE_URL is required: the Anthropic-compatible endpoint this pod's model route answers on, which the three agent runtimes call. Without it no agent can take a turn, and the selected checks include one that needs one"
+    fail "LEGION_E2E_MODEL_BASE_URL is required: the Anthropic-compatible endpoint this pod's model route answers on, which both agent runtimes call. Without it no agent can take a turn, and the selected checks include one that needs one"
   if why=$(model_base_url_refusal "$model_base_url") && [ -n "$why" ]; then
     fail "LEGION_E2E_MODEL_BASE_URL $why: name the model endpoint's base URL"
   fi
@@ -576,9 +576,9 @@ if [ -n "$needs_model" ]; then
   [ -r "$model_key_file" ] ||
     fail "LEGION_E2E_MODEL_KEY_FILE names $model_key_file, which cannot be read"
   [ -n "$model_id" ] ||
-    fail "LEGION_E2E_MODEL_ID is required: the anthropic/<id> Oh My Pi and OpenCode run"
+    fail "LEGION_E2E_MODEL_ID is required: the anthropic/<id> Oh My Pi runs"
   [[ $model_id =~ ^anthropic/[^[:space:]]+$ ]] ||
-    fail "LEGION_E2E_MODEL_ID is '$model_id'; it must be anthropic/<id>, the provider both Oh My Pi and OpenCode reach the endpoint through"
+    fail "LEGION_E2E_MODEL_ID is '$model_id'; it must be anthropic/<id>, the provider Oh My Pi reaches the endpoint through"
   [ -n "$claude_model" ] ||
     fail "LEGION_E2E_CLAUDE_MODEL is required: the model id Claude Code runs against that endpoint"
 fi
@@ -618,12 +618,6 @@ if [ -n "$needs_claude" ]; then
   claude_version=$(jq -er '.dependencies["@anthropic-ai/claude-code"]' "$claude_pin/package.json") ||
     fail "$claude_pin/package.json pins no @anthropic-ai/claude-code"
 fi
-if [ -n "$needs_opencode" ]; then
-  if [ -z "$opencode_version" ]; then
-    opencode_version=$(jq -er '.dependencies["@opencode-ai/plugin"]' "$root/packages/envoy-plugin/package.json" | tr -d '~^') ||
-      fail "packages/envoy-plugin/package.json pins no @opencode-ai/plugin, so the opencode-ai release to install is unknown; name it in LEGION_E2E_OPENCODE_VERSION"
-  fi
-fi
 
 mkdir -p "$work/bin" "$work/registered" "$work/home/.omp" "$work/agent" "$work/tmp" "$work/omp-cwd"
 (
@@ -638,7 +632,7 @@ if [ -n "$needs_model" ]; then
   [ -s "$work/model-key" ] || fail "LEGION_E2E_MODEL_KEY_FILE ($model_key_file) holds no key"
   model_key_preflight "$model_base_url" "$work/model-key" "$work/model-header" \
     "LEGION_E2E_MODEL_KEY_FILE ($model_key_file)"
-  note "the model endpoint accepts the key; Oh My Pi and OpenCode run $model_id, Claude Code $claude_model"
+  note "the model endpoint accepts the key; Oh My Pi runs $model_id, Claude Code $claude_model"
 fi
 note "work $work; evidence $evidence"
 echo "ok prerequisites"
@@ -655,7 +649,7 @@ if [ -n "$needs_dispatch" ]; then
     fail "./cmd/dispatch did not build"
   note "built envoy-dispatch from this checkout"
 fi
-if [ -n "$needs_omp" ] || [ -n "$needs_opencode" ] || [ -n "$needs_claude" ]; then
+if [ -n "$needs_omp" ] || [ -n "$needs_claude" ]; then
   (cd "$root" && bun install --frozen-lockfile) >"$evidence/logs/bun-install.log" 2>&1 ||
     fail "bun install failed; see $evidence/logs/bun-install.log"
 fi
@@ -700,37 +694,6 @@ if [ -n "$needs_claude" ]; then
     --arg data "$work/claude-config/plugins/data/claude-envoy-inline" \
     '{mcpServers:{legion:{command:$bun,args:[$channel],env:{CLAUDE_PLUGIN_DATA:$data}}}}' >"$work/claude-mcp.json"
   note "Claude Code $installed from $claude_pin, with this checkout's claude-envoy as its one MCP server"
-fi
-if [ -n "$needs_opencode" ]; then
-  # OpenCode, the release this checkout's plugin pins its @opencode-ai/plugin to, installed under
-  # $TMPDIR, with the plugin packed from this checkout and unpacked beside it, as pi-envoy is
-  # (lib/pack-plugin.sh). The pack is what makes it load: the plugin reads the Legion skills from
-  # beside its own bundle, its tarball stages them there at prepack
-  # (`skillsDirectory`, packages/envoy-plugin/src/server.ts), and a plain `bun run build` leaves
-  # dist/ in the checkout with no skills/ next to it — with Dispatch configured the plugin then
-  # refuses to load at all, OpenCode serves on with no Envoy tools, and no session ever registers.
-  # The unpacked tarball's one external import, @opencode-ai/plugin, is resolved through the
-  # checkout's own node_modules, which the `bun install --frozen-lockfile` above holds the pinned
-  # release in; the bundle inlines everything else.
-  mkdir -p "$work/opencode" "$work/npm-cache" "$work/opencode-pack" "$work/opencode-plugin"
-  printf '{"name":"envoy-session-states-opencode","private":true}\n' >"$work/opencode/package.json"
-  (cd "$work/opencode" && npm install --no-audit --no-fund --cache "$work/npm-cache" "opencode-ai@$opencode_version") \
-    >"$evidence/logs/npm-opencode.log" 2>&1 ||
-    fail "installing opencode-ai@$opencode_version failed; see $evidence/logs/npm-opencode.log"
-  opencode_bin=$work/opencode/node_modules/.bin/opencode
-  [ -x "$opencode_bin" ] || fail "the install left no executable at $opencode_bin"
-  (cd "$root/packages/envoy-plugin" && bun pm pack --destination "$work/opencode-pack") \
-    >"$evidence/logs/build-opencode-plugin.log" 2>&1 ||
-    fail "packages/envoy-plugin did not pack; see $evidence/logs/build-opencode-plugin.log"
-  opencode_tarballs=("$work"/opencode-pack/*.tgz)
-  { [ "${#opencode_tarballs[@]}" -eq 1 ] && [ -f "${opencode_tarballs[0]}" ]; } ||
-    fail "packing packages/envoy-plugin left ${#opencode_tarballs[@]} entries matching $work/opencode-pack/*.tgz; expected one tarball"
-  opencode_plugin=$work/opencode-plugin
-  tar xzf "${opencode_tarballs[0]}" -C "$opencode_plugin" --strip-components=1
-  ln -sfT "$root/packages/envoy-plugin/node_modules" "$opencode_plugin/node_modules"
-  [ -d "$opencode_plugin/skills/dispatch-first" ] ||
-    fail "the packed plugin in $opencode_plugin carries no skills/dispatch-first, and refuses to load without it"
-  note "OpenCode $("$opencode_bin" --version) with this checkout's @sjawhar/opencode-legion-envoy, packed as the release packs it"
 fi
 echo "ok build"
 
@@ -993,9 +956,9 @@ stored_cards_landed() {
 }
 
 # shows_state FILE: FILE shows a session row carrying both `state` and `last_seen`. Each host
-# hands its model the listener's rows as JSON, and each of the three files this is asked of — an
-# Oh My Pi session file, Claude Code's stream-json and OpenCode's answer — carries that JSON
-# inside a JSON string, where every quote is written `\"`. The backslashes are dropped before the
+# hands its model the listener's rows as JSON, and each of the two files this is asked of — an
+# Oh My Pi session file and Claude Code's stream-json — carries that JSON inside a JSON string,
+# where every quote is written `\"`. The backslashes are dropped before the
 # keys are looked for, because `"state"` is not a substring of `\"state\"` and a check that
 # looked for it would read every host as showing nothing.
 # shellcheck disable=SC1003 # '\\' is tr's own spelling of one backslash, not an escaped quote
@@ -1045,68 +1008,6 @@ claude_stop() {
   claude_fd=
   stop_agent "$claude_pid"
   claude_pid=
-}
-
-# ---- OpenCode -------------------------------------------------------------------------------------------
-# `opencode serve` is the process a session's plugin registers from, with this checkout's plugin
-# loaded by path. OpenCode's Anthropic provider appends `/messages` to the base URL it is given, so
-# the provider's baseURL is the endpoint's `/v1`; the serve binds a port the rig picks, since
-# `--port 0` is its own default port and not the kernel's choice.
-free_port() {
-  python3 -c 'import socket
-s = socket.socket()
-s.bind(("127.0.0.1", 0))
-print(s.getsockname()[1])
-s.close()'
-}
-
-opencode_start() {
-  mkdir -p "$work/opencode-config/opencode" "$work/opencode-data" "$work/opencode-cwd"
-  jq -n --arg url "$model_base_url/v1" --arg key "$(cat "$work/model-key")" \
-    --arg id "${model_id#*/}" --arg plugin "file://$opencode_plugin" \
-    '{"$schema":"https://opencode.ai/config.json",plugin:[$plugin],
-      provider:{anthropic:{options:{baseURL:$url,apiKey:$key},models:{($id):{}}}},
-      model:("anthropic/" + $id)}' >"$work/opencode-config/opencode/opencode.json"
-  jq -n --arg url "http://127.0.0.1:$port_a" --arg token "$(cat "$work/envoy-token")" \
-    --arg dispatch "$dispatch_url" --arg dtoken "$(cat "$work/dispatch-token")" \
-    '{envoy:{enabled:true,url:$url,token:$token},
-      dispatch:(if $dispatch == "" then {enabled:false} else {enabled:true,serverUrl:$dispatch,token:$dtoken} end)}' \
-    >"$work/opencode-config/opencode/envoy.json"
-  opencode_port=$(free_port)
-  rm -f "$work/opencode.pid"
-  own_session "$work/opencode.pid" \
-    env -i PATH="$PATH" HOME="$work/home" TMPDIR="$work/tmp" \
-    XDG_CONFIG_HOME="$work/opencode-config" XDG_DATA_HOME="$work/opencode-data" \
-    OPENCODE_CONFIG_DIR="$work/opencode-config/opencode" ENVOY_HEARTBEAT_MS="$heartbeat_ms" \
-    ENVOY_MACHINE_ID="envoy-session-states-$$" \
-    "$opencode_bin" serve --hostname 127.0.0.1 --port "$opencode_port" \
-    >>"$evidence/logs/opencode.log" 2>&1 &
-  agent_pid "$work/opencode.pid" opencode_pid
-  await_start opencode "$opencode_pid" 300 "the OpenCode serve to answer" \
-    curl -fsS --max-time 3 "http://127.0.0.1:$opencode_port/global/health"
-}
-
-opencode_api() { # opencode_api METHOD PATH [BODY]
-  local method=$1 path=$2 body=${3:-}
-  answer=$evidence/answers/$check.opencode.$RANDOM.json
-  local -a args=(-sS --max-time 600 -o "$answer" -w '%{http_code}' -X "$method")
-  [ -z "$body" ] || args+=(-H 'content-type: application/json' --data "$body")
-  api_status=$(curl "${args[@]}" "http://127.0.0.1:$opencode_port$path" 2>>"$evidence/logs/curl.log") || api_status=000
-  [ "$api_status" = 200 ]
-}
-
-# opencode_turn SESSION TEXT has that session take one model turn, which is what makes its plugin
-# register it: a serve registers only the sessions it has actually run.
-opencode_turn() {
-  opencode_api POST "/session/$1/message" \
-    "$(jq -cn --arg id "${model_id#*/}" --arg t "$2" \
-      '{model:{providerID:"anthropic",modelID:$id},parts:[{type:"text",text:$t}]}')" ||
-    refuse "OpenCode answered $api_status to a turn of $1: $(head -c 300 "$answer")"
-}
-
-opencode_new_session() {
-  opencode_api POST /session '{"title":"envoy session states"}' || return 1
-  jq -er .id "$answer"
 }
 
 # ---- 1. a stalled session reads unresponsive, and comes back ----------------------------------------------
@@ -1302,32 +1203,27 @@ check_stored_deliveries_arrive_once() {
 # A session with a serving port is reached by a push to that port, and a stalled one answers no
 # push. That send is refused by name, with the state it was refused on, so the sender routes around
 # the pane instead of believing its message was taken.
+#
+# The session is registered straight onto the wire, the same POST /v1/interests/subscribe a
+# plugin's heartbeat makes, on a loopback port the kernel has just handed out: no agent runtime
+# this proof starts receives on a serving port — both plugins register port 0 and receive on their
+# own NATS connection — while the listener's registration route still takes a port and its send
+# route still refuses a stalled session that carries one, so the wire is where that case is driven.
 check_send_to_serving_port_is_refused() {
-  [ -n "$opencode_pid" ] || opencode_start
-  [ -n "$opencode_session" ] || opencode_session=$(opencode_new_session) ||
-    refuse "OpenCode would not open a session" || return 1
-  opencode_turn "$opencode_session" "Reply with the single word READY and nothing else." || return 1
-  wait_until 240 "the OpenCode session to register live" state_is "$port_a" "$opencode_session" '' live || return 1
-  api "$port_a" GET "/v1/registry/$opencode_session" || true
-  jq -e --argjson p "$opencode_port" '.port == $p' "$answer" >/dev/null ||
-    refuse "the OpenCode session registered port $(jq -r .port "$answer"), not its serve's $opencode_port" || return 1
-  # The serve is reached through opencode-ai's bin/opencode, a Node launcher that runs the
-  # platform binary as a child of its own and forwards the signals it can catch; SIGSTOP is not
-  # one, so stopping the launcher's pid alone leaves the serve heartbeating. The stall goes to
-  # the whole process group, which own_session gave this launcher as its session leader.
-  kill -STOP -- -"$opencode_pid" || refuse "could not stop the OpenCode serve" || return 1
-  wait_until 180 "the OpenCode session to read unresponsive" \
-    state_is "$port_a" "$opencode_session" unresponsive unresponsive || return 1
+  local target=ses_ess_serving_$$ port
+  port=$(free_port) || refuse "no loopback port to register as a serving port" || return 1
+  registered "$target" "$port" false || return 1
+  wait_until 180 "the session on a serving port to read unresponsive" \
+    state_is "$port_a" "$target" unresponsive unresponsive || return 1
   ! api "$port_a" POST /v1/messages/send \
-    "$(jq -cn --arg t "$opencode_session" '{source:"agent",source_session:"ess-sender",target_session:$t,message:"A push to a stalled serving port."}')" ||
-    refuse "the send to the stalled OpenCode session was accepted; a push to a port nothing answers must be refused" || return 1
+    "$(jq -cn --arg t "$target" '{source:"agent",source_session:"ess-sender",target_session:$t,message:"A push to a stalled serving port."}')" ||
+    refuse "the send to the stalled session on port $port was accepted; a push to a port nothing answers must be refused" || return 1
   [ "$api_status" = 404 ] ||
-    refuse "the send to the stalled OpenCode session answered $api_status, not the 404 that names its state" || return 1
-  jq -e --arg s "$opencode_session" \
+    refuse "the send to the stalled session on port $port answered $api_status, not the 404 that names its state" || return 1
+  jq -e --arg s "$target" \
     '(.error | startswith("no live session " + $s)) and .state == "unresponsive" and (.last_seen | numbers)' "$answer" >/dev/null ||
     refuse "the refusal does not name the session's unresponsive state and last_seen: $(head -c 300 "$answer")" || return 1
-  kill -CONT -- -"$opencode_pid" || true
-  note "a send to the stalled OpenCode session on port $opencode_port was refused 404 naming unresponsive"
+  note "a send to the stalled session on serving port $port was refused 404 naming unresponsive"
 }
 
 # ---- 4. a role claim outlives every lookup --------------------------------------------------------------
@@ -1426,7 +1322,7 @@ check_issue_claim_refuses_the_stalled_holder() {
 # its claim. The horizon here is a listener of the run's own at 90s — the same boundary, which ten
 # minutes of waiting would measure no better.
 check_gone_only_past_the_horizon() {
-  local role=ess-kill-$$ victim victim_pid victim_fd killed_at gone_at flight before_new topic
+  local role=ess-kill-$$ victim victim_pid victim_fd killed_at gone_at before_new topic
   write_omp_profile
   omp_launch victim victim_pid victim_fd
   wait_until 240 "the victim session to print ready" grep -q '"type":"ready"' "$work/victim.out" || return 1
@@ -1469,17 +1365,6 @@ check_gone_only_past_the_horizon() {
   note "the role claim was released only once its holder was gone"
   stop_pid "$shortlistener_pid"
   shortlistener_pid=
-  # A clean stop is gone at once, registration still settling and all: the plugin waits for its own
-  # registration to land before it deregisters, so no DELETE can be overtaken and undone.
-  [ -n "$opencode_pid" ] || opencode_start
-  flight=$(opencode_new_session) || refuse "OpenCode would not open a session" || return 1
-  opencode_turn "$flight" "Reply with the single word READY and nothing else." || return 1
-  wait_until 240 "the in-flight session to register" state_is "$port_a" "$flight" '' live || return 1
-  kill -TERM "$opencode_pid" || refuse "could not stop the OpenCode serve" || return 1
-  wait_until 60 "the cleanly stopped session to be gone at once" \
-    state_is "$port_a" "$flight" unresponsive gone || return 1
-  opencode_pid=
-  note "a clean SIGTERM left the OpenCode session gone at once, its registration still settling"
   # /clear mints a new session id; the one it leaves must be gone at once, and a resume inside the
   # 15 minutes the registry remembers a last heartbeat for gets its topics back.
   topic=notifications.team.ess-$$.all
@@ -1509,11 +1394,11 @@ check_gone_only_past_the_horizon() {
 }
 
 # ---- 7. every plugin shows the state ---------------------------------------------------------------------
-# The three hosts each show their model the same two facts about a peer: which state it is in, and
+# Both hosts show their model the same two facts about a peer: which state it is in, and
 # when it was last seen. A host that showed membership of a list instead would show nothing at all
 # when the list dropped a live session, which is the failure this issue is about.
 check_every_plugin_shows_the_state() {
-  local peer=ses_ess_peer_$$ transcript deleted ask
+  local peer=ses_ess_peer_$$ transcript ask
   # The tool takes no `include`: it lists the unresponsive sessions by name on every call, which
   # is the behaviour this check reads. An ask that named one would have every host refuse the call
   # on its arguments (parseEnvoyToolArguments) before it reached the listener.
@@ -1540,30 +1425,7 @@ check_every_plugin_shows_the_state() {
     refuse "Claude Code's envoy_sessions answer shows no state and last_seen" || return 1
   grep -q "$peer" "$work/claude.out" ||
     refuse "Claude Code's envoy_sessions answer does not name the unresponsive peer $peer" || return 1
-  [ -n "$opencode_pid" ] || opencode_start
-  [ -n "$opencode_session" ] || opencode_session=$(opencode_new_session) ||
-    refuse "OpenCode would not open a session" || return 1
-  opencode_turn "$opencode_session" "$ask" || return 1
-  shows_state "$answer" ||
-    refuse "OpenCode's envoy_sessions answer shows no state and last_seen: $(head -c 300 "$answer")" || return 1
-  grep -q "$peer" "$answer" ||
-    refuse "OpenCode's envoy_sessions answer does not name the unresponsive peer $peer" || return 1
-  note "all three hosts showed the peer's state and its last_seen"
-  # Ending a session makes it gone at once, and for OpenCode on either way of ending one.
-  deleted=$(opencode_new_session) || refuse "OpenCode would not open a second session" || return 1
-  opencode_turn "$deleted" "Reply with the single word READY and nothing else." || return 1
-  wait_until 240 "the second OpenCode session to register" state_is "$port_a" "$deleted" '' live || return 1
-  opencode_api DELETE "/session/$deleted" ||
-    refuse "OpenCode would not delete the session: $api_status $(head -c 200 "$answer")" || return 1
-  wait_until 60 "the deleted session to be gone at once" state_is "$port_a" "$deleted" unresponsive gone || return 1
-  note "session.deleted left $deleted gone at once"
-  wait_until 240 "the first OpenCode session to be live" state_is "$port_a" "$opencode_session" '' live || return 1
-  kill -TERM "$opencode_pid" || refuse "could not SIGTERM the OpenCode serve" || return 1
-  wait_until 60 "the SIGTERMed serve's session to be gone at once" \
-    state_is "$port_a" "$opencode_session" unresponsive gone || return 1
-  opencode_pid=
-  opencode_session=
-  note "a SIGTERM to the serve left its session gone at once"
+  note "both hosts showed the peer's state and its last_seen"
 }
 
 # ---- 8. a change to the bucket's maximum age reaches both listeners ---------------------------------------

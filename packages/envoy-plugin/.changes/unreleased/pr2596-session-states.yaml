@@ -1,7 +1,0 @@
-kind: Added
-body: |-
-    The Envoy tools render a session's state, and the session list asks for unresponsive sessions
-    too. A session that ends is `gone` at once rather than after the registry's live window:
-    `session.deleted` deletes the session, and the serve process handles `SIGTERM`, `SIGINT` and
-    `SIGHUP` by deleting every session it served and waiting for each delete, which the exit
-    handler it replaces could not do.

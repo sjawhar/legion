@@ -23,6 +23,16 @@
       "jj": true
     },
     {
+      "script": "ci-red-no-takeover.sh",
+      "go_version_file": "packages/daemon/go.mod",
+      "apt": [],
+      "bun": false,
+      "evidence_variable": "CI_RED_NO_TAKEOVER_EVIDENCE_DIR",
+      "timeout_minutes": 25,
+      "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/ci-red-no-takeover.sh; CI's service satisfies it, and the script starts no container, installing the nats-server it needs with go install",
+      "jj": true
+    },
+    {
       "script": "dispatch-claimant-delivery.sh",
       "go_version_file": "packages/envoy/go.mod",
       "apt": ["postgresql-client"],
@@ -94,7 +104,7 @@
     },
     {
       "script": "envoy-session-states.sh",
-      "needs": "a Legion pod: its own model route for all three agent runtimes (LEGION_E2E_MODEL_BASE_URL, LEGION_E2E_MODEL_KEY_FILE, LEGION_E2E_MODEL_ID and LEGION_E2E_CLAUDE_MODEL), the worker image's Oh My Pi and Claude Code pin, and a loopback PostgreSQL with pgvector (ENVOY_SESSION_STATES_PG_DSN); it starts its own NATS, listeners, Dispatch and OpenCode"
+      "needs": "a Legion pod: its own model route for both agent runtimes (LEGION_E2E_MODEL_BASE_URL, LEGION_E2E_MODEL_KEY_FILE, LEGION_E2E_MODEL_ID and LEGION_E2E_CLAUDE_MODEL), the worker image's Oh My Pi and Claude Code pin, and a loopback PostgreSQL with pgvector (ENVOY_SESSION_STATES_PG_DSN); it starts its own NATS, listeners and Dispatch"
     },
     {
       "script": "multi-repo-acceptance.sh",

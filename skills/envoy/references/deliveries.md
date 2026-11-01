@@ -11,6 +11,7 @@ envoy:
   to: you (ses_example_recipient)
   from: 01a0bbbb-cccc-7ddd-eeee-0123456789ab (Reviewer)
   at: "2026-09-07T04:41:12Z"
+  delivered: "2026-09-07T04:41:13Z"
   id: agent-message-2
   by: "2026-09-07T05:00:00Z"
   urgency: high
@@ -35,10 +36,13 @@ envoy:
 
 - `to`: the local inbox that receives this delivery.
 - `from`: the sending session's self-asserted id, with its session title in parentheses when the envelope carries one. Attribution and a direct-reply target, not an authenticated identity.
-- `at`: the envelope timestamp; judge freshness by it.
+- `at`: when the server that accepted the delivery took it, by that server's clock: the Envoy listener the sender sent through for a session's message or a webhook event, Dispatch's server for a Dispatch event. The sending session sets no time of its own; its machine's clock counts only where that listener runs on the same machine. It is not the present time: a delivery read late carries an old `at`.
+- `delivered`: when this session got the delivery, by this machine's clock. An Oh My Pi session shows it in every model request, beside `at`, or beside `published_at` on a notice that names a message the session could not be shown. A session the host moves to shows when it got the delivery there, which can be later than another session got it. A session that got the delivery before its process restarted can show an estimate of that time, taken from its transcript, never later than the delivery.
+- `waited`: present when `delivered` is 15 minutes or more after the send time, less any clock difference `clocks` states: how long the delivery waited, in words. An old send time on a late delivery says the delivery waited, not that a clock is wrong.
+- `clocks`: present when this machine's clock runs 15 minutes or more ahead of or behind the Envoy listener's, read from the listener's replies, or when `delivered` is 15 minutes or more before the send time less that difference: which way the clocks differ, and by how much. Only this machine's clock and the listener's are measured, so a send time still after the delivery once the measured difference is taken off says the sending server's own clock runs ahead of the listener's. A difference under 15 minutes is not shown and stays in `waited`.
 - `id`: the delivery id; pass it as `in_reply_to` when you reply.
 - `by`: the expiry deadline, when the sender set one.
-- `urgency`: the sender's priority: `low`, `med`, `high` or `blocking`.
+- `urgency`: how soon the sender asks you to act: `low`, `med`, `high` or `blocking`. It is for you to read only: it does not change when a delivery reaches you, or its place among others.
 - `expects_reply`: `none`, `optional` or `required`.
 - `re`: the delivery this one replies to. A Dispatch frame names it as a `dispatch://` ref: the ask (`dispatch://KEY/ask/<id>`, or `dispatch://PROJECT/artifact/<slug>/ask/<id>` for a document ask) or the message (`dispatch://KEY/message/<id>`), never the quoted text. On an ask, `dispatch.question` holds the start of the question's text; `dispatch read` gives the whole.
 - `supersedes`: an earlier delivery this one replaces; act on this one in its place.
@@ -54,7 +58,7 @@ envoy:
 It depends on where a session takes its deliveries, not on whether the topic is built in or your own.
 
 - A session that holds its own NATS connection (every Oh My Pi session, and a Claude Code one) receives every message published on a subject it subscribes to, whoever sent it: its own publish included, and a subagent's publish to a topic the parent subscribes to. This holds for a topic the stream keeps and for a live team topic alike while it is connected. After an outage, once its connection or subscription is back, the session recovers from the stream what was published meanwhile on its own inbox and on each kept topic it follows, up to 72 hours back, and is shown each message once, marked as published while its connection was down. That includes a team topic it registered with the listener (every topic it follows with `envoy_subscribe`): the listener forwards each team topic message to the inbox of every session registered on it but the sender, and the stream keeps that copy. A team topic it subscribes to without registering it is gone for the outage.
-- A session the listener delivers to by push, over a serve port (such as the OpenCode plugin), does not receive its own publish, and receives a team topic only through the listener that owns it when that listener runs with `ENVOY_SUBSCRIBE_ALL_TOPICS=1` (the shared hub's listener does not).
+- A session the listener delivers to by push, over a serve port, does not receive its own publish, and receives a team topic only through the listener that owns it when that listener runs with `ENVOY_SUBSCRIBE_ALL_TOPICS=1` (the shared hub's listener does not).
 - A role is not a subject its holder subscribes to: the listener finds the live holder and forwards the message to it, and drops the message when that holder is the message's source session.
 
 ## Listener API errors

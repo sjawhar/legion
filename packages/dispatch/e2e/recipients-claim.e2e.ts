@@ -12,6 +12,7 @@ import {
   putIssueState,
   releaseClaim,
 } from "./api";
+import { inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -312,7 +313,7 @@ test("unfollowing a follower while a role route's holder is unknown says the rou
   }
 });
 
-test("a route change in a status write moves the open card's route row without a reload, and a close that also moves the route withdraws the card in place", async ({
+test("a route change in a status write moves the open card's route row without a reload, and a close that also moves the route withdraws the card the reader is answering in place", async ({
   browser,
 }) => {
   const moved = "e2e-reach-routed-next";
@@ -340,9 +341,9 @@ test("a route change in a status write moves the open card's route row without a
     const card = page.getByTestId(`ask-${ask.id}`);
     const recipients = card.getByRole("region", { name: "Recipients" });
     await expect(recipients).toContainText("Reaches 2");
-    // Focus stays on this toggle inside the card's row. The Inbox lists an open ask only while its
-    // issue is open, but it holds a row the reader's focus is in where they last saw it, so the
-    // card stays mounted in the Inbox after the close below.
+    // From 1280 px this card is the reading column's: the question the Inbox selected when the
+    // page opened, with the list's short rows beside it. The toggle is in the column, so the
+    // reader's hand is on no row at all.
     await recipients.getByRole("button", { name: /^Reaches/ }).click();
     const viaIssue = recipients.getByRole("list", { name: "Via claim or route" });
     const routeRow = (session: string) =>
@@ -357,13 +358,23 @@ test("a route change in a status write moves the open card's route row without a
     await expect(recipients.locator(`[title='${routed}']`)).toHaveCount(0);
     await expect(recipients).toContainText("Reaches 2");
 
+    // The reader starts answering. A question the server drops leaves the Inbox at once, except
+    // where they have typed an answer to it: the column then keeps that question, closed, until
+    // they select another row (INFRA-575, `dispatch://INFRA-575/spec`). That is what holds this
+    // card in front of the close below.
+    const typed = "Ship it once the route lands.";
+    await card.locator("[data-ask-answer]").fill(typed);
+
     // One PATCH moves the route back and closes the issue. The close withdraws the issue's open
-    // asks, so the mounted card shows its ask withdrawn by the closer and lists no recipient at
-    // all, since nobody can answer it any more.
+    // asks: the row leaves the list at once, and the card the reader was answering shows its ask
+    // withdrawn by the closer where it stands, listing no recipient at all - nobody can answer it
+    // any more - with their unsent text kept under it to copy.
     await patchIssue(issue.key, { route: `session:${routed}`, status: "done" });
     await expect(card).toContainText("Withdrawn when alice closed the issue");
     await expect(recipients).toHaveCount(0);
     await expect(card).toBeVisible();
+    await expect(page.getByTestId("ask-unsent-answer")).toContainText(typed);
+    await expect(inboxRow(page, ask.id)).toHaveCount(0);
   } finally {
     await alice.close();
   }

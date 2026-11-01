@@ -3257,18 +3257,30 @@ export async function executeDispatchTool(
     const owner = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
     // A Dispatch that predates verified service tokens omits the field entirely.
     const service = identity.kind === "agent" ? (identity.service ?? null) : null;
+    // So does one that predates broker-issued tokens, which are the only credential that proves
+    // a session of its own: read either omission as that older build, not as "no session".
+    const proved = identity.kind === "agent" ? (identity.session ?? null) : null;
+    const project = identity.kind === "agent" ? (identity.project ?? null) : null;
+    // The session Dispatch records the writes as: the one the credential proved, else this host's.
+    const session = proved ?? sessionId;
     const unowned =
       "no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.";
+    const acting =
+      owner !== null
+        ? `Session ${session} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.`
+        : service !== null
+          ? // The text names the identity the way every other surface does; details
+            // keeps the subject whole, because that is the persisted value.
+            `Session ${session} runs as service ${serviceSubjectLabel(service)}: ${unowned}`
+          : `Session ${session} runs under the shared token: ${unowned}`;
+    const elsewhere =
+      proved !== null && proved !== sessionId
+        ? ` Your credential names session ${proved}, which is not this host session (${sessionId}): Dispatch records every write you make as ${proved}.`
+        : "";
+    const writable = project !== null ? ` It may write project ${project} and no other.` : "";
     return {
-      text:
-        owner !== null
-          ? `Session ${sessionId} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.`
-          : service !== null
-            ? // The text names the identity the way every other surface does; details
-              // keeps the subject whole, because that is the persisted value.
-              `Session ${sessionId} runs as service ${serviceSubjectLabel(service)}: ${unowned}`
-            : `Session ${sessionId} runs under the shared token: ${unowned}`,
-      details: { session: sessionId, owner, service },
+      text: acting + elsewhere + writable,
+      details: { session, owner, service, project },
     };
   }
   const args = checked.args;

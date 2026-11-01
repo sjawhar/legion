@@ -1614,9 +1614,7 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	if err != nil || result.Refusal != nil {
 		t.Fatalf("complete implementing = %+v, %v", result.Refusal, err)
 	}
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
-		t.Fatalf("end the turn: %v", err)
-	}
+	endTurn(ctx, t, machine, token)
 	implementerLaunches := func() int {
 		n := 0
 		for _, call := range rt.Calls() {
@@ -1770,9 +1768,7 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			// moved to testing: the round-2 task still pending is the finished phase's, and is dropped.
 			apply("handoff:implementer:implementing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: implementer, Commit: "impl-round-2"})
 			due("the move to testing")
-			if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer}); err != nil {
-				t.Fatalf("end the steer's turn: %v", err)
-			}
+			endTurn(ctx, t, machine, implementer)
 			if got := machine.Claim(); got.State != supervise.StateIdle || got.Pending != nil || len(rt.CallsOf("Suspend")) != 0 {
 				t.Fatalf("after round 2's turn the implementer is %s holding %+v with %d suspensions, want idle, holding nothing, never stopped",
 					got.State, got.Pending, len(rt.CallsOf("Suspend")))

@@ -968,8 +968,8 @@ test("the live view shows the session's model next to its title and on the turn 
   expect(turnModel.textContent).toBe("anthropic/claude-opus-5");
 });
 
-// A session whose client never reports a model (Claude Code, OpenCode, or a build too old) shows
-// nothing, in the header or on the turn, rather than a guess.
+// A session whose client never reports a model (Claude Code or a build too old) shows nothing,
+// in the header or on the turn, rather than a guess.
 test("the live view shows nothing for a session whose client reports no model", async () => {
   renderLiveView({
     agentState: {},

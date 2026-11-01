@@ -227,8 +227,8 @@ links to its conversation as it happens, at `/agents/<session>/live`.
   model instead), "This session's Oh My Pi does not tell Dispatch its model and thinking level.",
   or "This session switches its model and thinking level only at its own terminal." A model with
   no adjustable thinking shows `no adjustable thinking`, and a level the model decides shows
-  `model default`. Claude Code and OpenCode sessions don't publish their model or thinking level,
-  so their header is unchanged.
+  `model default`. Claude Code sessions don't publish their model or thinking level, so their
+  header is unchanged.
 - The agent's turns stream in while the page is open. They are relayed, not stored.
 - Your messages to the agent, and its replies through Dispatch, are stored and shown in the same
   thread. A reply through Dispatch is labelled **Reply via Dispatch**.

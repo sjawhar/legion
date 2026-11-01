@@ -491,6 +491,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.checkLook(ctx, row, value)
 	case record.CheckBound:
 		return r.checkBound(ctx, row)
+	case record.PhaseEnded:
+		return r.phaseEnded(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -729,6 +731,45 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 	return nil
 }
 
+// phaseEnded publishes the message of a phase-ended row (record.PhaseEnded) to the Envoy topic of
+// the role whose phase a CI-red transition ended, the claim of that role on the row's issue, and to
+// nothing else. It is no architect notice: it carries one sentence of the daemon's own rather than
+// a Notice, waits behind no other row of its issue (its own lane, record.LaneRoleMessage), and its
+// recipient is the role the workflow named rather than whichever architect owns the issue. The
+// message stops nothing it reaches: pi-envoy hands it to an Oh My Pi session at its next model turn
+// and ends a running wait, the Claude Code bridge puts it in that session's inbox, and the role's
+// turn, jobs and process run on.
+//
+// A topic with no live holder (notify.ErrNoHolder) ends the row with one log line rather than
+// holding it as an architect's notice is held: the role's next task from the daemon names its phase
+// anyway, so a message nobody is there to read is worth nothing later, and a role that never claims
+// its topic — a session that has not registered, or one that failed — would hold the row for ever.
+// The three answers of the confirmed publish route are different failures and keep the ordinary
+// retry: a holder that did not confirm in time (notify.ErrNotDelivered) can take it on the next
+// attempt, a holder that does not advertise the delivery mode (notify.ErrRefusedByHolder) can be
+// replaced by another session on the role, and a forward the listener's own NATS grant denies
+// (notify.ErrPublishDenied) goes through once an operator changes that grant.
+func (r *outbox) phaseEnded(ctx context.Context, row record.OutboxRow, payload record.PhaseEnded) error {
+	if r.notices == nil {
+		return errors.New("phase-ended executor has no Envoy publisher")
+	}
+	token, err := claim.NewToken(r.project, row.Issue, payload.Role)
+	if err != nil {
+		return fmt.Errorf("the %s of %s: %w", payload.Role, row.Issue, err)
+	}
+	message := payload.Message(row.Issue)
+	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(token), message, message, record.OutboxKey(row.ID))
+	if errors.Is(published, notify.ErrNoHolder) {
+		r.log.Info("outbox phase-ended message finished undelivered: no live session holds the role",
+			"row", row.ID, "issue", row.Issue, "role", payload.Role, "from", payload.From, "to", payload.To)
+		return nil
+	}
+	if published != nil {
+		return fmt.Errorf("publish the end of %s's %s phase to its %s: %w", row.Issue, payload.From, payload.Role, published)
+	}
+	return nil
+}
+
 // controllerNotice publishes a controller notice row to the controller topic of the daemon's own
 // project, the one its controller subscribes to, and to nothing else: the Notice it is, under the
 // row's own key.
@@ -822,27 +863,15 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return err
 			}
 		}
-		// An operator's suspension holds its claim until the operator resumes
-		// it: the start, and the task it gives, wait on the row's backoff, before a quiesce
-		// interrupts the role whose phase it would take over. StartedBy refuses the same in the
-		// claim's own decision. A check start does not wait: its look cannot run, and ends
-		// (checkLookHeld).
+		// An operator's suspension holds its claim until the operator resumes it: the start, and the
+		// task it gives, wait on the row's backoff. StartedBy refuses the same in the claim's own
+		// decision. A check start does not wait: its look cannot run, and ends (checkLookHeld).
 		if found {
 			if held := machine.Claim(); held.RuleHolds() {
 				if payload.CheckLook > 0 {
 					return r.checkLookHeld(ctx, row, payload, *check)
 				}
 				return fmt.Errorf("start %s of %s: %w", payload.Role, issue.Key, held.RuleHoldError())
-			}
-		}
-		// A start that takes the phase over from a role still at work in it (CI settled red before
-		// that role completed) does nothing — no claim, no working-copy adoption, no task — until
-		// that role's turn is over (supervise.Machine.Quiesce), so the two never write the shared
-		// workspace together. A retry of a start that has already run against its claim (the claim's
-		// newest start, which StartedBy persists) is past that wait.
-		if payload.Quiesce != "" && (!found || machine.Claim().LastStartRow < row.ID) {
-			if err := r.quiesce(ctx, row, issue.Key, payload.Quiesce); err != nil {
-				return err
 			}
 		}
 		if !found {
@@ -936,9 +965,11 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		}
 		if payload.Task != "" {
 			// The row's phase, already held to the issue's above, travels with the delivery: it is
-			// what says the task is still the work to do once the delivery has outlived its id.
+			// what says the task is still the work to do once the delivery has outlived its id. The
+			// row's assignment travels with it too, the one the start's own transaction wrote on the
+			// role's phases row: it is what the completion this task's turn reports is held to.
 			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, Phase: payload.Phase, Generation: payload.Generation,
-				ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID)}); err != nil {
+				Assignment: payload.Assignment, ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID)}); err != nil {
 				return fmt.Errorf("deliver to claim %s: %w", token, err)
 			}
 		}
@@ -1130,27 +1161,6 @@ func (r *outbox) stopWithoutMachine(ctx context.Context, row record.OutboxRow, t
 	}
 	if pending {
 		return wait.Errorf("stop claim %s: waiting for its stored claim's supervising machine", token)
-	}
-	return nil
-}
-
-// quiesce asks the claim of role on issue, whose phase the start row takes over, to be out of its
-// turn (supervise.Machine.Quiesce): nil once it is, supervise.ErrQuiesceHeld while it is not, which
-// the runner retries on its backoff. A role with no claim runs nothing.
-func (r *outbox) quiesce(ctx context.Context, row record.OutboxRow, issue string, role claim.Role) error {
-	token, err := claim.NewToken(r.project, issue, role)
-	if err != nil {
-		return fmt.Errorf("derive the claim outbox row %d takes over from: %w", row.ID, err)
-	}
-	outgoing, found := r.supervisor.Machine(token)
-	if !found {
-		return nil
-	}
-	if err := outgoing.Quiesce(ctx, row.ID); err != nil {
-		return err
-	}
-	if row.Attempts > 0 {
-		r.log.Info("outbox start goes on: the claim it takes the phase from is out of its turn", "row", row.ID, "issue", issue, "role", role)
 	}
 	return nil
 }
