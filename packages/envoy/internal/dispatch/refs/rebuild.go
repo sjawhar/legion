@@ -185,29 +185,53 @@ func sourceText(ctx context.Context, q Queryer, kind, id string) (string, time.T
 	}
 	var body string
 	var writtenAt time.Time
-	found, err := foundSourceText(q.QueryRow(ctx, read, id).Scan(&body, &writtenAt), kind, id)
-	return body, writtenAt, found, err
+	switch err := q.QueryRow(ctx, read, id).Scan(&body, &writtenAt); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return "", time.Time{}, false, nil
+	case err != nil:
+		return "", time.Time{}, false, fmt.Errorf("read the text of %s %s: %w", kind, id, err)
+	}
+	return body, writtenAt, true, nil
 }
 
-// foundSourceText reads err, the answer of sourceRead's statement: no row is a source that does
-// not exist rather than a failure.
-func foundSourceText(err error, kind, id string) (bool, error) {
+// readSourceUnderOwner takes the owner lock of reference source kind id (sourceOwner) and runs
+// read, the statement that lock guards, in the statement after it, scanning its one row into dest.
+// It is how a background pass reads a source it is about to re-index (ReindexOwedItem,
+// IndexOwedItemBlocks): the lock excludes every writer of that source, and the read sees what the
+// lock's previous holder committed. A source whose owner is nil - a direct message, whose
+// conversation is no owner - is read with no lock, since nothing rewrites a message's body.
+// found is false when the source is gone, before the lock or while the pass waited for it: no row
+// is a source that does not exist rather than a failure.
+func readSourceUnderOwner(ctx context.Context, tx pgx.Tx, kind, id, read string, dest ...any) (bool, error) {
+	owner, found, err := sourceOwner(ctx, tx, kind, id)
+	if err != nil || !found {
+		return false, err
+	}
+	// The owner's lock, then the read in a statement of its own (store.LockOwnerAndRead): that
+	// statement's snapshot is taken once the lock is granted, so it holds everything the lock's
+	// previous holder committed, an edit of this source among it.
+	if owner != nil {
+		err = store.LockOwnerAndRead(ctx, tx, *owner, read, []any{id}, dest...)
+	} else {
+		err = tx.QueryRow(ctx, read, id).Scan(dest...)
+	}
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return false, nil
 	case err != nil:
-		return false, fmt.Errorf("read the text of %s %s: %w", kind, id, err)
+		return false, fmt.Errorf("read %s %s under its owner: %w", kind, id, err)
 	}
 	return true, nil
 }
 
 // sourceOwner is the owner whose lock every writer of reference source kind id takes, and which a
-// re-index of its text takes before it reads it (ReindexOwedItem, IndexOwedItemBlocks): the issue
-// of an issue's document, comment, ask or issue message (api.ownerForArtifact, api.ownerOf,
+// re-index of its text takes before it reads it (readSourceUnderOwner): the issue of an issue's
+// document, comment, ask or issue message (api.ownerForArtifact, api.ownerOf,
 // api.createStoredMessage), and the artifact of a document no issue owns and of the comments and
-// asks on it (the owner api.lockedComment locks). A direct message has none: its conversation is
-// no owner, and no site rewrites a message's body. The read takes no lock, since no source moves
-// between owners. found is false when the source is gone.
+// asks on it (the owner api.lockedComment locks). The issue-else-document rule is store.OwnerOf's,
+// which holds it for every caller. A direct message has none: its conversation is no owner, and no
+// site rewrites a message's body. The read takes no lock, since no source moves between owners.
+// found is false when the source is gone.
 func sourceOwner(ctx context.Context, q Queryer, kind, id string) (*store.Owner, bool, error) {
 	var query string
 	switch kind {
@@ -229,15 +253,7 @@ func sourceOwner(ctx context.Context, q Queryer, kind, id string) (*store.Owner,
 	case err != nil:
 		return nil, false, fmt.Errorf("read the owner of %s %s: %w", kind, id, err)
 	}
-	switch {
-	case issueKey != nil:
-		owner := store.IssueOwner(*issueKey)
-		return &owner, true, nil
-	case artifactID != nil:
-		owner := store.ArtifactOwner(*artifactID)
-		return &owner, true, nil
-	}
-	return nil, true, nil
+	return store.OwnerOf(issueKey, artifactID), true, nil
 }
 
 // OwedItem is one comment, ask or issue message owed an index with the block grammar
@@ -275,12 +291,15 @@ func OwedItems(ctx context.Context, q Queryer, limit int) ([]OwedItem, error) {
 // ReindexOwedItem reconciles one owed item's refs with its text, read with this build's grammar,
 // and settles its owed row, in one transaction. It takes the source's owner lock (sourceOwner),
 // the lock every writer of that text takes, and reads the text in the statement after it
-// (sourceRead), so an edit committed while it waited is the text it indexes; a direct message,
-// whose conversation is no owner, has no such lock and needs none, since nothing rewrites a
-// message's body. It takes no source row: a row lock would assign the transaction a transaction
-// id to hold through everything it reads and plans, and under the owner lock it excludes nothing
-// the owner lock does not. Reading and planning come first and its writes follow back to back
-// (IndexItem, replaceRefs, the owed row's delete), as every Dispatch write transaction runs.
+// (readSourceUnderOwner, sourceRead), so an edit committed while it waited is the text it indexes;
+// a direct message, whose conversation is no owner, has no such lock and needs none, since nothing
+// rewrites a message's body. It takes no source row: a row lock would assign the transaction a
+// transaction id to hold through everything it reads and plans, and under the owner lock it
+// excludes nothing the owner lock does not. Everything it writes is read and planned first, under
+// that lock and with no transaction id held - a comment's or a message's block index
+// (ReadItemIndex, PlanItemIndex) and the references the text cites (PlanReplace) - and its writes
+// then go as one batch, in that order with the owed row's delete last (store.RunWrite), as every
+// Dispatch write transaction runs.
 //
 // Dropping that row lock leaves no deadlock with the trigger that writes the owed row: the
 // trigger fires on the edit's update of the text, in the edit's write phase, under the owner lock
@@ -291,7 +310,7 @@ func OwedItems(ctx context.Context, q Queryer, limit int) ([]OwedItem, error) {
 // time the text was written and no source_seq, since no event introduced it, as a rebuild's does;
 // a re-index of text no one rewrote appends no event, as rebuild-refs appends none. An item whose
 // source is gone has its edges deleted with its owed row. A comment or message has its blocks
-// indexed too (IndexItem, which takes the item's state row in its first queued write), so the
+// indexed too (PlanItemIndex, whose first queued statement takes the item's state row), so the
 // mentions its blocks hold are read with the same grammar as its own.
 func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL string) error {
 	read, err := sourceRead(item.Kind, item.ID)
@@ -303,42 +322,47 @@ func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL st
 		return err
 	}
 	defer tx.Rollback(ctx)
-	owner, found, err := sourceOwner(ctx, tx, item.Kind, item.ID)
+	var body string
+	var writtenAt time.Time
+	found, err := readSourceUnderOwner(ctx, tx, item.Kind, item.ID, read, &body, &writtenAt)
 	if err != nil {
 		return err
 	}
-	var body string
-	var writtenAt time.Time
-	if found {
-		// The owner's lock, then the text in a statement of its own (store.LockOwnerAndRead):
-		// that statement's snapshot is taken once the lock is granted, so it holds everything the
-		// lock's previous holder committed, an edit of this text among it.
-		if owner != nil {
-			err = store.LockOwnerAndRead(ctx, tx, *owner, read, []any{item.ID}, &body, &writtenAt)
-		} else {
-			err = tx.QueryRow(ctx, read, item.ID).Scan(&body, &writtenAt)
-		}
-		if found, err = foundSourceText(err, item.Kind, item.ID); err != nil {
-			return err
-		}
-	}
+	kind := ItemKind(item.Kind)
+	blocks := found && (kind == ItemComment || kind == ItemMessage)
+	var indexing ItemIndexing
+	var replacement Replacement
 	if found {
 		located := text.ExtractAt(body, serverURL)
-		if kind := ItemKind(item.Kind); kind == ItemComment || kind == ItemMessage {
-			if _, err := IndexItem(ctx, tx, kind, item.ID, body, writtenAt, located, nil); err != nil {
+		if blocks {
+			index, err := ReadItemIndex(ctx, tx, kind, item.ID)
+			if err != nil {
+				return fmt.Errorf("index the blocks of %s %s: %w", item.Kind, item.ID, err)
+			}
+			if indexing, err = PlanItemIndex(index, kind, item.ID, body, writtenAt, located, nil); err != nil {
 				return fmt.Errorf("index the blocks of %s %s: %w", item.Kind, item.ID, err)
 			}
 		}
-		if _, err := replaceRefs(ctx, tx, item.Kind, item.ID, text.Refs(located), &writtenAt); err != nil {
+		if replacement, err = PlanReplace(ctx, tx, item.Kind, item.ID, text.Refs(located), &writtenAt); err != nil {
 			return fmt.Errorf("index %s %s: %w", item.Kind, item.ID, err)
 		}
-	} else if _, err := tx.Exec(ctx, `delete from refs where from_kind = $1 and from_id = $2`, item.Kind, item.ID); err != nil {
-		return fmt.Errorf("delete the references of %s %s, which is gone: %w", item.Kind, item.ID, err)
 	}
-	if _, err := tx.Exec(ctx, `
-		delete from block_grammar_owed where kind = $1 and id = $2::uuid and enqueued_at = $3
-	`, item.Kind, item.ID, item.EnqueuedAt); err != nil {
-		return fmt.Errorf("settle the block index owed by %s %s: %w", item.Kind, item.ID, err)
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		if found {
+			if blocks {
+				indexing.Queue(b)
+			}
+			replacement.Queue(b)
+		} else {
+			b.Queue(fmt.Sprintf("delete the references of %s %s, which is gone", item.Kind, item.ID),
+				`delete from refs where from_kind = $1 and from_id = $2`, item.Kind, item.ID)
+		}
+		b.Queue(fmt.Sprintf("settle the block index owed by %s %s", item.Kind, item.ID), `
+			delete from block_grammar_owed where kind = $1 and id = $2::uuid and enqueued_at = $3
+		`, item.Kind, item.ID, item.EnqueuedAt)
+		return nil
+	}); err != nil {
+		return fmt.Errorf("re-index %s %s with this build's grammar: %w", item.Kind, item.ID, err)
 	}
 	return tx.Commit(ctx)
 }

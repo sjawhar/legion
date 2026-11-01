@@ -701,14 +701,14 @@ func OwedItemBlocks(ctx context.Context, q Queryer, limit int) ([]OwedItemBlock,
 }
 
 // IndexOwedItemBlocks indexes one owed comment or message in a transaction of its own and reports
-// whether it indexed it. It takes the item's owner lock (sourceOwner), the lock every writer of the
-// item takes, and reads the item in the statement after it, so a write committed while it waited
-// is seen; a direct message, whose conversation is no owner, has no such lock and needs none,
-// since nothing ever rewrites a message's body. It takes no item row: a row lock would assign the
-// transaction a transaction id to hold through everything it reads and plans, and under the owner
-// lock it excludes nothing the owner lock does not. Reading and planning come first and its
-// writes follow back to back (IndexItemIfOwed), as every Dispatch write transaction runs. A new
-// block and a new mention take the time the item's body was written: a comment's
+// whether it indexed it. It takes the item's owner lock (readSourceUnderOwner), the lock every
+// writer of the item takes, and reads the item in the statement after it, so a write committed
+// while it waited is seen; a direct message, whose conversation is no owner, has no such lock and
+// needs none, since nothing ever rewrites a message's body. It takes no item row: a row lock would
+// assign the transaction a transaction id to hold through everything it reads and plans, and
+// under the owner lock it excludes nothing the owner lock does not. Reading and planning come
+// first and its writes follow back to back (IndexItemIfOwed), as every Dispatch write transaction
+// runs. A new block and a new mention take the time the item's body was written: a comment's
 // coalesce(edited_at, created_at), a message's created_at. An item a write site indexed since it
 // was listed is no longer owed and is left alone; one deleted since, before the lock or while it
 // waited, took its state row with it (on delete cascade), so nothing is owed.
@@ -722,25 +722,11 @@ func IndexOwedItemBlocks(ctx context.Context, pool Pool, item OwedItemBlock, ser
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	owner, found, err := sourceOwner(ctx, tx, string(item.Kind), item.ID)
-	if err != nil || !found {
-		return false, err
-	}
-	// The owner's lock, then the item's read in a statement of its own (store.LockOwnerAndRead):
-	// that statement's snapshot is taken once the lock is granted, so it holds everything the
-	// lock's previous holder committed, an edit of the item among it.
 	read := `select true from ` + tables.items + ` where id = $1::uuid`
 	var present bool
-	if owner != nil {
-		err = store.LockOwnerAndRead(ctx, tx, *owner, read, []any{item.ID}, &present)
-	} else {
-		err = tx.QueryRow(ctx, read, item.ID).Scan(&present)
-	}
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return false, nil
-	case err != nil:
-		return false, fmt.Errorf("read %s %s under its owner: %w", item.Kind, item.ID, err)
+	found, err := readSourceUnderOwner(ctx, tx, string(item.Kind), item.ID, read, &present)
+	if err != nil || !found {
+		return false, err
 	}
 	indexed, err := IndexItemIfOwed(ctx, tx, item.Kind, item.ID, serverURL)
 	if err != nil {

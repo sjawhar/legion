@@ -42,6 +42,24 @@ func ArtifactOwner(id string) Owner { return Owner{Kind: OwnerArtifact, Key: id}
 // ProjectOwner is the project key's owner.
 func ProjectOwner(key string) Owner { return Owner{Kind: OwnerProject, Key: key} }
 
+// OwnerOf is the owner of a row that names the issue it belongs to, the document it belongs to, or
+// neither: the issue when it names one, since an issue owns its document and every comment, ask
+// and message under it, and otherwise the document, which owns the comments and asks on a document
+// no issue owns. A row naming neither has no owner and nil is returned, a direct message among
+// them, whose conversation is no owner. The rule is one rule, so every reader and writer of such a
+// row takes the same lock (refs.sourceOwner).
+func OwnerOf(issueKey, artifactID *string) *Owner {
+	switch {
+	case issueKey != nil:
+		owner := IssueOwner(*issueKey)
+		return &owner
+	case artifactID != nil:
+		owner := ArtifactOwner(*artifactID)
+		return &owner
+	}
+	return nil
+}
+
 // lockKey is the text whose hashtext is the lock's second key: `<kind>:<key>`, the same spelling
 // the event broker orders owners by.
 func (o Owner) lockKey() string { return string(o.Kind) + ":" + o.Key }
