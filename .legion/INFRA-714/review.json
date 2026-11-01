@@ -2,23 +2,53 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-714",
-  "previousHandoff": "b1a3a05cdff33d649cf1a7d56db4f32dc4840872",
+  "previousHandoff": "16eb13fa2f8d8dcbfd9d6d7489042eba96910e7e",
   "round": 4,
-  "headReviewed": "the head this push makes: a7ca2d50b6 (my prose commit) on e2167fa388; code head b42d5725e0",
-  "decision": "approved",
+  "headReviewed": "the head this push makes, on 16eb13fa (my prose commit a7ca2d50 on e2167fa3); code head b42d5725e0",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
+  "important": 1,
   "minor": 6,
   "thermonuclear": "deep-review and code-quality both ran at e2167fa3; both APPROVE with minors only. Each re-ran round 3's probes with its own go test -overlay files over LEGION_TEST_PG_DSN.",
   "roundThreeVerified": "1 stuck-merge-state notice reads only the current head's own runs (classify.ChecksConcludedOnHead, decisions.go:702; review.go:616): probe with the reviewer's handoff push head->head-2 gives 0 notices and no told mark while head-2's CI runs, then exactly 1 after head-2 settles and stays blocked, also when the code head was blocked before the approval. 2 CI merged per check run (settlement.go:73 Mixed applied, mergeAttemptSets + concludedBy): handoff pr-title first then code head red unit -> failing=[unit] and told; code-head re-run passing clears it; redelivery stale. 3 Abandoned.Told set in acked (table.go:903-912), a refused prompt keeps it untold; negative control re-adding the old line fails the test. 4 SendInFlight published (machine.go:836) and counted (supervisor.go:105); claimInTurn iterates the lock-free supervised() snapshot. Minors 5-12 of round 3 verified fixed.",
   "a10": "Accepted departure verified: issueClose keeps Session and SessionFile, readSessionStore refuses pvc (config/kubernetes.go:1215-1226), a missing session becomes ErrSessionFileMissing -> startFresh with the loss reported. Tester's gap: no extra test needed; supervise/issue_close_test.go:65,68,107,119 and daemon/outbox_issue_suspend_test.go:674,736 assert the id is kept.",
   "proseFixedByReviewer": "a7ca2d50: docs/kubernetes.md:1187 and supervise/table.go RequestIssueClose doc (close keeps the whole session, reopen resumes); outbox_issue_suspend_test.go comments citing the nonexistent supervise.Deps.SessionOnIssueVolume; workflow/table.go conflict-trigger comment naming the deleted quiesce/takenOver; history narration in classify/settlement.go, workflow/review.go, workflow/engine.go.",
   "keyFindings": [
-    {"severity": "minor", "file": "packages/daemon/internal/supervise/table.go:1427", "description": "Not a defect: issueClose's body is now the same as Machine.end; could return m.end(ctx) as treeClose does."},
-    {"severity": "minor", "file": "packages/daemon/internal/classify/decisions.go:704", "description": "Not a defect: the run-on-current-head test is written here and at workflow/review.go:217, and stuckMergeStateReason relies on the two agreeing; one classify helper would make that hold by construction."},
-    {"severity": "minor", "file": "packages/daemon/internal/supervise/issue_close_test.go:28", "description": "Not a defect: closingHarness duplicates newHarness, and reopen_resumes_session_test.go repeats TestAReopenedClaimResumesTheSessionItKept with a header describing e2236b4e."},
-    {"severity": "minor", "file": "packages/daemon/internal/daemon/supervisor.go:255", "description": "Not a defect: a hold behind another claim's send that ends without a turn waits for the next sweep, hello or ready rather than an IssueTurnEnded; latency bounded by the probe interval, nothing stranded."},
-    {"severity": "minor", "file": "packages/daemon/internal/classify/decisions.go:704", "description": "Not a defect, documented fail-closed (record.go:30-35): fence runs from before the upgrade carry no head, so such a head gets no stuck notice until it settles again; loses a notice, never a move."},
-    {"severity": "minor", "file": "docs/kubernetes.md:1187", "description": "Fixed by me in a7ca2d50, with the other stale prose listed above."}
-  ]
+    {
+      "severity": "important",
+      "file": "(pull request)",
+      "description": "The head conflicts with main (27 files on both sides), so GitHub runs no CI and the required checks cannot pass. Merge main forward. The code of this round is otherwise approvable: no correctness finding stands, and the four round-3 blockers are fixed and re-proven by probe."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/supervise/table.go:1427",
+      "description": "Not a defect: issueClose's body is now the same as Machine.end; could return m.end(ctx) as treeClose does."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/classify/decisions.go:704",
+      "description": "Not a defect: the run-on-current-head test is written here and at workflow/review.go:217, and stuckMergeStateReason relies on the two agreeing; one classify helper would make that hold by construction."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/supervise/issue_close_test.go:28",
+      "description": "Not a defect: closingHarness duplicates newHarness, and reopen_resumes_session_test.go repeats TestAReopenedClaimResumesTheSessionItKept with a header describing e2236b4e."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/daemon/supervisor.go:255",
+      "description": "Not a defect: a hold behind another claim's send that ends without a turn waits for the next sweep, hello or ready rather than an IssueTurnEnded; latency bounded by the probe interval, nothing stranded."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/classify/decisions.go:704",
+      "description": "Not a defect, documented fail-closed (record.go:30-35): fence runs from before the upgrade carry no head, so such a head gets no stuck notice until it settles again; loses a notice, never a move."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md:1187",
+      "description": "Fixed by me in a7ca2d50, with the other stale prose listed above."
+    }
+  ],
+  "ci": "No CI can run: GitHub reports the pull request CONFLICTING (mergeStateStatus DIRTY) against main d86f8de8 / 0cf0edcd, 27 files changed on both sides since fork point 7285fd05 (admit.go, daemon/outbox.go, workflow.go, intake/facts.go, record/*.go, workflow/gate.go, skills/legion-controller, docs site among them). No github-actions suite was created for 16eb13fa in 15 minutes while other branches got runs. Run 41301854655 at b42d5725 still queued. The running daemon (contract 43) has not moved the issue for the conflict."
 }
