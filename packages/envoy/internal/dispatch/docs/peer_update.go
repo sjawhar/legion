@@ -1594,15 +1594,15 @@ const applyHeapBound = heapAboveTheReserve / 3
 // whose budget is full keeps every byte of garbage the limit allows - the budget's unused room,
 // both heap bounds and this slack together - and the memory it holds parks under the limit. That
 // memory is what a pod's kernel charges it: what the runtime holds less what it has released,
-// which is the figure the limit bounds. Measured on 2026-10-29 with the real-process drive of the
+// which is the figure the limit bounds. Measured on 2026-11-01 with the real-process drive of the
 // worst case the bounds allow (cmd/dispatch,
 // TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory, three steps: the budget filled,
 // the cold reads' cache filled, the heaviest handoffs applying beside full copy bounds), it peaked
-// by step at 2,563, 3,605 and 3,665 MiB of the pod's 4,096, 431 MiB under it, the drive taking
-// 402 s and the keystrokes a person typed through both heavy steps answered in a 99th percentile
-// of 185 ms.
+// by step at 2,856, 3,620 and 3,237 MiB of the pod's 4,096, 476 MiB under it, the drive taking
+// 405 s and the keystrokes a person typed through both heavy steps answered in a 99th percentile
+// of 92 ms.
 //
-// The VmRSS that run read was 2,601, 3,615 and 4,171 MiB, the last past the pod, and is not what a
+// The VmRSS that run read was 2,862, 3,625 and 3,749 MiB, each above the charge, and is not what a
 // pod is charged: this repository's sandboxes run under gVisor, whose VmRSS keeps every page the
 // runtime has handed back unless the madvise(MADV_DONTNEED) that released it covered 2 MiB or
 // more, and the scavenger releases in smaller pieces (cmd/dispatch, peakResident, which reads the

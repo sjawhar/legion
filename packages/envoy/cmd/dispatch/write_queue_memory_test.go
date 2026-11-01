@@ -591,8 +591,9 @@ func (s *throttledReader) leave() {
 // tens of bytes of awareness the socket that never reads adds by joining and leaving the room
 // while the slow browser is still draining.
 //
-// Measured on 2026-10-31 over four runs, the last under sjawhar/ygo v1.54.1-sami.3: 200
-// keystrokes and a handoff of 3,008,463 to 3,008,663 bytes took 49.657 to 55.575 s and left the
+// Measured on 2026-10-31 and 2026-11-01 over five runs, the last two under sjawhar/ygo
+// v1.54.1-sami.3: 200
+// keystrokes and a handoff of 3,008,463 to 3,008,663 bytes took 49.657 to 59.138 s and left the
 // slow browser 3,008,506 to 3,009,102 bytes behind
 // when the burst ended - nearly all of it the relayed handoff - 4.78 per cent of its
 // 62,914,560-byte budget, and under half the 6,291,456 bytes the budget clears the largest frame

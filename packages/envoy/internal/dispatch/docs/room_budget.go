@@ -1345,8 +1345,8 @@ func (s *Service) storedRoomReservation(ctx context.Context, room string) (int64
 // beside the other work that sandbox was carrying, the eleven were refused in 23.2 s and the last
 // admitted at 1m27.7s, the decodes of those rooms' loads most of it, which ask for six times the
 // bound's time the counts do. At the price of 500 the budget holds thirty-seven such rooms, and
-// the run of 2026-10-31 under sjawhar/ygo v1.54.1-sami.3 refused the thirteen in 11.2 s and
-// admitted the last at 1m13.5s
+// the run of 2026-11-01 under sjawhar/ygo v1.54.1-sami.3 refused the thirteen in 10.5 s and
+// admitted the last at 1m15.2s
 // (TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays). The grant is covered inside the
 // transaction the count already holds, so no holder of the bound waits for a pooled connection
 // (copyHeaps).
