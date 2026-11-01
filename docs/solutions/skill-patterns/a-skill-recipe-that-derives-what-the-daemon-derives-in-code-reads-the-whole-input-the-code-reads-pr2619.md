@@ -41,7 +41,7 @@ sjawhar/legion#2619 (LEGION-755) rewrote the controller's setter rule in
 200 events; the daemon reads the whole log (`packages/daemon/internal/intake/label_setter.go:25`,
 over `EventsAfter(key, 0)` in `packages/daemon/internal/daemon/repositories.go:1280`). On a root
 with more than 200 events whose label was removed and set again late, the two would name different
-setters. The reviewer found it (`.legion/LEGION-755/review.json`, `keyFindings[0]`) and fixed it in
-commit `3f22ff3869b12001d80e02c4ff62fc8523ac30f8` (`triage.md:31-35` now pages with `&after=` and
-says the daemon reads the whole log), re-running A5's greps and
-`packages/pi-legion/src/skills-guard.test.ts` on the edited file.
+setters. The reviewer found it and fixed it in commit `3f22ff3869b12001d80e02c4ff62fc8523ac30f8`
+(`triage.md:31-35` now pages with `&after=` and says the daemon reads the whole log), re-running
+A5's greps and `packages/pi-legion/src/skills-guard.test.ts` on the edited file; its approval of
+sjawhar/legion#2619 (review 5726715630) lists the fix.

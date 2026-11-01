@@ -70,6 +70,6 @@ unless named otherwise:
   `listing`) and `packages/daemon/internal/workflow/gate.go:581` (`approval`); counted by
   `personHandoverLogLines` at `:590`; the boot proof's `listing` = 1 and `event` = 0 at
   `TestABootListingQueuesAPersonsLabelAgainstScratchDispatch` (`:956`).
-- The tester's independent rig (`.legion/LEGION-755/test.json`, `implementerProof.how`) re-ran the
-  three tests and added live negatives on the same anchors: a park and a label removal between the
-  queue and the delivery, each read after the delivery's own log line.
+- The tester's independent rig (the `E2E (tester)` line of sjawhar/legion#2619) re-ran the three
+  tests and added live negatives on the same anchors: a park and a label removal between the queue
+  and the delivery, each read after the delivery's own log line.

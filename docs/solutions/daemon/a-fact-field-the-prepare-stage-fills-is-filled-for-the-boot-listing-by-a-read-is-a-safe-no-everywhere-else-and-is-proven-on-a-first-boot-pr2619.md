@@ -90,6 +90,6 @@ sjawhar/legion#2619 (LEGION-755), which has the daemon queue a person's handover
   `admit.go:420` and `gate.go:578`.
 - The first-boot proof: `TestABootListingQueuesAPersonsLabelAgainstScratchDispatch`
   (`person_handover_scratch_dispatch_test.go:956`), whose doc comment names the premise at
-  `packages/daemon/internal/intake/consume.go:248` (`DeliverNewPolicy`); the tester's handoff
-  (`test.json`, `proof[2]`) read one line with `source=listing`, none with `source=event`, and no
-  second row after the second boot.
+  `packages/daemon/internal/intake/consume.go:248` (`DeliverNewPolicy`) and whose assertions read
+  one line with `source=listing`, none with `source=event`, and no second row after the second
+  boot; the tester re-ran it on a rig of its own (the `E2E (tester)` line of sjawhar/legion#2619).

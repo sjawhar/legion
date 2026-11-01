@@ -43,7 +43,8 @@ sjawhar/legion#2619 (LEGION-755) adds `StatusWrite.PersonHandover`
 (`packages/daemon/internal/record/outbox.go:122`, `json:"personHandover,omitempty"`), read by
 `record.Postgres.PersonHandoverPending` (`record/store.go:1127`) and by the status executor's
 label guard (`packages/daemon/internal/daemon/outbox.go:522`). The decoder's strictness is
-`record/outbox.go:558` (`decoder.DisallowUnknownFields()`). The reviewer's handoff
-(`.legion/LEGION-755/review.json`, `keyFindings[2]`) names the rollback window and the held later
-rows, and the pull request body's "Not proven / risk" carries it as the deploy note; the plan (D1)
-chose the field over a kind so the existing `dispatch_status` executor delivers the row.
+`record/outbox.go:558` (`decoder.DisallowUnknownFields()`). The reviewer's approval of
+sjawhar/legion#2619 (review 5726715630, its inline note at `record/outbox.go:122`) names the
+rollback window and the held later rows, and the pull request body's "Not proven / risk" carries
+it as the deploy note; the plan (D1) chose the field over a kind so the existing `dispatch_status`
+executor delivers the row.
