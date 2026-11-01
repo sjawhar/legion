@@ -2,25 +2,15 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-625",
-  "completed": "2026-11-01T11:53:00Z",
-  "round": 5,
-  "reviewedCodeHead": "a7c72b55e772",
-  "codeUnderReview": "3c7c64c189 plus the reviewer's prose commit a7c72b55",
-  "decision": "changes_requested",
+  "completed": "2026-11-01T14:17:00Z",
+  "round": 6,
+  "reviewedCodeHead": "615064010f1cfd28f18fdddb714ccd57dda97a2e",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "ciRead": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. Run 41288413692 at a7c72b55 (the run at 3c7c64c1, 41285902474, was cancelled by that push). Attempt 1: lint, typecheck, test, dispatch-memory and every other lane green; dispatch red in 'Test dispatch dashboard', job 124798054818: MarkdownBody.test.tsx:1241 'rebuilds a body holding a picture…' expect(pendingMark).toBeNull() received \"true\", so Playwright never ran. I re-ran the failed job once (attempt 2, job 124821220790): unit tests and 'Browser-test dispatch dashboard' green, 1512 passed, 34 skipped, none flaky; among them in WebKit and Firefox the page-parsed rows ('49 list markers … just under the worker's threshold', '500 list items, just under …'), the write row (heavy-document-writes, chromium, ratio and 1,000 ms bound), and the streamed-turn row in all three engines.",
-  "thermonuclear": "Both run once at 3c7c64c1: deep-review APPROVE (2 minor), code-quality CHANGES (3 low). Every finding was prose; fixed by the reviewer in a7c72b55.",
-  "roundFourFindings": "D3 holds: LoadDoc's own defer recovers a panic and calls failRoomLoad on the load's goroutine before ygo's barrier closes; applyRoom, failUnfinishedLoad, roomLoadWaitedOn, roomLoadNumber, loadsBegun and the numbering are deleted; the ten call sites are s.srv.Apply as on main. TestALoadThatPanicsFailsItsRoomWhereThePanicIsMet, TestLoadFailureMakesDocumentServiceUnavailable and TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable pass against a test Postgres (reviewer's run, with DISPATCH_TEST_DATABASE_URL). The three minors hold: the write spec runs in chromium only, sawAFrameText is gone and the streamed-turn row is its own spec, and the fragment's '53 MiB where it allocated 98' is measured against main with #2522 (deep review re-measured 44 % less on a one-paragraph document).",
-  "proseFixedByReviewer": [
-    "heavy-bodies-page.ts docblock: only the streamed-turn spec reads loose text.",
-    "heavy-streamed-turn.e2e.ts header: 'Heavy bodies drawn where a reader only opens them', not 'The same bodies'.",
-    "heavy-document-writes.e2e.ts: the 8,000 items and the bracket run are the first document write of their shape, not the first parse: heavy-bodies.e2e.ts creates comments holding the same bytes first on the same server.",
-    "websocket.go LoadDoc: the panic error no longer repeats 'loading room %q', which ygo already wraps (server.go:1916).",
-    "PR body: removed the D3-window bullet, the load-identity sentence naming deleted code, and the old two-count annotation."
-  ],
-  "keyFindings": [
-    {"severity": "important", "file": "packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx", "description": "The sliced-paint rows race the paint's done(): the last batch ends its task on 'page', and done() (which clears data-markdown-pending) runs in the next setTimeout task, so a waitFor on the item count can pass while the element is still pending and the next line's expect(pendingMark).toBeNull() reds. It red the dispatch lane at a7c72b55 (job 124798054818, :1241) and passed on re-run. Thirteen rows share the pattern (waitFor on topItems/topParagraphs, then pendingMark null at :1212, :1235, :1268, :1310, :1353, :1383, :1420, :1425, :1477, :1558, :1622, :1637, :1656). Wait for the settled state inside the waitFor (pending cleared and the count) in each."}
-  ]
+  "ciRead": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. CI head 61506401, run 41304383884: lint, typecheck, test, dispatch (unit tests and the whole Playwright suite), dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess and every other lane success; pr-title success (run 41304545227). worker-image / build failed in attempt 1 on the runner's own disk ('No space left on device' in the runner's diagnostics log, before Build and push reported a result); I re-ran the failed jobs once and attempt 2 is success, ci-ok success. Compare 61506401...2fbde2f4: handoffsOnly true, 2 files.",
+  "thermonuclear": "Not run this round: 61506401 changes one test file (MarkdownBody.test.tsx) and no runtime code. The pair ran at 3c7c64c1 for the runtime code this head carries unchanged.",
+  "roundFiveFinding": "Holds. Every row that waited on the painter's DOM and then read data-markdown-pending at once now waits for the mark (the thirteen named, plus 1421, 1705 and the fallback mark at 692), and a docblock on pendingMark says why. The file passed 51/51 three times in a row on the pod, and the dispatch lane is green at 61506401. Thread PRRT_kwDORFy7ds6yZ48J accepted; all 35 threads are resolved.",
+  "keyFindings": []
 }
