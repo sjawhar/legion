@@ -107,6 +107,13 @@ type ExchangeSession struct {
 	// session name only while a registration says it may. Like Principal it is no claim of the
 	// token and is not stored.
 	Instance string `json:"-"`
+
+	// Fleet is the service the machine's Google account is listed for
+	// (exchange.Claims.Fleet), empty for every other kind of caller. The provider records it on
+	// the launcher credential it mints for that machine in the exchange's own transaction, which
+	// is what lets the machine enroll afterwards. Like Principal it is no claim of the token and
+	// is not stored.
+	Fleet string `json:"-"`
 }
 
 // NewExchangeSession is an empty exchange session with its extra claims ready to be written, the
@@ -163,6 +170,7 @@ func (s *ExchangeSession) Clone() oauth2.Session {
 		ActorToken:   maps.Clone(s.ActorToken),
 		Principal:    s.Principal,
 		Instance:     s.Instance,
+		Fleet:        s.Fleet,
 	}
 	if s.DefaultSession != nil {
 		cloned.DefaultSession, _ = s.DefaultSession.Clone().(*oauth2.DefaultSession)

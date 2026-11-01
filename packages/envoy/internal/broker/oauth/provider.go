@@ -81,6 +81,12 @@ type Provider struct {
 // is a 500 server_error, which a client retries.
 var ErrLoginEnded = errors.New("the machine login has ended")
 
+// ErrMachineKeyTaken is the ExchangeConfig.MachineCredentials error (wrapped or not) that
+// refuses a machine's exchange invalid_grant: another live machine login already holds the key
+// the request's DPoP proof presented, and a launcher credential's key is one credential's.
+// Any other error from it is a 500 server_error.
+var ErrMachineKeyTaken = errors.New("another live machine login holds this key")
+
 // TokenHooks are the broker's own steps around a token request the library has validated.
 type TokenHooks struct {
 	// Before runs before either grant issues anything, with the grant type and the login's session

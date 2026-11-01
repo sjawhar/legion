@@ -365,19 +365,17 @@ func NewSet(secrets map[string]Secret) *Set {
 	return &Set{Version: hex.EncodeToString(digest.Sum(nil)), Secrets: secrets}
 }
 
-// Requester is an enrolled session, pod or VM as the policy sees it.
+// Requester is an enrolled session or pod as the policy sees it.
 type Requester struct {
 	// Operator is the email of the person whose machine login the session enrolled under; empty
-	// for a pod or a VM.
+	// for a pod.
 	Operator string
 	// Service is the service of the machine login that enrolled the session, set only when the
 	// session is a pod whose verified service account is one of the accounts BROKER_SERVICES maps
-	// to that same service, or a VM whose verified service-account email BROKER_VM_SERVICES maps to
-	// it, from the project and with an instance name its fleet allows (requests.Machine.requester);
-	// empty otherwise. A service may list several accounts, but each account is listed once and
-	// proves exactly one service, since a machine login's service is its own claim and only the
-	// pod's or VM's account can prove it: an account listed for another service, or for none,
-	// proves nothing here.
+	// to that same service (requests.Machine.requester); empty otherwise. A service may list
+	// several accounts, but each account is listed once and proves exactly one service, since a
+	// machine login's service is its own claim and only the pod's account can prove it: an
+	// account listed for another service, or for none, proves nothing here.
 	Service string
 	// Withheld is the names the session's operator withheld from it by revoking a grant of them
 	// the session got without asking (requests.Machine.RevokeByApprover). Evaluate answers each as

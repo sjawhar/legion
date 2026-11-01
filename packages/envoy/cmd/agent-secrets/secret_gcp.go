@@ -413,7 +413,7 @@ func (b *gcpBackend) requireWriteSignIn(ctx context.Context) (string, error) {
 // names none).
 func gcpCredsFound(creds *google.Credentials, kind google.CredentialsType) string {
 	if len(creds.JSON) == 0 {
-		return "the metadata server's identity, this VM's or this pod's"
+		return "the metadata server's identity, this machine's or this pod's"
 	}
 	if kind == "" {
 		return "credentials that name no type"

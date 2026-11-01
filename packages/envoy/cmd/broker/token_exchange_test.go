@@ -88,6 +88,16 @@ const (
 	// machineAudience is what a machine's Google identity token must carry here, its own beside
 	// the two above.
 	machineAudience = "https://broker.example/machines"
+	// fleetSecret is the agent-tier secret fleetPerson owns, which a machine of the pinned fleet
+	// is granted at once because its launcher credential enrols a session that acts for her.
+	// fleetSecretPath is its path in the store the broker reads, and fleetSecretValue what it
+	// holds.
+	fleetSecret      = "FLEET_SECRET"
+	fleetSecretPath  = "example/agent-secrets/fleet-secret"
+	fleetSecretValue = "fleet-secret-v1"
+	// fleetSecretKMSKey is the key the fake store records against that secret, a placeholder of
+	// the shape an ARN has.
+	fleetSecretKMSKey = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
 )
 
 // TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt is the live proof of the exchange: the
@@ -401,8 +411,18 @@ func TestAPodWritesOnlyUnderASessionRegisteredForIt(t *testing.T) {
 // person and project its fleet's entry gives it; a fleet listed with no person is answered a
 // token that names its service instead, which a machine carrying no Compute Engine claims at all
 // — a workload identity pool's token, and the one a pod's metadata server answers — also gets;
-// and each way in that must not work is refused with a message of its own. It skips when
-// BROKER_TEST_DATABASE_URL is unset, as every Postgres-backed broker test does.
+// and each way in that must not work is refused with a message of its own.
+//
+// It is also the live proof of the bridge the same trade builds to the secrets routes: the
+// token answer names the launcher credential the exchange minted for the machine, that
+// credential's own key enrols a session at POST /v1/enrollments, and that session asks for and
+// reads the secret its fleet's person owns — the whole of what a machine does, from a metadata
+// token to a secret, with no step a person takes. The machine of the fleet that names no person
+// holds a credential too and is refused the enrollment, naming the setting that fixes it.
+//
+// Each machine here signs with a key of its own, as two real machines do: a launcher credential
+// is keyed on the key it holds, so one key cannot be two machines' credentials.
+// It skips when BROKER_TEST_DATABASE_URL is unset, as every Postgres-backed broker test does.
 func TestTheBinaryExchangesAMachinesGoogleIdentityToken(t *testing.T) {
 	databaseURL := storetest.URL(t)
 	// Three issuers the test controls: the cluster's, GitHub's, and the one standing in for
@@ -412,7 +432,7 @@ func TestTheBinaryExchangesAMachinesGoogleIdentityToken(t *testing.T) {
 	clusterKey := cluster.PublishKey(t, "cluster-key")
 	googleKey := google.PublishKey(t, "google-key")
 
-	key := proofKey(t)
+	key, poolKey := proofKey(t), proofKey(t)
 	jkt, err := proof.Thumbprint(&key.PublicKey)
 	if err != nil {
 		t.Fatal(err)
@@ -421,6 +441,7 @@ func TestTheBinaryExchangesAMachinesGoogleIdentityToken(t *testing.T) {
 
 	broker := startBroker(t, brokerOptions{Env: googleExchangeEnv(t, databaseURL, cluster, github, google, longAccessSeconds)})
 	live := newLiveBroker(broker.Addr, key)
+	poolLive := newLiveBroker(broker.Addr, poolKey)
 
 	t.Run("the real binary boots with the machine entries its Google settings make", func(t *testing.T) {
 		boot := broker.Await(t, "token exchange")
@@ -437,7 +458,7 @@ func TestTheBinaryExchangesAMachinesGoogleIdentityToken(t *testing.T) {
 		}
 	})
 
-	var fleetToken string
+	var fleetToken, fleetCredential, poolCredential string
 	t.Run("a pinned machine's identity token and a proof of its own key mint an access token", func(t *testing.T) {
 		subject := mintMachineToken(t, google, googleKey, pinnedFleetAccount, machineAudience, true, fleetCloudProject, fleetInstanceName)
 		status, body := live.exchange(t, machineForm(subject, "example-machine-1"))
@@ -448,6 +469,15 @@ func TestTheBinaryExchangesAMachinesGoogleIdentityToken(t *testing.T) {
 		if fleetToken == "" || body["token_type"] != "DPoP" || body["issued_token_type"] != oauthwire.SubjectTokenTypeAccessToken {
 			t.Fatalf("the exchange answered token_type %v, issued_token_type %v and %d bytes of access token, want a DPoP-bound access token of type %s",
 				body["token_type"], body["issued_token_type"], len(fleetToken), oauthwire.SubjectTokenTypeAccessToken)
+		}
+		fleetCredential, _ = body[oauthwire.ExtraCredentialID].(string)
+		expires, _ := body[oauthwire.ExtraCredentialExpiresAt].(string)
+		if fleetCredential == "" || expires == "" {
+			t.Fatalf("the token answer carries %s %v and %s %v, want the launcher credential the exchange minted and its expiry: without it the machine reaches no secrets route",
+				oauthwire.ExtraCredentialID, body[oauthwire.ExtraCredentialID], oauthwire.ExtraCredentialExpiresAt, body[oauthwire.ExtraCredentialExpiresAt])
+		}
+		if _, err := time.Parse(time.RFC3339, expires); err != nil {
+			t.Errorf("%s = %q, which is no RFC 3339 time: %v", oauthwire.ExtraCredentialExpiresAt, expires, err)
 		}
 	})
 
@@ -483,10 +513,14 @@ func TestTheBinaryExchangesAMachinesGoogleIdentityToken(t *testing.T) {
 		// identity pool carries and what a pod's metadata server answers on Google Kubernetes
 		// Engine; this fleet's entry pins neither a project nor an instance name, so it is taken.
 		subject := mintMachineToken(t, google, googleKey, poolFleetAccount, machineAudience, true, "", "")
-		status, body := live.exchange(t, machineForm(subject, "example-pool-1"))
+		status, body := poolLive.exchange(t, machineForm(subject, "example-pool-1"))
 		token, _ := body["access_token"].(string)
 		if status != http.StatusOK || token == "" {
 			t.Fatalf("the exchange of %s's identity token = %d %v, want 200: an entry that pins neither a project nor an instance name takes a token carrying no Compute Engine claims", poolFleetAccount, status, body)
+		}
+		poolCredential, _ = body[oauthwire.ExtraCredentialID].(string)
+		if poolCredential == "" {
+			t.Fatalf("the service-only token answer carries no %s; every machine the exchange answers holds a credential", oauthwire.ExtraCredentialID)
 		}
 		status, body = live.introspect(t, token, apiToken)
 		if status != http.StatusOK || body["active"] != true {
@@ -505,6 +539,39 @@ func TestTheBinaryExchangesAMachinesGoogleIdentityToken(t *testing.T) {
 		} {
 			if field.got != field.want {
 				t.Errorf("introspection answered %s %v, want %v: the answer must name %s", field.name, field.got, field.want, field.proves)
+			}
+		}
+	})
+
+	t.Run("the credential the exchange minted enrols the machine's session and reads its secret", func(t *testing.T) {
+		if fleetCredential == "" {
+			t.Fatal("the exchange named no credential, so there is nothing to enrol under")
+		}
+		machine := podBroker{t: t, base: "http://" + broker.Addr}
+		session := machine.enrolMachine(key, fleetCredential, "example-machine-1")
+		granted := machine.ask(session, fleetSecret)
+		if granted.State != "granted" || granted.GrantID == nil {
+			t.Fatalf("the machine's request for %s = %+v, want it granted at once: %s is an agent-tier secret %s owns, and the machine's session acts for her", fleetSecret, granted, fleetSecret, fleetPerson)
+		}
+		if got := machine.values(session, *granted.GrantID)[fleetSecret]; got != fleetSecretValue {
+			t.Fatalf("the machine read %s = %q, want %q", fleetSecret, got, fleetSecretValue)
+		}
+	})
+
+	t.Run("a machine whose fleet names no person is refused the enrollment, naming the setting", func(t *testing.T) {
+		if poolCredential == "" {
+			t.Fatal("the service-only exchange named no credential, so there is nothing to enrol under")
+		}
+		machine := podBroker{t: t, base: "http://" + broker.Addr}
+		_, status, answer := machine.enrolSession(poolKey, poolCredential, "example-pool-1")
+		var refusal struct{ Code, Error string }
+		machine.decode(answer, &refusal)
+		if status != http.StatusForbidden || refusal.Code != "FLEET_NAMES_NO_PERSON" {
+			t.Fatalf("the service-only machine's enrollment = %d %s, want 403 FLEET_NAMES_NO_PERSON: its token names a service Dispatch reads, and a secret is a person's", status, answer)
+		}
+		for _, names := range []string{"BROKER_VM_EXCHANGE_ACCOUNTS", poolFleetAccount} {
+			if !strings.Contains(refusal.Error, names) {
+				t.Errorf("the refusal reads %q, which does not name %q: it must say which entry to add", refusal.Error, names)
 			}
 		}
 	})
@@ -597,7 +664,10 @@ func TestTheBinaryExchangesAMachinesGoogleIdentityToken(t *testing.T) {
 func exchangeEnv(t *testing.T, databaseURL string, cluster, github *oidctest.Issuer, accessSeconds int) []string {
 	t.Helper()
 	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
-	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": []}`), 0o600); err != nil {
+	fakeSecrets := `{"secrets": [
+		{"name": "` + fleetSecretPath + `", "kms_key_id": "` + fleetSecretKMSKey + `", "tags": {"owner": "` + fleetPerson + `", "tier": "agent"}, "value": "` + fleetSecretValue + `"}
+	]}`
+	if err := os.WriteFile(fakeSecretsFile, []byte(fakeSecrets), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return []string{

@@ -20,11 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path"
 	"slices"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 	"unicode"
@@ -172,14 +170,6 @@ type Machine struct {
 	// the service a pod whose projected token proved it runs as that account proves, when its
 	// launcher's service is that one (requester).
 	ServicesByAccount map[string]string
-	// VMServicesByAccount, VMProjects and VMInstancePatterns are BROKER_VM_SERVICES,
-	// BROKER_VM_PROJECTS and BROKER_VM_INSTANCES, each keyed by a Google service-account email: the
-	// service a VM whose identity token proved it runs as that account proves, when its launcher's
-	// service is that one, while the VM is still in that project and its instance name still matches
-	// that glob (requester).
-	VMServicesByAccount map[string]string
-	VMProjects          map[string]string
-	VMInstancePatterns  map[string]string
 	// Minters maps each policy kind (policy.Kinds) to its Minter. A release never returns the
 	// stored value of a kind secret.
 	Minters map[string]Minter
@@ -209,21 +199,21 @@ func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *rec
 type enrollmentRow struct {
 	ID, Kind, Thumbprint string
 	// Operator is the person the session acts for, nil for a pod; Service is the service of the
-	// launcher credential that enrolled it, nil for a person's machine; Subject is a pod's verified
-	// service account, or a VM's verified service-account email, nil for a session; Host is that
-	// credential's host, which for a VM's own login is <project>/<zone>/<instance name>.
+	// launcher credential that enrolled it, nil for a person's machine; Subject is a pod's
+	// verified service account, nil for a session; Host is that credential's host.
 	Operator, Service, Subject, Host *string
 	RuntimeID, Slot                  string
 }
 
 // requester is enrollment e as the policy sees it, read through q: the person it acts for (none
-// for a pod or a VM), its service, and the names that person withheld from it (RevokeByApprover's
-// withhold). Its service is its launcher credential's only when it is a pod and ServicesByAccount
-// maps the pod's verified service account to that same service, or a VM whose fleet still allows
-// it (vmAllowed): a machine login's service name is the machine's own claim, which anyone signed in
-// to Dispatch may approve, so the account is what proves the service. Any other session has none.
-// It is read on every request, decision and release, so a fleet narrowed in the configuration stops
-// an enrolled VM's service secrets at its next call, not at its lease's end. A caller that decides
+// for a pod), its service, and the names that person withheld from it (RevokeByApprover's
+// withhold). Its service is its launcher credential's only when it is a pod and
+// ServicesByAccount maps the pod's verified service account to that same service: a machine
+// login's service name is the machine's own claim, which anyone signed in to Dispatch may
+// approve, so the account is what proves the service. Any other session has none.
+// It is read on every request, decision and release, so an account dropped from the
+// configuration stops an enrolled pod's service secrets at its next call, not at its lease's
+// end. A caller that decides
 // for the session reads it after locking the session's row, which RevokeByApprover holds while it
 // withholds, so a withhold either committed before the read or waits for the caller.
 func (m *Machine) requester(ctx context.Context, q querier, e enrollmentRow) (policy.Requester, error) {
@@ -236,48 +226,12 @@ func (m *Machine) requester(ctx context.Context, q querier, e enrollmentRow) (po
 		return policy.Requester{}, err
 	}
 	var service string
-	if e.Subject != nil && e.Service != nil {
-		switch e.Kind {
-		case "pod":
-			if bound, ok := m.ServicesByAccount[*e.Subject]; ok && bound == *e.Service {
-				service = *e.Service
-			}
-		case "vm":
-			if m.vmAllowed(*e.Subject, *e.Service, deref(e.Host)) {
-				service = *e.Service
-			}
+	if e.Subject != nil && e.Service != nil && e.Kind == "pod" {
+		if bound, ok := m.ServicesByAccount[*e.Subject]; ok && bound == *e.Service {
+			service = *e.Service
 		}
 	}
 	return policy.Requester{Operator: deref(e.Operator), Service: service, Withheld: withheld}, nil
-}
-
-// vmAllowed reports whether a VM running as account, logged in as service, whose credential's host
-// is <project>/<zone>/<instance name>, is still its fleet's: BROKER_VM_SERVICES binds account to
-// service, BROKER_VM_PROJECTS names that project, and the BROKER_VM_INSTANCES glob matches that
-// name, the check enroll.Service.VMService makes at the VM's login, enrollment and renewal.
-func (m *Machine) vmAllowed(account, service, host string) bool {
-	if bound, ok := m.VMServicesByAccount[account]; !ok || bound != service {
-		return false
-	}
-	project, rest, ok := strings.Cut(host, "/")
-	if !ok || project != m.VMProjects[account] {
-		return false
-	}
-	_, instance, ok := strings.Cut(rest, "/")
-	if !ok {
-		return false
-	}
-	matched, err := path.Match(m.VMInstancePatterns[account], instance)
-	return err == nil && matched
-}
-
-// vmRemoved reports whether e is a vm enrollment its fleet no longer allows (vmAllowed): such a VM
-// has no identity left, so Create treats it as an enrollment that is not live (pgx.ErrNoRows),
-// Values releases nothing to it (ErrGrantNotLive), and ApplyDecision's approval of its pending
-// request grants nothing, as for an ended session. enroll.Service.Lookup already refuses its
-// session proofs; this keeps the decision and the release refused whatever calls them.
-func (m *Machine) vmRemoved(e enrollmentRow) bool {
-	return e.Kind == "vm" && (e.Subject == nil || e.Service == nil || !m.vmAllowed(*e.Subject, *e.Service, deref(e.Host)))
 }
 
 // Create verifies the request object (record.VerifyRequestObject, jti replay through the Replay
@@ -717,10 +671,8 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	next, detail := "denied", ""
 	if approve {
 		event = "approved"
-		if live && !m.vmRemoved(enr) {
+		if live {
 			next = "granted"
-		} else if live {
-			detail = "the requesting VM is no longer one its fleet's settings allow"
 		} else {
 			detail = "the requesting enrollment is no longer live"
 		}
@@ -978,17 +930,13 @@ func mayRevoke(login string, approver, operator *string) (allowed, asOperator bo
 	return false, false
 }
 
-// enrollment reads a live enrollment (not revoked, lease not lapsed, and, for a VM, one its fleet
-// still allows: vmRemoved); pgx.ErrNoRows otherwise.
+// enrollment reads a live enrollment (not revoked, lease not lapsed); pgx.ErrNoRows otherwise.
 func (m *Machine) enrollment(ctx context.Context, id string) (enrollmentRow, error) {
 	var e enrollmentRow
 	err := m.Store.Pool.QueryRow(ctx, `select e.id, e.kind, e.operator, c.service, c.host, e.subject, e.thumbprint, e.runtime_id, e.slot from enrollments e
 		left join launcher_credentials c on c.id = e.launcher_credential_id
 		where e.id=$1 and e.revoked_at is null and enrollment_lease_live(e.lease_expires_at)`, id).
 		Scan(&e.ID, &e.Kind, &e.Operator, &e.Service, &e.Host, &e.Subject, &e.Thumbprint, &e.RuntimeID, &e.Slot)
-	if err == nil && m.vmRemoved(e) {
-		return enrollmentRow{}, pgx.ErrNoRows
-	}
 	return e, err
 }
 

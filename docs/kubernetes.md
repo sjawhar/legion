@@ -4567,6 +4567,9 @@ An issued token carries these claims and no others:
 - `project` — the one project key a `named` token may write.
   A `person` token carries none.
 
+- `credential_id` — the launcher credential the exchange minted for a machine presenting its Google identity token, which that machine enrols its session under.
+  Every other kind of subject token carries none.
+
 The subject token's own kind decides those claims (`packages/envoy/internal/broker/exchange/exchange.go`).
 A pod's token needs an entry for its service account, which gives the project and the person and may fix the session, and Kubernetes must have bound that token to a pod (`Set.Pod`).
 A workflow run's token needs an entry for its repository, its workflow path and its ref (`Set.Workflow`).

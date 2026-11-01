@@ -1,7 +1,7 @@
-// vm_identity_test.go pins how the broker boots with Google VM identity tokens: the Google issuer
-// is discovered, and named in one boot line, only when BROKER_GOOGLE_OIDC_AUDIENCE is set; the VM
-// services reach the request machine, the policy loader and the enrollment service; and an audience
-// with no VM service refuses the boot.
+// vm_identity_test.go pins how the broker boots with Google identity tokens: the Google issuer's
+// key set is read, and named in one boot line, only when BROKER_GOOGLE_OIDC_AUDIENCE is set; the
+// machine services reach the policy loader; and an audience with no machine service refuses the
+// boot.
 package main
 
 import (
@@ -97,7 +97,7 @@ func captureLog(t *testing.T) *bytes.Buffer {
 
 // TestWithNoGoogleAudienceTheBrokerDiscoversOneIssuer: with no Google audience the broker reads
 // the cluster's key set alone, builds the pod verifier on it, answers that same key set for the
-// token exchange, holds no VM verifier and no Google key set, and logs nothing about Google.
+// token exchange, holds no Google key set, and logs nothing about Google.
 func TestWithNoGoogleAudienceTheBrokerDiscoversOneIssuer(t *testing.T) {
 	logged := captureLog(t)
 	d := &discovery{}
@@ -109,8 +109,8 @@ func TestWithNoGoogleAudienceTheBrokerDiscoversOneIssuer(t *testing.T) {
 		t.Fatalf("read the key sets of %v, want the cluster's issuer alone, %v", d.asked, want)
 	}
 	cluster, ok := found.Pod.(enroll.K8sPodVerifier)
-	if !ok || !cluster.Verifier.Issues(issuedBy("https://cluster.example")) || found.VM != nil {
-		t.Fatalf("verifiers = pod %#v, vm %v; want a pod verifier for the cluster's issuer and no VM verifier", found.Pod, found.VM)
+	if !ok || !cluster.Verifier.Issues(issuedBy("https://cluster.example")) {
+		t.Fatalf("verifiers = pod %#v; want a pod verifier for the cluster's issuer", found.Pod)
 	}
 	if found.K8sKeys == nil || found.K8sKeys != d.keys["https://cluster.example"] {
 		t.Fatalf("the exchange's key source = %p, want the cluster's own, %p", found.K8sKeys, d.keys["https://cluster.example"])
@@ -124,10 +124,10 @@ func TestWithNoGoogleAudienceTheBrokerDiscoversOneIssuer(t *testing.T) {
 }
 
 // TestAGoogleAudienceDiscoversGooglesIssuer: with BROKER_GOOGLE_OIDC_AUDIENCE set the broker also
-// reads the Google issuer's key set, verifies machine tokens on it (enroll.GoogleVMVerifier, for
-// that issuer and not the cluster's), hands that same key set to the token exchange, which is what
-// lets it register the Google subject token type, and logs one line naming the issuer, the
-// audience, the VM services and how many machine entries the exchange holds.
+// reads the Google issuer's key set and hands it to the token exchange, which is what lets the
+// exchange register the Google subject token type and resolve a machine's token against Google's
+// own keys, and logs one line naming the issuer, the audience, the machine services and how many
+// machine entries the exchange holds.
 func TestAGoogleAudienceDiscoversGooglesIssuer(t *testing.T) {
 	logged := captureLog(t)
 	d := &discovery{}
@@ -137,10 +137,6 @@ func TestAGoogleAudienceDiscoversGooglesIssuer(t *testing.T) {
 	}
 	if want := []string{"https://cluster.example", config.DefaultGoogleOIDCIssuer}; !slices.Equal(d.asked, want) {
 		t.Fatalf("read the key sets of %v, want %v", d.asked, want)
-	}
-	google, ok := found.VM.(enroll.GoogleVMVerifier)
-	if !ok || google.Verifier == nil || !google.Issues(issuedBy(config.DefaultGoogleOIDCIssuer)) || google.Issues(issuedBy("https://cluster.example")) {
-		t.Fatalf("VM verifier = %#v, want an enroll.GoogleVMVerifier for Google's issuer alone", found.VM)
 	}
 	if found.GoogleKeys == nil || found.GoogleKeys != d.keys[config.DefaultGoogleOIDCIssuer] {
 		t.Fatalf("the exchange's Google key source = %p, want Google's own, %p", found.GoogleKeys, d.keys[config.DefaultGoogleOIDCIssuer])
@@ -153,7 +149,7 @@ func TestAGoogleAudienceDiscoversGooglesIssuer(t *testing.T) {
 }
 
 // TestAStandInIssuerIsDiscoveredInGooglesPlace: BROKER_GOOGLE_OIDC_ISSUER names the issuer whose
-// keys the broker reads and whose tokens its VM verifier takes, so a dev stack's stand-in
+// keys the broker reads and whose tokens the exchange takes, so a dev stack's stand-in
 // (cmd/dev-oidc-issuer) serves in Google's place with nothing else changed.
 func TestAStandInIssuerIsDiscoveredInGooglesPlace(t *testing.T) {
 	logged := captureLog(t)
@@ -167,30 +163,32 @@ func TestAStandInIssuerIsDiscoveredInGooglesPlace(t *testing.T) {
 	if want := []string{"https://cluster.example", cfg.GoogleOIDCIssuer}; !slices.Equal(d.asked, want) {
 		t.Fatalf("read the key sets of %v, want %v", d.asked, want)
 	}
-	google, ok := found.VM.(enroll.GoogleVMVerifier)
-	if !ok || !google.Issues(issuedBy(cfg.GoogleOIDCIssuer)) || google.Issues(issuedBy(config.DefaultGoogleOIDCIssuer)) {
-		t.Fatalf("VM verifier = %#v, want one for the stand-in issuer alone", found.VM)
+	if found.GoogleKeys == nil || found.GoogleKeys != d.keys[cfg.GoogleOIDCIssuer] {
+		t.Fatalf("the exchange's Google key source = %p, want the stand-in issuer's own, %p", found.GoogleKeys, d.keys[cfg.GoogleOIDCIssuer])
 	}
 	if !strings.Contains(logged.String(), "issuer=http://127.0.0.1:18080") {
 		t.Fatalf("log = %q, want the stand-in issuer named", logged)
 	}
 }
 
-// TestTheRequestMachineCarriesTheVMServices pins the one place the broker hands
-// BROKER_VM_SERVICES to the request decisions, without which no VM is ever its service's.
-func TestTheRequestMachineCarriesTheVMServices(t *testing.T) {
-	m := newRequestMachine(vmConfig(t, "example-vm-audience"), nil, nil, nil, nil)
-	if want := map[string]string{exampleVMAccount: "example-fleet"}; !maps.Equal(m.VMServicesByAccount, want) {
-		t.Fatalf("request Machine's VMServicesByAccount = %v, want %v", m.VMServicesByAccount, want)
+// TestTheEnrollmentServiceCarriesTheMachineServices pins the one place the broker hands
+// BROKER_VM_SERVICES to AuthenticateLauncher, without which a machine's own launcher credential
+// stops authenticating at its next call.
+func TestTheEnrollmentServiceCarriesTheMachineServices(t *testing.T) {
+	cfg := vmConfig(t, "example-vm-audience")
+	enr := &enroll.Service{VMServicesByAccount: cfg.VMServicesByAccount}
+	if want := map[string]string{exampleVMAccount: "example-fleet"}; !maps.Equal(enr.VMServicesByAccount, want) {
+		t.Fatalf("the enrollment service's VMServicesByAccount = %v, want %v", enr.VMServicesByAccount, want)
 	}
+	m := newRequestMachine(cfg, nil, nil, nil, nil)
 	if want := map[string]string{"system:serviceaccount:example:example-sa": "example-service"}; !maps.Equal(m.ServicesByAccount, want) {
 		t.Fatalf("request Machine's ServicesByAccount = %v, want %v", m.ServicesByAccount, want)
 	}
 }
 
 // TestThePolicyServesTheVMServicesSecrets: the policy loader's services are BROKER_SERVICES' and
-// BROKER_VM_SERVICES', sorted and each once, so a secret a VM service owns is that service's and not
-// refused as owner-tag-malformed.
+// BROKER_VM_SERVICES', sorted and each once, so a secret a machine service owns is that
+// service's and not refused as owner-tag-malformed.
 func TestThePolicyServesTheVMServicesSecrets(t *testing.T) {
 	if got, want := serviceNames(vmConfig(t, "example-vm-audience")), []string{"example-fleet", "example-service"}; !slices.Equal(got, want) {
 		t.Fatalf("serviceNames = %v, want %v", got, want)

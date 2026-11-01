@@ -568,7 +568,9 @@ func googleToken(account string, verified any, cloud, instance string) map[strin
 // its service and no person at all, and a token carrying no Compute Engine claims — a workload
 // identity pool's, and the one a pod's metadata server answers — is taken by an entry that pins
 // nothing. No Google entry ever answers an Instance: nothing registers a machine, so the claim on
-// the session name is what keeps two machines of one account apart.
+// the session name is what keeps two machines of one account apart. Every one of them answers
+// its Fleet, the service its account is listed for, whether or not the token names that service:
+// it is what the launcher credential the exchange mints records.
 func TestGoogleAnswersTheListedMachine(t *testing.T) {
 	set := listed(t)
 	for _, c := range []struct {
@@ -579,22 +581,22 @@ func TestGoogleAnswersTheListedMachine(t *testing.T) {
 	}{
 		{name: "a pinned machine of the project and a name the pattern matches",
 			token: googleToken(pinnedAccount, true, cloudProject, instanceName), session: "example-machine",
-			want: exchange.Claims{Session: "example-machine", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: pinnedPrincipal}},
+			want: exchange.Claims{Session: "example-machine", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: pinnedPrincipal, Fleet: pinnedService}},
 		{name: "another machine of that account is the same principal",
 			token: googleToken(pinnedAccount, true, cloudProject, "example-vm-8"), session: "example-other",
-			want: exchange.Claims{Session: "example-other", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: pinnedPrincipal}},
+			want: exchange.Claims{Session: "example-other", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: pinnedPrincipal, Fleet: pinnedService}},
 		{name: "email_verified as the string Google writes on some of its tokens",
 			token: googleToken(pinnedAccount, "true", cloudProject, instanceName), session: "example-machine",
-			want: exchange.Claims{Session: "example-machine", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: pinnedPrincipal}},
+			want: exchange.Claims{Session: "example-machine", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: pinnedPrincipal, Fleet: pinnedService}},
 		{name: "an entry naming no person answers its service and no project",
 			token: googleToken(poolAccount, true, "", ""), session: "example-pool-1",
-			want: exchange.Claims{Session: "example-pool-1", Service: poolService, Scope: exchange.ProjectScopePerson, Principal: poolPrincipal}},
+			want: exchange.Claims{Session: "example-pool-1", Service: poolService, Scope: exchange.ProjectScopePerson, Principal: poolPrincipal, Fleet: poolService}},
 		{name: "an entry pinning nothing takes a machine that does run on an instance",
 			token: googleToken(poolAccount, true, "other-project", "anything"), session: "example-pool-2",
-			want: exchange.Claims{Session: "example-pool-2", Service: poolService, Scope: exchange.ProjectScopePerson, Principal: poolPrincipal}},
+			want: exchange.Claims{Session: "example-pool-2", Service: poolService, Scope: exchange.ProjectScopePerson, Principal: poolPrincipal, Fleet: poolService}},
 		{name: "the session the entry fixes, the request naming none",
 			token: googleToken(fixedAccount, true, "", ""), session: "",
-			want: exchange.Claims{Session: machineSession, Service: poolService, Scope: exchange.ProjectScopePerson, Principal: fixedPrincipal}},
+			want: exchange.Claims{Session: machineSession, Service: poolService, Scope: exchange.ProjectScopePerson, Principal: fixedPrincipal, Fleet: poolService}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			claims, err := set.Google(c.token, c.session)
@@ -700,5 +702,45 @@ func TestReadGoogleIdentityReadsGooglesClaimShapes(t *testing.T) {
 	odd := exchange.ReadGoogleIdentity(map[string]any{"email": 7, "email_verified": "yes", "google": "not an object"})
 	if odd != (exchange.GoogleIdentity{}) {
 		t.Errorf("ReadGoogleIdentity(claims of other shapes) = %+v, want every field empty", odd)
+	}
+}
+
+// TestMachineSubjectNamesOneMachineAndReadsItsAccountBack: the subject the broker keys a
+// machine's launcher credential by. A machine minted on a Compute Engine instance is named by
+// that instance, so a new key keeps the one credential; a machine minted anywhere else is named
+// by the key its proof presented, so two machines of one account are two credentials and never
+// one. Both read their account back, and a Kubernetes ServiceAccount reads as no machine at all.
+func TestMachineSubjectNamesOneMachineAndReadsItsAccountBack(t *testing.T) {
+	onInstance := exchange.ReadGoogleIdentity(googleToken(pinnedAccount, true, cloudProject, instanceName))
+	onNone := exchange.ReadGoogleIdentity(googleToken(poolAccount, true, "", ""))
+
+	instanceSubject := exchange.MachineSubject(onInstance, "thumbprint-one")
+	if want := pinnedAccount + "@" + cloudProject + "/example-zone-a/1234567890"; instanceSubject != want {
+		t.Fatalf("MachineSubject(a Compute Engine machine) = %q, want %q", instanceSubject, want)
+	}
+	if other := exchange.MachineSubject(onInstance, "thumbprint-two"); other != instanceSubject {
+		t.Errorf("MachineSubject of the same instance with another key = %q, want the same subject %q: a new key moves the one credential", other, instanceSubject)
+	}
+	first := exchange.MachineSubject(onNone, "thumbprint-one")
+	if want := poolAccount + "#thumbprint-one"; first != want {
+		t.Fatalf("MachineSubject(a machine minted on no instance) = %q, want %q", first, want)
+	}
+	if second := exchange.MachineSubject(onNone, "thumbprint-two"); second == first {
+		t.Errorf("two machines of %s with keys of their own share the subject %q; each must hold a credential of its own", poolAccount, first)
+	}
+	for _, c := range []struct {
+		subject, account string
+		machine          bool
+	}{
+		{subject: instanceSubject, account: pinnedAccount, machine: true},
+		{subject: first, account: poolAccount, machine: true},
+		{subject: "system:serviceaccount:legion-system:legion-daemon", machine: false},
+		{subject: pinnedAccount, machine: false},
+		{subject: "", machine: false},
+	} {
+		account, ok := exchange.MachineAccount(c.subject)
+		if ok != c.machine || account != c.account {
+			t.Errorf("MachineAccount(%q) = %q, %t; want %q, %t", c.subject, account, ok, c.account, c.machine)
+		}
 	}
 }

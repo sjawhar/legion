@@ -148,7 +148,7 @@ type GoogleIdentity struct {
 
 // ReadGoogleIdentity reads a Google identity token's own claims out of the claim map of a token
 // something else has already verified. It is the one reading of those claim shapes: this package
-// decides on them, the broker's VM token verifier reads the same token (enroll.VerifyGoogle), and
+// decides on them, the broker's own Google token verifier reads the same token (enroll.VerifyGoogle), and
 // a caller authenticated by such a token reads the account off it, so all three read one
 // declaration rather than three spellings of Google's claim names. It refuses nothing: a claim
 // that is absent or of another JSON type reads as empty, and which of those is a refusal is the
@@ -175,6 +175,47 @@ func isVerified(claim any) bool {
 		return value == "true"
 	}
 	return false
+}
+
+// MachineSubject names one machine as the broker keys the launcher credential its exchange
+// mints: the row's `subject`, under the live-unique index that makes each machine's credential
+// its own and lets its next exchange move that one credential rather than add another.
+//
+// A machine whose token was minted on a Compute Engine instance is named
+// <account>@<project>/<zone>/<instance id>, the account with the instance the token proves. An
+// instance id is unique only within a project and a zone, so neither the id nor the account
+// alone names one machine; the whole of it does, and it stays the same when the machine makes a
+// new key, so a machine that exchanges again after a reboot moves its one credential.
+//
+// A machine whose token carries no Compute Engine claim at all — one minted through a workload
+// identity pool, and the one a pod's metadata server on Google Kubernetes Engine answers — is
+// named <account>#<thumbprint>, the account with the RFC 7638 thumbprint of the key its DPoP
+// proof presented. Two such machines of one account present byte-identical tokens, so nothing in
+// the token tells them apart and the key is all there is: naming the account alone would give
+// the two of them one credential, and whichever exchanged last would take the other's. The cost
+// is that a machine making a new key leaves its old credential behind until that credential's
+// own expiry, which is the subject token's.
+func MachineSubject(identity GoogleIdentity, thumbprint string) string {
+	if identity.Compute.Whole() {
+		return identity.Account + "@" + identity.Compute.Project + "/" + identity.Compute.Zone + "/" + identity.Compute.InstanceID
+	}
+	return identity.Account + "#" + thumbprint
+}
+
+// MachineAccount reads the Google account back out of a MachineSubject, which is what says
+// whether the machine's entry still lists it (enroll.Service.AuthenticateLauncher). ok is false
+// for a subject of any other kind, a Kubernetes ServiceAccount's among them: that one is
+// system:serviceaccount:<namespace>:<name>, which carries neither "#" nor an "@" with a path
+// after it.
+func MachineAccount(subject string) (string, bool) {
+	if account, _, keyed := strings.Cut(subject, "#"); keyed {
+		return account, account != ""
+	}
+	at := strings.LastIndex(subject, "@")
+	if at <= 0 || !strings.Contains(subject[at+1:], "/") {
+		return "", false
+	}
+	return subject[:at], true
 }
 
 // String names the scope as a refusal or a log line spells it, the zero value included, so a
@@ -225,6 +266,13 @@ type Claims struct {
 	// workflow run, and a dev box session, each of which writes under a name its configuration or
 	// its person already decides.
 	Instance string
+	// Fleet is the service a machine's Google account is listed for (GoogleEntry.Service),
+	// whether or not the token names it, and is empty for every other decision. Like Principal
+	// and Instance it is no claim of the minted token: it is what the launcher credential the
+	// exchange mints for that machine records as its service, which a credential keyed by a
+	// subject must carry. Service holds the same string when the entry names no person, and
+	// nothing when it names one, so a reader that wants the fleet of every machine reads this.
+	Fleet string
 }
 
 // Reservation is a session name an entry fixes and the principal it belongs to. The broker holds
@@ -590,14 +638,14 @@ func (s *Set) Workflow(token map[string]any, session string) (Claims, error) {
 // verified, that the machine is one the entry allows, and what its token may write.
 //
 // Where a machine runs is the entry's to pin. An entry that pins the Compute Engine project and
-// an instance-name pattern holds the token to a VM of that project whose name the pattern
+// an instance-name pattern holds the token to an instance of that project whose name the pattern
 // matches, and refuses a token carrying no Compute Engine claims, which proves nothing about
 // where it was minted. An entry that pins neither takes such a token: that is what a token minted
 // through a workload identity pool carries, and what a token from the metadata server of a pod on
 // Google Kubernetes Engine carries, neither of which runs on an instance of its own.
 //
 // The principal is the listed account, not the machine: every machine of one account is one
-// holder, so a VM rebuilt under another instance id keeps writing under the name the machine
+// holder, so a machine rebuilt under another instance id keeps writing under the name the machine
 // before it held, and a machine of any other account is refused that name. Nothing separates two
 // machines of one account the way a registration separates two pods, so each names a session of
 // its own and the claim on the name keeps them apart.
@@ -627,7 +675,7 @@ func (s *Set) Google(token map[string]any, session string) (Claims, error) {
 	if err != nil {
 		return Claims{}, err
 	}
-	claims := Claims{Session: name, Scope: ProjectScopePerson, Principal: googlePrincipal(identity.Account)}
+	claims := Claims{Session: name, Scope: ProjectScopePerson, Principal: googlePrincipal(identity.Account), Fleet: entry.Service}
 	if entry.Person != "" {
 		claims.Person, claims.Scope, claims.Project = entry.Person, ProjectScopeNamed, entry.Project
 	} else {

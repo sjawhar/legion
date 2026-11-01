@@ -28,10 +28,14 @@ import (
 //
 // What is compared: the names the document's bullets open with, against the keys decide writes into
 // an exchange session's extra claims, which is where this provider's opaque tokens carry them. The
-// code's side is collected by calling decide twice — once for a pod's subject token, whose entry
-// gives the named project scope, and once for a machine access token, whose scope is the person's —
-// and taking the union, since `project` is written under one scope and deleted under the other. So
-// a claim a new scope or a new decision adds is a claim this fails until the list names it.
+// code's side is collected by calling decide for each kind of subject token — a pod's, whose entry
+// gives the named project scope, a machine access token's, whose scope is the person's, and a
+// machine's Google identity token, whose entry names a service — and taking the union, since
+// `project` is written under one scope and deleted under the other. So a claim a new scope or a
+// new decision adds is a claim this fails until the list names it. The one claim no decision
+// writes, the launcher credential a machine's exchange mints (machineCredential, which runs after
+// decide because the credential does not exist until the request's key is bound), is added to that
+// union by name; what proves it is written is the live exchange in cmd/broker.
 //
 // A claim is the backticked name a bullet opens with, followed by the em dash the list's shape puts
 // after it, and a backticked word later in a bullet's prose is not a claim. The `project_scope`
@@ -67,6 +71,12 @@ const (
 	claimsIssuer       = "https://kubernetes.example/cluster"
 	claimsAudience     = "https://broker.example"
 	claimsCredentialID = "machine-credential-1"
+	// The Google half: the issuer a machine's identity token comes from, the audience it must
+	// carry, and the account an entry lists for a fleet that names no person.
+	claimsGoogleIssuer   = "https://accounts.google.example"
+	claimsGoogleAudience = "https://broker.example/machines"
+	claimsGoogleAccount  = "example-fleet@example-project.iam.gserviceaccount.com"
+	claimsGoogleService  = "example-fleet"
 )
 
 // The claims docs/kubernetes.md lists are exactly the claims an exchanged token carries. Both sides
@@ -85,17 +95,17 @@ func TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries(t *testing.T) {
 	}
 }
 
-// issuedClaims are the claim names decide writes onto an exchange session, sorted, over both of the
-// project scopes it can decide: a pod's projected token, which its entry gives a named project, and
-// a machine login's access token, which names none. A scope that wrote a claim nothing documents,
-// or stopped writing one the list still carries, lands in this set.
+// issuedClaims are the claim names an exchanged token carries, sorted: the keys decide writes onto
+// an exchange session over each kind of subject token and each project scope, and the launcher
+// credential a machine's exchange adds after decide has run. A scope that wrote a claim nothing
+// documents, or stopped writing one the list still carries, lands in this set.
 func issuedClaims(t *testing.T) []string {
 	t.Helper()
 	policy, err := exchange.NewSet([]exchange.AccountEntry{{
 		Account: claimsPodAccount,
 		Project: claimsProject,
 		Person:  claimsPerson,
-	}}, nil, nil)
+	}}, nil, []exchange.GoogleEntry{{Account: claimsGoogleAccount, Service: claimsGoogleService}})
 	if err != nil {
 		t.Fatalf("exchange.NewSet: %v", err)
 	}
@@ -105,6 +115,7 @@ func issuedClaims(t *testing.T) []string {
 	provider := &Provider{exchange: ExchangeConfig{
 		Policy:     policy,
 		Kubernetes: IssuerConfig{Issuer: claimsIssuer, Audience: claimsAudience},
+		Google:     IssuerConfig{Issuer: claimsGoogleIssuer, Audience: claimsGoogleAudience},
 	}}
 
 	subjects := []struct {
@@ -122,6 +133,13 @@ func issuedClaims(t *testing.T) []string {
 		token: map[string]any{
 			"sub":                       claimsPerson,
 			oauthwire.ExtraCredentialID: claimsCredentialID,
+		},
+	}, {
+		tokenType: oauthwire.SubjectTokenTypeGoogle,
+		token: map[string]any{
+			"aud":            claimsGoogleAudience,
+			"email":          claimsGoogleAccount,
+			"email_verified": true,
 		},
 	}}
 
@@ -148,6 +166,11 @@ func issuedClaims(t *testing.T) []string {
 			issued[name] = true
 		}
 	}
+	// The launcher credential a machine's exchange answers with, written onto the session by
+	// machineCredential once the request's key is bound and the credential exists, which is
+	// after decide has run. It is named here rather than decided, so what holds the code to it
+	// is the live exchange in cmd/broker, not this check.
+	issued[oauthwire.ExtraCredentialID] = true
 	return slices.Sorted(maps.Keys(issued))
 }
 

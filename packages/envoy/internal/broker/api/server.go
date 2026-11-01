@@ -323,7 +323,7 @@ func (s *server) sessionCaller(w http.ResponseWriter, r *http.Request, notLiveCo
 // accountCaller authenticates a listed caller's own projected ServiceAccount token for
 // authenticate, the credential accountAuth's routes take, and answers the caller the list names
 // it: its name and its powers, which authenticate then checks against the route's. It is the
-// check a daemon's token login makes (machine.Service.VerifyKubernetesServiceToken), against the same
+// check a daemon's token login makes (machine.Service.VerifyServiceToken), against the same
 // verifier and with the same taxonomy: a broker that trusts no Kubernetes issuer, a token that
 // has expired, one that does not verify, one that lives longer than
 // machine.MaxTokenLoginLifetime from its issue (so a copied token is spendable for at most an
@@ -359,16 +359,15 @@ func (s *server) accountCaller(w http.ResponseWriter, r *http.Request) (caller, 
 
 // serviceCaller authenticates a service's own projected ServiceAccount token for authenticate,
 // the credential serviceAuth's routes take, and answers the service BROKER_SERVICE_LOGINS lets
-// that account log in as. It is the Kubernetes half of the token login's own check
-// (machine.Service.VerifyKubernetesServiceToken), so a route of this class and a daemon's token
+// that account log in as. It is the token login's own check
+// (machine.Service.VerifyServiceToken), so a route of this class and a daemon's token
 // login accept exactly the same credential: the same verifier, the same hour-from-issue bound on a
-// copied token, and the same list. A Google VM's identity token, which a token login also takes,
-// is refused here as another issuer's token, 401 ACCOUNT_TOKEN_INVALID. An account that list does
+// copied token, and the same list. An account that list does
 // not name is 403 ACCOUNT_NOT_LISTED, the credential being sound and the broker's list refusing; a
 // broker that trusts no Kubernetes token issuer answers 401 ACCOUNT_TOKENS_OFF, as this class's
 // routes then authenticate no one. No refusal repeats the token.
 func (s *server) serviceCaller(w http.ResponseWriter, r *http.Request) (caller, bool) {
-	account, err := s.deps.MachineLogin.VerifyKubernetesServiceToken(r.Context(), bearer(r))
+	account, err := s.deps.MachineLogin.VerifyServiceToken(r.Context(), bearer(r))
 	switch {
 	case errors.Is(err, machine.ErrTokenLoginsOff):
 		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKENS_OFF", "this broker trusts no Kubernetes token issuer, so no service authenticates with a ServiceAccount token")

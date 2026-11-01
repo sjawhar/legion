@@ -172,7 +172,7 @@ type Config struct {
 	// turns Google identity tokens on at all.
 	GoogleOIDCIssuer string
 	// BROKER_GOOGLE_OIDC_AUDIENCE: the audience a machine's Google identity token must carry,
-	// both at the VM token login and at the RFC 8693 token exchange, where such a token is a
+	// at the RFC 8693 token exchange, where such a token is a
 	// subject token (urn:envoy:params:oauth:token-type:google-identity). Its issuer is
 	// BROKER_GOOGLE_OIDC_ISSUER, Google's own unless a dev stack says otherwise. Needs
 	// BROKER_VM_SERVICES, since an audience no VM service is listed for could accept no token.
@@ -202,8 +202,7 @@ type Config struct {
 	// machines an entry means. Keyed by account. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, it is
 	// empty, so every listed account takes a machine wherever it runs — including one whose token
 	// carries no Compute Engine claims at all, which is what a token minted through a workload
-	// identity pool and a token from a Kubernetes pod's metadata server both carry. The VM token
-	// login, which has an instance to name, still refuses a token carrying none.
+	// identity pool and a token from a Kubernetes pod's metadata server both carry.
 	VMProjects map[string]string
 	// BROKER_VM_INSTANCES: the names each pinned account's machines may have,
 	// whitespace-separated <service account email>=<instance-name glob> entries, at most one per

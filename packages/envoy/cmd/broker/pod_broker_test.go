@@ -181,3 +181,39 @@ func (b podBroker) decode(answer []byte, into any) {
 		b.t.Fatalf("decode %s: %v", answer, err)
 	}
 }
+
+// enrolSession has the launcher credential credentialID, held by launcherKey, enrol a session of
+// its own: the step a machine takes with the credential its token exchange minted, whose key is
+// the key its DPoP proof presented. It answers the session key it generated and the broker's
+// status and body, so a caller can drive the refusal as well as the enrollment.
+func (b podBroker) enrolSession(launcherKey *ecdsa.PrivateKey, credentialID, runtimeID string) (*ecdsa.PrivateKey, int, []byte) {
+	b.t.Helper()
+	key := proofKey(b.t)
+	thumbprint, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	signed, err := proof.SignLauncher(launcherKey, credentialID, http.MethodPost, b.base+"/v1/enrollments", time.Now())
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	status, answer := b.post("/v1/enrollments", map[string]string{"Proof": signed}, map[string]any{
+		"kind": "session", "runtime_id": runtimeID, "thumbprint": thumbprint,
+	})
+	return key, status, answer
+}
+
+// enrolMachine is enrolSession held to the answer a machine must get: 201 and an enrollment its
+// own key signs for, which is what every later secrets call presents.
+func (b podBroker) enrolMachine(launcherKey *ecdsa.PrivateKey, credentialID, runtimeID string) pod {
+	b.t.Helper()
+	key, status, answer := b.enrolSession(launcherKey, credentialID, runtimeID)
+	var enrolled struct {
+		EnrollmentID string `json:"enrollment_id"`
+	}
+	b.decode(answer, &enrolled)
+	if status != http.StatusCreated || enrolled.EnrollmentID == "" {
+		b.t.Fatalf("the machine's session enrollment under credential %s = %d %s, want 201 with an enrollment_id", credentialID, status, answer)
+	}
+	return pod{runtimeID: runtimeID, key: key, enrollmentID: enrolled.EnrollmentID}
+}

@@ -48,29 +48,6 @@ On a machine that runs agents directly, `agent-secrets-helper` (`../agent-secret
 each session's key and signs for it; in a container or a Kubernetes pod, the session's key lives in
 `AGENT_SECRETS_KEY_DIR`.
 
-A Google Cloud VM needs no credential a person installs and no machine login a person approves: it
-logs in and enrols itself with the identity token its own metadata server signs. It then holds a
-session key and its enrollment id in its key dir, as a box does, and a machine login, which
-Dispatch's machine-login page lists; each `enroll --vm` run logs in again with a launcher key it
-keeps only in memory.
-
-```sh
-export AGENT_SECRETS_URL=https://broker.example AGENT_SECRETS_KEY_DIR=/run/agent-secrets
-export AGENT_SECRETS_AUDIENCE=example-vm-audience
-agent-secrets enroll --vm --service example-fleet
-agent-secrets renew --vm &
-agent-secrets DEMO_API_KEY --reason "Run the lane" -- ./lane.sh
-```
-
-`enroll --vm` writes `key.pem` and `enrollment` into `AGENT_SECRETS_KEY_DIR` (`--out` names
-another directory) and prints the enrollment id, alone, on stdout. Re-running it on the same
-directory keeps that key, gets its own live enrollment back and renews that enrollment's lease,
-so a VM that re-runs `enroll --vm` often enough needs no `renew --vm` at all; concurrent runs on
-one directory take turns on `<out>/enroll.lock`. `renew --vm` is the other way to hold the lease:
-it asks the metadata server for a fresh token before every renewal, since a VM enrollment's
-renewal must carry one. `GCE_METADATA_HOST` replaces the metadata server's host. Every other
-form then reads the key dir as a box's or a pod's.
-
 The docs site's "Secrets Broker" section, built from `docs/site/src/content/docs/broker/`, has the
 quickstart, the guides and the generated CLI reference.
 

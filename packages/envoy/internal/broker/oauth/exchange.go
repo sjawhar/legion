@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"crypto"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -148,6 +149,14 @@ type ExchangeConfig struct {
 	// Google is the issuer a machine's identity token comes from, Google's own in a deployment
 	// and a stand-in for it on a dev stack.
 	Google IssuerConfig
+	// MachineCredentials creates or re-uses the launcher credential a machine holds, in the
+	// transaction the exchange carries (oauthstore.TxFrom), and answers its id. Every secrets
+	// route is an enrollment's, and an enrollment is made under a launcher credential and a
+	// proof signed by its key, so without this a machine holding a Dispatch access token could
+	// still read no secret. It is required of a broker that accepts a Google subject token and
+	// unused by one that does not; enroll.Service.IssueTokenLoginTx is what the broker's wiring
+	// hands over.
+	MachineCredentials MachineCredentials
 }
 
 // validate refuses a configuration the exchange could not serve.
@@ -158,8 +167,46 @@ func (c ExchangeConfig) validate() error {
 	if err := c.GitHub.validate("GitHub"); err != nil {
 		return err
 	}
-	return c.Google.validate("Google")
+	if err := c.Google.validate("Google"); err != nil {
+		return err
+	}
+	if c.Google.configured() && c.MachineCredentials == nil {
+		return errors.New("oauth: a broker that accepts a machine's Google identity token needs MachineCredentials: the exchange mints the machine's launcher credential, and without it no machine it answers could enroll or read a secret")
+	}
+	return nil
 }
+
+// MachineCredential is the launcher credential one machine's exchange asks for. The broker's
+// wiring turns it into a row; nothing here is the provider's to decide.
+type MachineCredential struct {
+	// Subject keys the credential, so a machine's next exchange moves the one credential it
+	// already holds rather than adding another (exchange.MachineSubject).
+	Subject string
+	// Service is the fleet the machine's account is listed for (exchange.Claims.Fleet). A
+	// credential keyed by a subject carries one, which is what says the login is a service's
+	// and no person approved it.
+	Service string
+	// Operator is the person the machine's fleet writes for, and is what makes its enrollments
+	// that person's sessions, exactly as a dev box's machine login does. It is empty for a fleet
+	// whose entry names no person, whose token names its service instead.
+	Operator string
+	// Host is the machine as an operator reads it on their machine-login page:
+	// <project>/<zone>/<instance name> for a machine minted on a Compute Engine instance, and
+	// the account for one minted anywhere else.
+	Host string
+	// Thumbprint and JWK are the key the request's DPoP proof presented, which is the key the
+	// machine's later launcher proofs are signed with.
+	Thumbprint string
+	JWK        json.RawMessage
+	// Expires is when the credential ends: the subject token's own expiry, so a machine that
+	// stops being able to mint an identity token stops enrolling within the hour Google bounds
+	// one at.
+	Expires time.Time
+}
+
+// MachineCredentials creates or re-uses the credential cred describes, in the transaction ctx
+// carries, and answers its id.
+type MachineCredentials func(ctx context.Context, cred MachineCredential) (string, error)
 
 // tokenTypes are the token types the library registers for the exchange, keyed by the exact
 // string a request names them with.
@@ -261,7 +308,10 @@ func keyFunc(keys KeySource) jwt.Keyfunc {
 // or not at all. The machine access-token subject type takes its decision here, between the
 // library validating the request and the library building the answer, and then holds its launcher
 // credential's row (liveCredential) until the token commits; the three JWT types took their
-// decision during validation, through Store.ExchangeSubject. Beside liveCredential, and for every
+// decision during validation, through Store.ExchangeSubject. The Google subject type mints or
+// moves the machine's own launcher credential here (machineCredential), for the same reason and
+// in the same transaction: the answer names it, and a machine whose token committed without it
+// could enroll nothing. Beside those, and for every
 // type, the registration a pod's session name needs is read before the library builds anything
 // (registeredPodSession). The claim on the session name is made
 // for every type once the library has built the answer, because that is when the issued token's
@@ -303,6 +353,15 @@ func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var credential MachineCredential
+	var credentialID string
+	if request.GetRequestForm().Get(FormSubjectTokenType) == oauthwire.SubjectTokenTypeGoogle {
+		credentialID, credential, err = p.machineCredential(txCtx, r, session)
+		if err != nil {
+			p.writeError(ctx, w, request, err)
+			return
+		}
+	}
 	if err := p.registeredPodSession(txCtx, session); err != nil {
 		p.writeError(ctx, w, request, err)
 		return
@@ -322,6 +381,12 @@ func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	committed = true
+	if credentialID != "" {
+		// Named in the answer as the device login's own token answer names it, so one client
+		// reads a credential the same way whichever grant gave it one.
+		resp.SetExtra(oauthwire.ExtraCredentialID, credentialID)
+		resp.SetExtra(oauthwire.ExtraCredentialExpiresAt, credential.Expires.UTC().Format(time.RFC3339))
+	}
 	if taken != "" {
 		// Logged once the claim has committed, because it is the one way a principal loses a name
 		// it used within the retention: the configuration now fixes it for an entry.
@@ -420,7 +485,7 @@ func (p *Provider) decide(_ context.Context, request oauth2.Requester, subjectTo
 		return "", oauth2.ErrInvalidRequest.WithHintf("The subject token was refused: %s.", err).WithWrap(err).WithDebugError(err)
 	}
 	session.Subject, session.Username = claims.Principal, claims.Principal
-	session.Principal, session.Instance = claims.Principal, claims.Instance
+	session.Principal, session.Instance, session.Fleet = claims.Principal, claims.Instance, claims.Fleet
 	if session.Extra == nil {
 		// A session read back out of a row that carried no extra claims has none to write on.
 		session.Extra = map[string]any{}
@@ -492,6 +557,124 @@ func (p *Provider) liveCredential(ctx context.Context, subjectToken map[string]a
 		return oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
 	}
 	return nil
+}
+
+// machineCredential creates or re-uses the launcher credential the machine presenting a Google
+// identity token holds (ExchangeConfig.MachineCredentials), in the exchange's own transaction,
+// and writes its id onto the session so the stored token names it. It answers the id and what it
+// asked for, which is what the token answer's extras repeat.
+//
+// It is the bridge between the two halves of what a machine does: the exchange answers a
+// Dispatch access token, which writes Dispatch and reads no secret, and every secrets route is
+// an enrollment's, made under a launcher credential and a proof signed by its key. One trade
+// gives the machine both, and both end together, because the credential is written in the
+// transaction the token is written in and expires when the subject token does.
+//
+// The credential is keyed by the machine (exchange.MachineSubject) and bound to the key the
+// request's DPoP proof presented, so a machine's next exchange moves the one credential it holds
+// and no machine can move another's. Its operator is the person the fleet's entry names, which
+// is what makes the machine's enrollments that person's sessions, as a dev box's machine login
+// does; a fleet listed with no person has none, and such a machine holds a credential that
+// enrolls nothing until its entry names one.
+//
+// A key another live credential holds is invalid_grant rather than a server error: the broker's
+// state refuses it and the machine fixes it by making a key of its own, which is what every
+// machine does.
+func (p *Provider) machineCredential(ctx context.Context, r *http.Request, session *oauthstore.ExchangeSession) (string, MachineCredential, error) {
+	subjectToken := session.GetSubjectToken()
+	identity := exchange.ReadGoogleIdentity(subjectToken)
+	thumbprint := session.GetDPoPJWKThumbprint()
+	key, err := proofKey(r, thumbprint)
+	if err != nil {
+		return "", MachineCredential{}, oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
+	}
+	expires, ok := expiryOf(subjectToken)
+	if !ok {
+		return "", MachineCredential{}, oauth2.ErrInvalidRequest.WithHint("The subject token names no expiry, so there is nothing to expire the machine's credential with.")
+	}
+	person, _ := session.Extra[ClaimPerson].(string)
+	cred := MachineCredential{
+		Subject:    exchange.MachineSubject(identity, thumbprint),
+		Service:    session.Fleet,
+		Operator:   person,
+		Host:       machineHost(identity),
+		Thumbprint: thumbprint,
+		JWK:        key,
+		Expires:    expires,
+	}
+	id, err := p.exchange.MachineCredentials(ctx, cred)
+	if err != nil {
+		if errors.Is(err, ErrMachineKeyTaken) {
+			return "", MachineCredential{}, oauth2.ErrInvalidGrant.WithHint("Another live machine login holds the key this proof was signed with. A machine makes a key of its own.").WithWrap(err).WithDebugError(err)
+		}
+		return "", MachineCredential{}, oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
+	}
+	if session.Extra == nil {
+		session.Extra = map[string]any{}
+	}
+	// On the session, not only in the answer, because the row the token is stored in is what a
+	// second exchange of that token reads its credential back out of (decide, the access-token
+	// subject type).
+	session.Extra[oauthwire.ExtraCredentialID] = id
+	return id, cred, nil
+}
+
+// machineHost is the machine as its credential's row records it, which is what an operator reads
+// on their machine-login page: the instance a Compute Engine token was minted on, and the
+// account alone for a token minted anywhere else, which names no instance to show.
+func machineHost(identity exchange.GoogleIdentity) string {
+	if identity.Compute.Whole() {
+		return identity.Compute.Project + "/" + identity.Compute.Zone + "/" + identity.Compute.Instance
+	}
+	return identity.Account
+}
+
+// proofKey is the public key of the DPoP proof on r, as JSON, which the machine's launcher
+// credential records beside its thumbprint. The library has already verified this proof and
+// bound the session to its key, and it publishes the parsed key only inside its own request
+// handling, so the header is read again here and held to the thumbprint the library bound: a
+// key whose thumbprint is not that one is not the key this request proved.
+func proofKey(r *http.Request, thumbprint string) (json.RawMessage, error) {
+	header := r.Header.Get("DPoP")
+	if header == "" || thumbprint == "" {
+		return nil, fmt.Errorf("oauth: the exchange reached the machine's credential with no DPoP proof (%t) or no bound key (%t)", header != "", thumbprint != "")
+	}
+	proof, err := jose.ParseSigned(header, subjectTokenAlgorithms)
+	if err != nil {
+		return nil, fmt.Errorf("oauth: re-read the request's DPoP proof: %w", err)
+	}
+	if len(proof.Signatures) != 1 || proof.Signatures[0].Header.JSONWebKey == nil {
+		return nil, fmt.Errorf("oauth: the request's DPoP proof carries %d signatures and no embedded key", len(proof.Signatures))
+	}
+	key := proof.Signatures[0].Header.JSONWebKey.Public()
+	jkt, err := jwt.ThumbprintJWK(&key)
+	if err != nil {
+		return nil, fmt.Errorf("oauth: the thumbprint of the DPoP proof's key: %w", err)
+	}
+	if jkt != thumbprint {
+		return nil, fmt.Errorf("oauth: the DPoP proof's key is %s and the request is bound to %s", jkt, thumbprint)
+	}
+	raw, err := json.Marshal(&key)
+	if err != nil {
+		return nil, fmt.Errorf("oauth: the DPoP proof's key as JSON: %w", err)
+	}
+	return raw, nil
+}
+
+// expiryOf is a verified token's `exp` as a time. A claim map decoded from JSON holds a number
+// as float64, and the library's own parse holds one as json.Number, so both are read; ok is
+// false for a token that names no expiry at all.
+func expiryOf(token map[string]any) (time.Time, bool) {
+	switch value := token["exp"].(type) {
+	case float64:
+		return time.Unix(int64(value), 0), true
+	case int64:
+		return time.Unix(value, 0), true
+	case json.Number:
+		seconds, err := value.Int64()
+		return time.Unix(seconds, 0), err == nil
+	}
+	return time.Time{}, false
 }
 
 // registeredPodSession refuses an exchange whose claims name an instance (exchange.Claims.Instance,
