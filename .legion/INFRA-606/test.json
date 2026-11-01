@@ -2,52 +2,79 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "round": 21,
-  "previousHandoff": "9e5642edb7e900ef2273f6243625f2ca973ad0da",
-  "headTested": "25206ba7ab966c710745e882522af7bfb99dcadf",
-  "handoffHead": "9558989909b5bdb848fe3b33e2e4ea51ceb3e483",
-  "branchHead": "45530037436dbb21120f3299dedbded3b74b9c1a",
+  "round": 22,
+  "previousHandoff": "2a6d5ffa2dc6096a6c3ba219be2bbec4851f60e0",
+  "headTested": "253a1afccf556c7f90d96901ce909400d9572342",
+  "handoffHead": "6ef20e69bc44385bbefbfb6a5ba5cd651496c26a",
   "roundShape": {
-    "verdict": "confirmation round for 3d5c31a9 -> 25206ba7 (fingerprint unchanged, bare gates only)",
+    "verdict": "full round (the architect's call: main moved far and the mention key changed in runtime code)",
     "tool": "round-shape.py v3, run from the workspace with 2406",
-    "oldHead": "3d5c31a9da84b2ba48cc9895ba0add4ea3b0f9d5",
-    "newHead": "25206ba7ab966c710745e882522af7bfb99dcadf",
-    "differingFiles": [],
-    "equalOnlyAfterNormalisation": [],
-    "toolCheck": "783a30cc -> 3d5c31a9 on the same tool lists 2 files, so a 0 here is a real answer"
+    "oldHead": "25206ba7ab966c710745e882522af7bfb99dcadf",
+    "newHead": "253a1afccf556c7f90d96901ce909400d9572342",
+    "differingFiles": [
+      ".dispatch/architecture/dispatch-api.md (doc)",
+      "packages/contracts/src/dispatch-api.ts (runtime: main's additions beside the PR's; tsc clean)",
+      "packages/envoy/.changes/unreleased/pr2406-Changed-20261028-113305.yaml (changelog)",
+      "packages/envoy/AGENTS.md (doc)",
+      "packages/envoy/internal/dispatch/api/comment_delivery.go (runtime: the key fix)",
+      "packages/envoy/internal/dispatch/api/comment_delivery_claim_test.go (test)",
+      "packages/envoy/internal/dispatch/api/comment_delivery_deploy_test.go (test, new)",
+      "packages/envoy/internal/dispatch/api/comment_delivery_duplicate_test.go (test)",
+      "packages/envoy/internal/dispatch/api/comment_delivery_supersede_test.go (test)",
+      "packages/envoy/internal/dispatch/api/delivery_live_hub_test.go (test)",
+      "packages/envoy/internal/dispatch/api/delivery_sweep.go (comments only)",
+      "packages/envoy/internal/dispatch/api/delivery_sweep_test.go (test)",
+      "packages/envoy/internal/dispatch/api/envoy_resolve.go (comments only)",
+      "packages/envoy/internal/dispatch/api/events.go (comments only)",
+      "packages/envoy/internal/dispatch/api/handler_errors.go (runtime: main's Retry-After from writeHandlerError carried into the PR's moved function)",
+      "packages/envoy/internal/dispatch/api/keyed_delivery_repeat_test.go (test)",
+      "packages/envoy/internal/dispatch/api/server.go (runtime: main's 85+/23- applied, minus the four lines now in handler_errors.go)",
+      "packages/envoy/internal/dispatch/model/model.go (runtime: the key fix)",
+      "packages/envoy/internal/dispatch/outbox/mentions.go (runtime: the key fix)",
+      "packages/envoy/internal/dispatch/outbox/publisher_mentions_test.go (test)"
+    ],
+    "equalOnlyAfterNormalisation": [
+      "packages/envoy/cmd/dispatch/README.md",
+      "packages/envoy/internal/dispatch/store/migrations/NNNN_comment_fallback_copies.census.sql (0150 -> 0151)",
+      "packages/envoy/internal/dispatch/store/migrations/NNNN_comment_fallback_copies.up.sql (0150 -> 0151)"
+    ]
   },
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round21-partial-md; round 18's behaviour evidence stands",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round22-checkpoint-md (version 3); dispatch://INFRA-606/artifact/infra606-tester-round22-restart-tar-gz",
   "implementerProof": {
     "verdict": "verified",
-    "how": "At 25206ba7: go build -p 1 and go vet -p 1 of packages/envoy exit 0; bun run typecheck in packages/contracts and packages/dispatch exit 0; the PR's own diff is unchanged (round-shape.py, 0 files)."
+    "how": "Re-ran the implementer's deploy test, the outbox, deliveryaudit, store and pgmigrate suites, and the claimant live proof at 253a1afc; all pass. The deploy test's negative control reproduces with 45530037's key."
   },
-  "failures": [
-    {
-      "criterion": "The pull request merges into main.",
-      "evidence": "gh pr view 2406 reads CONFLICTING / DIRTY at the branch head 45530037 against main d09b46d7, so GitHub runs no CI on it. Testing that head proves nothing that will merge (the architect's ruling at 03:40Z)."
-    },
-    {
-      "criterion": "The fallback table's migration has a number no other migration uses.",
-      "evidence": "This PR adds 0150_comment_fallback_copies.up.sql and .census.sql; main d09b46d7 now carries 0150_dpop_proofs.up.sql and .census.sql. pgmigrate refuses two migrations with one version, and TestMigrationSetIsNumberedOneToN and the shared-version guard fail after a merge that keeps both. Renumber to the next free number on main."
-    },
-    {
-      "criterion": "Review round 9 finding 1 (review 5722118474): a mention the previous build delivered reaches its session once across the deploy.",
-      "evidence": "Main sends a mention under the key <comment>:<target>:<mode> (main's comment_delivery.go: stored.ID+\":\"+target.Target+\":\"+target.Delivery). This PR sends it under <comment>:<target> (model.CommentMentionIdempotencyKey, model.go:1294, used at comment_delivery.go:653 and outbox/mentions.go:403). The listener uses the idempotency key as the dedupe key, so a send by this build of a mention the previous build already delivered is a different event for 72 h after the deploy: a sweep resend of a stranded attempt, a same-mode Retry of an old receipt timeout, and the outbox copy of an old failed attempt. The reviewer's deep reviewer reproduced the first two on the test listener with repeat-dropping on. The fix is the implementer's: key by the mention's own mode, <comment>:<target>:<comment_mentions.delivery>, with a test that sends under main's key and resends from this build. I did not commit a red test for it this round: my attempts to write the test file did not go through, and nothing is on legion/INFRA-606-wip."
-    }
-  ],
-  "failed": 3,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "Confirmation checks at 25206ba7.",
-      "surface": "round-shape.py over the two heads; go build and go vet of packages/envoy; tsc in contracts and dispatch; GitHub checks at 25206ba7",
-      "command": "python3 round-shape.py 3d5c31a9da84b2ba48cc9895ba0add4ea3b0f9d5 25206ba7ab966c710745e882522af7bfb99dcadf 2406; GOMAXPROCS=4 GOMEMLIMIT=12GiB go build -p 1 ./... && go vet -p 1 ./...; bun run typecheck in packages/contracts and packages/dispatch; gh api repos/sjawhar/legion/commits/25206ba7.../check-runs",
-      "observed": "0 files differ. Build, vet and both typechecks exit 0. At 25206ba7 ci-ok, lint, typecheck, test, pr-title, dispatch, envoy-go and envoy-go-race-api are all success (read 2026-10-31 18:08Z), so main's claims test is fixed there.",
-      "headSha": "25206ba7ab96",
-      "negativeControl": "At 3d5c31a9, before main's #2598, envoy-go failed TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries (round 20)."
+      "criterion": "Review round 9 finding 1: a mention sent under main's key, then resent from this build, reaches its session as one frame.",
+      "surface": "internal/dispatch/api against a superuser Postgres 16 on the issue volume, through the test listener with repeat-dropping on",
+      "command": "GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 ./internal/dispatch/api/ -run '^TestAMentionThePreviousBuildDeliveredIsDroppedAsARepeatAfterTheDeploy$' -count=3; the same with -overlay ov/oldkey.json, whose model.go returns <comment>:<target> as 45530037 did",
+      "observed": "Both subtests (a sweep resend of a stranded attempt, a same-mode Retry of a receipt timeout) pass 3 of 3. The test hands the listener the previous build's frame under the literal key <comment>:session:s1:steer, so it does not derive the old key from the function under test.",
+      "headSha": "253a1afccf55",
+      "negativeControl": "With 45530037's key both subtests fail: 's1 was handed 2 frames of the comment'."
+    },
+    {
+      "criterion": "Migrations: one number each, and a fresh database migrates through 0151 with comment_fallback_copies present, both ways against main.",
+      "surface": "store and pgmigrate suites; a scratch database 'mig' with the real envoy-dispatch binaries of head and of main e622d943",
+      "command": "go test -p 1 ./internal/dispatch/store/ ./internal/pgmigrate/...; mig.sh main, head, main, head",
+      "observed": "TestMigrationSetIsNumberedOneToN passes; store and pgmigrate (its version guard included) pass. Main migrates a fresh database to 150; head applies 151, with comment_fallback_copies and its 2 indexes beside main's dpop_proofs; main then starts healthy on the 151 database, and head starts again.",
+      "headSha": "253a1afccf55",
+      "negativeControl": "Round 21 recorded the collision at 45530037: 0150_comment_fallback_copies against main's 0150_dpop_proofs."
+    },
+    {
+      "criterion": "Delivery and stream behaviour hold on the merged binary: the outbox, deliveryaudit and api mention groups, the claimant live proof, and a restart with resuming live sockets.",
+      "surface": "Go suites; scripts/e2e/dispatch-claimant-delivery.sh on the head binary (real envoy-dispatch, the run's own NATS, the fake listener); the load-test restart scenario on a stack seeded at migration 151",
+      "command": "go test -p 1 ./internal/dispatch/outbox/... ./internal/dispatch/deliveryaudit/...; go test -p 1 ./internal/dispatch/api/ -run 'Mention|Retry|Sweep|Keyed|Fallback|Supersede|Claimant|Refresh|Lane|Deploy|Duplicate|Silent|Abandoned|Listener'; DATABASE_URL=<scratch> DISPATCH_BIN=<head> bash scripts/e2e/dispatch-claimant-delivery.sh; run-step.sh r22-restart --events 4 --sessions 400 --requests 60 --live 50 --live-resume 1 --live-stale 10 --restart-at 90s --mention-frac 0.2 --mentions 3 --envoy-rtt 200ms",
+      "observed": "outbox and deliveryaudit pass; the api groups give 166 PASS and 1 SKIP. Claimant proof: 15 ok, 0 FAIL. Restart (build 6ef20e69, clean tree): 50 reconnects, replayed frames per reconnect at most 172 for last_id sockets and 33 for stale ones, all under the 256-event bound; the 10 stale sockets refetched; 5,901 KiB replayed in total; 15.2 Dispatch CPU-s in the minute after the restart. Sampled memory peak 4.63 GiB of 19 over 2,700 samples during the suites.",
+      "headSha": "253a1afccf55",
+      "negativeControl": "The replay bound's control is round 17's, on the base build: an unbounded resume replays the whole backlog. Not re-run this round."
     }
   ],
   "notes": [
-    "No load run and no Go suite ran in this round, so no memory sample was taken. Nothing of mine is left running.",
-    "The pod was recreated several times during this round; the confirmation results were checkpointed on Dispatch before CI finished."
+    "CI at 253a1afc, read at 08:14Z: every lane is green except two, and ci-ok is queued behind them. pi-legion failed on legion-background-subagent-omp.test.ts:477, where two millisecond timestamps were equal; this PR touches no file under packages/pi-legion or packages/pi-shared, and the controller says main fixed that test with #2621 (081e9e60) after this run's merge ref was taken. dispatch failed one browser test, overlapping-marks.e2e.ts:311 @phone, on a 30 s timeout; the whole file passes 40 of 40 at head locally (--project chromium --repeat-each 5), and this PR changes no editor or marks code. Both are flakes. The controller asks that #2406 get a fresh run on the new main by closing and reopening it, since a re-run tests the old merge ref. ci-ok is unread.",
+    "Restart time was 37.7 s (round 17: 11.7 s): the old process logged 'shutting down' at 07:26:49 and drained in-flight requests until about 07:27:20. The box was CPU-starved before the restart too ('announce the server fleet's build: context deadline exceeded' every ~10 s from 07:26:02). I did not run a base build beside it, so I make no claim on that figure.",
+    "The memory sampler's 2,700 samples cover the Go suites; it had ended before the restart run, whose memory is not sampled. Leftover check (ps for memory.usage_in_bytes, sleep 2, envoy-dispatch, playwright, chrome-headless): nothing listed. The load stack is stopped."
   ]
 }
