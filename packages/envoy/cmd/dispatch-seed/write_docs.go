@@ -85,7 +85,10 @@ func (r *seedRun) writeDocument(ctx context.Context, tx pgx.Tx, index int) error
 
 	versionAt := created.Add(time.Duration(document.Versions-1) * versionStep)
 	located := text.ExtractAt(latest, serverURL)
-	moved, err := refs.IndexBlocks(ctx, tx, document.ID, document.Versions, versionAt, latest, blocks, located)
+	// No block pointers: a typed block's `block[]` attribute is what carries one, and every
+	// document this tool writes is plain markdown with no typed block in it, so the list the
+	// server builds from a document's block tree is empty here.
+	moved, err := refs.IndexBlocks(ctx, tx, document.ID, document.Versions, versionAt, latest, blocks, located, nil)
 	if err != nil {
 		return fmt.Errorf("index blocks: %w", err)
 	}

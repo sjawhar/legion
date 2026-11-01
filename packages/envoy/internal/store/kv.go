@@ -17,7 +17,6 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
-	"github.com/sjawhar/envoy/internal/routing"
 )
 
 // RoleClaim is the durable ownership record for a role lane. Role claims are
@@ -55,17 +54,21 @@ type Registry struct {
 	// including delete tombstones. It prevents a delayed local write-through
 	// from replacing a newer watcher update.
 	cacheRevisions map[string]uint64
+	// index indexes the cache's topic patterns by subject token (subjectIndex), for Match. Every
+	// change to cache changes it too; nil until the first one.
+	index *subjectIndex
 	// watcher feeds the cache from the interest bucket. Once it is ready the cache is consistent
 	// with the bucket, and Match answers every "is this session subscribed?" question without
 	// falling through.
 	watcher *kvwatch.Watcher
 	// roleWatcher feeds holders from the role bucket, so a session's roles are read from the claims
 	// with no bucket call (RolesHeldBy), which answers only while its first scan is complete
-	// (kvwatch.Watcher.Complete). holdersMu guards holders, the session each role's claim names,
-	// holderRevisions, the latest revision applied for each role, delete markers included, which keeps
-	// a delayed watcher update from undoing a claim this registry wrote, and holderEpoch, which a
-	// recreated bucket's reset advances, so a claim write this registry made on the old bucket cannot
-	// land in the new bucket's view and fence out its lower revisions.
+	// (kvwatch.Watcher.Complete), and a role's holder is too (CachedRoleHolder). holdersMu guards
+	// holders, the session each role's claim names, holderRevisions, the latest revision applied for
+	// each role, delete markers included, which keeps a delayed watcher update from undoing a claim
+	// this registry wrote or read, and holderEpoch, which a recreated bucket's reset advances, so a
+	// claim write this registry made on the old bucket cannot land in the new bucket's view and fence
+	// out its lower revisions.
 	roleWatcher     *kvwatch.Watcher
 	holdersMu       sync.RWMutex
 	holders         map[string]string
@@ -260,6 +263,10 @@ func (r *Registry) cacheInterestLocked(sessionID string, item Interest, revision
 	}
 	r.cache[sessionID] = item
 	r.cacheRevisions[sessionID] = revision
+	if r.index == nil {
+		r.index = newSubjectIndex()
+	}
+	r.index.set(sessionID, item)
 }
 
 func (r *Registry) evictCachedInterestLocked(sessionID string, revision uint64) {
@@ -267,6 +274,9 @@ func (r *Registry) evictCachedInterestLocked(sessionID string, revision uint64) 
 		return
 	}
 	delete(r.cache, sessionID)
+	if r.index != nil {
+		r.index.remove(sessionID)
+	}
 	if r.cacheRevisions == nil {
 		r.cacheRevisions = map[string]uint64{}
 	}
@@ -367,6 +377,7 @@ func (r *Registry) resetCache() {
 	r.mu.Lock()
 	r.cache = map[string]Interest{}
 	r.cacheRevisions = map[string]uint64{}
+	r.index = nil
 	r.mu.Unlock()
 }
 
@@ -414,6 +425,13 @@ func (r *Registry) roleHolderEpoch() uint64 {
 	r.holdersMu.RLock()
 	defer r.holdersMu.RUnlock()
 	return r.holderEpoch
+}
+
+// roleHolderRevision is the latest revision of role the holder view applied, 0 for none.
+func (r *Registry) roleHolderRevision(role string) uint64 {
+	r.holdersMu.RLock()
+	defer r.holdersMu.RUnlock()
+	return r.holderRevisions[role]
 }
 
 // applyRoleClaim applies one entry the role claim watcher delivered to the holder view. A claim
@@ -714,14 +732,20 @@ func (r *Registry) putInterest(ctx context.Context, sessionID string, value []by
 	return revision, err
 }
 
-// roleClaim reads role's claim from the bucket, waiting no longer than ctx (bus.Bounded).
+// roleClaim reads role's claim from the bucket, waiting no longer than ctx (bus.Bounded), and
+// refreshes the holder view with what it read: the claim's holder at its revision, or, for a role
+// the bucket no longer holds, its removal after the revision the view had applied.
 func (r *Registry) roleClaim(ctx context.Context, role string) (RoleClaim, nats.KeyValueEntry, error) {
+	epoch := r.roleHolderEpoch()
 	roles := r.roles()
 	entry, answered, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return roles.Get(role) })
 	if !answered {
 		return RoleClaim{}, nil, fmt.Errorf("read role %s's claim: %w", role, err)
 	}
 	if errors.Is(err, nats.ErrKeyNotFound) {
+		if revision := r.roleHolderRevision(role); revision > 0 {
+			r.forgetRoleHolder(role, revision, epoch)
+		}
 		return RoleClaim{}, nil, nil
 	}
 	if err != nil {
@@ -731,6 +755,7 @@ func (r *Registry) roleClaim(ctx context.Context, role string) (RoleClaim, nats.
 	if err != nil {
 		return RoleClaim{}, nil, err
 	}
+	r.setOwnRoleHolder(role, claim.HolderSessionID, entry.Revision(), epoch)
 	return claim, entry, nil
 }
 
@@ -1075,16 +1100,34 @@ func (r *Registry) RoleClaim(ctx context.Context, role string) (RoleClaim, error
 	return claim, err
 }
 
-// RoleHolder returns the authoritative session ID for role, read with no deadline of its own. Only
-// tests call it, to read what a claim left behind; every route and the role lane read RoleClaim
-// within a deadline (resolveRoleHolder, cmd/listener/role_holder.go). An unclaimed role returns an
-// empty holder without an error.
+// RoleHolder returns the authoritative session ID for role, read from the bucket with no deadline
+// of its own, for a caller that answers no request: CachedRoleHolder on a miss, and tests reading
+// what a claim left behind. Every route and the role lane read RoleClaim within a deadline
+// (resolveRoleHolder, cmd/listener/role_holder.go). An unclaimed role returns an empty holder
+// without an error.
 func (r *Registry) RoleHolder(role string) (string, error) {
 	claim, err := r.RoleClaim(context.Background(), role)
 	if err != nil {
 		return "", err
 	}
 	return claim.HolderSessionID, nil
+}
+
+// CachedRoleHolder returns role's holder from the role claim watcher's view of the bucket, and on a
+// miss reads the bucket as RoleHolder does, which fills the view. The view holds every claim this
+// registry wrote, read or watched, so it answers without a round trip; a claim another listener
+// wrote reaches it through the watcher, a moment after the bucket. The listener's role lane resolves
+// each role message's holder through it, and reads the bucket itself (RoleHolder) when the holder
+// it found was superseded. An unclaimed role is a miss, which returns an empty holder without an
+// error.
+func (r *Registry) CachedRoleHolder(role string) (string, error) {
+	r.holdersMu.RLock()
+	holder, ok := r.holders[role]
+	r.holdersMu.RUnlock()
+	if ok {
+		return holder, nil
+	}
+	return r.RoleHolder(role)
 }
 
 // ErrMalformedInterest is an interest record the bucket holds and this build cannot decode. The bus
@@ -1128,39 +1171,55 @@ func (r *Registry) Get(ctx context.Context, sessionID string) (Interest, error) 
 	return fresh, nil
 }
 
-// Match returns the cached interests registered on machineID whose topics match topic: a
-// listener delivers live only to the sessions of its own machine.
+// CachedInterest returns sessionID's interest from the cache alone, and whether the cache holds
+// one; it never reads the bucket.
+func (r *Registry) CachedInterest(sessionID string) (Interest, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	item, ok := r.cache[sessionID]
+	return item, ok
+}
+
+// Match returns, once each, the cached interests of machineID with a topic pattern that matches
+// topic (routing.Match's rules), looked up in the subject index: a listener delivers live only to
+// the sessions of its own machine.
 func (r *Registry) Match(machineID string, topic string) []Interest {
-	return r.match(topic, func(item Interest) bool { return item.MachineID == machineID })
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.matchLocked(func(visit func(string)) { r.index.match(machineID, topic, visit) })
 }
 
 // MatchAll returns every cached interest whose topics match topic, on any machine, sorted by
 // SessionID for deterministic output: a sender that must confirm delivery to each subscribed
 // session needs them all, wherever each session registered.
 func (r *Registry) MatchAll(topic string) []Interest {
-	out := r.match(topic, func(Interest) bool { return true })
+	r.mu.RLock()
+	out := r.matchLocked(func(visit func(string)) { r.index.matchAll(topic, visit) })
+	r.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].SessionID < out[j].SessionID
 	})
 	return out
 }
 
-// match returns the cached interests keep accepts that have a topic pattern matching topic.
-func (r *Registry) match(topic string, keep func(Interest) bool) []Interest {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+// matchLocked returns, once each, the cached interests of the keys walk visits over the subject
+// index; the index visits a key once per matching pattern. The caller holds r.mu.
+func (r *Registry) matchLocked(walk func(visit func(key string))) []Interest {
 	out := []Interest{}
-	for _, item := range r.cache {
-		if !keep(item) {
-			continue
-		}
-		for _, pattern := range item.Topics {
-			if routing.Match(pattern, topic) {
-				out = append(out, item)
-				break
-			}
-		}
+	if r.index == nil {
+		return out
 	}
+	var seen map[string]struct{}
+	walk(func(key string) {
+		if _, dup := seen[key]; dup {
+			return
+		}
+		if seen == nil {
+			seen = map[string]struct{}{}
+		}
+		seen[key] = struct{}{}
+		out = append(out, r.cache[key])
+	})
 	return out
 }
 

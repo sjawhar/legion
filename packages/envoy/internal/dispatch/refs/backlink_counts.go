@@ -17,10 +17,11 @@ import (
 // silently low.
 //
 // It counts only edges whose source is a node kind this build reads, so the count is the rows its
-// list shows, and counts a document's, comment's or message's mention once for each of its blocks
-// citing the node, in place of the item's own edge (heldByABlock): a comment citing a node from
-// two paragraphs counts 2. A node with no inbound edge is absent from the result; the caller
-// decides what zero means.
+// list shows, and counts a document's, comment's or message's mention once for each of its blocks'
+// links to the node, in place of the item's own edge (heldByABlock): a comment citing a node from
+// two paragraphs counts 2, and a document's block pointing at the node counts once whatever its
+// link's kind. A node with no inbound edge is absent from the result; the caller decides what
+// zero means.
 func BacklinkCounts(
 	ctx context.Context,
 	q Queryer,
@@ -198,9 +199,14 @@ func mentionBacklinkArms(toKind string, exclude func(alias string) string) []str
 		`select r.to_id from refs r
 			where r.to_kind = ` + kind + ` and r.to_id = any($1) and r.from_kind = any($2)
 			and not ` + heldByABlock("r") + exclude("r"),
-		// block_refs_to (to_kind, to_id).
+		// block_refs_to (to_kind, to_id). The view's own arm lists a block[] pointer's row only
+		// while block_ref_listed holds, the types test a typed block's pointer carries, and a row
+		// with no limit is listed without the call; this arm repeats both, so the count is the
+		// rows the list shows. A pointer whose target is retyped out of its allowed types leaves
+		// the count the moment it leaves the list, with no rewrite of either.
 		`select b.to_id from block_refs b
-			where b.to_kind = ` + kind + ` and b.to_id = any($1)` + exclude("b"),
+			where b.to_kind = ` + kind + ` and b.to_id = any($1)
+			and (b.to_types is null or block_ref_listed(b.to_types, b.to_id))` + exclude("b"),
 		// comment_block_refs_to (to_kind, to_id, (comment_id::text)), then the comment_blocks
 		// primary key for the join. The join keeps the view's position filter (0142 lines
 		// 212-215): the count copies the view's answer, it does not correct it.

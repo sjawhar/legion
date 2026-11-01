@@ -556,7 +556,7 @@ func newBatchTree(node *pmdoc.Node) *batchTree {
 }
 
 // validatedBatchTree is a batch tree whose validation its caller already paid for: the fork read
-// applyLive hands its mutate (readFork, editTree).
+// applyLive hands its mutate (readForkTree, editTree).
 func validatedBatchTree(valid pmdoc.ValidDocument) *batchTree {
 	return &batchTree{node: valid.Node(), valid: valid, done: true}
 }
@@ -1266,6 +1266,16 @@ func escapedMarkerExample(with string, width int) string {
 func invalidSchemaOp(field string, err error) error {
 	if errors.Is(err, pmdoc.ErrSchema) {
 		return &ErrInvalidOp{Field: field, Reason: err.Error()}
+	}
+	return err
+}
+
+// invalidBlockPointerOp reports a batch introducing a block pointer to a block of a type its
+// attribute does not allow (pmdoc.ErrBlockPointer) as an invalid operation on its attributes, as
+// the route's other attribute refusals are.
+func invalidBlockPointerOp(err error) error {
+	if errors.Is(err, pmdoc.ErrBlockPointer) {
+		return &ErrInvalidOp{Field: "attributes", Reason: err.Error()}
 	}
 	return err
 }

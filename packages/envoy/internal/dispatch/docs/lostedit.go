@@ -28,10 +28,11 @@ import (
 //
 // Two windows need the answer, both on the same write:
 //
-//   - Before the version is rendered, on the transaction's fork, once captureLiveTextAndAuthors
-//     has brought it up to date with the room. A loss there refuses the whole batch
-//     (ErrEditLost), and the transaction's rollback leaves no version, durable update, room
-//     update or broadcast behind.
+//   - Before the version is rendered, on a scratch merge of the transaction's fork with what the
+//     room committed since the transaction read it (mergedSinceRead): the version records the
+//     fork itself, which takes nothing in after that read, but the write still has to survive the
+//     room it is published into. A loss there refuses the whole batch (ErrEditLost), and the
+//     transaction's rollback leaves no version, durable update, room update or broadcast behind.
 //   - After the committed write is published to the room, where a deletion that landed between
 //     the version render and the publish shows up. Nothing can be undone by then, so the write
 //     reports the loss on its 200 instead (Ledger.LostOps).
@@ -125,16 +126,21 @@ func recordInsertedText(
 	return nil
 }
 
-// refuseLostWrite refuses the calling transaction's write to room when the room's concurrent
-// changes have already removed the text it inserted, before any version records it: LEGION-269's
-// first window. fork is the transaction's document brought up to date with the room (joinRead);
-// a caller with no write of its own, or whose write inserted nothing, has nothing to lose.
-func (s *Service) refuseLostWrite(ctx context.Context, room string, fork *crdt.Doc, actor *model.Actor) error {
-	write := joinedLiveWrite(ctx, room)
-	if write == nil || write.loss == nil || fork == nil {
+// refuseLostWrite refuses write, the calling transaction's write to room, when the room's
+// concurrent changes have already removed the text it inserted, before any version records it:
+// the lost write's first window. It reads a scratch merge of the write's fork with what the room
+// committed after the transaction read it (mergedSinceRead), and only when the room committed
+// something since: otherwise there is nothing the write could have lost. A write that inserted
+// nothing has nothing to lose.
+func (s *Service) refuseLostWrite(room string, write *liveWrite, actor *model.Actor) error {
+	if write.loss == nil {
 		return nil
 	}
-	lost, err := write.loss.lost(fork)
+	merged, err := s.mergedSinceRead(write)
+	if err != nil || merged == nil {
+		return err
+	}
+	lost, err := write.loss.lost(merged)
 	if err != nil {
 		return err
 	}
@@ -153,6 +159,34 @@ func (s *Service) refuseLostWrite(ctx context.Context, room string, fork *crdt.D
 		refusal.Ops = lost
 	}
 	return refusal
+}
+
+// mergedSinceRead is write's fork merged, on a scratch copy, with the room document resident for
+// its document as it stands now: the document the room holds once the write is published, as far
+// as the room has gone. The fork itself takes nothing in after the transaction's read (forkLive),
+// so the version the write records is its own state; this copy is read for the lost-write check
+// and dropped. It is nil when no room holds the document, or when the room has committed nothing
+// since the read (committedSince): the fork is then that document already. A cold fork has no
+// read point, so any room that holds the document is merged.
+func (s *Service) mergedSinceRead(write *liveWrite) (*crdt.Doc, error) {
+	live := s.srv.GetDoc(write.artifactID)
+	if live == nil || !s.committedSince(write.artifactID, live, write.point) {
+		return nil, nil
+	}
+	state, _, _, err := s.readPoint(write.artifactID, live)
+	if err != nil {
+		return nil, err
+	}
+	merged := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(merged, state, nil); err != nil {
+		return nil, fmt.Errorf("read the room for the lost-write check: %w", err)
+	}
+	// What the fork holds and the room does not: the write's own updates, and for a fork read
+	// from the store, whatever the store held that this room never took.
+	if err := crdt.ApplyUpdateV1(merged, crdt.EncodeStateAsUpdateV1(write.fork, merged.StateVector()), nil); err != nil {
+		return nil, fmt.Errorf("merge the write with the room for the lost-write check: %w", err)
+	}
+	return merged, nil
 }
 
 // lost names the operations whose inserted text doc no longer holds in the block it was written
