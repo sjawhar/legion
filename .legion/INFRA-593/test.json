@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-593",
+  "previousHandoff": "43a1c5f68a4dca962b0226f79f4ab0406d1794c0",
+  "round": 18,
+  "headTested": "b0fa30f7a84bd3e424306bb5948dc53b0f4da34d",
+  "prHead": "a1fd2c276abfa328f25f24996b4f94882ef92600",
+  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-18-txt",
+  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-18-tar-gz",
+  "previousRounds": [
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-2-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-3-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-4-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-5-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-6-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-7-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-8-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-9-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-10-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-11-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-12-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-13-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-14-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-15-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-16-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-17-txt"
+  ],
+  "roundShape": {
+    "tool": "dispatch://INFRA-592/artifact/round-shape-py version 1 (sanity: same head -> 0 files; e22b1dfa->a50f4960 -> round 17's files), and INFRA-598's round-shape v3",
+    "oldHead": "a50f4960c8a2a66995fa55d81c1c9d850049f187",
+    "newHead": "b0fa30f7a84bd3e424306bb5948dc53b0f4da34d",
+    "runtimeFilesWhoseOwnDiffChanged": {
+      "packages/envoy/cmd/dispatch/main.go": "comment only (re-wrapped)",
+      "packages/envoy/infra/gcp/dispatch.go": "dispatchConnectionsPerPod 89->91 became 90->92 (main's base moved to 90)",
+      "packages/envoy/internal/dispatch/store/pool.go": "comment only (re-wrapped)"
+    },
+    "round": "full, on the architect's call (merge of main 225f2bea, migration 0151 -> 0160)"
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Ran the per-file diff check from a50f4960 myself with a sanity control; ran the two-process lease test, the connection-count test, every store migration test, the head plus #2395's two migrations, the docs tests under race, and the real-process upgrade, rolling update, sweep and unfoldable-log scenarios on envoy-dispatch built from b0fa30f7 and main 225f2bea."
+  },
+  "failed": 0,
+  "failures": [],
+  "expectedRed": "TestMigrationSetIsNumberedOneToN fails by design at store_test.go:378: 'migration 0160_doc_compaction_owed.up.sql is numbered 160 where 158 comes next: ...' (the check names the first gap, so 0159 is not named).",
+  "memory": {
+    "cap": "go test -p 1, GOMAXPROCS=2, GOMEMLIMIT=12GiB, CGO_ENABLED=1 -race -timeout 40m",
+    "sampler": "named job mem-sampler-infra-593-r18, bounded at 1,500 samples, stopped via proc://mem-sampler-infra-593-r18/kill",
+    "samples": 434,
+    "sampledPeakGiB": 6.28,
+    "leftoverCheck": "After the kill returned, ran ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|seq 1 1500|mem18|bin18/' and it listed nothing."
+  },
+  "proof": [
+    {
+      "criterion": "Architect check 2: main's woken excerpt loop beside RunCompactionSweep; document-compaction in the two-process lease test; 92 connections.",
+      "surface": "envoy-dispatch at b0fa30f7: two real processes on one superuser Postgres 18.6 and an embedded NATS; infra/gcp module",
+      "command": "go test -tags multiprocess ./cmd/dispatch -run '^TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses$'; (cd infra && go test ./gcp -run '^TestDispatchConnectionsPerPodIsTheServers$')",
+      "observed": "main.go:554 RunReferenceExcerptReconciliation(ctx, leases, excerptsWake) beside :558 RunCompactionSweep(ctx, leases). Lease test PASS (15.5 s): 'document-compaction: A ran 1 skipped 0, B ran 0 skipped 1'. Connections test PASS: 64+4+1+13+1+2+1+2+4 = 92.",
+      "headSha": "b0fa30f7a84bd3e424306bb5948dc53b0f4da34d",
+      "negativeControl": "In the same run, B skipped document-compaction because A held the lease or the hour was served."
+    },
+    {
+      "criterion": "Architect check 3: every migration test but the numbering one passes; the numbering test fails only on the gap; the head plus #2395's two files passes it.",
+      "surface": "internal/dispatch/store at b0fa30f7, and at b0fa30f7 plus #2395's 0151_duty_holds/0152_outbox_claim (legion/INFRA-590 0d26a56b) copied as 0158/0159, on a superuser Postgres 18.6",
+      "command": "go test ./internal/dispatch/store -run 'Migrat|Census|TouchedTables|Embedded' (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-18-tar-gz)",
+      "observed": "Head: 81 PASS, 1 FAIL, TestMigrationSetIsNumberedOneToN at store_test.go:378 'migration 0160_doc_compaction_owed.up.sql is numbered 160 where 158 comes next'. With the two files: the numbering test, embedding, census and TestMigrate0160 PASS; TestMigrateCreatesEmptySchemaAndIsIdempotent fails 'migration did not create events_unpublished' because #2395's 0152 drops that index and its own store_test.go change, not dropped in, removes it from the list.",
+      "headSha": "b0fa30f7a84bd3e424306bb5948dc53b0f4da34d",
+      "negativeControl": "The numbering test refuses the head alone (the 0158/0159 gap)."
+    },
+    {
+      "criterion": "Architect check 4: the compaction and format tests once under race, and the real-process proof.",
+      "surface": "internal/dispatch/docs at b0fa30f7; envoy-dispatch b0fa30f7 and main 225f2bea as real processes on Postgres 18.6 through the HTTP API",
+      "command": "CGO_ENABLED=1 go test -race -p 1 -count=1 -timeout 40m ./internal/dispatch/docs -run '<format/refusal tests>|Test.*Compaction.*|Test.*Sweep.*'; bash scenU4.sh; bash scenC2.sh; CUTTER=bin18/cutter bash scenD.sh (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-18-tar-gz)",
+      "observed": "Race: exit 0, ok, 66 PASS, 0 DATA RACE. Upgrade from main: start sweep candidates=4 compacted=4 rows_deleted=31; the database at max(version) 160 with 158 rows; rolling update: head's queue folded main's document 120 s after a read. 12 writers during a sweep: candidates=12 compacted=12, every text exact, no ERROR. Unfoldable log: rows left as stored, 'crdt: invalid update' once per line, 0.13 CPU-s in 200 s. go build, go vet and go vet -tags multiprocess clean.",
+      "headSha": "b0fa30f7a84bd3e424306bb5948dc53b0f4da34d",
+      "negativeControl": "Main's upload is the case doc_compaction_owed misses; only head's queue, through a read, folded it."
+    }
+  ],
+  "ci": "Read on GitHub at b0fa30f7 at 10:32 UTC: run 41296387674 (created 10:11:33Z) queued; changes success, pr-title success/cancelled; lint, typecheck, test, dispatch, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, broker-multiprocess, envoy-go, envoy-go-race, envoy-go-race-api, envoy-go-race-docs, envoy-go-race-pmdoc, envoy-infra-go, envoy-e2e-local, envoy-session-stall, envoy-smoke, listener-server-change, ci-filters, pi-legion, docs / build, worker-image / build queued; ci-ok not posted. No red posted yet, so the expected numbering red is not yet seen; every lane unread."
+}
