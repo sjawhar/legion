@@ -71,7 +71,8 @@
 # GOWORK=off GOTOOLCHAIN=local; a tree without cmd/dispatch/pprof.go gets zz_loadtest_pprof.go.txt as
 # cmd/dispatch/zz_loadtest_pprof.go, which serves pprof on LOADTEST_DISPATCH_PPROF_PORT. Every
 # Dispatch binary has a <binary>.json beside it: dispatch_commit, dispatch_tree, build_dirty, patch,
-# patch_sha256, dispatch_pprof_overlay, dispatch_binary_sha256, go_version, newest_migration.
+# patch_sha256, dispatch_pprof_overlay, dispatch_binary_sha256, go_version, newest_migration and
+# migrations (every version in that tree).
 #
 # Environment: LOADTEST_ROOT (default ${TMPDIR:-/tmp}/dispatch-loadtest); LOADTEST_SRC (default: the
 # checkout holding this script); the ports, which follow LOADTEST_ROOT (common.sh: the root's block
@@ -548,11 +549,22 @@ resolve_commit() {
     die "'$1' names no commit in $SRC"
 }
 
-# newest_migration ENVOY_DIR: the highest NNNN prefix of a migration file in that tree, an integer.
+# newest_migration ENVOY_DIR: the highest version prefix of a migration file in that tree, an
+# integer.
 newest_migration() {
   local file
   file=$(cd -- "$1/internal/dispatch/store/migrations" && printf '%s\n' [0-9]*.sql | sort -n | tail -n1)
   printf '%s\n' "$((10#${file%%_*}))"
+}
+
+# migration_versions ENVOY_DIR: every migration version in that tree, as a JSON array in ascending
+# order: the leading digits of each [0-9]*.up.sql name, as the runners read them.
+migration_versions() {
+  local file
+  for file in "$1"/internal/dispatch/store/migrations/[0-9]*.up.sql; do
+    file=${file##*/}
+    printf '%s\n' "$((10#${file%%_*}))"
+  done | sort -n | jq -s -c .
 }
 
 # write_build_json BINARY ENVOY_DIR COMMIT TREE DIRTY PATCH PATCH_SHA256 OVERLAY: BINARY.json, the
@@ -562,10 +574,12 @@ write_build_json() {
   jq -n --arg commit "$3" --arg tree "$4" --argjson dirty "$5" --arg patch "$6" --arg patch_sha "$7" \
     --argjson overlay "$8" --arg binary_sha "$(sha256_of "$binary")" \
     --arg go "$(go version "$binary" | awk '{ print $NF }')" --argjson migration "$(newest_migration "$dir")" \
+    --argjson migrations "$(migration_versions "$dir")" \
     'def orNull: if . == "" then null else . end;
      {dispatch_commit: $commit, dispatch_tree: ($tree | orNull), build_dirty: $dirty,
       patch: ($patch | orNull), patch_sha256: ($patch_sha | orNull), dispatch_pprof_overlay: $overlay,
-      dispatch_binary_sha256: $binary_sha, go_version: $go, newest_migration: $migration}' >"$binary.json"
+      dispatch_binary_sha256: $binary_sha, go_version: $go, newest_migration: $migration,
+      migrations: $migrations}' >"$binary.json"
 }
 
 # build_dispatch_at REV OUT [PATCH]: build cmd/dispatch of commit REV (PATCH applied) into OUT, and
@@ -799,8 +813,12 @@ cmd_seed() {
   note "installing the commit-time trigger (loadtest.event_commits)"
   loadgen trigger-sql | psql_db dispatch >/dev/null
 
-  local migration counts
+  # migrations is every version the seed has applied, and migration the highest of them. A build is
+  # compared against the set (common.sh, seed_migration_check): a migration whose version is below
+  # one the seed already holds leaves the highest version where it was.
+  local migration migrations counts
   migration=$(sql dispatch 'select max(version) from schema_migrations')
+  migrations=$(sql dispatch "select coalesce(json_agg(version order by version), '[]'::json) from schema_migrations")
   counts=$(sql dispatch "select json_build_object(
       'projects', (select count(*) from projects),
       'issues', (select count(*) from issues),
@@ -816,11 +834,12 @@ cmd_seed() {
   # without LOADTEST_DISPATCH_COMMIT, so the record names both: build_commit is the checkout's,
   # dispatch_commit and dispatch_build the binary's.
   [ -f "$BIN/envoy-dispatch.json" ] || die "no Dispatch build record at $BIN/envoy-dispatch.json; run stack.sh setup"
-  jq -n --argjson migration "$migration" --arg commit "$(build_commit)" --argjson dirty "$(build_dirty)" \
+  jq -n --argjson migration "$migration" --argjson migrations "$migrations" --arg commit "$(build_commit)" \
+    --argjson dirty "$(build_dirty)" \
     --argjson counts "$counts" --arg at "$(date -u +%FT%TZ)" --arg pg "$("$PGBIN/postgres" --version)" \
     --argjson seconds "$((SECONDS - started))" --slurpfile build "$BIN/envoy-dispatch.json" \
     '$build[0] as $b |
-     {migration: $migration, build_commit: $commit, build_dirty: $dirty,
+     {migration: $migration, migrations: $migrations, build_commit: $commit, build_dirty: $dirty,
       dispatch_commit: $b.dispatch_commit, dispatch_binary_sha256: $b.dispatch_binary_sha256,
       dispatch_build: $b, created_at: $at,
       seed_seconds: $seconds, postgres_version: $pg, counts: $counts}' >"$SEED_META"

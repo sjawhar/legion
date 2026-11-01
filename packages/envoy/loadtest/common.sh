@@ -50,10 +50,10 @@
 # stack process keeps the lock.
 #
 # prepare_stack runs stack.sh setup (an incremental build of SRC), start and seed, each of which
-# does nothing when its work is already done, and the migration check: a build whose highest
-# migration is older than the seed's is refused with exit 1. Then it sets BUILD to
-# `stack.sh build-info` ("<commit> <dirty>"). run-step.sh calls it before a step that is not part of
-# a series; run-series.sh calls it once, before its first step.
+# does nothing when its work is already done, and the migration check: a build that lacks a
+# migration the seed holds is refused with exit 1, and one that holds migrations the seed lacks is
+# noted. Then it sets BUILD to `stack.sh build-info` ("<commit> <dirty>"). run-step.sh calls it
+# before a step that is not part of a series; run-series.sh calls it once, before its first step.
 
 die() {
   printf '%s: %s\n' "${0##*/}" "$*" >&2
@@ -323,32 +323,73 @@ lock_root() {
   die "one run at a time per root ($file): wait for that run to end, or use another LOADTEST_ROOT"
 }
 
+# build_migration_versions prints the version of each migration in directory $1, one per line: the
+# leading digits of every [0-9]*.up.sql name, as the runners read them (internal/pgmigrate).
+build_migration_versions() {
+  local file
+  for file in "$1"/[0-9]*.up.sql; do
+    file=${file##*/}
+    printf '%s\n' "$((10#${file%%_*}))"
+  done
+}
+
+# seed_migration_check compares the migration versions $2 (one per line) of the build $3 describes
+# with the set the seed's meta file $1 records; a non-empty $4 says $2 is only the build's highest.
+# It dies when the seed holds a version this build lacks, since a newer build made that seed, and
+# notes the versions this build holds and the seed lacks. It compares the sets, not the highest
+# version of each: a migration whose version is below one the seed already holds, a numbered
+# migration merged after a timestamped one, leaves the highest version the same on both sides.
+seed_migration_check() {
+  local meta=$1 build=$2 what=$3 only_highest=${4:-}
+  local seed behind ahead seed_max build_max reseed
+  reseed="reseed with this build (stack.sh seed --force)"
+  if [[ -n "$only_highest" ]] || ! jq -e 'has("migrations")' "$meta" >/dev/null; then
+    # A seed.meta.json written before the seed recorded its versions holds only the highest one, and
+    # so does a build record written before setup recorded the build's, so only the highest can be
+    # compared: neither can say which versions are below it.
+    seed_max=$(jq -er .migration "$meta")
+    build_max=$(printf '%s\n' "$build" | sort -n | tail -n1)
+    if ((build_max < seed_max)); then
+      die "this build's ($what) highest migration is $build_max, older than the seed's $seed_max (seed made by $(jq -r .build_commit "$meta")); $reseed or run a newer one"
+    fi
+    note "only the highest migrations are compared, the seed's $seed_max and this build's ($what) $build_max, since one of the two records only its highest; $reseed to compare the whole set"
+    return 0
+  fi
+  seed=$(jq -r '.migrations[]' "$meta")
+  behind=$(grep -Fxv -f <(printf '%s\n' "$build") <<<"$seed" || true)
+  ahead=$(grep -Fxv -f <(printf '%s\n' "$seed") <<<"$build" || true)
+  if [[ -n "$behind" ]]; then
+    die "the seed holds $(wc -l <<<"$behind") migration(s) this build ($what) does not have, the highest $(sort -n <<<"$behind" | tail -n1), so a newer build made it (seed made by $(jq -r .build_commit "$meta")); $reseed or run a newer one"
+  fi
+  if [[ -n "$ahead" ]]; then
+    note "this build ($what) holds $(wc -l <<<"$ahead") migration(s) the seed lacks, the highest $(sort -n <<<"$ahead" | tail -n1). Dispatch migrates each step's copy forward at start, and any backfill those migrations start runs inside the step; $reseed to measure it alone"
+  fi
+}
+
 prepare_stack() {
   local stack
   stack=$(dirname -- "${BASH_SOURCE[0]}")/stack.sh
   "$stack" setup
   "$stack" start
   "$stack" seed
-  # A build cannot start on a seed that a newer build migrated: compare the highest migration of the
+  # A build cannot start on a seed that a newer build migrated: compare the migrations of the
   # Dispatch that setup built (bin/envoy-dispatch.json, which names LOADTEST_DISPATCH_COMMIT's tree
-  # when that is set, and the checkout's otherwise) with the seed's level. Without that record, the
-  # checkout's highest migration file stands for it.
-  local build_json=$ROOT/bin/envoy-dispatch.json build_level build_what seed_level
+  # when that is set, and the checkout's otherwise) with the set the seed records. Without that
+  # record, the checkout's migration files stand for it.
+  # A record written before setup recorded the build's versions holds only its highest one.
+  local build_json=$ROOT/bin/envoy-dispatch.json build_versions build_what only_highest=""
   if [ -f "$build_json" ]; then
-    build_level=$(jq -er .newest_migration "$build_json")
     build_what="Dispatch $(jq -r .dispatch_commit "$build_json")"
+    if jq -e 'has("migrations")' "$build_json" >/dev/null; then
+      build_versions=$(jq -r '.migrations[]' "$build_json")
+    else
+      build_versions=$(jq -er .newest_migration "$build_json")
+      only_highest=1
+    fi
   else
-    local migrations=$SRC/packages/envoy/internal/dispatch/store/migrations build_file
-    build_file=$(cd -- "$migrations" && printf '%s\n' [0-9]*.up.sql | sort -n | tail -n1)
-    build_level=$((10#${build_file%%_*}))
-    build_what=$migrations/$build_file
+    build_versions=$(build_migration_versions "$SRC/packages/envoy/internal/dispatch/store/migrations")
+    build_what="the checkout's migrations"
   fi
-  seed_level=$(jq -er .migration "$ROOT/seed.meta.json")
-  if ((build_level < seed_level)); then
-    die "this build's highest migration is $build_level ($build_what), older than the seed's $seed_level (seed made by $(jq -r .build_commit "$ROOT/seed.meta.json")); reseed with this build (stack.sh seed --force) or run a newer one"
-  fi
-  if ((build_level > seed_level)); then
-    note "the seed is at migration $seed_level and this build ($build_what) at $build_level. Dispatch migrates each step's copy forward at start, and any backfill those migrations start runs inside the step; reseed with this build (stack.sh seed --force) to measure it alone"
-  fi
+  seed_migration_check "$ROOT/seed.meta.json" "$build_versions" "$build_what" "$only_highest"
   BUILD=$("$stack" build-info)
 }

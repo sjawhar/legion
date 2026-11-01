@@ -219,8 +219,11 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 	// it instead of holding the probe's one connection for the full bound.
 	ctx, cancel := context.WithTimeout(ctx, healthProbeTimeout)
 	defer cancel()
+	// The cast holds the result at bigint whichever type the column has: a connection that
+	// prepared this read while schema_migrations.version was an integer would otherwise fail it
+	// once after a boot widens the column ("cached plan must not change result type").
 	var version int
-	if err := health.QueryRow(ctx, "select coalesce(max(version), 0) from schema_migrations").Scan(&version); err != nil {
+	if err := health.QueryRow(ctx, "select coalesce(max(version), 0)::bigint from schema_migrations").Scan(&version); err != nil {
 		return 0, err
 	}
 	return version, nil
