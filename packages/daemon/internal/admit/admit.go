@@ -90,9 +90,10 @@ func New(store record.Store, engine *workflow.Engine, cap int, project string, l
 }
 
 // Apply records root and orphan todo observations of issues handed to Legion and every newer
-// observation of a recorded issue, wakes the controller for an unrecorded root in triage handed to
-// Legion (a controller notice, not a record), releases slots roots returned after they completed
-// or began waiting only on a person, promotes waiting roots while capacity remains, and wakes the
+// observation of a recorded issue, queues the todo of an unrecorded root in triage whose legion
+// label a person set (queuePersonHandover) and wakes the controller for one whose label a session
+// set (a controller notice, not a record), releases slots roots returned after they completed or
+// began waiting only on a person, promotes waiting roots while capacity remains, and wakes the
 // controller when a slot it released is still free after that (wakeForFreeSlot). The workflow
 // handler runs first: it records every live-tree child, leaving admission to record only a
 // still-unrecorded root or orphan. A release's adoption of children it cannot adopt
@@ -164,16 +165,26 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		return released, nil, err
 	}
 	handed := observation.HandedOver
-	// A root in triage handed to Legion is the controller's to triage, so each observation of it
-	// while it is unrecorded wakes the controller: its creation with the label, or the edit that
-	// adds it, since the dashboard creates an issue without labels. The controller triages from
-	// Dispatch and the daemon's state, never from the wake. A root without the label is not
-	// Legion's and wakes nobody. This runs before any hold check: a hold defers only whether an
-	// unrecorded todo is admitted, never whether an unrecorded triage root wakes the
-	// controller. The record stays empty, as for any root not yet todo; Reconcile's boot
-	// listing reads every status now, but a triage root is never a todo candidate it admits.
+	// A root in triage handed to Legion is queued by the daemon when a person set the label
+	// (observation.LabelSetter, read from the issue's event log when the fact was prepared): a
+	// person's label is the handover, so the daemon writes its todo through the outbox
+	// (queuePersonHandover) and no agent's write admits it. A label a session set, or one whose
+	// setter the log did not show (the zero LabelSetter: a fact nothing prepared, or a log with no
+	// labelling event) is not a person's, so each observation of the root while it is unrecorded
+	// wakes the controller as before: its creation with the label, or the edit that adds it, since
+	// the dashboard creates an issue without labels. The controller triages from Dispatch and the
+	// daemon's state, never from the wake. A root without the label is not Legion's and wakes
+	// nobody. This runs before any hold check: a hold defers only whether an unrecorded todo is
+	// admitted, never whether an unrecorded triage root is queued or wakes the controller. The
+	// record stays empty, as for any root not yet todo; the daemon's own todo write records it
+	// through the path below once Dispatch echoes it. Reconcile's boot listing reads every status
+	// now, but a triage root is never a todo candidate it admits.
 	if observation.Status == "triage" && observation.Parent == "" && handed {
-		if err := a.enqueue(ctx, tx, observation.Key, record.ControllerNotice{Kind: record.TriageNotice}, a.now()); err != nil {
+		if observation.LabelSetter == "user" {
+			if err := a.queuePersonHandover(ctx, tx, observation.Key, "triage", "event"); err != nil {
+				return nil, nil, err
+			}
+		} else if err := a.enqueue(ctx, tx, observation.Key, record.ControllerNotice{Kind: record.TriageNotice}, a.now()); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -384,6 +395,35 @@ func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, kind record.N
 	return a.enqueue(ctx, tx, issue, notice, dueAt)
 }
 
+// queuePersonHandover queues the todo write of a person's handover of key: a root a person handed
+// to Legion, which the daemon admits without an agent's act. Today that is a person's legion label
+// on an unrecorded root in triage (applyFact for the event, applySummary for the boot listing);
+// the workflow queues the same write for a person's approval of a parked labelled root's spec. The
+// controller used to write this todo at a triage wake, so a handover waited on an agent's memory;
+// a person's decision is the handover, and the daemon writes it itself and wakes nobody. The row
+// carries observedStatus, the status the person's act found the issue in, because its delivery
+// (the daemon's outbox) re-reads the issue and writes only while Dispatch still shows that status:
+// a person's later park, between the act and the delivery, is never undone. One row per issue at
+// a time: while a marked row is pending (record.Store.PersonHandoverPending) a second act — the
+// stream's redelivery, another edit of the same root, the boot listing of a root an event already
+// queued — queues nothing, since the pending row carries the same write, and the triage wake that
+// act would otherwise write is not written either; once the row is delivered the issue is todo, so
+// a later look at the same label finds nothing to queue. The workflow's other status rows of the
+// issue suppress nothing. The queue is logged once it commits, under one message for every source
+// of a person's handover — `event` and `listing` here, `approval` from the workflow — so the boot
+// proof reads which path queued a root from the line's source field.
+func (a *Admission) queuePersonHandover(ctx context.Context, tx pgx.Tx, key, observedStatus, source string) error {
+	pending, err := a.store.PersonHandoverPending(ctx, tx, key)
+	if err != nil || pending {
+		return err
+	}
+	if err := a.enqueue(ctx, tx, key, record.StatusWrite{Status: "todo", ObservedStatus: observedStatus, PersonHandover: true}, a.now()); err != nil {
+		return err
+	}
+	intake.OnCommit(ctx, func() { a.log.Info("admission: queued a person's handover", "issue", key, "source", source) })
+	return nil
+}
+
 // blocked is every issue Legion is waiting to start that waits on an unfinished Dispatch issue,
 // as the tick notice carries it: the roots promotion skips and the children the workflow holds,
 // judged from this transaction's own reads by the function the state's `blocked` is built with
@@ -555,12 +595,13 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 // applySummary applies one Dispatch boot-listing summary to admission's own record of the issue
 // it names, exactly as it would if nothing had ever deferred it: a still-unrecorded key is
 // recorded only when the summary itself shows it todo — into its parent's live tree as the
-// workflow records a child, else as a root when it is handed to Legion — and a recorded key a
-// live event has already carried strictly past the summary's own sequence is left alone —
-// reapplying the summary would overwrite fresher information with stale. Both Reconcile,
-// immediately when the consumer is already caught up, and release, once the consumer catches up
-// to a summary Reconcile deferred, call this the same way: a key nothing else ever gets around to
-// explaining still lands on what the listing already knew.
+// workflow records a child, else as a root when it is handed to Legion — or queued when it shows a
+// root in triage whose legion label a person set, and a recorded key a live event has already
+// carried strictly past the summary's own sequence is left alone — reapplying the summary would
+// overwrite fresher information with stale. Both Reconcile, immediately when the consumer is
+// already caught up, and release, once the consumer catches up to a summary Reconcile deferred,
+// call this the same way: a key nothing else ever gets around to explaining still lands on what
+// the listing already knew.
 func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary intake.DispatchIssue, slotted map[string]struct{}) error {
 	stored, err := a.store.Issue(ctx, tx, summary.Key)
 	if err != nil {
@@ -568,6 +609,16 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary intake.
 	}
 	handed := summary.HandedOver
 	if stored == nil {
+		// An unrecorded root the listing shows in triage with the label is queued as its event
+		// would be (applyFact) when a person set the label, which the listing's preparation read
+		// from the issue's event log: the person's label fell while the daemon was down, or on a
+		// stream position a fresh consumer never reads, and only the listing can see it. Any other
+		// setter returns below as it did before, with no wake: the listing carries no actor, so
+		// only a person's label read from the log queues, and a session's label at boot is the
+		// controller's to find at its own start, as it always was.
+		if summary.Status == "triage" && summary.Parent == "" && handed && summary.LabelSetter == "user" {
+			return a.queuePersonHandover(ctx, tx, summary.Key, "triage", "listing")
+		}
 		if summary.Status != "todo" {
 			return nil
 		}
