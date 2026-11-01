@@ -313,9 +313,17 @@ func storableAskBlockID(id string) bool {
 	return id != "" && strings.IndexByte(id, 0) < 0
 }
 
-// recordAskAuthors records authors, keyed by block id, in tx, keeping the author an earlier
+// askAuthorsStatement records a document's ask block authors, keeping the author an earlier
 // registration of a block already recorded.
-func recordAskAuthors(ctx context.Context, tx pgx.Tx, room string, authors map[string]model.Actor) error {
+const askAuthorsStatement = `
+	insert into doc_ask_block_authors (artifact_id, block_id, actor)
+	select $1::uuid, block, actor from unnest($2::text[], $3::jsonb[]) as author(block, actor)
+	on conflict (artifact_id, block_id_key(block_id)) do nothing`
+
+// askAuthorsArgs is askAuthorsStatement's arguments for authors, keyed by block id, and nil when
+// none of them can name a durable row (storableAskBlockID). An append queues the statement with
+// them among its own writes (appendUpdateTxClass), which go in one round trip.
+func askAuthorsArgs(room string, authors map[string]model.Actor) ([]any, error) {
 	blocks := make([]string, 0, len(authors))
 	encoded := make([]string, 0, len(authors))
 	for block, actor := range authors {
@@ -324,19 +332,25 @@ func recordAskAuthors(ctx context.Context, tx pgx.Tx, room string, authors map[s
 		}
 		raw, err := json.Marshal(actor)
 		if err != nil {
-			return fmt.Errorf("encode an ask block's author: %w", err)
+			return nil, fmt.Errorf("encode an ask block's author: %w", err)
 		}
 		blocks = append(blocks, block)
 		encoded = append(encoded, string(raw))
 	}
 	if len(blocks) == 0 {
-		return nil
+		return nil, nil
 	}
-	if _, err := tx.Exec(ctx, `
-		insert into doc_ask_block_authors (artifact_id, block_id, actor)
-		select $1::uuid, block, actor from unnest($2::text[], $3::jsonb[]) as author(block, actor)
-		on conflict (artifact_id, block_id_key(block_id)) do nothing
-	`, room, blocks, encoded); err != nil {
+	return []any{room, blocks, encoded}, nil
+}
+
+// recordAskAuthors records authors, keyed by block id, in tx, keeping the author an earlier
+// registration of a block already recorded.
+func recordAskAuthors(ctx context.Context, tx pgx.Tx, room string, authors map[string]model.Actor) error {
+	args, err := askAuthorsArgs(room, authors)
+	if err != nil || args == nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, askAuthorsStatement, args...); err != nil {
 		return fmt.Errorf("record the document's ask block authors: %w", err)
 	}
 	return nil

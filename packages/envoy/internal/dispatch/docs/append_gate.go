@@ -100,11 +100,44 @@ const closeMargin = 2 * time.Second
 // still on its way) would otherwise store edits on a closed issue, which nothing settles until the
 // issue reopens. The read takes no lock on the issue's row: an append whose read precedes the
 // close's commit lands, as it would have a moment earlier, and is settled once the issue reopens.
+// The prune checkpoint comes back with it, so the recovery a crashed prune owes
+// (PgVersioned.recoverPruneTx) costs a round trip only where one stands rather than one on every
+// append: normally the column is null and the append goes on from this read alone.
 const appendGateStatement = `
 	select coalesce(max(version), 0), coalesce(min(version) <= $2, false),
 		(select (extract(epoch from clock_timestamp() - i.closed_at) * 1000000)::bigint
-			from artifacts a join issues i on i.key = a.issue_key where a.id = $1)
+			from artifacts a join issues i on i.key = a.issue_key where a.id = $1),
+		(select ceiling from doc_checkpoints where artifact_id = $1)
 	from doc_updates where artifact_id = $1`
+
+// appendGateRead is what one appendGateStatement read says about a document: latest, its head
+// (0 for an empty history); intact, whether any stored row at or below the reading room's cursor
+// remains; closedFor, how long ago its issue closed on the database's clock, nil while it is open
+// and for a document of no issue; and pruneCeiling, a crashed prune's checkpoint, nil while none
+// stands.
+type appendGateRead struct {
+	latest       int64
+	intact       bool
+	closedFor    *time.Duration
+	pruneCeiling *int64
+}
+
+// readAppendGate is appendGateStatement for room against a room instance holding every version
+// through through, read through q inside the appending transaction, under the document's advisory
+// lock that transaction's session holds.
+func readAppendGate(ctx context.Context, q Queryer, room string, through int64) (appendGateRead, error) {
+	var read appendGateRead
+	var closedMicros *int64
+	if err := q.QueryRow(ctx, appendGateStatement, room, through).
+		Scan(&read.latest, &read.intact, &closedMicros, &read.pruneCeiling); err != nil {
+		return appendGateRead{}, fmt.Errorf("read the document's head for the append gate: %w", err)
+	}
+	if closedMicros != nil {
+		closed := time.Duration(*closedMicros) * time.Microsecond
+		read.closedFor = &closed
+	}
+	return read, nil
+}
 
 // observedBeforeClose is whether a browser update the room's observer took age ago, on this
 // process's monotonic clock, was taken no later than closeMargin after its issue's close
@@ -118,14 +151,14 @@ func observedBeforeClose(observed time.Time, age, closedFor time.Duration) bool 
 	return !observed.IsZero() && age+closeMargin >= closedFor
 }
 
-// gateAppend is the gate: its one read of room, under the document's advisory lock the appending
-// transaction holds, so no append lands between the read and its own, and the verdict over that
-// read for update - the version the append goes after (it is stored at latest+1), ErrIssueClosed
-// or ErrRoomBehindHead. The append comes from a room instance whose cursor holds every version
-// through through, ruled by kind, of an update the room's observer took at observed (zero for a
-// derived write or an append with no class). An appendBrowser append is refused when the
-// document's issue is closed and its room took the update later than closeMargin after the close
-// (observedBeforeClose), or when the room's history was replaced (historyReplaced); an
+// gateAppend is the gate: the verdict over read, one readAppendGate of room taken under the
+// document's advisory lock the appending transaction's session holds, so no append lands between
+// that read and its own - the version the append goes after (it is stored at latest+1),
+// ErrIssueClosed or ErrRoomBehindHead. The append comes from a room instance whose cursor holds
+// every version through through, ruled by kind, of an update the room's observer took at observed
+// (zero for a derived write or an append with no class). An appendBrowser append is refused when
+// the document's issue is closed and its room took the update later than closeMargin after the
+// close (observedBeforeClose), or when the room's history was replaced (historyReplaced); an
 // appendDerived append unless the room holds the head exactly. Equality for the derived rule, not
 // `through < head`: a room standing past the head holds a history the store no longer has.
 //
@@ -139,19 +172,8 @@ func observedBeforeClose(observed time.Time, age, closedFor time.Duration) bool 
 // and reloaded at the head (Service.closeRoomOnReplacedHistory), rather than taking every later
 // update of its browsers down this path, a decode of the whole stored document under the
 // document's lock each.
-func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind appendKind, observed time.Time, update []byte) (latest int64, replaced bool, err error) {
-	var intact bool
-	var closedMicros *int64
-	if err := tx.QueryRow(ctx, appendGateStatement, room, through).Scan(&latest, &intact, &closedMicros); err != nil {
-		return 0, false, fmt.Errorf("read the document's head for the append gate: %w", err)
-	}
-	// closedFor is how long ago the document's issue closed on the database's clock, nil while it
-	// is open and for a document of no issue.
-	var closedFor *time.Duration
-	if closedMicros != nil {
-		closed := time.Duration(*closedMicros) * time.Microsecond
-		closedFor = &closed
-	}
+func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind appendKind, observed time.Time, update []byte, read appendGateRead) (latest int64, replaced bool, err error) {
+	latest, intact, closedFor := read.latest, read.intact, read.closedFor
 	// The update's age is taken at the read, as the database measures the close's.
 	var age time.Duration
 	if !observed.IsZero() {
