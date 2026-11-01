@@ -2,59 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-251",
-  "previousHandoff": "ab06eee9dbdeb28449122ea35f8831fd5719fee6",
-  "round": 19,
-  "headSha": "946d850cba53",
-  "handoffHead": "f8925f0cb9e7959d7cc12f5809d673933fb8dac3",
-  "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran. No model ran inside any run: the agents are test shims.",
-  "rig": "The pod was recreated again. I used the pod's PostgreSQL 18.6 (LEGION_TEST_PG_DSN) and a new nats-server 2.10.29. I rebuilt the drivers from this session's transcript by running round 18's recorded replay again, and taught them main's #2571: each accepted prompt now ends with its prompt_result frame, as Oh My Pi sends it. Copies are at $TMPDIR/tester/*.round19.go; none is committed.",
+  "previousHandoff": "079532ed2107768e91509e32d4dd54bda49b0c2c",
+  "round": 20,
+  "headSha": "695ee39dea13",
+  "handoffHead": "2bfe17dfabf0df1767e0d0c7d29c313ee168fc96",
+  "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran. No model ran inside any test.",
+  "scope": "Forward-merge re-check 946d850c -> 695ee39d: the fingerprint is unchanged, so this round ran the bare gates only, as the architect asked. I computed the branch's own diff against each head's fork point (e622d943 and 081e9e60), leaving out .legion/, with index and hunk-header lines removed. Both sha256 values are d8a7e86d3f16985c, over 82 files on each side. The merge brought only main's #2621 (packages/pi-legion/extensions/legion-background-subagent-omp.test.ts and one docs/solutions file) and main's release and changelog commits.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The merge kept both sides in every conflicted file. I compared this change's own diff (against its fork point) at 9dda974d and at 946d850c. The non-test daemon code moved only by comments, by the migration renumber to 0068 and 0069, and by main's assignment beside the branch's fields. supervise/delivery.go: Delivery carries both Kept (branch) and Assignment (main), and the DeliveredRows comment is kept. supervise/table.go: RequestDeliver has main's Assignment and the branch's Row and Kept. store/claims.go: the claim read and write carry main's serving_assignment and the branch's delivered_rows. The delivery read and write carry main's assignment and the branch's kept_decisions, with placeholders renumbered to $28 and $12. The scan sets both Assignment and Kept (claims.go:395, :401). daemon/outbox.go: the start's deliver passes main's Assignment and the branch's Row and Kept. No hunk drops a side. The review's Minors tests pass: TestALateReportOfASpentCatchUpNamesWhatItsRowReleased (both cases), the composer test, and TestAHoldReleaseLeavesAClaimThatCounts."
+    "how": "The implementer's fingerprint claim (3f7d4072..., 77 files, unchanged) holds under my own procedure: my fingerprint, d8a7e86d3f16985c over 82 files, is the same at 946d850c and at 695ee39d. The pi-legion test passes 10 of 10 on the pinned Oh My Pi."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "On the whole daemon, main's #2571 retirement still works, and a kept decision in a root task is still told once (held task, busy refusal, death mid-turn)",
-      "surface": "The whole Legion daemon (startDaemonWithin) on the pod's PostgreSQL and nats-server; Dispatch events as envelopes on ENVOY_NOTIFICATIONS; the architect is a shim on the daemon's worker stream that sends prompt responses, agent_start, agent_end and prompt_result by hand; a death is a runtime Gone observation",
-      "command": "go test -tags e2e -count=1 -run '^TestTesterTakenBackConfirmationLive$' -v ./internal/daemon/ (throwaway driver)",
-      "observed": "PASS, 4 steps. (a) Busy refusal: a turn of the agent's own confirmed the task (kept 0), then the prompt was refused 'Agent is already processing'. The row was put back (kept=1, unheld=0, pending=1), and after the turn ended the resend named ask-a once. (b) Foreign turn, then the prompt accepted: after agent_end and before prompt_result, pending=1; after the result, pending=0, and no resend. ask-b was told once. (c) New for #2571: the task's turn ended, then a background turn started and ended, with the result still to come. pending=1 (nothing retired); after prompt_result, pending=0, and no resend. ask-d was told once, none kept. (d) Death mid-turn: kept=1, pending=1. The relaunch named ask-c once, and it was then told. Held task: TestTesterHeldTaskHandOverLive passes, the child told its own decision and the old root only its own.",
-      "headSha": "946d850cba53",
-      "negativeControl": "Rounds 17 and 18 ran the put-back control, on code this round did not move: without holdKeptDecisions' put-back, (a) loses the decision. Step (b) and (c)'s pending=1 before the result is itself the check that the delivery was not retired at the turn's end."
+      "criterion": "The pi-legion background-subagent test, red at 079532ed, passes at this head",
+      "surface": "bun test of packages/pi-legion/extensions/legion-background-subagent-omp.test.ts against the pinned Oh My Pi binary (.omp-pin: github:sjawhar/oh-my-pi@18.13.3-sami.20261029-115123, the linux-x64 asset of release v18.13.3-sami.20261029-115123, 'omp/18.13.3') and a real nats-server",
+      "command": "LEGION_TEST_OMP=<that omp> LEGION_TEST_NATS_URL=nats://127.0.0.1:54333 bun test extensions/legion-background-subagent-omp.test.ts, 10 times",
+      "observed": "10 of 10 pass. Each run measured that the subagent started 21 to 53 ms before the role's turn ended, and that the turn ended 79 to 135 ms before the subagent's request was released.",
+      "headSha": "695ee39dea13",
+      "negativeControl": "Without LEGION_TEST_OMP the test skips ('0 pass, 1 skip'), so these runs did drive the binary."
     },
     {
-      "criterion": "Migrations apply fresh and from main's 0067",
-      "surface": "store.Store.Migrate on the pod's PostgreSQL 18.6. The migrations differ from main@origin only by the added 0068_parked_decisions and 0069_claim_delivered_rows, so migrating through 67 is main's schema",
-      "command": "go test -count=1 -run TestTesterMigrateFreshAndFrom0067 -v ./internal/store/ (throwaway)",
-      "observed": "Fresh: migrated to version 69. From 0067: a claim (every not-null column filled) and its pending delivery with assignment 'asg-1' were seeded at 0067. Migrate applied 2 migrations, and the store read the claim back with its pending outbox:7, assignment asg-1, delivered_rows [] and empty kept. TestParkedDecisionsArriveWith0068AndGoWithTheirIssue passes too.",
-      "headSha": "946d850cba53",
-      "negativeControl": "Seeding at 0067 with only some columns was refused by 0067's own not-null constraints (session, then session_file), so the seed is main's real schema."
-    },
-    {
-      "criterion": "The pinned seeds, the two tests red at 9dda974d, and the concurrent composers",
-      "surface": "The daemon, store, intake and launcher packages",
-      "command": "go test -count=1 -run 'TestKeptDecisionsRegressionSeeds|...' ./internal/daemon/; go test -count=10 -run TestConsumePreparesAnIssueEventsRepositoryBeforeApplyingIt ./internal/intake/; go test -count=10 -run TestTheContainersStopEndsEveryRoleWithinOneStopGrace ./internal/launcher/; go test -count=2 -run 'TestTesterManyComposersOneTree|TestTwoComposersNeverBothNameOneKeptDecision|...' ./internal/store/",
-      "observed": "All 38 pinned-seed subtests PASS (262 and 701 among them, 153 s); every other kept-decision test passes, with 0 SQLSTATE 42501 in the run. intake TestConsumePreparesAnIssueEventsRepositoryBeforeApplyingIt: 10 of 10 pass. launcher TestTheContainersStopEndsEveryRoleWithinOneStopGrace: 10 of 10 pass. The 12-composer stress: 120 of 120 decisions named once, twice over.",
-      "headSha": "946d850cba53",
-      "negativeControl": "Round 18: without UnclaimedKept's lock, the stress names decisions 2 to 3 times."
-    },
-    {
-      "criterion": "One bounded sweep, with invariant failures and connection or cleanup errors counted apart",
-      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce on the pod's PostgreSQL, binary built from f8925f0c",
-      "command": "LEGION_KEPT_PROPERTY_RUNS=400 LEGION_KEPT_PROPERTY_STEPS=300 timeout 7000 ./daemon19.test -test.run '^TestKeptDecisionsReachTheCurrentArchitectOnce$' -test.v",
-      "observed": "PASS in 1764 s: 400 of 400 seeds. Invariant failures: 0. Cleanup errors (SQLSTATE 42501): 0. Connection errors: 0. Deadlocks: 0. 'did not drain': 0. Across the seeds: 619 members handed over (71 without their run), 181 orphans, 400 adoptions, 1565 trees closed, 341 streaming restarts, 338 foreign turns, 97 receipt timeouts with no copy, 12 hand-overs inside a publish, 40 between a held task and its confirmation, 123 sends refused busy after a foreign confirm.",
-      "headSha": "946d850cba53",
+      "criterion": "The daemon packages and the pinned seeds",
+      "surface": "go test on the pod's PostgreSQL 18.6 and nats-server 2.10.29",
+      "command": "go test -count=1 -timeout 50m ./internal/admit/ ./internal/workflow/ ./internal/record/ ./internal/store/ ./internal/supervise/ ./internal/daemon/; then go test -v -skip 'TestDaemonPermissionsOnRealServers|TestATerminalAttempt' ./internal/daemon/",
+      "observed": "record and supervise are ok. All 38 TestKeptDecisionsRegressionSeeds subtests PASS, and 270 daemon tests passed. Every failure I classified by message is the pod's, not this change's. (1) 53 tests failed only in cleanup, with 'permission denied to terminate process (SQLSTATE 42501)' (sjawhar/legion#2613); 32 more are the parents of those. (2) Two tests panicked with 'rootless Docker not found': TestDaemonPermissionsOnRealServers and TestTheWorkflowConnectsAsTheNatsSeedTheDaemonResolved. (3) TestATerminalAttemptIgnoresSIGTSTP and TestATerminalAttemptLeavesLaterChildrenSIGTTOUsDefault fail with 'parse SigIgn \"\"': gVisor's /proc/self/status has no SigIgn line, and this change does not touch foreground.go or foreground_test.go. (4) One admit test met 'failed to receive message' at the shared PostgreSQL under load; run again alone it passed 3 of 3. Invariant failures: 0.",
+      "headSha": "695ee39dea13",
       "negativeControl": "The pinned seeds are each a past failure."
-    },
-    {
-      "criterion": "The round-7 run, and every whole-daemon drive once",
-      "surface": "The whole daemon as above",
-      "command": "TESTER_REAL_EVENTS=... go test -tags e2e -count=1 -run '^TestTester.*Live$' -v ./internal/daemon/",
-      "observed": "All 12 drives PASS (217 s). Round-7 passed its 14 steps: of 13 real Dispatch events re-fetched from INFRA-251 and INFRA-168, the 3 a person made are relayed. Verdict jq: undelivered 2, sent 1, unrelayed ['its root is not parked'], unmatched []. Also passing: crash window, stale start, RootHears, closing tree, orphan hand-over, held-task hand-over, hand-over without its run, orphaned parked child, grandchild in both orders, adopted queued root, and taken-back confirmation.",
-      "headSha": "946d850cba53",
-      "negativeControl": "As above."
     }
   ],
-  "ci": "Head f8925f0c, read 2026-11-01T06:37Z: changes, ci-filters, ci-images, claude-envoy, docs, envoy-client, pi-shared, typecheck and worker-image passed; test, lint, pi-envoy and pi-legion were still running. Not waited on. GitHub: MERGEABLE, BLOCKED."
+  "ci": "Head 2bfe17df, read 2026-11-01T08:07Z: changes and pr-title success; every other lane, test included, still queued. Not waited on, so its green is not yet read. GitHub: mergeable UNKNOWN."
 }
