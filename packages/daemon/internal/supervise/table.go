@@ -225,10 +225,11 @@ type PodUpdateEnded struct {
 	Claim claim.Token
 	// Round is the round this end is of, as the sweep read it from the claim. An end for any
 	// other round decides nothing: the sweep posts from the claims it read at the start of a
-	// tick, and a round can be replaced by another (openPodUpdate) or left behind (leaveRound)
-	// before the post is handled, where ending whichever round the claim stands in now would end
-	// a round nobody has weighed. What each round's end then does is read from its own id
-	// (Claim.InPluginRound), never from a flag the caller keeps in step with it.
+	// tick, and a round can be replaced by another (openPodUpdate) or ended by a registration at
+	// this daemon's contract (endCurrentPluginRound) before the post is handled, where ending
+	// whichever round the claim stands in now would end a round nobody has weighed. What each
+	// round's end then does is read from its own id (Claim.InPluginRound), never from a flag the
+	// caller keeps in step with it.
 	Round string
 }
 
