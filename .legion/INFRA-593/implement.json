@@ -2,60 +2,53 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-593",
-  "previousHandoff": "11a890e13f6407ae42681cb07667eeb88cfb2302",
+  "previousHandoff": "0f8cd916a7ed25e08902272b654878f8600443fd",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2444",
-  "round": "Review round 14's required change: a merge of main after #2496, #2387 and #2446. The merge is 7f9adf8f (main 7b4bf9a1), followed by f533f33c (main 8d555cc2, #2394, a README conflict only), because main showed the PR conflicting again. It is a full round: round-shape.py lists 13 files, runtime among them.",
+  "round": "Review round 15: one important finding, six minor ones, and the forward merge of main through 0642a37a (#2633). The merge (13f952a8) had no conflict and left the file set and the fingerprint unchanged. Two fix commits follow it (b3a91c12, 95ef7808), pushed in one code push. A full round.",
   "proof": [
     {
-      "criterion": "Main's #2496 (one flush for every writer, the stored-order rule, newDocumentCopy) and this PR's compaction, cap, refusal and cleanup-off copy hold together: every copy that replays stored or room updates is built by newCappedDocumentCopy",
-      "surface": "go test of the docs package on a local Postgres 16.2 (GOMAXPROCS=4, GOMEMLIMIT=12GiB, CGO_ENABLED=1 for -race)",
-      "command": "go test -race -p 1 -parallel 4 -timeout 70m ./internal/dispatch/docs -count=300 -run '^(TestACompactionStoresTheRoomsFormattedStateAsTheRoomHoldsIt|TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce|TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt|TestAStoredLogThatDoesNotFoldIsRefusedNamingItsReasonOnce|TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown|TestARoomLoadsItsStoredHistoryAsItWasStored|TestTheStoredRowsOfARoomFoldToItsDocumentWhenAPeerUpdateParks|TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt)$'; go test ./internal/dispatch/docs -run '^TestStoredOrder' -args -stored-order-rounds=200",
-      "observed": "2,400 of 2,400 pass, with 0 data races (sampled peak 3.23 of 19 GiB, 490 samples). Every TestStoredOrder* test passes, TestStoredOrderFormattedWritesReplayToEveryVersion included. The soak logs rounds=200 counted=200 mismatching_rounds=0 mismatches=0 writes=400 write_p50=65ms write_p99=223ms.",
-      "headSha": "7f9adf8f3fc82d5177f6fead97a79fa74283aace",
-      "negativeControl": "Before passRoomLock, TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt failed with 'the failed room's eviction never queued on the document's advisory lock' (120 s). With it, the test passes 300 of 300 under -race."
+      "criterion": "Important: the stored-order check never reports clean over versions a compaction folded below the base",
+      "surface": "go test of the docs and cmd/dispatch packages, and the real envoy-dispatch stored-order command over a document the real server compacted",
+      "command": "go test ./internal/dispatch/docs -run '^TestStoredOrder' -args -stored-order-rounds=200; go test ./cmd/dispatch -run StoredOrder; DATABASE_URL=<e2e database> ./envoy-dispatch stored-order --artifact <document> (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt v24)",
+      "observed": "All 15 TestStoredOrder* tests pass, including the two new subtests of TestStoredOrderChecker and the second document of TestStoredOrderSubcommandExitCodes. The soak logs rounds=200 mismatching_rounds=0 mismatches=0. On the compacted e2e document the command prints versions_checked=1 versions_compacted=31 with compacted=\"31 versions record updates below the compaction base 38 and were not compared\", clean on the one version it compared (exit 0). On a copy with that version deleted it prints clean=0 unchecked=1 and exits 1.",
+      "headSha": "95ef78087492a3b5090986869215f31cad567838",
+      "negativeControl": "With the old bucketing and Checked() restored, the new subtests and the CLI case fail: both documents report clean, and the command exits 0 with clean=1 unchecked=0 for a document whose only version is below its base."
     },
     {
-      "criterion": "The suites pass at the merges",
-      "surface": "go test of docs, api, cmd/dispatch, store, duty, outbox and pgmigrate on fresh local databases",
-      "command": "go test -p 1 -parallel 4 -count=1 -timeout 75m ./internal/dispatch/docs ./internal/dispatch/api ./cmd/dispatch ./internal/dispatch/store/... ./internal/dispatch/duty/... ./internal/dispatch/outbox/... ./internal/pgmigrate/... (at 7f9adf8f); ./internal/dispatch/docs ./cmd/dispatch ./internal/dispatch/store/... (at f533f33c)",
-      "observed": "At 7f9adf8f, docs, api, cmd/dispatch, duty, outbox and pgmigrate pass (sampled peak 11.99 of 19 GiB, 1,406 samples). At f533f33c, docs and cmd/dispatch pass (peak 11.99 GiB, 805 samples). The store suite passes at both heads except TestMigrationSetTakesNumbersThenTimestamps, which is main's own failure: #2387 added numbered migrations 0158-0161 after #2411 closed numbering at 157, as the INFRA-514 architect reported at 17:22Z. TestTheCompactionOwedMigrationNamesEveryDocumentOfMoreThanOneRow passes.",
-      "headSha": "f533f33ce137a1c0ca3524656fedc27277a64b12",
-      "negativeControl": "The failing store test names main's four files (0158_message_delivery_urgency ... 0161_delivery_run_warnings) and none of this PR's."
+      "criterion": "The minors and the merge leave compaction, format, refusal, peer and failed-room behaviour intact",
+      "surface": "go test -race of the docs package on a local Postgres 16.2 (GOMAXPROCS=4, GOMEMLIMIT=12GiB, CGO_ENABLED=1)",
+      "command": "go test -race -p 1 -parallel 4 -timeout 70m ./internal/dispatch/docs -count=300 -run '^(TestACompactionStoresTheRoomsFormattedStateAsTheRoomHoldsIt|TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce|TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt|TestAStoredLogThatDoesNotFoldIsRefusedNamingItsReasonOnce|TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown|TestARoomLoadsItsStoredHistoryAsItWasStored|TestTheStoredRowsOfARoomFoldToItsDocumentWhenAPeerUpdateParks|TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt)$'",
+      "observed": "2,400 of 2,400 pass, with 0 data races.",
+      "headSha": "95ef78087492a3b5090986869215f31cad567838",
+      "negativeControl": "Without passRoomLock (measured last round, at 7f9adf8f), TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt failed with 'the failed room's eviction never queued on the document's advisory lock'."
     },
     {
-      "criterion": "A restarted process's first sweep folds old rows and leaves young rows as written, and a compacted document's stored rows still pass envoy-dispatch stored-order",
-      "surface": "real envoy-dispatch built from the head on a local Postgres 16.2, DISPATCH_NATS_DISABLED=1, and its stored-order command",
-      "command": "bash $TMPDIR/infra593/e2e.sh; DATABASE_URL=<the run's database> ./envoy-dispatch stored-order --artifact <the document> (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 23)",
-      "observed": "30 uploads made 41 rows. The restarted process's first sweep logged candidates=1 compacted=1 rows_deleted=37, leaving 4 rows. The 3 young rows are unchanged (version, xmin, md5), the text sha256 is identical, and a 31st upload reads back. stored-order then reports base=38 updates_checked=4 versions_checked=1 mismatches=0, clean=1. schema_migrations holds 20261101144855, 20261028195714, 161 (newest first).",
-      "headSha": "f533f33ce137a1c0ca3524656fedc27277a64b12",
-      "negativeControl": "On a copy of that database with row 41's update cut by 4 bytes, stored-order refuses it once: refused=\"update 41 does not apply to the fold before it: crdt: invalid update: encoding: unexpected end of input\" (run at 7f9adf8f)."
+      "criterion": "The suites pass at the head with main's numbering fix merged, and the real process compacts as before",
+      "surface": "go test of docs, api, cmd/dispatch, store, duty, outbox and pgmigrate on a fresh local database; real envoy-dispatch with NATS off",
+      "command": "go test -p 1 -parallel 4 -count=1 -timeout 80m ./internal/dispatch/docs ./internal/dispatch/api ./cmd/dispatch ./internal/dispatch/store/... ./internal/dispatch/duty/... ./internal/dispatch/outbox/... ./internal/pgmigrate/...; bash $TMPDIR/infra593/e2e.sh",
+      "observed": "Every package passes, store included (TestMigrationSetTakesNumbersThenTimestamps passes after 0642a37a). Sampled peak 12.20 of 19 GiB over 1,884 samples; the leftover-sampler check printed 0 lines. The e2e run: 41 rows; the restarted process's first sweep logged candidates=1 compacted=1 rows_deleted=37, leaving 4 rows; the 3 young rows are unchanged; the text sha256 is identical; a 31st upload reads back.",
+      "headSha": "95ef78087492a3b5090986869215f31cad567838",
+      "negativeControl": "At f533f33c, before this merge, the same store suite failed TestMigrationSetTakesNumbersThenTimestamps on main's 0158-0161."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/docs/livewrite.go",
-    "packages/envoy/internal/dispatch/docs/service.go",
-    "packages/envoy/internal/dispatch/docs/ledger.go",
-    "packages/envoy/internal/dispatch/docs/persistence.go",
-    "packages/envoy/internal/dispatch/docs/compaction.go",
-    "packages/envoy/internal/dispatch/docs/websocket.go",
-    "packages/envoy/internal/dispatch/docs/roomcursor.go",
-    "packages/envoy/internal/dispatch/docs/pending_authors.go",
     "packages/envoy/internal/dispatch/docs/storedorder.go",
-    "packages/envoy/internal/dispatch/docs/tree.go",
-    "packages/envoy/internal/dispatch/docs/stale_room_test.go",
-    "packages/envoy/internal/dispatch/api/comment_mention_takeover_test.go",
-    "packages/envoy/AGENTS.md",
+    "packages/envoy/internal/dispatch/docs/storedorder_test.go",
+    "packages/envoy/cmd/dispatch/storedorder.go",
+    "packages/envoy/cmd/dispatch/storedorder_test.go",
     "packages/envoy/cmd/dispatch/README.md",
-    "docs/solutions/database-issues/a-sweep-over-a-table-too-large-to-migrate-reads-a-worklist-the-hot-write-fills-in-its-own-statement-pr2444.md"
-  ],
-  "trickyParts": [
-    "Since #2496, a row can be stored by a flush rather than by an append on its own transaction. Every such commit now notes the queue: AppendRoomFlush, commitSettlement and Ledger.commit (noteAppended).",
-    "This PR's compaction takes the document lock only when it has rows to fold, but #2387's failed-room test needs the eviction to queue on that lock. passRoomLock waits for the lock and releases it, only for a compaction that waits and writes nothing."
+    "packages/envoy/internal/dispatch/docs/compaction.go",
+    "packages/envoy/internal/dispatch/docs/persistence.go",
+    "packages/envoy/internal/dispatch/docs/ledger.go",
+    "packages/envoy/internal/dispatch/docs/compaction_queue.go",
+    "packages/envoy/internal/dispatch/docs/service.go",
+    "packages/envoy/internal/dispatch/docs/tree.go",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/.changes/unreleased/pr2444-document-load-and-compaction.yaml"
   ],
   "deviations": [
-    "Two merge pushes instead of one: 7f9adf8f was pushed, main then showed the PR CONFLICTING after #2394, so f533f33c merged that too. The second merge changed only the README, and the fingerprint is the same.",
-    "The 300-run race test and the stored-order soak ran at 7f9adf8f. The suites, the proof and the stored-order check ran again at f533f33c, whose diff from 7f9adf8f is #2394's own change plus the README paragraph order.",
-    "TestMigrationSetTakesNumbersThenTimestamps is red on main itself; this PR does not fix it, as the architect instructed. Main is merged forward once main's fix lands.",
+    "The checker keeps a version that records update 0 (a document's first, before any row was stored) under versions_skipped rather than versions_compacted: no fold ever reaches it, and counting it would mark every ordinary document as compacted.",
+    "The README's stored-order section keeps that section's existing 100-column wrapping, which is main's layout there, rather than one sentence per line.",
     "Retro removed .legion/INFRA-593/, and this handoff writes it again; the next retro must remove it again."
   ]
 }
