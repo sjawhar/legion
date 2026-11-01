@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-590",
+  "completed": "2026-11-01T06:23:30Z",
+  "round": 20,
+  "reviewedCodeHead": "d99681cece964276e4a5427500fd94c7e9b39f2a",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "roundShape": "Confirmation (merge of main f93dd6895, #2541 took 0150). The PR's own diff at d99681ce vs b52f6b34, per file and with migration numbers normalised, differs only in the renumbering: 0150_duty_holds -> 0151_duty_holds and 0151_outbox_claim -> 0152_outbox_claim, with every reference moved (README, packages/envoy/AGENTS.md, the changelog fragment); cmd/dispatch/README.md puts main's 0150 paragraph first. The migration folder runs 0149_event_horizon, 0150_dpop_proofs, 0151_duty_holds, 0152_outbox_claim, each with a census file; no reference to the old numbers remains. The PR body's risk line names 0152 and its migrations line 0151_duty_holds/0152_outbox_claim after 0150_dpop_proofs.",
+  "ci": "At d99681ce, run 41262122784 attempt 2: lint, typecheck, test, pr-title, envoy-go, envoy-go-race, docs / build and ci-ok all success. Attempt 1's docs / build failed on the legion/handover screenshot selector (two h1 elements), which main's docs build at e018f1d300 failed identically (job 124639636176); this PR changes no screenshot code. Compare d99681ce...d6335fe4 is handoffs only.",
+  "thermonuclear": "None this round: a confirmation round; the pair ran at 1b15f353 with no finding.",
+  "threads": "24, none unresolved.",
+  "keyFindings": []
+}
