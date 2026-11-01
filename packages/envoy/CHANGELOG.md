@@ -1,5 +1,61 @@
 # Changelog
 
+## [25.0.0] - 2026-10-31
+
+### Changed
+
+- `envoy-infra`'s `gcp:Dispatch` now declares Dispatch's Tailscale Service `svc:<hostname>` itself,
+  after the Cloud SQL instance, so the tailnet name comes back only once an availability-type
+  switch has restarted the database. Breaking: the `tailnetService` input is gone and a consumer
+  passes a `tailscale` provider instead. The component's create is an upsert, so it adopts a
+  Service that already exists under that name and overwrites its comment, ports and tags: a stack
+  that declared `svc:<hostname>` itself hands it over in two applies, `retainOnDelete: true` on
+  its own declaration first (with `protect: false` on it if it is protected) and the pin move
+  second, since removing that declaration without the retain deletes the Service the component
+  has just adopted, and `pulumi state delete` is refused there because the component depends on
+  the Service's output. The front door's Deployment waits for the Service and the
+  instance; the server Deployment no longer waits for the front door, so it comes back inside a
+  cutover's stop, while the listener's still does. A new `databaseWaitsFor` input orders the
+  instance's update after a resource the consumer names. A new `signingKeyGenerations` input makes
+  `DISPATCH_SIGNING_KEY` an ordered key set, so an operator rotates the session signing key in
+  three applies — `[0]`, `[0, 1]`, `[1, 0]`, `[1]` — without signing anyone out; the default `[0]`
+  renders exactly the one key the component always wrote.
+
+## [24.8.1] - 2026-10-31
+
+### Changed
+
+- A soft role claim on `POST /v1/roles/set` that names a `previous_session_id` takes the role from that predecessor only when the predecessor has no live registration, when its live registration carries the same `client_instance_id` as the claimant, or when either side carries no instance id. Any other live predecessor keeps the role, and the claim is answered 409 naming it. The predecessor's registration is read from the `envoy_sessions` bucket itself rather than from the cache of it, and the claimant's is read from the bucket too, falling back to the cache when that read does not answer. `POST /v1/interests/subscribe` stores the new optional `client_instance_id` field on the session entry, and `DELETE /v1/sessions/<id>` accepts it as a query parameter: with it, the registration is removed only while it carries that id or none, and the answer is `200 {"deleted":true}` or `200 {"deleted":false,"reason":...}`.
+
+## [24.8.0] - 2026-10-31
+
+### Changed
+
+- A document left open and idle keeps its connection through ygo v1.54.1-sami.1's awareness echo, as `@hocuspocus/server` does: an editor's browser gets its own presence renewal back, and a read-only page gets a small empty presence reply. Dispatch no longer writes keep-alive frames of its own into the document socket.
+
+### Fixed
+
+- Dispatch's ygo pin moves from v1.51.3-sami.4 to v1.54.1-sami.1, the sjawhar/ygo fork rebuilt on upstream ygo v1.54.0. For people editing a document this fixes:
+  - An edit the room refuses now changes nothing. Before, an edit refused for holding too many items that wait on an earlier edit had already put its first part in the document, which was saved while the sender was told the edit was refused and the other editors never got it. Deletions that wait on an earlier edit are now capped the same way.
+  - An edit the room takes only in part now reaches the other editors with what it added and with what it holds until an earlier edit arrives. Before, they did not get that part and stayed behind the room until they reconnected.
+  - A browser that stops reading is closed when a write to it fails, and the room no longer counts it as present. Input it sent before the server closed it is dropped, and the browser sends it again when it reconnects.
+  - A link or other mark on observed text no longer hangs the document on the next edit, and a browser that sends its unacknowledged edits again after a reconnect no longer fills the room's queue of waiting edits.
+  - A crafted edit with a clock past 2^53-1 or a client id past 2^55-1, which no Yjs browser makes, is refused. A stored document that already held one would no longer load; browser and server client ids are 32-bit, and no stored document checked holds one.
+
+## [24.7.0] - 2026-10-31
+
+### Added
+
+- Broker migration 0020 lets the `enrollments` kind check admit `vm`, the enrollment kind of a
+  Google Cloud VM, beside `session` and `pod`. It recreates the one check constraint and rewrites
+  no row, so a broker of the release before it keeps serving over the migrated database, and a
+  rollback past it needs no down migration. `POST /v1/enrollments` still takes `session` and `pod`
+  alone; nothing creates a `vm` enrollment yet. The migration holds `ACCESS EXCLUSIVE` on
+  `enrollments` for the instant its transaction lasts, so a request of the earlier broker that
+  reads `enrollments` waits that instant. Behind a long transaction it waits at most the runner's
+  5 s lock timeout, after which the new broker's boot fails having applied nothing, and its next
+  boot tries again.
+
 ## [24.6.0] - 2026-10-31
 
 ### Added

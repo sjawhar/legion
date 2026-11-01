@@ -794,7 +794,9 @@ func TestFetchRemovesTheLocksAnInterruptedFetchLeftInTheFeed(t *testing.T) {
 		t.Errorf("the partial pack's removal was not logged: %q", logged)
 	}
 	for _, object := range objects {
-		if err := exec.Command("git", "--git-dir="+feed, "cat-file", "-e", object).Run(); err != nil {
+		held := exec.Command("git", "--git-dir="+feed, "cat-file", "-e", object)
+		held.Dir = feed
+		if err := held.Run(); err != nil {
 			t.Errorf("the feed lost %s, an object the clone may borrow", object)
 		}
 	}
@@ -1159,6 +1161,7 @@ func killGitGC(t *testing.T, feed string) {
 	t.Helper()
 	slowGitGC(t, feed)
 	command := exec.Command("/usr/bin/git", "--git-dir="+feed, "gc", "--prune=now")
+	command.Dir = feed
 	environment := without(os.Environ(), "PATH")
 	for _, key := range []string{"OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION"} {
 		environment = without(environment, key)
@@ -1482,6 +1485,7 @@ func incompleteCacheOf(t *testing.T, remote string) string {
 	}
 	old := packOf(t, cache)
 	command := exec.Command("git", "--git-dir="+cache, "pack-objects", "--quiet", filepath.Join(cache, "objects", "pack", "pack"))
+	command.Dir = cache
 	command.Stdin = strings.NewReader(strings.Join(kept, "\n") + "\n")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("pack the cache without %s: %v\n%s", dropped, err, output)
