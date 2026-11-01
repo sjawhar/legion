@@ -85,6 +85,48 @@ test("sends Envoy messages through the shared transport", async () => {
   })
 })
 
+test("renders a kept role publish as a success that says no session holds the role yet", async () => {
+  // Nobody holds the role, so the listener kept the message and answered 202 (INFRA-839). The
+  // tool says so in the same words the Oh My Pi plugin uses, and names no holder: the holder a
+  // lapsed claim carries never received the message.
+  const client = createEnvoyClient({
+    baseUrl: "http://envoy.test",
+    fetch: async (_request, init) => {
+      const body = JSON.parse(String(init?.body)) as { readonly topic: string }
+      return new Response(
+        JSON.stringify({
+          event_id: "evt-kept",
+          source: "agent",
+          source_event_id: "agent.ses_claude.evt-kept",
+          source_session: "ses_claude",
+          topic: body.topic,
+          dedupe_key: "agent.legion-architect.evt-kept",
+          issued_at: 1,
+          payload_summary: "the worker is stalled",
+          trace_id: "trace-kept",
+          kept: true,
+          kept_reason: "holder_lapsed",
+          holder: "ses_lapsed",
+        }),
+        { status: 202, headers: { "Content-Type": "application/json" } },
+      )
+    },
+  })
+  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+
+  const result = (await executeEnvoyTool(runtime, "envoy_publish", {
+    topic: "notifications.role.legion-architect",
+    message: "the worker is stalled",
+  })) as { readonly message: string; readonly kept: boolean; readonly keptReason: string }
+
+  expect(result.message).toBe(
+    "published evt-kept; kept for the role: no session holds it yet, and the message waits for the session that claims it next",
+  )
+  expect(result.message).not.toContain("ses_lapsed")
+  expect(result.kept).toBe(true)
+  expect(result.keptReason).toBe("holder_lapsed")
+})
+
 test("replies in a Slack thread with slack_post, with the token the broker grants", async () => {
   // The broker's client on PATH, standing in for the exec form once LEGION_SLACK_BOT_TOKEN is
   // granted, and a fake Slack Web API at SLACK_POST_API_URL.

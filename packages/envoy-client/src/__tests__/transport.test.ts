@@ -456,6 +456,88 @@ describe("EnvoyClient", () => {
     });
   });
 
+  test("reads a 202 kept answer as a published message the listener holds for the role's next holder", async () => {
+    // Nobody holds the role, so the listener kept the message on the role's kept lane and
+    // answered 202. That is a success, not a refusal: the message reaches whoever claims the
+    // role next, and `request`'s `response.ok` test lets the body through.
+    const kept = new Response(
+      JSON.stringify({
+        event_id: "event-kept",
+        source: "agent",
+        source_event_id: "agent.ses_sender.event-kept",
+        source_session: "ses_sender",
+        topic: "notifications.role.legion-architect",
+        dedupe_key: "agent.legion-architect.event-kept",
+        issued_at: 3,
+        payload_summary: "the worker is stalled",
+        trace_id: "trace-kept",
+        kept: true,
+        kept_reason: "holder_lapsed",
+        holder: "ses_lapsed",
+      }),
+      { status: 202, headers: { "Content-Type": "application/json" } }
+    );
+    const recorded = recordFetch([kept]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const result = await client.publish({
+      sourceSessionID: "ses_sender",
+      topic: "notifications.role.legion-architect",
+      message: "the worker is stalled",
+    });
+
+    expect(result.kept).toBe(true);
+    expect(result.keptReason).toBe("holder_lapsed");
+    expect(result.holder).toBe("ses_lapsed");
+    expect(result.envelope.event_id).toBe("event-kept");
+  });
+
+  test("sends keep on the wire only when the caller asked for it, and still throws the listener's 404", async () => {
+    const refused = () =>
+      new Response(
+        JSON.stringify({ error: "no holder for role legion-architect", reason: "unclaimed" }),
+        {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    const delivered = jsonResponse({
+      event_id: "event-delivered",
+      source: "agent",
+      source_event_id: "agent.ses_sender.event-delivered",
+      source_session: "ses_sender",
+      topic: "notifications.role.legion-architect",
+      dedupe_key: "agent.legion-architect.event-delivered",
+      issued_at: 4,
+      payload_summary: "ping",
+      trace_id: "trace-delivered",
+      holder: "ses_architect",
+    });
+    const recorded = recordFetch([delivered, refused()]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    // An unset `keep` sends no field at all, so an older listener sees an unchanged request.
+    const plain = await client.publish({
+      sourceSessionID: "ses_sender",
+      topic: "notifications.role.legion-architect",
+      message: "ping",
+    });
+    expect(plain.kept).toBeUndefined();
+    expect(plain.keptReason).toBeUndefined();
+    expect(await recorded.requests[0]?.json()).not.toHaveProperty("keep");
+
+    // A sender with a queue of its own asks for no keep, and gets today's 404 as an error.
+    await expect(
+      client.publish({
+        sourceSessionID: "ses_sender",
+        topic: "notifications.role.legion-architect",
+        message: "ping",
+        keep: false,
+      })
+    ).rejects.toThrow("no holder for role legion-architect");
+    expect(await recorded.requests[1]?.json()).toMatchObject({ keep: false });
+  });
+
   test("deletes a session registration", async () => {
     const recorded = recordFetch([new Response(null, { status: 200 })]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });

@@ -104,6 +104,7 @@ import {
   envoyToolSpecs,
   type MessageMetadataArguments,
   parseEnvoyToolArguments,
+  publishConfirmationText,
   sendConfirmationText,
   sessionsOnMachine,
   toMessageMetadata,
@@ -3925,11 +3926,11 @@ export default function envoyExtension(pi: PiApi): void {
           // topic's subscribers are not in the answer); AGENTS.md and the envoy skill carry the
           // general rule. A direct envoy_send is unaffected: the agent-subject lane has no such
           // skip.
-          const undelivered = source !== "" && result.holder === source && inSubagent;
-          const published =
-            result.holder === undefined
-              ? `published ${result.envelope.event_id}`
-              : `published ${result.envelope.event_id}; holder ${result.holder}`;
+          // A kept answer reached no session at all, so the echo rule cannot apply to it: the
+          // holder it names is the lapsed claim's session, which never received the message.
+          const undelivered =
+            result.kept !== true && source !== "" && result.holder === source && inSubagent;
+          const published = publishConfirmationText(result);
           return toolSuccess(
             undelivered
               ? `${published}\nNot delivered: that holder is the session this subagent sends as, and the listener drops a message whose source session is its recipient, so the agent that spawned you did not receive it. Reach it with a write to its agent:// address instead.`
@@ -3938,6 +3939,8 @@ export default function envoyExtension(pi: PiApi): void {
               event_id: result.envelope.event_id,
               topic,
               ...(result.holder === undefined ? {} : { holder: result.holder }),
+              ...(result.kept === undefined ? {} : { kept: result.kept }),
+              ...(result.keptReason === undefined ? {} : { kept_reason: result.keptReason }),
               ...(undelivered ? { undelivered_echo: true } : {}),
             }
           );

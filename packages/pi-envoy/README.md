@@ -22,8 +22,10 @@ The same route forwards a team or other ad-hoc topic's message to each session r
 topic that holds its own NATS connection, as this one does, other than its sender, and the sender's
 error names each session that did not reply. The stream stores each forward on the recipient's
 agent subject, and when the listener supports consumer delivery that session takes the stored copy
-once, also after a restart or a dropped connection (below). A role message is not kept for a later
-claimant, and on the core path a session does not recover one it missed.
+once, also after a restart or a dropped connection (below). A role message no live holder can take
+is kept for the session that claims the role next. That session is handed the message once, within
+one hour of the keep, and the publish answers 202 to say the listener kept it. On the core path a
+session does not recover a role message it missed.
 
 This extension claims the role for the session the host has open, and every automatic claim is
 soft: it names the session it continues, which is a fork's or branch's parent, or the session

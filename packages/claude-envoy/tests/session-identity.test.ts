@@ -88,11 +88,12 @@ test("pruning drops title files older than the age, keeps fresh ones, and tolera
   }
 })
 
-// Only one path removes a role file by hand (a soft setRole that comes back unclaimed), and the
-// handoff prune cannot reach one: it walks `sessions/<pid>/` and asks about a pid, while a role
-// file is keyed by session id. The record of the session running the sweep is never dropped,
-// whatever its age: at startup, before any heartbeat has touched it, age alone would expire the
-// record of the very session that is running.
+// Only one path removes a role file by hand (a soft setRole another live session holds off,
+// never any answer of the publish route), and the handoff prune cannot reach one: it walks
+// `sessions/<pid>/` and asks about a pid, while a role file is keyed by session id. The record
+// of the session running the sweep is never dropped, whatever its age: at startup, before any
+// heartbeat has touched it, age alone would expire the record of the very session that is
+// running.
 test("pruning drops role files older than the age, keeps fresh ones and the sweeper's own, and tolerates no directory", async () => {
   const stateDirectory = await mkdtemp(join(tmpdir(), "claude-envoy-roles-"))
   try {

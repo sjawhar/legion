@@ -23,6 +23,13 @@ module: packages/envoy/internal/dispatch/api
   uses the sentinel (several checks sharing one bound), the outer deadline is still "ours", and only
   the cause says so.
 - Keep the new reason out of any count that means "skipped for time".
+- Seen again in sjawhar/legion#2588 (`packages/envoy/cmd/listener/role_keep.go`), on the logging
+  side rather than the counting one: a guard written as `ctx.Err() != nil`, to keep a listener
+  shutdown out of the error log, also silenced the operation's own ten-minute deadline, so ten
+  minutes of a failing lane ended with nothing above Debug. It cost four review rounds, and this
+  page already said not to. `errors.Is(ctx.Err(), context.Canceled)` is the weaker fix that change
+  took; the `WithTimeoutCause` form above is the one to reach for, since it also survives an outer
+  allowance that cancels.
 
 ## Evidence
 

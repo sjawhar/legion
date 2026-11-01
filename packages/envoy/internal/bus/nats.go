@@ -1444,14 +1444,22 @@ func (c *Client) PublishReportingDuplicateWithin(ctx context.Context, item contr
 	return c.publishJetStream(ctx, item)
 }
 
-// PublishStoredAs publishes item to the notification stream under Nats-Msg-Id msgID instead of the
-// one publishJetStream derives, within ctx's bound as PublishWithin's, for a caller that names the
-// stored message itself: the listener's exception about a stored message, which every listener that
-// raises it from its own durable publishes under one id, so the stream keeps one copy. A duplicate
-// the stream drops counts as published. Its refusals are publishJetStream's (ErrTooLarge,
-// ErrRefused). item.Topic must be one the stream captures.
-func (c *Client) PublishStoredAs(ctx context.Context, item contracts.Envelope, msgID string) error {
-	_, err := c.publishJetStreamAs(ctx, item, msgID)
+// PublishStoredAs publishes item to the notification stream on subject, under Nats-Msg-Id msgID
+// instead of the one publishJetStream derives, within ctx's bound as PublishWithin's, for a caller
+// that names both the subject it is stored on and the stored message itself:
+//   - the listener's exception about a stored message, published on the exception's own topic,
+//     which every listener that raises it from its own durable publishes under one id, so the
+//     stream keeps one copy;
+//   - a role message the listener could not deliver, stored on that role's kept subject
+//     (KeptRoleSubject) while the envelope keeps its own topic field, so the holder that later
+//     takes the role is handed the message as its sender sent it. Every listener that kept the
+//     same message writes it under one id (KeptMsgID).
+//
+// A duplicate the stream drops counts as published, which is the ordinary case for a kept copy
+// rather than a fault. Its refusals are publishJetStream's (ErrTooLarge, ErrRefused); subject must
+// be one the stream captures, or nothing answers the publish.
+func (c *Client) PublishStoredAs(ctx context.Context, subject string, item contracts.Envelope, msgID string) error {
+	_, err := c.publishJetStreamOn(ctx, subject, item, msgID)
 	return err
 }
 
@@ -1497,12 +1505,15 @@ func (c *Client) publishJetStream(ctx context.Context, item contracts.Envelope) 
 	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
 		msgID = ForwardMsgID(item.DedupeKey, item.Topic)
 	}
-	return c.publishJetStreamAs(ctx, item, msgID)
+	return c.publishJetStreamOn(ctx, item.Topic, item, msgID)
 }
 
-// publishJetStreamAs is publishJetStream under Nats-Msg-Id msgID, none when it is empty.
-func (c *Client) publishJetStreamAs(ctx context.Context, item contracts.Envelope, msgID string) (bool, error) {
-	if err := checkSubject(item.Topic); err != nil {
+// publishJetStreamOn is publishJetStream to subject under Nats-Msg-Id msgID, none when it is
+// empty. Every publish of the envelope's own topic passes item.Topic; a kept role message passes
+// the subject it is stored on (PublishStoredAs), which leaves item.Topic the role topic it was
+// published on.
+func (c *Client) publishJetStreamOn(ctx context.Context, subject string, item contracts.Envelope, msgID string) (bool, error) {
+	if err := checkSubject(subject); err != nil {
 		return false, err
 	}
 	data, err := json.Marshal(item)
@@ -1514,43 +1525,93 @@ func (c *Client) publishJetStreamAs(ctx context.Context, item contracts.Envelope
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return false, err
 	}
-	// publish sends data under options, once more if the connection had closed, and names a
-	// refusal as the ErrPublishDenied, ErrTooLarge or ErrStreamFull it is.
-	publish := func(options ...nats.PubOpt) (*nats.PubAck, error) {
-		sentAt := time.Now()
-		ack, err := c.JS().Publish(item.Topic, data, options...)
-		if err != nil && errors.Is(err, nats.ErrConnectionClosed) {
-			if err := c.ensureConnWithContext(ctx); err != nil {
-				return nil, err
-			}
-			sentAt = time.Now()
-			ack, err = c.JS().Publish(item.Topic, data, options...)
-		}
-		if err != nil {
-			if denied := c.deniedPublish(item.Topic, sentAt); denied != nil {
-				return nil, denied
-			}
-			return nil, streamFull(c.refused(err, len(data)))
-		}
-		return ack, nil
-	}
 	options := []nats.PubOpt{nats.Context(ctx)}
 	if msgID != "" {
 		options = append(options, nats.MsgId(msgID))
 	}
-	ack, err := publish(options...)
+	ack, err := c.sendStored(ctx, subject, data, options...)
 	if err != nil {
 		return false, err
 	}
 	if err := notStored(ack); err != nil {
 		// The server holds the id at sequence 0 and no message under it, so the same envelope
 		// goes once more without the id, which no duplicate record can match.
-		if _, sendErr := publish(nats.Context(ctx)); sendErr != nil {
+		if _, sendErr := c.sendStored(ctx, subject, data, nats.Context(ctx)); sendErr != nil {
 			return false, fmt.Errorf("%w, and its publish without its id failed: %w", err, sendErr)
 		}
 		return false, nil
 	}
 	return ack.Duplicate, nil
+}
+
+// sendStored publishes data to subject on the notification stream under options, once more if the
+// connection had closed under it, and names a refusal as the ErrPublishDenied, ErrTooLarge or
+// ErrStreamFull it is. It is the one send of the stored path: its callers (publishJetStreamOn,
+// PublishCursorAt) bound ctx, connected first and pass nats.Context(ctx) among the options, so the
+// acknowledgement wait ends with that bound.
+func (c *Client) sendStored(ctx context.Context, subject string, data []byte, options ...nats.PubOpt) (*nats.PubAck, error) {
+	sentAt := time.Now()
+	ack, err := c.JS().Publish(subject, data, options...)
+	if err != nil && errors.Is(err, nats.ErrConnectionClosed) {
+		if err := c.ensureConnWithContext(ctx); err != nil {
+			return nil, err
+		}
+		sentAt = time.Now()
+		ack, err = c.JS().Publish(subject, data, options...)
+	}
+	if err != nil {
+		if denied := c.deniedPublish(subject, sentAt); denied != nil {
+			return nil, denied
+		}
+		return nil, streamFull(c.refused(err, len(data)))
+	}
+	return ack, nil
+}
+
+// ErrCursorMoved is wrapped by the error of a PublishCursorAt the stream refused because its
+// subject's last sequence was no longer the one the caller read: another writer advanced the
+// cursor in between, and this write stored nothing. It is the one failure of that call which says
+// the caller lost a race rather than that the bus is unwell, so a caller reads the cursor again
+// and decides, where it retries any other failure.
+var ErrCursorMoved = errors.New("the cursor moved under this write")
+
+// PublishCursorAt publishes the raw bytes data to the notification stream on subject - bytes of
+// the caller's own, not an envelope - only while the stream's last sequence on subject is
+// expected, and returns the sequence the stream stored them at. expected is the sequence of the
+// message the caller read on subject, and 0 when it read none, which stores only while the stream
+// holds nothing there (nats.ExpectLastSequencePerSubject).
+//
+// It is what the listener's per-role drain cursor is written with. Two listeners draining one role
+// at once each read the cursor and write the one after it, and only the first of them may land:
+// the second would otherwise move the cursor back over a kept message the first had already
+// forwarded, or forward one twice. The loser's error wraps ErrCursorMoved and stored nothing.
+// Every other failure keeps the error the publish path reports: ErrPublishDenied for a write the
+// connection's user may not make, ErrTooLarge for a subject or body past the server's bounds,
+// ErrStreamFull while the stream holds its byte limit, and ctx's error when ctx ends first.
+func (c *Client) PublishCursorAt(ctx context.Context, subject string, data []byte, expected uint64) (uint64, error) {
+	if err := checkSubject(subject); err != nil {
+		return 0, err
+	}
+	ctx, cancel := c.publishAcknowledgementClock.WithTimeout(ctx, publishBound)
+	defer cancel()
+	if err := c.ensureConnWithContext(ctx); err != nil {
+		return 0, err
+	}
+	ack, err := c.sendStored(ctx, subject, data, nats.Context(ctx), nats.ExpectLastSequencePerSubject(expected))
+	if err != nil {
+		return 0, cursorMoved(err)
+	}
+	return ack.Sequence, nil
+}
+
+// cursorMoved names the server's refusal of a publish whose expected last sequence per subject did
+// not match as the ErrCursorMoved it is, and returns any other error as it is.
+func cursorMoved(err error) error {
+	var apiErr *nats.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode == nats.JSErrCodeStreamWrongLastSequence {
+		return fmt.Errorf("%w: %w", ErrCursorMoved, err)
+	}
+	return err
 }
 
 // PublishCore publishes directly to the envelope's NATS subject without
@@ -1623,6 +1684,16 @@ var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
 // it, and a forward of the same message to another recipient is a copy of its own.
 func ForwardMsgID(dedupeKey, subject string) string {
 	return dedupeKey + ":" + subject
+}
+
+// KeptMsgID is the Nats-Msg-Id of the kept copy of a role message whose dedupe key is dedupeKey:
+// its forward id on that role's kept subject (ForwardMsgID, KeptRoleSubject). Every
+// listener of the deployment takes the same raw role publish on its own role-lane subscription,
+// so each of them may find the role undeliverable and write a kept copy of that one message.
+// Under one id the stream's duplicate window collapses those copies into the single stored copy
+// the next holder of the role is handed.
+func KeptMsgID(dedupeKey, role string) string {
+	return ForwardMsgID(dedupeKey, KeptRoleSubject(role))
 }
 
 // ErrForwardNotStored is returned by RequestCoreTo when the holder's empty receipt arrived but the
