@@ -2,44 +2,33 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-558",
-  "round": 9,
-  "completed": "2026-10-31T23:52:00Z",
-  "codeHead": "7a037ba4",
-  "scope": "Changes since round 8's code head e9defcab: 338cfeaf (the revoke's nil guard removed, the slow-page test requiring its own revoke and an end within 4 s, real cancels in fixtures, a contracts comment) and the merge of main at efed4e4d (7a037ba4), which takes ygo v1.54.1-sami.3.",
+  "round": 10,
+  "completed": "2026-11-01T00:25:00Z",
+  "codeHead": "b77098219",
+  "scope": "A merge of main at daf71f53 (b7709821) only, as the architect set it: the merge adds nothing beyond the branch's diff; no unreleased fragment repeats a CHANGELOG entry; this PR's fragment exists; the revoke and token tests once; ci-ok and pr-title. Round 9's results stand.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran the revoke, token, rebuild and replica tests at 7a037ba4 under -race (3 of 3 each), and the two-build harness and browser spec against legion-envoy-v25.0.0 (bb27e1ee)."
+    "how": "I re-ran the revoke and token tests at b7709821 under -race (10 tests pass) and read the merge's remerge-diff."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The revoke's cancel is what ends a slow revoked page, and the slow-page test catches its loss; the tests of the revoke, token answers, rebuild and replica hold.",
-      "surface": "Package docs on the pod's test Postgres 18 (LEGION_TEST_PG_DSN), at head and in a scratch copy of 7a037ba4 with admission.cancel(errSchemaRevoked) removed",
-      "command": "go test -race -count=3 -run 'TestARevoke|TestARevoked|TestAdmissionRecheck|TestATokenIsAnswered|TestTheRebuild|TestRebuild|TestARebuild|TestTheRoomsRenderedReplicaHoldsWhatACommitParked|TestAStoredHistoryYgoRefusesFromItsClocksCannotLoad|TestSchemaAdmission' ./internal/dispatch/docs/; in the scratch copy: go test -run TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole",
-      "observed": "At head, every listed test PASSes 3 of 3 under -race (22 tests), ok 486.079s.",
-      "headSha": "7a037ba4",
-      "negativeControl": "In the scratch copy without the revoke's cancel, the slow-page test FAILs: 'the revoked page, reading two seconds after the revoke and within 4s of it ended with read tcp ...: i/o timeout, want a close with 4412 or the 1006 ...'."
+      "criterion": "The merge of main adds nothing beyond the branch's own diff, and the changelog fragments are right.",
+      "surface": "git remerge-diff of b7709821; each package's .changes/unreleased against its CHANGELOG.md at b7709821",
+      "command": "git show --remerge-diff --stat b7709821; for each code file changed since 7a037ba4, compare its changed lines with main's efed4e4d..daf71f53 change; check each unreleased fragment's body against the package's CHANGELOG.md",
+      "observed": "The remerge-diff names three files: main's deletion of the two INFRA-767 fragments (folded into packages/envoy/CHANGELOG.md by 6eceb88f), and this PR's pr2461-Added fragment, reworded for sjawhar/ygo v1.54.1-sami.3 and the per-socket token answer. The code files changed since round 9's head (cmd/dispatch/settings.go, settings_test.go, stream_replicas_test.go) carry exactly main's own #2580 lines. No unreleased fragment's entry is in its CHANGELOG.md. This PR's fragments exist: envoy 9, contracts 2, claude-envoy 1, envoy-client 1, pi-envoy 1. Evidence: https://github.com/sjawhar/legion/pull/2461#issuecomment-6551288330",
+      "headSha": "b77098219",
+      "negativeControl": "Before the merge, unreleased/ held the two INFRA-767 fragments that main had already folded into CHANGELOG.md."
     },
     {
-      "criterion": "The merge adds only main's changes, and go.mod and go.sum equal main's for ygo.",
-      "surface": "git remerge-diff of 7a037ba4; go.mod and go.sum at 7a037ba4 against origin/main",
-      "command": "git show --remerge-diff --stat 7a037ba4; diff of the ygo lines in go.mod and go.sum against origin/main",
-      "observed": "The remerge-diff touches four files: go.mod and go.sum (main's pin replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.54.1-sami.3, with ygo lines equal to main's in both), ProofDocument.tsx (main's dependency list kept, without blockSchema, which the branch's compiled schema no longer defines) and pending-sync.test.ts (both sides' imports and tests kept).",
-      "headSha": "7a037ba4",
-      "negativeControl": "Before the merge, go.mod named v1.54.1-sami.2 (round 7)."
-    },
-    {
-      "criterion": "Acceptance 1 / item 6, and the 1 s rule on real binaries: the two-build test and the cross-build browser spec pass both ways; a revoked page reading at +2 s ends on a code it reconnects on and syncs the whole document.",
-      "surface": "Real envoy-dispatch processes (legion-envoy-v25.0.0 and this head; this head with a V3/R3 build) on the pod's test Postgres and a nats-server; Chromium through the two-process proxy; a victim page keeping its own CRDT copy and a writer page sending 30 x ~300 KB updates",
-      "command": "DISPATCH_PREVIOUS_BUILD=$TMPDIR/dispatch-previous-250 go test -tags twobuild -count=1 -timeout 30m -v -run TestTwoBuilds ./cmd/dispatch; bun run e2e:multiprocess -- cross-build.multiprocess (B=v25.0.0, then both on this tree); conv.sh <tick> 2.0, three times",
-      "observed": "CLI PASS (19.8s), documents PASS (63.1s, 57 of 57 refs rows each way), messages PASS (119.7s), ok 202.657s. Browser: 2 passed and 1 skipped (B=v25.0.0); 3 passed (both on this tree). Slow page, 3 of 3: close 1006 after 8, 7 and 6 large messages; after the reconnect (readonly) the copy equals a fresh page's read of the room (5c6b171d..., 11daa9e5..., 8c21f039...). Evidence: https://github.com/sjawhar/legion/pull/2461#issuecomment-6550766310",
-      "headSha": "7a037ba4",
-      "negativeControl": "In each slow-page run, the page's copy before the reconnect differs from the room's."
+      "criterion": "The revoke and token tests hold on the merged head.",
+      "surface": "Package docs on the pod's test Postgres (LEGION_TEST_PG_DSN)",
+      "command": "CGO_ENABLED=1 go test -race -count=1 -v -run 'TestARevoke|TestARevoked|TestAdmissionRecheck|TestATokenIsAnswered|TestSchemaAdmission' ./internal/dispatch/docs/",
+      "observed": "10 tests PASS, including TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole and TestATokenIsAnsweredFromItsOwnSocketInEitherOrder; ok 50.958s.",
+      "headSha": "b77098219",
+      "negativeControl": "Round 9: without the revoke's cancel, the slow-page test FAILs (i/o timeout)."
     }
   ],
-  "ci": "At 7a037ba4, CI run 41251696819 was queued, changes included; pr-title was pending (runs 41251774280, 41251750130). There is no ci-ok or pr-title verdict yet.",
-  "notes": [
-    "The workspace recreation removed my scratch Postgres and the Playwright browser cache. The Go tests and real binaries used the pod's test Postgres (LEGION_TEST_PG_DSN); I reinstalled Chromium under $TMPDIR."
-  ]
+  "ci": "At b7709821, CI run 41257504555 was queued, changes included; pr-title was queued (run 41257556683). There is no ci-ok or pr-title verdict yet. At 7a037ba4, ci-ok was cancelled when the next push superseded it, and pr-title succeeded."
 }
