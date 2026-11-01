@@ -18,6 +18,8 @@ export type {
   Artifact,
   ArtifactApproval,
   ArtifactBlock,
+  ArtifactGrant,
+  ArtifactGrantsResponse,
   ArtifactRebuildReport,
   ArtifactReview,
   ArtifactReviewEventPayload,

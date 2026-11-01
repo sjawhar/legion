@@ -644,6 +644,27 @@ export interface ArtifactReview {
   readonly created_at: string;
 }
 
+/** One data grant on a page file: the data file one page file may read, as the panel on that
+ *  page file's view lists it (`dispatch://INFRA-682`, "Data grants"). `id` is the grant's own,
+ *  which `DELETE /api/v1/artifacts/{id}/grants/{grant_id}` names; `artifact_id`, `ref` and
+ *  `name` are the data file's. `version` is the version the grant pins, `null` for a grant that
+ *  covers every version of that file, the newest included. Only a person grants one, so
+ *  `granted_by` is a person's login. */
+export interface ArtifactGrant {
+  readonly id: string;
+  readonly artifact_id: string;
+  readonly ref: string;
+  readonly name: string;
+  readonly version: number | null;
+  readonly granted_by: string;
+  readonly created_at: string;
+}
+
+/** What `GET /api/v1/artifacts/{id}/grants` answers for a page file: its grants, oldest first. */
+export interface ArtifactGrantsResponse {
+  readonly grants: ArtifactGrant[];
+}
+
 /** The document's approval as of its latest version: `draft` has never been reviewed or
  *  requested; `awaiting` has an open approval ask; `approved` is approved at the latest version;
  *  `stale` is approved at an older version; `changes_requested` carries the reviewer's reason. */

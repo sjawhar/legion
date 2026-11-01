@@ -101,6 +101,10 @@ function describe(event: Event, previousStatus: string | undefined): string | Ag
       return `saved ${event.payload.name} v${event.payload.version.number}`;
     case "artifact.human_edited":
       return `edited ${event.payload.name} v${event.payload.from_version} to v${event.payload.to_version}`;
+    case "artifact.grants_changed":
+      // The event names the page file and no grant, because every reader re-reads the whole
+      // list, so the line says what changed and not which file was granted.
+      return "changed the data this page may read";
     case "comment.created":
       if (event.payload.ask_id !== null) {
         return `replied to “${event.payload.ask_question ?? "an ask"}”`;

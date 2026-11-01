@@ -609,6 +609,12 @@ function documentTargets(event: Event, viewer: string | undefined): RefreshTarge
   if (event.type === "subscription.removed") {
     targets.push({ queryKey: ["subscribers", id] });
   }
+  // A person granted this page file a data file or took one away: the panel on the file's view
+  // and every `view` block showing that page read the whole list again, since the event names
+  // the page file alone.
+  if (event.type === "artifact.grants_changed") {
+    targets.push({ queryKey: ["artifact-grants", id] });
+  }
   return targets;
 }
 
@@ -744,6 +750,13 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
   if (event.type === "artifact.human_edited") {
     // The notice a person's settled edits send to the document's agents, after each edit's own
     // `artifact.version` refreshed what it changed: a line in the issue's log and nothing more.
+    return targets;
+  }
+  if (event.type === "artifact.grants_changed") {
+    // A person granted this page file a data file or took one away. The event names the page
+    // file alone, so the panel on its view and every `view` block showing that page read the
+    // whole list again; nothing else of the issue moved.
+    targets.push({ queryKey: ["artifact-grants", event.payload.artifact_id] });
     return targets;
   }
   if (event.type === "artifact.created" || event.type === "artifact.version") {

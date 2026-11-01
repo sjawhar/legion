@@ -27,6 +27,7 @@ const picture: IssueReferenceSummaryDocument = {
   latest_version: 2,
   name: "shot.png",
   primary: false,
+  size: 4096,
   slug: "shot-png",
 };
 
@@ -858,6 +859,7 @@ test("two references in one body each resolve their own inline link and title, r
     latest_version: 4,
     name: "Runbook.md",
     project: "CORE",
+    size: null,
     slug: "runbook-md",
   });
   const getIssue = spyOn(api, "getIssue");

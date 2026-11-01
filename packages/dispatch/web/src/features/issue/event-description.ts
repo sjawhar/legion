@@ -110,6 +110,8 @@ function describe(event: Event): string | AgentPart[] {
       return `Saved ${event.payload.name} v${event.payload.version.number}`;
     case "artifact.human_edited":
       return `Edited ${event.payload.name} v${event.payload.from_version} to v${event.payload.to_version}`;
+    case "artifact.grants_changed":
+      return "Changed the data this page may read";
     case "suggestion.accepted":
       return "Suggestion accepted";
     case "suggestion.rejected":
