@@ -2,24 +2,15 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-707",
-  "previousHandoff": "efd263bacf8593783a89a99abe520eeba0a7457f",
-  "round": 6,
-  "headReviewed": "67ac05a4a0c143056bc0c68fad08ca37798b6be8",
+  "previousHandoff": "599901d3071f2c08e9af9e0e7d103d59841f9c45",
+  "round": "6 (confirmation after a forward merge)",
+  "headReviewed": "791da8eec977728cab74b93a68240152895c2832",
   "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 3,
-  "fingerprint": "d88134be 8cb51c95... -> 272dc896 1241ec25...: changed, so a new round. The delta is the forward merge 67ac05a4 of main d04cb867 after READY was withdrawn for the conflict.",
-  "merge": "livewrite.go/mutation.go conflicts against #2522 resolved by keeping this PR's structure (readFork(ctx, write) is the once-per-transaction room read; captureLiveTextAndAuthors keeps readPoint+flushThrough+stateTree; main's write branch lives in captureWrite) and adopting #2522's ValidDocument return under the name readForkTree; all six callers handle it as main does. The fork has one goroutine until commit installs it as the shadow, so pmdoc.ReadUnshared's precondition holds. browsertype now connects as people through the identity header because main's #2541 admits only the identity service's person to a document room.",
-  "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 67ac05a4.",
-    "codeQuality": "Verdict: CHANGES at 67ac05a4: comments merged from #2522 named readFork for the tree reader (tree.go:186, :269, edits.go:559, AGENTS.md:510) and AGENTS.md cited pre-merge mutation.go lines. Both prose; fixed in my commit 248b5563 with the README's DISPATCH_IDENTITY_HEADER_TRUSTED=1."
-  },
-  "proseFix": "248b5563",
-  "ci": "Required set (rulesets): ci-ok, pr-title. Run 41266722253 at 67ac05a4 was still running at 05:30Z; my prose push follows its end, and I approve the head it makes only once ci-ok and pr-title are green there.",
-  "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/tree.go", "description": "Comments named readFork (now the room read) as the fork's tree reader; fixed in 248b5563."},
-    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": "readFork named as the tree reader, and four mutation.go line references from main's tree; fixed in 248b5563."},
-    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/README.md", "description": "browsertype's server needs DISPATCH_IDENTITY_HEADER_TRUSTED=1 too; fixed in 248b5563."}
-  ]
+  "minor": 0,
+  "fingerprint": "599901d3 0e405626e047d75bb7f531d4ece72f295b28a1ada1a48fe02f76317a735e708d = 791da8ee 0e405626e047d75bb7f531d4ece72f295b28a1ada1a48fe02f76317a735e708d: unchanged; a confirmation, not a round.",
+  "merge": "0c066286 merges main 3d3fb96d (#2391, #2608). Its remerge-diff touches only .dispatch/architecture/dispatch-docs.md (the conflict markers), keeping this PR's stored-order paragraph and main's lines.",
+  "ci": "Required set: ci-ok, pr-title. Run 41303015483 at 0c066286: every job success, ci-ok green at 14:08Z; pr-title success. The compare 0c066286...791da8ee changes only .legion/INFRA-707/.",
+  "keyFindings": []
 }
