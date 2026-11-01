@@ -29,11 +29,14 @@ Read this on a `triage` wake, at every start, and when a person hands you an iss
    issues they hold. Never reassign it, because who holds an issue is the people's decision, made
    from the issue header.
 2. Find who set the label. `dispatch read` does not show who set a label, so list its events:
-   `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<issue>/events?limit=200"`.
-   The event that added the label set it, and its `actor` is who: the newest `issue.created` or
-   `issue.updated` event whose `payload.labels` holds `legion` (any case) while the previous
-   `issue.created` or `issue.updated` event held none, or the `issue.created` event itself when it
-   carries the label. Events of other kinds between them do not count.
+   `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<issue>/events?limit=200"`,
+   oldest first, 200 a page. When a page holds 200 events, read the next with
+   `&after=<the last event's seq>` until a page holds fewer: the setter is the newest transition,
+   and the daemon reads the whole log. The event that added the label set it, and its `actor` is
+   who: the newest `issue.created` or `issue.updated` event whose `payload.labels` holds `legion`
+   (any case) while the previous `issue.created` or `issue.updated` event held none, or the
+   `issue.created` event itself when it carries the label. Events of other kinds between them do
+   not count.
    - `actor.kind` is `user`: a person set it. That root is queued by the daemon (its own `todo`
      write through its outbox). Write no `todo` and post no note for it. Your work on it is done.
    - Your own filing for a person hands it over too: its spec as filed (`dispatch doc-read --issue
