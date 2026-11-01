@@ -5,9 +5,11 @@ import type { Doc } from "yjs";
 import { api } from "../../api/client";
 import { whoAmIQuery } from "../../api/queries";
 import type { Ask } from "../../api/types";
+import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { Timestamp } from "../refs/Timestamp";
 import { AskBlockCard } from "./AskBlockCard";
 import { installTypedBlocks } from "./ask-block";
+import { changeMarksAgainst } from "./change-marks";
 import { colorForLogin } from "./connection";
 import { createDoc, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
@@ -21,6 +23,10 @@ export interface VersionViewProps {
   artifactId: string;
   /** The document's block-indexed asks, so a historical decision block still names its asker. */
   asks: readonly Ask[];
+  /** The markdown of the version this one is marked against - the last approved one - with which
+   *  the view draws what changed since it: the words each changed block gained, and each block
+   *  removed since then where it stood. Without it nothing is marked. */
+  changeBaseline?: string;
   createdAt: string | undefined;
   highlight: Highlight | undefined;
   /** The project document shown, for block asks with no issue to be referenced under. */
@@ -31,6 +37,7 @@ export interface VersionViewProps {
 export function VersionView({
   artifactId,
   asks,
+  changeBaseline,
   createdAt,
   highlight,
   owner,
@@ -111,6 +118,13 @@ export function VersionView({
         // runs again once the diagrams have drawn; the cleanup drops it once unmounted.
         disposeRefocus = refocusAfterDiagrams(() => editor.focusMark(highlighted.id));
       }
+      if (changeBaseline === undefined) return;
+      // The baseline is parsed by the shared headless engine, which the shell warms after the
+      // first paint: awaiting that load marks a version opened straight by its own URL too,
+      // rather than racing the warm-up and marking nothing.
+      await warmMarkdownRenderer().catch(() => undefined);
+      if (!mounted) return;
+      editor.setChangeDecorations(changeMarksAgainst(changeBaseline, editor.view.state.doc));
     };
     mount().catch((error: unknown) => {
       // A version the parser refuses must say so; an empty read-only editor looks like an
@@ -128,7 +142,7 @@ export function VersionView({
       handle?.destroy();
       ydoc?.destroy();
     };
-  }, [createEditor, highlighted, markdown, userQuery.data]);
+  }, [changeBaseline, createEditor, highlighted, markdown, userQuery.data]);
 
   if (versionQuery.isPending) {
     return <p>Loading version…</p>;

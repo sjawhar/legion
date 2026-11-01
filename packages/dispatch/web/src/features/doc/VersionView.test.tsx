@@ -1,9 +1,13 @@
 import { expect, test } from "bun:test";
+import type { ChangeDecorations } from "@legion/proof-editor";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, waitFor, within } from "@testing-library/react";
+import type { Node as ProseMirrorNode } from "prosemirror-model";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
-import type { CreateEditor } from "./editor";
+import { renderWithEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
+import { changeMarksAgainst } from "./change-marks";
+import type { CreateEditor, EditorHandle } from "./editor";
 import { DocumentRuntime } from "./runtime";
 import { compiledBlockSchema } from "./schema";
 import { VersionView } from "./VersionView";
@@ -15,10 +19,12 @@ function createQueryClient(): QueryClient {
 }
 
 function renderVersionView({
+  changeBaseline,
   createEditor,
   highlight,
   markdown,
 }: {
+  changeBaseline?: string;
   createEditor?: (inner: CreateEditor) => CreateEditor;
   highlight: { by: string; id: string; quote: string } | undefined;
   markdown: string;
@@ -46,6 +52,7 @@ function renderVersionView({
         <VersionView
           artifactId="artifact-1"
           asks={[]}
+          changeBaseline={changeBaseline}
           createdAt="2026-09-09T00:00:00Z"
           highlight={shown}
           owner={undefined}
@@ -167,6 +174,78 @@ test("VersionView shows the parser's error instead of an empty document when a v
     );
     expect(editors[0]?.destroyed).toBe(true);
     expect(within(view.container).getByRole("heading").textContent).toMatch(/^Version 1 · /);
+  } finally {
+    view.unmount();
+  }
+});
+
+/** The document the editor builds for `markdown`, which the component marks against its
+ *  baseline: the fake editor holds no ProseMirror document of its own. */
+function renderedDocument(markdown: string): ProseMirrorNode {
+  let doc: ProseMirrorNode | undefined;
+  renderWithEngine((engine) => {
+    doc = engine?.parse(markdown);
+  });
+  if (doc === undefined) throw new Error(`the engine rendered nothing for "${markdown}"`);
+  return doc;
+}
+
+/** Records what the host draws over the rendered document, and gives the handle the document the
+ *  editor would hold for `markdown`. */
+function recordMarks(
+  markdown: string,
+  drawn: ChangeDecorations[]
+): (inner: CreateEditor) => CreateEditor {
+  return (inner) => async (root, options) => {
+    const handle: EditorHandle = await inner(root, options);
+    // The fake runtime's view holds a plain state object with no document of its own, and the
+    // component reads `view.state.doc` to compute the marks.
+    const state = handle.view.state as unknown as { doc: ProseMirrorNode };
+    state.doc = renderedDocument(markdown);
+    handle.setChangeDecorations = (decorations) => drawn.push(decorations);
+    return handle;
+  };
+}
+
+test("VersionView draws the marks its baseline computes over the version it renders", async () => {
+  await warmMarkdownRenderer();
+  const markdown = "# Plan\n\nThe plan ships behind a canary today.\n\nThe end.\n";
+  const baseline = "# Plan\n\nThe plan ships behind a flag today.\n\nThe old note.\n\nThe end.\n";
+  const drawn: ChangeDecorations[] = [];
+  const { view } = renderVersionView({
+    changeBaseline: baseline,
+    createEditor: recordMarks(markdown, drawn),
+    highlight: undefined,
+    markdown,
+  });
+
+  try {
+    await waitFor(() => expect(drawn).toHaveLength(1));
+    const marks = changeMarksAgainst(baseline, renderedDocument(markdown));
+    // The baseline changed one paragraph and lost another, so there is something to draw.
+    expect(marks.text.length).toBeGreaterThan(0);
+    expect(marks.widgets.length).toBeGreaterThan(0);
+    expect(drawn[0]).toEqual(marks);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("VersionView draws nothing when it is given no baseline", async () => {
+  await warmMarkdownRenderer();
+  const markdown = "# Plan\n\nThe plan ships behind a canary today.\n";
+  const drawn: ChangeDecorations[] = [];
+  const { editors, view } = renderVersionView({
+    createEditor: recordMarks(markdown, drawn),
+    highlight: undefined,
+    markdown,
+  });
+
+  try {
+    await waitFor(() => expect(editors).toHaveLength(1));
+    await Bun.sleep(20);
+    expect(editors[0]?.markdown).toBe(markdown);
+    expect(drawn).toEqual([]);
   } finally {
     view.unmount();
   }
