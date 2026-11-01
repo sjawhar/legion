@@ -2,50 +2,70 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-484",
-  "completed": "2026-11-01T02:10:00Z",
-  "round": 11,
-  "codeHead": "b3b3844f134e",
+  "completed": "2026-11-01T05:35:00Z",
+  "round": 12,
+  "codeHead": "a110d464a050d096e908608422d6c573a2c81b18",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The round is one commit of documentation, b3b3844f134e, ten lines added and four removed in docs/kubernetes.md, and I read both passages against the code rather than against the diff. Nothing outside docs/ and .legion/ changed since the head I verified last round: `jj diff --from 7589fb76b844 --to d881a7352154 --summary '~(docs | .legion)'` prints nothing, so the code is byte for byte the one whose tests, reverts and regression I recorded in rounds 9 and 10, and the architect's own direction was that those results stand. I re-ran the cheap guards here all the same."
+    "how": "I drove the reviewer's five reproductions as permanent tests and then reverted each fix: every one is load-bearing and each reddened only its own test. I checked the architect's three forced consequences of the forward merge myself, confirmed the file-set accounting file by file, and ran the regression on a PostgreSQL of my own, built again from the zonky jar on port 5441 after the restart took the last one."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "The architect's first line: docs/kubernetes.md line 2966 no longer gives a launch the replacement of an issue pod that lacks the broker enrollment or a role's overlay mount, and says what does.",
-      "surface": "The prose an operator reads, against the code it describes: `movedInPod`, `driftedInPod` and `roundCovers` in internal/runtime/sandbox, and the two of my red tests that hold the behaviour.",
-      "command": "sed -n '2960,2976p' docs/kubernetes.md, read against packages/daemon/internal/runtime/sandbox/addresses.go and drift.go; and cd packages/daemon && go test ./internal/runtime/sandbox -run 'TestARoleStartedInAKeptDriftedPodIsStartedAsItsPodWasBuilt|TestAKeptPodWithoutTheEnrollmentTellsItsRoleOfNoBroker|TestTheControllersPodIsNotLeftBehindByAConfigurationItCannotCarry' -count=1",
-      "observed": "The paragraph now splits the two cases exactly as the code does. An issue pod is replaced at a launch for the stale stream and the layout before one container alone, with the reason given — such a launcher never redials, and that layout's workers predate the op — and `movedInPod` cited. What its workers can be asked about first, the enrollment, a role's overlay mount and the session store, is named as drift with `driftedInPod` cited: 'the relaunch keeps that pod, the role runs in it as the pod was built, and the update round is what replaces it, once every worker in it has pushed and answered'. The controller's pod is then given every one of those facets as a moved address, with `roundCovers` cited, which is why its launch replaces it. That is what the code does and what my tests hold; the three tests are ok.",
-      "headSha": "b3b3844f134e",
-      "negativeControl": "The sentence that was already right is the control, and it still reads that way: the controller's pod keeps the launch replacement it had, so the fix narrowed the claim to the pod kind it is true of rather than deleting it. My round-3 red test, TestTheControllersPodIsNotLeftBehindByAConfigurationItCannotCarry, is what would fail if that half were taken away, and it passes."
+      "criterion": "The five reproductions of review round 4, each a permanent test, each red at the behaviour it replaces.",
+      "surface": "The claim machine over its own store, and the daemon's real supervision with the real sweep over a real Postgres and internal/runtime/fake as the cluster.",
+      "command": "cd packages/daemon && go test ./internal/supervise -run 'TestPodUpdateARoundThatReplacedThePodTellsItsWorkerNothing|TestPodUpdateARoundThatEndsUnderATurnReleasesItsWorkerOnceTheTurnIsOver|TestPodUpdateARoundThatEndsOnAnAskNoTurnConfirmedReleasesItsWorker|TestAStaleRegistrationNoInstallCanMoveIsAcceptedAtAnyContract|TestPodUpdateTakesNoTurnTheDaemonLearnedOfFromTheAgentAsTheAnswer' -count=1 -v && LEGION_TEST_PG_DSN=postgres://legion@127.0.0.1:5441/postgres?sslmode=disable go test ./internal/daemon -run 'TestPodUpdateTellsTheWorkerToCarryOnOnlyWhereItsPodStayed|TestPodUpdateReadsAClaimMidRelaunchWithoutWaitingAndCountsItUnanswered' -count=1 -v",
+      "observed": "PASS for every one, every row. The daemon-level carry-on test runs four rows: the round replaced the pod, the pod went without its round, the drift cleared over the pod that replaced the round's own, and the drift cleared over the round's own pod.",
+      "headSha": "a110d464a050d096e908608422d6c573a2c81b18",
+      "negativeControl": "Each fix reverted in turn, and each reddened its own test and no other. (1) `tell` with `!ended.Replaced` removed: TestPodUpdateARoundThatReplacedThePodTellsItsWorkerNothing alone. (2) the held round end (`m.roundOver = &ended`) made unreachable: TestPodUpdateARoundThatEndsUnderATurnReleasesItsWorkerOnceTheTurnIsOver alone. (3) `&& got < PodUpdateContract` restored on staleRegistration's no-install branch: the at-contract and above-contract rows fail while the below-contract row passes, which is the control the reviewer's reproduction turns on. (4) roundView's `m.View().Claim` put back to `m.Claim()`: TestPodUpdateReadsAClaimMidRelaunchWithoutWaitingAndCountsItUnanswered fails by timeout after 10.9 s, 'the live read did not answer while a claim's machine was inside a Resume'. (5) `|| m.unseenTurn` removed from answerByTurnEnd: TestPodUpdateTakesNoTurnTheDaemonLearnedOfFromTheAgentAsTheAnswer alone. The whole internal/supervise package was run under each of the four reverts that touch it, so 'and no other' is measured rather than assumed."
     },
     {
-      "criterion": "The architect's second line: docs/kubernetes.md line 1968 no longer says a launch replaces an issue pod whose disk size moved.",
-      "surface": "The same prose against drift.go's podShapeRecord and roundCovers.",
-      "command": "jj diff -r b3b3844f134e --git -- docs/kubernetes.md, and grep -n 'keeps the size it started with' docs/kubernetes.md",
-      "observed": "The sentence now ends at 'a pod already running keeps the size it started with', and a new one says the disk size is one of the five keys of the `legion.dev/pod-shape` record, so a running issue pod is brought onto the new size by its update round once every worker has pushed and answered, and the controller's pod, which no round covers, by the next launch into it. Both halves match the code: the disk is a podShapeRecord field, and roundCovers excludes the controller's pod alone.",
-      "headSha": "b3b3844f134e",
-      "negativeControl": "The controller half is the control again: had the fix given the disk size to the round for every pod, it would contradict roundCovers and my round-3 test. It does not."
+      "criterion": "The architect's first forced change: main deleted Quiesce, so answerByTurnEnd's m.interrupt guard and its test went. A turn this daemon cut, or never saw start, must still be no answer.",
+      "surface": "The claim machine, through the cut that survives: m.interrupted, which a death, a repoint and a held suspension's deadline all make.",
+      "command": "a throwaway test in internal/supervise: open the round on a claim below the contract, confirm the ask's turn, call m.interrupted, then end the turn and read the claim",
+      "observed": "The cut is still no answer, and by a mechanism the deleted guard is not needed for: m.interrupted takes the task back unconfirmed (observed 'after the cut: confirmed=false interrupted=true'), and answerByTurnEnd returns at its own `p.ConfirmedAt.IsZero()` line before it reaches any vouching guard. After the turn's end the claim reads 'signalled=<nil>' with its round still open. The never-saw-start half is the surviving assertion and it is carried by TestPodUpdateTakesNoTurnTheDaemonLearnedOfFromTheAgentAsTheAnswer, whose two rows are a restored turn the daemon asks the agent about (askFirst) and a turn start naming no delivery (unseenTurn); revert (5) above reddens both. The throwaway was removed and `jj status` is clean.",
+      "headSha": "a110d464a050d096e908608422d6c573a2c81b18",
+      "negativeControl": "The guard that remains is the control for the one that went: with `|| m.unseenTurn` removed the two rows fail, so the vouching rule is still enforced by something, and the cut path is covered by the confirmation check rather than by the deleted flag."
     },
     {
-      "criterion": "The architect's third line: no other line of docs/, scripts/e2e/README.md or skills/ gives a launch the replacement of a drifted issue pod, and none tells an operator to drain for an update.",
-      "surface": "The whole documentation tree, read line by line rather than counted.",
-      "command": "grep -rniE 'launch replaces|replaces such a pod|relaunch replaces|replaced by (its|the) next launch|at the next launch|next launch replaces|relaunched replaces' docs/ scripts/e2e/README.md skills/ | grep -v docs/solutions; and grep -rniE drain over docs/, scripts/e2e/README.md, skills/, packages/daemon/internal/prompts/ and packages/claude-envoy/legion/",
-      "observed": "Ten hits, and I read each: 1256 and 1532 are the disk shape before the pod-owned disk (`supersededDisk`), 1592 is a runbook that deletes Sandboxes, 1607 is 'no launch replaces a live pod for an image change alone', 1630 is the `movedInPod` statement itself, 1667 is the layout before one container, 2966 and 2970 are the rewritten paragraph, 3031 is a failed init container, and 3803 is the three-way list that gives drift to the round in as many words. Every one is true of the code at this head. The drain sweep leaves the session proxy's one-second drain, the session-store migration and the layout cutover runbooks, the rollback's 'the drained ones', the tmux-to-Kubernetes cutover, and running-legion.md's passage on an operator resuming the claims it suspended across a release upgrade — each another subject, and none an instruction to drain for an update. Under skills/, internal/prompts/ and claude-envoy/legion/ the only hit is escalation.md's 'no drain is asked of anybody'.",
-      "headSha": "b3b3844f134e",
-      "negativeControl": "The grep is the control for itself only if a true hit still appears, and three do: 1607, 1630 and 3803 are the lines that state the rule, so a sweep that silently matched nothing would be a broken pattern rather than a clean tree."
+      "criterion": "The architect's second forced change: main made settle wait for prompt_result, so the round's end runs from a new afterTurn. Both orders must release the answered worker once and take no task back.",
+      "surface": "The claim machine through the three events in each order: StreamTurnEnd, PodUpdateEnded and StreamPromptResult.",
+      "command": "a throwaway test in internal/supervise with the two orders, turn end before the prompt result and after",
+      "observed": "Both orders end identically and correctly: the claim is idle, its round is cleared, and exactly one prompt is released, the carry-on task — 'The update round is over. The daemon replaced no process and no pod. Your session and your disk are the ones you had before the round. … The update task told you to start no new work. That instruction is no longer in effect. Continue your work now.' One release in each order, not two and not none, and the pending delivery afterwards is that carry-on task itself rather than a task taken back. The throwaway was removed.",
+      "headSha": "a110d464a050d096e908608422d6c573a2c81b18",
+      "negativeControl": "The orders are each other's control: a release that ran from the turn's end alone would send nothing in the prompt-result-first order, and one that ran from both would send two in the other. Each order sends exactly one."
     },
     {
-      "criterion": "The round lost nothing and the code is the head already verified.",
-      "surface": "The branch's own diff and the repository's own suites.",
-      "command": "jj diff --from 'fork_point(\"main\"@origin | @-)' --to @- --summary | wc -l; jj diff --from 971cf98aedfc --to @- over my four red tests; cd packages/daemon && gofmt -l . && go build ./... && go vet -tags e2e ./... && go test ./cmd/legion -count=1; cd ../.. && bunx biome check .",
-      "observed": "The branch's own file set is 137, as it was last round, so nothing left it this time. My four red tests are unchanged ('No matching entries for paths') and the three sandbox ones and the three supervise ones are ok. gofmt, go build and go vet -tags e2e clean; biome exits 0. `./cmd/legion` leaves only TestProbeImageReadsEachRolesOwnOverlaysAsTheRoleStarts, which needs the worker image.",
-      "headSha": "b3b3844f134e",
-      "negativeControl": "The file-set count is the control for the carry-over loss I found in round 9, when it fell from 137 to 135 and took docs/kubernetes.md and scripts/e2e/README.md with it; it holds at 137 here. TestProbeImageReadsEachRolesOwnOverlaysAsTheRoleStarts is reproduced on a control clone of main under /legion/scratch/tmp/main-control, so it is the pod's missing worker image and not this change."
+      "criterion": "The architect's third forced change: migration 0065 is renamed 0068 and DaemonAPIVersion is 45. A fresh database migrates cleanly.",
+      "surface": "A PostgreSQL of my own, empty, built from the zonky jar on port 5441 after the restart, migrated by the daemon's own migrator.",
+      "command": "ls packages/daemon/internal/store/migrations | tail; the version numbers checked for duplicates; cd packages/daemon && LEGION_TEST_PG_DSN=postgres://legion@127.0.0.1:5441/postgres?sslmode=disable go test ./internal/store -count=1",
+      "observed": "ok (85.8s) on a database that had never been migrated. The directory now reads 0064_pull_request_pass_settlement, 0065_supervise_quiesce, 0066_phase_ended_kind, 0067_phase_assignment, 0068_claim_pod_update, so this change's migration sits above main's three and no version number appears twice. The contract is 45 at all five sites: api/version.go, supervise/plugin.go's PodUpdateContract, packages/contracts/fixtures/daemon-api/version.json, and both plugin manifests.",
+      "headSha": "a110d464a050d096e908608422d6c573a2c81b18",
+      "negativeControl": "The duplicate check is the control for the rename: `ls migrations/*.sql | cut -d_ -f1 | sort | uniq -d` prints nothing, and migrations.All refuses two files at one version, so a rename that collided with main's 0065, 0066 or 0067 would fail the package rather than pass it."
+    },
+    {
+      "criterion": "The file-set accounting across the forward merge: 137 to 136, with every departure deliberate.",
+      "surface": "The branch's own changed-file set at its fork point, read on both sides of the merge.",
+      "command": "for h in 666f870589b8 a110d464a050; do jj diff --from \"fork_point(\\\"main\\\"@origin | $h)\" --to $h --summary | awk '{print $2}' | sort; done; then comm over the two",
+      "observed": "137 before and 136 after, and the comm names exactly what the implementer claimed. Three left: packages/daemon/.changes/unreleased/INFRA-484-no-drain-for-an-old-plugin.yaml and INFRA-484-round-id-and-the-last-check.yaml, and internal/store/migrations/0065_claim_pod_update.up.sql. Two joined: .changes/unreleased/INFRA-484-the-update-round.yaml, which is the two fragments folded into one as the reviewer's minor asked, and migrations/0068_claim_pod_update.up.sql, the rename. Nothing left unaccounted.",
+      "headSha": "a110d464a050d096e908608422d6c573a2c81b18",
+      "negativeControl": "This is the check that caught round 9's silent loss, when the set fell from 137 to 135 and took docs/kubernetes.md and scripts/e2e/README.md with it. Both of those are still in the set here, and so are my four red tests."
+    },
+    {
+      "criterion": "The whole branch's regression lock at the merge head, in both languages.",
+      "surface": "The repository's own suites, on a PostgreSQL of mine rather than the pod's shared one.",
+      "command": "cd packages/daemon && gofmt -l . && go build ./... && go vet -tags e2e ./... && LEGION_TEST_PG_DSN=postgres://legion@127.0.0.1:5441/postgres?sslmode=disable go test ./internal/... ./cmd/... -count=1 -timeout 35m; cd ../.. && bunx biome check .",
+      "observed": "gofmt, go build and go vet -tags e2e clean; biome exits 0; pi-shared 102 ran 0 fail, pi-legion 561 ran 0 fail, claude-envoy 289 ran 0 fail, contracts 328 ran 0 fail. The Go suite leaves ten failures and no others. My four red tests from rounds 1, 2, 3 and 7 all pass, and their assertions are unchanged.",
+      "headSha": "a110d464a050d096e908608422d6c573a2c81b18",
+      "negativeControl": "Nine of the ten reproduce on a clone of main at d09b46d79822 run against the same Postgres. The tenth, internal/workspace's TestFetchKeepsAFeedAfterGitGC, is the load-sensitive one this branch has recorded since round 1: it took 35.5 s in the full run and passes in isolation in 4.8 s. cmd/legion's TestProbeImageReadsEachRolesOwnOverlaysAsTheRoleStarts, which failed in every round until now, passes here: the restart gave this pod what it needed, which is what the set claims of each of its members."
     }
   ],
-  "ciAtHead": "Queued. CI run 41263567766 at the code head b3b3844f134e had every job queued when I read it at 02:08Z, the repo-wide runner backlog the architect named; 41260250272 at the previous head was cancelled by this round's push. No run of this branch has concluded since 41137946033 at 4b379e4fd2b6. The whole Go suite, the four plugin suites and every static lane were run here at the code this head carries, which is byte for byte last round's, and are recorded in rounds 9 and 10: ten failures in the Go suite and no others, each reproduced on a control clone of main.",
+  "ciAtHead": "Queued. CI run 41274915884 at the code head a110d464a050 had every job queued when I read it at 05:32Z. No run of this branch has concluded since 41137946033 at 4b379e4fd2b6, seven code heads ago: each later run was cancelled by the next push, and the repo-wide runner backlog the architect named has kept the newest queued. The reviewer needs a concluded run at the head it approves, and nothing either role does here can produce one.",
+  "notes": [
+    "A correction to my own round-9 and round-10 handoffs, which said 'the Postgres on 5433 is the implementer's'. The implementer corrected me: 5433 is the pod launcher's own legion-testpg, shared by every role of the pod, which is the better explanation of the cross-talk I measured; the implementer's own was 5447. Nothing of those rounds' verdicts moves, only that sentence. Mine this round is 5441, built from the zonky jar after the restart took the last one.",
+    "The round rewrote the doc comment above my round-7 red test in stale_contract_test.go, because the old wording stated the rule the owner's direction of 2026-10-31 replaced: it said an update round sends a below-contract claim nothing, where such a claim is now asked and answers by ending its turn. I checked the three test bodies of that file line by line against 8c9d36a5b0d4 and they are byte for byte unchanged; only the prose above them moved, and it had to."
+  ],
   "notReached": [
     "AC8, the live stage4a pod-update and pod-update-fleet checkpoints: `kubectl -n legion auth can-i get sandboxes` answers `no` from this pod, as in every round. The live acceptance is the first image roll on the INFRA deployment after the release, through the implementer's production check.",
     "AC9: after the deploy, by its nature."
