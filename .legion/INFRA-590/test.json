@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-590",
+  "completed": "2026-11-01T11:18:00Z",
+  "round": 30,
+  "testedHead": "827ab32f07783d01d398c2f6c86f21c311cb3acf",
+  "previousTestedHead": "d99681cece964276e4a5427500fd94c7e9b39f2a",
+  "roundShape": "Full round, as briefed (main 225f2beae, #2391, merged with nine conflicts in runtime code). round-shape.py v3, d99681cece964276e4a5427500fd94c7e9b39f2a -> 827ab32f07783d01d398c2f6c86f21c311cb3acf, pull request 2395: files whose own diff differs: 10. Runtime files among them: cmd/dispatch/shutdown.go, internal/dispatch/store/pool.go, internal/pglisten/listener.go, internal/dispatch/docs/edit_notices.go, infra/gcp/dispatch.go; the others are cmd/dispatch/shutdown_test.go and docs (.dispatch/architecture/dispatch-duty.md, running-dispatch.md, the changelog fragment, cmd/dispatch/README.md). Equal only after normalisation: 7 (dispatch-outbox.md, AGENTS.md, outbox/batch.go and the four migration files). cmd/dispatch/main.go conflicted but its own diff is unchanged. Control: 2678be4b84 -> b5e8445e62 still prints 4 files.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran at 827ab32f on the issue volume's superuser Postgres 17, -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, one package at a time: the migration numbering and shared-version tests, cmd/dispatch (both sides' shutdown tests), pglisten, store, duty, outbox and multiprocess ok; the head binary migrates a fresh database through 0159; TestDispatchConnectionsPerPodIsTheServers passes at 92; vet and gofmt clean."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The nine resolutions keep both parents; shutdown drains #2391's intakes and releases the publisher hold before the pool closes",
+      "surface": "the PR's own diff of each runtime file against main 225f2beae, and cmd/dispatch's shutdown tests",
+      "command": "jj diff --from 225f2beae --to 827ab32f07 for shutdown.go, pool.go, pglisten/listener.go, docs/edit_notices.go, infra/gcp/dispatch.go, shutdown_test.go; go test -v ./cmd/dispatch/",
+      "observed": "shutdown.go at the head runs: HTTP drain, documents, waitBackground, waitIntakes (main's #2391), then, once waitUntilIdle reports the database answering, waitForOutbox (this PR, bounded by outboxStopBudget), deregister, pool.Close. So the intakes drain before the outbox wait, and the outbox records its batch and releases the hold before the pool closes; the PR adds only the outbox wait and its parameter. pool.go: main's four permanent listeners (with #2391's shared hub) plus the outbox's LISTEN = 5, outboxPoolSize 1 -> 2, comments to match. pglisten/listener.go and docs/edit_notices.go: comments only. infra/gcp/dispatch.go: dispatchConnectionsPerPod 90 -> 92. shutdown_test.go: main's tests unchanged but for the added nil outboxStopped argument, plus this PR's stalling-publisher test. Both sides' tests pass: TestShutdownWaitsForTheOutboxToReleaseThePublisherHold, TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool, TestShutdownWaitsForDeliveryWorkBeforeClosingThePool, TestAPanicAfterTheIntakesStartEndsTheProcess, every TestSIGTERM* (the database-unanswering one included); cmd/dispatch ok 315.8 s.",
+      "headSha": "827ab32f07783d01d398c2f6c86f21c311cb3acf",
+      "negativeControl": "TestSIGTERMWithTheDatabaseUnansweringExitsWithinTheShutdownBudget: with the database unanswering, shutdown skips the outbox wait and exits within budget."
+    },
+    {
+      "criterion": "Migrations 0158/0159 above main's 0157; a fresh database migrates through 0159 with duty_holds; connections 92",
+      "surface": "store's migration tests; the real envoy-dispatch built at 827ab32f on a fresh database; infra/gcp",
+      "command": "go test -run 'TestMigrationSetIsNumberedOneToN|Version' ./internal/dispatch/store/; envoy-dispatch (DISPATCH_NATS_DISABLED=1) on t590mig30; GET /healthz; psql schema_migrations >= 150, to_regclass('duty_holds'), events indexes like 'events_outbox%'; in a scratch copy, go test -run TestDispatchConnectionsPerPodIsTheServers ./gcp/",
+      "observed": "TestMigrationSetIsNumberedOneToN and TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny pass. The binary listened with /healthz schema_version 159; versions 150-159 recorded; duty_holds present; events_outbox_fresh, _owner, _retry present; SIGTERM deregistered it. The renumbered SQL is byte-identical to d99681ce's 0151/0152 but one comment (migration 0151 -> 0158). main@origin (f124e65772) still ends at 0157. TestDispatchConnectionsPerPodIsTheServers passes with dispatchConnectionsPerPod = 92.",
+      "headSha": "827ab32f07783d01d398c2f6c86f21c311cb3acf",
+      "negativeControl": "TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny: a shared version is refused before any migration applies."
+    },
+    {
+      "criterion": "Multiprocess once (take-over within 10 s after SIGKILL, a NATS cut and a silent cut; each issue's events once and in order); outbox, duty, store; vet",
+      "surface": "packages/envoy, -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, one package at a time",
+      "command": "go test -tags multiprocess ./cmd/dispatch; go test ./internal/dispatch/outbox/ ./internal/dispatch/duty/ ./internal/dispatch/store/ ./internal/pglisten/ (each alone); go vet ./..., go vet -tags multiprocess ./cmd/dispatch; gofmt -l",
+      "observed": "multiprocess ok 970.5 s: take-over 4.247 s after SIGKILL, 3.004 s after a NATS cut, 2.151 s after a silent cut, 4.83 s after SIGSTOP; the resumed process logged the hold lost 30 ms after it resumed; 200/80/60 comments once and in order. outbox ok 277.5 s, duty ok 22.7 s, store ok 259.7 s, pglisten ok 14.7 s; vet and gofmt clean. No -race run this round. Sampled memory peak 6.11 GiB of 19 over the round, 1052 samples every 2 s (named job mem-sampler-INFRA-590, stopped by proc kill). Leftover check after the kill (ps -eo pid,args | grep -E 'memory.usage_in_bytes|sleep 2|mem-sampler|mem.samples|r30/envoy-dispatch|suites.sh'): printed no lines.",
+      "headSha": "827ab32f07783d01d398c2f6c86f21c311cb3acf",
+      "negativeControl": "TestAFrozenPublisherSendsNothingWhenItResumes: the SIGSTOPped holder sent nothing after it resumed."
+    },
+    {
+      "criterion": "Every lane with ci-ok at 827ab32f",
+      "surface": "GitHub check runs",
+      "command": "gh api repos/sjawhar/legion/commits/827ab32f07783d01d398c2f6c86f21c311cb3acf/check-runs?filter=latest --paginate",
+      "observed": "At 11:15Z, CI run 41298106555 (started 10:34:46Z): pr-title, changes, docs / build, pi-legion, pi-shared success; lint, listener-server-change, worker-image / build in progress; typecheck, test, envoy-go, envoy-go-race and 18 others queued; ci-ok not yet created. Unread: lint, typecheck, test, envoy-go, envoy-go-race, ci-ok and every other unfinished lane. #2395 MERGEABLE.",
+      "headSha": "827ab32f07783d01d398c2f6c86f21c311cb3acf",
+      "negativeControl": "none: a read of CI"
+    }
+  ]
+}
