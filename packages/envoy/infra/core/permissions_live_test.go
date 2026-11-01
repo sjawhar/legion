@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sjawhar/envoy/infra/core"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -154,7 +155,9 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 					require.Equal(t, []string{"Publish", removed}, v[1:], "the server refused something else too: %s", v[0])
 				}
 				t.Logf("server violation (%d alike): %s", len(logged), logged[0][0])
-				require.Contains(t, process.Output.String(), "subscribe failed, retrying")
+				// The lease holder retries the create it cannot make; `subscribe failed, retrying`
+				// was the line of the start-time bind this listener no longer has.
+				require.Contains(t, process.Output.String(), "durable consumer read failed; retrying")
 			})
 		})
 	}
@@ -263,6 +266,58 @@ func TestListenerPermissionsRefuseTheSubscriptionToEveryTopicOnRealServers(t *te
 			logged := violationsOnceLogged(t, server, "notifications.>")
 			require.Len(t, logged, 1, "the server refused more than the subscription: %q", logged)
 			require.Equal(t, []string{"Subscription", "notifications.>"}, logged[0][1:], logged[0][0])
+		})
+	}
+}
+
+// A user holding ListenerPermissions alone opens the listener state bucket as the listener does,
+// creating it on first use with one value per key and a 10 minute age, finds it on a second open,
+// and takes, renews and releases its machine's delivery lease there as the listener's lease does:
+// each write read back by key, a direct get on the key's subject, at the revision it wrote. It also
+// writes a session's last-seen record. A write to another machine's lease key is refused, on the
+// 2.10 image and on the hub's. Every allowed operation comes first, so the refused publish after
+// them is the only violation the server logs.
+func TestListenerPermissionsOpenTheListenerStateBucketOnRealServers(t *testing.T) {
+	for _, image := range testnats.Images {
+		t.Run(image.Name, func(t *testing.T) {
+			t.Parallel()
+			seed, server, uri := startGrantServer(t, image.Ref, core.ListenerPermissions(liveMachineID))
+			conn, errs := connect(t, uri, seed)
+			js, err := conn.JetStream()
+			require.NoError(t, err)
+			config := &natsgo.KeyValueConfig{
+				Bucket: bus.ListenerStateBucket, History: 1, TTL: 10 * time.Minute, Storage: natsgo.FileStorage,
+			}
+			_, err = bus.EnsureKeyValue(js, config)
+			require.NoError(t, err, "create the %s bucket", bus.ListenerStateBucket)
+			kv, err := bus.EnsureKeyValue(js, config)
+			require.NoError(t, err, "open the existing %s bucket", bus.ListenerStateBucket)
+
+			lease := "lease." + bus.ListenerDurable(liveMachineID)
+			readBack := func(revision uint64, what string) {
+				t.Helper()
+				entry, err := kv.Get(lease)
+				require.NoError(t, err, "read back the lease after %s", what)
+				require.Equal(t, revision, entry.Revision(), "the lease read back after %s", what)
+			}
+			taken, err := kv.Create(lease, []byte(`{"holder":"box-a","boot":"0123456789abcdef"}`))
+			require.NoError(t, err, "take the lease")
+			readBack(taken, "taking it")
+			renewed, err := kv.Update(lease, []byte(`{"holder":"box-a","boot":"0123456789abcdef"}`), taken)
+			require.NoError(t, err, "renew the lease")
+			readBack(renewed, "renewing it")
+			released, err := kv.Update(lease, []byte(`{"holder":"box-a","boot":"0123456789abcdef","released":true}`), renewed)
+			require.NoError(t, err, "release the lease")
+			readBack(released, "releasing it")
+			_, err = kv.Put("seen."+liveSession, []byte(`{"at":1}`))
+			require.NoError(t, err, "record a session's last-seen time")
+
+			otherLease := "$KV." + bus.ListenerStateBucket + ".lease." + bus.ListenerDurable("example-host-b")
+			require.NoError(t, conn.Publish(otherLease, []byte(`{"holder":"box-a","boot":"0123456789abcdef"}`)))
+			requireViolation(t, conn, errs, `Publish to "`+otherLease+`"`)
+			for _, v := range violationsOnceLogged(t, server, otherLease) {
+				require.Equal(t, otherLease, v[2], "the server refused what the grant should allow: %s", v[0])
+			}
 		})
 	}
 }

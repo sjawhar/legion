@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-557",
+  "previousHandoff": "5b597d6af1e7c1a4e0dd9362c2788c2fa347783e",
+  "round": "retro's finding: the connected flag's install race",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
+  "codeHead": "3c1ab0d386a1fcc6a2c5e26cdfa23743e80b63fa",
+  "proof": [
+    {
+      "criterion": "The connected flag follows the installed connection's last event in any order of event and install, the two raced interleavings included",
+      "surface": "internal/bus client with a real nats.go connection whose server has stopped, events delivered through the install's test hook",
+      "command": "cd packages/envoy && go test -count=1 -run 'TestTheConnectedFlagFollowsTheInstalledConnectionsLastEventInAnyOrder|TestALateEventOfAReplacedConnectionLeavesTheFlagToItsReplacement' -v ./internal/bus/",
+      "observed": "all seven rows and the replaced-connection test pass",
+      "headSha": "3c1ab0d386a1fcc6a2c5e26cdfa23743e80b63fa",
+      "negativeControl": "a6ebeefc's nats.go with the hook placed between settleConnected's read and its clear: 'the install (dialed up true) and events [false true], the client reads connected false, want true' and 'the install (dialed up false) and events [true], ... reads connected false, want true'"
+    },
+    {
+      "criterion": "No regression in the take-over and the bus",
+      "surface": "real envoy-listener binaries under the rendered grant; the listener suite; internal/bus with -race",
+      "command": "go test -tags multiprocess -count=3 -run '^(TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s|TestTwoPodsReceiveConnectionLostWhileItsReconnectHooksHangHandsOverWithin15s)$' ./cmd/listener; untagged ./cmd/listener; go test ./internal/bus/... and -race",
+      "observed": "packet-dropping 3 of 3, slowest 11.948/11.966/11.949 s; hung hooks 3 of 3, slowest 12.147/12.154/13.063 s; listener ok 997.823s; bus ok 350.082s, race ok 375.765s. https://github.com/sjawhar/legion/pull/2404#issuecomment-6549929928",
+      "headSha": "3c1ab0d386a1fcc6a2c5e26cdfa23743e80b63fa",
+      "negativeControl": "the interleaving test above fails against the old code"
+    }
+  ],
+  "filesChanged": [
+    "internal/bus/nats.go: connFlagMu, installedConn and connUp under it; noteConnection records every connection's last event and moves the flag for the installed one; markConnected(nc, dialedUp) sets the flag from that record; settleConnected deleted; afterInstall test hook",
+    "internal/bus/connected_flag_test.go (new)",
+    "cmd/listener/README.md, packages/envoy/AGENTS.md: the events are the flag's only source"
+  ],
+  "deviations": [],
+  "openQuestions": [],
+  "discoveredComplexity": []
+}

@@ -41,13 +41,15 @@ var cutRewatchCaches = []string{
 // branch a rewatch replaced is pinned by the unit test of internal/kvwatch. What this test holds
 // is the whole cut path, every cache's replacement included, to no ERROR at all.
 func TestASilentCutRewatchesTheCachesWithNoErrorLine(t *testing.T) {
+	const instance = "cut-rewatch-pod"
 	server, uri := testnats.Start(t)
 	// The live topics lane opens only under ENVOY_SUBSCRIBE_ALL_TOPICS (liveLaneEnv), and both
 	// clients connect before the listener reports itself healthy.
-	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "cut-rewatch", liveLaneEnv...)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "cut-rewatch",
+		append([]string{"ENVOY_INSTANCE_ID=" + instance}, liveLaneEnv...)...)
 	listener.waitHealthy(t)
 
-	thaw, output := freezeUntilBothClientsReportTheCut(t, server, listener)
+	thaw, output := freezeUntilBothClientsReportTheCut(t, server, listener, instance)
 	thaw()
 
 	// Every cache is rewatched on the reconnect, and each replacement's warm-up line says so.

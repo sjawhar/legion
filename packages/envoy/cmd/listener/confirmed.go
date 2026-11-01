@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -168,10 +169,23 @@ func unconfirmedReason(lastForward error) sendOutcome {
 // confirm records that sessionID's receipt for the message under dedupeKey arrived through the
 // route. The route's own record (listenerDeps.confirmed) is what a later send of the same key
 // reads, so envoy-client's retry of a send skips a recipient the first attempt confirmed; the
-// delivery handlers' cache is told too, so they do not push the same key to it again.
+// delivery ledger every lane asks is told too, so no lane prompts or forwards the same key to that
+// session again, on this pod or any other of the machine. A ledger that cannot be read or written
+// leaves only the route's own record, under one WARN: the lane that takes the pair next settles it
+// itself.
 func (d *listenerDeps) confirm(dedupeKey, sessionID string) {
 	d.confirmed.Record(dedupeKey, sessionID)
-	d.delivery.dedupeCache.Record(dedupeKey, sessionID)
+	attempt, err := d.delivery.ledger.Attempt(dedupeKey, sessionID)
+	if err != nil {
+		d.delivery.logger.Warn(ledgerUnavailableLine, slog.String("operation", "attempt"), slog.String("session_id", sessionID), slog.String("dedupe_key", dedupeKey), slog.String("error", err.Error()))
+		return
+	}
+	if attempt.Verdict != dedupe.Proceed {
+		return
+	}
+	if err := d.delivery.ledger.Record(attempt); err != nil {
+		d.delivery.logger.Warn(ledgerUnavailableLine, slog.String("operation", "record"), slog.String("session_id", sessionID), slog.String("dedupe_key", dedupeKey), slog.String("error", err.Error()))
+	}
 }
 
 // roleSend is one role message through the publish route. The route does not publish on the role
@@ -282,9 +296,12 @@ func (s *roleSend) timedOut(lastForward error) {
 // recorded capability_refused as sendHandler records it.
 //
 // The dedupe check reads the route's own record (listenerDeps.confirmed), not the delivery
-// handlers' cache: agentSubjectDelivery and fanoutDelivery record a key there for a self-subscribed
-// session whose push they skipped, having heard nothing from it, so a role send under a key one of
-// them saw would be answered 200 for a holder that never confirmed it.
+// ledger: the ledger records what this machine delivered - a prompt a session's server accepted,
+// a forward this pod published - which is not the recipient's own word that it has the message,
+// so a role send under a key the ledger holds would be answered 200 for a holder that never
+// confirmed it. The record is this pod's alone (README, "State the pods share"), so a send
+// retried against another pod of the machine forwards again, which is what the holder's receipt
+// answers.
 func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 	verdict := beforeForward(s.item, s.holder, entry, s.d.confirmed.Seen)
 	switch verdict.kind {
@@ -427,9 +444,8 @@ func topicRecipients(d *listenerDeps, item contracts.Envelope) []string {
 // publish, so the refusal is the recipient's subject or the grant's, not the sender's input.
 //
 // Only a receipt that arrived through the route counts, which is why it reads the route's own
-// record (listenerDeps.confirmed) and not the delivery handlers' cache: with the live topics lane
-// on, the lane receives this send's own publish on the topic, and its fanout records there every
-// self-subscribed session on this machine whose push it skipped, having heard nothing from it.
+// record (listenerDeps.confirmed) and not the delivery ledger: the ledger records what this
+// machine delivered, a push or a forward, and not the recipient's word that it has the message.
 func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.Envelope, sessionID string) sendOutcome {
 	var lastForward error
 	for {

@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+    Session registrations, interests and role claims are written by compare-and-set at the revision
+    the listener read, merged again over the bucket's value on a conflict, at most 5 attempts, then
+    `503` with `Retry-After: 1`; every read-modify-write keeps the JSON fields a build does not know.
+    `/v1/messages/send` and `/v1/roles/set` read the session bucket before answering that a session
+    their pod's cache has not seen is unknown.
+time: 2026-10-28T10:25:07.958720478Z
+custom:
+    Issue: pr2404

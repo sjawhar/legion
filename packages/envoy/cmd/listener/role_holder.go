@@ -384,7 +384,7 @@ func resolveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions
 		if !errors.Is(err, nats.ErrKeyNotFound) {
 			return roleHolderResult{holder: holder}, &roleHolderFailure{step: roleHolderSessionRead, cause: err}
 		}
-		lastSeen := sessions.LastSeen(holder)
+		lastSeen := sessions.LastSeen(ctx, holder)
 		release, superseded, err := releaseExpiredRoleClaim(ctx, registry, role, holder, sessions.TTL())
 		if err != nil {
 			return roleHolderResult{holder: holder}, &roleHolderFailure{step: roleHolderRelease, cause: err}

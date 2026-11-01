@@ -305,7 +305,7 @@ Every host runs the listener as the same machine id, so every one of them binds 
 `listener-<tailnet.listener.machineId>`. `tailnet.listener.image` must therefore be a build with
 dispatch://INFRA-557's single-deliverer take-over: one pod delivers from the durable, every other
 one waits as a standby and takes over within seconds when the active pod goes, and `/healthz`
-answers 200 only on a pod that can serve `/v1`. No such build exists until INFRA-557 lands. With an
+answers 200 only on a pod that can serve `/v1`. This release is such a build. With an
 earlier build, a second pod waits 135 seconds to bind the durable the first one holds, then exits
 and is restarted, over and over. Its listener answers `/healthz` with 200 (`"starting"`) and
 serves `/v1` through that wait, so its advertiser advertises it after two answers, its node joins
@@ -1159,8 +1159,10 @@ cannot recover from, a certificate cache it cannot read.
 Readiness is the other question. `envoy-dispatch` is ready while `curl -fsS` of its `/healthz`
 succeeds (every 10 seconds, three failures), which Postgres alone decides: the server serves while
 NATS is down. `envoy-listener` is ready while `curl -fsS` of its `/healthz` succeeds every 5
-seconds, two failures in a row taking it out; that endpoint answers within 5 seconds, so the probe
-allows 6. A front-door pod is ready while it hosts the Service ([The front door](#the-front-door)).
+seconds, two failures in a row taking it out; that endpoint answers `503` `starting` until the pod
+serves `/v1`, then `200` with `"role"` `active` on the lease holder or `standby` on every other
+pod, so a standby is ready too, and it answers within 5 seconds, so the probe allows 6. A
+front-door pod is ready while it hosts the Service ([The front door](#the-front-door)).
 Without `natsInCluster` the app and the listener reach NATS only through the front door's SOCKS5
 proxy, so with no front-door pod ready the listener fails readiness within its probe's window (10
 seconds) and leaves its Service, while the app stays ready, and the in-cluster `allowedNamespaces`
@@ -1670,15 +1672,16 @@ envoy-infra:gcp:Dispatch needs a "random" provider in its providers option
 
 By default the docker provider waits up to 90 seconds for the container's health check to pass,
 and `pulumi up` fails if it does not. The check passes once `/healthz` answers `200`, which it does
-from `starting` on, before the listener has connected to NATS. A listener is connected when
-`/healthz` answers `"status":"healthy"` or `"status":"degraded"`: a degraded answer is a
-dependency that repairs itself, such as a role claim view whose first scan has not delivered every
-claim, and the listener behind it is connected and serving. The answers are listed under
+once the listener serves: NATS connected, its caches loaded and `/v1` open, as its machine's
+active listener or as a standby (`"role"` in the body). Until then `/healthz` answers `503`
+`starting`. A `200` is `"status":"healthy"` or `"status":"degraded"`: a degraded answer is a
+dependency that repairs itself, such as a role claim view whose first scan has not delivered
+every claim, and the pod behind it is connected and serving. The answers are listed under
 [Health and readiness](https://sjawhar.github.io/legion/dispatch/envoy/#health-and-readiness).
 
 `waitForHealthy: false` creates the container without waiting on its health check. Use it for a
-listener that cannot reach its NATS server when the stack is applied: Docker restarts the listener
-until it connects.
+listener that cannot reach its NATS server when the stack is applied: the listener stays up and
+keeps trying to connect, answering `503` `starting` until it does.
 
 ### The watchdog
 
@@ -1948,8 +1951,11 @@ The log group, the Cloud Map service, the task definition, the service and the a
 `baseTags` and `service: <N>`; the policies and the filters carry none.
 
 The container, `envoy-listener`, runs `/usr/local/bin/envoy-listener` from `image` on port 9020.
-Its health check fetches `/healthz` on the task's own address, the one the target group probes. Its
-environment, in this order:
+Its health check fetches `/healthz` on the task's own address, the one the target group probes. A
+task passes it once it serves `/v1`, as its machine's active listener or as a standby, and answers
+`503` `starting` before that; so during a deployment ECS stops the old task only once the new one
+serves, and the new one takes over the old one's deliveries when the old one's stop releases the
+delivery lease (`packages/envoy/cmd/listener/README.md`). Its environment, in this order:
 
 | Variable | Value |
 | --- | --- |
@@ -1971,20 +1977,22 @@ ECS injects its secrets from their ARNs: `ENVOY_GITHUB_WEBHOOK_SECRET` with `git
 Each alarm pages `alarmTopicArn` on one matching line in five minutes (`Sum` over 300 s at least 1,
 missing data not breaching) and sends the OK transition there too, so the channel sees the signal
 stop: `<N>-publish-failure` (a JetStream publish that did not complete), `<N>-webhook-refused` (a
-delivery NATS can never take, answered 422), `<N>-reconnect-hooks-stalled` (a KV watch rebuild that
-has not succeeded for a minute after a NATS reconnect, so the listener's caches serve what they
+delivery NATS can never take, answered 422), `<N>-reconnect-hooks-stalled` (a KV watch rebuild
+that has not succeeded for a minute after a NATS reconnect, so the pod's caches serve what they
 last held and `/healthz` answers 200 `degraded`), `<N>-stream-subject-dropped` (a start that
 dropped another deployment's overlapping stream subject), `<N>-durable-refused` (a start that
-refused its durable consumer) and `<N>-subscribe-exhausted` (a start that gave up binding its
-durable subscription). `<N>-publish-failure` and `<N>-webhook-refused` count a GitHub delivery's
-first failure or refusal in each listener task: a later one of the same delivery, such as each of
-the redeliveries Dispatch's sweep asks for over 72 hours, is logged
-`redelivery <delivery>: <action> refused` (or `failed`), which no filter counts, so one delivery
-pages once per task, and again after a restart. Each description names `logGroupName` as the log
-to read, and assumes the wiring of the deployment the alarms were written for: that GitHub
-deliveries come from Dispatch's GitHub App (`legion-envoy`), whose redelivery sweep retries them,
-and that Slack retries an event three times.
-A listener fed otherwise pages the same way, with descriptions that overstate what is retried.
+refused its durable consumer) and `<N>-subscribe-exhausted` (a listener holding its machine's
+delivery lease that has gone 135 s or more without receiving from its durable: another subscriber
+holds it push-bound, usually a build from before the lease still running, or its reads, writes or
+subscribes of the durable fail, and it gives the lease up). `<N>-publish-failure` and
+`<N>-webhook-refused` count a GitHub delivery's first failure or refusal in each listener task: a
+later one of the same delivery, such as each of the redeliveries Dispatch's sweep asks for over 72
+hours, is logged `redelivery <delivery>: <action> refused` (or `failed`), which no filter counts,
+so one delivery pages once per task, and again after a restart. Each description names
+`logGroupName` as the log to read, and assumes the wiring of the deployment the alarms were
+written for: that GitHub deliveries come from Dispatch's GitHub App (`legion-envoy`), whose
+redelivery sweep retries them, and that Slack retries an event three times. A listener fed
+otherwise pages the same way, with descriptions that overstate what is retried.
 
 Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn` and
 `internalUrl`, `http://<cloudMapServiceName>.<cloudMapNamespaceName>:9020`.
@@ -2836,14 +2844,28 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
   delete nothing. `HostPermissions` and `DispatchPermissions` hold it through
   `ListenerPermissions`; `SessionPermissions` does not, so a session holding that set alone reads
   what it missed only through the listener;
-- for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions` and
-  `envoy_ci_state`, the calls nats.go's key-value store makes: the info, create and update of the
-  bucket's stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its
-  watchers' consumer create and delete and their flow-control replies. The update is the raise a
-  start, or the listener's keeper every 30 seconds after, sends when it finds a bucket with fewer
-  copies than `ENVOY_NATS_REPLICAS`; neither writes fewer copies than it found, and a grant without
-  it makes that raise time out after 10 seconds with
-  `raise KV_<bucket>: ENVOY_NATS_REPLICAS=<n>: context deadline exceeded`;
+- for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions`,
+  `envoy_ci_state` and `envoy_listener` (the machine's delivery lease and the delivery state its
+  listeners share, `packages/envoy/cmd/listener/README.md`), the calls nats.go's key-value store
+  makes: the info, create and update of the bucket's stream `KV_<bucket>`, its direct and stream
+  message gets, writes to its keys, and its watchers' consumer create and delete and their
+  flow-control replies. The update is the raise a start, or the listener's keeper every 30
+  seconds after, sends when it finds a bucket with fewer copies than `ENVOY_NATS_REPLICAS`;
+  neither writes fewer copies than it found, and a grant without it makes that raise time out
+  after 10 seconds with `raise KV_<bucket>: ENVOY_NATS_REPLICAS=<n>: context deadline exceeded`.
+  The writes are `$KV.<bucket>.>` for every bucket but `envoy_listener`, where they are
+  the machine's own keys alone: its lease `$KV.envoy_listener.lease.listener-<m>`, the
+  clean-hand-back marks of its stopping pods
+  `$KV.envoy_listener.handback.listener-<m>.>`, its delivery
+  ledger `$KV.envoy_listener.delivery.listener-<m>.>`, and every session's last-seen record
+  `$KV.envoy_listener.seen.>`, so one machine's user cannot take or clear another machine's lease
+  or ledger, or vouch for another machine's hand-over. The last-seen keys are not scoped to the
+  writing machine because they are read
+  across machines: a role claim names its holder session and no machine, and
+  `GET /v1/roles/<role>` on any listener answers a lapsed holder's `last_seen` out of that
+  session's record, whichever machine it registered through. A listener whose grant lacks
+  `envoy_listener` logs an ERROR naming it and delivers without a lease, as its machine's only
+  deliverer;
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
 

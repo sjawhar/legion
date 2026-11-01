@@ -175,8 +175,10 @@ whitespace; `.`, `*`, `>`, `/` or `\`; a control character; and any whitespace o
 ordinary space; and any id over 246 bytes, so `listener-<id>` fits NATS's 255-byte consumer-name
 limit. An ordinary space is accepted only inside the id and becomes a hyphen in both names. The refusal names the field itself, as
 `users[1].dispatchMachineId contains '.', which the listener's NATS names or the hub's grant entries cannot carry`. Two ids that give one durable name, of either kind
-(`a b` and `a-b` collide), or one giving the hub's own listener's (the `hostname`'s), would put
-two listeners on one durable and queue group, so the later one is refused, as
+(`a b` and `a-b` collide), or one giving the hub's own listener's (the `hostname`'s), would make
+two machines one: their listeners would share one durable, one queue group and one delivery lease
+(`lease.listener-<id>` in the `envoy_listener` bucket), so one listener would silently become the
+other's standby rather than deliver for its own machine. The later one is refused, as
 `users[2]: dispatchMachineId gives the same durable name as users[0].machineId` or
 `… as the hub's own listener`. Every `dispatchMachineId` user also binds Dispatch's fixed durables
 `delivery-events` and `delivery-jobs`, so a second one is refused the same way, as
@@ -252,6 +254,21 @@ secret and writes the seed with `envoy-infra seed generate`, whose printed key i
 (see [Making a seed](../README.md#making-a-seed)). The seed reaches the listener's environment as
 `NATS_NKEY_SEED` through `docker run --env-file`, which Docker reads as root, since the listener's
 image runs as an unprivileged user.
+
+The hub runs one listener for machine `<h>`, so `<h>` has no standby: while the listener restarts,
+or while a new VM boots, `<h>`'s durable holds its deliveries until the listener is back. The
+listener's user grants the `envoy_listener` bucket, where a listener keeps its machine's delivery
+lease and the delivery state every listener of the machine shares (`ListenerPermissions`, from the
+envoy-infra release that added it; see `packages/envoy/cmd/listener/README.md`). Each user may write
+only its own machine's lease and delivery ledger there, and the sessions' last-seen records. A hub
+whose users an earlier envoy-infra rendered lacks the bucket: a listener image that uses it then
+logs one ERROR naming it and delivers without a lease, as the machine's only deliverer, keeping
+that state in its own process, which for the hub's one listener changes nothing but that a restart
+forgets it. The grant reaches the hub with the update that renders its users again, which replaces
+the VM. A hub rendered with the bucket's writes not yet scoped to each machine's keys runs this
+listener as it is; the update narrows them.
+A listener elsewhere started with `ENVOY_MACHINE_ID=<h>` would share the hub listener's lease and
+become its standby, or its deliverer, so no other listener takes the hub's `hostname` as its id.
 
 ## What the hub's VM runs
 
@@ -841,7 +858,7 @@ bind the one durable `listener-<machine id>`. The hosts are therefore safe only 
 build that has dispatch://INFRA-557's single-deliverer take-over: one pod delivers from the
 durable, every other pod waits as a standby and takes over within seconds when the active pod
 goes, and `/healthz` answers 200 only on a pod that can serve `/v1`, which is what the advertiser
-judges. No such build exists until INFRA-557 lands. With an earlier build, a second host's listener
+judges. This release is such a build. With an earlier build, a second host's listener
 waits 135 seconds to bind the durable the first one holds, then exits and is restarted, again and
 again (`cmd/listener/durable.go`, `durableBindDeadline`). Through each wait its `/healthz` answers
 200 (`"starting"`) and its `/v1` serves (`cmd/listener/main.go`, `healthzHandler`), so its

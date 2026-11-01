@@ -497,6 +497,30 @@ func TestTheKeeperRaisesTheBucketsItsProgramNamesBackToTheirCopies(t *testing.T)
 	}
 }
 
+// A bucket a program adds once it has opened it (KeepBucket) is raised by the keeper from its
+// next pass on, as one named at the connect is (WithKeptBuckets): the listener names its state
+// bucket there, since a pod whose NATS user lacks the grant for it opens none and must not have
+// the keeper refused on it every period. Until it is added the keeper leaves it alone.
+func TestTheKeeperRaisesABucketItsProgramAddsAfterTheStart(t *testing.T) {
+	cluster, js := startClusterJetStream(t)
+	const added = "envoy_keeper_added"
+	client := startOnCluster(t, cluster, WithReplicas(3), withKeepInterval(testKeepInterval))
+	if _, err := EnsureKeyValue(client.JS(), &nats.KeyValueConfig{Bucket: added, Storage: nats.FileStorage, Replicas: 3, History: 5, TTL: time.Hour}); err != nil {
+		t.Fatalf("open %s at three copies: %v", added, err)
+	}
+	stream := "KV_" + added
+	info := testnats.AwaitSettledStream(t, js, stream)
+	lowered := info.Config
+	lowered.Replicas = 1
+	if _, err := js.UpdateStream(&lowered); err != nil {
+		t.Fatalf("lower %s to one copy: %v", stream, err)
+	}
+	heldFor(t, js, stream, "one copy", 4, func(info *nats.StreamInfo) bool { return info.Config.Replicas == 1 })
+
+	client.KeepBucket(added)
+	awaitKept(t, js, stream, "three copies", func(info *nats.StreamInfo) bool { return info.Config.Replicas == 3 })
+}
+
 // The keeper of a program with the default settings, one copy and no byte limit, on a stream that
 // has an id, sends no stream update over several periods, whatever the stream's copies and limit:
 // it never lowers either, and raises no bucket it names, at one copy as well. The update count is

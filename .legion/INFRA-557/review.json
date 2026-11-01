@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-557",
+  "completed": "2026-10-31T23:35:54Z",
+  "round": 16,
+  "scope": "The connected-flag fix (3c1ab0d3) and its failing-first test, ci-ok and pr-title (architect, 21:26Z); widened at 23:34Z: the tester's unreproduced loss of evt-mp-0021 in TestTwoPodsShortDropKeepsTheActivePod, whose log cannot tell lost from late, is a finding to be closed by a code trace, a fix or a matched bound, and harness delivery logging.",
+  "reviewedHead": "3c1ab0d386a1fcc6a2c5e26cdfa23743e80b63fa",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "connectedFlag": "closed: settleConnected is deleted; noteConnection records each connection's last event under connFlagMu and moves connectedConn only for the installed connection; markConnected takes connFlagMu, reads that record (or dialedUp when there is none) and prunes the others, so an event lands wholly before or after an install; readers load connectedConn alone; c.mu is taken before connFlagMu and no holder of connFlagMu takes c.mu or calls nats.go, so no lock-order inversion. TestTheConnectedFlagFollowsTheInstalledConnectionsLastEventInAnyOrder (7 rows, afterInstall hook) fails on a6ebeefc's nats.go per the implementer; passes here 3 of 3 (reviewer run, without -race since cgo is off here).",
+  "ci": "At 3c1ab0d3 (CI run 41247900236) lint and typecheck queued, test in progress at 23:35Z; pr-title success (run 41247956497). A request for changes does not wait on CI.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/cmd/listener/multiprocess_takeover_test.go", "description": "In the tester's first full multiprocess run at 3c1ab0d3, TestTwoPodsShortDropKeepsTheActivePod failed: '1 of 93 messages never reached their session within 30s: [evt-mp-0021 to ses_mp_drop_one]', the first message published after the 2 s cut; pod-a reconnected both connections and kept the lease. The harness strips delivery lines from a failing run, so the log cannot tell lost from late; it did not recur in 108 runs. Required: (1) trace from the code the path of the first message published after a 2 s cut while the active pod keeps its lease (the test's publisher, the JetStream durable consumer with its ack wait and redelivery, the receiver's resubscribe) and say in the PR body whether any path drops it or holds it past 30 s, and which; (2) if a path drops it, fix it with a test that forces that path and fails first; if a path only delays it, state the worst-case delay and make the test's bound match it, with the reason; (3) either way, add delivery logging to the multiprocess harness (publish, receive and ack, each with the message id) so a recurrence shows where the message went. Nothing else changes."}
+  ]
+}

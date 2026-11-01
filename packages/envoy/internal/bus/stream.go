@@ -45,6 +45,11 @@ const (
 	// WebhookRedeliveryBucket holds the cursor and records of Dispatch's sweep of the GitHub App
 	// webhook's failed deliveries (internal/dispatch/redeliver).
 	WebhookRedeliveryBucket = "envoy_webhook_redelivery"
+	// ListenerStateBucket holds the state every listener pod of a machine shares: the machine's
+	// delivery lease (ListenerLeaseKey, cmd/listener), the clean-hand-back marks of its stopping
+	// pods (ListenerHandBackPrefix), its delivery ledger (ListenerLedgerPrefix, internal/dedupe)
+	// and every session's last-seen record (LastSeenPrefix, internal/session).
+	ListenerStateBucket = "envoy_listener"
 )
 
 // ListenerBuckets reports the KV buckets envoy-listener opens, in the order its NATS grant lists
@@ -56,6 +61,39 @@ const (
 // Each call returns a fresh slice, so no caller changes another's list.
 func ListenerBuckets() []string {
 	return []string{InterestBucket, RoleClaimBucket, SessionBucket, CIStateBucket}
+}
+
+// LastSeenPrefix begins each session's last-seen record in ListenerStateBucket. The listener's
+// grant writes these keys for every session, whichever machine registered it: a role claim
+// (RoleClaimBucket, one bucket for the whole fleet) names its holder session and no machine, so
+// GET /v1/roles/<role> on any listener answers a lapsed holder's last_seen out of that session's
+// record whichever machine the holder registered through. A key scoped to the writing machine
+// would leave every such read with no record to find.
+const LastSeenPrefix = "seen."
+
+// ListenerLeaseKey is the key of machine machineID's delivery lease in ListenerStateBucket. The
+// listener's grant writes this key and no other machine's.
+func ListenerLeaseKey(machineID string) string {
+	return "lease." + ListenerDurable(machineID)
+}
+
+// ListenerLedgerPrefix begins each key of the delivery ledger in ListenerStateBucket of the
+// listeners that bind durable (ListenerDurable). The listener's grant writes its own machine's
+// ledger and no other.
+func ListenerLedgerPrefix(durable string) string {
+	return "delivery." + durable + "."
+}
+
+// ListenerHandBackPrefix begins each clean-hand-back mark in ListenerStateBucket of the listeners
+// that bind durable (ListenerDurable): a pod that stopped gracefully writes
+// `handback.<durable>.<revision>` to vouch for the lease record it released at that revision, and
+// the pod that takes that record reads the mark before it shortens its settle hold
+// (cmd/listener, lease.MarkHandBack and lease.HandBackMarked). The listener's grant writes its own
+// machine's marks and no other's, and the bucket's MaxAge removes a mark nobody reads. A mark is
+// keyed by the revision it vouches for, not by the machine alone, so a stopping pod writes
+// nothing about the lease record once another pod has taken it.
+func ListenerHandBackPrefix(durable string) string {
+	return "handback." + durable + "."
 }
 
 // NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the
@@ -203,6 +241,41 @@ func StreamCaptures(topic string) bool {
 		}
 	}
 	return false
+}
+
+// ReadStreamSubjects reads the subjects ENVOY_NOTIFICATIONS carries now from the server, which may
+// hold more than this binary compiles in (streamSubjects): a start of another build keeps every
+// subject the deployed stream carries and adds its own (reconcileSubjects).
+func ReadStreamSubjects(js nats.JetStreamContext) ([]string, error) {
+	info, err := js.StreamInfo(Stream)
+	if err != nil {
+		return nil, err
+	}
+	return info.Config.Subjects, nil
+}
+
+// SubjectsCapture reports whether some subject of subjects matches topic by NATS's rules: a `*`
+// token matches any one token, a last `>` token matches one or more tokens, and any other token
+// matches itself. topic is read literally, as nats.go publishes it.
+func SubjectsCapture(subjects []string, topic string) bool {
+	return slices.ContainsFunc(subjects, func(subject string) bool { return subjectMatches(subject, topic) })
+}
+
+func subjectMatches(subject, topic string) bool {
+	for {
+		subjectToken, subjectRest, subjectMore := strings.Cut(subject, ".")
+		topicToken, topicRest, topicMore := strings.Cut(topic, ".")
+		if subjectToken == ">" {
+			return true
+		}
+		if subjectToken != "*" && subjectToken != topicToken {
+			return false
+		}
+		if !subjectMore || !topicMore {
+			return subjectMore == topicMore
+		}
+		subject, topic = subjectRest, topicRest
+	}
 }
 
 // streamCfg is the stream this binary creates, before ConnectOwningStream sets its replicas

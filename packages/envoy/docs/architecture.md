@@ -32,7 +32,7 @@ Agent messages  --/       |
 
 ## Runtime shape
 
-- one listener container per machine
+- one listener per machine id delivering at a time: further listeners of the same id (pods of one Deployment) are standbys, and the delivery lease `lease.listener-<machine id>` in the `envoy_listener` KV bucket says which one receives the machine's durable consumer (`cmd/listener/README.md`)
 - one GitHub receiver container on the public EC2 host
 - one Slack receiver container on the public EC2 host
 - NATS cluster across all machines via Tailscale mesh, with JetStream for durable notifications and core NATS for live role routing
@@ -41,6 +41,7 @@ Agent messages  --/       |
 - The stream and every KV bucket hold the deployment's replica count, `ENVOY_NATS_REPLICAS` (1 to 5, default 1; more than 1 needs a clustered NATS), and the stream at least the byte limit `ENVOY_STREAM_MAX_BYTES` when set: a start creates them at that count and limit, raises one found with fewer copies or a smaller limit (or none), and never lowers either, and every program that owns the stream (each listener, the Dispatch server) runs a keeper that every 30 seconds raises the stream's copies and byte limit back to its settings, puts back the discard policy and `envoy_stream_id`, and raises its own buckets' copies. An operator's raise of the limit stands, and programs with different settings do not fight: the largest stands. JetStream's stream update has no compare-and-swap, so a start with other or no settings can put back what it read until the next keeper pass; a clustered deployment sets the same `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES` in every program
 - JetStream KV bucket `envoy_interests` for session subscriptions
 - JetStream KV bucket `envoy_sessions` with 5m TTL for session port/host data, plus the `plugin` and `plugin_version` each registration names (the npm package the session registers through and that plugin's build; absent for a session whose plugin predates them)
+- JetStream KV bucket `envoy_listener` with a 10m `MaxAge` for what a machine's listeners share: the delivery lease, the delivery ledger and each session's last-seen record
 
 ## Listener API
 
@@ -74,7 +75,7 @@ requires a bearer checks no `Host`.
 | `/v1/sessions/{session_id}` | DELETE | Remove a live session registration. With the optional `client_instance_id` query parameter the registration is removed only while it carries that id or carries none, answered `200 {"deleted":true}` for one that is gone and `200 {"deleted":false,"reason":…}` for one that stayed, so a departing client instance never removes the registration a later instance made under the same session id. A write route |
 | `/v1/messages/send` | POST | Send a direct agent-to-agent message. The target is read from the session store itself, so a 404 means the store says that session's key is gone; a store read or a publish the bus did not answer is a 503 with `Retry-After: 1` (see “Send and publish answers” below). |
 | `/v1/messages/publish` | POST | Publish an event. Required `message` becomes the human `payload_summary`; optional `payload` is distinct machine data in `payload`. A topic the stream captures is answered once JetStream stored it, bounded to five seconds. A role topic is forwarded to its live holder, and an ad-hoc topic (any `notifications.` topic the stream does not capture, such as `notifications.team.deploy-squad`) is published over core NATS and forwarded to each self-subscribed session registered on it; both are answered once each recipient confirmed the message, or with a 504 naming each that did not after four seconds (see "Role delivery and exceptions"). A publish of a captured topic the bus did not serve, and a role-holder read at a role send's first resolution that did not answer, are both the 503 below rather than a 500. |
-| `/healthz` | GET | Health check (always available, even during startup); its bus checks answer within 3 s, and a rebuild of the KV watches that has not succeeded for a minute after a reconnect is `200 degraded` naming the `KV watch rebuild` - not a refusal, which would take the probes' only listener out and replace it with one that rebuilds into the same failure on empty caches, so the state pages through the `<N>-reconnect-hooks-stalled` alarm instead - while a rebuild that fails and is run again under that minute leaves the answer it had (see “Webhook and health check bounds” below) |
+| `/healthz` | GET | Readiness: `503 {"status":"starting"}` until the listener serves, then `200` with `"role":"active"` or `"standby"`; `503` when a dependency is down (always available, even during startup); its bus checks answer within 3 s, and a rebuild of the KV watches that has not succeeded for a minute after a reconnect is `200 degraded` naming the `KV watch rebuild` - not a refusal, which would take a pod the probes still route to out and replace it with one that rebuilds into the same failure on empty caches, so the state pages through the `<N>-reconnect-hooks-stalled` alarm instead - while a rebuild that fails and is run again under that minute leaves the answer it had (see “Webhook and health check bounds” below) |
 
 ## Send and publish answers
 
@@ -177,7 +178,7 @@ writes, and a request the starting gate turns away while the routes are still op
 | --- | --- |
 | `delivered` | Pushed to the session, or forwarded to a role holder that receipted it |
 | `skipped` | Nothing to push: the session consumes its own subscription, or the envelope would echo back to the session that sent it |
-| `dedupe` | A repeat the dedupe cache recognised as already delivered, or the attempt cache as already attempted |
+| `dedupe` | A repeat the delivery ledger every pod of the machine shares recognised as already delivered, or as already attempted by this process |
 | `failed` | The push, the role forward, or the delivery-mode guard before either, failed |
 | `receipt_timeout` | A role forward reached the server and its live holder sent no receipt within two seconds |
 | `unplaceable_no_record` | An agent delivery given up: no session record this listener could read |
@@ -220,8 +221,8 @@ that did not answer; what changed is how long a silent bus can hold them.
 | `/webhook/github`, any other event | publishes | the request, the route's write deadline, and the bus's 5 s a publish | `503 service unavailable` |
 | `/webhook/slack` | publishes | 2.5 s from the handler's start (`slackAnswerBudget`), inside the 3 s Slack waits | `503 service unavailable` |
 | `/webhook/ghostwispr` | publish | the request, and the bus's 5 s | `503 service unavailable` |
-| `/healthz` | flush, each cache's KV ping, the durable consumer's info read | 3 s from the request's start, shared (`healthzBudget`) | `503 unhealthy` naming the dependency and `context deadline exceeded`, so the container health check fails, as it did when the 10 s wait outran it; a check that answered with a failure keeps its answer (`200 degraded` or `503 unhealthy`) |
-| `/healthz`, the KV watch rebuild | none: the stall the bus client recorded for its reconnect hooks (`bus.Client.HookStall`) | a minute of hooks due with no run that succeeded (`bus.RepairGrace`) | `200 degraded`, `KV watch rebuild unavailable: <last rewatch error> (no rebuild has succeeded for 1m0s)`, the stall alone when no run has failed behind it; deliberately not a refusal, since the ECS container health check and GKE's readiness probe both read `/healthz` on a single task, so refusing would replace or unroute the only listener and its replacement would rebuild into the same failing rewatch with caches that warm up empty, losing the fanout messages the running task's stale caches still place, and the state pages through the `<N>-reconnect-hooks-stalled` alarm on the bus's ERROR `envoy nats reconnect hooks have not succeeded` instead; a shorter stall keeps the answer the checks above gave, since the bus runs the hooks again within seconds of a failed run |
+| `/healthz` | flush, each cache's KV ping, the active pod's durable consumer info read | 3 s from the request's start, shared (`healthzBudget`), inside the answer's own 5 s (`healthzDeadline`) | `503 unhealthy` naming the dependency and `context deadline exceeded`, so the container health check fails, as it did when the 10 s wait outran it; a check that answered with a failure keeps its answer (`200 degraded` or `503 unhealthy`) |
+| `/healthz`, the KV watch rebuild | none: the stall the bus client recorded for its reconnect hooks (`bus.Client.HookStall`) | a minute of hooks due with no run that succeeded (`bus.RepairGrace`) | `200 degraded`, `KV watch rebuild unavailable: <last rewatch error> (no rebuild has succeeded for 1m0s)`, the stall alone when no run has failed behind it; read last, on the active pod's answer and a standby's alike (`okAnswer`), so every refusal above stands and a report the pod already carries - a failing takeover, a durable lag that could not be read - keeps its place with the stall named after it; deliberately not a refusal, since the ECS container health check and GKE's readiness probe both read `/healthz`, so refusing would unroute or replace a pod whose caches still hold what they warmed up with and its replacement would rebuild into the same failing rewatch with caches that warm up empty, losing the fanout messages the running pod's stale caches still place, and the state pages through the `<N>-reconnect-hooks-stalled` alarm on the bus's ERROR `envoy nats reconnect hooks have not succeeded` instead; a shorter stall keeps the answer the checks above gave, since the bus runs the hooks again within seconds of a failed run |
 
 nats.go's KV calls take no context and wait out the JetStream MaxWait (10 s), so a CI write's KV
 calls and `/healthz`'s pings are waited for through a context (`kvCall`, `bus.Bounded`) that
@@ -303,21 +304,24 @@ retrying them repeats nothing, and they keep the window's whole allowance. A pus
 deferred once, however long the window, and the give-up after it is terminal whether or not its
 notice can be published, so it is pushed at most twice: it may have landed — the session server
 refusing the prompt, a connection that never reached it and an answer lost after the server took
-the prompt all come back as the same failure — and a deferral clears the attempt-cache entry that
-otherwise keeps a redelivery from pushing again, so each retry can repeat an instruction the
+the prompt all come back as the same failure — and a deferral clears the delivery-ledger attempt
+that otherwise keeps a redelivery from pushing again, so each retry can repeat an instruction the
 session already has. One retry covers a peer restarting or a connection refused for a moment;
 twelve would let the same
 instruction arrive thirteen times. At most 64 agent deliveries are held deferred at once — a
 quarter of the durable's 256 ack-pending slots, one of which a deferred message holds for its whole
 window — and a message that arrives while that cap is reached is given up at once. The 64 is one
 budget for the whole listener: a single set, made once at start and shared by every delivery
-handler built from it, the one a self-health rebind builds after a NATS flap included, so a rebind
-opens no second budget beside the first. The set is keyed on each message's JetStream stream
+handler built from it, the durable's included, which the receive loop keeps across every
+resubscribe and lease take-over, so no handler opens a second budget beside the first. The set is
+keyed on each message's JetStream stream
 sequence, so only that message's next delivery gives its slot back; a redelivery this listener
 never deferred (another branch's NAK, an expired ack wait) frees nothing. A slot whose message
 never comes back here (the stream dropped or purged it, or its redelivery reached another
-subscriber) expires 125 s after the deferral that took it, the 5 s delay plus two 60 s ack waits,
-the longest a deferred message can legitimately stay pending, so such slots cannot hold the budget
+subscriber) expires 125 s after the deferral that took it: the 5 s delay (or a 6 s ack wait after a
+lost NAK), then the redelivery's wait in the pod's local queue behind a 30 s prompt or a settle
+hold, with margin. That is the longest a deferred message can legitimately stay pending, so such
+slots cannot hold the budget
 for longer than that. Each deferral logs
 `listener agent delivery deferred` with `reason`, `attempt` and `window_deferrals`, the deferrals
 that message's cause is allowed (1 for `push_failed`); only the give-up counts
@@ -325,8 +329,9 @@ that message's cause is allowed (1 for `push_failed`); only the give-up counts
 `listener agent delivery given up`, and then publishes the exception. A notice that cannot be
 published — it embeds the original payload, so an envelope near the server's max payload has its
 notice refused as too large on every attempt — logs ERROR `listener exception publish failed`
-beside the give-up line and changes nothing else: the message is not NAKed, it keeps the
-attempt-cache entry that turns a redelivery a lost ACK brings into `listener attempt-dedupe skip`,
+beside the give-up line and changes nothing else: the message is not NAKed, it keeps the ledger
+attempt that turns a redelivery a lost ACK brings into `listener attempt-dedupe skip` on the same
+pod (another pod of the machine defers it until that attempt can be taken over),
 and it is ACKed. No other path NAKs on a notice it could not publish: the generic fanout, the one
 that still could, owes no `no_holder` notice at all, since the handler routes every role and agent
 topic elsewhere and a topic reaching the fanout is never a control topic.

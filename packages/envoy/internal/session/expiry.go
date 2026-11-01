@@ -9,13 +9,13 @@ import (
 type expiryKind uint8
 
 const (
-	// expireLive is the deadline of the id's live cache entry. At it the entry leaves the cache and
-	// its final heartbeat moves to lastSeen.
+	// expireLive is the deadline of the id's live cache entry. At it the entry leaves the cache,
+	// and its final heartbeat stays readable as the lapsed session's last-seen time.
 	expireLive expiryKind = iota
-	// expireLastSeen is the deadline of the id's lastSeen record and of its revision fence, the
-	// registry's retention (one TTL unless WithLastSeenRetention set longer) after the id left the
-	// cache. At it the record leaves lastSeen and, when the id is still not cached, the fence leaves
-	// cacheRevisions.
+	// expireLastSeen is the deadline of the id's per-process last-seen record (seenLocal) and of
+	// its revision fence, the registry's retention (one TTL unless WithLastSeenRetention set
+	// longer) after the id left the cache. At it the record leaves seenLocal and, when the id is
+	// still not cached, the fence leaves cacheRevisions.
 	expireLastSeen
 )
 
@@ -121,17 +121,18 @@ func (r *SessionRegistry) armExpiryLocked() {
 // timer for the next one.
 //
 // A live entry's deadline removes the entry only when the cache still holds it with that same
-// expiresAt; a write that replaced it since moved the deadline, and then nothing happens. Removing it
-// records its final heartbeat in lastSeen until the retention after its deadline, so LastSeen
-// answers the same before and after the removal, and schedules the id's lastSeen deadline.
+// expiresAt; a write that replaced it since moved the deadline, and then nothing happens. The
+// session's final heartbeat is already recorded (cacheSessionLocked wrote it to seenLocal, or
+// recordSeen to the listener state bucket), so LastSeen answers the same before and after the
+// removal; the removal only schedules the id's last-seen deadline.
 //
-// A lastSeen deadline removes the id's lastSeen record and, when the cache holds no entry for the
-// id, its revision fence in cacheRevisions, so the fence map holds only live ids and ids that left
-// within the retention. Dropping the fence is safe because the retention is never less than one
-// TTL: any revision older than the fence was written before the id left the cache, so its Created()
-// is more than one TTL in the past, and expiryFor gives a late delivery of it a deadline that has
-// already passed. cacheSessionLocked does not insert such a delivery for an id it does not hold, so
-// it neither makes the id live nor brings back a LastSeen answer.
+// A last-seen deadline removes the id's seenLocal record and, when the cache holds no entry for
+// the id, its revision fence in cacheRevisions, so the fence map holds only live ids and ids that
+// left within the retention. Dropping the fence is safe because the retention is never less than
+// one TTL: any revision older than the fence was written before the id left the cache, so its
+// Created() is more than one TTL in the past, and expiryFor gives a late delivery of it a deadline
+// that has already passed. cacheSessionLocked does not insert such a delivery for an id it does
+// not hold, so it neither makes the id live nor brings back a LastSeen answer.
 func (r *SessionRegistry) expireDue() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -147,16 +148,15 @@ func (r *SessionRegistry) expireDue() {
 			if !ok || !cs.expiresAt.Equal(item.deadline) {
 				continue
 			}
-			r.retainLastSeenLocked(id, cs.entry.UpdatedAt, cs.expiresAt)
 			delete(r.cache, id)
-			r.setExpiryLocked(id, expireLastSeen, cs.expiresAt.Add(r.retention()))
+			r.setExpiryLocked(id, expireLastSeen, r.lastSeenUntilLocked(id, cs.expiresAt))
 		case expireLastSeen:
-			if seen, ok := r.lastSeen[id]; ok {
-				if seen.expiresAt.After(now) {
-					r.setExpiryLocked(id, expireLastSeen, seen.expiresAt)
+			if at, ok := r.seenLocal[id]; ok {
+				if until := r.seenUntil(at); until.After(now) {
+					r.setExpiryLocked(id, expireLastSeen, until)
 					continue
 				}
-				delete(r.lastSeen, id)
+				delete(r.seenLocal, id)
 			}
 			if _, cached := r.cache[id]; !cached {
 				delete(r.cacheRevisions, id)

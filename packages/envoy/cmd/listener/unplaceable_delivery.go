@@ -11,6 +11,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 )
@@ -45,16 +46,16 @@ const unplaceableDeferralCap = consumerMaxAckPending / 4
 // defaultUnplaceableRetryWindow is the window main.go uses when ENVOY_UNPLACEABLE_RETRY_WINDOW
 // is unset or unreadable: a minute of retries, which at unplaceableRetryDelay is 12 deferrals
 // and so 13 deliveries, 15 with the margin above and so inside consumerMaxDeliver, and well
-// inside the attempt cache's TTL (attemptCacheTTL, main.go), the entry whose clearing keeps each
-// redelivery from being swallowed as an attempt-dedupe skip.
+// inside the delivery ledger's attempted age (dedupe.AttemptedAge), the age of the ledger attempt
+// whose clearing keeps each redelivery from being swallowed as an attempt-dedupe skip.
 // TestUnplaceableRetryWindowFitsTheBoundsItDependsOn pins both.
 const defaultUnplaceableRetryWindow = 60 * time.Second
 
 // pushFailedDeferrals is how many times a push_failed delivery (session.ReasonPushFailed) is
 // deferred, whatever the window would buy the other two causes: one, so such a message is
 // delivered at most twice. The other causes push nothing, so retrying them repeats nothing; this
-// one is different. A deferral clears the attempt-cache entry the delivery recorded, the entry
-// that otherwise keeps a redelivery from pushing a second time, and session.Deliverer's prompt
+// one is different. A deferral clears the ledger attempt the delivery recorded (ledgerAttempt), the
+// attempt that otherwise keeps a redelivery from pushing a second time, and session.Deliverer's prompt
 // returns the same error for a session server that refused the prompt, a connection that never
 // reached it, and an answer lost after the server had taken the prompt - so every retry of a
 // push that may have landed repeats an instruction the session may already have. One retry
@@ -65,21 +66,23 @@ const pushFailedDeferrals = 1
 
 // unplaceableDeferralExpiry is how long a slot in unplaceableDeferrals lasts after the deferral
 // that took it, the longest a deferred message can legitimately stay pending before a delivery of
-// it reaches this listener's handler again and gives the slot back. It is the sum of three waits:
-//   - unplaceableRetryDelay (5 s), the NAK delay the deferral asks for: the stream redelivers no
-//     sooner;
-//   - consumerAckWait (durable.go, 60 s): finalizeAfter's NAK is fire-and-forget, and one lost on
-//     the wire leaves the message pending until the AckWait of the delivery that was deferred
-//     runs out, which began before the slot was taken, so it ends inside this term;
-//   - a margin of one more consumerAckWait for the redelivery to wait in this listener's client
-//     buffer behind the deliveries ahead of it before its handler runs the release. A handler that
-//     is further behind than that has let the stream redeliver the message again in the meantime.
+// it reaches this listener's handler again and gives the slot back. That is two waits:
+//   - the durable's: unplaceableRetryDelay (5 s), the NAK delay the deferral asks for, or, when
+//     retryAfter's fire-and-forget NAK is lost on the wire, consumerAckWait (durable.go, 6 s)
+//     counted from the delivery that was deferred, which began before the slot was taken;
+//   - this pod's: the redelivery waits in the receive loop's local queue (receive.go), kept alive
+//     by InProgress so the durable never redelivers it meanwhile, behind the prompt in hand, up to
+//     promptRequestLimit (30 s), or behind a settle hold after a take-over (7 s at most), before
+//     the handler runs it and releases its slot.
 //
-// 125 s in all. A slot older than that belongs to a message that is not coming back here - the
-// stream dropped or purged it, or its redelivery reached another subscriber - and take reclaims
-// it. TestUnplaceableRetryWindowFitsTheBoundsItDependsOn pins that it exceeds the first two
-// terms, so a message that is still legitimately pending never has its slot reclaimed early.
-const unplaceableDeferralExpiry = unplaceableRetryDelay + consumerAckWait + consumerAckWait
+// Those come to under a minute; 125 s leaves more than as much again for prompts queued ahead of
+// the redelivery. It is a figure of its own, not a sum of consumerAckWait, since the ack wait
+// bounds nothing a message waits in the local queue. A slot older than that belongs to a message
+// that is not coming back here - the stream dropped or purged it, or its redelivery reached
+// another subscriber - and take reclaims it. TestUnplaceableRetryWindowFitsTheBoundsItDependsOn
+// pins that it exceeds the two waits, so a message that is still legitimately pending never has
+// its slot reclaimed early.
+const unplaceableDeferralExpiry = 125 * time.Second
 
 // unplaceableDeferrals is the set of agent deliveries this listener holds deferred right now,
 // keyed on each message's stream sequence (nats.MsgMetadata.Sequence.Stream), and the budget
@@ -174,7 +177,9 @@ func (d *unplaceableDeferrals) sweepLocked(now time.Time) {
 // unplaceableAgentDelivery answers an agent delivery that nothing placed and nothing failed hard
 // enough to NAK (agentSubjectDelivery's undelivered, error-free result). It either defers the
 // message for redelivery or gives it up with its record, and finalizes the message either way.
-func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope, sessionID string, metadata *nats.MsgMetadata, result session.HandleAgentResult) {
+// attempt is the delivery-ledger attempt agentSubjectDelivery took for the pair, the zero Attempt
+// for a session this listener does not prompt (promptsHere), which settles nothing.
+func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope, sessionID string, metadata *nats.MsgMetadata, result session.HandleAgentResult, attempt dedupe.Attempt) {
 	// Nothing placed this message and nothing failed hard enough to NAK: the session has
 	// no record this listener could find, its record names nothing to push to, or the push
 	// to the port it names did not land. Each can be true of a session that is about to be
@@ -246,15 +251,16 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	if deferred {
 		// No exception and no delivery counter: the message is not disposed of yet, and
 		// publishing the no_holder notice per attempt would send a dozen of them, each one
-		// read back by every listener in the fleet. The attempt-cache entry agentSubjectDelivery
-		// recorded must go, or the redelivery this NAK asks for is swallowed as an attempt-dedupe
-		// skip before it reaches the session at all.
+		// read back by every listener in the fleet. The ledger attempt agentSubjectDelivery
+		// took must go, or the redelivery this NAK asks for is swallowed as an attempt-dedupe
+		// skip (dedupe.InFlight) before it reaches the session at all.
 		//
 		// The line carries the two numbers the decision was made on. It carried the
 		// message's stream age before, which no longer bounds anything: a line naming it
 		// would invite exactly the reading this clock was changed to end.
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID: sessionID,
+			attempt:   attempt,
 			log: func(logger *logging.Logger) {
 				logger.DeliveryLog(slog.LevelInfo, "listener agent delivery deferred", sessionID, item.Topic, item.EventID, "deferred",
 					slog.String("reason", reason),
@@ -262,10 +268,10 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 					slog.Uint64("window_deferrals", windowDeferrals),
 				)
 			},
-			clearAttempt: true,
+			settle: settleClear,
 		})
 		cfg.messagesNAKed.Inc()
-		message.finalizeAfter(unplaceableRetryDelay)
+		message.retryAfter(unplaceableRetryDelay)
 		return
 	}
 	// Given up: the deferrals this cause is allowed are spent, the delivery count is reached,
@@ -278,18 +284,18 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	// So applyDeliveryOutcome writes the counter and the give-up line first, then publishes
 	// the notice, once per message rather than once per attempt. A notice that does not go
 	// out is logged exceptionPublishFailedLine and nothing else: it neither NAKs the message
-	// nor clears its attempt-cache entry. The entry is kept rather than cleared because it is
-	// what stops a further delivery of this message pushing again - the redelivery an ACK
-	// lost on the wire brings (finalize's ACK is fire-and-forget), which arrives after the
-	// durable's AckWait and well inside attemptCacheTTL - and this function ACKs the message once
-	// the give-up is applied.
+	// nor clears its ledger attempt. The attempt is kept (dedupe.Ledger.Keep) rather than cleared
+	// because it is what stops a further delivery of this message pushing again - the redelivery
+	// an ACK lost on the wire brings (finalize's ACK is fire-and-forget), which arrives after the
+	// durable's AckWait and well inside dedupe.AttemptedAge - and this function ACKs the message
+	// once the give-up is applied.
 	//
 	// What this gives up is the notice itself, when it cannot be published. That is cheaper
 	// than the retry it replaces. For an agent subject nothing in this deployment reads the
 	// no_holder exception: the Legion daemon's NATS grant subscribes only to the role lanes'
 	// exception subjects (infra/core, DaemonPermissions), while the give-up line, its counter
 	// and exceptionPublishFailedLine are what an operator does read. The retry NAKed the
-	// message and cleared its attempt entry, so every redelivery ran the whole handler again
+	// message and cleared its ledger attempt, so every redelivery ran the whole handler again
 	// and pushed a message whose push allowance was already spent; and the failure it retried
 	// is correlated with the fault (the bus that will not take the notice is the one whose
 	// trouble made the message unplaceable) and can be permanent - the notice embeds the
@@ -298,11 +304,13 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	// with no give-up record at all.
 	applyDeliveryOutcome(cfg, item, deliveryOutcome{
 		sessionID:    sessionID,
+		attempt:      attempt,
 		metricStatus: giveUpStatus,
 		log: func(logger *logging.Logger) {
 			logger.DeliveryLog(slog.LevelWarn, "listener agent delivery given up", sessionID, item.Topic, item.EventID, giveUpStatus, slog.String("reason", reason))
 		},
 		exceptionReason: "no_holder",
+		settle:          settleKeep,
 	})
 	message.finalize(false)
 }

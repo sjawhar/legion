@@ -47,12 +47,11 @@ func newConfirmedRecord(t *testing.T) *dedupe.Cache {
 }
 
 // withPublishRoute gives d what the publish route needs beyond its stores, as main wires it: a
-// delivery config over d's stores with a dedupe cache, client.RequestCoreTo as the forward, a
-// logger and a delivered counter, and a confirmation record.
+// delivery config over d's stores with a delivery ledger, client.RequestCoreTo as the forward, a
+// logger and a delivered counter, and a confirmation record. The ledger is this process's own
+// (dedupe.Memory), as a listener without the listener state bucket keeps it.
 func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
 	t.Helper()
-	cache := dedupe.New(10 * time.Minute)
-	t.Cleanup(cache.Stop)
 	logs := &cmdtest.LockedBuffer{}
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -64,7 +63,7 @@ func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
 		forwardRole:       d.client.RequestCoreTo,
 		registry:          d.registry,
 		sessions:          d.sessions,
-		dedupeCache:       cache,
+		ledger:            dedupe.NewMemory(promptRequestLimit + ledgerTakeoverMargin),
 		logger:            logging.NewWithWriter("test", logs),
 		messagesDelivered: metrics.New().NewCounter("test_messages_delivered", "test"),
 	}
@@ -388,13 +387,13 @@ func TestPublishRouteNamesTheAdHocTopicSubscriberThatDidNotConfirm(t *testing.T)
 }
 
 // With the live topics lane on, the lane receives the route's own publish on the topic and its
-// fanout records, in the delivery handlers' dedupe cache, every self-subscribed session on this
-// machine whose push it skipped: such a session holds its own subscription, so there is nothing to
-// push to, and nothing was heard from it. A recipient that never sends its receipt must still be
-// named as not confirming, rather than counted delivered from that record.
+// fanout records, in the delivery ledger, every self-subscribed session on this machine whose push
+// it skipped: such a session holds its own subscription, so there is nothing to push to, and
+// nothing was heard from it. A recipient that never sends its receipt must still be named as not
+// confirming, rather than counted delivered from that record.
 func TestPublishRouteDoesNotCountTheLiveLanesSkippedPushAsAConfirmation(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
-	live, err := openLiveTopics([]string{testnats.URL(t)}, harness.config.machineID, liveDeliveryHandler(harness.config))
+	live, err := openLiveTopics([]string{testnats.URL(t)}, harness.config.machineID, "pod-live", liveDeliveryHandler(harness.config))
 	if err != nil {
 		t.Fatalf("open the live topics lane: %v", err)
 	}
@@ -425,9 +424,10 @@ func TestPublishRouteDoesNotCountTheLiveLanesSkippedPushAsAConfirmation(t *testi
 			t.Fatalf("ses_silent received event %s, want only the answered %s", frame.EventID, failure.EventID)
 		}
 	}
-	// The lane did run for this send: without its record the test would not tell the fix apart.
-	if !harness.config.dedupeCache.Seen("publish.lane-1", "ses_silent") {
-		t.Fatalf("the live lane did not record ses_silent's skipped push of publish.lane-1, so the test exercised nothing")
+	// The lane did run for this send: it counted ses_silent's skipped push, and without that the
+	// test would not tell the fix apart.
+	if counterValue(t, metricsBody(t, harness), `test_messages_delivered{delivery_status="skipped"}`) < 1 {
+		t.Fatalf("the live lane did not deliver publish.lane-1 to ses_silent, so the test exercised nothing")
 	}
 }
 

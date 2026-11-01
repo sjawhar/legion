@@ -227,15 +227,16 @@ func startUnplaceableDelivery(t *testing.T, harness listenerDeliveryHarness, cfg
 }
 
 // startDeliveryThrough is startUnplaceableDelivery with the subscription's handler given whole,
-// for a run that must put something in front of the listener's own handler.
-func startDeliveryThrough(t *testing.T, harness listenerDeliveryHarness, handler natsgo.MsgHandler, target string, soak time.Duration) unplaceableDeliveryRun {
+// for a run that must put something in front of the listener's own handler. The handler runs each
+// message under context.Background(), as a durable message nothing cancels.
+func startDeliveryThrough(t *testing.T, harness listenerDeliveryHarness, handler durableHandler, target string, soak time.Duration) unplaceableDeliveryRun {
 	t.Helper()
 	return startEnvelopeDeliveryThrough(t, harness, handler, target, listenerTestEnvelope(contracts.AgentSubject(target), "unplaceable-"+target), soak)
 }
 
 // startEnvelopeDeliveryThrough is startDeliveryThrough with the envelope given whole, for a run
 // whose envelope must carry something the default one does not; item.Topic is target's subject.
-func startEnvelopeDeliveryThrough(t *testing.T, harness listenerDeliveryHarness, handler natsgo.MsgHandler, target string, item contracts.Envelope, soak time.Duration) unplaceableDeliveryRun {
+func startEnvelopeDeliveryThrough(t *testing.T, harness listenerDeliveryHarness, handler durableHandler, target string, item contracts.Envelope, soak time.Duration) unplaceableDeliveryRun {
 	t.Helper()
 	subject := item.Topic
 	exceptions, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + subject)
@@ -252,7 +253,7 @@ func startEnvelopeDeliveryThrough(t *testing.T, harness listenerDeliveryHarness,
 	time.Sleep(soak)
 
 	inbox := natsgo.NewInbox()
-	subscription, err := harness.client.Conn.Subscribe(inbox, handler)
+	subscription, err := harness.client.Conn.Subscribe(inbox, func(msg *natsgo.Msg) { handler(context.Background(), msg) })
 	if err != nil {
 		t.Fatalf("subscribe the delivery handler on %s: %v", inbox, err)
 	}
@@ -268,7 +269,8 @@ func startEnvelopeDeliveryThrough(t *testing.T, harness listenerDeliveryHarness,
 	// consumerAckWait would hold a handler that asked for neither an ack nor a retry past any
 	// deadline this test could wait out.
 	config := natsgo.ConsumerConfig{Durable: consumer, DeliverSubject: inbox}
-	applyListenerConsumerPolicy(&config, []string{subject})
+	applyListenerConsumerPolicy(&config)
+	config.FilterSubject = subject
 	config.AckWait = 10 * time.Second
 	if _, err := harness.client.JS().AddConsumer(bus.Stream, &config); err != nil {
 		t.Fatalf("create the durable %s over %s: %v", consumer, subject, err)
@@ -731,14 +733,14 @@ func TestARedeliveryThisListenerNeverDeferredGivesNoSlotBack(t *testing.T) {
 		cfg.deferredUnplaceable = held
 		handler := jetStreamDeliveryHandler(cfg)
 		var firstTaken atomic.Bool
-		startDeliveryThrough(t, harness, func(msg *natsgo.Msg) {
+		startDeliveryThrough(t, harness, func(ctx context.Context, msg *natsgo.Msg) {
 			if firstTaken.CompareAndSwap(false, true) {
 				if err := msg.Nak(); err != nil {
 					t.Errorf("NAK the first delivery of %s: %v", target, err)
 				}
 				return
 			}
-			handler(msg)
+			handler(ctx, msg)
 		}, target, 0)
 		return harness, held
 	}
@@ -808,14 +810,14 @@ func TestAWindowPastTheDurablesMaxDeliverStillGivesUpBeforeIt(t *testing.T) {
 		cfg.unplaceableRetryWindow = window
 		handler := jetStreamDeliveryHandler(cfg)
 		var taken atomic.Uint64
-		return startDeliveryThrough(t, harness, func(msg *natsgo.Msg) {
+		return startDeliveryThrough(t, harness, func(ctx context.Context, msg *natsgo.Msg) {
 			if taken.Add(1) < handlerFirstSees {
 				if err := msg.Nak(); err != nil {
 					t.Errorf("NAK an early delivery of %s: %v", target, err)
 				}
 				return
 			}
-			handler(msg)
+			handler(ctx, msg)
 		}, target, 0)
 	}
 
@@ -877,7 +879,7 @@ func recordsFor(records []deliveryRecord, sessionID string) []deliveryRecord {
 // keep the window's whole allowance. A failed push may have landed: session.Deliverer's prompt
 // returns the same error for a session server that refused the prompt, a connection that never
 // reached it, and an answer lost after the server took the prompt, and every deferral clears the
-// attempt-cache entry that would otherwise stop a redelivery pushing again - so each retry of such
+// ledger attempt that would otherwise stop a redelivery pushing again - so each retry of such
 // a push can hand the session an instruction it already has. At the default window's dozen
 // deferrals that is the same instruction up to thirteen times; at pushFailedDeferrals it is twice
 // at most.

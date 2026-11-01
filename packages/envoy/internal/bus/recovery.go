@@ -11,6 +11,97 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// callbacks are what the client tells each of its connections to report its events to. nats.go
+// runs them one at a time, in the order of the events, on the connection's own dispatcher
+// goroutine, so each of them returns at once: the connected flag's moves are the stores and
+// clears of noteConnection, and a connection event's work is handed to a goroutine of the
+// client's (queueReconnect).
+func (c *Client) callbacks() connectCallbacks {
+	return connectCallbacks{
+		reconnected: c.queueReconnect,
+		closed:      c.onClosed,
+		asyncErr:    c.onAsyncError,
+		state:       c.noteConnection,
+	}
+}
+
+// queueReconnect takes a connection event of nc - its connect or its reconnect in place -
+// records what must be recorded in step with nats.go's own callbacks (countConnectionEvent) and
+// hands the work of it (onReconnect) to a goroutine of the client's, which works through the
+// events one at a time and in the order they were reported. It is wired as the reconnect
+// callback, which nats.go runs on the connection's dispatcher goroutine, the one goroutine every
+// callback of that connection runs on: restoring the subscriptions and running the hooks there
+// would hold the next disconnect behind them, and the connected flag, which the callbacks keep,
+// would read up for as long as the hooks took - 12 s of a failing hook's requests, where
+// cmd/listener's delivery lease releases the machine's record after 3 s of its receive signal
+// reading down. The flag is still moved on that goroutine alone (noteConnection), so a set and
+// the clear of a later disconnect keep nats.go's own order, and this callback returns before the
+// event's work begins.
+func (c *Client) queueReconnect(nc *nats.Conn) {
+	c.countConnectionEvent(nc)
+	c.reconnectQueueMu.Lock()
+	c.reconnectQueue = append(c.reconnectQueue, nc)
+	running := c.reconnectRunning
+	c.reconnectRunning = true
+	c.reconnectQueueMu.Unlock()
+	if running {
+		return
+	}
+	go c.workThroughReconnects()
+}
+
+// countConnectionEvent records a connection event of nc that the client's own state must take in
+// the order nats.go reports it, before the work of the event is queued: the hooks are due for it,
+// the publish denials and the refusal of the core subscription are the connection's past, and a
+// refusal of what nats.go re-sent is reported after this callback and marks the subscription
+// again (onAsyncError, where the order is what keeps the mark from outliving its refusal). It
+// runs on nats.go's callback goroutine, so it takes the client's locks and nothing else: no
+// request, no wait.
+//
+// nc is the connection already in c.Conn, reconnected in place, and the JetStream context taken
+// from it keeps working, so neither field is reassigned here. A callback nats.go delivers late
+// for a connection the client has since replaced is no event of the client's: the replacement
+// was its own (ensureConnWithContext). A client that has stopped records nothing: its connection
+// is the drain's or the close's.
+func (c *Client) countConnectionEvent(nc *nats.Conn) {
+	if c.stopped() {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if nc != c.Conn {
+		return
+	}
+	c.markHooksDueLocked()
+	// The session this reconnect replaced is the one the server reported its publish refusals
+	// on, and the publishes they answered are over; this session's grant is read again from its
+	// own refusals.
+	c.clearPublishDenials()
+	// nats.go has re-sent every subscription, so a refusal the server made of the core one before
+	// is past: this server may grant it.
+	c.subscriptionsMu.Lock()
+	c.subscriptions[coreSubscription].refused = false
+	c.subscriptionsMu.Unlock()
+}
+
+// workThroughReconnects runs onReconnect for each connection event queued, oldest first, and
+// returns once the queue is empty. One runs at a time: an event queued while this one works is
+// taken by this goroutine rather than by one of its own.
+func (c *Client) workThroughReconnects() {
+	for {
+		c.reconnectQueueMu.Lock()
+		if len(c.reconnectQueue) == 0 {
+			c.reconnectRunning = false
+			c.reconnectQueueMu.Unlock()
+			return
+		}
+		nc := c.reconnectQueue[0]
+		c.reconnectQueue = c.reconnectQueue[1:]
+		c.reconnectQueueMu.Unlock()
+		c.onReconnect(nc)
+	}
+}
+
 // onClosed is wired as the ClosedCB callback. It launches recovery in a
 // background goroutine so the NATS library callback returns immediately.
 func (c *Client) onClosed() {
@@ -20,19 +111,25 @@ func (c *Client) onClosed() {
 // onConnect is the ConnectedCB of a client that connects in the background
 // (WithConnectInBackground): nats.go has connected the connection the constructor returned for the
 // first time, and has sent the core subscriptions made before it. It is a connection event as a
-// reconnect in place is, so onReconnect binds the JetStream subscription made before it and runs
-// the reconnect hooks, an owning client's reconciliation of the stream first (ensureStreamOnce).
-// nats.go runs it once per connection, and the client never installs a second connection before
-// this one has connected (ensureConnWithContext), so it marks the end of the wait only for c.Conn.
+// reconnect in place is, so the work of it binds the JetStream subscription made before it and
+// runs the reconnect hooks, an owning client's reconciliation of the stream first
+// (ensureStreamOnce), on the client's own goroutine (queueReconnect). nats.go runs it once per
+// connection, and the client never installs a second connection before this one has connected
+// (ensureConnWithContext), so it marks the end of the wait only for c.Conn, here on the callback
+// goroutine: a caller waiting for the first connection waits for nats.go's connect, not for the
+// hooks.
 func (c *Client) onConnect(nc *nats.Conn) {
 	c.mu.Lock()
 	if nc == c.Conn {
 		c.awaitingConnection = false
 	}
 	c.mu.Unlock()
-	c.onReconnect(nc)
+	c.queueReconnect(nc)
 }
 
+// onReconnect is a connection event's work: the subscriptions the connection lost are bound
+// again and the reconnect hooks are run for it. It runs on the client's own goroutine, never on
+// nats.go's callback goroutine (queueReconnect), and one event's work at a time.
 func (c *Client) onReconnect(nc *nats.Conn) {
 	// A reconnect after the client stopped belongs to a process that is shutting down: closeStopped
 	// closes the connection, or leaves it to the drain when the reconnect came before Drain stopped
@@ -41,25 +138,6 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 		c.closeStopped(nc)
 		return
 	}
-	// nc is the connection already in c.Conn, reconnected in place, and the JetStream context taken
-	// from it keeps working, so neither field is reassigned here. The reconnect is a connection
-	// event, so the hooks are due. A callback nats.go delivers late for a connection the client has
-	// since replaced is not: the replacement was its own event.
-	c.mu.Lock()
-	if nc == c.Conn {
-		c.markHooksDueLocked()
-		// The session this reconnect replaced is the one the server reported its publish refusals
-		// on, and the publishes they answered are over; this session's grant is read again from
-		// its own refusals.
-		c.clearPublishDenials()
-		// nats.go has re-sent every subscription, so a refusal the server made of the core one
-		// before is past: this server may grant it. A refusal of the re-sent one is reported after
-		// this callback, and marks it again (onAsyncError).
-		c.subscriptionsMu.Lock()
-		c.subscriptions[coreSubscription].refused = false
-		c.subscriptionsMu.Unlock()
-	}
-	c.mu.Unlock()
 	pending, restoreErr := c.restoreSubscriptions()
 	if errors.Is(restoreErr, errStopped) {
 		// Stopped between the check above and the re-subscribe: same as that branch.

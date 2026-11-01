@@ -936,12 +936,7 @@ func SubscribeGrantConfig(user string, allow ...string) string {
 // grantConfig is the configuration of a server with JetStream whose one nkey user may use direction
 // (publish or subscribe) only on the subjects allow names.
 func grantConfig(user, direction string, allow []string) string {
-	quoted := make([]string, len(allow))
-	for index, subject := range allow {
-		quoted[index] = fmt.Sprintf("%q", subject)
-	}
-	return nkeyConfig(fmt.Sprintf("{ nkey: %q, permissions: { %s: { allow: [%s] } } }",
-		user, direction, strings.Join(quoted, ", ")))
+	return nkeyConfig(fmt.Sprintf("{ nkey: %q, permissions: { %s: { allow: %s } } }", user, direction, quotedList(allow)))
 }
 
 func nkeyConfig(entry string) string {

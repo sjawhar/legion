@@ -75,12 +75,13 @@ production. It would have scaled to 35 s only on a deployment that really held 7
   stream setting for the markers the server itself adds, not a per-message TTL, and it applies to
   streams created with it.
 - **Read the bucket in one pass anyway.** The key count then stops mattering and the marker count
-  costs bandwidth rather than round trips: `roleRevisions`
-  (`packages/envoy/internal/store/kv.go`) takes one watch over existing keys, as
-  `internal/kvwatch` does for the interest, session and CI caches. Timed on loopback against that
-  function, best of five: 9 claims 0.87 ms, 9 claims and 1,000 markers 4.9 ms, 9 claims and 5,000
-  markers 17.2 ms. Linear and cheap, but not free, and markers accrue with nothing expiring them —
-  which is what `PurgeDeletes` is for.
+  costs bandwidth rather than round trips: `roleRevisions` (`packages/envoy/internal/store/kv.go`)
+  took one watch over existing keys, as `internal/kvwatch` does for the interest, session and CI
+  caches. Timed on loopback against that function, best of five: 9 claims 0.87 ms, 9 claims and
+  1,000 markers 4.9 ms, 9 claims and 5,000 markers 17.2 ms. Linear and cheap, but not free, and
+  markers accrue with nothing expiring them — which is what `PurgeDeletes` is for. #2404
+  removed that snapshot: a claim's grace now counts from the machine's service start in its
+  delivery lease record, so `store.Open` reads no claim and the role bucket costs a start nothing.
 - **A scan can end early, and one of the two ways looks like success.** nats.go sends a nil entry
   when it has delivered every existing key, and its idle timer sends the *same* nil when nothing
   arrived within the JetStream `MaxWait`, reporting the timeout only on `Error()`
@@ -89,8 +90,9 @@ production. It would have scaled to 35 s only on a deployment that really held 7
   channel with no marker (`kv.go:1170`) as the other early end. `nats.KeyValue.Keys()` has the
   same timer, so listing keys and reading each one back has the bug too — it is not specific to
   keeping the watch.
-- **For `envoy_interests`, the markers are now collected, and that is the standing answer.** Every
-  listener runs one pass after its interest cache's first warm-up and then every five minutes
+- **For `envoy_interests`, the markers are now collected, and that is the standing answer.** On
+  each machine id the listener holding the delivery lease runs one pass as it starts receiving the
+  durable and then every five minutes
   (`Registry.StartInterestMarkerCollector`, `packages/envoy/internal/store/interest_markers.go`): it
   takes the lowest revision a MetaOnly scan of the bucket delivers as a PUT and purges the stream
   below it, which removes every marker under the live keys in one request. That floor comes from

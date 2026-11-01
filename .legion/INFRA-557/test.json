@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-557",
+  "previousHandoff": "55058d8acfb5d79cce7e07282380206f4a34505d",
+  "round": 22,
+  "testedHead": "3c1ab0d386a1fcc6a2c5e26cdfa23743e80b63fa",
+  "handoffHead": "ebe4d6fe2119393b5242c68ce2873ade748bcc19",
+  "scope": "Retro's finding, fixed in 3c1ab0d3: the connected flag takes its state from the connection's events alone, both writers take connFlagMu, and settleConnected is deleted. Also 0074091 (the reviewer's AGENTS.md wording) and 85ce0263 (retro's docs/solutions).",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Flag tests: built a control tree from a6ebeefc with an afterInstall hook. With the hook between settleConnected's IsConnected read and its clear, TestTheConnectedFlagFollowsTheInstalledConnectionsLastEventInAnyOrder fails 4 of 7 rows, including the implementer's two named messages ('the install (dialed up true) and events [false true], the client reads connected false, want true'; 'the install (dialed up false) and events [true], ... want true'). With the hook after settleConnected returns, those two raced rows pass and 2 others fail, because the old code asked the test's down connection for its state. At 3c1ab0d3 both new tests pass 3 of 3. I re-ran the take-over rows, bus -race and the listener suite (proof below)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The connected flag follows the installed connection's last event in any order of event and install (retro's race).",
+      "surface": "internal/bus client with real nats.go connections whose server has stopped; events delivered through the install's test hook.",
+      "command": "cd packages/envoy && go test -count=3 -run 'TestTheConnectedFlagFollowsTheInstalledConnectionsLastEventInAnyOrder|TestALateEventOfAReplacedConnectionLeavesTheFlagToItsReplacement' ./internal/bus/",
+      "observed": "ok at 3c1ab0d3, 3 of 3.",
+      "headSha": "3c1ab0d386a1fcc6a2c5e26cdfa23743e80b63fa",
+      "negativeControl": "Against a6ebeefc, with the hook in settleConnected's read-then-clear window: 4 of 7 rows fail, the two raced ones among them, and the replaced-connection test fails."
+    },
+    {
+      "criterion": "The take-overs still hold on real processes: the packet-dropping row and the hung-rewatch-hook row.",
+      "surface": "two real envoy-listener processes under the rendered grant, on a real nats-server; pod-a's receive connection behind the lane relay.",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=3 -run '^TestTwoPodsReceiveConnectionLost(WhileItsReconnectHooksHangHandsOverWithin15s|ToADroppingRouteReleasesTheLeaseWithin15s)$' -v ./cmd/listener",
+      "observed": "Packet-dropping: 3 of 3, slowest message 11.944/11.958/11.951 s. Hung rewatch hook: 3 of 3, take-over 6.188-7.106 s, slowest message 12.217/12.157/13.082 s.",
+      "headSha": "3c1ab0d386a1fcc6a2c5e26cdfa23743e80b63fa",
+      "negativeControl": "Rounds 18 and 20: both rows fail before their fixes (7494c07d, 9c247139)."
+    },
+    {
+      "criterion": "No regression across the multiprocess suite, internal/bus under -race, and the listener suite.",
+      "surface": "real listener binaries; the package suites.",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 40m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener (twice); CGO_ENABLED=1 go test -race -count=1 ./internal/bus/...; DISPATCH_TEST_DATABASE_URL=<private Postgres 17 + pgvector on the issue volume> go test -count=1 ./cmd/listener",
+      "observed": "Multiprocess run 2: 33 PASS, ok 849.853s, including TestTwoPodsReadinessWaitsForNATS and TestTwoPodsStandbyAcrossANATSRestartLogsNoResubscribeFailure (the background-connect path, dialedUp false); in the main SIGKILL row all 32 messages arrive within 15 s and in order. Multiprocess run 1: 32 PASS, 1 FAIL (see observations). Bus -race ok 391.290s. Listener ok 1034.390s.",
+      "headSha": "3c1ab0d386a1fcc6a2c5e26cdfa23743e80b63fa",
+      "negativeControl": "The flag test against a6ebeefc fails (first entry)."
+    }
+  ],
+  "observations": [
+    "Unreproduced loss. In the first full multiprocess run, TestTwoPodsShortDropKeepsTheActivePod failed with '1 of 93 messages never reached their session within 30s: [evt-mp-0021 to ses_mp_drop_one]'. evt-mp-0021 was the first message published after the 2 s cut. pod-a reconnected both connections 2 s after the cut and logged no lease release, so the flag did not read down past the 3 s receive bound. The harness strips delivery lines from a failing run, so the log does not show where the message went. The row then passed 90 of 90 times at 3c1ab0d3 (8 alone, 18 three at a time, 64 eight at a time) and 18 of 18 at f08b5cc2 under the same load, and once more in the second full suite. The loaded runs used a harness copy that prints the full pod output. No earlier round recorded this row failing. I cannot tie it to this change or reproduce it, so there is no red test; it is named to the architect as a risk.",
+    "Fingerprint since a6ebeefc: internal/bus/nats.go, the new connected_flag_test.go, one sentence each in cmd/listener/README.md and packages/envoy/AGENTS.md, and three docs/solutions files. Since f08b5cc2, also 0074091's two-line AGENTS.md wording.",
+    "The connUp map keeps one entry per connection that reports after the client replaced it, and the next install prunes it, so it stays small.",
+    "Required checks at 3c1ab0d3, read 23:32Z: CI run 41247900236 has changes success and lint, typecheck, test, listener-multiprocess and the other lanes queued; ci-ok has no check run yet. pr-title passed in run 41247956497; run 41247900223 was cancelled. Not green when read."
+  ],
+  "evidence": "https://github.com/sjawhar/legion/pull/2404#issuecomment-6550622778",
+  "notes": "The control trees and harness copies are in $TMPDIR/r22, not committed. The private Postgres was rebuilt in $TMPDIR/pg and stopped after the run."
+}

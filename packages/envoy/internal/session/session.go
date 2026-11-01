@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,22 @@ import (
 // NAK, since the owning listener delivers the message.
 var ErrWrongMachine = errors.New("session belongs to a different machine")
 
+// OwnedBy reports whether the listener machineID is the one that delivers to the session entry
+// resolved through interest, the rule ErrWrongMachine states: the owner is the listener the
+// session's stored subscription names (interest.MachineID), else the one it registered through
+// (entry.MachineID), and a session neither names is every listener's. A nil interest names no
+// listener of its own; the entry is taken by value, since both callers ask only of a session they
+// have resolved. DeliverWithResultForEntry refuses a serve-port session this answers false for,
+// and the listener asks the same question before it writes the delivery ledger for a pair
+// (promptsHere, cmd/listener/delivery.go), so one rule answers both.
+func OwnedBy(machineID string, interest *store.Interest, entry SessionEntry) bool {
+	owner := entry.MachineID
+	if interest != nil && interest.MachineID != "" {
+		owner = interest.MachineID
+	}
+	return owner == "" || owner == machineID
+}
+
 // ErrNoSessionRecord is returned when no session entry was resolved for the session a delivery
 // names: as far as the resolution that produced it could tell, no record of that session exists.
 // A caller that resolved the entry from a cache alone cannot conclude the session is gone from
@@ -43,15 +60,38 @@ var ErrNoPushTarget = errors.New("no reachable push target")
 
 var foreignSessionID = regexp.MustCompile(`\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
 
+// ErrAddressNotReachable is a delivery refused before any request: the session's address is local to
+// the pod that would dial it (hostFor's podLocal), and its registration was accepted by another pod
+// (SessionEntry.AcceptedHost), whose loopback is not this pod's. Every pod of a machine computes the
+// same address (hostFor reads only the registration and the pod's HostBridge), so retrying it on
+// this pod, or on any pod but the one that accepted the registration, reaches the wrong process or
+// none. The listener reports it as delivery_failed and does not retry the message.
+var ErrAddressNotReachable = errors.New("address not reachable from this listener pod")
+
 // Deliverer pushes a notification to the session a delivery resolved, over that session's serve
 // port. It holds no session source of its own: every caller resolves the entry it delivers
 // through and hands it over (DeliverWithResultForEntry), so the record delivery acts on is the
 // one that caller read.
 type Deliverer struct {
-	MachineID    string
-	HostBridge   string
+	MachineID  string
+	HostBridge string
+	// PodHost is this listener pod's host name (os.Hostname, the pod's name in Kubernetes), which the
+	// subscribe handler stamps as a port registration's AcceptedHost. A pod-local address is refused
+	// (ErrAddressNotReachable) for a session whose AcceptedHost names another pod. Empty when the
+	// host name is unknown, and then nothing is refused.
+	PodHost      string
 	RequestLimit time.Duration
 	HTTPClient   *http.Client
+	// ctx carries every prompt's HTTP request (WithContext), so cancelling it aborts a prompt in
+	// flight; nil sends each under context.Background.
+	ctx context.Context
+}
+
+// WithContext returns a copy of d whose prompts run under ctx: cancelling ctx aborts a prompt in
+// flight, which then fails with ctx's error like any other failed request.
+func (d Deliverer) WithContext(ctx context.Context) *Deliverer {
+	d.ctx = ctx
+	return &d
 }
 
 // DeliveryResult describes a completed delivery attempt.
@@ -84,14 +124,14 @@ func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest s
 		// of a serving-port session is the listener its stored subscription names. A re-registration
 		// does not move that subscription (store's mergeForUpsert); dispatch://INFRA-429 moves it.
 		// A non-owner acks silently: no delivery, no exception on any subject, no NAK.
-		owner := interest.MachineID
-		if owner == "" {
-			owner = entry.MachineID
-		}
-		if owner != "" && owner != d.MachineID {
+		if !OwnedBy(d.MachineID, &interest, *entry) {
 			return DeliveryResult{}, ErrWrongMachine
 		}
-		return DeliveryResult{}, d.prompt(*entry, interest.SessionID, text)
+		host, podLocal := d.hostFor(*entry)
+		if podLocal && d.acceptedElsewhere(*entry) {
+			return DeliveryResult{}, fmt.Errorf("%w: %s is local to pod %s, and pod %s accepted the session's registration", ErrAddressNotReachable, host, d.PodHost, entry.AcceptedHost)
+		}
+		return DeliveryResult{}, d.prompt(host, entry.Port, interest.SessionID, text)
 	}
 	return DeliveryResult{}, fmt.Errorf("%w for session %s", ErrNoPushTarget, interest.SessionID)
 }
@@ -176,7 +216,7 @@ func foreignSession(item contracts.Envelope) string {
 	return ""
 }
 
-func (d Deliverer) prompt(entry SessionEntry, sessionID string, text string) error {
+func (d Deliverer) prompt(host string, port int, sessionID string, text string) error {
 	type promptBody struct {
 		Parts []map[string]string `json:"parts"`
 	}
@@ -187,8 +227,12 @@ func (d Deliverer) prompt(entry SessionEntry, sessionID string, text string) err
 	if err != nil {
 		return err
 	}
-	url := "http://" + net.JoinHostPort(d.hostFor(entry), strconv.Itoa(entry.Port)) + "/session/" + sessionID + "/prompt_async"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	url := "http://" + net.JoinHostPort(host, strconv.Itoa(port)) + "/session/" + sessionID + "/prompt_async"
+	ctx := d.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -224,19 +268,47 @@ func (d Deliverer) prompt(entry SessionEntry, sessionID string, text string) err
 // recorded (its plugin predates the field), at host.docker.internal when it registered through
 // this listener, else at the machine id of the listener it registered through. A session owned
 // by a listener that cannot reach its port is reached by nobody.
-func (d Deliverer) hostFor(entry SessionEntry) string {
+//
+// podLocal reports the two answers that are local to the pod that dials them: a loopback bridge
+// (isLoopbackHost), and the host.docker.internal fallback. hostFor reads only the registration and
+// this pod's bridge, so every pod of a machine computes the same address, and every other answer
+// (a bridge that is not loopback, a recorded Host, another listener's machine id) reaches the
+// session from each of them alike. A pod-local address reaches the session only from the pod the
+// session can reach, which DeliverWithResultForEntry checks (acceptedElsewhere) before it dials.
+// A bridge naming host.docker.internal is not the fallback: it is the operator's choice of address
+// for this machine, as any bridge that is not loopback is.
+func (d Deliverer) hostFor(entry SessionEntry) (host string, podLocal bool) {
 	registeredHere := entry.MachineID == "" || entry.MachineID == d.MachineID
 	stayedLocal := d.MachineID != "" && strings.EqualFold(entry.Host, d.MachineID)
 	if (registeredHere || stayedLocal) && d.HostBridge != "" {
-		return d.HostBridge
+		return d.HostBridge, isLoopbackHost(d.HostBridge)
 	}
 	if entry.Host != "" {
-		return entry.Host
+		return entry.Host, false
 	}
 	if registeredHere {
-		return "host.docker.internal"
+		return "host.docker.internal", true
 	}
-	return entry.MachineID
+	return entry.MachineID, false
+}
+
+// isLoopbackHost reports whether host names this host's loopback: a loopback IP literal (127.0.0.0/8,
+// ::1) or localhost, compared case-insensitively.
+func isLoopbackHost(host string) bool {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(host, "localhost")
+}
+
+// acceptedElsewhere reports whether entry's registration was accepted by a listener pod other than
+// this one (SessionEntry.AcceptedHost against PodHost, compared case-insensitively), so a pod-local
+// address dialled here would not reach the session. A registration without AcceptedHost (written by
+// a build before the field) and a pod that does not know its own host name refuse nothing, and are
+// delivered as before. Pods that share a host (host networking) share its name and its loopback,
+// so they deliver each other's registrations.
+func (d Deliverer) acceptedElsewhere(entry SessionEntry) bool {
+	return entry.AcceptedHost != "" && d.PodHost != "" && !strings.EqualFold(entry.AcceptedHost, d.PodHost)
 }
 
 var hostName = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_.-]{0,251}[A-Za-z0-9_])?$`)

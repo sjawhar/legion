@@ -592,9 +592,9 @@ func TestSessionRegistryPutDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 
 	const sessionID = "ses_revision"
 	raw := reg.watcher.KV()
-	useKV(t, reg, &interleavingSessionPutKeyValue{
+	useKV(t, reg, &interleavingSessionWriteKeyValue{
 		KeyValue: raw,
-		afterFirstPut: func() {
+		afterFirstWrite: func() {
 			remote := SessionEntry{Port: 13382, MachineID: "remote-host", Dir: "/remote", Driving: true}
 			buf, err := json.Marshal(remote)
 			if err != nil {
@@ -673,23 +673,36 @@ func useKV(t *testing.T, r *SessionRegistry, kv natsgo.KeyValue) {
 	}
 }
 
-type interleavingSessionPutKeyValue struct {
+// interleavingSessionWriteKeyValue runs afterFirstWrite once the first write through it (Put, Create
+// or Update) has landed, before the registry applies its write-through.
+type interleavingSessionWriteKeyValue struct {
 	natsgo.KeyValue
 
-	puts          int
-	afterFirstPut func()
+	writes          int
+	afterFirstWrite func()
 }
 
-func (kv *interleavingSessionPutKeyValue) Put(key string, value []byte) (uint64, error) {
-	kv.puts++
-	revision, err := kv.KeyValue.Put(key, value)
+func (kv *interleavingSessionWriteKeyValue) wrote(revision uint64, err error) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if kv.puts == 1 {
-		kv.afterFirstPut()
+	kv.writes++
+	if kv.writes == 1 {
+		kv.afterFirstWrite()
 	}
 	return revision, nil
+}
+
+func (kv *interleavingSessionWriteKeyValue) Put(key string, value []byte) (uint64, error) {
+	return kv.wrote(kv.KeyValue.Put(key, value))
+}
+
+func (kv *interleavingSessionWriteKeyValue) Create(key string, value []byte) (uint64, error) {
+	return kv.wrote(kv.KeyValue.Create(key, value))
+}
+
+func (kv *interleavingSessionWriteKeyValue) Update(key string, value []byte, last uint64) (uint64, error) {
+	return kv.wrote(kv.KeyValue.Update(key, value, last))
 }
 
 // interleavingSessionGetKeyValue writes value under key after each of the first interleaves reads

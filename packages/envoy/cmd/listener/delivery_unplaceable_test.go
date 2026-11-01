@@ -3,16 +3,19 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dedupe"
 )
 
 // TestUnplaceableRetryWindowFitsTheBoundsItDependsOn pins the arithmetic the unplaceable retry
 // rests on. The window (defaultUnplaceableRetryWindow), its NAK delay (unplaceableRetryDelay),
 // the deferral slots' expiry (unplaceableDeferralExpiry), the durable's MaxDeliver,
 // MaxAckPending and AckWait (consumerMaxDeliver, consumerMaxAckPending, consumerAckWait,
-// durable.go) and the attempt cache's TTL (attemptCacheTTL, main.go) are seven constants in
-// three files, and changing any one of them alone silently breaks a property no delivery test
-// would report: a message simply stops arriving, or the durable's pending budget stops being
-// bounded, with no failure and no record anywhere.
+// durable.go), the prompt limit (promptRequestLimit), the settle holds' caps
+// (productionReceiveConfig) and the delivery ledger's attempted age (dedupe.AttemptedAge) are
+// constants in three packages, and changing any one of them alone silently breaks a property no
+// delivery test would report: a message simply stops arriving, or the durable's pending budget
+// stops being bounded, with no failure and no record anywhere.
 func TestUnplaceableRetryWindowFitsTheBoundsItDependsOn(t *testing.T) {
 	// The window is spent as whole deferrals of unplaceableRetryDelay each, counted from the
 	// first delivery, so a message's deliveries are the deferrals the window buys plus the
@@ -25,9 +28,9 @@ func TestUnplaceableRetryWindowFitsTheBoundsItDependsOn(t *testing.T) {
 		t.Fatalf("a %s window retried every %s is %d deliveries, %d with the margin, which is past the durable's MaxDeliver of %d: JetStream would stop redelivering silently - nothing here consumes its advisory - before this listener wrote its give-up record, which is the loss this bound exists to prevent",
 			defaultUnplaceableRetryWindow, unplaceableRetryDelay, deliveries, deliveries+margin, consumerMaxDeliver)
 	}
-	if defaultUnplaceableRetryWindow >= attemptCacheTTL {
-		t.Fatalf("a %s retry window reaches the attempt cache's %s TTL: a message's own retries must never outlive the attempt entry whose clearing keeps each redelivery from being swallowed as a listener attempt-dedupe skip",
-			defaultUnplaceableRetryWindow, attemptCacheTTL)
+	if defaultUnplaceableRetryWindow >= dedupe.AttemptedAge {
+		t.Fatalf("a %s retry window reaches the delivery ledger's %s attempted age: a message's own retries must never outlive the ledger attempt whose clearing keeps each redelivery from being swallowed as a listener attempt-dedupe skip",
+			defaultUnplaceableRetryWindow, dedupe.AttemptedAge)
 	}
 	// A deferred message is NAKed rather than ACKed, so it holds one of the durable's pending
 	// slots for its whole window instead of giving it back at once. The cap on how many this
@@ -40,12 +43,17 @@ func TestUnplaceableRetryWindowFitsTheBoundsItDependsOn(t *testing.T) {
 			unplaceableDeferralCap, consumerMaxAckPending)
 	}
 	// A deferred message stays pending for its NAK delay, and for the durable's AckWait when the
-	// NAK is lost on the wire, before a delivery of it can reach this listener and give its slot
-	// back. An expiry no longer than that would reclaim the slot of a message the durable is
-	// still legitimately holding, and the set would count fewer deferrals than this listener has.
-	if legitimatelyPending := unplaceableRetryDelay + consumerAckWait; unplaceableDeferralExpiry <= legitimatelyPending {
-		t.Fatalf("a deferral slot expires after %s, no later than the %s a deferred message can legitimately stay pending (its %s NAK delay plus the durable's %s AckWait): a slot would be reclaimed while its message is still held, and the cap would stop bounding the durable's pending deferrals",
-			unplaceableDeferralExpiry, legitimatelyPending, unplaceableRetryDelay, consumerAckWait)
+	// NAK is lost on the wire, before the durable redelivers it. The redelivery then waits in this
+	// pod's local queue, kept alive by InProgress, behind the prompt in hand (promptRequestLimit)
+	// and behind a settle hold after a take-over (either cap) before the handler runs it and gives
+	// its slot back. An expiry no longer than all that would reclaim the slot of a message the
+	// durable is still legitimately holding, and the set would count fewer deferrals than this
+	// listener has.
+	receive := productionReceiveConfig()
+	legitimatelyPending := unplaceableRetryDelay + consumerAckWait + promptRequestLimit + receive.settleCap + receive.handBackSettleCap
+	if unplaceableDeferralExpiry <= legitimatelyPending {
+		t.Fatalf("a deferral slot expires after %s, no later than the %s a deferred message can legitimately stay pending (its %s NAK delay plus the durable's %s AckWait, then its wait in the local queue behind a %s prompt and the %s and %s settle caps): a slot would be reclaimed while its message is still held, and the cap would stop bounding the durable's pending deferrals",
+			unplaceableDeferralExpiry, legitimatelyPending, unplaceableRetryDelay, consumerAckWait, promptRequestLimit, receive.settleCap, receive.handBackSettleCap)
 	}
 }
 

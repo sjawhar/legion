@@ -94,7 +94,9 @@ func HandleAgentMessage(
 			return HandleAgentResult{OwnedElsewhere: true}
 		}
 		if err != nil {
-			return HandleAgentResult{ShouldNAK: true, Err: err, Reason: reasonFor(err)}
+			// A refused address (ErrAddressNotReachable) is the same on every attempt of this pod,
+			// so it is reported and not retried.
+			return HandleAgentResult{ShouldNAK: !errors.Is(err, ErrAddressNotReachable), Err: err, Reason: reasonFor(err)}
 		}
 		return HandleAgentResult{Delivered: true, Skipped: delivery.Skipped}
 	}
@@ -111,6 +113,11 @@ func HandleAgentMessage(
 	delivery, err := deliverer.DeliverWithResultForEntry(item, store.Interest{SessionID: sessionID}, entry)
 	if errors.Is(err, ErrWrongMachine) {
 		return HandleAgentResult{OwnedElsewhere: true}
+	}
+	if errors.Is(err, ErrAddressNotReachable) {
+		// The session is this listener's and was found; its address is not reachable from this pod,
+		// which is a failed delivery to report, not a session found nowhere, and not retried.
+		return HandleAgentResult{Err: err}
 	}
 	if err != nil {
 		// Session not found or delivery failed without interest — don't NAK,

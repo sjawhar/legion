@@ -167,8 +167,10 @@ time, then the sends and Dispatch attempts by outcome, then the verdict.
 ### Verdict and exit codes
 
 A target **fails** when `/v1/sessions` answers anything but 200 at any tick
-where its `/healthz` answered 200 (whatever its `status`, `starting` included),
-or when it never answers `/v1/sessions` 200 at all. A `/v1` request that times
+where its `/healthz` answered 200 (whatever its `status`: `healthy` or `degraded`,
+as the active task or a standby, and `starting` from a listener before INFRA-557,
+which answered 200 while it bound its durable), or when it never answers
+`/v1/sessions` 200 at all. A `/v1` request that times
 out (the probe allows 3 s, less than Dispatch's 5 s client timeout), or whose
 connection closes or resets without an answer (what Go's `net/http` does after
 a handler panics), is a non-200 answer: `000:timeout`, `000:empty reply`,
@@ -192,7 +194,11 @@ bearer), and the verdict names each such outcome with its count.
 A listener from before LEGION-456 keeps `/v1` closed until its durable binds,
 so during a rolling deploy the replacement answers `/healthz` 200 `starting`
 and `/v1` 503 `service starting` for most of a minute and the run exits 1. A
-listener that opens `/v1` once its caches are warm passes.
+listener that opens `/v1` once its caches are warm passes. Since INFRA-557 a
+listener answers `/healthz` 503 `starting` until `/v1` is open, so the probe
+judges none of its starting ticks, and a replacement that waits for the old
+task's deliveries answers 200 `standby` while it serves `/v1`, so it is judged
+like the task it replaces.
 
 `listener-deploy-probe.test.sh` proves the verdict over two fake tasks, one
 Python process per case serving `127.0.0.1` and `127.0.0.2` on one port the

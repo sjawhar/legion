@@ -13,7 +13,8 @@ Envoy carries events between GitHub, Slack, Dispatch, Legion, and agent sessions
   session's inbox for 72 hours, while role messages and team topics travel live and are not kept.
   Envoy also keeps its own state in JetStream key-value buckets: which session is subscribed to
   what (`envoy_interests`), which sessions are live (`envoy_sessions`), who holds each role
-  (`envoy_roles`), and pull request check results (`envoy_ci_state`). The stream and every bucket
+  (`envoy_roles`), pull request check results (`envoy_ci_state`), and, per machine, which
+  listener delivers and what it has delivered (`envoy_listener`). The stream and every bucket
   are kept in at least as many copies as the deployment's `ENVOY_NATS_REPLICAS` says, when every
   Envoy program of the deployment carries the same value
   ([Keeping the stream](#keeping-the-stream)).
@@ -304,7 +305,7 @@ verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows.
 
 | Setting | What it is |
 | --- | --- |
-| `ENVOY_MACHINE_ID` | Required. Names this listener; its durable consumer is `listener-<machine id>`. |
+| `ENVOY_MACHINE_ID` | Required. Names the machine this listener delivers for; its durable consumer is `listener-<machine id>`. Every listener started with one id is a pod of that machine: one delivers at a time and the others stand by ([Health and readiness](#health-and-readiness)), so two machines must never share an id. |
 | `NATS_URLS` | Required. Comma-separated NATS addresses, such as `nats://<nats-host>:4222`. |
 | `NATS_NKEY_SEED_FILE` | The NATS user to connect as, as a file holding its seed. |
 | `ENVOY_ALLOW_REMOTE_NATS` | Set to `1` when NATS runs on another machine; otherwise the listener refuses it. |
@@ -313,7 +314,7 @@ verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows.
 | `ENVOY_API_TOKEN` | The bearer token `/v1` callers must send. |
 | `ENVOY_OIDC_ISSUER`, `ENVOY_OIDC_AUDIENCE` | Also accept Kubernetes service-account tokens from that issuer for that audience. Set both or neither. |
 | `ENVOY_ALLOWED_HOSTS` | Comma-separated host names or addresses, with no port, that a listener with no bearer serves `/v1` to besides loopback. Set it to each name clients reach such a listener by, such as a forward to it. |
-| `ENVOY_HOST_BRIDGE` | Where the listener reaches a session on its own machine that registered a serve port: one registered through it, or one whose recorded host is the listener's own `ENVOY_MACHINE_ID` (letter case ignored), as a session that stayed on that machine and re-registered through another listener records. Unset, it uses the host the session registered with, then `host.docker.internal`. A session that re-registered through another listener and records another host is reached at that host, else that listener's machine id, never through the bridge. A listener delivers only to the sessions it owns: a session's owner is the listener its stored subscription names (the one it first subscribed through), else the one it last registered through; any other session is its owner's to deliver. |
+| `ENVOY_HOST_BRIDGE` | Where the listener reaches a session on its own machine that registered a serve port: one registered through it, or one whose recorded host is the listener's own `ENVOY_MACHINE_ID` (letter case ignored), as a session that stayed on that machine and re-registered through another listener records. Unset, it uses the host the session registered with, then `host.docker.internal`. A session that re-registered through another listener and records another host is reached at that host, else that listener's machine id, never through the bridge. A listener delivers only to the sessions it owns: a session's owner is the listener its stored subscription names (the one it first subscribed through), else the one it last registered through; any other session is its owner's to deliver. A loopback bridge and the `host.docker.internal` fallback reach only the pod that dials them: with several pods for one machine id, a pod that would dial one for a session another pod registered reports the delivery failed instead. |
 | `ENVOY_SUBSCRIBE_ALL_TOPICS` | Set to `1` to have the listener also deliver every topic the stream does not store, such as a team topic, to the sessions on its machine that registered a serve port. Only a NATS user allowed to subscribe to `notifications.>` (a host's own user) may set it; under any other the listener exits at start with an error naming the variable. |
 | `ENVOY_NATS_REPLICAS` | The deployment's replica count, a whole number from 1 to 5; default `1`. The listener creates the `ENVOY_NOTIFICATIONS` stream and its buckets with this many copies and raises one it finds with fewer, at start and every 30 seconds after ([Keeping the stream](#keeping-the-stream)). More than 1 needs a clustered NATS: a single server refuses it, and the listener then exits at start with an error naming the variable. Any other value refuses startup. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
 | `ENVOY_STREAM_MAX_BYTES` | The `ENVOY_NOTIFICATIONS` stream's size limit, a positive whole number of bytes. Once the stream holds that much it refuses every new message and keeps every one it holds, which leaves only when it is 72 hours old, and the sender gets an error it can retry: the listener answers a GitHub webhook `503`, which Dispatch's redelivery sweep has GitHub send again (five times, over about half an hour); Dispatch's outbox retries its event; an agent's send or publish fails with `stream ENVOY_NOTIFICATIONS is full`. Size the limit above what the stream takes in 72 hours at its busiest, with room to spare. Unset, the listener creates the stream with no limit and keeps a limit the stream already has; set, it raises a smaller limit, or none, to its own at start and every 30 seconds, and never lowers one ([Keeping the stream](#keeping-the-stream)). A limit larger than the NATS server can reserve makes the listener exit at start with an error naming the variable. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
@@ -395,31 +396,48 @@ install it, what each component deploys and which settings it sets.
 
 ### Health and readiness
 
-`GET /healthz` needs no credential:
+Any number of listeners may run with one `ENVOY_MACHINE_ID`, in Kubernetes as the pods of one
+Deployment. Every one of them serves `/v1`, the webhooks and role messages; only the one holding
+the machine's delivery lease, the active pod, delivers what the durable consumer carries, and the
+others are standbys. When the active pod stops, a standby takes over within a few seconds, and
+about 12 seconds after the active pod is killed or its node is lost; each session still gets its
+events in order. The listener's NATS user needs the `envoy_listener` bucket in its grant for that;
+without it the listener logs an error naming the bucket and runs as the machine's only deliverer,
+so run one listener per machine id until the grant is in place.
+
+`GET /healthz` needs no credential, and answers within 5 seconds:
 
 | Answer | Meaning |
 | --- | --- |
-| `200` `starting` | The listener is still binding its durable consumer. |
-| `200` `healthy` | Everything answers. The body includes the consumer's lag, and `live_topics`: `subscribed` when the listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`), `not_applicable` when it does not. |
-| `200` `degraded` | A passing key-value failure the listener is retrying, or a role claim view that answers no read: its watcher's first scan has not delivered every claim, so `GET /v1/sessions` and `GET /v1/registry/<session_id>` answer the bus-unavailable `503` until it has. Both repair themselves, so the answer stays `200`. A key-value failure's body carries `status` and `error` alone, and the listener checks nothing after it, so it can stand in front of a lost durable consumer. The role claim view is checked last, after every check that can answer `unhealthy`, and its body keeps the `healthy` body's fields. Also `KV watch rebuild unavailable` when the listener has not rebuilt its key-value watches for a minute after a NATS reconnect: its caches serve what they last held, and the answer stays a `200` because the container health check and the readiness probe both read `/healthz`, so refusing would take out the one listener still serving those caches and replace it with one that rebuilds into the same failure with empty caches. |
-| `503` `unhealthy` | NATS is unreachable, the subscription or a cache watcher stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone or the server refuses it, as one restarted without that grant does. |
+| `503` `starting` | The listener cannot serve yet: it is connecting to NATS, loading its caches, or waiting for its OIDC issuer. It stays up and keeps trying, however long that takes. |
+| `200` `healthy`, `role` `active` | Everything answers, and this listener delivers. The body includes the consumer's lag, and `live_topics`: `subscribed` when the listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`), `not_applicable` when it does not. |
+| `200` `healthy`, `role` `standby` | Everything answers, and another listener of the machine delivers; `active_instance` names it. A standby is ready: send it traffic. |
+| `200` `degraded` | A passing key-value failure the listener is retrying, a role claim view that answers no read, or a pod that is its machine's deliverer and does not receive the durable yet: it holds the delivery lease, runs without one, has read no holder at all, or the lease record still names it while its renewals have lapsed. Nothing of the durable reaches a session until it receives, so no such answer is healthy; it stays `200`, so a readiness probe keeps the pod in service. The role claim view answers no read until its watcher's first scan has delivered every claim, so `GET /v1/sessions` and `GET /v1/registry/<session_id>` answer the bus-unavailable `503` until it has; it repairs itself, so that answer stays `200` too. A key-value failure's body carries `status` and `error` alone, and the listener checks nothing after it, so it can stand in front of a lost durable consumer. The role claim view is checked last, after every check that can answer `unhealthy`, on an active pod's answer and a standby's alike, and its body keeps the `healthy` body's fields. Also `KV watch rebuild unavailable` when the pod has not rebuilt its key-value watches for a minute after a NATS reconnect, active or standby: its caches serve what they last held, and the answer stays a `200` because the container health check and the readiness probe both read `/healthz`, so refusing would take out a pod still serving those caches and replace it with one that rebuilds into the same failure with empty caches. A pod that has more than one of these names each in `error`, in the order it reads them: its own failure first, then the role claim view, then the stalled rebuild. |
+| `503` `unhealthy` | NATS is unreachable, the role subscription or a cache watcher stopped, or, on the active listener, its subscription stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone or the server refuses it, as one restarted without that grant does. A pod this answers for is refused however long its KV watch rebuild has stalled, and whatever its role claim view answers: both are the last things `/healthz` reads. |
+
+The webhooks open once NATS is connected, and `/v1` once the session and subscription caches are
+loaded too and the role claim view has every claim its watcher holds; until then each answers
+`503` `service starting`, and `/healthz` answers `503` `starting` until both are open. A warm-up
+that does not finish inside 30 seconds opens them anyway, and `/healthz` then reports whichever
+cache or view is behind. So a readiness check on `/healthz` sends a listener no traffic before it
+can serve, and sends traffic to the active listener and the standbys alike. A liveness check
+should restart only a listener that does not answer at all, not one that answers `503`.
 
 After a NATS reconnect the listener rebuilds the key-value watches its caches read through. A
 rebuild that fails is tried again within seconds, so one that fails and then succeeds inside that
-minute leaves the listener `healthy` and logs a warning rather than an error; only a rebuild that
-has not succeeded for a minute is logged as an error and makes `/healthz` answer `200` `degraded`,
-naming the rebuild and how long it has gone without succeeding. Page on that error line, not on
-the health check: the health check and the readiness probe act on `/healthz` themselves, so a
-listener taken out for a stalled rebuild is replaced by one that rebuilds into the same failure
-with caches that warm up empty and drop the messages the running one still delivers.
+minute leaves the pod `healthy` and logs a warning rather than an error; only a rebuild that has
+not succeeded for a minute is logged as an error and makes `/healthz` answer `200` `degraded`,
+naming the rebuild and how long it has gone without succeeding, whichever role the pod holds.
+Page on that error line, not on the health check: the health check and the readiness probe act on
+`/healthz` themselves, so a pod taken out for a stalled rebuild is replaced by one that rebuilds
+into the same failure with caches that warm up empty and drop the messages the running one still
+delivers, and a standby taken out is one pod less to take the delivery lease over.
 
-`/v1` opens before `/healthz` leaves `starting`: as soon as NATS is connected and the session and
-subscription caches are loaded. Until then `/v1` answers `503` `service starting`. During a rolling
-deploy the new listener therefore serves `/v1` while the old one still holds the durable consumer,
-and takes the consumer within two seconds of the old one exiting.
-
-Give the listener about 30 seconds to stop after `SIGTERM`. It stops taking requests, lets
-deliveries in progress finish, then exits with a non-zero code so a restart policy brings it back.
+Give the listener about 30 seconds to stop after `SIGTERM`. It hands its deliveries to a standby,
+stops taking requests, lets deliveries in progress finish, then exits with a non-zero code so a
+restart policy brings it back. The listener's
+[README](https://github.com/sjawhar/legion/blob/main/packages/envoy/cmd/listener/README.md) has
+the details: the lease, the take-over times, the probe settings and what the pods share.
 
 ## Running Envoy on one machine
 
@@ -455,8 +473,8 @@ wherever a command or the `envoy.json` below names the default.
    curl http://127.0.0.1:9020/healthz
    ```
 
-   `--wait` returns once both containers pass their health checks. The answer's `status` is then
-   `healthy`, or `starting` for a few seconds ([Health and readiness](#health-and-readiness)). Both
+   `--wait` returns once both containers pass their health checks, so the answer's `status` is
+   `healthy` ([Health and readiness](#health-and-readiness)). Both
    restart with Docker unless you stop them. `up` refuses an empty `ENVOY_MACHINE_ID` and an
    `ENVOY_IMAGE_TAG` that was never published; when a container stays unhealthy instead (a port
    already in use, say), `docker compose -f single-node.compose.yml logs --tail 50` says why.
