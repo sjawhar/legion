@@ -67,6 +67,7 @@ import { decode } from "@toon-format/toon";
 import { z } from "zod";
 import { version as packageVersion } from "../package.json" with { type: "json" };
 import { resetEnvoySessionsForTests } from "../src/envoy-session";
+import { REPLAY_DELIVERED_ENTRY } from "../src/missed-messages";
 import {
   type CommandContext,
   createStandInHost,
@@ -11146,7 +11147,7 @@ console.log(JSON.stringify(args));
     ]);
   });
 
-  test("delivers a targeted Steer card as an aside while a turn runs and an Aside always as one", async () => {
+  test("delivers a targeted Steer card and an Aside each as an aside, a turn running or not", async () => {
     let idle = false;
     const { agent, delivered, fixture } = await bootDirectSession("targeted-modes", {
       idle: () => idle,
@@ -11164,7 +11165,7 @@ console.log(JSON.stringify(args));
       { deliverAs: "aside", triggerTurn: true },
       { deliverAs: "aside", triggerTurn: true },
       { deliverAs: "aside", triggerTurn: true },
-      { deliverAs: "steer", triggerTurn: true },
+      { deliverAs: "aside", triggerTurn: true },
     ]);
   });
 
@@ -11422,10 +11423,11 @@ console.log(JSON.stringify(args));
       ).toEqual(Array(3).fill({ deliverAs: "aside", triggerTurn: true }));
     });
 
-    // An idle session has no steering queue to wait in. The host starts a turn for a steer with
-    // `triggerTurn` after an interrupt (an Esc, or the RPC `abort` a Legion daemon sends) and in
-    // plan mode too, where an idle aside folds into the context with no turn.
-    test("leaves a card that reaches an idle session a steer that starts a turn", async () => {
+    // An idle session starts a turn for an aside with `triggerTurn`, after an interrupt (an Esc,
+    // or the RPC `abort` a Legion daemon sends) and in plan mode too, unless the person interrupts
+    // after the send; a steer would join the steering queue a person's message waits in whenever
+    // the host turned busy before it checked.
+    test("sends a card that reaches an idle session as an aside that starts a turn", async () => {
       const { agent, delivered, sends } = await bootDirectSession("idle-card-starts-a-turn", {
         idle: () => true,
         sendUserInput: async () => ({ handled: "prompt" }),
@@ -11436,14 +11438,14 @@ console.log(JSON.stringify(args));
 
       expect(sends).toHaveLength(1);
       expect(String(sends[0]?.content)).toContain("wake up");
-      expect(sends[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+      expect(sends[0]?.options).toEqual({ deliverAs: "aside", triggerTurn: true });
     });
 
     // The Legion entry names its controller's session in the start-turn mark from its
     // `session_start` until the start turn runs (`../src/card-wake`): an idle card there, in any
     // mode, is a follow-up that starts no turn, so the start message keeps the first turn. A mark
     // naming another session (a `task` subagent's) changes nothing.
-    test("sends a card that reaches an idle session the start-turn mark names as a follow-up that starts no turn, and leaves it a steer under another session's mark", async () => {
+    test("sends a card that reaches an idle session the start-turn mark names as a follow-up that starts no turn, and leaves it an aside under another session's mark", async () => {
       const { agent, delivered, sends } = await bootDirectSession("idle-card-start-turn", {
         idle: () => true,
       });
@@ -11457,7 +11459,7 @@ console.log(JSON.stringify(args));
       iface.startupTurn = { session: "ses_task_subagent", sentAt: undefined };
       agent.push(forwardedRoleEnvelope("legion-controller", "other mark", "other-mark-card"));
       await delivered(2);
-      expect(sends[1]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+      expect(sends[1]?.options).toEqual({ deliverAs: "aside", triggerTurn: true });
     });
 
     // Only Dispatch's 200 makes a turn: whatever it refuses, and whatever keeps it from answering,
@@ -15503,18 +15505,17 @@ console.log(JSON.stringify(args));
     ).toHaveLength(1);
   });
 
-  // A context without `isIdle` cannot say no turn runs, and the wake for a folded card needs it, so
-  // its cards stay steers with `triggerTurn`: an aside there could fold into the context with no
-  // turn after an interrupt or in plan mode, where a steer starts one.
-  test("delivers an inbound card as a steer on a host that reports no idle state", async () => {
-    const { agent, delivered, fixture } = await bootDirectSession("deliver-as-steer");
+  // A context without `isIdle` cannot say whether a turn runs; its cards are asides with
+  // `triggerTurn` as every other host's are, which an idle host starts a turn for.
+  test("delivers an inbound card as an aside on a host that reports no idle state", async () => {
+    const { agent, delivered, fixture } = await bootDirectSession("deliver-as-aside");
 
-    agent.push(forwardedRoleEnvelope("legion-controller", "steer me in", "steer"));
+    agent.push(forwardedRoleEnvelope("legion-controller", "aside me in", "aside"));
     await delivered(1);
 
     expect(fixture.deliveries.length).toBe(1);
-    expect(fixture.deliveries[0]?.content).toContain("steer me in");
-    expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    expect(fixture.deliveries[0]?.content).toContain("aside me in");
+    expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "aside", triggerTurn: true });
   });
 
   test("an ended subscription iterator resubscribes instead of going deaf", async () => {
@@ -15998,6 +15999,8 @@ describe("consumer delivery", () => {
       readonly entries?: readonly unknown[];
       readonly turn?: "idle" | "streaming";
       readonly runEphemeralTurn?: SessionContext["runEphemeralTurn"];
+      /** The listener's clock, sent as every reply's `Date`; replies carry none without it. */
+      readonly listenerClock?: () => number;
     } = {}
   ) {
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
@@ -16006,7 +16009,7 @@ describe("consumer delivery", () => {
     let refusing = options.refuse;
     const registrations: Registration[] = [];
     const dispatchReplies: string[] = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const listener = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(input.toString());
       if (url.pathname.endsWith("/reply")) {
         dispatchReplies.push(url.pathname);
@@ -16053,6 +16056,16 @@ describe("consumer delivery", () => {
       }
       return response({});
     }) as typeof fetch;
+    const listenerClock = options.listenerClock;
+    globalThis.fetch =
+      listenerClock === undefined
+        ? listener
+        : ((async (input: string | URL | Request, init?: RequestInit) => {
+            const answer = await listener(input, init);
+            const headers = new Headers(answer.headers);
+            headers.set("date", new Date(listenerClock()).toUTCString());
+            return new Response(answer.body, { status: answer.status, headers });
+          }) as typeof fetch);
     const events: string[] = [];
     natsState.onPublish = (subject) => {
       const data = natsState.published.at(-1)?.data;
@@ -16473,6 +16486,161 @@ describe("consumer delivery", () => {
     const inbox = session.relay(2, late, { subject: issueSubject });
     await until(() => session.replies(inbox).includes("done"), "the unfollowed frame's done");
     expect(session.cards("evt-after-removal")).toHaveLength(0);
+  });
+
+  // A session behind on its inbox read a card stamped five hours earlier, took the stamp for the
+  // present time, and told other sessions that the machines' clocks were slow. Each model request
+  // now shows when the card reached the session beside when it was sent (`../src/card-age`).
+  describe("the time a card reached the session", () => {
+    test("a card the host writes hours after its send shows every model request when it was delivered and how long it waited", async () => {
+      const session = await bootConsumer("card-age-late", { turn: "streaming" });
+      const sentAt = Date.now() - (5 * 3_600_000 + 30_000);
+      const frame = JSON.stringify({ ...JSON.parse(peer("card-age-late")), issued_at: sentAt });
+
+      // The turn streams, so the host holds the card until the turn takes it.
+      session.relay(1, frame);
+      await until(() => session.cards("evt-card-age-late").length > 0, "the relayed card");
+      await session.take();
+      const [card] = session.cards("evt-card-age-late");
+      if (card === undefined) throw new Error("the card was not handed");
+      const written = {
+        role: "custom",
+        customType: card.customType,
+        content: card.content,
+        display: true,
+        details: card.details,
+        timestamp: sentAt,
+      };
+      const context = sessionContext(SESSION);
+      const contextHandler = session.fixture.handlers.get("context");
+      if (contextHandler === undefined) throw new Error("no context handler was registered");
+      const first = JSON.stringify(await contextHandler({ messages: [written] }, context));
+      const second = JSON.stringify(await contextHandler({ messages: [written] }, context));
+
+      expect(first).toMatch(/\\n {2}delivered: \\"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\\"\\n/);
+      expect(first).toContain(
+        "waited: \\\"5 h 0 min between at and delivered; delivered is this machine's clock and at the sending server's, and at is when it was sent, not the present time\\\""
+      );
+      // The same bytes in every request, so the provider's prompt cache reads them again.
+      expect(second).toBe(first);
+      // The card the host keeps is the one it was handed.
+      expect(card.content).not.toContain("delivered:");
+    });
+
+    // The mirror of the case above: a machine whose clock runs 4 h 45 min ahead of the listener's
+    // read a card that waited a second exactly as if it had waited 4 h 45 min. The listener's
+    // replies carry its clock, so the card says how the clocks stand and states no wait.
+    test("a card from a listener whose clock runs hours behind this machine's says so, and states no wait", async () => {
+      const behind = 4 * 3_600_000 + 45 * 60_000;
+      const session = await bootConsumer("card-age-clocks", {
+        turn: "streaming",
+        listenerClock: () => Date.now() - behind,
+      });
+      // The listener stamps the send by its own clock, a second before the card reaches us.
+      const sentAt = Date.now() - behind - 1_000;
+      const frame = JSON.stringify({ ...JSON.parse(peer("card-age-clocks")), issued_at: sentAt });
+
+      session.relay(1, frame);
+      await until(() => session.cards("evt-card-age-clocks").length > 0, "the relayed card");
+      await session.take();
+      const [card] = session.cards("evt-card-age-clocks");
+      if (card === undefined) throw new Error("the card was not handed");
+      const written = {
+        role: "custom",
+        customType: card.customType,
+        content: card.content,
+        display: true,
+        details: card.details,
+        timestamp: Date.now(),
+      };
+      const contextHandler = session.fixture.handlers.get("context");
+      if (contextHandler === undefined) throw new Error("no context handler was registered");
+      const request = JSON.stringify(
+        await contextHandler({ messages: [written] }, sessionContext(SESSION))
+      );
+
+      expect(request).not.toContain("waited:");
+      expect(request).toContain(
+        "clocks: \\\"this machine's clock runs 4 h 45 min ahead of the Envoy listener's, read from the listener's replies; delivered is this machine's clock and at the sending server's\\\""
+      );
+    });
+
+    // One process serves one session at a time, and a session the host moves to is shown the
+    // same event by its own consumer. The request that session makes must state when the event
+    // reached it, from its own ledger record, and never when the session before it was shown it.
+    test("an event in the session the host moved to reads that session's own delivery time", async () => {
+      const session = await bootConsumer("card-age-moved", { turn: "streaming" });
+      session.relay(1, peer("card-age-moved"));
+      await until(() => session.cards("evt-card-age-moved").length > 0, "the relayed card");
+      await session.take();
+
+      // The host resumes a session it left, whose file holds no record of this event: what that
+      // session was shown is its own file's, and this process's write for the session before it
+      // is not in it.
+      const mark = session.fixture.entries.length;
+      const movedFile = () => session.fixture.entries.slice(mark);
+      const resumed = sessionContext("ses_moved");
+      const movedContext = {
+        ...resumed,
+        sessionManager: { ...resumed.sessionManager, getBranch: movedFile, getEntries: movedFile },
+      };
+      await session.fixture.handlers.get("session_switch")?.({ reason: "resume" }, movedContext);
+      await settle();
+
+      const [card] = session.cards("evt-card-age-moved");
+      if (card === undefined) throw new Error("the card was not handed");
+      // Handed before this process started, as a card held across a restart is: the request time
+      // is no delivery time for it, so with nothing in this session's file it stays as it is.
+      const written = {
+        role: "custom",
+        customType: card.customType,
+        content: card.content,
+        display: true,
+        details: card.details,
+        timestamp: 1,
+      };
+      const contextHandler = session.fixture.handlers.get("context");
+      if (contextHandler === undefined) throw new Error("no context handler was registered");
+      const movedWithoutRecord =
+        JSON.stringify(await contextHandler({ messages: [written] }, movedContext)) ?? "";
+
+      // The write this session's host made, a minute and a half before this request.
+      const movedAt = Math.floor((Date.now() - 90_000) / 1_000) * 1_000;
+      const movedIso = `${new Date(movedAt).toISOString().slice(0, 19)}Z`;
+      const recorded = {
+        ...movedContext,
+        sessionManager: {
+          ...movedContext.sessionManager,
+          getBranch: () => [
+            ...movedFile(),
+            {
+              type: "custom",
+              customType: REPLAY_DELIVERED_ENTRY,
+              data: { event_id: "evt-card-age-moved", at: movedAt },
+            },
+          ],
+        },
+      };
+      const movedWithRecord = JSON.stringify(
+        await contextHandler({ messages: [written] }, recorded)
+      );
+      const live = JSON.stringify(
+        await contextHandler({ messages: [written] }, sessionContext(SESSION))
+      );
+      const liveAgain = JSON.stringify(
+        await contextHandler({ messages: [written] }, sessionContext(SESSION))
+      );
+
+      // Never the time the session shown it first was shown it: with nothing in this session's
+      // file, its request states no delivery time at all.
+      expect(movedWithoutRecord).not.toContain("delivered:");
+      expect(movedWithRecord).toContain(`delivered: \\"${movedIso}\\"`);
+      // The session shown it first reads its own write, which its `message_end` fixed.
+      expect(live).toMatch(/\\n {2}delivered: \\"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\\"\\n/);
+      expect(live).not.toContain(movedIso);
+      // Returning to it reads the same bytes, so the provider's prompt cache reads them again.
+      expect(liveAgain).toBe(live);
+    });
   });
 });
 

@@ -2,20 +2,19 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-594",
-  "completed": "2026-10-31T21:30:00Z",
-  "round": 7,
-  "reviewedCode": "3a38540c3919 (code) under handoff head d44e1d62",
+  "completed": "2026-11-01T02:55:00Z",
+  "round": 8,
+  "reviewedCode": "92d1681b0595 (code) under handoff head d5e097a8",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 3,
-  "ci": "Required set ci-ok and pr-title. At code head 3a38540c: every named lane green; dispatch failed (one Playwright row of overlapping-marks.e2e.ts at browserContext.close, a package this PR does not touch), so ci-ok will be red. Compare 3a38540c...d44e1d62 handoffsOnly true (9 files). Changes requested, so no empty commit of mine: the implementer's push refreshes CI.",
-  "thermonuclear": "deep review: Verdict CHANGES at 3a38540c (1 Medium, reproduced in a scratch copy; the #2592 merge and the e2e order comparison hold); code quality: Verdict CHANGES at 3a38540c (structure only). I re-traced the Medium in the code.",
-  "threads": "Accepted PRRT_kwDORFy7ds6yRU8J, PRRT_kwDORFy7ds6yRU8K, PRRT_kwDORFy7ds6yRU8L, PRRT_kwDORFy7ds6yRU8N.",
+  "minor": 2,
+  "ci": "Required set ci-ok and pr-title: both completed success at 92d1681b (every other check success, worker-image / attest skipped). Compare 92d1681b...d5e097a8 handoffsOnly true (6 files). GitHub now reports the PR CONFLICTING with main 527853ab.",
+  "thermonuclear": "deep review: Verdict CHANGES at 92d1681b (1 Medium, reproduced with a scratch test; the round-7 path fixed); code quality: Verdict CHANGES at 92d1681b (Low structure only). I re-traced the Medium in the code (claim_wiring.go:91-95, session.go:133-142, delivery.go:1001).",
+  "threads": "Accepted PRRT_kwDORFy7ds6yUlDf, PRRT_kwDORFy7ds6yUlDh, PRRT_kwDORFy7ds6yUlDl (the portless test kept as the tester's lock), PRRT_kwDORFy7ds6yUlDp.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/cmd/listener/delivery.go:993", "description": "A session with no entry sent an unreadable mode: judgeFollowedTopic returns followedTopicModeUnreadable before the nil-target check, Resolve fails ErrNoSessionRecord, so relayed is false and the refusal records an attempt (recorded = !relayed). When the session registers again with its consumer start at or below the message, its relay judges followedTopicAttempted and holds for attemptCacheTTL (5 min), stalling later messages, then reports a second delivery_failed. Contradicts delivery.go:999-1003, AGENTS.md:3411 and the changelog. fanout_refusal_reports_test.go:81 pins wantAttempt: true. Test that must fail: serving-port consumer session, delete its entry, publish {\"delivery\":{\"mode\":\"bogus\"}}, await the fan-out, assert no attempt record; register again and assert a later message reaches the port well inside attemptCacheTTL. Fix: recorded = err == nil && !delivery.Relayed."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/delivery.go:969", "description": "Structure: decide refusals before the take case (relayed && Port > 0 skip; else report with recorded) so the 'verdict == take ||' clause and the three copies of the reason go."},
-    {"severity": "minor", "file": "scripts/e2e/envoy-session-delivery.sh:1160", "description": "compare_issue_order's length check cannot fail: published_order and written_order come from the same filter; read the markers once and sort by stream_seq; the duplicated selector is checked in one copy only."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/delivery.go:990", "description": "The comment 'nothing reads such a record back for that session' is wrong (judgeFollowedTopic reads it on the next copy, which is why a portless relayed session now gets one exception per copy and redelivery); name the serving-port hold as the reason. session_relay_portless_refusal_test.go duplicates a row of fanout_refusal_reports_test.go."}
+    {"severity": "important", "file": "packages/envoy/cmd/listener/delivery.go:1001", "description": "A serving-port session whose registration tick falls back to core (a transient StreamID/Ensure error; the entry is written without Delivery while its consumer stays) and is sent an unreadable or unadvertised mode: Resolve returns Push with err nil, so the refusal records an attempt. The next tick restores consumer delivery at the consumer's original start, below the message; the relay finds followedTopicAttempted and holds for attemptCacheTTL (5 min), stalling later messages, then reports a second delivery_failed. Fourth path to the same stall (rounds 5, 6, 7): fix it on the relay side so a refusal record can never hold the relay, e.g. in followedTopicVerdict judge as if no attempt existed, ack a refusal already reported, hold only a message that would be taken. Test that must fail: copy TestAnUnreadableDeliveryModeToASessionWithNoEntryLeavesNoHoldForItsRelay, write SessionEntry{Port: 4096, MachineID, Host} (what a consumer-error tick writes) instead of deleting it, publish the bogus mode, register again, publish a later message: it must reach the port well inside attemptCacheTTL (deep review's scratch TestDR8CoreWindowRefusalHoldsRelay fails at 20 s)."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/delivery.go:983", "description": "Structure: the relay-skip literal is now written twice and the hold reason four times with drifting citations; name relayJudges := relayed && target.Port > 0 and keep one skip; state the hold rule once citing holdWhilePushedElsewhere."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/session_relay_portless_refusal_test.go:18", "description": "The comment quotes the condition bafcc923 removed."}
   ]
 }

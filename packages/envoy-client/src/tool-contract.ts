@@ -56,7 +56,12 @@ export function messageMetadataShape<Element extends SchemaNode<Element>>(
   return {
     in_reply_to: schema.string().optional(),
     supersedes: schema.string().optional(),
-    urgency: schema.enum(URGENCY_VALUES).describe("low | med | high | blocking").optional(),
+    urgency: schema
+      .enum(URGENCY_VALUES)
+      .describe(
+        "low | med | high | blocking: how soon the recipient should act, shown on its card. It does not deliver the message sooner or ahead of others."
+      )
+      .optional(),
     expects_reply: schema
       .enum(EXPECTS_REPLY_VALUES)
       .describe("none | optional | required")

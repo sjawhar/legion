@@ -227,7 +227,7 @@ Claude Code drops invalid meta keys, so the server filters them before writing t
 | `topic` | NATS subject that delivered the event. |
 | `event_id` | Envoy event identity of this publish; the listener mints a new one for every send. The channel uses it to deliver one copy of a publish that arrives on two overlapping subscriptions. |
 | `dedupe_key` | Identity a re-send shares with the first delivery; the channel uses it to drop the re-send. |
-| `urgency` | Optional Envoy priority. |
+| `urgency` | Optional: how soon the sender asks the reader to act. Informational only: it does not change when or in what order deliveries arrive. |
 | `from_session` | Optional source session identifier. |
 | `expects_reply` | Optional Envoy reply expectation. |
 | `in_reply_to` | Optional correlated inbound event id. |

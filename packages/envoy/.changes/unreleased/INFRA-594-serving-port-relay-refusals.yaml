@@ -15,7 +15,14 @@ body: |-
   can be shown to advertise, which any publisher can send on a followed topic -- is left to the
   relay of a serving-port session's consumer, which acks it with one `delivery_failed` exception,
   rather than being reported twice and leaving that relay, and the session's later messages
-  behind it, stalled for five minutes on a record of a push nobody was making. A refusal is left
+  behind it, stalled for five minutes on a record of a push nobody was making. The relay judges
+  each message as if no attempt record of it stood, and reads that record only to tell a push in
+  flight, which it holds its copy for, from a refusal the fan-out recorded as it reported it,
+  which it acks without a second report.
+  So no record of a refusal holds a relay, whatever the session's entry said when the fan-out
+  judged the message: a serving port on consumer delivery, a portless one, none at all, or the
+  core-path entry a heartbeat tick whose consumer call failed transiently writes, which left
+  that five-minute stall standing for any message that arrived in its window. A refusal is left
   to a relay only where that relay judges what it sends: a portless session's relay publishes
   every frame unjudged, and the plugin drops a frame whose delivery mode it cannot read without a
   word, so the fan-out publishes that session's `delivery_failed` itself, recording no attempt

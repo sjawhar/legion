@@ -45,7 +45,12 @@ import {
   SignInChannel,
   type UnsentChange,
 } from "./features/shell/sign-in-channel";
-import { COMPACT_VIEWPORT_QUERY, useDialog, useMediaQuery } from "./features/shell/useDialog";
+import {
+  COMPACT_VIEWPORT_QUERY,
+  READING_PANE_QUERY,
+  useDialog,
+  useMediaQuery,
+} from "./features/shell/useDialog";
 import { useDocumentTitle } from "./features/shell/useDocumentTitle";
 import { useKeyboardFit } from "./features/shell/useKeyboardFit";
 import { useUserPreference } from "./features/shell/userPreference";
@@ -210,8 +215,11 @@ function ShellMessagePage({ children, title }: { children?: ReactNode; title: st
 
 function InboxPage(): ReactNode {
   useDocumentTitle("Inbox · Dispatch");
+  // From the reading pane's width the page fills the viewport (`fillsViewport` below), and the
+  // two columns divide the height left under the heading; below it the page scrolls as ever.
+  const readingPaneShown = useMediaQuery(READING_PANE_QUERY);
   return (
-    <section>
+    <section className={readingPaneShown ? "flex min-h-0 flex-1 flex-col" : undefined}>
       {/* Only the page links to the answers page; the drawer's Inbox stays a peek. */}
       <div className="mb-4 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h1 className="text-[22px] font-semibold tracking-tight">Inbox</h1>
@@ -424,8 +432,12 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   // A page that scrolls inside itself gets a viewport-tall shell (dynamic viewport units where
   // the browser has them, so a phone's collapsing toolbar is accounted for), with `<main>` a
   // flex column that hands it the height left below the compact header, capped above an iOS
-  // on-screen keyboard while its composer has focus.
-  const fillsViewport = routeFillsViewport(location.pathname);
+  // on-screen keyboard while its composer has focus. The Inbox is one of them wherever its
+  // reading pane shows: each of the pane's two columns scrolls in itself, which it cannot do
+  // while the page scrolls as one. Below that width the Inbox scrolls the document as ever.
+  const readingPaneShown = useMediaQuery(READING_PANE_QUERY);
+  const fillsViewport =
+    routeFillsViewport(location.pathname) || (routeIsInbox(location.pathname) && readingPaneShown);
   const connection = useLiveSocketPill();
   const needsYouCount = useNeedsYouCount();
   const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);
