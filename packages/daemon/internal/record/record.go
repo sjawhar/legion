@@ -230,6 +230,44 @@ const (
 	AnsweredByVersion Answer = "version"
 )
 
+// ParkedDecision is a person's decision on a tree nobody in it could hear, which the daemon
+// relayed to the controller (a parked-decision notice) or kept for a root that waits for its slot
+// (RelayParkedDecision). It is kept under the issue it was decided on, never under a root, so the
+// tree it is owed to is read from the record whenever a start or a catch-up names it: an issue
+// that changes trees takes its decisions with it with nothing to move. It stands until the one
+// start task or catch-up that claimed it (ClaimedBy, the outbox row whose payload names it:
+// workflow.Engine.ParkedDecisionTask names only rows nothing counting claims or holds) has told
+// an architect of its issue's tree, and is deleted then — by that catch-up's publish
+// (Store.ForgetKeptDecisions) or by the confirmation of the delivery that holds it (HeldBy). A
+// claiming row that reached no architect hands it over instead (workflow.HandOverKept): it goes
+// back to KEPT, and a fresh catch-up names it at once while its tree has an architect to tell, so
+// a release never leaves it kept with nobody to name it again.
+type ParkedDecision struct {
+	// Issue is where in Dispatch the decision was made: the issue of the ask, comment or spec it
+	// was made on. It is the row's key with Ref, and what says whose debt the row is: the
+	// architect of the tree this issue stands in now owes the person the answer, whatever tree it
+	// stood in when the decision was made. It is empty for no row the daemon writes, since every
+	// path that keeps one knows where it was made (RelayParkedDecision).
+	Issue    string
+	Ref      string
+	Decision DecisionKind
+	Actor    string
+	At       time.Time
+	// ClaimedBy is the outbox row claiming it, 0 when no row does; HeldBy is the claim and the
+	// delivery id of the queued start task holding it, the zero value when none does.
+	ClaimedBy int64
+	HeldBy    DeliveryHold
+}
+
+// DeliveryHold is the claim token and delivery id of a start's task queued on an architect's
+// claim, which holds what that task names until that delivery is confirmed (the rows are told),
+// retired (the hold is cleared and the rows are KEPT again) or taken back under a new id (the
+// hold moves to it). The zero value is no hold.
+type DeliveryHold struct {
+	Claim    string
+	Delivery string
+}
+
 // AwaitingPerson says whether the issue is a root waiting on a person (phase awaiting_person).
 func (i Issue) AwaitingPerson() bool { return i.Phase == phase.AwaitingPerson && i.Awaiting != nil }
 
@@ -912,6 +950,10 @@ type DispatchIssueRow struct {
 // atomically deduplicate an event, update the record, and enqueue all of its effects.
 type Store interface {
 	MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) (fresh bool, err error)
+	// Processed reports whether source's event eventID is already marked (MarkProcessed), for a
+	// caller that must read the mark rather than take it: a catch-up that finds itself superseded
+	// reads whether it published what it named before deciding to forget it or hand it over.
+	Processed(ctx context.Context, tx pgx.Tx, source, eventID string) (bool, error)
 	Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error)
 	Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error)
 	// LiveIssues is every record of project that is not finished, by key: each not in phase done,
@@ -1000,6 +1042,70 @@ type Store interface {
 	OpenProductionChecksOfTree(ctx context.Context, tx pgx.Tx, tree string) ([]ProductionCheck, error)
 	// SessionClaimsTree says whether the agent session holds a claim in the tree.
 	SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error)
+	// AddParkedDecision keeps a relayed decision under the issue it was decided on, for the next
+	// start or catch-up of the tree that issue stands in. A ref that issue already keeps keeps its
+	// newest decision: a later one, by At, replaces it, KEPT again, so a changes request the
+	// person has since followed with an approval of the same spec is not what the start names.
+	AddParkedDecision(ctx context.Context, tx pgx.Tx, decision ParkedDecision) error
+	// ParkedDecisions is every decision owed to tree — every row whose issue stands in tree now,
+	// in any state — newest first, ties by ref. It is what the close of a tree reads: the tree
+	// ends owing each of them (workflow's warnKeptDecisionsOfAClosedTree).
+	ParkedDecisions(ctx context.Context, tx pgx.Tx, tree string) ([]ParkedDecision, error)
+	// UnclaimedKept is what a start or catch-up of tree may name: every row whose issue stands in
+	// tree now and that no counting claim or hold holds — a claim counts only while the claiming
+	// outbox row's issue stands in the same tree, and a hold only while the holding claim's tree
+	// is that tree — newest first, ties by ref, and tree's own readmitted approval pair on the
+	// same rule, zeros when there is none to name (workflow.Engine.ParkedDecisionTask).
+	UnclaimedKept(ctx context.Context, tx pgx.Tx, tree string) ([]ParkedDecision, int, int, error)
+	// ClaimKeptDecisions claims for outbox row what kept names of what tree is owed and nothing
+	// counting claims or holds yet, in the transaction that enqueues row: from then on no other
+	// start or catch-up of that tree names it until that row settles what it named. A published
+	// catch-up tells it (ForgetKeptDecisions); a start whose task the claim queued leaves it to
+	// that delivery, which holds it until its confirmation tells it; a start or catch-up that
+	// reached no architect hands it over (ReleaseKeptClaims, workflow.HandOverKept), and a row's
+	// deletion releases it as a last resort (claimed_by is set null with the row), for the next
+	// start or catch-up to name.
+	ClaimKeptDecisions(ctx context.Context, tx pgx.Tx, tree string, kept KeptDecisions, row int64) error
+	// MoveKeptClaims moves every claim of outbox row from to row to: the re-hold's copy of a catch-up
+	// carries the claims of the row it copies, which then finishes.
+	MoveKeptClaims(ctx context.Context, tx pgx.Tx, from, to int64) error
+	// ReleaseKeptClaims unclaims every parked decision and readmitted approval outbox row holds,
+	// and reports the tree each released row is owed to now, by key: the hand-over's first step,
+	// since the row told no architect what it named, and what says which trees' architects the
+	// hand-over must write a fresh catch-up to (workflow.HandOverKept).
+	ReleaseKeptClaims(ctx context.Context, tx pgx.Tx, row int64) ([]string, error)
+	// ReleaseHeldDecisions clears the hold the delivery of claim token holds on the rows marks
+	// names, and reports the tree each released row is owed to now, by key: the send-time drop of
+	// what a held task names of another tree leaves those rows KEPT for that tree to name
+	// (workflow's RootTask). A retired delivery's holds go the same way, in the write that retires
+	// it (the claim store's RetireDelivery).
+	ReleaseHeldDecisions(ctx context.Context, tx pgx.Tx, token claim.Token, delivery string, marks []DecisionMark) ([]string, error)
+	// HeldKeptRefs is the reference of every decision the delivery of claim token still holds: what
+	// a held task may still name when it is about to be sent (workflow's RootTask). A reference it
+	// named that is gone from here was told by something else, or replaced by a newer decision on
+	// the same reference, and this task names it no longer.
+	HeldKeptRefs(ctx context.Context, tx pgx.Tx, token claim.Token, delivery string) ([]string, error)
+	// ArchitectLaunches is the launch each tree's root architect claim stands at now, by tree, for
+	// the trees that have one: what a catch-up queued to another tree's architect is written for
+	// (record.CatchUp.Launch), so a failed forward of an older one is not queued again behind it.
+	ArchitectLaunches(ctx context.Context, tx pgx.Tx, trees []string) (map[string]uint64, error)
+	// KeepReadmittedApproval keeps, for root's next architect start, the spec version a person
+	// approved and the spec's latest version, which its re-admission found above the approved one
+	// before it cleared the old generation's gate; a later keep replaces it, KEPT again.
+	KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root string, approved, latest int) error
+	// DropReadmittedApproval deletes the pair root keeps, if any: a re-admission whose gate holds no
+	// stale approval, or under gates.design off, leaves nothing an earlier one kept.
+	DropReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) error
+	// ReadmittedApproval is the pair root keeps, in any state, zeros when it keeps none.
+	ReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) (approved, latest int, err error)
+	// ForgetKeptDecisions tells what outbox row's published catch-up named of what tree is owed
+	// (KeptDecisions), of the rows row claims or nothing claims: every parked decision still
+	// standing at the reference and time it named — a newer decision on the same reference, kept
+	// since and unclaimed, survives — and the readmitted approval still standing at the pair of
+	// versions it named. One whose issue has left tree since the row was composed is told nothing:
+	// its claim and hold are cleared instead, so the tree it stands in now names it. A row whose
+	// task reached no architect tells nothing and hands over instead (ReleaseKeptClaims).
+	ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, tree string, kept KeptDecisions, row int64) error
 	// ClaimSession is the session claims records for token, "" and no error when the token holds
 	// no row. The workflow reads it for the reviewer's claim (PhaseRow.Claim) to tell the
 	// reviewer's own review from another review-App session's by the Legion footer each carries
@@ -1083,6 +1189,9 @@ type Store interface {
 	// row among them, are not counted.
 	PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
+	// EnqueueID enqueues row as Enqueue does and returns its id, for a row that claims what it names
+	// (ClaimKeptDecisions). It refuses a ready_merge row, whose insert may update another.
+	EnqueueID(ctx context.Context, tx pgx.Tx, row OutboxRow) (int64, error)
 	// DueRows is every row of project a lane may run at now — due, under no live lease, in order
 	// behind none of its issue's older rows, and, for a lifecycle row, with no other lifecycle row
 	// of its issue under a live lease — oldest first, with no lease taken. Issue "" is every issue
@@ -1141,11 +1250,25 @@ type Store interface {
 	// caller that then wakes the row's lane has its issue and kind.
 	ExpediteOutbox(ctx context.Context, tx pgx.Tx, row OutboxRow, now time.Time) error
 	// DropCatchUps deletes every catch-up notice row of issue the outbox still holds, a re-held copy
-	// and a row the runner has leased included. A leased row may be mid-publish: the runner executes
-	// it from memory, and the notice executor publishes it only while OutboxLeased still finds it,
-	// so a dropped row is delivered only when the drop lands during its publish, a duplicate the
-	// fresh catch-up follows.
-	DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) error
+	// and a row the runner has leased included, but for two a drop would lose a person's decision
+	// from. The first is a row whose publish told the decisions it named (KeptToldSource) and whose
+	// forget has not committed yet: that row still owes them that forget, which its next run makes,
+	// and dropping it would release them for the fresh catch-up to tell a second time. The second is
+	// a row that carries kept decisions under a live lease (lease_until after now, which is the
+	// caller's clock, the one a claim's lease is written from: ClaimRow): its lane may be publishing
+	// it this moment, outside every transaction, and the drop would release what it named for the
+	// fresh catch-up, written in the same transaction, to name again — telling the architect that
+	// already has the publish in its hands a person's decision twice. Such a row is left for its own
+	// ending to settle what it claims: its publish forgets exactly what it named
+	// (ForgetKeptDecisions), a newer catch-up that supersedes it hands those rows over
+	// (workflow.HandOverKept), and every other ending leaves them to the row's deletion, for the
+	// architect's next ready to name. A leased row with no decisions is dropped as before: the
+	// runner executes it from memory, and the notice executor publishes it only while OutboxLeased
+	// still finds it, so a dropped row is delivered only when the drop lands during its publish, a
+	// duplicate the fresh catch-up follows. A dropped catch-up's decisions are released with its row
+	// and named again by the fresh catch-up, written in the same transaction as the drop: only a
+	// published catch-up forgets them.
+	DropCatchUps(ctx context.Context, tx pgx.Tx, issue string, now time.Time) error
 	// DropStatusWrites deletes every Dispatch status write of issue the outbox still holds, a row
 	// the runner has leased included; one mid-attempt can still reach Dispatch, and its finish then
 	// finds nothing to delete.

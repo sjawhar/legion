@@ -143,6 +143,20 @@ func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue,
 			return err
 		}
 	}
+	// What a person decided on an adopted member while it waited for its slot is kept under that
+	// member, so the tree it now stands in owes it (Store.UnclaimedKept reads by the issue's tree
+	// now). The tree's architect already runs and no ready is coming, so it is written a catch-up
+	// now, as a release's hand-over does (CatchUpTheTreesOwed); an architect that does not hear yet
+	// is written nothing, and its next start or ready names them.
+	decisions, approved, _, err := e.store.UnclaimedKept(ctx, tx, root.Tree)
+	if err != nil {
+		return err
+	}
+	if len(decisions) > 0 || approved > 0 {
+		if err := CatchUpTheTreesOwed(ctx, tx, e.store, e.cfg.DesignGate, []string{root.Tree}, e.now()); err != nil {
+			return err
+		}
+	}
 	if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "child-status", Role: claim.RoleArchitect,
 		Reason: fmt.Sprintf("%s joined the tree of %s from the admission queue", issue.Key, root.Key)}); err != nil {
 		return err

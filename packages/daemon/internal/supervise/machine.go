@@ -123,7 +123,17 @@ type Claim struct {
 	// no start has run for. A stop from an older row is one the newer start superseded: it was
 	// written to end a run that is over, and acting on it would stop the run that start began.
 	LastStartRow int64
-	Locator      *runtime.Locator
+	// DeliveredRows is every outbox start row whose task this claim queued (RequestDeliver.Row),
+	// in the order the rows gave them, and empty for a claim no row has given a task. Each row is
+	// written with its delivery, in the same transaction, so a row's task is known queued no later
+	// than it is: a retry of that row is never queued again, whether its delivery is still pending
+	// or the claim has since retired it. The rows of one issue do not run in row order
+	// (record's outboxInOrder), so the set is kept rather than a high-water mark: an older row
+	// still to deliver after a newer one has is given its task, and only a row that gave this
+	// claim a task is read as given. It is also what says whether a start's task reached the
+	// claim, which is what settles the decisions that start named (the outbox's settleKept).
+	DeliveredRows []int64
+	Locator       *runtime.Locator
 	// Enrollment is the secrets broker's record of the claim's running process, when the runtime
 	// enrolls pods: the enrollment id, and the incarnation it was made for. It is
 	// revoked and cleared wherever the process is let go (letGo), so a record for another
@@ -297,6 +307,26 @@ type Deps struct {
 	// is never put to it, which the machine decides rather than this answer. generation is 0 for a
 	// task of no run. nil holds every delivery.
 	PhaseHolds func(ctx context.Context, issue string, p phase.Phase, generation uint64) (bool, error)
+	// RootHears says whether the root of c's tree has an architect to hear d now: it runs, it does
+	// not linger and it does not wait in `todo` for an admission slot. A root architect's task of
+	// a run names no phase, so no phase ever drops it, and it waits on the claim until that claim
+	// next runs — which can be after a park, a hand back to `todo` or a linger, generations later.
+	// Such a task names a person's decisions, which its own confirmation tells (daemon's
+	// settleKept, the claim store's putDelivery), so it is held rather than dropped: false keeps it
+	// pending, unsent and uncharged, and the start of the root's next run sends it (queue). It is
+	// asked only about a root architect's task of a run — never a phase worker's, never a task of
+	// no run such as an operator's or a production check's. nil sends every delivery.
+	RootHears func(ctx context.Context, c Claim, d Delivery) (bool, error)
+	// RootTask is what a root architect's held task of a run says now: its text, and what it names
+	// of the decisions a person made while nobody in the root's tree could hear them
+	// (Delivery.Kept), re-read from the record at the moment the task is about to be sent. An
+	// issue the task names can have left this claim's tree while the task waited, and the tree it
+	// stands in now is the one owed that answer: the answer drops it from the task, releases this
+	// delivery's hold on its row and writes that tree's architect a catch-up naming it, all in one
+	// write of its own. An empty text is a task that names nothing now, which is retired rather
+	// than sent. It is asked only about a root architect's task of a run (asksRoot), once that
+	// root has an architect to hear it, and nil leaves every task as it was queued.
+	RootTask func(ctx context.Context, c Claim, d Delivery) (task string, kept []byte, err error)
 	// TreeClosable answers whether the operator may close this claim's tree: false refuses the
 	// close, and an error is the read itself failing, which the caller sees as a failure rather
 	// than a refusal. It is asked for the operator's own close — the workflow's linger close is its
@@ -606,6 +636,11 @@ func (c Claim) ReleasedLaunch() bool {
 // includes a held suspension (holdSuspension), which the start drops — unless it is the operator's:
 // a claim an operator's suspension holds records no start and answers ErrHeldByOperator, so the
 // start waits for the operator to resume the claim.
+//
+// It is also what releases a task held because its root had no architect to hear it (sendPending,
+// Deps.RootHears): this start is the root running again, so the held task goes now, before the
+// start's own work — including when that start carries no task of its own to deliver, where
+// nothing else would ask.
 func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 	m.mu.Lock()
 	defer m.unlock()
@@ -613,14 +648,17 @@ func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 		return fmt.Errorf("start row %d of %s: %w", row, m.claim.Token, m.current().RuleHoldError())
 	}
 	if row <= m.claim.LastStartRow {
-		return nil
+		return m.sendPending(ctx)
 	}
 	m.claim.LastStartRow = row
 	if m.held != nil {
 		m.log.Info("supervise: a start drops the held suspension", "row", row, "reason", m.held.Reason)
 		m.dropHeld()
 	}
-	return m.persist(ctx)
+	if err := m.persist(ctx); err != nil {
+		return err
+	}
+	return m.sendPending(ctx)
 }
 
 // ServingRun is the issue generation of the run whose task this claim's worker took, and 0 for a

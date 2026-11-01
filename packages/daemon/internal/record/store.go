@@ -41,6 +41,15 @@ func (s *Postgres) MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID
 	return tag.RowsAffected() == 1, nil
 }
 
+func (s *Postgres) Processed(ctx context.Context, tx pgx.Tx, source, eventID string) (bool, error) {
+	var marked bool
+	if err := tx.QueryRow(ctx, "select exists (select 1 from processed_events where source = $1 and event_id = $2)",
+		source, eventID).Scan(&marked); err != nil {
+		return false, fmt.Errorf("read whether %s event %s is processed: %w", source, eventID, err)
+	}
+	return marked, nil
+}
+
 // issueColumns reads an empty ancestry as NULL, so a record with none scans as a nil Ancestry, as
 // it was written.
 const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, awaiting_ask, awaiting_gate_version, coalesce(awaiting_artifact, ''), awaiting_answered_at, coalesce(awaiting_answered_by, ''), coalesce(awaiting_answered_detail, ''), awaiting_since_seq, awaiting_since, handout_seq, coalesce(declared_seq, 0), declared_at, nullif(ancestry, '{}'), handed_over_from`
@@ -626,6 +635,325 @@ func (s *Postgres) SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, sessi
 	return claims, nil
 }
 
+// keptCounts is the validity rule as SQL: the claim and the hold a kept row carries count only
+// while they stand in the same tree as the row's own issue. row is the kept row's alias and owner
+// the alias of the issues row of its issue, which is where the tree it is owed to is read. A void
+// claim or hold is ignored, so a hand-over, an orphaning, an adoption or a grandchild's
+// hand-over leaves nothing to move: the tree the row's issue stands in now names it.
+func keptCounts(row, owner string) string {
+	return `(` + row + `.claimed_by is null or not exists (
+		select 1 from outbox claimer join issues claimed on claimed.key = claimer.issue
+		where claimer.id = ` + row + `.claimed_by and claimed.tree = ` + owner + `.tree))
+		and (` + row + `.held_by_claim is null or not exists (
+		select 1 from claims holder join pending_task_deliveries held on held.claim_token = holder.token
+		where holder.token = ` + row + `.held_by_claim and held.delivery_id = ` + row + `.held_by_delivery
+		and held.confirmed_at is null and holder.tree = ` + owner + `.tree))`
+}
+
+// keptNameable and approvalNameable are keptCounts for a kept decision and for a readmitted
+// approval, each read through the issues row of its own issue.
+var (
+	keptNameable     = keptCounts("kept", "owner")
+	approvalNameable = keptCounts("readmitted_approvals", "owner")
+)
+
+func (s *Postgres) AddParkedDecision(ctx context.Context, tx pgx.Tx, decision ParkedDecision) error {
+	if _, err := tx.Exec(ctx, `insert into parked_decisions (issue, ref, decision, actor, at) values ($1, $2, $3, $4, $5)
+		on conflict (issue, ref) do update set decision = excluded.decision, actor = excluded.actor,
+		at = excluded.at, claimed_by = null, held_by_claim = null, held_by_delivery = null
+		where parked_decisions.at <= excluded.at`,
+		decision.Issue, decision.Ref, string(decision.Decision), decision.Actor, decision.At); err != nil {
+		return fmt.Errorf("keep the decision %s on %s: %w", decision.Ref, decision.Issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) ParkedDecisions(ctx context.Context, tx pgx.Tx, tree string) ([]ParkedDecision, error) {
+	return parkedDecisions(ctx, tx, tree, false)
+}
+
+// UnclaimedKept locks every kept row of tree, and tree's readmitted approval, before it reads which
+// of them nothing claims: the composer that reads them claims what it names in the same
+// transaction (ClaimKeptDecisions), so a second composer of the tree waits here until the first
+// commits and then reads the first's claims. The lock is its own statement, so the read after it
+// judges each claim against a snapshot that holds every claimer committed before the lock was
+// granted. Without it the second composer would read a claim the first has not committed as no
+// claim, name the decision too, and two tellings would name it.
+func (s *Postgres) UnclaimedKept(ctx context.Context, tx pgx.Tx, tree string) ([]ParkedDecision, int, int, error) {
+	if _, err := tx.Exec(ctx, `select 1 from parked_decisions kept join issues owner on owner.key = kept.issue
+		where owner.tree = $1 order by kept.issue, kept.ref for update of kept`, tree); err != nil {
+		return nil, 0, 0, fmt.Errorf("lock the decisions owed to %s: %w", tree, err)
+	}
+	if _, err := tx.Exec(ctx, `select 1 from readmitted_approvals where issue = $1 for update`, tree); err != nil {
+		return nil, 0, 0, fmt.Errorf("lock the approval kept for %s: %w", tree, err)
+	}
+	decisions, err := parkedDecisions(ctx, tx, tree, true)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	var approved, latest int
+	err = tx.QueryRow(ctx, `select approved_version, latest_version from readmitted_approvals
+		join issues owner on owner.key = readmitted_approvals.issue
+		where readmitted_approvals.issue = $1 and `+approvalNameable, tree).Scan(&approved, &latest)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, 0, 0, fmt.Errorf("read the approval kept for %s: %w", tree, err)
+	}
+	return decisions, approved, latest, nil
+}
+
+// parkedDecisions is every decision owed to tree — every row whose issue stands in tree now — or
+// only those a start or catch-up of tree may name (keptCounts), newest first, ties by ref.
+func parkedDecisions(ctx context.Context, tx pgx.Tx, tree string, nameable bool) ([]ParkedDecision, error) {
+	rows, err := tx.Query(ctx, `select kept.issue, kept.ref, kept.decision, kept.actor, kept.at, coalesce(kept.claimed_by, 0),
+		coalesce(kept.held_by_claim, ''), coalesce(kept.held_by_delivery, '')
+		from parked_decisions kept join issues owner on owner.key = kept.issue
+		where owner.tree = $1 and (not $2 or (`+keptNameable+`)) order by kept.at desc, kept.ref`, tree, nameable)
+	if err != nil {
+		return nil, fmt.Errorf("read the decisions owed to %s: %w", tree, err)
+	}
+	defer rows.Close()
+	var decisions []ParkedDecision
+	for rows.Next() {
+		var decision ParkedDecision
+		if err := rows.Scan(&decision.Issue, &decision.Ref, &decision.Decision, &decision.Actor, &decision.At,
+			&decision.ClaimedBy, &decision.HeldBy.Claim, &decision.HeldBy.Delivery); err != nil {
+			return nil, fmt.Errorf("scan a decision owed to %s: %w", tree, err)
+		}
+		decisions = append(decisions, decision)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the decisions owed to %s: %w", tree, err)
+	}
+	return decisions, nil
+}
+
+func (s *Postgres) KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root string, approved, latest int) error {
+	if _, err := tx.Exec(ctx, `insert into readmitted_approvals (issue, approved_version, latest_version) values ($1, $2, $3)
+		on conflict (issue) do update set approved_version = excluded.approved_version, latest_version = excluded.latest_version,
+		claimed_by = null, held_by_claim = null, held_by_delivery = null`,
+		root, approved, latest); err != nil {
+		return fmt.Errorf("keep the approval of %s at version %d below version %d: %w", root, approved, latest, err)
+	}
+	return nil
+}
+
+func (s *Postgres) DropReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) error {
+	if _, err := tx.Exec(ctx, "delete from readmitted_approvals where issue = $1", root); err != nil {
+		return fmt.Errorf("drop the approval kept for %s: %w", root, err)
+	}
+	return nil
+}
+
+func (s *Postgres) ReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) (approved, latest int, err error) {
+	err = tx.QueryRow(ctx, "select approved_version, latest_version from readmitted_approvals where issue = $1", root).Scan(&approved, &latest)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("read the approval kept for %s: %w", root, err)
+	}
+	return approved, latest, nil
+}
+
+// keptMarks is kept's decisions as two parallel arrays, the reference and the time of each, which
+// is what identifies the rows it names within one tree, for unnest. The reference spells the issue
+// it was decided on (specRef, itemRef), so no two rows of one tree answer to one reference.
+func keptMarks(kept KeptDecisions) ([]string, []time.Time) {
+	refs := make([]string, 0, len(kept.Decisions))
+	at := make([]time.Time, 0, len(kept.Decisions))
+	for _, named := range kept.Decisions {
+		refs = append(refs, named.Ref)
+		at = append(at, named.At)
+	}
+	return refs, at
+}
+
+// ClaimKeptDecisions claims for outbox row what it names of what tree is owed and nothing else
+// claims or holds (keptNameable). A row is claimed or held, never both: a hold the claim overrides
+// is one keptNameable found void (its holder serves another tree than the row's issue now), and
+// the claim clears it, so no later release of that hold can touch this claim.
+//
+// What stops a second composer from naming a decision another telling claims is UnclaimedKept's
+// lock, which the composer takes before it reads what it names: each row it names is still there
+// to claim when this runs. The count check below is defensive and does not catch that race on its
+// own: without the lock, a second composer's UPDATE waits on the first's row lock and then
+// re-checks the row, but keptNameable's subquery reads the statement's old snapshot, which does
+// not see the first composer's outbox row, so it claims anyway and the count matches. The check
+// catches a caller that names what it did not read under the lock, and rolls it back.
+func (s *Postgres) ClaimKeptDecisions(ctx context.Context, tx pgx.Tx, tree string, kept KeptDecisions, row int64) error {
+	if len(kept.Decisions) > 0 {
+		refs, at := keptMarks(kept)
+		claimed, err := tx.Exec(ctx, `update parked_decisions kept set claimed_by = $4, held_by_claim = null, held_by_delivery = null
+			from unnest($2::text[], $3::timestamptz[]) as named (ref, at), issues owner
+			where owner.key = kept.issue and owner.tree = $1 and kept.ref = named.ref
+			and kept.at = named.at and `+keptNameable, tree, refs, at, row)
+		if err != nil {
+			return fmt.Errorf("claim the decisions named to %s for outbox row %d: %w", tree, row, err)
+		}
+		if claimed.RowsAffected() != int64(len(kept.Decisions)) {
+			return fmt.Errorf("outbox row %d names %d decisions owed to %s and could claim %d: a row names only what it claims",
+				row, len(kept.Decisions), tree, claimed.RowsAffected())
+		}
+	}
+	if kept.Approved > 0 {
+		claimed, err := tx.Exec(ctx, `update readmitted_approvals set claimed_by = $4, held_by_claim = null, held_by_delivery = null
+			from issues owner
+			where owner.key = readmitted_approvals.issue and readmitted_approvals.issue = $1
+			and approved_version = $2 and latest_version = $3 and `+approvalNameable,
+			tree, kept.Approved, kept.Latest, row)
+		if err != nil {
+			return fmt.Errorf("claim the approval named to %s for outbox row %d: %w", tree, row, err)
+		}
+		if claimed.RowsAffected() != 1 {
+			return fmt.Errorf("outbox row %d names the approval kept for %s and could not claim it: a row names only what it claims", row, tree)
+		}
+	}
+	return nil
+}
+
+func (s *Postgres) MoveKeptClaims(ctx context.Context, tx pgx.Tx, from, to int64) error {
+	for _, table := range []string{"parked_decisions", "readmitted_approvals"} {
+		if _, err := tx.Exec(ctx, "update "+table+" set claimed_by = $2 where claimed_by = $1", from, to); err != nil {
+			return fmt.Errorf("move the claims of outbox row %d to %d: %w", from, to, err)
+		}
+	}
+	return nil
+}
+
+func (s *Postgres) ReleaseKeptClaims(ctx context.Context, tx pgx.Tx, row int64) ([]string, error) {
+	trees, err := releasedTrees(ctx, tx, `with decisions as (
+		update parked_decisions set claimed_by = null where claimed_by = $1 returning issue
+	), approvals as (
+		update readmitted_approvals set claimed_by = null where claimed_by = $1 returning issue
+	), released as (
+		select issue from decisions union all select issue from approvals
+	)`, row)
+	if err != nil {
+		return nil, fmt.Errorf("release the claims of outbox row %d: %w", row, err)
+	}
+	return trees, nil
+}
+
+func (s *Postgres) ReleaseHeldDecisions(ctx context.Context, tx pgx.Tx, token claim.Token, delivery string,
+	marks []DecisionMark) ([]string, error) {
+	if len(marks) == 0 {
+		return nil, nil
+	}
+	refs := make([]string, 0, len(marks))
+	for _, mark := range marks {
+		refs = append(refs, mark.Ref)
+	}
+	trees, err := releasedTrees(ctx, tx, `with released as (
+		update parked_decisions set held_by_claim = null, held_by_delivery = null
+		where held_by_claim = $1 and held_by_delivery = $3 and ref = any($2::text[]) returning issue
+	)`, string(token), refs, delivery)
+	if err != nil {
+		return nil, fmt.Errorf("release what the task %s held for %s names of another tree: %w", delivery, token, err)
+	}
+	return trees, nil
+}
+
+func (s *Postgres) HeldKeptRefs(ctx context.Context, tx pgx.Tx, token claim.Token, delivery string) ([]string, error) {
+	rows, err := tx.Query(ctx, `select ref from parked_decisions where held_by_claim = $1 and held_by_delivery = $2`,
+		string(token), delivery)
+	if err != nil {
+		return nil, fmt.Errorf("read what the delivery %s on %s holds: %w", delivery, token, err)
+	}
+	defer rows.Close()
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("scan what the delivery %s on %s holds: %w", delivery, token, err)
+		}
+		refs = append(refs, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read what the delivery %s on %s holds: %w", delivery, token, err)
+	}
+	return refs, nil
+}
+
+// releasedTrees runs a release whose common table expressions return, under the name released, the
+// issue of every row it released, and reports the tree each of those issues stands in now, by key:
+// the trees whose architects the release must write a fresh catch-up to (workflow.HandOverKept).
+func releasedTrees(ctx context.Context, tx pgx.Tx, release string, args ...any) ([]string, error) {
+	rows, err := tx.Query(ctx, release+`
+		select distinct owner.tree from issues owner
+		where owner.key in (select issue from released) order by owner.tree`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var trees []string
+	for rows.Next() {
+		var tree string
+		if err := rows.Scan(&tree); err != nil {
+			return nil, err
+		}
+		trees = append(trees, tree)
+	}
+	return trees, rows.Err()
+}
+
+func (s *Postgres) ArchitectLaunches(ctx context.Context, tx pgx.Tx, trees []string) (map[string]uint64, error) {
+	if len(trees) == 0 {
+		return nil, nil
+	}
+	rows, err := tx.Query(ctx, `select tree, generation from claims
+		where role = $1 and issue = tree and tree = any($2::text[])`, string(claim.RoleArchitect), trees)
+	if err != nil {
+		return nil, fmt.Errorf("read the launches of the architects of %v: %w", trees, err)
+	}
+	defer rows.Close()
+	launches := map[string]uint64{}
+	for rows.Next() {
+		var tree string
+		var generation int64
+		if err := rows.Scan(&tree, &generation); err != nil {
+			return nil, fmt.Errorf("scan the launch of an architect of %v: %w", trees, err)
+		}
+		launches[tree] = uint64(generation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the launches of the architects of %v: %w", trees, err)
+	}
+	return launches, nil
+}
+
+func (s *Postgres) ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, tree string, kept KeptDecisions, row int64) error {
+	if len(kept.Decisions) > 0 {
+		refs, at := keptMarks(kept)
+		if _, err := tx.Exec(ctx, `delete from parked_decisions kept
+			using unnest($2::text[], $3::timestamptz[]) as named (ref, at), issues owner
+			where owner.key = kept.issue and owner.tree = $1 and kept.ref = named.ref
+			and kept.at = named.at and (kept.claimed_by = $4 or kept.claimed_by is null)`,
+			tree, refs, at, row); err != nil {
+			return fmt.Errorf("tell the decisions named to %s: %w", tree, err)
+		}
+		// What the teller named of an issue that has left its tree since the row was composed is
+		// not this architect's to be told: the row's claim goes instead, so the tree the issue
+		// stands in now names it. The old architect hearing it as well is the lesser fault, and the
+		// telling that reached it is one this row has already made. Only this row's own claim is
+		// cleared: a row is claimed or held, never both, and no other claim or hold is this row's.
+		if _, err := tx.Exec(ctx, `update parked_decisions kept set claimed_by = null
+			from unnest($2::text[], $3::timestamptz[]) as named (ref, at), issues owner
+			where owner.key = kept.issue and owner.tree <> $1 and kept.ref = named.ref
+			and kept.at = named.at and kept.claimed_by = $4`, tree, refs, at, row); err != nil {
+			return fmt.Errorf("leave the decisions named to %s that its tree no longer owes: %w", tree, err)
+		}
+	}
+	if kept.Approved > 0 {
+		if _, err := tx.Exec(ctx, `delete from readmitted_approvals using issues owner
+			where owner.key = readmitted_approvals.issue and owner.tree = $1 and readmitted_approvals.issue = $1
+			and approved_version = $2 and latest_version = $3 and (claimed_by = $4 or claimed_by is null)`,
+			tree, kept.Approved, kept.Latest, row); err != nil {
+			return fmt.Errorf("tell the approval named to %s: %w", tree, err)
+		}
+	}
+	return nil
+}
+
 func (s *Postgres) ClaimSession(ctx context.Context, tx pgx.Tx, token claim.Token) (string, error) {
 	var session string
 	if err := tx.QueryRow(ctx, "select session from claims where token = $1", string(token)).Scan(&session); err != nil {
@@ -1200,6 +1528,22 @@ func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error 
 	return nil
 }
 
+func (s *Postgres) EnqueueID(ctx context.Context, tx pgx.Tx, row OutboxRow) (int64, error) {
+	if row.Kind == OutboxKindReadyMerge {
+		return 0, fmt.Errorf("enqueue %s for %s with its id: a ready_merge row may update an existing row", row.Kind, row.Issue)
+	}
+	if !json.Valid(row.Payload) {
+		return 0, fmt.Errorf("enqueue %s for %s: payload is not JSON", row.Kind, row.Issue)
+	}
+	var id int64
+	if err := tx.QueryRow(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token, lease_until)
+		values ($1, $2, $3, $4, $5, $6, $7, $8) returning id`,
+		string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.LeaseToken, row.LeaseUntil).Scan(&id); err != nil {
+		return 0, fmt.Errorf("enqueue %s for %s: %w", row.Kind, row.Issue, err)
+	}
+	return id, nil
+}
+
 // The outbox's runnable predicates are one SQL text, so the lanes' list of due rows (DueRows), their
 // claim (ClaimRow) and the state report's held rows (HeldRows) can never disagree about which row
 // may run. Each refers to the statement's first five parameters, which outboxDueArgs supplies — $1
@@ -1468,8 +1812,18 @@ func (s *Postgres) DropStatusWrites(ctx context.Context, tx pgx.Tx, issue string
 	return nil
 }
 
-func (s *Postgres) DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) error {
-	if _, err := tx.Exec(ctx, "delete from outbox where kind = $1 and issue = $2 and payload->>'kind' = 'catch-up'", string(OutboxKindNotice), issue); err != nil {
+func (s *Postgres) DropCatchUps(ctx context.Context, tx pgx.Tx, issue string, now time.Time) error {
+	// A catch-up that carries kept decisions and one of whose telling's rows (itself, the row it
+	// copies, or a copy of either) is under a live lease is kept: that row may be publishing now,
+	// and the decisions this one claims are that telling's to settle.
+	if _, err := tx.Exec(ctx, `delete from outbox where kind = $1 and issue = $2 and payload->>'kind' = 'catch-up'
+		and not exists (select 1 from processed_events where source = $3
+			and event_id = $4 || coalesce((outbox.payload->>'resend_of')::bigint, outbox.id))
+		and not (payload->'catch_up'->'kept' is not null and exists (select 1 from outbox live
+			where live.kind = outbox.kind and live.issue = outbox.issue
+			and coalesce((live.payload->>'resend_of')::bigint, live.id) = coalesce((outbox.payload->>'resend_of')::bigint, outbox.id)
+			and live.lease_token <> '' and live.lease_until > $5))`,
+		string(OutboxKindNotice), issue, KeptToldSource, outboxKeyPrefix, now); err != nil {
 		return fmt.Errorf("drop the queued catch-ups of %s: %w", issue, err)
 	}
 	return nil

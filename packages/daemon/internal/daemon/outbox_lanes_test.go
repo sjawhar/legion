@@ -448,6 +448,45 @@ func TestACommittedRowRunsOnItsLaneWithoutASweep(t *testing.T) {
 	})
 }
 
+// enqueuingByID writes rows with their ids, as workflow.EnqueueNaming writes a start or catch-up
+// that claims kept decisions.
+type enqueuingByID struct {
+	records record.Store
+	rows    []record.OutboxRow
+}
+
+func (h enqueuingByID) Apply(ctx context.Context, tx pgx.Tx, _ intake.Fact) (intake.Result, error) {
+	for _, row := range h.rows {
+		if _, err := h.records.EnqueueID(ctx, tx, row); err != nil {
+			return intake.Result{}, err
+		}
+	}
+	return intake.Result{}, nil
+}
+
+// A row written with its id through the workflow's store wakes its lane as it commits, as a row
+// written without one does: a catch-up that claims kept decisions (workflow.EnqueueNaming, the
+// hand-over's and the ready's) is published at once rather than after the next sweep.
+func TestARowWrittenWithItsIDRunsOnItsLaneWithoutASweep(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	clock := microClock()
+	client := &postingDispatch{}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: record.NewStore(), dispatch: client, log: quietLogger()}
+	runLanes(t, runner, clock)
+
+	row := mustOutboxRow(t, "LEGION-208", record.MessagePost{Body: "committed with its id"}, clock.Now())
+	if _, err := intake.ApplyFact(context.Background(), pool, "lanes-test", "by-id", intake.DaemonBooted{Boot: 1},
+		enqueuingByID{records: wakingRecords(runner), rows: []record.OutboxRow{row}}); err != nil {
+		t.Fatalf("commit the row: %v", err)
+	}
+	testwait.Eventually(t, "the row written with its id was posted", func() bool {
+		return client.postsTo("LEGION-208") == 1 && outboxRowsOf(t, pool, "LEGION-208") == 0
+	})
+	if _, sweeps := clock.armed(outboxLease); sweeps != 1 {
+		t.Fatalf("sweep timers armed = %d, want the one Run armed at boot and never fired", sweeps)
+	}
+}
+
 // A row due later runs at its moment and not before: the commit wakes its lane, which finds
 // nothing due and arms one timer for the wait, and the row runs when that timer fires on the
 // clock, with no sweep in between.

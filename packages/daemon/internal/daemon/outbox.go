@@ -18,6 +18,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghautomerge"
 	"github.com/sjawhar/legion/daemon/internal/ghbranch"
@@ -87,7 +88,11 @@ type outbox struct {
 	// is shared, and another project's rows are another daemon's.
 	dispatchProject string
 	stateDir        string
-	log             *slog.Logger
+	// designGate is the project's design gate policy (gates.design), which a catch-up this runner
+	// writes states and whose kept approval pair a start task names (workflow.QueueCatchUp). A
+	// test that builds the runner by hand leaves it zero, which reads as the shipped policy.
+	designGate config.DesignGate
+	log        *slog.Logger
 	// now is the moment a row is listed, claimed, renewed and retried at; clock arms the lanes'
 	// timers — the sweep's, a lane's wait for its next due row, a running row's lease renewal.
 	// Both are the wall clock in production, and a test holds both still (heldClock). A test that
@@ -138,13 +143,13 @@ type outboxTrees interface {
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir, githubAPI string, tools map[string]string, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, designGate config.DesignGate, project, dispatchProject, stateDir, githubAPI string, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
-		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI,
+		handlers: handlers, designGate: designGate, project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI,
 		log: log, now: time.Now, clock: supervise.RealClock{},
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
@@ -458,7 +463,13 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 	case record.ControllerNotice:
 		return r.controllerNotice(ctx, row, value)
 	case record.SuperviseRequest:
-		return r.supervise(ctx, row, value)
+		if err := r.supervise(ctx, row, value); err != nil {
+			return err
+		}
+		// Whatever the row made of itself — a task delivered, an earlier generation, a phase left,
+		// a lingering tree — the decisions it named are settled here (settleKept), reading from the
+		// claim what became of the task: the run itself is over, and what it did is on the claim.
+		return r.settleKept(ctx, row, value, false)
 	case record.GateSeed:
 		return r.seedGate(ctx, row, value)
 	case record.LingerClose:
@@ -642,13 +653,16 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // lingers or has closed — the row finishes undelivered with one log line. So does a row whose
 // architect cannot be resolved from the record (errNoticeUnroutable), which holds back no later
 // notice either, and, before any publish, a row whose architect stopped with its finished tree
-// (stoppedWithTree). A listener that confirms a role message before it answers says when the
-// architect's session did not take the notice (notify.ErrNotDelivered): when the last forward
-// reached the NATS server and drew no receipt (`receipt_timeout`) — a session that is registered
-// but no longer running, or one whose connection is moving to another server — the notice is
-// queued again from the answer by the re-hold policy (reholdNotice, notice_exceptions.go) and the
-// row finishes; when the listener could not forward it at all (`delivery_failed`), as when the hub
-// is down, the row retries on its backoff as any failed publish does, so an outage drops nothing.
+// (stoppedWithTree). A person's spec decision in either of the two cases a notice finishes
+// undelivered because nobody will hold the role (its architect stopped with its finished tree, or
+// will not hold its role again) goes to the controller instead (parkDecision). A listener that
+// confirms a role message before it answers says when the architect's session did not take the
+// notice (notify.ErrNotDelivered): when the last forward reached the NATS server and drew no
+// receipt (`receipt_timeout`) — a session that is registered but no longer running, or one whose
+// connection is moving to another server — the notice is queued again from the answer by the
+// re-hold policy (reholdNotice, notice_exceptions.go) and the row finishes; when the listener could
+// not forward it at all (`delivery_failed`), as when the hub is down, the row retries on its
+// backoff as any failed publish does, so an outage drops nothing.
 // A holder that does not advertise the notice's delivery mode (notify.ErrRefusedByHolder) refuses
 // every attempt until another session holds the role, and a forward the listener's own NATS grant
 // denies (notify.ErrPublishDenied) is denied on every attempt until an operator changes the grant,
@@ -661,8 +675,22 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // publish, and so does a catch-up a newer one superseded (catchUpSuperseded, read against the
 // snapshot's root and the claim as it runs now): the re-hold reads the claim from memory and
 // writes its copy outside ApplyFact's lock, so it can lose the race to a ready and commit an older
-// copy after the fresh catch-up.
+// copy after the fresh catch-up. A catch-up that publishes records the telling and forgets the
+// decisions it named (toldKept, settleTold); one a newer catch-up superseded hands them to a fresh
+// catch-up instead (supersededKept), since the newer one was composed without them; one that
+// finishes any other way leaves them claimed until its row's deletion releases them, for the
+// architect's next ready to name. However the row ends, a catch-up that told its decisions in any
+// run forgets them here rather than let its ending release what the architect has already heard.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
+	if err := r.deliverNotice(ctx, row, payload); err != nil {
+		return err
+	}
+	return r.settleTold(ctx, row, payload)
+}
+
+// deliverNotice is the notice executor's own work: routing the notice, publishing it, and settling
+// what a catch-up that will never publish named. Its endings are notice's to read.
+func (r *outbox) deliverNotice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
 	}
@@ -686,7 +714,15 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		if err != nil {
 			return fmt.Errorf("the architect of %s: %w", tree.root.Key, err)
 		}
-		if catchUpSuperseded(*payload.CatchUp, r.supervisedClaim(root).Claim, &tree.root) {
+		held := r.supervisedClaim(root).Claim
+		if catchUpSuperseded(*payload.CatchUp, held, &tree.root) {
+			// A row that published before told what it named and settles after this run
+			// (settleTold); one that never published hands its decisions to a fresh catch-up, since
+			// the newer catch-up was composed from what nobody claimed and left them out.
+			_, told := payload.Published(row.ID)
+			if err := r.supersededKept(ctx, tree.root.Key, row.ID, told); err != nil {
+				return err
+			}
 			r.log.Info("outbox catch-up finished without publishing: a newer catch-up supersedes it", "row", row.ID, "issue", row.Issue,
 				"generation", payload.CatchUp.Generation, "launch", payload.CatchUp.Launch)
 			return nil
@@ -696,7 +732,11 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	if err != nil {
 		return fmt.Errorf("the architect of %s: %w", row.Issue, err)
 	}
+	notice, key := payload.Published(row.ID)
 	if held := r.supervisedClaim(architect); stoppedWithTree(tree.root.Lingers(), held) {
+		if err := r.parkDecision(ctx, row.Issue, tree.root.Key, payload, key, row.ID); err != nil {
+			return err
+		}
 		r.log.Info("outbox notice finished undelivered: its architect stopped with its finished tree",
 			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "state", held.State, "stopping", held.Stopping)
 		return nil
@@ -704,18 +744,24 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	if earlier := earlierNoticeFor(tree, architect, r.holdsItsRole); earlier != 0 {
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
-	notice, key := payload.Published(row.ID)
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
 	var notDelivered notify.ErrNotDelivered
 	var refused notify.ErrRefusedByHolder
 	var denied notify.ErrPublishDenied
 	switch {
 	case published == nil:
+		// The architect has the catch-up, so the decisions it named and this row claims are told:
+		// the telling is recorded under the key it went out on, before anything forgets them, and
+		// the settle after this run forgets them (toldKept, settleTold).
+		if payload.CatchUp != nil && payload.CatchUp.Kept != nil {
+			return r.toldKept(ctx, tree.root.Key, key)
+		}
 		return nil
 	case errors.As(published, &notDelivered) && notDelivered.Reason == notify.ReasonReceiptTimeout:
 		// The notice went out under the key of the row it copies, or of this row (Notice.Published).
+		// The copy takes over this row's claims on the decisions it names (claims).
 		source := cmp.Or(payload.ResendOf, row.ID)
-		reported := reportedNotice{issue: row.Issue, notice: notice, row: source, architect: architect}
+		reported := reportedNotice{issue: row.Issue, notice: notice, row: source, architect: architect, claims: row.ID}
 		if err := r.reholdNotice(ctx, reported, notDelivered.Reason, notDelivered.Holder); err != nil {
 			return fmt.Errorf("re-hold the notice for %s that its architect %s did not take: %w", row.Issue, architect, err)
 		}
@@ -732,6 +778,9 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
 	}
 	if ended := architectEnded(tree, r.claimState(architect)); ended != "" {
+		if err := r.parkDecision(ctx, row.Issue, tree.root.Key, payload, key, row.ID); err != nil {
+			return err
+		}
 		r.log.Info("outbox notice finished undelivered: its architect will not hold its role again",
 			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "because", ended)
 		return nil
@@ -975,19 +1024,6 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return fmt.Errorf("relaunch retired claim %s: %w", token, err)
 			}
 		}
-		// A start that finds a tree's root architect running is a re-admission while its session
-		// lived on. The linger suspends the root's claim, so that happens only when the claim was
-		// mid-launch when the suspend ran (the machine ignores a suspend while launching), or the
-		// re-admission's start ran before the suspend. No ready follows, and a ready is what tells
-		// the architect its tree (workflow's claimReady), so the start applies that fact itself,
-		// for the running launch, once per start row, and the architect is told its tree's new
-		// generation.
-		if claimTookRole(state) && claim.IsTreeArchitect(payload.Role, issue.Key, issue.Tree) {
-			if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("start-running:%s:%d", token, row.ID),
-				intake.ClaimReady{Issue: issue.Key, Role: payload.Role, Launch: machine.Claim().Generation}, r.handlers...); err != nil {
-				return fmt.Errorf("tell the running architect of %s its tree: %w", issue.Key, err)
-			}
-		}
 		// A claim that, once relaunched, still holds a task of this row's phase and run that it will
 		// work is given that task: one not yet confirmed (a failed claim keeps the task it held, and a
 		// death in a turn takes the task back unconfirmed, behind the sentence saying so), or one
@@ -1000,21 +1036,52 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// start names no phase, so it is never one of these: each look's task is delivered, its row
 		// id its delivery's, and a delivery with no phase is held by nothing (supervise's
 		// phaseHolds), so the task reaches the implementer whatever the issue's phase.
-		held := machine.Claim()
+		held, gave := machine.Claim(), false
 		if pending := held.Pending; (payload.ResumeTask || state == supervise.StateFailed) && pending != nil && payload.Phase != "" &&
 			pending.StillWorked(payload.Generation, payload.Phase, held.State) {
 			r.log.Info("outbox start of a claim that holds its phase's task; not delivered again", "row", row.ID, "issue", issue.Key,
 				"role", payload.Role, "phase", payload.Phase, "held", pending.ID)
-			return nil
-		}
-		if payload.Task != "" {
+		} else if payload.Task != "" {
 			// The row's phase, already held to the issue's above, travels with the delivery: it is
 			// what says the task is still the work to do once the delivery has outlived its id. The
 			// row's assignment travels with it too, the one the start's own transaction wrote on the
-			// role's phases row: it is what the completion this task's turn reports is held to.
+			// role's phases row: it is what the completion this task's turn reports is held to. The
+			// row travels as well: the claim writes it with the delivery, so a retry of this row (a
+			// settle or a ClaimReady below that failed, a crash before the row finished) queues the
+			// task again neither while it is pending nor once the claim has retired it
+			// (supervise.Claim.DeliveredRows), and that same record is what says, when the row
+			// settles what its task named, that the claim has it (settleKept). What the task names
+			// of what its tree is owed travels with it as well (supervise.Delivery.Kept): the
+			// claim's write of the delivery takes those rows from this start row and holds them
+			// under that claim and delivery id, and the write recording the turn's confirmation
+			// tells them (the claim store's putDelivery, 20261101163106_parked_decisions).
+			kept, err := keptJSON(payload.Kept)
+			if err != nil {
+				return err
+			}
 			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, Phase: payload.Phase, Generation: payload.Generation,
-				Assignment: payload.Assignment, ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID)}); err != nil {
+				Assignment: payload.Assignment, ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID), Row: row.ID, Kept: kept}); err != nil {
 				return fmt.Errorf("deliver to claim %s: %w", token, err)
+			}
+			gave = true
+		}
+		// A start that finds a tree's root architect running is a re-admission while its session
+		// lived on. The linger suspends the root's claim, so that happens only when the claim was
+		// mid-launch when the suspend ran (the machine ignores a suspend while launching), or the
+		// re-admission's start ran before the suspend. No ready follows, and a ready is what tells
+		// the architect its tree (workflow's claimReady), so the start applies that fact itself,
+		// for the running launch, once per start row, and the architect is told its tree's new
+		// generation. Its catch-up names what nobody claims, which this row's task may name too, so
+		// the decisions the task carries are settled first (settleKept) and the catch-up is
+		// composed without them; the settle after the row then finds nothing left to do. A retry of
+		// the row queues the task no second time and applies the fact once.
+		if claimTookRole(state) && claim.IsTreeArchitect(payload.Role, issue.Key, issue.Tree) {
+			if err := r.settleKept(ctx, row, payload, gave); err != nil {
+				return err
+			}
+			if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("start-running:%s:%d", token, row.ID),
+				intake.ClaimReady{Issue: issue.Key, Role: payload.Role, Launch: machine.Claim().Generation}, r.handlers...); err != nil {
+				return fmt.Errorf("tell the running architect of %s its tree: %w", issue.Key, err)
 			}
 		}
 		return nil
@@ -1335,16 +1402,17 @@ func (r *outbox) seedGate(ctx context.Context, row record.OutboxRow, payload rec
 	// waiting on its gate. A document Dispatch shows below the version the seed was queued at has a
 	// gate above any version Dispatch wrote (a daemon that registered the caller's version unchecked
 	// could record one), so the seed resets the gate to Dispatch's version with what it read there
-	// (intake.GateAboveDispatch).
+	// (intake.GateAboveDispatch). A review also names its reviewer, since the seed is not fenced on
+	// the tree's linger and its review may meet a parked tree.
 	fact := intake.DispatchArtifact{Key: row.Issue, ArtifactID: payload.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion,
 		RequestWaitsOnAgent: approval.AskID != "" && approval.WaitingOn == "agent"}
 	review := record.EventMark{Seq: approval.Seq, At: approval.At}
 	changes, reason := approval.ChangesRequestedLatest()
 	switch {
 	case approval.ApprovedLatest() != 0:
-		fact.Kind, fact.Mark = intake.DispatchArtifactApproved, review
+		fact.Kind, fact.Mark, fact.Actor = intake.DispatchArtifactApproved, review, approval.LatestReviewer()
 	case changes != 0:
-		fact.Kind, fact.Reason, fact.Mark = intake.DispatchArtifactChangesRequested, reason, review
+		fact.Kind, fact.Reason, fact.Mark, fact.Actor = intake.DispatchArtifactChangesRequested, reason, review, approval.LatestReviewer()
 	case approval.LatestVersion == payload.Version:
 		return nil
 	}

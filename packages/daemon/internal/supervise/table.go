@@ -265,6 +265,15 @@ type RequestDeliver struct {
 	// of no assignment — an operator's own, a resume, a production check's look — names none, and
 	// leaves the assignment the claim is serving alone.
 	Assignment string
+	// Row is the outbox row the task comes from (a workflow start), 0 for a task of no row (an
+	// operator's own, the controller's start message). A row the claim already queued a task from
+	// (Claim.DeliveredRows) queues nothing: its task was given once.
+	Row int64
+	// Kept is what the task names of what its tree is owed, as the row recorded it
+	// (record.KeptDecisions, encoded JSON), carried onto the delivery and persisted with it, which
+	// is what holds those rows until the delivery tells them (Delivery.Kept). Empty for a task
+	// that names none.
+	Kept []byte
 }
 
 // RequestExit is the agent reporting its own end.
@@ -992,12 +1001,19 @@ func agentBusy(reason string) bool {
 // it is that delivery's turn: a replay naming it, or — B1 — Oh My Pi's own agent_start while the
 // delivery is in flight (sent and not yet answered, acknowledged and waiting, or possibly sent by
 // an earlier daemon). Any other turn is a foreign one, and confirms nothing.
+//
+// The question a restart left (askFirst) counts as in flight for every delivery but one: a root
+// architect's task of a run (asksRoot) may be a task nobody has ever sent, held on the claim while
+// its root had no architect to hear it, so a turn of the agent's own is not that task's. Confirmed
+// by it, the task would tell the person's decisions it names — the confirmation is their telling —
+// to an architect nobody prompted, and be retired unsent when that turn ended. Only a send of this
+// machine's own or a prompt it waits for a turn on makes such a turn that task's.
 func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	start := ev.(StreamTurnStart)
 	m.claim.State = StateWorking
 	p := m.claim.Pending
 	_, awaiting := m.timers[TimerTurn]
-	inFlight := m.send != nil || awaiting || m.askFirst
+	inFlight := m.send != nil || awaiting || (m.askFirst && (p == nil || !m.asksRoot(*p)))
 	if p != nil && p.ConfirmedAt.IsZero() && (start.DeliveryID == p.ID || (start.DeliveryID == "" && inFlight)) {
 		return m.confirm(ctx)
 	}

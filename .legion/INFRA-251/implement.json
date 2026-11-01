@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-251",
+  "previousHandoff": "a71947ddb981c8daf19be12045c47c8082f7aeae",
+  "proof": [
+    {
+      "criterion": "The devbox proof of A3/A4 runs with one GitHub App in both github_apps slots, the implement App 5341240 (the architect's task for this round)",
+      "surface": "scripts/e2e/parked-decision-devbox.sh's own rig and boot (start_listener, start_dispatch, write_legion_config, install-plugin-profile.sh, install-key-file-model-route.sh, the real `legion start`) in this issue's pod, with Postgres 18 and NATS 2.10 started locally, a scratch Dispatch project PDBOOT mapped to sjawhar/legion-smoke, and a stand-in mise for the pinned Oh My Pi build (the pod has no mise or tmux)",
+      "command": "script edit: require_app_inputs implement; write_github_apps implement; the implement entry copied to the review slot; check_github_apps implement. Then legion start --check-config --config work/legion.yaml; then start_kept daemon \u2026 legion start --config work/legion.yaml",
+      "observed": "GET /app proved the key: {\"implement\":\"legion-implementer[bot]\"}, both slots app_id \"5341240\". `legion start --check-config` printed 'Config OK: project=PDBOOT'. The real boot passed the plugin gate ('pi-legion speaks this daemon's contract and loads with pi-envoy', daemonApiVersion 44) and the store, config and dispatch stages, then exited: 'legion start: the review App names bot login \"legion-implementer[bot]\" and the implement App \"legion-implementer[bot]\"; the workflow needs two different Apps' (packages/daemon/internal/daemon/workflow.go:233, appLoginsAtBoot, called at workflow.go:294; workflow_test.go:90 asserts it). The daemon judges a push by its pusher against the review App's login, so one App cannot serve both roles. The architect ruled: no daemon change and no other App; the script stays as it is (two Apps) and the proof waits on a readable key for the review App 5341243.",
+      "headSha": "56b6404b40e1f916f90dbc3d110471bf49e69b59",
+      "negativeControl": "`legion start --check-config` accepts the one-App file (it runs no key command and reads no login), so it cannot show the refusal; only the real boot reaches appLoginsAtBoot, and the refusal names both logins."
+    }
+  ],
+  "filesChanged": [],
+  "deviations": [
+    "No code change this round: the one-App edit was made, booted and reverted. scripts/e2e/parked-decision-devbox.sh is unchanged from d94e8bfd (code head 56b6404b)."
+  ],
+  "openQuestions": [
+    "The A3/A4 devbox proof needs a key the proof can read for the review App 5341243 (GH_REVIEW_APP_PRIVATE_KEY_B64 is destroyed in the broker); the architect sends that request to the controller for the operator's approval. Acceptance also waits on the gateway grant."
+  ]
+}

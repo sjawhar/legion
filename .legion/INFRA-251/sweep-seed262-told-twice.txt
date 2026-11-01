@@ -1,0 +1,262 @@
+=== RUN   TestKeptDecisionsReachTheCurrentArchitectOnce/seed-262
+    kept_decision_property_test.go:3121: dispatch://LEGION-1/ask/ask-0014 was told 2 times to the architect of LEGION-1: first at step 226 by the catch-up published under legion-outbox:69, now by the catch-up published under legion-outbox:72; a person's decision reaches its architect once, and a second time only as a task the machine took back and sent again
+        
+        seed 262, step 232 (LEGION_KEPT_PROPERTY_SEED=262 replays this run)
+        trace:
+          0 re-admit generation=1 start-row=1 names=0
+          1 decide ref=dispatch://LEGION-4/ask/ask-0001 issue=LEGION-4 tree=LEGION-4 by=user:bob kind=ask-answered outcome=kept kept=true
+          2 decide ref=dispatch://LEGION-1/ask/ask-0002 issue=LEGION-1 tree=LEGION-1 by=user:bob kind=ask-answered outcome=sent kept=true
+          3 publisher=denied
+          4 run-row id=1 issue=LEGION-1 kind=supervise what=start architect generation=1 names=0 outcome=ran and finished
+          5 restart claims=1 architect=launching
+          6 adopt queued=LEGION-4 under=LEGION-1 tree=LEGION-1 generation=2 phase=admitted last-row=4
+          6 move issue=LEGION-4 from=LEGION-4 to=LEGION-1 rows-issued-before=2 owes-its-new-tree=dispatch://LEGION-4/ask/ask-0001
+          7 run-row id=4 issue=LEGION-4 kind=notice what=child-status outcome=error: the notice waits for its architect: legion-legion-legion-1-architect's notice row 4 waits behind its row 3
+          8 restart claims=1 architect=launching
+          9 ready tree=LEGION-1 launch=1 state=ready
+         10 forget-failure=true
+         11 run-row id=3 issue=LEGION-1 kind=notice what=catch-up generation=1 launch=1 names=2 resends=0 outcome=ran, finish lost to a crash
+         12 launch-refusal=true architect=ready
+         13 park status=done lingers=true generation=1 suspend-row=5
+         14 restart claims=1 architect=ready
+         15 forget-failure=false
+         16 ready-fact tree=LEGION-1 launch=1 catch-up-row=5
+         17 hand-over member=LEGION-2 with-run=true tree=LEGION-2 generation=2 status=in_progress phase=planning last-row=10
+         17 move issue=LEGION-2 from=LEGION-1 to=LEGION-2 rows-issued-before=5 owes-its-new-tree=none
+         18 hand-over member=LEGION-3 with-run=true tree=LEGION-3 generation=2 status=in_progress phase=implementing last-row=15
+         18 race-row id=3 what=catch-up generation=1 launch=1 names=2 resends=0 answer=receipt-timeout during=the hand-over of LEGION-3 beside its parent ran=true [the issue left the tree the publishing catch-up was composed for] outcome=ran and finished
+         18 move issue=LEGION-3 from=LEGION-1 to=LEGION-3 rows-issued-before=10 owes-its-new-tree=none
+         19 race-row id=16 what=catch-up generation=1 launch=1 names=2 resends=1 answer=delivers during=the run of row 14 of LEGION-3 (start architect generation=2 names=0) ran=false [] outcome=error: the notice waits for its architect: legion-legion-legion-1-architect's notice row 16 waits behind its row 4
+         20 launch-refusal=false architect=ready
+         21 re-admit generation=2 start-row=17 names=0
+         22 ready tree=LEGION-1 launch=1 state=ready
+         23 run-row id=9 issue=LEGION-2 kind=supervise what=start architect generation=2 names=0 outcome=ran and finished
+         24 race-row id=16 what=catch-up generation=1 launch=1 names=2 resends=1 answer=receipt-timeout during=the run of row 14 of LEGION-3 (start architect generation=2 names=0) ran=false [] outcome=ran and finished
+         25 run-row id=5 issue=LEGION-1 kind=supervise what=suspend architect generation=1 names=0 outcome=ran and finished
+         26 race-row id=18 what=catch-up generation=2 launch=1 names=2 resends=0 answer=receipt-timeout during=the run of row 10 of LEGION-2 (start planner generation=2 names=0) ran=false [] outcome=error: the notice waits for its architect: legion-legion-legion-1-architect's notice row 18 waits behind its row 4
+         27 launch-refusal=true architect=ready
+         28 ready tree=LEGION-2 launch=1 state=ready
+         29 restart claims=2 architect=ready
+         30 launch-refusal=false architect=ready
+         31 launch-refusal=true architect=ready
+         32 forget-failure=true
+         33 launch-refusal=false architect=ready
+         34 restart claims=2 architect=ready
+         35 publisher=receipt-timeout
+         36 ready-fact tree=LEGION-2 launch=1 catch-up-row=19
+         37 publisher=refused
+         38 run-row id=14 issue=LEGION-3 kind=supervise what=start architect generation=2 names=0 outcome=ran and finished
+         39 restart claims=3 architect=ready
+         40 ready tree=LEGION-2 launch=1 state=ready
+         41 run-together rows=2 [id=15 issue=LEGION-3 what=start implementer generation=2 names=0 outcome=ran and finished | id=19 issue=LEGION-2 what=catch-up generation=2 launch=1 names=0 resends=0 outcome=ran and finished]
+         42 run-together rows=2 [id=4 issue=LEGION-4 what=child-status outcome=ran and finished | id=17 issue=LEGION-1 what=start architect generation=2 names=0 outcome=ran and finished]
+         43 ready tree=LEGION-1 launch=1 state=ready
+         44 restart claims=4 architect=ready
+         45 run-together rows=2 [id=10 issue=LEGION-2 what=start planner generation=2 names=0 outcome=ran and finished | id=20 issue=LEGION-1 what=catch-up generation=2 launch=1 names=0 resends=0 outcome=error: the notice waits for its architect: legion-legion-legion-1-architect's notice row 20 waits behind its row 18]
+         46 launch-refusal=true architect=ready
+         47 launch-refusal=false architect=ready
+         48 run-together rows=2 [id=18 issue=LEGION-1 what=catch-up generation=2 launch=1 names=2 resends=0 outcome=ran and finished | id=20 issue=LEGION-1 what=catch-up generation=2 launch=1 names=0 resends=0 outcome=error: the notice waits for its architect: legion-legion-legion-1-architect's notice row 20 waits behind its row 18]
+         49 restart claims=5 architect=ready
+         50 forget-failure=false
+         51 ready tree=LEGION-2 launch=1 state=ready
+         52 launch-refusal=true architect=ready
+         53 forget-failure=true
+         54 run-row id=20 issue=LEGION-1 kind=notice what=catch-up generation=2 launch=1 names=0 resends=0 outcome=ran and finished
+         55 forget-failure=false
+         56 launch-refusal=false architect=ready
+         57 ready tree=LEGION-1 launch=1 state=ready
+         58 forget-failure=true
+         59 park status=done lingers=true generation=2 suspend-row=21
+         60 forget-failure=false
+         61 ready tree=LEGION-3 launch=1 state=ready
+         62 restart claims=5 architect=ready
+         63 run-row id=21 issue=LEGION-1 kind=supervise what=suspend architect generation=2 names=0 outcome=ran and finished
+         64 re-admit generation=3 start-row=22 names=2
+         65 run-row id=22 issue=LEGION-1 kind=supervise what=start architect generation=3 names=2 outcome=ran and finished
+         66 restart claims=5 architect=launching
+         67 park status=backlog lingers=false generation=3 suspend-row=23
+         68 launch-refusal=true architect=launching
+         69 forget-failure=true
+         70 todo-wait generation=3 waits=true
+         71 decide ref=dispatch://LEGION-1/ask/ask-0003 issue=LEGION-1 tree=LEGION-1 by=user:alice kind=ask-resolved outcome=kept kept=true
+         72 run-row id=23 issue=LEGION-1 kind=supervise what=suspend architect generation=3 names=0 outcome=error: suspend claim legion-legion-legion-1-architect: the suspension is held for the agent's turn to end
+         73 ready-fact tree=LEGION-3 launch=1 catch-up-row=24
+         74 restart claims=5 architect=launching
+         75 decide ref=dispatch://LEGION-1/ask/ask-0004 issue=LEGION-1 tree=LEGION-1 by=user:alice kind=ask-resolved outcome=kept kept=true
+         76 publisher=receipt-timeout
+         77 run-together rows=2 [id=23 issue=LEGION-1 what=suspend architect generation=3 names=0 outcome=error: suspend claim legion-legion-legion-1-architect: the suspension is held for the agent's turn to end | id=24 issue=LEGION-3 what=catch-up generation=2 launch=1 names=0 resends=0 outcome=ran and finished]
+         78 run-row id=25 issue=LEGION-3 kind=notice what=catch-up generation=2 launch=1 names=0 resends=1 outcome=ran, finish lost to a crash
+         79 restart claims=5 architect=launching
+         80 publisher=denied
+         81 ready tree=LEGION-3 launch=1 state=ready
+         82 publisher=denied
+         83 run-row id=23 issue=LEGION-1 kind=supervise what=suspend architect generation=3 names=0 outcome=error: suspend claim legion-legion-legion-1-architect: the suspension is held for the agent's turn to end
+         84 run-row id=25 issue=LEGION-3 kind=notice what=catch-up generation=2 launch=1 names=0 resends=1 outcome=ran and finished
+         85 decide ref=dispatch://LEGION-1/ask/ask-0005 issue=LEGION-1 tree=LEGION-1 by=user:bob kind=ask-answered outcome=kept kept=true
+         86 run-row id=23 issue=LEGION-1 kind=supervise what=suspend architect generation=3 names=0 outcome=error: suspend claim legion-legion-legion-1-architect: the suspension is held for the agent's turn to end
+         87 decide ref=dispatch://LEGION-1/ask/ask-0006 issue=LEGION-1 tree=LEGION-1 by=user:bob kind=ask-answered outcome=kept kept=true
+         88 run-row id=23 issue=LEGION-1 kind=supervise what=suspend architect generation=3 names=0 outcome=error: suspend claim legion-legion-legion-1-architect: the suspension is held for the agent's turn to end
+         89 run-row id=23 issue=LEGION-1 kind=supervise what=suspend architect generation=3 names=0 outcome=error: suspend claim legion-legion-legion-1-architect: the suspension is held for the agent's turn to end
+         90 publisher=delivers
+         91 decide ref=dispatch://LEGION-1/ask/ask-0007 issue=LEGION-1 tree=LEGION-1 by=user:bob kind=ask-resolved outcome=kept kept=true
+         92 launch-refusal=false architect=launching
+         93 ready tree=LEGION-1 launch=2 state=suspended
+         94 launch-refusal=true architect=suspended
+         95 re-admit generation=4 start-row=26 names=5
+         96 publisher=delivers
+         97 forget-failure=false
+         98 decide ref=dispatch://LEGION-1/ask/ask-0008 issue=LEGION-1 tree=LEGION-1 by=user:bob kind=ask-resolved outcome=sent kept=true
+         99 park status=backlog lingers=false generation=4 suspend-row=28
+        100 decide ref=dispatch://LEGION-1/ask/ask-0009 issue=LEGION-1 tree=LEGION-1 by=user:bob kind=ask-answered outcome=sent kept=true
+        101 restart claims=5 architect=suspended
+        102 ready tree=LEGION-3 launch=1 state=ready
+        103 restart claims=5 architect=suspended
+        104 run-row id=23 issue=LEGION-1 kind=supervise what=suspend architect generation=3 names=0 outcome=ran and finished
+        105 decide ref=dispatch://LEGION-1/ask/ask-0010 issue=LEGION-1 tree=LEGION-1 by=user:alice kind=ask-resolved outcome=sent kept=true
+        106 ready tree=LEGION-3 launch=1 state=ready
+        107 restart claims=5 architect=suspended
+        108 restart claims=5 architect=suspended
+        109 forget-failure=true
+        110 ready tree=LEGION-2 launch=1 state=ready
+        111 claim-failed tree=LEGION-1 launch=4 refusals=2 notice-row=32
+        111 run-together rows=2 [id=28 issue=LEGION-1 what=suspend architect generation=4 names=0 outcome=ran and finished | id=26 issue=LEGION-1 what=start architect generation=4 names=5 outcome=error: resume claim legion-legion-legion-1-architect: tester: no process could be opened for the claim]
+        112 restart claims=5 architect=failed
+        113 decide ref=dispatch://LEGION-1/ask/ask-0011 issue=LEGION-1 tree=LEGION-1 by=user:alice kind=ask-answered outcome=sent kept=true
+        114 forget-failure=false
+        115 run-together rows=2 [id=26 issue=LEGION-1 what=start architect generation=4 names=5 outcome=error: retry claim legion-legion-legion-1-architect: tester: no process could be opened for the claim | id=31 issue=LEGION-1 what=worker-died outcome=ran and finished]
+        116 ready tree=LEGION-3 launch=1 state=ready
+        117 run-row id=26 issue=LEGION-1 kind=supervise what=start architect generation=4 names=5 outcome=error: retry claim legion-legion-legion-1-architect: tester: no process could be opened for the claim
+        118 run-row id=26 issue=LEGION-1 kind=supervise what=start architect generation=4 names=5 outcome=error: retry claim legion-legion-legion-1-architect: tester: no process could be opened for the claim
+        119 launch-refusal=false architect=failed
+        120 run-row id=26 issue=LEGION-1 kind=supervise what=start architect generation=4 names=5 outcome=error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending
+        121 run-row id=26 issue=LEGION-1 kind=supervise what=start architect generation=4 names=5 outcome=error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending
+        122 ready tree=LEGION-1 launch=11 state=ready
+        123 restart-streaming tree=LEGION-1 claims=5 architect=ready: its agent answers get_state in a turn
+        124 ready-fact tree=LEGION-1 launch=11 catch-up-row=26
+        125 re-admit generation=5 start-row=34 names=4
+        126 ready tree=LEGION-3 launch=1 state=ready
+        127 run-row id=34 issue=LEGION-1 kind=supervise what=start architect generation=5 names=4 outcome=error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending
+        128 run-together rows=2 [id=26 issue=LEGION-1 what=start architect generation=4 names=5 outcome=ran and finished | id=34 issue=LEGION-1 what=start architect generation=5 names=4 outcome=error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending]
+        129 run-together rows=2 [id=35 issue=LEGION-1 what=catch-up generation=5 launch=11 names=5 resends=0 outcome=ran and finished | id=34 issue=LEGION-1 what=start architect generation=5 names=4 outcome=error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending]
+        129 told ref=dispatch://LEGION-1/ask/ask-0003 generation=5 tree=LEGION-1 issue-tree=LEGION-1 by=the catch-up published under legion-outbox:35
+        129 told ref=dispatch://LEGION-1/ask/ask-0004 generation=5 tree=LEGION-1 issue-tree=LEGION-1 by=the catch-up published under legion-outbox:35
+        129 told ref=dispatch://LEGION-1/ask/ask-0005 generation=5 tree=LEGION-1 issue-tree=LEGION-1 by=the catch-up published under legion-outbox:35
+        129 told ref=dispatch://LEGION-1/ask/ask-0006 generation=5 tree=LEGION-1 issue-tree=LEGION-1 by=the catch-up published under legion-outbox:35
+        129 told ref=dispatch://LEGION-1/ask/ask-0007 generation=5 tree=LEGION-1 issue-tree=LEGION-1 by=the catch-up published under legion-outbox:35
+        130 ready tree=LEGION-2 launch=1 state=ready
+        131 restart-streaming tree=LEGION-1 claims=5 architect=ready: its agent answers get_state in a turn
+        132 forget-failure=true
+        133 restart-streaming tree=LEGION-1 claims=5 architect=ready: its agent answers get_state in a turn
+        134 restart claims=5 architect=ready
+        135 forget-failure=false
+        136 run-row id=34 issue=LEGION-1 kind=supervise what=start architect generation=5 names=4 outcome=error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending
+        137 launch-refusal=true architect=ready
+        138 restart-streaming tree=LEGION-1 claims=5 architect=ready: its agent answers get_state in a turn
+        139 foreign-turn tree=LEGION-1 delivery=outbox:22 state=idle pending=true
+        140 park status=backlog lingers=false generation=5 suspend-row=36
+        141 run-row id=36 issue=LEGION-1 kind=supervise what=suspend architect generation=5 names=0 outcome=ran and finished
+        142 ready tree=LEGION-2 launch=1 state=ready
+        143 decide ref=dispatch://LEGION-1/ask/ask-0012 issue=LEGION-1 tree=LEGION-1 by=user:bob kind=ask-resolved outcome=sent kept=true
+        144 todo-wait generation=5 waits=true
+        145 launch-refusal=false architect=suspended
+        146 decide ref=dispatch://LEGION-1/ask/ask-0013 issue=LEGION-1 tree=LEGION-1 by=user:alice kind=ask-resolved outcome=kept kept=true
+        147 re-admit generation=6 start-row=38 names=2
+        148 forget-failure=true
+        149 run-together rows=2 [id=34 issue=LEGION-1 what=start architect generation=5 names=4 outcome=ran and finished | id=38 issue=LEGION-1 what=start architect generation=6 names=2 outcome=error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending]
+        150 park status=backlog lingers=false generation=6 suspend-row=40
+        151 run-together rows=2 [id=38 issue=LEGION-1 what=start architect generation=6 names=2 outcome=error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending | id=40 issue=LEGION-1 what=suspend architect generation=6 names=0 outcome=error: suspend claim legion-legion-legion-1-architect: the suspension is held for the agent's turn to end]
+        152 run-together rows=2 [id=40 issue=LEGION-1 what=suspend architect generation=6 names=0 outcome=error: suspend claim legion-legion-legion-1-architect: the suspension is held for the agent's turn to end | id=39 issue=LEGION-1 what=catch-up generation=6 launch=11 names=4 resends=0 outcome=error: tell the decisions the catch-up of LEGION-1 named: tester: the forget's transaction did not commit]
+        152 told ref=dispatch://LEGION-1/ask/ask-0008 generation=6 tree=LEGION-1 issue-tree=LEGION-1 by=the catch-up published under legion-outbox:39
+        152 told ref=dispatch://LEGION-1/ask/ask-0009 generation=6 tree=LEGION-1 issue-tree=LEGION-1 by=the catch-up published under legion-outbox:39
+        152 told ref=dispatch://LEGION-1/ask/ask-0010 generation=6 tree=LEGION-1 issue-tree=LEGION-1 by=the catch-up published under legion-outbox:39
+        152 told ref=dispatch://LEGION-1/ask/ask-0011 generation=6 tree=LEGION-1 issue-tree=LEGION-1 by=the catch-up published under legion-outbox:39
+        153 todo-wait generation=6 waits=true
+        154 launch-refusal=true architect=launching
+        155 ready tree=LEGION-1 launch=12 state=suspended
+        156 launch-refusal=false architect=suspended
+        157 decide ref=dispatch://LEGION-1/ask/ask-0014 issue=LEGION-1 tree=LEGION-1 by=user:bob kind=ask-answered outcome=kept kept=true
+        158 forget-failure=false
+        159 run-together rows=3 [id=39 issue=LEGION-1 what=catch-up generation=6 launch=11 names=4 resends=0 outcome=ran and finished | id=40 issue=LEGION-1 what=suspend architect generation=6 names=0 outcome=error: suspend claim legion-legion-legion-1-architect: the suspension is held for the agent's turn to end | id=38 issue=LEGION-1 what=start architect generation=6 names=2 outcome=error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending]
+        160 run-row id=38 issue=LEGION-1 kind=supervise what=start architect generation=6 names=2 outcome=error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending
+        161 re-admit generation=7 start-row=41 names=1
+        162 forget-failure=true
+        163 restart claims=5 architect=launching
+        164 decide ref=dispatch://LEGION-1/ask/ask-0015 issue=LEGION-1 tree=LEGION-1 by=user:bob kind=ask-resolved outcome=sent kept=true
+        165 run-together rows=3 [id=41 issue=LEGION-1 what=start architect generation=7 names=1 outcome=error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending | id=38 issue=LEGION-1 what=start architect generation=6 names=2 outcome=ran and finished | id=40 issue=LEGION-1 what=suspend architect generation=6 names=0 outcome=ran and finished]
+        166 launch-refusal=true architect=launching
+        167 decide ref=dispatch://LEGION-1/ask/ask-0016 issue=LEGION-1 tree=LEGION-1 by=user:bob kind=ask-answered outcome=sent kept=true
+        168 ready tree=LEGION-3 launch=1 state=ready
+        169 run-row id=41 issue=LEGION-1 kind=supervise what=start architect generation=7 names=1 outcome=error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending
+        170 restart claims=5 architect=launching
+        171 launch-refusal=false architect=launching
+        172 publisher=delivery-failed
+        173 launch-refusal=true architect=launching
+        174 ready tree=LEGION-3 launch=1 state=ready
+        175 forget-failure=false
+        176 race-row id=43 what=catch-up generation=7 launch=13 names=3 resends=0 answer=delivers during=the run of row 41 of LEGION-1 (start architect generation=7 names=1) ran=true [error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending] outcome=ran and finished
+        176 told ref=dispatch://LEGION-1/ask/ask-0012 generation=7 tree=LEGION-1 issue-tree=LEGION-1 by=the catch-up published under legion-outbox:43
+        176 told ref=dispatch://LEGION-1/ask/ask-0013 generation=7 tree=LEGION-1 issue-tree=LEGION-1 by=the catch-up published under legion-outbox:43
+        176 told ref=dispatch://LEGION-1/ask/ask-0015 generation=7 tree=LEGION-1 issue-tree=LEGION-1 by=the catch-up published under legion-outbox:43
+        177 run-row id=41 issue=LEGION-1 kind=supervise what=start architect generation=7 names=1 outcome=error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending
+        178 publisher=refused
+        179 restart claims=5 architect=launching
+        180 run-row id=41 issue=LEGION-1 kind=supervise what=start architect generation=7 names=1 outcome=error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending
+        181 park status=backlog lingers=false generation=7 suspend-row=45
+        182 ready tree=LEGION-3 launch=1 state=ready
+        183 ready tree=LEGION-2 launch=1 state=ready
+        184 decide ref=dispatch://LEGION-1/ask/ask-0017 issue=LEGION-1 tree=LEGION-1 by=user:bob kind=ask-resolved outcome=sent kept=true
+        185 ready tree=LEGION-1 launch=13 state=ready
+        186 re-admit generation=8 start-row=47 names=2
+        187 publisher=receipt-timeout
+        188 run-row id=47 issue=LEGION-1 kind=supervise what=start architect generation=8 names=2 outcome=error: deliver to claim legion-legion-legion-1-architect: deliver refused: a delivery is already pending
+        188 told ref=dispatch://LEGION-4/ask/ask-0001 generation=3 tree=LEGION-1 issue-tree=LEGION-1 by=the start task of row 22, prompt outbox:22
+        188 told ref=dispatch://LEGION-1/ask/ask-0002 generation=3 tree=LEGION-1 issue-tree=LEGION-1 by=the start task of row 22, prompt outbox:22
+        189 park status=done lingers=true generation=8 suspend-row=48
+        190 take-back tree=LEGION-1 delivery=outbox:22 waits as M5XKB3K4GQR7J7L6DIDB2CGXU5: the task of row 22, to be sent again
+        190 late-refusal tree=LEGION-1 delivery=outbox:22 pending=M5XKB3K4GQR7J7L6DIDB2CGXU5 state=idle
+        191 forget-failure=true
+        192 forget-failure=false
+        193 restart-streaming tree=LEGION-1 claims=5 architect=idle: its agent answers get_state in a turn
+        194 launch-refusal=false architect=idle
+        195 foreign-turn tree=LEGION-1 delivery=M5XKB3K4GQR7J7L6DIDB2CGXU5 state=idle pending=true
+        196 ready tree=LEGION-2 launch=1 state=ready
+        197 launch-refusal=true architect=idle
+        198 forget-failure=true
+        199 re-admit generation=9 start-row=49 names=0
+        200 ready tree=LEGION-1 launch=13 state=idle
+        200 told ref=dispatch://LEGION-4/ask/ask-0001 generation=3 tree=LEGION-1 issue-tree=LEGION-1 by=the start task of row 22 sent again after the machine took it back, prompt M5XKB3K4GQR7J7L6DIDB2CGXU5
+        200 told ref=dispatch://LEGION-1/ask/ask-0002 generation=3 tree=LEGION-1 issue-tree=LEGION-1 by=the start task of row 22 sent again after the machine took it back, prompt M5XKB3K4GQR7J7L6DIDB2CGXU5
+        201 ready-fact tree=LEGION-1 launch=13 catch-up-row=50
+        202 turn tree=LEGION-1 state=idle pending=false
+        203 publisher=receipt-timeout
+        204 park status=done lingers=true generation=9 suspend-row=51
+        205 forget-failure=false
+        206 ready tree=LEGION-3 launch=1 state=ready
+        207 forget-failure=true
+        208 re-admit generation=10 start-row=52 names=0
+        209 run-row id=49 issue=LEGION-1 kind=supervise what=start architect generation=9 names=0 outcome=ran and finished
+        210 forget-failure=false
+        211 park status=done lingers=true generation=10 suspend-row=53
+        212 run-row id=52 issue=LEGION-1 kind=supervise what=start architect generation=10 names=0 outcome=ran and finished
+        213 launch-refusal=false architect=idle
+        214 close tree=LEGION-1 generation=10 owed=dispatch://LEGION-1/ask/ask-0014; dispatch://LEGION-1/ask/ask-0016; dispatch://LEGION-1/ask/ask-0017
+        215 re-admit generation=11 start-row=68 names=0
+        216 run-row id=53 issue=LEGION-1 kind=supervise what=suspend architect generation=10 names=0 outcome=ran and finished
+        217 restart claims=5 architect=idle
+        218 run-together rows=2 [id=41 issue=LEGION-1 what=start architect generation=7 names=1 outcome=ran and finished | id=48 issue=LEGION-1 what=suspend architect generation=8 names=0 outcome=ran and finished]
+        219 ready tree=LEGION-2 launch=1 state=ready
+        220 run-row id=45 issue=LEGION-1 kind=supervise what=suspend architect generation=7 names=0 outcome=ran and finished
+        221 ready tree=LEGION-3 launch=1 state=ready
+        222 run-together rows=3 [id=68 issue=LEGION-1 what=start architect generation=11 names=0 outcome=ran and finished | id=47 issue=LEGION-1 what=start architect generation=8 names=2 outcome=ran and finished | id=69 issue=LEGION-1 what=catch-up generation=11 launch=13 names=1 resends=0 outcome=ran and finished]
+        223 launch-refusal=true architect=idle
+        224 launch-refusal=false architect=idle
+        225 ready tree=LEGION-1 launch=13 state=idle
+        226 run-together rows=2 [id=51 issue=LEGION-1 what=suspend architect generation=9 names=0 outcome=ran and finished | id=71 issue=LEGION-1 what=catch-up generation=11 launch=13 names=1 resends=1 outcome=ran and finished]
+        226 told ref=dispatch://LEGION-1/ask/ask-0014 generation=11 tree=LEGION-1 issue-tree=LEGION-1 by=the catch-up published under legion-outbox:69
+        227 run-row id=72 issue=LEGION-1 kind=notice what=catch-up generation=11 launch=13 names=3 resends=0 outcome=ran, finish lost to a crash
+        228 publisher=no-holder
+        229 park status=backlog lingers=false generation=11 suspend-row=74
+        230 run-together rows=2 [id=73 issue=LEGION-1 what=catch-up generation=11 launch=13 names=3 resends=1 outcome=error: the notice waits for its architect: legion-legion-legion-1-architect's notice row 73 waits behind its row 72 | id=72 issue=LEGION-1 what=catch-up generation=11 launch=13 names=3 resends=0 outcome=error: the notice waits for its architect: legion-legion-legion-1-architect holds no role for LEGION-1: publish notice to notifications.role.legion-legion-legion-1-architect: listener returned 404 Not Found: no live session holds the role]
+        231 publisher=refused
+        232 re-admit generation=12 start-row=75 names=0
+        232 race-row id=72 what=catch-up generation=11 launch=13 names=3 resends=0 answer=delivers during=the re-admission of LEGION-1 ran=true [the root stands at generation 12] outcome=ran and finished

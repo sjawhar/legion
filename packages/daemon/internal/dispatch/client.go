@@ -271,6 +271,9 @@ func (c *HTTPClient) Approval(ctx context.Context, artifactID string) (Approval,
 	if response.Approval.Seq != nil {
 		approved.Seq = *response.Approval.Seq
 	}
+	if response.Approval.By != nil {
+		approved.By = Actor(*response.Approval.By)
+	}
 	// Only an open request is named: Dispatch names the ask an older review answered too, which is
 	// no request anyone is asked to act on now.
 	if response.Approval.State == "awaiting" {
@@ -505,6 +508,8 @@ type approvalResponse struct {
 	// that predates the sequence, or a review recorded before it kept one, sends no seq.
 	At  *string `json:"at"`
 	Seq *int64  `json:"seq"`
+	// By is who gave the review State shows, and is absent where Dispatch names nobody.
+	By *actor `json:"by"`
 }
 
 type actor struct {

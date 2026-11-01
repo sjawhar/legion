@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-251",
+  "previousHandoff": "a54452542a12f764715de0c73d0190660cd526c0",
+  "round": 27,
+  "headSha": "56b6404b40e1",
+  "handoffHead": "5b31b3b7882744746ec35798def091e21065a2e4",
+  "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran.",
+  "scope": "The one code commit since round 26, 56b6404b (the reviewer's), changes comments in packages/daemon/internal/workflow/gate.go (every changed line there is a comment; 0 non-comment lines) and the walk step in skills/legion-controller/references/parked-decisions.md. The implementer's round made no code change: its one-App devbox attempt was booted and reverted. So this round checks that the comment and skill change is true and runs the bare gates.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "The implementer's boot finding is the daemon's own rule: workflow.go's appLoginsAtBoot refuses one App in both slots ('the workflow needs two different Apps'). The A3/A4 devbox proof therefore needs the review App 5341243's key, which waits on the operator through the architect and controller. That is a prerequisite of acceptance, not a defect of this change."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The walk now reads the field the daemon reads: the root's parent",
+      "surface": "Dispatch's issue API, live, and the daemon's dispatch client",
+      "command": "curl $DISPATCH_URL/api/v1/issues/INFRA-251 and /INFRA-168 | jq '{key, parent, primary_artifact_id}'; grep the client's Issue struct",
+      "observed": "INFRA-251: parent 'INFRA-168', primary_artifact_id 5493be7d-.... INFRA-168: parent null, primary_artifact_id a0d2035b-.... The daemon's client decodes the same `json:\"parent\"` field (packages/daemon/internal/dispatch/client.go:412, :426), and personHandoverQueues tests view.Parent != nil. The walk's other two conditions (artifact_id == primary_artifact_id; reason not prefixed 'Carried forward from the approval of version') are unchanged from round 26's line-by-line match. 'When that read fails, skip nothing: judge the approval' errs toward a redundant judgement, never a skipped decision. The linked triage.md#triage-a-root step 2 holds the events curl the walk cites (triage.md:32).",
+      "headSha": "56b6404b40e1",
+      "negativeControl": "INFRA-251 itself shows a non-null parent, so its approval would be judged, not skipped."
+    },
+    {
+      "criterion": "Bare gates: the code still builds and its handover tests pass; CI at the code head; no tester files on the branch",
+      "surface": "go vet and go test in packages/daemon; GitHub checks",
+      "command": "go vet ./internal/workflow/; go test -run 'PersonsApproval|AHandoverApprovalTheGate|ACarriedCopyOfAParkedRootsGate' ./internal/workflow/; gh api commits/<d94e8bfd>/check-runs; jj file list -r 5b31b3b7 'glob:**/zz_tester_*'",
+      "observed": "vet clean, and the workflow handover tests ok. CI at d94e8bfd (the push carrying 56b6404b): every lane success, ci-ok success, test and lint among them. 5b31b3b7 is a handoff-only push with skip-checks: true, so it ran no CI and that verdict carries to it. No zz_tester_* file on the branch.",
+      "headSha": "56b6404b40e1",
+      "negativeControl": "Not applicable."
+    }
+  ],
+  "ci": "d94e8bfd (code 56b6404b): ci-ok success, every lane success. 5b31b3b7: handoff-only with skip-checks, no runs. Read 2026-11-01T22:36Z. GitHub: MERGEABLE, BLOCKED."
+}
