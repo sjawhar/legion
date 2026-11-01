@@ -1050,6 +1050,26 @@ admission keeps them all, and an `ARTIFACT_NOT_FOUND` admission removes rows for
 is gone. The connection indicator names saved edits while disconnected and warns when IndexedDB
 cannot retain them across a reload.
 
+The server refuses one browser's edit two ways, and `connection.ts` answers each by its close code
+(`packages/contracts`). `4413` (`DOCUMENT_TOO_LARGE_CLOSE_CODE`) is permanent - the edit would take
+the document past a bound of its own, the server could not merge it quickly enough
+(`DOC_TOO_TANGLED`), or the document must be rebuilt before it can take it
+(`DOC_NEEDS_REBUILD`) - so the provider is stopped, the refused `Update` frame's saved row alone is
+dropped (`dropRefused`, after this admission's restore has settled; a refused `SyncStep2` names no
+row, so its rows stay and the replay after the rebuild finds the one the server refuses), and
+`ProofDocument` tears the editor down and admits again from a fresh read, since the refused text is
+still in the connection's document and any reconnect would send it again. The notice the reader
+sees is the close reason's own sentence (`refusedEditNotice`), dismissible, and says the other
+edits are kept; for `DOC_NEEDS_REBUILD` it carries the rebuild offer, a button that confirms first
+and then calls `POST /api/v1/artifacts/{id}/rebuild` with the editor suspended, as the
+`409 DOCUMENT_UNLOADABLE` repair state does. `4503` (`DOCUMENT_BUSY_CLOSE_CODE`) is transient - the
+memory budget over the documents the server holds open is full - so nothing is dropped and the
+provider's own reconnect stands: the page shows that Dispatch is out of room and keeps trying,
+the edits stay in the document and in the browser's saved rows, and the notice goes once a frame
+from this browser applies again (`onBusy(false)`, a `SyncStatus(1)` the socket reads). A
+read-only admission's promise is unchanged by both: it keeps every saved row, since a plain
+not-applied answer drops nothing.
+
 The one exception is a page being left: from `beforeunload` no failure reloads it, because WebKit
 and Firefox cancel the chunk downloads in flight when a navigation starts (WebKit also refuses new
 ones), and a reload then would replace the reader's navigation with a reload of the page they are

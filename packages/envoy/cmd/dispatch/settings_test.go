@@ -1515,6 +1515,54 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": ""})), "DISPATCH_AZURE_FEDERATED_TOKEN_FILE missing")
 			refusedWith(t, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": missing}, "DISPATCH_AZURE_FEDERATED_TOKEN_FILE set, but DISPATCH_EMBEDDER is unset")
 		},
+		"DISPATCH_MEMORY_TRACE": func(t *testing.T) {
+			directory := t.TempDir()
+			path := filepath.Join(directory, "memory.trace")
+			ctx, stop := context.WithCancel(context.Background())
+			t.Cleanup(stop)
+			startMemoryTrace(ctx, envGetter(map[string]string{"DISPATCH_MEMORY_TRACE": path}).get("DISPATCH_MEMORY_TRACE"))
+			var line string
+			for deadline := time.Now().Add(30 * time.Second); line == ""; {
+				if time.Now().After(deadline) {
+					t.Fatalf("the trace wrote no sample to %s", path)
+				}
+				time.Sleep(memoryTraceInterval)
+				written, err := os.ReadFile(path)
+				if err != nil && !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("read the trace: %v", err)
+				}
+				if sample, ended := strings.CutSuffix(string(written), "\n"); ended {
+					line, _, _ = strings.Cut(sample, "\n")
+				}
+			}
+			fields := map[string]int64{}
+			for _, field := range strings.Fields(line) {
+				name, value, _ := strings.Cut(field, "=")
+				if number, err := strconv.ParseInt(value, 10, 64); err == nil {
+					fields[name] = number
+				}
+			}
+			// The whole of what the runtime has mapped, the class of it this kernel may still
+			// count resident, and the process's own figure, each read as a number.
+			for _, field := range []string{"total", "heap_released", "heap_objects", "go_memory_limit", "heap_goal", "vmrss"} {
+				if _, read := fields[field]; !read {
+					t.Errorf("the trace's sample has no %s as a number: %s", field, line)
+				}
+			}
+			if fields["total"] < fields["heap_objects"] || fields["heap_objects"] <= 0 {
+				t.Errorf("the trace's sample has %d bytes of heap objects within %d mapped: %s", fields["heap_objects"], fields["total"], line)
+			}
+			if !strings.HasPrefix(line, "time=") {
+				t.Errorf("the trace's sample does not open with the time it was taken: %s", line)
+			}
+			// Unset, the setting writes no file at all: the trace is off, not empty.
+			startMemoryTrace(ctx, envGetter(nil).get("DISPATCH_MEMORY_TRACE"))
+			time.Sleep(2 * memoryTraceInterval)
+			entries, err := os.ReadDir(directory)
+			if err != nil || len(entries) != 1 || entries[0].Name() != "memory.trace" {
+				t.Errorf("with the setting unset the directory holds %v (%v), want the one trace the set path named", entries, err)
+			}
+		},
 		"DISPATCH_WEB_DIST": func(t *testing.T) {
 			if dir, err := defaultWebDistDir(resolveWith(t, map[string]string{"DISPATCH_WEB_DIST": "/srv/dispatch/dist"}).WebDist); err != nil || dir != "/srv/dispatch/dist" {
 				t.Errorf("web dist = %q, %v", dir, err)

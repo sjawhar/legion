@@ -64,8 +64,15 @@ Each item below names a variable, then its purpose.
   `POST /api/v1/agents/{session_id}/stream/_test/publish` (human only) feeds the in-memory agent relay, with `as=drop` ending agent views as `dropped`;
   `POST /api/v1/artifacts/_test/quiesce` closes every live document and waits for settlements;
   `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses;
+  `POST /api/v1/artifacts/_test/room-budget` sets the open documents' memory budget, so a browser test can fill it;
+  `GET /api/v1/artifacts/{id}/_test/live` answers whether the document's room is resident here;
+  `POST /api/v1/artifacts/{id}/_test/hold-admission` makes the document's next socket wait before its admission;
+  `POST /api/v1/artifacts/{id}/_test/refuse-next-update` makes the document's room refuse the next update a read-write browser sends it;
+  `POST /api/v1/artifacts/{id}/_test/used-up` leaves the document a history whose re-scan uses up a room's scan total;
+  `POST /api/v1/artifacts/{id}/_test/tangled` leaves it one ending in a tangle no one apply of a browser's may scan through;
   and `POST /api/v1/writes/_test/slow` `{method, path, delay_ms}` makes every keyed run of that method and exact path wait `delay_ms` once its key is claimed.
   The first four act on every process serving the database, whichever one the call reached (Running more than one process, below), and the flag costs each process one more Postgres connection outside the shared pool, the one those hooks listen on.
+  The routes table in `AGENTS.md` has each one's rules.
   Leave unset in every real deployment.
 
 - `DISPATCH_DEV_SIGNIN`
@@ -113,6 +120,21 @@ Each item below names a variable, then its purpose.
   Where meaning search embeds, and with what credential.
   Every process of one deployment takes the same values, and a model change on Azure takes a new deployment name, since each vector records an identity that names the deployment and not the model behind it (Search, below).
   A model service or Entra that is down refuses no boot: search answers by keyword and says so, and the queue retries.
+
+- `DISPATCH_MEMORY_TRACE`
+
+  Path of a file the server writes one line of memory figures to every 50 ms, for telling a pod that is near its memory limit from one the Go runtime is holding comfortably inside it.
+  Each line is `key=value` pairs: the time it was taken;
+  every class `total` is the sum of (`heap_objects`, `heap_unused`, `heap_free`, `heap_released`, `heap_stacks`, `os_stacks`, the `metadata_*` classes, `profiling_buckets` and `other`);
+  `go_memory_limit` and `heap_goal`;
+  `gc_cycles` and `gc_limiter_last_enabled_cycle`, which names the cycle the collector last spent more than half the processor on;
+  `goroutines`;
+  the process's `vmrss`, `rssanon`, `rssfile` and `vmhwm` from `/proc/self/status`, each `-1` where the kernel keeps no such line;
+  and the container's `cgroup_memory_current`.
+  The limit the boot sets bounds `total - heap_released`, so that is the figure to compare with the container's:
+  a `vmrss` past the limit while `total - heap_released` is under it is memory the runtime has handed back that this kernel still counts (gVisor does: it drops a page only where the `madvise(MADV_DONTNEED)` that released it covered 2 MiB or more, and the scavenger releases in smaller pieces).
+  A sample costs two small file reads and one `runtime/metrics` read, and an hour of tracing is some 70,000 lines and 35 MB;
+  unset, nothing is sampled and no file is written.
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot with comma-separated `owner/repo=KEY` entries.
 Existing dashboard mappings take precedence over this seed:
@@ -1997,6 +2019,42 @@ Each item below names a path with its method and identity, then its purpose.
 
   Write the crafted malformed tree e2e uses; not mounted otherwise.
 
+- `/api/v1/artifacts/{id}/_test/live` (GET; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  Answer `{live}`, whether the document's room is resident in this server, loading and rebuilding nothing;
+  the real-process memory drives read it.
+  Not mounted otherwise.
+
+- `/api/v1/artifacts/{id}/_test/hold-admission` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  Make the document's next socket wait `ms` (0 to 120000; 0 takes the hold back) before its admission, as a browser in a burst waits for its room;
+  the browser test of the editor's first sync uses it.
+  Not mounted otherwise.
+
+- `/api/v1/artifacts/{id}/_test/refuse-next-update` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  Make the document's room refuse the next update a read-write browser sends it, as it refuses one holding content the editor never sends, so a browser test can drive `4413 DOC_UPDATE_REFUSED` from the editor, which sends no such content.
+  One update is armed, and the update that meets it takes the arming; arming another document forgets the first.
+  Not mounted otherwise.
+
+- `/api/v1/artifacts/_test/room-budget` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  Set the open documents' memory budget to `bytes`, or restore the real one with `0` - the share of this process's Go memory limit the budget takes, 2 GiB at the 4 GiB limit the figures are calibrated on and 16 GiB on the production pod - and answer the budget it set, so a browser test can fill the budget with a few small documents and drive the editor's handling of `4503 DOC_BUSY`;
+  the real-process drives use the real budget.
+  Not mounted otherwise.
+
+- `/api/v1/artifacts/{id}/_test/used-up` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  Close the document's room and append a stored history whose re-scan uses up a room's 1,000,000-item scan total, so the next room it loads is used up and a browser test can drive `4413 DOC_NEEDS_REBUILD` and the rebuild the dashboard offers without typing the scans a real room takes.
+  Not mounted otherwise.
+
+- `/api/v1/artifacts/{id}/_test/tangled` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
+
+  Close the document's room and append a stored history ending in a tangle - tens of thousands of items chained onto the end of its last text - that no one apply of a browser's may scan through, so an edit a browser made at that place before the tangle arrived is refused `4413 DOC_TOO_TANGLED` rather than `DOC_NEEDS_REBUILD`:
+  the tangle costs the room's load about one scan an item, which leaves far more of its 1,000,000-item scan total than one apply may scan.
+  The hook answers an error rather than leave a tangle an insert at its head scans within the items one unweighed apply may (`scanCeiling`), or one that leaves the room near its scan total.
+  Not mounted otherwise.
+
 - `/api/v1/live/_test/disconnect` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
 
   Close every open live socket on every process with 1012, as a restart does; not mounted otherwise.
@@ -2440,17 +2498,21 @@ Each item below names a path with its method and identity, then its purpose.
 
 - `/api/v1/artifacts/{id}/rebuild` (POST; cookie or trusted header (human only))
 
-  Rebuild a document only when its durable history cannot load (`409 DOCUMENT_UNLOADABLE` on its reads):
-  deletes its document updates, checkpoints, and snapshots, then writes one fresh update from the latest saved version or optional `{markdown}`.
+  Rebuild a document whose durable history no write can change, the recovery from either cap a document can reach:
+  a history that cannot load (`409 DOCUMENT_UNLOADABLE` on its reads), rebuilt from the latest saved version or optional `{markdown}`;
+  and a history that loads but stands so near the decode cap (1,048,576 structs, within a write's smallest replacement of it) or the room's edit-scan total that every write is refused, rebuilt from its own text, unsettled edits included, or optional `{markdown}`.
+  It deletes the document's updates, checkpoints, and snapshots, then writes one fresh update that lists the replaced history's clients as retired, so a browser still holding that history is closed `4413` with reason `DOC_NEEDS_REBUILD` rather than handing it back.
+  A document near a cap whose room this server holds has that room closed first, flushed into the stored history;
+  the browsers connected to it reconnect to the rebuilt document and drop their unsent edits.
   A supplied markdown source that changes the document writes the next immutable version, emits `artifact.version`, and moves an open approval request to that version, where it waits on its agent, as every version does;
   an omitted source keeps the existing latest-version behavior.
   The rebuild, that version, its event and the move commit in one transaction, and every refusal comes before anything is written:
-  a live room is `409 DOCUMENT_LIVE`; a healthy, non-resident document is `409 DOCUMENT_LOADS`;
+  any other document live in this server is `409 DOCUMENT_LIVE`; any other history that loads is `409 DOCUMENT_LOADS`, with or without markdown;
   supplied markdown on a closed issue's document is `409 ISSUE_CLOSED`;
   supplied markdown held to a new document's limits - more than 65,536 elements, or stored as markdown longer than 1 MiB or making more than 65,536 elements - is `413 CAP_EXCEEDED`.
   The latest saved version rebuilds whatever it weighs, except a document whose tree is more items than ygo decodes in one update (1,048,576), which no document can hold and which is `413 CAP_EXCEEDED` naming the count, from either source.
   A refused or failed rebuild leaves the document unchanged.
-  It answers the report, whose `source_version` is the version the rebuilt document holds: its latest saved version, or the version supplied markdown wrote.
+  It answers the report, whose `source_version` is the version the rebuilt document holds: its latest saved version, or the version supplied markdown wrote, and whose `validation_error` says why the history was rebuilt.
 
 - `/api/v1/artifacts/{id}/text` (GET; cookie, trusted header, or bearer)
 
@@ -2654,7 +2716,7 @@ A row holding text in a cell past the table's width is rejected as `TABLE_WIDTH`
 
 ## Element weights
 
-One write's markdown, and the markdown a document stores, make at most 65,536 elements (`pmdoc.MaxDocumentElements`), weighed node by node over the tree goldmark parses, front matter apart.
+One write's markdown, and the markdown a write leaves a document storing, make at most 65,536 elements (`pmdoc.MaxDocumentElements`), weighed node by node over the tree goldmark parses, front matter apart.
 Every route that takes caller markdown refuses past that with `413 CAP_EXCEEDED`, and its message lists these weights, written once in `pmdoc/elements.go` (`weighed`):
 
 | Node | Weight |
@@ -2696,6 +2758,17 @@ What each node type weighs:
 | `image` | an image; its alt text's nodes weigh 1 each | 3 | source, alt, title |
 | `html` | a piece of inline HTML | 2 | the HTML |
 | `footnote_reference` | a footnote reference | 2 | label |
+
+A browser's edits over the document websocket are weighed by the bounds that socket holds, not by
+this count: no element count stands between a keystroke and the room, so a live document can hold
+more than 65,536 elements, and a server write to such a document is refused `413 CAP_EXCEEDED` for
+as long as it would leave it heavier still, until someone shortens it, while a write that leaves it
+no heavier passes and a rebuild from its latest stored version restores it whatever it weighs. What
+a browser is refused instead is `4413 DOC_TOO_LARGE` at the byte bound (1 MiB, with 64 KiB of creep
+past it and 8 KiB of new content in one update at the bound), at the decode cap (1,048,576
+structs), at the 9.5 MiB a document may hold that no rendering shows, and at the heaviest
+whole-state message a browser may hand back (44,936,089 bytes); Document errors below has the rest.
+
 ## Input errors
 
 Each item below names a status and code, then its meaning.
@@ -2787,19 +2860,51 @@ Each item below names a status and code, then its meaning.
 - `409 DOCUMENT_UNLOADABLE`
 
   A document's stored history does not decode, so nothing can read or open it.
-  Rebuild it from its latest saved version (`POST /api/v1/artifacts/{id}/rebuild`); the dashboard offers that rebuild for this code alone.
+  Rebuild it from its latest saved version (`POST /api/v1/artifacts/{id}/rebuild`); the dashboard offers that rebuild for this code, and for the `4413 DOC_NEEDS_REBUILD` close below.
   A room or store that could not serve the document stays `503 DOC_SERVICE_UNAVAILABLE`, which is retried, not rebuilt.
 
 - `409 DOCUMENT_LIVE`
 
-  A rebuild found the document resident in this server:
-  open in an editor, or left by its last editor less than 90 seconds ago (a room stays resident a minute after its last peer leaves, and the sweep that evicts it runs every 30 seconds).
+  A rebuild found the document resident in this server, open in an editor or left by its last editor less than 90 seconds ago (a room stays resident a minute after its last peer leaves, and the sweep that evicts it runs every 30 seconds), and its history far from both caps a rebuild recovers.
   Close its editors and retry two minutes later, or repair a schema-invalid tree by replacing it from markdown.
+  A document near the decode cap or the edit-scan total is not refused for its room: the rebuild closes the room first.
 
 - `409 DOCUMENT_LOADS`
 
-  A rebuild found that the document's durable history loads.
+  A rebuild found that the document's durable history loads and stands far from both the decode cap and the edit-scan total, so a write can still change it.
   Nothing was deleted; replace a schema-invalid document from markdown instead.
+
+- `4413 DOC_TOO_LARGE`
+
+  The document websocket (`/ws/doc/{room}`) refuses one browser's update that would take the document past a bound of its own:
+  it stores and relays nothing of the update and closes that one browser with code `4413` (`DOCUMENT_TOO_LARGE_CLOSE_CODE` and `DOCUMENT_TOO_LARGE_CLOSE_REASON` in `packages/contracts`, generated into Go), leaving every other browser of the room editing.
+  The bounds are the byte bound every server write obeys (1 MiB of rendering; past it an update may still carry 8 KiB of new content, for the editor's own derived writes and for typing, until the rendering has crept 64 KiB past the bound, after which only an update carrying nothing new at all is taken), the decode cap (1,048,576 structs, whatever the update inserts or deletes, since a room holding more could never be loaded again), the 9.5 MiB a document may hold that no rendering shows (margin records, element names and attributes, mark values), and the heaviest whole-state message a browser may hand back, 44,936,089 bytes, which only an update that inserts something is weighed against.
+  The 4400-4499 band is permanent, so the dashboard drops the refused edit, re-reads the document and says so in one sentence, rather than reconnecting into the same refusal.
+
+- `4413 DOC_TOO_TANGLED`
+
+  The same close for an update the server could not merge quickly enough:
+  its apply's conflict scans would pass the scans the room allows that apply - a per-apply ceiling of 400,000 items, or what is left of the room's 1,000,000-item scan total, whichever is less - so it is refused whole and taken back out of the document.
+  Permanent like `DOC_TOO_LARGE`.
+
+- `4413 DOC_NEEDS_REBUILD`
+
+  The same close for an update the document cannot take until it is rebuilt:
+  the room's scan total is used up, where it still takes an update whose scans pass 64 items or fewer so that typing in place goes on, or the browser still holds the edit history a rebuild of the document replaced, which applied would put the old document beside the rebuilt one.
+  The dashboard drops the refused edit and offers the rebuild (`POST /api/v1/artifacts/{id}/rebuild`), as it does for `409 DOCUMENT_UNLOADABLE`.
+
+- `4413 DOC_UPDATE_REFUSED`
+
+  The same close for an update holding content the document does not take:
+  bytes the server's own decoder refuses, or content the Proof editor never sends - a subdocument, a root outside the document's tree and its margin, or a write of the list of clients a rebuild retired - which the server reads from the update's own bytes, without decoding it, and refuses whole, storing and relaying nothing of it.
+  Permanent like `DOC_TOO_LARGE`: the client that sent it would send it again on every reconnect, so the dashboard drops the refused edit and re-reads the document.
+
+- `4503 DOC_BUSY`
+
+  The memory budget over the documents this server holds open is full and no room can be closed:
+  a browser asking for one more document is closed with code `4503` (`DOCUMENT_BUSY_CLOSE_CODE` and `DOCUMENT_BUSY_CLOSE_REASON` in `packages/contracts`) before any room is made for it, once its admission has waited for the sweep it started, and an update that inserts anything into a document already open is closed with it too, whatever it leaves the document's bytes at, since an insert of fewer bytes than it deletes can still add elements.
+  The budget is the share of the server's Go memory limit the open rooms are charged together (2 GiB at the 4 GiB limit the figures are calibrated on, 16 GiB on the production pod; the boot line `dispatch: the document service's memory bounds` names it), and an update that only deletes is admitted while the charges stay within the pressure reserve past that limit - a share of the same limit, 256 MiB of the calibration - so a full document can still be cut.
+  The 4500-4599 band is transient, so the dashboard keeps the edit it could not send and lets the provider's own backoff retry.
 
 ## Comment errors
 

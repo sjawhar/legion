@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-179",
+  "previousHandoff": "2111ea86ebb67f21bb13750e9bd59b09511e2216",
+  "proof": [
+    {
+      "criterion": "A2: a person sees each refusal's reason; a permanent 4413 drops only the refused edit, 4503 keeps it and retries, DOC_NEEDS_REBUILD offers the rebuild, a read-only viewer's saved edits are kept and sent later",
+      "surface": "Dispatch dashboard in Chromium against the real Go server and Postgres 17 + pgvector (the suite's own harness, DISPATCH_TEST_HOOKS=1)",
+      "command": "cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --workers 1 e2e/document-refusals.e2e.ts e2e/doc.e2e.ts --reporter=list",
+      "observed": "23 passed (5.0m) at the merge with main cef56589: DOC_TOO_LARGE, the read-only viewer's kept edits, 4503 holding typing until room frees, DOC_NEEDS_REBUILD and the rebuild it offers, DOC_TOO_TANGLED, DOC_UPDATE_REFUSED, and main's 17 doc.e2e rows",
+      "headSha": "cef565895c35",
+      "negativeControl": "The refusal rows copied onto the merge base ea460e50: 6 failed (no refusal notice; 404 for the test routes). DOC_UPDATE_REFUSED: a plain hook error on ygo v1.54.1-sami.x closes 4205 and the editor reconnects in a loop; the row asserts 4413 DOC_UPDATE_REFUSED and one close."
+    },
+    {
+      "criterion": "A3/A4: the room budget keeps the pod under its memory; peaks measured by what the pod's kernel charges and by the runtime's held-less-released against the Go limit",
+      "surface": "real Dispatch server process, cmd/dispatch memory drives (-tags memory), on ygo v1.54.1-sami.3",
+      "command": "go test -tags memory -p 1 -count=1 -run '^(TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays|TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory|TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory|TestTheRoomBudgetDoesNotOverchargeTypingAndPasting)$' -v ./cmd/dispatch/",
+      "observed": "At c6ccc5bf (merge with main, ygo v1.54.1-sami.3, 2026-11-01): A3 refuses at 37 rooms, where its arithmetic says (2 GiB / 57,600,000); fifty at once 37 admitted, 13 refused, peak 3,730 MiB charged, held 5,472,158 under the limit. Heaviest apply 3,237 MiB charged at its heaviest step, held +67,714 over the limit (within the 128 MiB margin), raw VmRSS 3,749 MiB. Burst 3,658 MiB. Typing drive refuses at room 9 as its arithmetic says; largest structure part 440,092 = its price. API writes charge their structs (TestARoomFedOnlyByAPIWritesIsChargedTheStructsTheyAdd).",
+      "headSha": "c6ccc5bfd2aa",
+      "negativeControl": "With the runtime-limit margin set to -1 GiB the burst drive fails on that check alone."
+    },
+    {
+      "criterion": "Write-queue budget: a socket that never reads is closed; twenty stay under the pod; an honest slow reader is never closed",
+      "surface": "real Dispatch server process, cmd/dispatch/write_queue_memory_test.go (-tags memory), ygo Server.PeerWriteQueueBytes at 60 MiB",
+      "command": "go test -tags memory -p 1 -count=1 -run '^(TestASocketThatNeverReadsIsClosedWithinItsWriteQueueBudget|TestTwentySocketsThatNeverReadStayUnderThePodsMemory|TestAThrottledReaderIsNotClosedByTheWriteQueueBudget)$' -v ./cmd/dispatch/",
+      "observed": "At c6ccc5bf: one silent socket closed at 63,117,516 queued; twenty closed at 1,258,425,600 between them, peak 2,016 MiB charged; the throttled reader 3,008,706 B behind (4.78% of the budget), never closed, ended with the document byte for byte.",
+      "headSha": "c6ccc5bfd2aa",
+      "negativeControl": "Budget set to 0: all three drives fail (no close logged; one silent socket held 1,228,628,256 B above idle)."
+    },
+    {
+      "criterion": "A1 cost: every keystroke row's p50 within +10% of the merge base",
+      "surface": "BenchmarkKeystrokeBesideReads through the peer hook, GOMAXPROCS=1, -benchtime 1x -count 6, benchstat",
+      "command": "GOMAXPROCS=1 go test ./internal/dispatch/docs/ -run '^$' -bench '^BenchmarkKeystrokeBesideReads$' -benchtime 1x -count 6 (main's side of the merge 072a7d34 with head's document builder, head c6ccc5bf on ygo v1.54.1-sami.3), benchstat",
+      "observed": "p50: none -13.09%, copy/250ms ~ (p=0.180), copy/back-to-back -4.26%, readLive/250ms ~ (p=0.394), readLive/back-to-back ~ (p=1.000); every row within +10%",
+      "headSha": "c6ccc5bfd2aa",
+      "negativeControl": "Main's own benchmark document does not build at 072a7d34 (65,536-element cap), so its side ran with head's builder; both runs on a quiet pod (load 0.00). An earlier loaded head run (+13.5% on one row) was discarded."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/docs: peer_update.go, room_budget.go, update_walk.go, scan_budget.go, copy_heap.go, measure.go, growth.go, tree.go, websocket.go, rebuild.go, room_server.go, service.go, testhooks.go, pending_authors.go, roomstate.go, marks.go and their tests",
+    "packages/envoy/cmd/dispatch: main.go, memory_trace.go, settings.go, browser_memory_test.go, write_queue_memory_test.go, memory_harness_test.go, README.md, AGENTS.md",
+    "packages/envoy/internal/dispatch/api: artifacts.go, artifact_rebuild.go, routes_table.go and tests",
+    "packages/contracts: dispatch-api.ts, scripts/gen-go.ts; packages/envoy/internal/contracts/generated.go",
+    "packages/dispatch/web/src/features/doc: connection.ts, pending-sync.ts, ProofDocument.tsx and tests; packages/dispatch/e2e/document-refusals.e2e.ts, doc.e2e.ts, api.ts",
+    ".github/workflows/ci.yaml (dispatch-memory in six shards), .github/scripts/ci_job_reads.py, ci_filter_coverage.py",
+    "packages/envoy/AGENTS.md, packages/dispatch/AGENTS.md, changie fragments for contracts and envoy"
+  ],
+  "trickyParts": [
+    "The memory drives judge the pod by max(VmRSS - heap released) and by the runtime's total - released against the Go limit + 128 MiB, from DISPATCH_MEMORY_TRACE. The test pod runs gVisor, which frees MADV_DONTNEED pages only for calls of 2 MiB or more, so raw VmRSS keeps released pages; Dispatch's production pod runs runc (no RuntimeClassName in infra/gcp/dispatch_kube.go:492-501).",
+    "ygo v1.54.1-sami.x closes a peer whose OnPeerUpdate hook refuses: every refusal path returns a *websocket.PeerClose (4413 with its reason, 4503 DOC_BUSY), else the editor would loop through 4205. The one plain error kept is an apply ygo itself refused after the hook ran (pending cap), which ygo answers SyncStatus(0) with the peer kept.",
+    "ygo v1.54.1-sami.1+ commits a format-cleanup transaction after a remote apply; scan counting sums every transaction the apply commits (scan_budget.go)."
+  ],
+  "deviations": [
+    "Plan departure: the memory measurement. Peaks are what the pod's kernel charges (VmRSS - released, gVisor) beside the runtime's held-less-released against the Go limit; raw VmRSS is quoted beside them. Evidence: peak sample with GOGC=100 total 4,656,629,640, released 791,166,976, total-released 3,865,462,664 (7,902 under the limit) while VmRSS read 4,616,740,864; a test program shows gVisor frees MADV_DONTNEED only for >= 2 MiB calls; production runs runc. GOGC stays the runtime default (an adaptive ratio was built, measured to buy no memory, and removed).",
+    "Plan departure: the struct prices follow ygo v1.54.1-sami.1's larger crdt.abstractType (reearth/ygo#295): bytesOfHeapAStruct 620->650, bytesOfHeapAnElement 470->500, bytesOfHeapAByteAtTheDensest 1,058->1,126. Measured on v1.54.1-sami.3 (2026-10-31; abstract_type.go identical to sami.1): typed-room factor 1.056x (held 58,735,880, drop frees 58,730,488), A3 refuses at 37 rooms, the long session 636,015 of 1,000,000 against 15x.",
+    "Plan departure 5 amended and a new departure: a refused non-editor update closes the browser 4413 DOC_UPDATE_REFUSED (a new contract reason) instead of being answered with the peer kept, and errApplyTooHeavy closes 4413 DOC_TOO_LARGE; cause: upstream ygo#304's final form (provider/websocket/peer_update.go:38-53). Accepted by the architect 2026-10-30.",
+    "Plan departure: a per-peer write-queue byte budget of 60 MiB (ygo Server.PeerWriteQueueBytes, reearth/ygo#342), from the measurement that one non-reading socket after a 4 MiB update held 420,255,432 B for 100 SyncStep1s. 64 MiB did not fit twenty sockets beside a full room budget under the Go limit (3,915,246,839 > 3,865,470,566); 60 MiB leaves 34,109,807.",
+    "The over-charge drive runs on a budget of eight rooms (480 MiB) set through the test hook rather than the full 2 GiB, so it fits CI; the full budget's memory is proven by the burst and A3 drives.",
+    "The keystroke gate's main side ran with head's document builder: main's own 524 KiB document passes the 65,536-element write cap and does not build (live_read_bench_test.go:91)."
+  ],
+  "discoveredComplexity": [
+    "Defect found and fixed: the room budget's sweep closed a room while a Server.Apply was inside it, through ygo's CloseRoom(force), which ignores Apply's in-flight count; the write was lost (cause of TestSetAskBlockTextRefusalOfEveryBrokenBodyLeadsToAValidDecision's CI failure). Every budget close and the rebuild's close now go through closeGate; tests TestTheBudgetSweepLeavesARoomAnApplyIsWriting, TestTheRebuildsCloseLeavesARoomAnApplyIsWriting, TestTheRoomBudgetAdmissionWaitsForARoomAnApplyIsInside. The upstream fix (CloseRoom refuses ErrRoomInUse) is in reearth/ygo#342, for fork release v1.55.1-sami.1.",
+    "Defect found and fixed: the replica applied only LoggedUpdate.Update; it now applies Parked after it (TestAPeerUpdateThatParksBehindAGapLeavesTheReplicaHoldingWhatTheRoomHolds).",
+    "Defect found and fixed: scans of an apply on a text carrying formatting read as 0 on ygo sami.1+, because the format-cleanup transaction's count overwrote the apply's (TestAnApplysScansAreCountedThroughTheFormatCleanupAfterIt).",
+    "Defect found and fixed: the heaviest-apply drive's cold reads were served from a cache the server's block-index pass filled, so they did not fold.",
+    "Upstream: ygo's CloseRoom ignoring Apply's in-flight count is fixed by member 88bb0246 (CloseRoom refuses ErrRoomInUse from outside; CloseRoomWithin for a close inside the caller's own Apply), in reearth/ygo#342 for fork release v1.55.1-sami.1; the release owner makes Dispatch's one-line closeInstance change with that pin. Dispatch's own closeGate stays.",
+    "CI reds at the merge with main, fixed: the full server's stray marks were by alice, whom main's #2548 rightly keeps while alice's browser is on the room (the drive now uses another author); three heap/allocation measurements skip under -race as the room-memory tests do (they failed identically under -race at 0149c144)."
+  ],
+  "openQuestions": []
+}

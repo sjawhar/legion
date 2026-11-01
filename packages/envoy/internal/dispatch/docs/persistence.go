@@ -660,9 +660,17 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 
 // RebuildTx replaces a room's durable history with one fresh update at the next version, inside
 // tx, which holds the room's lock until it ends. Its caller has already proved that ygo cannot load
-// the old merged history; this method never makes that destructive decision itself.
+// the old merged history; this method never makes that destructive decision itself. The seed is a
+// whole state, and its validation decodes it under a grant of the copy-heap bound, covered before
+// the room's lock is taken and given back once the decode is done.
 func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {
-	if err := validateUpdate(seed); err != nil {
+	release, err := holdCopy(ctx, len(seed))
+	if err != nil {
+		return RebuildReport{}, err
+	}
+	err = validateUpdate(seed)
+	release()
+	if err != nil {
 		return RebuildReport{}, wrapUnlessTooLarge(itemCapError(seed, err), "validate rebuilt document seed")
 	}
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {
@@ -911,20 +919,36 @@ var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
 // does not export. TestUploadRefusesADocumentTooLargeToStore (api) holds the two together: a
 // document encoding to more than this is refused by ygo and answered as CAP_EXCEEDED with the count.
 // No single upload reaches it: the heaviest document pmdoc's element limit admits encodes to about
-// 131,000 items. Repeated versions can take a live state to it, so every joined write (applyLive
-// and applyMargin, through recordLiveOperation) decodes its state before appending once its clocks
-// pass this cap (refuseUndecodable, growth.go) - not settlement's own repairs, which write outside
-// both and never reach it (growth.go's own doc comment names the three).
+// 131,000 items, an eighth of it. Repeated versions can take a live state to it, so every joined
+// write (applyLive and applyMargin, through recordLiveOperation) counts its state's structs before
+// appending once a ceiling of them without an encode passes this cap (refuseUndecodable,
+// structCeiling, growth.go), and the block-id stamp, the sweep of unrecorded marks and
+// settlement's repair of a returning answer, which write into the live document outside both, ask
+// whether the document their write would leave stays within it and leave the document as it was
+// where it would not (Service.leavesPastDecodeCap; growth.go's own doc comment names the three).
+// The clock sum in that ceiling is only the cheap first question, never the answer: it counts
+// characters, where this cap counts items, so a busy document sums past it long before it holds
+// that many - 1,050,470 clocks at a mebibyte of typed-over markdown, and 1,310,720 at 256 KiB
+// after a mebibyte of typing and deleting, both of which decode (growth.go gives the figures).
 //
 // It is also the pending queue every decode of document bytes takes, whether the service builds
 // the decoder (newDocumentCopy) or ygo builds it for the service (Server.MaxPendingItems: the
-// rooms). ygo's decoder parks each item whose parent it cannot place yet, and each later item of
-// that client behind it, and refuses the update once its queue is full, 100,000 items at ygo's
+// rooms, which ygo caps once a room's stored state is in, having decoded that state with the queue
+// lifted, sjawhar/ygo v1.51.3-sami.7, provider/websocket/server.go:1702 and :1766-1773; the service
+// decoded the same state under the queue first, loadTree or LoadDoc's rescan, so a room starts
+// within it). ygo's decoder parks each item whose parent it cannot place yet, and each later item
+// of that client behind it, and refuses the update once its queue is full, 100,000 items at ygo's
 // default. An update decoded alone parks every item that leans on the document it was written
-// against, and no update carries more items than this, so no decode parks past it. ygo's own
-// check of each update the service broadcasts (Server.BroadcastUpdate) takes no pending queue at
-// all: it is the check ygo's bundled stores run, since the room has already applied the update
-// (reearth/ygo#268, in the pinned fork).
+// against, and no update carries more items than this, so no decode parks items past it. The
+// queue caps, apart, the delete ranges parked for structs the document does not hold
+// (checkParkedDeletes, crdt/update.go:580-586 and :799-822): one update can name more of them
+// than this, up to this many for each of its clients, and a decode that would park more than this
+// is refused, so a history holding more parked delete ranges than this does not load. A room's
+// struct total counts each parked range splitsAStructCanCause times within this cap
+// (countRoomStructs), so no room the peer update hook guards stores one. ygo's own check of each
+// update the service broadcasts (Server.BroadcastUpdate) takes no pending queue at all: it is the
+// check ygo's bundled stores run, since the room has already applied the update (reearth/ygo#268,
+// in the pinned fork).
 // TestTheStoreTakesOneBrowserUpdateItsRoomTook and TestASettlementStampsMoreBlocksThanYgosDefaultQueue
 // are updates the store's check refuses at ygo's default queue.
 const maxUpdateItems = 1 << 20

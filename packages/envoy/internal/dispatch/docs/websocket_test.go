@@ -321,11 +321,11 @@ func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
 	preload := func(t *testing.T) []byte {
 		t.Helper()
 		_, loaded, err := service.loadTree(context.Background(), artifactID)
-		if err != nil || loaded == nil || len(loaded.Update) == 0 {
+		if err != nil || loaded == nil || len(loaded.loaded.Update) == 0 {
 			t.Fatalf("load cold document: loaded=%v err=%v, want its durable history", loaded, err)
 		}
-		service.preloads.Store(artifactID, &preloadedDocument{loaded: *loaded})
-		return loaded.Update
+		service.preloads.Store(artifactID, loaded)
+		return loaded.loaded.Update
 	}
 
 	// The load hands ygo nothing and keeps the state on its record for the room's load to apply
@@ -340,7 +340,9 @@ func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
 		if !ok {
 			t.Fatal("LoadDoc recorded no load")
 		}
-		return record.(*roomLoad).takeState()
+		taken := record.(*roomLoad).take()
+		taken.grant.release()
+		return taken.state
 	}
 
 	held := preload(t)

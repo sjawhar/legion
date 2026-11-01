@@ -49,6 +49,12 @@ var keyedWriteGuardStops = map[string]string{
 	// request's caller before its key is claimed and hands the handler that resolution
 	// (resolvedCallerKey), so none of it runs under the key.
 	"api.server.optionalActor": "the caller is resolved before the key is claimed",
+	// The two document test hooks, mounted only with DISPATCH_TEST_HOOKS (routes_table.go): each
+	// appends a crafted history to the document through PgVersioned, which begins a transaction
+	// on a pooled connection of its own. That history is the fixture a browser test needs, not a
+	// write of anyone's request, and no caller of these routes sends an Idempotency-Key.
+	"api.server.useUpScanTotal":       "a test-only hook writes a crafted history, not the request's write",
+	"api.server.tangleBeyondOneApply": "a test-only hook writes a crafted history, not the request's write",
 	// The pool itself: its statement methods are what the guard looks for at their call sites.
 	"store.Pool.Exec": "", "store.Pool.Query": "", "store.Pool.QueryRow": "", "store.Pool.SendBatch": "",
 	"store.Pool.CopyFrom": "", "store.Pool.Begin": "", "store.Pool.BeginTx": "", "store.Pool.begin": "",

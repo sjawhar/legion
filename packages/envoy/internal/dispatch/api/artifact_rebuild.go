@@ -8,14 +8,19 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// rebuildArtifact discards only a history ygo cannot load and replaces it with one seed update
-// from the latest saved markdown, or supplied markdown. It is human-only because a rebuild
-// intentionally deletes durable history; a document that loads is refused unchanged. The rebuild,
-// the version supplied markdown writes, its artifact.version event and the move of the open
-// approval request to that version commit in one transaction, so no refusal or failure leaves a
-// changed document without them. A closed issue's document is rebuilt with the close's ask states
-// written into its seed (docs.Service.RebuildDocument), so a block whose ask the close withdrew
-// reads resolved once the rebuild commits, not open as the latest version saved it.
+// rebuildArtifact replaces a document history no write can change with one seed update: a history
+// ygo cannot load, from its latest saved markdown or supplied markdown, and a history that loads but
+// stands so near the decode cap or the scan total that every write to it is refused, from its own
+// text or supplied markdown, the rebuild being the recovery from either cap. Such a document's room
+// is closed first if this server holds it, and the browsers connected to it drop their unsent
+// edits; any other document is refused unchanged, 409 DOCUMENT_LIVE while this server holds its
+// room and 409 DOCUMENT_LOADS otherwise (docs.Service.RebuildDocument). It is human-only because a
+// rebuild intentionally deletes durable history. The rebuild, the version supplied markdown
+// writes, its artifact.version event and the move of the open approval request to that version
+// commit in one transaction, so no refusal or failure leaves a changed document without them. A
+// closed issue's document is rebuilt with the close's ask states written into its seed
+// (docs.Service.RebuildDocument), so a block whose ask the close withdrew reads resolved once the
+// rebuild commits, not open as the latest version saved it.
 func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {

@@ -13,6 +13,7 @@ import {
   getArtifact,
   getArtifactText,
   getArtifactVersion,
+  holdDocumentAdmission,
   patchIssue,
 } from "./api";
 import { runDispatch } from "./dispatch-cli";
@@ -302,6 +303,53 @@ test("named versions, the version picker, and the diff stay current across users
     await versionPicker.selectOption("");
     await expect(documentEditor(page)).toBeVisible();
     await expect.poll(sockets).toBe(1);
+  } finally {
+    await alice.close();
+  }
+});
+
+/** How long the server holds the editor's socket before it admits it. A burst of browsers opening
+ * documents at the bound measured one waiting 21.4 s for the copy bound before its room loaded,
+ * all of it before the server answers the socket's upgrade; this is longer. */
+const FIRST_SYNC_HOLD_MS = 25_000;
+
+test("a document whose room keeps its first sync waiting 25 seconds loads on its one connection", async ({
+  browser,
+}) => {
+  test.setTimeout(FIRST_SYNC_HOLD_MS + 60_000);
+  await createProject({ key: "WAIT", name: "Waiting rooms" });
+  const issue = await createIssue({
+    project: "WAIT",
+    spec: "# Waited for\n\nThe room took its time.\n",
+    title: "First sync after a wait",
+  });
+  const artifactId = issue.primary_artifact_id;
+  await holdDocumentAdmission(artifactId, FIRST_SYNC_HOLD_MS);
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    const sockets = countDocumentSockets(page, artifactId);
+    const opened = Date.now();
+    await page.goto(`/issues/${issue.key}/spec`);
+    // Partway through the wait the editor is still on its first socket, waiting, not connected.
+    await page.waitForTimeout(FIRST_SYNC_HOLD_MS / 2);
+    expect(sockets()).toBe(1);
+    await expect(connectedDot(page)).toHaveCount(0);
+
+    await expect(documentEditor(page)).toContainText("The room took its time.", {
+      timeout: FIRST_SYNC_HOLD_MS + 30_000,
+    });
+    expect(Date.now() - opened).toBeGreaterThanOrEqual(FIRST_SYNC_HOLD_MS);
+    await expect(connectedDot(page)).toHaveText("connected");
+    expect(sockets()).toBe(1);
+
+    // And the connection the wait ended on is the one the editor keeps: an edit saves through it.
+    await typeAtEnd(page, " Typed once it loaded.");
+    await expect
+      .poll(async () => (await getArtifactText(artifactId)).markdown)
+      .toContain("Typed once it loaded.");
+    expect(sockets()).toBe(1);
   } finally {
     await alice.close();
   }

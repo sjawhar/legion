@@ -113,6 +113,10 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/artifacts/{id}/versions":                   scopeProject,
 	"POST /api/v1/artifacts/{id}/edits":                      scopeProject,
 	"POST /api/v1/artifacts/{id}/_test/outside-schema":       scopeProject,
+	"POST /api/v1/artifacts/{id}/_test/hold-admission":       scopeProject,
+	"POST /api/v1/artifacts/{id}/_test/refuse-next-update":   scopeProject,
+	"POST /api/v1/artifacts/{id}/_test/used-up":              scopeProject,
+	"POST /api/v1/artifacts/{id}/_test/tangled":              scopeProject,
 
 	"PUT /api/v1/asks/{id}/followers/{session_id}":    scopeProject,
 	"DELETE /api/v1/asks/{id}/followers/{session_id}": scopeProject,
@@ -164,6 +168,7 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/live/_test/disconnect":                   scopeDeployment,
 	"POST /api/v1/live/_test/rotate":                       scopeDeployment,
 	"POST /api/v1/artifacts/_test/quiesce":                 scopeDeployment,
+	"POST /api/v1/artifacts/_test/room-budget":             scopeDeployment,
 	"POST /api/v1/writes/_test/slow":                       scopeDeployment,
 }
 
@@ -312,7 +317,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/artifacts/{id}/subscribers", authHuman, "Sessions subscribed to a document's topics.", s.listArtifactSubscribers},
 		{http.MethodDelete, "/api/v1/artifacts/{id}/subscribers/{session_id}", authHuman, "Unsubscribe a session from a document.", s.unsubscribeArtifactSession},
 		{http.MethodGet, "/api/v1/artifacts/{id}", authAny, "Read a document's metadata and current version.", s.getArtifact},
-		{http.MethodPost, "/api/v1/artifacts/{id}/rebuild", authHuman, "Rebuild a document history ygo cannot load from its latest saved markdown; a live document is 409 DOCUMENT_LIVE and one that loads is 409 DOCUMENT_LOADS.", s.rebuildArtifact},
+		{http.MethodPost, "/api/v1/artifacts/{id}/rebuild", authHuman, "Rebuild a document's history into one fresh update: a history ygo cannot load, from its latest saved markdown or supplied {markdown}; a history so near the decode cap or the edit-scan total that every write is refused, from its own text or supplied markdown, closing its room in this server first, whose connected browsers drop their unsent edits; 409 DOCUMENT_LIVE for any other document live in this server, 409 DOCUMENT_LOADS for any other history that loads.", s.rebuildArtifact},
 		{http.MethodGet, "/api/v1/artifacts/{id}/reviews", authAny, "List a document's approval reviews.", s.listArtifactReviews},
 		{http.MethodPost, "/api/v1/artifacts/{id}/reviews", authHuman, "Approve or request changes on a document's latest settled version; answers the open approval ask when present, preserving its thread.", s.createArtifactReview},
 		{http.MethodPost, "/api/v1/artifacts/{id}/approval-requests", authAny, "Open an approval ask for a document's latest version, with an optional summary. A document a human approved before carries that approval on the ask (approval.approved: version, at, by). An open ask follows later versions and waits on its agent until this route hands the same row back to a human.", s.requestArtifactApproval},
@@ -361,7 +366,13 @@ func (s *server) routes() []apiRoute {
 			routeRow{http.MethodPost, "/api/v1/live/_test/disconnect", authAny, "Test hook: close every open live socket on every process with 1012, as a restart does.", s.disconnectLiveSockets},
 			routeRow{http.MethodPost, "/api/v1/live/_test/rotate", authAny, "Test hook: close every open live socket on every process with 4001 (max age), as its age does.", s.rotateLiveSockets},
 			routeRow{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document on every process and finish the settlements in flight.", s.quiesceDocuments},
+			routeRow{http.MethodPost, "/api/v1/artifacts/_test/room-budget", authAny, "Test hook: set the open documents' memory budget to bytes (0 restores the real one), so a browser test can fill it.", s.setRoomBudget},
 			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
+			routeRow{http.MethodGet, "/api/v1/artifacts/{id}/_test/live", authAny, "Test hook: whether the document's room is resident in this server, {live}; loads and rebuilds nothing.", s.artifactRoomLive},
+			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/hold-admission", authAny, "Test hook: make the document's next socket wait ms before its admission, as a browser in a burst waits for its room (0 takes the hold back).", s.holdArtifactAdmission},
+			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/refuse-next-update", authAny, "Test hook: make the document's room refuse the next update a read-write browser sends it, as it refuses one whose walk it refuses.", s.refuseNextDocumentUpdate},
+			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/used-up", authAny, "Test hook: close the document's room and append a stored history whose re-scan uses up a room's scan total.", s.useUpScanTotal},
+			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/tangled", authAny, "Test hook: close the document's room and append a tangle no one apply of a browser's may scan through.", s.tangleBeyondOneApply},
 			routeRow{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers on every process.", s.publishAgentStreamFrame},
 			routeRow{http.MethodPost, "/api/v1/writes/_test/slow", authAny, "Test hook: {method, path, delay_ms} delays every keyed run of that method and path by delay_ms after its key is claimed, on the handler's own context; 0 disarms.", s.armSlowWrite},
 		)

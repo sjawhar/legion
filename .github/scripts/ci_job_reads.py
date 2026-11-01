@@ -350,6 +350,18 @@ SCHEMA_SCRIPT = ('go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pul
 # cmd/listener package compiles under the serverchange tag, whichever test the run selects.
 SOAK_STEP = "Server-change soak of the listener"
 SOAK_SCRIPT = "go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener"
+# Each memory shard lists the package's tests and runs its own sixth of them, so its step holds
+# two go commands and a `-run` the simple form does not reduce; both compile the one package
+# under the memory tag, whichever names the shard drew.
+MEMORY_STEP = "Memory tests of the Dispatch server"
+MEMORY_SCRIPT = """\
+go test -tags memory -list '.*' ./cmd/dispatch > "$RUNNER_TEMP/memory-tests.txt"
+all=$(grep -E '^(Test|Example|Fuzz)' "$RUNNER_TEMP/memory-tests.txt")
+mine=$(printf '%s\\n' "$all" | awk -v shard="$MEMORY_SHARD" -v shards="$MEMORY_SHARDS" '(NR - 1) % shards + 1 == shard')
+[ -n "$mine" ] || { echo "::error::shard $MEMORY_SHARD of $MEMORY_SHARDS takes none of the $(printf '%s\\n' "$all" | grep -c . ) tests ./cmd/dispatch lists"; exit 1; }
+echo "shard $MEMORY_SHARD of $MEMORY_SHARDS runs $(printf '%s\\n' "$mine" | wc -l) of $(printf '%s\\n' "$all" | wc -l) tests:"
+printf '%s\\n' "$mine"
+go test -tags memory -count=1 -timeout 40m -v -run "^($(printf '%s\\n' "$mine" | paste -sd'|' -))$" ./cmd/dispatch"""
 
 
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
@@ -681,9 +693,10 @@ GATES = [
                  ["./internal/dispatch/docs/"], race=True),
     ], reads=setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("dispatch_memory", "dispatch-memory", runs=[
-        step_run("dispatch-memory", "Memory tests of the Dispatch server", "go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch",
-                 ENVOY, ["./cmd/dispatch"], tags="memory"),
+    gate("dispatch_memory", "dispatch-memory", exact=[
+        pinned_step("dispatch-memory", MEMORY_STEP, ENVOY, MEMORY_SCRIPT, [
+            (ENVOY, ["./cmd/dispatch"], "go test -tags memory ./cmd/dispatch", {"tags": "memory"}),
+        ]),
     ], reads=setup_go("dispatch-memory", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("dispatch_multiprocess", "dispatch-multiprocess", runs=[

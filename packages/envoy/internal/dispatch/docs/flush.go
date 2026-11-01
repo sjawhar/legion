@@ -65,6 +65,26 @@ func (s *Service) readPointQuietly(room string, live *crdt.Doc) ([]byte, roomPoi
 	return state, point, read, settles, nil
 }
 
+// readPointTreeQuietly is readPointQuietly for a settlement's read of the room's tree: the tree
+// at the same exact commit position, read from the replica's own document rather than from a copy
+// decoded of the state there (renderedReplica.readPointTree), so a room that keeps a replica is
+// never decoded a second time to be read, and a document past the decode cap - which no copy of
+// it could be decoded from - is read as the replica holds it.
+func (s *Service) readPointTreeQuietly(room string, live *crdt.Doc) (*pmdoc.Node, roomPoint, bool, error) {
+	if live == nil {
+		return nil, roomPoint{}, false, errDocUnloaded
+	}
+	point := roomPoint{cursor: s.cursorOf(live)}
+	replica := s.replicaOf(live)
+	if replica == nil {
+		tree, err := stateTree(crdt.EncodeStateAsUpdateV1(live, nil))
+		return tree, point, false, err
+	}
+	tree, seq, settles, err := replica.readPointTree(room, live)
+	point.seq = seq
+	return tree, point, settles, err
+}
+
 // stateTree is the tree of state, a room's state as a read point copied it (readPoint).
 func stateTree(state []byte) (*pmdoc.Node, error) {
 	doc := newDocumentCopy()

@@ -409,14 +409,12 @@ func (s *Service) rebuildFork(ctx context.Context, write *liveWrite) (*crdt.Doc,
 		}
 		state = read
 	}
-	fork, err := buildFork(write.clientID, state)
+	fork, err := buildForkHeld(ctx, write.clientID, state)
 	if err != nil {
 		return nil, fmt.Errorf("fork live document: %w", err)
 	}
-	for _, update := range write.updates {
-		if err := crdt.ApplyUpdateV1(fork, update, nil); err != nil {
-			return nil, fmt.Errorf("fork live document with transaction writes: %w", err)
-		}
+	if err := applyTransactionWrites(fork, write.updates); err != nil {
+		return nil, err
 	}
 	write.fork, write.forkMarkdown = fork, nil
 	return fork, nil
@@ -449,7 +447,7 @@ func (s *Service) readFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 		return nil, err
 	}
 	if live := s.srv.GetDoc(write.artifactID); live != nil && !s.roomBehindHead(live, head) {
-		return s.warmFork(write, live)
+		return s.warmFork(ctx, write, live)
 	}
 	return s.coldFork(ctx, write, head)
 }
@@ -490,13 +488,13 @@ func (s *Service) roomBehindHead(live *crdt.Doc, head int64) bool {
 // the replica consumes moves the count, the safe way; recover draws a fresh epoch, and epochs are
 // unique in the process, so a replica of another room instance never matches. No pointer to the
 // replica outlives the read.
-func (s *Service) warmFork(write *liveWrite, live *crdt.Doc) (*crdt.Doc, error) {
+func (s *Service) warmFork(ctx context.Context, write *liveWrite, live *crdt.Doc) (*crdt.Doc, error) {
 	seq := write.state.creditSeq.Load()
 	state, point, read, err := s.readPoint(write.artifactID, live)
 	if err != nil {
 		return nil, err
 	}
-	fork, err := buildFork(write.clientID, state)
+	fork, err := buildForkHeld(ctx, write.clientID, state)
 	if err != nil {
 		return nil, fmt.Errorf("fork live document: %w", err)
 	}
@@ -540,9 +538,9 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite, head int64) (*
 	}
 	if live := s.srv.GetDoc(write.artifactID); live != nil && !s.roomBehindHead(live, head) {
 		loaded.Update = nil
-		return s.warmFork(write, live)
+		return s.warmFork(ctx, write, live)
 	}
-	fork, err := buildFork(write.clientID, loaded.Update)
+	fork, err := buildForkHeld(ctx, write.clientID, loaded.Update)
 	loaded.Update = nil
 	if err != nil {
 		// A room's load of the same history would fail it, as loadTree does.
@@ -568,6 +566,19 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite, head int64) (*
 	return fork, nil
 }
 
+// buildForkHeld is buildFork under a grant of the copy-heap bound: a whole-state decode, taken
+// once the read that handed over state is done, so the write holds no part of the bound while it
+// reads or waits for a lock, and given back once the fork is the write's. Its wait ends with ctx,
+// the write's.
+func buildForkHeld(ctx context.Context, client crdt.ClientID, state []byte) (*crdt.Doc, error) {
+	release, err := holdCopy(ctx, len(state))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return buildFork(client, state)
+}
+
 // buildFork is a write's fork of state, an encoded document state, whose items client authors.
 func buildFork(client crdt.ClientID, state []byte) (*crdt.Doc, error) {
 	fork := newDocumentCopy(crdt.WithClientID(client))
@@ -578,6 +589,17 @@ func buildFork(client crdt.ClientID, state []byte) (*crdt.Doc, error) {
 		return nil, err
 	}
 	return fork, nil
+}
+
+// applyTransactionWrites applies updates, the writes a transaction has made so far, to fork, a
+// copy of the document built without them.
+func applyTransactionWrites(fork *crdt.Doc, updates [][]byte) error {
+	for _, update := range updates {
+		if err := crdt.ApplyUpdateV1(fork, update, nil); err != nil {
+			return fmt.Errorf("fork live document with transaction writes: %w", err)
+		}
+	}
+	return nil
 }
 
 // heldThrough is the durable version the document this write's operations run on holds every
