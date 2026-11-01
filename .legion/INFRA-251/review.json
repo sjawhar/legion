@@ -2,24 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-251",
-  "previousHandoff": "ae45563e13de043d1c0b7413726c7fd67b06de94",
-  "headReviewed": "the handoff push above dc82a6d201be (code head 42250925f8e9)",
-  "completed": "2026-11-01T19:05:27Z",
-  "decision": "changes_requested",
-  "round": "narrowed round: review 5728675512's fix (recordHandover) and Minors, the migration rename and merge, the pi-legion fragment, the oracle's failed-telling allowance",
+  "previousHandoff": "f52c15b1954fcd659a69e8a5c103d4426ce4c3c3",
+  "headReviewed": "the push carrying this handoff above 56b6404b40e1 (my prose commit) over code head 8b3c87d819aa",
+  "completed": "2026-11-01T20:09:52Z",
+  "decision": "approved",
+  "round": "narrowed round (architect): only review 5729779186's three items",
   "critical": 0,
-  "important": 1,
-  "minor": 2,
+  "important": 0,
+  "minor": 0,
   "accepted": [
-    "recordHandover leaves #2619 otherwise unchanged: it only puts the gate. No notice, no answered wait, no tree advance, no READY release; a queued root is never live, so no child starts; a later gate seed finds the gate open and writes no stray design-approved. Its guard matches applyArtifact's (off, older version, StaleReview). The new admit test fails without it.",
-    "The migrations follow main's timestamp rule, after main's numbered ones, through main's merged loader; ci-ok is green at the code head.",
-    "The oracle allows one re-telling after a catch-up whose own telling write failed, or one retold task, and nothing more."
+    "Walk step 3 now selects exactly the approvals personHandoverQueues queues, among the roots the walk lists. Both audits matched the conditions one for one. A carried approval, and one on a root with a Dispatch parent, are judged again. The payload.artifact_id and payload.reason fields, the issue's primary_artifact_id and parent fields, and the triage.md step-2 curl all exist.",
+    "recordHandover shares applyArtifact's check through artifactIgnored. For applyArtifact the behaviour is identical, version events included. The new table test fails with the guard removed: I mutated it on my own Postgres and saw TestAHandoverApprovalTheGateWouldNotTakeLeavesItAsItWas FAIL.",
+    "The admit assertion now fails when recordHandover enqueues a design-approved notice: I mutated it and saw TestARootAPersonsApprovalHandsOverIsToldNoStaleApproval FAIL with the notice listed."
   ],
-  "keyFindings": [
-    {"severity": "important", "file": "skills/legion-controller/references/parked-decisions.md:174", "description": "Walk step 3 now skips every artifact.approved of the root's own spec, but personHandoverQueues queues only a person's non-carried approval of a parentless, labelled, parked root's primary document whose tree is not live (workflow/gate.go:636-656). A carried approval (Dispatch writes it in the person's name) and an approval on a handed-over child that keeps its Dispatch parent are relayed as design-approved, yet the walk skips them. The walk is the only backstop for a notice sent while no controller ran, so on the controller's own hold that approval is never judged and the root stays parked. Narrow the skip to the queued case (no Parent:, primary spec, reason not 'Carried forward from the approval of version …') and give the paragraph at :40-44 the same exceptions."},
-    {"severity": "minor", "file": "packages/daemon/internal/admit/parked_decision_test.go:597", "description": "The parked-decision-notice assertion cannot fail: the test never runs the outbox, so no parked-decision row can exist. Assert that no design-approved notice was enqueued and that the person-handover status write was queued."},
-    {"severity": "minor", "file": "packages/daemon/internal/workflow/gate.go:605", "description": "recordHandover's guard repeats applyArtifact's off/stale check and no test reaches its early returns (replacing it with `if false` leaves every test green). Share one check, or add a table test (older version, StaleReview, gates.design off); and the 'one reader' comment omits readmit's carried copy and read_state's designGate."}
+  "proseFixedByReviewer": [
+    "parked-decisions.md walk step 3: tests the root's `parent` field, from the same /api/v1/issues/<root> curl, which is the field the daemon reads, not `child_of` under `Links:`. That graph section prints `- unavailable` when its read fails. A failed read now means 'judge it'. (DeepReview27 Minor)",
+    "gate.go recordHandover comment: the reader count is dropped, a later review's artifactIgnored is named among the readers, and the third prose copy of artifactIgnored's rule is removed (CodeQuality27 1)",
+    "gate.go personHandoverQueues comment: names the walk's step 3 as its prose copy (CodeQuality27 2)"
   ],
-  "providers": "Verified from each run's own turns in the session store: DeepReview25, 71 assistant turns, and CodeQuality25, 41, all anthropic / claude-opus-5-5.",
-  "ci": "CI head 8f5605f9 (only .legion/INFRA-251/test.json above it): ci-ok success and pr-title success, read 2026-11-01T19:0xZ."
+  "keyFindings": [],
+  "providers": "Verified from each run's own turns in the session store: DeepReview27 (44 assistant turns) and CodeQuality27 (35), all anthropic / claude-opus-5-5.",
+  "ci": "To be read at this push's head before the approval."
 }
