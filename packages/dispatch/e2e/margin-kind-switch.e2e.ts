@@ -1,4 +1,5 @@
 import { type Browser, expect, type Page, test } from "@playwright/test";
+import type { Comment } from "../web/src/api/types";
 
 import { createComment, createIssue, createProject, getAsk, listComments } from "./api";
 import {
@@ -21,6 +22,9 @@ import { asUser } from "./users";
 // the switch retypes the provisional mark the bar wrote (LEGION-363). Alice acts, Bob watches the
 // same document in his own browser.
 const initialMarkdown = "The quick brown fox";
+// Every poll here reads the server or the two editors from Node, so the ladder is this file's
+// own: the default one first looks again 350 ms after a write the server answered in 30.
+const PROBE = { intervals: [50, 50, 100, 200, 500] };
 
 interface Readers {
   alicePage: Page;
@@ -98,6 +102,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): two readers of one document - bob's editor is where the retyped mark has to appear
+// for the switch to have reached the shared document at all. Both loads already run together.
 test("switching an anchored composer from Comment to Ask retypes its mark and asks about the selected text", async ({
   browser,
 }) => {
@@ -137,6 +143,8 @@ test("switching an anchored composer from Comment to Ask retypes its mark and as
   );
 });
 
+// SLOW(>=2s): the two readers this file's fixture opens, and the held send whose refusal the row
+// waits for before it reads the restored replacement.
 test("a send holds every suggestion control and restores its replacement on refusal", async ({
   browser,
 }) => {
@@ -271,6 +279,8 @@ test("refining the selection under an open composer leaves nothing of the first 
   });
 });
 
+// SLOW(>=2s): two readers of one document - bob's context is the proof that undo and redo wrote
+// back to the shared document, not to one editor's local state. Both loads already run together.
 test("undo and redo after a switch write back no comment mark when a sent suggestion is in the document", async ({
   browser,
 }) => {
@@ -284,12 +294,13 @@ test("undo and redo after a switch write back no comment mark when a sent sugges
       await barAction(alicePage, "Suggest");
       await composer(alicePage).getByLabel("Replacement").fill("red");
       await composer(alicePage).getByRole("button", { exact: true, name: "Send" }).click();
+      let suggestion: Comment | undefined;
       await expect
-        .poll(() =>
-          listComments(issueKey, artifactId).then((items) => items[0]?.suggestion?.replace_with)
-        )
+        .poll(async () => {
+          [suggestion] = await listComments(issueKey, artifactId);
+          return suggestion?.suggestion?.replace_with;
+        }, PROBE)
         .toBe("red");
-      const [suggestion] = await listComments(issueKey, artifactId);
       if (suggestion?.anchor == null) {
         throw new Error("The suggestion has no anchor.");
       }
@@ -330,6 +341,8 @@ test("Suggest on a mid-word selection is refused, and the comment stays", async 
   });
 });
 
+// SLOW(>=2s): two readers of one document, bob's recorded comment, alice's over it, and both
+// read back from the server's reading of the document.
 test("Comment over text another reader's comment covers goes through, and that comment stays whole", async ({
   browser,
 }) => {
@@ -361,7 +374,7 @@ test("Comment over text another reader's comment covers goes through, and that c
         .poll(async () => {
           aliceCommentTexts = await markTexts(commentMarks(alicePage));
           return Object.keys(aliceCommentTexts).length;
-        })
+        }, PROBE)
         .toBe(2);
       const aliceMark = Object.keys(aliceCommentTexts).find((id) => id !== bobMark);
       if (aliceMark === undefined) {
@@ -370,7 +383,7 @@ test("Comment over text another reader's comment covers goes through, and that c
       await Promise.all(
         [alicePage, bobPage].map((page) =>
           expect
-            .poll(() => markTexts(commentMarks(page)))
+            .poll(() => markTexts(commentMarks(page)), PROBE)
             .toEqual({ [bobMark]: "quick brown", [aliceMark]: "brown" })
         )
       );
@@ -379,16 +392,18 @@ test("Comment over text another reader's comment covers goes through, and that c
       await composer(alicePage).getByLabel("Comment").fill("just brown");
       await composer(alicePage).getByRole("button", { exact: true, name: "Send" }).click();
       await expect
-        .poll(() =>
-          listComments(issueKey, artifactId).then((items) =>
-            items
-              .map((item) => ({
-                body: item.body,
-                mark: item.anchor?.mark_id,
-                quote: item.anchor?.quote,
-              }))
-              .sort((a, b) => a.body.localeCompare(b.body))
-          )
+        .poll(
+          () =>
+            listComments(issueKey, artifactId).then((items) =>
+              items
+                .map((item) => ({
+                  body: item.body,
+                  mark: item.anchor?.mark_id,
+                  quote: item.anchor?.quote,
+                }))
+                .sort((a, b) => a.body.localeCompare(b.body))
+            ),
+          PROBE
         )
         .toEqual([
           { body: "just brown", mark: aliceMark, quote: "brown" },
@@ -397,7 +412,7 @@ test("Comment over text another reader's comment covers goes through, and that c
       await Promise.all(
         [alicePage, bobPage].map((page) =>
           expect
-            .poll(() => markTexts(commentMarks(page)))
+            .poll(() => markTexts(commentMarks(page)), PROBE)
             .toEqual({ [bobMark]: "quick brown", [aliceMark]: "brown" })
         )
       );

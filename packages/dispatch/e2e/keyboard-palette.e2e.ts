@@ -1,5 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
+import { QUERY_RETRY_DELAY_MS } from "../web/src/api/query-client";
 import { openAgents, seedAgents, shownAgentRows } from "./agents";
 import {
   createAsk,
@@ -180,6 +181,9 @@ test("a failed palette search keeps its Retry action", async ({ browser }) => {
         });
       }
     );
+    // A failed read is retried twice, `QUERY_RETRY_DELAY_MS` apart, before the alert: page
+    // timers, which the page's own clock fires.
+    await page.clock.install();
     await openIssue(page, issue.key, "Failed palette search");
     await page.keyboard.press("Control+k");
     const dialog = page.getByRole("dialog", { name: "Search" });
@@ -187,6 +191,16 @@ test("a failed palette search keeps its Retry action", async ({ browser }) => {
     await input.fill("astrolabe");
 
     const failure = dialog.getByRole("alert");
+    // Each refusal arms the next retry, so the jump repeats until the palette gives the read up.
+    await expect
+      .poll(
+        async () => {
+          await page.clock.runFor(QUERY_RETRY_DELAY_MS + 50);
+          return failure.count();
+        },
+        { intervals: [50, 50, 100, 200, 500] }
+      )
+      .toBe(1);
     await expect(failure).toHaveText(/Search failed\./);
     const retry = failure.getByRole("button", { name: "Retry" });
     await expect(retry).toBeVisible();

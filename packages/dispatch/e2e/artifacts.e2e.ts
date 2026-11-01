@@ -1,7 +1,9 @@
-import { access, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { writeFile } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
+import { expect, type Locator, type Page, type TestInfo, test } from "@playwright/test";
+
+import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
+import { QUERY_RETRY_DELAY_MS } from "../web/src/api/query-client";
 
 import {
   createAsk,
@@ -15,19 +17,26 @@ import {
 } from "./api";
 import { countDocumentSockets, documentEditor, documentTransport, typeAtEnd } from "./editor";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { signIn } from "./users";
 
-const fixtureDirectory = fileURLToPath(new URL("./fixtures", import.meta.url));
-const diagramPath = join(fixtureDirectory, "diagram.png");
-const notesPath = join(fixtureDirectory, "notes.md");
 const tinyPng =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL0eAAAAABJRU5ErkJggg==";
 
-test.beforeAll(async () => {
-  await mkdir(fixtureDirectory, { recursive: true });
-  await access(diagramPath).catch(() => writeFile(diagramPath, Buffer.from(tinyPng, "base64")));
-  await writeFile(notesPath, "# Review notes\n\nThese notes replace the initial spec.\n");
-});
+// The files a row uploads are written in that row's own output directory, which Playwright gives
+// each row of each worker (`testInfo.outputPath`): two workers running these rows at once would
+// otherwise write one path in the checkout, and a run must leave no file changed under e2e/.
+async function diagramFile(testInfo: TestInfo): Promise<string> {
+  const path = testInfo.outputPath("diagram.png");
+  await writeFile(path, Buffer.from(tinyPng, "base64"));
+  return path;
+}
+
+async function notesFile(testInfo: TestInfo): Promise<string> {
+  const path = testInfo.outputPath("notes.md");
+  await writeFile(path, "# Review notes\n\nThese notes replace the initial spec.\n");
+  return path;
+}
 
 test.beforeEach(async ({ context }) => {
   await resetDatabase();
@@ -75,14 +84,15 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   await openArtifacts(page, testInfo.project.name === "iphone");
 
   const upload = page.getByLabel("Upload artifact");
-  await upload.setInputFiles(diagramPath);
+  const diagramUpload = await diagramFile(testInfo);
+  await upload.setInputFiles(diagramUpload);
   await confirmUpload(page);
   const diagram = page.getByTestId("artifact-diagram-png");
   await expect(diagram).toContainText("diagram.png");
   await expect(diagram).toContainText("1 version");
   await expect(diagram.getByRole("img", { name: "diagram.png version 1" })).toBeVisible();
 
-  await upload.setInputFiles(diagramPath);
+  await upload.setInputFiles(diagramUpload);
   await confirmUpload(page);
   await expect(diagram).toContainText("2 versions");
   await expect(diagram.getByRole("link", { name: "Download version 2" })).toHaveAttribute(
@@ -94,7 +104,7 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   await expect(diagram.getByRole("button", { name: "Show all versions" })).toHaveCount(0);
   await expect(page.getByLabel("Filter artifacts")).toBeVisible();
 
-  await page.goto(`/issues/${issue.key}/artifacts/diagram-png`);
+  await navigateInApp(page, `/issues/${issue.key}/artifacts/diagram-png`);
   await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/diagram-png`);
   await expect(page.getByTestId("artifact-header")).toContainText("diagram.png");
   expect(sockets()).toBe(1);
@@ -114,10 +124,10 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   await expect(compare).toContainText("From · Version");
   await expect(compare).toContainText("To · Version");
 
-  await page.goto(`/issues/${issue.key}`);
+  await navigateInApp(page, `/issues/${issue.key}`);
   await openArtifacts(page, testInfo.project.name === "iphone");
 
-  await upload.setInputFiles(notesPath);
+  await upload.setInputFiles(await notesFile(testInfo));
   await confirmUpload(page);
   const notes = page.getByTestId("artifact-notes-md");
   await expect(notes).toContainText("notes.md");
@@ -132,7 +142,8 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   await createComment(issue.key, {
     body: `See dispatch://${issue.key}/artifact/diagram-png before deciding.`,
   });
-  await page.reload();
+  // No reload: both citations reach the open page on its event feed, and the panel below reads
+  // what the feed left.
   await openArtifacts(page, testInfo.project.name === "iphone");
 
   await diagram.getByRole("link", { name: "diagram.png" }).click();
@@ -147,6 +158,7 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   await diagramReferencedBy.getByRole("link", { name: `Comment · ${issue.key}` }).click();
   await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/comments/`));
 
+  // One cold load, so the notes.md panel below is read by a page that cached nothing.
   await page.goto(`/issues/${issue.key}`);
   await openArtifacts(page, testInfo.project.name === "iphone");
   await notes.getByRole("link", { name: "notes.md" }).click();
@@ -156,7 +168,7 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   await expect(notesReferencedBy).toContainText(
     `See dispatch://${issue.key}/artifact/notes-md@v1 before deciding.`
   );
-  await page.goto(`/issues/${issue.key}`);
+  await navigateInApp(page, `/issues/${issue.key}`);
   await openArtifacts(page, testInfo.project.name === "iphone");
   await page.screenshot({ path: testInfo.outputPath("artifacts-tab.png"), fullPage: true });
 
@@ -170,7 +182,7 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
     await openNavigation.click();
     await expect(page.getByRole("navigation", { name: "Navigation" })).toBeVisible();
     await page.getByRole("button", { name: "Close navigation" }).click();
-    await page.goto(`/issues/${issue.key}`);
+    await navigateInApp(page, `/issues/${issue.key}`);
     const openMargin = page.getByRole("button", { name: /review panel/i });
     if ((await openMargin.getAttribute("aria-expanded")) === "true") {
       await openMargin.click();
@@ -244,10 +256,10 @@ test("the artifacts tab filter narrows rows by name and kind @phone", async ({
   await openArtifacts(page, testInfo.project.name === "iphone");
 
   const upload = page.getByLabel("Upload artifact");
-  await upload.setInputFiles(diagramPath);
+  await upload.setInputFiles(await diagramFile(testInfo));
   await confirmUpload(page);
   await expect(page.getByTestId("artifact-diagram-png")).toBeVisible();
-  await upload.setInputFiles(notesPath);
+  await upload.setInputFiles(await notesFile(testInfo));
   await confirmUpload(page);
   await expect(page.getByTestId("artifact-notes-md")).toBeVisible();
 
@@ -461,6 +473,9 @@ test("a mounted editor does not reconnect into a document made unreadable while 
     name: "reconnect-repair.md",
   });
 
+  // The reconnect below waits a draw from [0, RECONNECT_SPREAD_MS) set at the previous open
+  // (`web/src/features/doc/connection.ts`), which the page's own clock spends.
+  await page.clock.install();
   await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
   await expect(documentEditor(page)).toContainText("before");
   await expect.poll(sockets).toBe(1);
@@ -475,6 +490,9 @@ test("a mounted editor does not reconnect into a document made unreadable while 
   );
   expect(corrupted.status()).toBe(204);
   await transport.release();
+  // Exactly the spread: a longer jump would arm the refusal's next re-admission and open a third
+  // socket, which is the count this row reads.
+  await page.clock.fastForward(RECONNECT_SPREAD_MS);
 
   await expect(page.getByText("replace the document from markdown to repair it")).toBeVisible();
   await expect(documentEditor(page)).toBeHidden();
@@ -498,6 +516,9 @@ test("an edit typed while the socket was down survives a text refetch the server
     name: "offline-edit.md",
   });
 
+  // Two page timers below are the page's, not the server's: the read's two retries
+  // (`QUERY_RETRY_DELAY_MS`) and the reconnect draw from [0, RECONNECT_SPREAD_MS).
+  await page.clock.install();
   await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
   await expect(documentEditor(page)).toContainText("before");
 
@@ -525,10 +546,19 @@ test("an edit typed while the socket was down survives a text refetch the server
     anchor: { artifact: upload.artifact.slug, quote: "before" },
     body: "On the text.",
   });
-  await expect.poll(() => refused).toBeGreaterThanOrEqual(3);
+  // Each refusal arms the next retry, so the jump repeats until the read has been given up.
+  await expect
+    .poll(
+      async () => {
+        await page.clock.runFor(QUERY_RETRY_DELAY_MS + 50);
+        return refused;
+      },
+      { intervals: [50, 50, 100, 200, 500] }
+    )
+    .toBeGreaterThanOrEqual(3);
   // The third answer fails the read; nothing on a page that keeps its editor marks that moment, so
-  // the page is given a moment to render the failure before what it shows is read.
-  await page.waitForTimeout(500);
+  // the page is given a moment of real time to render the failure before what it shows is read.
+  await sleep(250);
   await expect(documentEditor(page)).toBeVisible();
   await expect(documentEditor(page)).toContainText("offline edit");
   await expect(page.getByRole("button", { name: "Rebuild from the latest version" })).toHaveCount(
@@ -538,6 +568,7 @@ test("an edit typed while the socket was down survives a text refetch the server
 
   await page.unroute(textRoute);
   await transport.release();
+  await page.clock.fastForward(RECONNECT_SPREAD_MS);
   await expect
     .poll(async () => (await getArtifactText(upload.artifact.id)).markdown)
     .toBe("before\n\noffline edit\n");

@@ -178,6 +178,9 @@ test("the reader's own Resolve while a margin reply is out keeps the reply's dra
 // The Pinned tab takes the Comments tab's place, its threads' cards with it; the reply is the
 // margin's, so the thread finds it again. On a phone the thread fills the screen and Back waits for
 // the reply, so the Pinned tab is reachable only once Back lets go at the send's deadline.
+// SLOW(>=2s): the send deadline is already virtual (page.clock.fastForward past SEND_DEADLINE_MS);
+// what is left is one document load with its collaboration socket and the phone margin's sheet
+// and dialog transitions.
 test("the Pinned tab while a margin thread's reply is out keeps the reply's draft and refusal @phone", async ({
   browser,
 }, testInfo) => {

@@ -102,6 +102,8 @@ test("a paragraph replaced by a rule draws the words it lost in the editor", asy
   const handle = await createEditor(root, {
     awareness: null,
     blockSchema,
+    // This row reads the editor's decorations, never its decision blocks.
+    onAskBlockHosts: () => {},
     user: { color: "#f59e0b", name: "alice" },
     ydoc: new Y.Doc(),
   });

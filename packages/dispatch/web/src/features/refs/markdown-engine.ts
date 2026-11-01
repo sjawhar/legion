@@ -1,18 +1,12 @@
-import type { HeadlessProofEditor, SoftBreaks } from "@legion/proof-editor/headless";
-import { DOMSerializer, type Node as ProseMirrorNode, type Schema } from "prosemirror-model";
+import type { SoftBreaks } from "@legion/proof-editor/headless";
+import type { DOMSerializer, Node as ProseMirrorNode } from "prosemirror-model";
 import { useLayoutEffect, useState } from "react";
 
 import type { BlockSchema } from "../../api/types";
 import { loadBlockSchema } from "../doc/schema";
 import { renderAskBlockShell, renderTypedBlock } from "../doc/typed-block-drawing";
 import { referenceSpans } from "./reference-spans";
-import {
-  buildDispatchReference,
-  buildReferencePath,
-  parseDispatchReference,
-  pictureReference,
-  shortForm,
-} from "./routes";
+import { parseDispatchReference, shortForm } from "./routes";
 
 /** What a single newline inside a paragraph becomes, chosen per parse: `"space"` (the document
  *  default, hard-wrapped Markdown is one paragraph) or `"line"` (text whose author meant its
@@ -67,79 +61,27 @@ const engines = new Map<number, Promise<MarkdownEngine>>();
  *  throws no longer evicts it - the headless editor drops only its own refused parser. */
 let readyEngine: MarkdownEngine | undefined;
 
-/**
- * Proof's DOM serializer, except for a picture whose address is a Dispatch reference
- * (`pictureReference` in `routes.ts`, the reading `pictureView` shares): the browser cannot fetch
- * `dispatch://`, so an `image` node naming an artifact at a version
- * (`![shot.png](dispatch://KEY/artifact/shot-png@v1)`, the syntax a pasted picture is written in)
- * becomes an empty link to the artifact's page, marked `data-dispatch-picture` and captioned by
- * its `alt` or the artifact's slug, for `collectPictureAnchors` to hand to a `DispatchPicture`
- * (`useRenderedMarkdown`). One that pins no version, or names something other than an artifact,
- * is a reference like any other and becomes a link `collectReferenceAnchors` titles. A picture on
- * another website, or an address that is no reference, is serialized as Proof serializes it.
- */
-function pictureSerializer(schema: Schema): DOMSerializer {
-  const base = DOMSerializer.fromSchema(schema);
-  const image = base.nodes.image;
-  if (image === undefined) {
-    return base;
-  }
-  return new DOMSerializer(
-    {
-      ...base.nodes,
-      image: (node) => {
-        const picture = pictureReference(node.attrs);
-        if (picture === undefined) {
-          return image(node);
-        }
-        const { named, route } = picture;
-        if (named?.version === undefined) {
-          return ["a", { href: picture.source }];
-        }
-        return [
-          "a",
-          {
-            "data-dispatch-picture": buildDispatchReference(route),
-            "data-picture-caption": picture.caption,
-            href: buildReferencePath(route),
-          },
-        ];
-      },
-    },
-    base.marks
-  );
-}
-
-function buildEngine(proof: HeadlessProofEditor): MarkdownEngine {
-  return {
-    serializer: pictureSerializer(proof.schema),
-    parse(markdown, softBreaks = "space") {
-      try {
-        return proof.parseMarkdown(markdown, softBreaks);
-      } catch {
-        return undefined;
-      }
-    },
-  };
-}
-
 function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
   const cached = engines.get(blockSchema.version);
   if (cached !== undefined) {
     return cached;
   }
   headlessModule ??= import("@legion/proof-editor/headless");
-  const created = headlessModule
-    .then(({ createHeadlessProof }) =>
-      createHeadlessProof({
-        blockSchema,
-        readOnly: true,
-        renderBlock: (node, type) =>
-          type.name === "ask" ? renderAskBlockShell(node) : renderTypedBlock(node, type),
-      })
+  // The serializer travels with the headless editor rather than with this module: it is written
+  // against prosemirror-model's own classes, and nothing can build one before that editor's
+  // schema exists (`markdown-serializer.ts`).
+  const created = Promise.all([headlessModule, import("./markdown-serializer")])
+    .then(async ([{ createHeadlessProof }, { buildEngine }]) =>
+      buildEngine(
+        await createHeadlessProof({
+          blockSchema,
+          readOnly: true,
+          renderBlock: (node, type) =>
+            type.name === "ask" ? renderAskBlockShell(node) : renderTypedBlock(node, type),
+        })
+      )
     )
-    .then((proof) => {
-      const engine = buildEngine(proof);
+    .then((engine) => {
       readyEngine = engine;
       return engine;
     });

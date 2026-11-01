@@ -4,6 +4,7 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 import { createIssue, createProject, getIssue } from "./api";
 import { seedFakeGithub } from "./fake-github-helpers";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 
 // A project imports its component model from two repositories, each its own source, and the
@@ -57,6 +58,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): the row crosses four surfaces - Settings, the Architecture page, the issue's
+// Components picker and a reload for persistence - over two source saves and two imports.
 test("a project with two architecture sources shows both in Settings, on its Architecture page and in an issue's Components picker", async ({
   browser,
 }) => {
@@ -110,7 +113,9 @@ test("a project with two architecture sources shows both in Settings, on its Arc
     );
 
     // Step 3: the project opens on its Architecture, whose top level holds each source's roots.
-    await page.goto("/projects/CORE");
+    // In-app, as the rail's own link is: the redirect to /architecture is the router's, and this
+    // page has read no architecture data yet, so the tree below is a fresh server read either way.
+    await navigateInApp(page, "/projects/CORE");
     await expect(page).toHaveURL(/\/projects\/CORE\/architecture$/);
     await expect(componentRow(page, "Platform")).toBeVisible();
     await expect(componentRow(page, "Cluster")).toBeVisible();
@@ -142,7 +147,7 @@ test("a project with two architecture sources shows both in Settings, on its Arc
     await expect(repository).toHaveText("legion/arch");
 
     // Step 5: an issue's Components picker offers both sources' components; one of each saves.
-    await page.goto(`/issues/${issue.key}`);
+    await navigateInApp(page, `/issues/${issue.key}`);
     const line = page.getByTestId("issue-components");
     await expect(line).toContainText("Not attached");
     await line.getByRole("button", { name: `Edit components of ${issue.key}` }).click();

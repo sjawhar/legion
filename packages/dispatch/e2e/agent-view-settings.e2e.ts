@@ -49,6 +49,11 @@ const TERMINAL_ONLY_NOTICE =
   "This session switches its model and thinking level only at its own terminal.";
 const PENDING_PLACEHOLDER = "Waiting for the session to answer the switch…";
 
+/** A switch Dispatch has stored is there in milliseconds; Playwright's default
+ *  100/250/500/1000 ladder would first see it a quarter-second late, and these rows probe for
+ *  one eight times over. */
+const PROBE = { intervals: [50, 50, 100, 100, 250] };
+
 /** A live session of the row's own: the relay's replay and responder are process-global, so a
  *  session another row seeded would carry that row's frames into this one. */
 function liveSession(row: number): FakeSession {
@@ -209,7 +214,7 @@ async function storedSwitch(
       const { delivery } = JSON.parse(String(frame.payload)) as { delivery: { attempt: number } };
       found = { attempt: delivery.attempt, author: read.message.author, id: read.message.id };
       return true;
-    })
+    }, PROBE)
     .toBe(true);
   if (found === undefined) throw new Error(`no sent ${body}`);
   return found;
@@ -442,7 +447,7 @@ test("a model picked in the header is the viewer's own Send of /model, holds Sen
     // Nothing the session has not reported: the picker stays on the model it runs.
     await expect(model).toHaveValue("anthropic/model-a");
 
-    await expect.poll(async () => (await sentSwitches()).length).toBe(1);
+    await expect.poll(async () => (await sentSwitches()).length, PROBE).toBe(1);
     expect(await sentSwitches()).toEqual([
       {
         actor: { id: "alice", kind: "user" },
@@ -476,7 +481,7 @@ test("a model picked in the header is the viewer's own Send of /model, holds Sen
     await mode.selectOption("btw");
     await model.selectOption("anthropic/model-a");
     await expect(status).toHaveText("Switching model to anthropic/model-a…");
-    await expect.poll(async () => (await sentSwitches()).length).toBe(2);
+    await expect.poll(async () => (await sentSwitches()).length, PROBE).toBe(2);
     expect((await sentSwitches())[1]).toEqual({
       actor: { id: "alice", kind: "user" },
       message: "/model anthropic/model-a",
@@ -507,7 +512,7 @@ test("a thinking level picked in the header sends /effort, and the session's ans
     await expect(status).toBeVisible();
     await expect(status).toHaveText("Switching thinking level to high…");
     await expect(thinking).toHaveValue("auto");
-    await expect.poll(async () => (await sentSwitches()).length).toBe(1);
+    await expect.poll(async () => (await sentSwitches()).length, PROBE).toBe(1);
     expect(await sentSwitches()).toEqual([
       { actor: { id: "alice", kind: "user" }, message: "/effort high", mode: "steer", target: id },
     ]);
@@ -580,7 +585,7 @@ test("a switch from the header is stored under the person who made it and names 
     await expect(header(bob.page).status).toHaveText("Switching model to anthropic/model-b…");
     const stored = await storedSwitch(id, "/model anthropic/model-b");
     expect(stored.author).toEqual(expect.objectContaining({ id: "bob", kind: "user" }));
-    await expect.poll(async () => (await sentSwitches()).length).toBe(1);
+    await expect.poll(async () => (await sentSwitches()).length, PROBE).toBe(1);
     expect((await sentSwitches())[0]).toEqual(
       expect.objectContaining({ actor: { id: "bob", kind: "user" }, mode: "steer" })
     );
@@ -715,6 +720,7 @@ test("a switch the session never answers says so after 30 seconds and keeps the 
 // Decision 8: the header's values come from the session's reports alone and the line from the
 // latest switch's answer alone, so neither depends on which arrives first, and an earlier switch's
 // late answer never speaks for a newer switch.
+// SLOW(>=2s): four switch round trips (page, Dispatch, fake Envoy, reply) and five live frames.
 test("a switch's answer and the session's frame land in either order, and an earlier switch's late answer never changes a newer one's status @phone", async ({
   browser,
 }, testInfo) => {
