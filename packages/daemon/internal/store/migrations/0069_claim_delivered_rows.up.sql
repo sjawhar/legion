@@ -1,0 +1,31 @@
+-- 0069_claim_delivered_rows.up.sql — every outbox start a claim queued a task from.
+--
+-- A start row delivers its task to the claim (supervise's queue) and then finishes; a failure or
+-- a crash between the two runs the row again. The claim deduplicated only against a delivery still
+-- pending, so a retry after the architect's turn on the task had ended and retired it queued the
+-- whole task again, and the architect was told each decision in it twice. The claim records the
+-- id of every start row whose task it queued, in the transaction that writes that delivery, so a
+-- retry of that row queues nothing whether its delivery is pending or retired. The rows of one
+-- issue do not run in row order, so the set is kept rather than a high-water mark: an older start
+-- that has never reached this claim still gives its task.
+--
+-- It is also what says whether a start's task reached the claim, which is what settles the
+-- decisions that start named (0068_parked_decisions): a start whose task the claim took leaves
+-- them to the delivery, which holds them until its confirmation tells them, and one whose task
+-- reached no claim hands them over to a fresh catch-up, so a release never leaves a kept decision
+-- unclaimed while its issue's tree has an architect to tell.
+alter table claims add column delivered_rows bigint[] not null default '{}';
+
+-- pending_task_deliveries.kept_decisions is what that task names of the decisions a person made
+-- while nobody in the root's tree could hear them (supervise.Delivery.Kept, record.KeptDecisions as
+-- JSON), written with the delivery by the claim store. The rows themselves are not deleted when the
+-- claim queues the task: the claim's write of the delivery takes them from the start row that named
+-- them and holds them under that claim and delivery id (0068_parked_decisions), and the write that
+-- records the confirmation tells them — deleting those whose issue still stands in the claim's
+-- tree and leaving the rest kept for the tree they moved to. This column is what says which rows a
+-- delivery holds: the hold is written from it when the delivery is queued or taken back under a new
+-- id, and read from it when the confirmation tells them. A task can wait on a ready or idle claim
+-- for generations while its root is parked, lingering or waiting for its slot (supervise's
+-- Deps.RootHears), and what it names is narrowed at send time by what has left the claim's tree
+-- (supervise's Deps.RootTask). An empty object is a task that names none.
+alter table pending_task_deliveries add column kept_decisions jsonb not null default '{}'::jsonb;

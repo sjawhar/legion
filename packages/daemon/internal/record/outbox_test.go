@@ -43,6 +43,8 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		CheckLook{Look: 2, OpenedAt: now},
 		CheckLook{Look: 1},
 		CheckBound{},
+		PhaseEnded{Role: claim.RoleTester, From: phase.Testing, To: phase.Implementing, Reason: "CI is red at head: pytest"},
+		PhaseEnded{Role: claim.RoleImplementer, From: phase.Retro, To: phase.Implementing, Reason: "CI is red at head: pytest", TaskFollows: true},
 	}
 	for _, payload := range payloads {
 		t.Run(string(payload.OutboxKind()), func(t *testing.T) {
@@ -86,9 +88,9 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 func TestEveryOutboxKindIsInExactlyOneLane(t *testing.T) {
 	every := []OutboxKind{OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindSupervise,
 		OutboxKindGateSeed, OutboxKindLingerClose, OutboxKindIssueSuspend, OutboxKindWorkspaceRemove, OutboxKindMergeQueuePublish, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge,
-		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound}
+		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindPhaseEnded}
 	lanes := map[OutboxKind][]OutboxLane{}
-	for _, lane := range []OutboxLane{LaneLifecycle, LaneBoard} {
+	for _, lane := range []OutboxLane{LaneLifecycle, LaneBoard, LaneRoleMessage} {
 		for _, kind := range LaneKinds(lane) {
 			lanes[kind] = append(lanes[kind], lane)
 		}
@@ -165,6 +167,12 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 		{name: "a deploy run without a workflow", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Workflow = "" })}, reason: deployRunRefusal},
 		{name: "a deploy run without a step", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Step = "" })}, reason: deployRunRefusal},
 		{name: "a deploy run without a branch", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Branch = "" })}, reason: deployRunRefusal},
+		{name: "a phase-ended message to an architect", payload: PhaseEnded{Role: claim.RoleArchitect, From: phase.Accepting, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "never to an architect"},
+		{name: "a phase-ended message to no role", payload: PhaseEnded{From: phase.Testing, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "never to an architect"},
+		{name: "a phase-ended message without the phase that ended", payload: PhaseEnded{Role: claim.RoleTester, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "names the phase that ended and the different phase"},
+		{name: "a phase-ended message out of the phase the issue is in", payload: PhaseEnded{Role: claim.RoleImplementer, From: phase.Implementing, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "names the phase that ended and the different phase"},
+		{name: "a phase-ended message without a reason", payload: PhaseEnded{Role: claim.RoleTester, From: phase.Testing, To: phase.Implementing}, reason: "carries the reason the architect's notice carries"},
+		{name: "a phase-ended task that follows for another role", payload: PhaseEnded{Role: claim.RoleTester, From: phase.Testing, To: phase.Implementing, Reason: "CI is red at head: pytest", TaskFollows: true}, reason: "only the implementer is told its task follows"},
 		{name: "a check look bound without a look", payload: CheckLook{}, reason: "check look bound requires the look it bounds"},
 		{name: "unsupported payload", payload: unsupportedOutboxPayload{}, reason: "unknown outbox payload"},
 	} {
@@ -198,6 +206,8 @@ func TestDecodeOutboxPayloadRefusesInvalidRows(t *testing.T) {
 		{name: "a deploy run without a step", row: OutboxRow{ID: 44, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":1,"cause":"deploy run","deploy":{"run":7,"attempt":1,"workflow":".github/workflows/envoy.yaml","branch":"main"}}`)}, reason: deployRunRefusal},
 		{name: "a deploy run with an unknown field", row: OutboxRow{ID: 45, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":1,"cause":"deploy run","deploy":{"run":7,"attempt":1,"workflow":".github/workflows/envoy.yaml","step":"Apply","branch":"main","job":3}}`)}, reason: "unknown field"},
 		{name: "a check bound with a field", row: OutboxRow{ID: 41, Kind: OutboxKindCheckBound, Payload: json.RawMessage(`{"look":1}`)}, reason: "unknown field"},
+		{name: "a phase-ended message to an architect", row: OutboxRow{ID: 46, Kind: OutboxKindPhaseEnded, Payload: json.RawMessage(`{"role":"architect","from":"accepting","to":"implementing","reason":"CI is red at head: pytest"}`)}, reason: "never to an architect"},
+		{name: "a phase-ended message with an unknown field", row: OutboxRow{ID: 47, Kind: OutboxKindPhaseEnded, Payload: json.RawMessage(`{"role":"tester","from":"testing","to":"implementing","reason":"CI is red at head: pytest","quiesce":"tester"}`)}, reason: "unknown field"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := DecodeOutboxPayload(tc.row)

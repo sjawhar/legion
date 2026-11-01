@@ -226,27 +226,20 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.NotContains(t, dispatch.RequiredInputs, input)
 	}
-	// The pods' disruption protection, the front door's and the listener's replica counts and the
-	// database's availability are optional plain strings and integers.
+	// The pods' disruption protection, the front door's and the listener's replica counts, the
+	// database's availability and the image cert-publish runs on are optional plain strings and
+	// integers. Every input that configures Dispatch is optional in the schema: a generated Go
+	// SDK's constructor refuses a nil required input, so a cluster-only consumer could not call
+	// the component at all while one stayed required, and the resolver is what requires it with
+	// clusterOnly off.
 	for input, typ := range map[string]string{
 		"priorityClassName": "string", "appPdbMinAvailable": "integer",
 		"frontDoorPdbMinAvailable": "integer", "listenerPdbMinAvailable": "integer",
 		"frontDoorReplicas": "integer", "listenerReplicas": "integer",
-		"databaseAvailabilityType": "string",
+		"databaseAvailabilityType": "string", "frontDoorToolsImage": "string",
 	} {
 		require.Equal(t, typ, dispatch.InputProperties[input].Type, input)
 		require.True(t, dispatch.InputProperties[input].Plain, input)
-		require.False(t, dispatch.InputProperties[input].Secret, input)
-		require.NotContains(t, dispatch.RequiredInputs, input)
-	}
-	// The Tailscale Service the front door hosts is an Input, typically the consumer's Service's
-	// name output; the image cert-publish runs on is a plain string. Each keeps its type and its
-	// plainness, and both are optional in the schema: a generated Go SDK's constructor refuses a
-	// nil required input, so a cluster-only consumer could not call the component at all while
-	// they stayed required, and the resolver is what requires them with clusterOnly off.
-	for input, plain := range map[string]bool{"tailnetService": false, "frontDoorToolsImage": true} {
-		require.Equal(t, "string", dispatch.InputProperties[input].Type, input)
-		require.Equal(t, plain, dispatch.InputProperties[input].Plain, input)
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.NotContains(t, dispatch.RequiredInputs, input)
 	}

@@ -54,6 +54,46 @@ func TestATaskQueuedBeforeReadyIsDeliveredOnceAtReady(t *testing.T) {
 	h.wantBudgets(Budgets{})
 }
 
+// The assignment a confirmed task's retire leaves on the claim, durably, beside the run: the
+// worker goes on working that assignment in whatever turn comes next — one an Envoy notice starts,
+// with no delivery behind it — and the completion it reports there is still that assignment's. A
+// later task that carries no assignment, a resume or a production check's look, moves the run on
+// and leaves the assignment alone, so a resumed worker's in-flight completion is never refused.
+func TestARetiredTasksAssignmentStaysOnTheClaimAndAResumeLeavesIt(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "test it", Generation: 7, Assignment: "A1"})
+	if p := h.pending(); p.Assignment != "A1" {
+		t.Fatalf("the queued delivery carries assignment %q, want the start's A1", p.Assignment)
+	}
+	if stored, ok := h.store.delivery(testToken); !ok || stored.Assignment != "A1" {
+		t.Fatalf("the stored delivery is %+v, want it to carry A1: a restart reads the assignment back", stored)
+	}
+	h.must(StreamTurnStart{Claim: testToken})
+	if got := h.claim().ServingAssignment(); got != "A1" {
+		t.Fatalf("during the task's turn the claim serves assignment %q, want A1", got)
+	}
+	h.must(StreamTurnEnd{Claim: testToken})
+	if stored := h.store.load(testToken); stored.ServingAssignmentID != "A1" || stored.ServingGeneration != 7 {
+		t.Fatalf("after the turn the stored claim serves assignment %q of run %d, want A1 of 7",
+			stored.ServingAssignmentID, stored.ServingGeneration)
+	}
+	if got := h.claim().ServingAssignment(); got != "A1" {
+		t.Fatalf("after the turn the claim serves assignment %q, want A1: its next turn's completion is still this assignment's", got)
+	}
+
+	h.must(RequestDeliver{Claim: testToken, Task: "resume the phase", Generation: 8})
+	h.must(StreamTurnStart{Claim: testToken})
+	if got := h.claim().ServingAssignment(); got != "A1" {
+		t.Fatalf("during the resume's turn the claim serves assignment %q, want the A1 it was given: a resume hands out none", got)
+	}
+	h.must(StreamTurnEnd{Claim: testToken})
+	if stored := h.store.load(testToken); stored.ServingAssignmentID != "A1" || stored.ServingGeneration != 8 {
+		t.Fatalf("after the resume the stored claim serves assignment %q of run %d, want A1 of 8",
+			stored.ServingAssignmentID, stored.ServingGeneration)
+	}
+}
+
 func TestADeliveryToAnIdleClaimIsSentAtOnce(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateIdle)

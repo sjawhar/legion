@@ -115,6 +115,11 @@ type Claim struct {
 	// its delivery and whose next turn an Envoy notice starts with no delivery behind it. Zero is
 	// a claim that has retired no confirmed task of a run.
 	ServingGeneration uint64
+	// ServingAssignmentID is the assignment of the last confirmed delivery this claim retired, the
+	// assignment side of ServingGeneration: what ServingAssignment answers with once no delivery
+	// backs the worker's turn. Empty is a claim that has retired no confirmed task of an
+	// assignment, which every claim of a daemon upgraded in place is until its role's next start.
+	ServingAssignmentID string
 	// LastStartRow is the outbox row id of the newest start run against this claim, and 0 for one
 	// no start has run for. A stop from an older row is one the newer start superseded: it was
 	// written to end a run that is over, and acting on it would stop the run that start began.
@@ -201,10 +206,10 @@ type ClaimView struct {
 // when its tree closes.
 func (c Claim) treeRoot() bool { return claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) }
 
-// Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
-// StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
-// PromptRefused, Timer, StalePlugin, and the nine requests. The transition table has a row or a
-// named ignore for every one of them in every state.
+// Event is everything that reaches a machine: RuntimeObservation, StreamHello, StreamTurnStart,
+// StreamTurnEnd, StreamPromptResult, StreamClosed, StreamLateRefusal, PromptAcked, PromptRefused,
+// Timer, StalePlugin, and the requests. The transition table has a row or a named ignore for
+// every one in every state.
 type Event interface{ isEvent() }
 
 // Store is the persistence a machine writes through. A claim and its pending delivery are
@@ -446,6 +451,14 @@ type Machine struct {
 	// (takesBackConfirmed). A send always goes through the connection registered last, so it only
 	// rises, and a relaunch leaves it: the new process's connections are registered later still.
 	sentThrough uint64
+	// awaitingResult is the id of the pending delivery whose prompt Oh My Pi acknowledged and has
+	// not yet reported the end of (shimwire.PromptResult). While it is set, a turn that ends is
+	// not known to be that prompt's — with background work on, a role's own background result
+	// wakes it and starts turns the daemon never prompted — so the delivery's life ends at its
+	// result rather than at any agent_end (turnEnded, promptResulted). It is memory only: a
+	// restart has no prompt of its own outstanding and asks the agent where it is instead
+	// (askFirst).
+	awaitingResult string
 	// askFirst is a restored claim whose agent an earlier daemon was talking to: a pending
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
@@ -455,11 +468,6 @@ type Machine struct {
 	unansweredAsks int
 	// held is the suspension held for the agent's turn (holdSuspension), nil for none.
 	held *RequestSuspend
-	// interrupt is the turn this claim was interrupted in for a start that takes over its issue's
-	// phase (Quiesce), nil for none; quiesced is the newest such start that has found the claim out
-	// of a turn. Both are memory only (Quiesce).
-	interrupt *interrupt
-	quiesced  int64
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
@@ -658,33 +666,63 @@ func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 // claim that has taken none. It is the daemon's whole answer to which run a completion belongs to:
 // a completion names no run, the pane cannot say it (LEGION_GENERATION is the claim's launch
 // counter, and a live worker is handed the next run's task without being relaunched), and the
-// three sources are read in this order.
-//
-//  1. The task whose turn is running. A completion is a tool call inside a turn, and one process
-//     runs one turn at a time.
-//  2. Otherwise the run this claim is left serving: the turn's end retires its delivery, and the
-//     worker goes on working that run — a tester waiting on CI, a merger waiting on a person —
-//     until another delivery of a run replaces it. A notice's turn has no delivery behind it.
-//  3. Otherwise, for a claim that has served no run at all, a task it holds that the agent may
-//     have read. Oh My Pi's own agent_start names no prompt, so a turn that starts after the
-//     daemon's wait for it is indistinguishable from a turn of the agent's own and confirms
-//     nothing; a worker on its first task would otherwise have its completion refused. This
-//     cannot be mistaken for an older run's work, because there is no older run this claim
-//     served. A task the agent refused is not one it read, and carries no such mark.
+// three sources serving reads are read for it.
 //
 // An operator's task belongs to no run and answers for none of them: it carries generation 0.
 func (c Claim) ServingRun() uint64 {
-	p := c.Pending
-	if p == nil || p.Generation == 0 {
-		return c.ServingGeneration
+	return serving(c.Pending, deliveredRun, c.ServingGeneration)
+}
+
+// ServingAssignment is the assignment of the task this claim's worker took, and "" for a claim
+// that has taken none that carried one. It is the finer of the two: every phase entry of one run
+// carries that run, where each entry that hands this role a task carries an assignment of its own.
+// A task of no assignment answers for none of them: an operator's own, a resume, a production
+// check's look, and every task a daemon older than the assignment delivered — so a resumed
+// worker's in-flight completion is never refused for an assignment it was never given.
+func (c Claim) ServingAssignment() string {
+	return serving(c.Pending, deliveredAssignment, c.ServingAssignmentID)
+}
+
+// deliveredRun and deliveredAssignment are what a delivery carries of each: the two values serving
+// picks between, named so the accessors read as one rule applied twice rather than two rules.
+func deliveredRun(d Delivery) uint64        { return d.Generation }
+func deliveredAssignment(d Delivery) string { return d.Assignment }
+
+// serving picks what a claim's worker is on — the run for ServingRun, the assignment for
+// ServingAssignment — from the three sources both read, in this order. carried is what the pending
+// delivery holds of it, and retired what the claim was left serving (ServingGeneration,
+// ServingAssignmentID); the zero value of either is a task, or a claim, that answers for none of
+// them. The precedence lives here once, so a later fix to it — the DeliveredAt fallback, say —
+// cannot land on one of the two and miss the other.
+//
+//  1. The task whose turn is running. A completion is a tool call inside a turn, and one process
+//     runs one turn at a time.
+//  2. Otherwise what this claim is left serving: the turn's end retires its delivery, and the
+//     worker goes on working that run and that assignment — a tester waiting on CI, a merger
+//     waiting on a person — until another delivery carrying one replaces it. A notice's turn has
+//     no delivery behind it.
+//  3. Otherwise, for a claim that has served none at all, a task it holds that the agent may
+//     have read. Oh My Pi's own agent_start names no prompt, so a turn that starts after the
+//     daemon's wait for it is indistinguishable from a turn of the agent's own and confirms
+//     nothing; a worker on its first task would otherwise have its completion refused. This
+//     cannot be mistaken for older work, because there is none this claim served. A task the
+//     agent refused is not one it read, and carries no such mark.
+func serving[T comparable](pending *Delivery, carried func(Delivery) T, retired T) T {
+	var none T
+	if pending == nil {
+		return retired
 	}
-	if !p.ConfirmedAt.IsZero() {
-		return p.Generation
+	value := carried(*pending)
+	if value == none {
+		return retired
 	}
-	if c.ServingGeneration == 0 && !p.DeliveredAt.IsZero() {
-		return p.Generation
+	if !pending.ConfirmedAt.IsZero() {
+		return value
 	}
-	return c.ServingGeneration
+	if retired == none && !pending.DeliveredAt.IsZero() {
+		return value
+	}
+	return retired
 }
 
 // Claim is a copy of the claim as the machine holds it now. It waits for the decision in flight,
@@ -812,6 +850,13 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 	case StreamTurnStart:
 		if ev.DeliveryID != "" && (pending == nil || pending.ID != ev.DeliveryID) {
 			m.dropStale("StreamTurnStart", "delivery", ev.DeliveryID, pendingID(pending))
+			return false, nil
+		}
+	case StreamPromptResult:
+		// The result of a prompt for a delivery the claim no longer holds — retired, or taken back
+		// under a new id — answers a question nothing is still asking.
+		if pending == nil || pending.ID != ev.DeliveryID {
+			m.dropStale("StreamPromptResult", "delivery", ev.DeliveryID, pendingID(pending))
 			return false, nil
 		}
 	case StreamLateRefusal:
@@ -1143,16 +1188,14 @@ func (m *Machine) retire(ctx context.Context) error {
 }
 
 // letGo ends what the machine had with the claim's process: no timer watches it, no relaunch waits
-// on one (relaunchLater), no send talks to it, no suspension is held for its turn and no turn of it
-// is interrupted any more (the interrupt's start finds it over, quiesced), and the process the
-// claim records, when it records one, moves into previous — the claim no longer runs it (it was
+// on one (relaunchLater), no send talks to it, no suspension is held for its turn, and the process
+// the claim records, when it records one, moves into previous — the claim no longer runs it (it was
 // stopped, found dead, or left behind), and the next launch of the same session waits it out.
 func (m *Machine) letGo() {
 	m.disarmAll()
 	m.relaunch = nil
 	m.forgetSend()
 	m.held = nil
-	m.interruptOver()
 	if enrollment := ClearEnrollment(&m.claim); enrollment != nil {
 		m.revoke(*enrollment)
 	}
@@ -1339,6 +1382,8 @@ func claimOf(ev Event) claim.Token {
 		return ev.Claim
 	case StreamTurnEnd:
 		return ev.Claim
+	case StreamPromptResult:
+		return ev.Claim
 	case StreamClosed:
 		return ev.Claim
 	case StreamLateRefusal:
@@ -1374,6 +1419,8 @@ func claimOf(ev Event) claim.Token {
 	case RequestRetry:
 		return ev.Claim
 	case RequestOperatorRetry:
+		return ev.Claim
+	case RequestForgetSession:
 		return ev.Claim
 	case RequestDeliver:
 		return ev.Claim

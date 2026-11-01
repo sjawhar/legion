@@ -798,9 +798,9 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // role's pane will start Oh My Pi: its PI_CONFIG_FILES, runtime.tmux.pi_config_files then its own
 // files, each file read and the role's own each read alone by image's Oh My Pi
 // (capabilities.CheckOverlays), so a file a pane's Oh My Pi would refuse refuses the boot, naming
-// the role and the file, rather than every launch of that role. The turn-scoping overlay the
-// runtime writes at each launch is Legion's own and is left out. A run that never reached an exit
-// of its own is logged, not refused, as the model-fallback read is.
+// the role and the file, rather than every launch of that role. Legion names no overlay of its
+// own, so those two lists are the whole of a pane's PI_CONFIG_FILES. A run that never reached an
+// exit of its own is logged, not refused, as the model-fallback read is.
 func checkPaneRoleOverlays(ctx context.Context, cfg config.Config, image capabilities.Image, log *slog.Logger) error {
 	var every []string
 	if block := cfg.Runtime.Tmux; block != nil {

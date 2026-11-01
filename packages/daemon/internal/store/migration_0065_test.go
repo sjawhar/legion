@@ -4,99 +4,64 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// 0065 adds parked_decisions and readmitted_approvals: a decision is kept under the issue it was
-// made on, one row per Dispatch reference, and a root keeps one approval below its spec's latest
-// version. Both carry the claim of the outbox row that names them and the hold of the delivery
-// that carries them, and both go with the issue they name.
-func TestParkedDecisionsArriveWith0065AndGoWithTheirIssue(t *testing.T) {
-	store := emptyStore(t)
+// A database can hold supervise start rows the previous release queued with a `quiesce` key when
+// 0065 arrives. A start waits for no turn of the role it takes the phase from, so the payload has
+// no such field and decodes strictly (record.DecodeOutboxPayload), so a row still carrying
+// the key would fail to decode on every attempt and stall its issue's lifecycle lane. The negative
+// control is that failure read before the migration; the migration strips the key and leaves
+// everything else of the row as it is, so the start then runs as the start it already was. A row
+// that never had it is untouched.
+func TestTheSuperviseMigrationStripsTheQuiesceKeyFromQueuedRows(t *testing.T) {
 	ctx := context.Background()
+	store := emptyStore(t)
 	migrateThrough(t, store, 64)
-	var exists bool
-	if err := store.Pool().QueryRow(ctx, `select to_regclass('parked_decisions') is not null`).Scan(&exists); err != nil {
-		t.Fatalf("look for parked_decisions at 0064: %v", err)
+	insert := `insert into outbox (kind, issue, payload, attempts, next_at, last_error)
+		values ('supervise', $1, $2, 0, now(), '') returning id`
+	var takingOver, plain int64
+	if err := store.pool.QueryRow(ctx, insert, "LEGION-208",
+		`{"op":"start","tree":"LEGION-208","role":"implementer","task":"fix the red","generation":3,"phase":"implementing","quiesce":"tester"}`).Scan(&takingOver); err != nil {
+		t.Fatalf("queue the taking-over start the previous release wrote: %v", err)
 	}
-	if exists {
-		t.Fatal("parked_decisions exists at 0064, want it added by 0065")
+	if err := store.pool.QueryRow(ctx, insert, "LEGION-209",
+		`{"op":"start","tree":"LEGION-208","role":"tester","task":"test it","generation":4,"phase":"testing"}`).Scan(&plain); err != nil {
+		t.Fatalf("queue the start written without the field: %v", err)
 	}
+	before, err := decodeRow(t, store, takingOver)
+	if err == nil || !strings.Contains(err.Error(), `unknown field "quiesce"`) {
+		t.Fatalf("the start carrying quiesce decoded as %#v, %v before the migration, want the refusal that names the field: it is the row the migration exists for", before, err)
+	}
+	t.Logf("before the migration the start carrying quiesce is refused: %v", err)
 	if _, err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
+		t.Fatalf("migrate through the quiesce-key strip: %v", err)
 	}
-	var key []string
-	if err := store.Pool().QueryRow(ctx, `select array_agg(a.attname::text order by k.ord)
-		from pg_index i
-		cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
-		join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
-		where i.indrelid = 'parked_decisions'::regclass and i.indisprimary`).Scan(&key); err != nil {
-		t.Fatalf("read the primary key of parked_decisions: %v", err)
-	}
-	if strings.Join(key, ",") != "issue,ref" {
-		t.Fatalf("parked_decisions primary key = %v, want (issue, ref): a decision is kept under the issue it was made on", key)
-	}
-	var columns []string
-	if err := store.Pool().QueryRow(ctx, `select array_agg(attname::text order by attname) from pg_attribute
-		where attrelid = 'parked_decisions'::regclass and attnum > 0 and not attisdropped`).Scan(&columns); err != nil {
-		t.Fatalf("read the columns of parked_decisions: %v", err)
-	}
-	for _, column := range []string{"claimed_by", "held_by_claim", "held_by_delivery"} {
-		if !strings.Contains(strings.Join(columns, ","), column) {
-			t.Fatalf("parked_decisions columns = %v, want %s among them", columns, column)
-		}
-	}
-	if strings.Contains(strings.Join(columns, ","), "root") {
-		t.Fatalf("parked_decisions columns = %v, want no root: the tree a decision is owed to is read from its issue", columns)
-	}
-
-	if _, err := store.Pool().Exec(ctx, `insert into issues
-		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
-		values ('LEGION-210', 'LEGION-210', 'LEGION', 'parked root', 'done', 1, 'backlog', 'A', 1)`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Pool().Exec(ctx, `insert into parked_decisions (issue, ref, decision, actor, at)
-		values ('LEGION-210', 'dispatch://LEGION-210/spec', 'design-approved', 'user:alice', now())`); err != nil {
-		t.Fatalf("keep a decision: %v", err)
-	}
-	if _, err := store.Pool().Exec(ctx, `insert into parked_decisions (issue, ref, decision, actor, at)
-		values ('LEGION-210', 'dispatch://LEGION-210/spec', 'design-changes-requested', 'user:bob', now())`); err == nil ||
-		!strings.Contains(err.Error(), "duplicate key") {
-		t.Fatalf("a second row for one ref = %v, want the primary key to refuse it", err)
-	}
-	if _, err := store.Pool().Exec(ctx, `insert into parked_decisions (ref, decision, actor, at)
-		values ('dispatch://LEGION-210/ask/ask-1', 'ask-answered', 'user:alice', now())`); err == nil ||
-		!strings.Contains(err.Error(), "not-null") {
-		t.Fatalf("a decision naming no issue = %v, want the not-null constraint to refuse it: a kept row records where it was decided", err)
-	}
-	if _, err := store.Pool().Exec(ctx, `insert into parked_decisions (issue, ref, decision, actor, at)
-		values ('LEGION-404', 'dispatch://LEGION-404/spec', 'design-approved', 'user:alice', now())`); err == nil ||
-		!strings.Contains(err.Error(), "foreign key") {
-		t.Fatalf("a decision on an unrecorded issue = %v, want the foreign key to refuse it", err)
-	}
-	for _, refused := range []struct{ why, statement, error string }{
-		{"an approval at the latest version", `insert into readmitted_approvals (issue, approved_version, latest_version) values ('LEGION-210', 3, 3)`, "check constraint"},
-		{"an approval of version 0", `insert into readmitted_approvals (issue, approved_version, latest_version) values ('LEGION-210', 0, 3)`, "check constraint"},
-		{"an approval on an unrecorded root", `insert into readmitted_approvals (issue, approved_version, latest_version) values ('LEGION-404', 2, 3)`, "foreign key"},
+	for _, want := range []struct {
+		id      int64
+		payload record.SuperviseRequest
+	}{
+		{takingOver, record.SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: "implementer", Task: "fix the red", Generation: 3, Phase: "implementing"}},
+		{plain, record.SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: "tester", Task: "test it", Generation: 4, Phase: "testing"}},
 	} {
-		if _, err := store.Pool().Exec(ctx, refused.statement); err == nil || !strings.Contains(err.Error(), refused.error) {
-			t.Fatalf("%s = %v, want %s to refuse it", refused.why, err, refused.error)
+		got, err := decodeRow(t, store, want.id)
+		if err != nil {
+			t.Fatalf("decode row %d after the migration: %v", want.id, err)
 		}
+		if got != want.payload {
+			t.Fatalf("row %d decodes as %#v, want %#v", want.id, got, want.payload)
+		}
+		t.Logf("after the migration row %d runs as %#v", want.id, got)
 	}
-	if _, err := store.Pool().Exec(ctx, `insert into readmitted_approvals (issue, approved_version, latest_version) values ('LEGION-210', 3, 4)`); err != nil {
-		t.Fatalf("keep an older approval: %v", err)
+}
+
+// decodeRow decodes the supervise row id holds, as the outbox runner does.
+func decodeRow(t *testing.T, store *Store, id int64) (any, error) {
+	t.Helper()
+	var payload []byte
+	if err := store.pool.QueryRow(context.Background(), "select payload from outbox where id = $1", id).Scan(&payload); err != nil {
+		t.Fatalf("read row %d: %v", id, err)
 	}
-	if _, err := store.Pool().Exec(ctx, `insert into readmitted_approvals (issue, approved_version, latest_version) values ('LEGION-210', 2, 4)`); err == nil ||
-		!strings.Contains(err.Error(), "duplicate key") {
-		t.Fatalf("a second approval for one root = %v, want the primary key to refuse it", err)
-	}
-	if _, err := store.Pool().Exec(ctx, `delete from issues where key = 'LEGION-210'`); err != nil {
-		t.Fatalf("delete the issue: %v", err)
-	}
-	var kept, approvals int
-	if err := store.Pool().QueryRow(ctx, `select (select count(*) from parked_decisions), (select count(*) from readmitted_approvals)`).Scan(&kept, &approvals); err != nil {
-		t.Fatalf("count the kept rows: %v", err)
-	}
-	if kept != 0 || approvals != 0 {
-		t.Fatalf("%d decisions and %d approvals kept after their issue was deleted, want none", kept, approvals)
-	}
+	return record.DecodeOutboxPayload(record.OutboxRow{ID: id, Kind: record.OutboxKindSupervise, Payload: payload})
 }
