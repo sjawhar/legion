@@ -2,48 +2,58 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-251",
-  "previousHandoff": "0103f7a7bf102ab1be73409fe228ba4bf846665d",
-  "round": 21,
-  "headSha": "1ff14783191d",
-  "handoffHead": "644bd97b55a3733738f33ff155012a90a77af8dd",
-  "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran.",
-  "scope": "The compare 695ee39d...1ff14783 changes scripts/e2e/parked-decision-devbox.sh (148 lines), scripts/e2e/README.md (9) and the .legion/ handoffs. No daemon or other code moved.",
+  "previousHandoff": "37dafae322334a9b1469f1fc1fafd07d0b8eed4e",
+  "round": 22,
+  "headSha": "22a0671ee5be",
+  "handoffHead": "dde47991848a7c8800af3f91d982ebcf93757f15",
+  "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran. No model ran inside any drive: the agents are test shims.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "bash -n passes. shellcheck v0.10.0 -x (fetched from its release; the pod has none) exits 0 on the script at 1ff14783 and on stage3-devbox-workflow.sh, and flags SC2119/SC2120 on the script at 8d19216c, as the implementer says. I wrote my own command-word check: shfmt v3.10.0 --to-json lists every literal command word, and bash resolves each after sourcing transcript, rig, omp-home, workflow and leftovers. At 1ff14783, 114 words: unresolved only docker, mise and tmux, the devbox programs the prerequisites loop requires, which this pod lacks. At 8d19216c the same check also leaves pick_port and log_size unresolved. In my own harness I re-ran the implementer's listener and Dispatch smoke, and got the same result."
+    "how": "The merge kept main's #2619 and this change's relay. Diffing this change's own diff at 1ff14783 and at the merge 46297b56, the only daemon code that moved is DispatchArtifact.Actor and its decode and test lines, which main now carries with the same value (dispatch.Actor(event.Actor), intake/decode.go:315). workflow/gate.go's dispatchArtifact skips the root's own gate only when personHandoverQueues holds, so the approval that #2619 queues never reaches applyArtifact, where this change's design-approved relay runs. Every other approval does. #2619's own three scratch-Dispatch tests pass at this head: TestAPersonsLabelOnATriageRootIsQueuedByTheDaemonAgainstScratchDispatch, TestAPersonsApprovalOfAParkedRootsSpecIsQueuedByTheDaemonAgainstScratchDispatch and TestABootListingQueuesAPersonsLabelAgainstScratchDispatch. The implementer's helper smoke holds (proof[2])."
   },
-  "failures": [
-    {
-      "criterion": "CI reads green at the head (a bare gate)",
-      "evidence": "GitHub reports #2163 CONFLICTING (mergeStateStatus DIRTY), read 2026-11-01T12:44Z, and no check run exists at 1ff14783 or at 644bd97b, because GitHub starts no pull_request workflow on a conflicting head. git merge-tree --write-tree main@origin(9ee0862f2341) 644bd97b reports 'CONFLICT (content)' in packages/daemon/internal/intake/decode.go, facts.go and intake_test.go, against main's 9e1f057ed286 'feat(daemon): the daemon queues a person's handover itself (LEGION-755) (#2619)'. The implementer reintegrates main with a merge (skill://legion-worker/references/conflicts-and-rewrites.md). This change's script port is not at fault: CI at the previous head 2bfe17df read 15 success and 1 cancelled pr-title."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "Each rig call of the ported script against stage3-devbox-workflow.sh at main",
-      "surface": "The two scripts' function bodies and rig lines, diffed",
-      "command": "diff <(awk '/^start_listener\\(\\) \\{/,/^}/' stage3.sh) <(... parked-decision-devbox.sh), likewise for start_dispatch and start_daemon; grep of the docker run, install-plugin-profile, keep_port, mise, wait_for_run_processes and App lines",
-      "observed": "start_listener: identical but ENVOY_MACHINE_ID (legion-e2e3 vs legion-e2e-pd). start_dispatch: identical but Stage 3's optional `keep` argument for its restart path, which this script has no use for. start_daemon: the same start_kept/env/await_start call, without Stage 3's restart path (keep_port and write_legion_config inside it; the script does both in boot) and without Stage 3's daemon_runs_the_pinned_omp check of the omp the daemon resolved. That check is not ported. The script's omp_invocation is `mise x $pin -- omp` and it unsets LEGION_OMP_PATH, as Stage 3 does. The Postgres container line is byte-identical (pgvector@sha256:2358fcba...). The NATS line is the same but for the image: this script uses mirror.gcr.io/library/nats:2.10, as AGENTS.md says devbox proofs do, and Stage 3 at main uses bare nats:2.10. install-plugin-profile now passes --omp $pin after mise install, as Stage 3 does. require_app_inputs, write_github_apps and read_app_logins are called in prerequisites, in Stage 3's order.",
-      "headSha": "1ff14783191d",
-      "negativeControl": "The same comparison is what shows the one Stage 3 check not ported (daemon_runs_the_pinned_omp)."
+      "criterion": "On the whole daemon, #2619's handover and this change's relay side by side",
+      "surface": "The whole Legion daemon (startDaemonWithin) on the pod's PostgreSQL 18.6 and nats-server 2.10.29; Dispatch events as envelopes on ENVOY_NOTIFICATIONS; the Dispatch stand-in answers each issue's labels and primary_artifact_id and each artifact's issue and latest version; the controller is the listener stand-in's controller topic",
+      "command": "go test -tags e2e -count=1 -run '^TestTesterApprovalHandoverLive$' -v ./internal/daemon/ (throwaway driver)",
+      "observed": "PASS, 8 steps. (1) A session's approval of a parked labelled root queued nothing and told the controller nothing. (2) A person's approval of a parked labelled root's primary document: the daemon wrote the root todo, and 0 parked-decision notices name its spec. (3) The todo echo re-admitted it (phase admitted). The same approval again wrote no second todo and sent no notice. (4) An unlabelled parked root's approval: 1 notice, no todo. (5) An approval of a labelled parked root's non-primary document: 1 notice, no todo. (6) A parked tree's child's approval: 1 notice, no todo for the child or its root. (7) A person's ask answer, resolution and agent-turn reply on the parked tree: 1 notice each. Observed while building the drive: a second person's approval that lands between the daemon's todo write and that write's echo (the record still parked) is relayed to the controller once. That is a redundant notice on a tree about to run again, not a loss and not a second telling to an architect.",
+      "headSha": "22a0671ee5be",
+      "negativeControl": "With gate.go's `if queues && !carried` skip disabled (reverted with jj restore), step (2) FAILS: 'the controller was told 1 parked-decision notices for ...-1's approval, which the daemon queued as the person's handover'."
     },
     {
-      "criterion": "In the pod, without docker: the ported listener, Dispatch and daemon starts on held ports, and the prerequisites App check",
-      "surface": "A throwaway harness that sources the script's libs and evals the script's own start_listener, start_dispatch, write_legion_config and start_daemon bodies verbatim (awk-extracted). In place of the two containers: the pod's PostgreSQL 18 under the container's user legion with its password, databases dispatch and legion, and nats-server 2.10.29 -js on a port it reports. The binaries are built as the script builds them.",
-      "command": "HARNESS_APPS=0 bash $TMPDIR/pdh/harness.sh",
-      "observed": "prerequisites: require_app_inputs implement review and write_github_apps wrote github-apps.yaml naming app_id 5341240 (implement) and 5341243 (review), each with an agent-secrets private_key_command. app_key_unsets covers LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 and GH_REVIEW_APP_PRIVATE_KEY_B64. rig: the listener served on kernel-chosen port 46997, held by the listener alone (held_only_by). Dispatch served on its keeper's port 33678, held by Dispatch and its keeper alone, and took dispatch_human's project create and its repository mapping PUT, then listed the project. boot: keep_port held the daemon's port, write_legion_config named it, and `legion start --check-config` printed 'Config OK: project=PDH21586'.",
-      "headSha": "1ff14783191d",
-      "negativeControl": "The same harness over the script at 8d19216c stops at its first rig call: 'pick_port: command not found', 'log_size: command not found', 'port_listener: unbound variable'."
+      "criterion": "The script: bash -n, shellcheck -x, every command word defined, and the new checkpoints read their results back after the fact",
+      "surface": "scripts/e2e/parked-decision-devbox.sh at 22a0671e, statically and through a harness that evals its own functions",
+      "command": "bash -n; shellcheck v0.10.0 -x; the shfmt AST command-word check; HARNESS_APPS=0 bash $TMPDIR/tester/pd-harness.round22.sh",
+      "observed": "bash -n ok, shellcheck exit 0. Command words: 122, unresolved only docker, mise and tmux (devbox programs). Read-back: answer-readmits waits on the daemon log's relay line (relayed_logged), the controller transcript's delivery and its later todo write, Dispatch's todo-by-daemon event after the answer's seq, admission, and the architect's turn text. approval-queues waits on the log's 'admission: queued a person's handover' with source approval, Dispatch's todo by the daemon after the approval's seq, admission and planning. Its negative reads (no sent_logged, no design-approved relay, no undelivered spec notice, no new parked-decision in the controller transcript) run only after planning, by when any relay of that event would long since have been logged. The verdict now requires undelivered == [] and sent == [] and a relay line for each of the five trees. Harness against a real Dispatch: open_question, as the stand-in session, returned an ask id. answer_question, as user:smoke, answered it. Dispatch's events read ask.opened (actor session stage3-architect-stand-in), then ask.answered (actor user:smoke).",
+      "headSha": "22a0671ee5be",
+      "negativeControl": "answer_question on an ask that does not exist is refused by Dispatch (HTTP 400)."
     },
     {
-      "criterion": "Which checkpoints this pod could and could not reach",
-      "surface": "As above",
-      "command": "As above",
-      "observed": "Reached: bash -n, shellcheck, the command-word check, the prerequisites App inputs and github-apps.yaml, rig's listener, Dispatch, project and mapping on held ports, and boot's keep_port, legion.yaml and --check-config. Not reached: (1) read_app_logins and start_daemon. Both read the App keys through agent-secrets, and the broker held each read for a person's approval (agent-secrets printed that the request waits for a person to approve it under Credential requests in their Dispatch Inbox), so I cancelled both requests (60ae3499-9d75-48cf-afdc-0a6bbcc456e2 and de91c83c-b17a-4134-be92-a5b3c837da57; agent-secrets status reads 'cancelled'). This run asks no person to approve a key read. (2) Everything needing docker, mise, tmux, the model route or the proof human's gh: the containers, the plugin install, controller-up and every later checkpoint (trees-wait-on-a-person to the end). Those wait for the merge lane's devbox run.",
-      "headSha": "1ff14783191d",
+      "criterion": "The pinned seeds and one bounded sweep",
+      "surface": "The daemon package on the pod's PostgreSQL",
+      "command": "go test -run 'TestKeptDecisionsRegressionSeeds|...' ./internal/daemon/; LEGION_KEPT_PROPERTY_RUNS=300 LEGION_KEPT_PROPERTY_STEPS=300 ./daemon22.test -test.run '^TestKeptDecisionsReachTheCurrentArchitectOnce$'",
+      "observed": "Pinned: 38 of 38 subtests PASS, with 0 SQLSTATE 42501 in the run. Sweep (1535 s): 299 of 300 seeds passed. Invariant failures: 0. Cleanup errors: 0. Connection errors: 1. Seed 168 failed in 0.03 s, before any step, with 'create legion_outbox_test_...: failed to connect ... connection reset by peer' at the pod's PostgreSQL, and passed 3 of 3 when replayed. intake: ok. workflow: five tests failed under the shared-database load. Run again alone, four passed and one failed only in its cleanup (42501).",
+      "headSha": "22a0671ee5be",
+      "negativeControl": "The pinned seeds are each a past failure."
+    },
+    {
+      "criterion": "Every whole-daemon drive once, round 7 among them",
+      "surface": "The whole daemon as above",
+      "command": "TESTER_REAL_EVENTS=... go test -tags e2e -count=1 -run '^TestTester.*Live$' -v ./internal/daemon/",
+      "observed": "All 13 drives PASS (241 s). Round-7 passed its 14 steps: of 13 real Dispatch events from INFRA-251 and INFRA-168, the 3 a person made are relayed. Verdict jq over this run's whole log: unmatched [].",
+      "headSha": "22a0671ee5be",
+      "negativeControl": "The handover control above."
+    },
+    {
+      "criterion": "Which checkpoints wait for the merge lane's devbox run",
+      "surface": "The script's checkpoint list",
+      "command": "Not run here",
+      "observed": "Reached in this pod: the static checks, the prerequisites App inputs, the rig's listener and Dispatch on held ports, the question helpers against a real Dispatch, and boot's --check-config (round 21's harness, re-run). Waiting for the devbox run: read_app_logins and the daemon start (the App key reads need a person's approval at the broker; none was requested this round), and every checkpoint from controller-up on. Those are controller-up, trees-wait-on-a-person, trees-parked, answer-readmits, question-stays-parked, foreign-park-stays, approval-queues, controller-down, walk-on-start, verdict and cleanup-is-complete, all of which need docker, mise, tmux, the model route and the proof human's gh.",
+      "headSha": "22a0671ee5be",
       "negativeControl": "Not applicable."
     }
   ],
-  "ci": "No check run exists at 1ff14783 or 644bd97b: the pull request is CONFLICTING (failures[0]). At the previous head 2bfe17df: 15 success, 1 cancelled pr-title."
+  "ci": "Head dde47991, read 2026-11-01T14:32Z: 13 lanes success (lint, typecheck, pi-legion, pi-envoy, pi-shared, docs, worker-image among them); test was still running; one pr-title run was cancelled. Not waited on. GitHub: MERGEABLE, BLOCKED."
 }
