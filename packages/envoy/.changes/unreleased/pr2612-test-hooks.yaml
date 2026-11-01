@@ -1,0 +1,11 @@
+kind: Added
+body: |-
+  Three settings a test process can set under `DISPATCH_TEST_HOOKS=1`, so an end-to-end run no
+  longer waits out constants a person never sees:
+  `DISPATCH_TEST_MARK_WAIT` (how long a mark the browser says it wrote is waited for, default 1s),
+  `DISPATCH_TEST_UNRECORDED_MARK_TTL` (how long a mark no comment, ask or suggestion records is
+  kept before the settlement sweep expires it, default 1m), and `DISPATCH_TEST_EMBEDDER_OFF=1`
+  (build no embedder at all, whatever `DISPATCH_EMBEDDER` and the AWS SDK's own variables would
+  have built: meaning search answers keyword-only and says so, and the embedding queue does
+  nothing). Each is refused without the test hooks, and the two durations are refused unless they
+  are positive.

@@ -2060,10 +2060,11 @@ jobs:
     # `env:`: a name outside ci_filter_coverage.py's ENV_ALLOWED in this job's or any of its
     # steps' `env:` drops run-server.sh's `go build` out of check-ci-filters.sh's reduction, which
     # then counts it as reading every Go file of the repository.
-    # 35 while the worker count is being measured: a job the timeout kills reports as cancelled
-    # and writes no Playwright report, so the run that would say how long the suite takes says
-    # nothing at all. It comes down to the job's own measured time once that number is settled.
-    timeout-minutes: 35
+    # 32, which is four minutes over the 28 the issue's own acceptance sets and five over the
+    # 26 min 46 s this job measured at four lanes (run 41319582999). A job the timeout kills
+    # reports as cancelled and writes no Playwright report, so a timeout tight against the
+    # measurement costs the run that would say why it was slow.
+    timeout-minutes: 32
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
