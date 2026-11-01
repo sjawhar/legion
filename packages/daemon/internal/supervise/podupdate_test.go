@@ -14,7 +14,10 @@ package supervise
 // and a round that replaces another under a turn in flight — a late turn, a restart's turn, a
 // turn the daemon sent nothing for — switches all the same. The stale-plugin lane's two cases
 // are here as well: a claim that can answer gets a round, and one that cannot, like a
-// registration, keeps today's immediate relaunch.
+// registration, keeps today's immediate relaunch. The last group is the claim the daemon
+// relaunched into another pod while its pod round ran: its part in that round is frozen where
+// the dead pod left it, and the control beside it is a claim still in the round's own pod, which
+// takes its full part.
 //
 // Each test drives the machine through Handle, as the daemon's sweep and the API do; no action is
 // called directly.
@@ -28,6 +31,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
@@ -35,8 +39,13 @@ const (
 	// testPodUpdateRetask is the harness's re-task bound, far longer than any wait a test's claim
 	// is already in, so only a test that moves the clock itself reaches it.
 	testPodUpdateRetask = time.Hour
+	// testRoundPod is the uid of the pod testRound is the round of, and testOtherPod the uid of
+	// the pod a claim is relaunched into once that one has died. A pod round names the pod every
+	// claim of it runs in, so testRound is written from testRoundPod rather than beside it.
+	testRoundPod = "9d3f0c7a-2b41-4a39-9f6b-6c1d0a7e5b22"
+	testOtherPod = "4b8e1d60-3c92-4f7a-ae15-8d0c2b5f6a34"
 	// testRound is a pod round's identity, as the daemon's sweep writes it.
-	testRound = "pod:9d3f0c7a-2b41-4a39-9f6b-6c1d0a7e5b22"
+	testRound = PodRoundPrefix + testRoundPod
 	// testReasons is what the daemon found, as Claim.UpdateReasons holds it.
 	testReasons = "image"
 )
@@ -90,6 +99,42 @@ func (h *harness) wantRound(want string) Claim {
 		h.t.Fatalf("UpdateRound = %q, want %q", c.UpdateRound, want)
 	}
 	return c
+}
+
+// podProcess is a process of the test's claim in the pod with this uid, as the Sandbox runtime
+// hands one back: the claim's locator is the one record of which pod its worker runs in, and
+// PodRound of that uid is the round of that pod.
+func podProcess(pod string, generation uint64) runtime.Locator {
+	return runtime.Locator{
+		Runtime: runtime.RuntimeSandbox, Claim: testToken, Incarnation: runtime.SandboxIncarnation(pod, generation),
+		Sandbox: &runtime.SandboxLocator{
+			Namespace: "legion", Name: "legion-legion-209", PodUID: pod,
+			Container: runtime.IssuePodContainer, Generation: generation,
+		},
+	}
+}
+
+// inPod brings the harness's claim up to ready in the pod with this uid, so the round the test
+// opens over it is its own pod's.
+func (h *harness) inPod(pod string) {
+	h.t.Helper()
+	h.rt.ScriptSpawn(fake.SpawnResult{Locator: podProcess(pod, 1)})
+	h.reach(StateReady)
+}
+
+// diesIntoPod is the claim's pod dying under it and the relaunch coming up in another: the
+// runtime reports the process gone, the machine relaunches it on its recorded session, and the
+// Resume answers with a process in the pod named. The machine moves its own locator, as it does
+// in the cluster — nothing here writes the claim behind the machine's back — and the walk back
+// to ready is the one every relaunch takes.
+func (h *harness) diesIntoPod(pod string) {
+	h.t.Helper()
+	h.rt.ScriptResume(fake.SpawnResult{Locator: podProcess(pod, 1)})
+	h.observe(runtime.Gone)
+	h.relaunched()
+	if got := h.locator().Sandbox.PodUID; got != pod {
+		h.t.Fatalf("the relaunched claim runs in pod %q, want %q", got, pod)
+	}
 }
 
 // A round opened over a ready claim records itself and sends the round's task once, under an id
@@ -1265,4 +1310,114 @@ func TestPodUpdateTakesNoTurnTheDaemonLearnedOfFromTheAgentAsTheAnswer(t *testin
 			t.Error("the end of the update task's turn recorded no answer; no agent_start of a live turn names a delivery")
 		}
 	})
+}
+
+// A pod dies and the claim comes up in another one while the round opened over the dead pod is
+// still recorded on it. The worker now running holds none of the work that round asks about, so
+// the claim's part in the round is frozen unanswered: the ask the dead pod never read is dropped
+// rather than sent again, the sweep's next post asks nothing, and an answer given from the new
+// pod is refused. An answer counted there would report work as pushed that nobody pushed.
+func TestPodUpdateAnUnansweredClaimRelaunchedIntoAnotherPodIsAskedNothingMore(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract)
+	h.inPod(testRoundPod)
+	h.openUpdate(testRound, testReasons)
+	if asked := h.wantPrompts(1)[0]; !asksRound(asked.DeliveryID, testRound) {
+		t.Fatalf("delivery id = %q, want an ask of the round %q", asked.DeliveryID, testRound)
+	}
+
+	h.diesIntoPod(testOtherPod)
+
+	h.wantPrompts(1)
+	if p := h.claim().Pending; p != nil {
+		t.Fatalf("pending = %+v, want the round's ask dropped rather than sent in the new pod", p)
+	}
+	if d, held := h.store.delivery(h.token); held {
+		t.Errorf("the store holds %+v, want the ask dropped with the pod it was sent for", d)
+	}
+	if c := h.wantRound(testRound); c.UpdateSignalledAt != nil {
+		t.Errorf("claim = %+v, want its part in the round still unanswered", c)
+	}
+
+	// The sweep posts the round at every tick while it is open; this claim is asked nothing.
+	h.advance(2 * testPodUpdateRetask)
+	h.openUpdate(testRound, testReasons)
+
+	h.wantPrompts(1)
+	if p := h.claim().Pending; p != nil {
+		t.Errorf("pending = %+v, want no ask of the round in the new pod", p)
+	}
+
+	err := h.handle(PodUpdateSignalled{Claim: h.token, Generation: h.generation(), Session: session, Round: testRound, Head: "c0ffee"})
+
+	if !errors.Is(err, ErrLeftPodRound) {
+		t.Fatalf("the answer from the new pod returned %v, want the refusal of a process in another pod", err)
+	}
+	for _, name := range []string{testRound, PodRound(testOtherPod)} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("refusal = %q, want it to name %q", err, name)
+		}
+	}
+	if c := h.claim(); c.UpdateSignalledAt != nil || c.UpdateHead != "" {
+		t.Errorf("claim after the refused answer = %+v, want nothing of it recorded", c)
+	}
+}
+
+// A claim that answered its round and was then relaunched into another pod keeps that answer:
+// the answer was given in the pod the round is about, and no turn of the pod that replaced it
+// can move the branch the dead pod held. A turn there would otherwise take the answer back and
+// report a worker that did push as having lost its work.
+func TestPodUpdateAnAnsweredClaimRelaunchedIntoAnotherPodKeepsItsAnswer(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract)
+	h.inPod(testRoundPod)
+	h.openUpdate(testRound, testReasons)
+	h.wantPrompts(1)
+	h.must(StreamTurnStart{Claim: h.token})
+	h.signalUpdate("c0ffee")
+	h.must(StreamTurnEnd{Claim: h.token})
+	answered := h.claim().UpdateSignalledAt
+	if answered == nil {
+		t.Fatalf("claim = %+v, want the answer recorded in the round's own pod", h.claim())
+	}
+
+	h.diesIntoPod(testOtherPod)
+	h.must(StreamTurnStart{Claim: h.token})
+
+	c := h.wantRound(testRound)
+	if c.UpdateSignalledAt == nil || !c.UpdateSignalledAt.Equal(*answered) || c.UpdateHead != "c0ffee" {
+		t.Fatalf("claim after a turn in the new pod = %+v, want the answer of %v and the head it reported", c, answered)
+	}
+	if stored := h.store.load(h.token); stored.UpdateSignalledAt == nil || stored.UpdateHead != "c0ffee" {
+		t.Errorf("stored claim = %+v, want the answer standing in the store too", stored)
+	}
+}
+
+// The control that the guard reads the pod and nothing else: a claim still in the round's own
+// pod answers, a turn the daemon sent nothing for takes that answer back, and the next post of
+// the round asks it again — exactly as a claim that never left its pod always has.
+func TestPodUpdateAClaimInTheRoundsOwnPodStillLosesItsAnswerToAForeignTurn(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract)
+	h.inPod(testRoundPod)
+	h.openUpdate(testRound, testReasons)
+	first := h.wantPrompts(1)[0]
+	h.must(StreamTurnStart{Claim: h.token})
+	h.signalUpdate("c0ffee")
+	h.must(StreamTurnEnd{Claim: h.token})
+	if c := h.claim(); c.UpdateSignalledAt == nil {
+		t.Fatalf("claim = %+v, want the answer recorded", c)
+	}
+
+	h.must(StreamTurnStart{Claim: h.token})
+
+	c := h.wantRound(testRound)
+	if c.UpdateSignalledAt != nil || c.UpdateHead != "" {
+		t.Fatalf("claim after a turn of the agent's own = %+v, want the answer taken back", c)
+	}
+
+	h.openUpdate(testRound, testReasons)
+	h.must(StreamTurnEnd{Claim: h.token})
+
+	again := h.wantPrompts(2)[1]
+	if !asksRound(again.DeliveryID, testRound) || again.DeliveryID == first.DeliveryID {
+		t.Errorf("the ask after the foreign turn = %q, want a new ask of the round %q", again.DeliveryID, testRound)
+	}
 }

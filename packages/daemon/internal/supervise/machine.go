@@ -220,6 +220,23 @@ func (c Claim) InPluginRound() bool { return IsPluginRound(c.UpdateRound) }
 
 func IsPluginRound(round string) bool { return strings.HasPrefix(round, PluginRoundPrefix) }
 
+// leftPodRound is a claim whose process no longer runs in the pod its pod round was opened over:
+// that pod died and the claim was relaunched into another one while the round was still recorded
+// on it. The work the round asks about went with the dead pod's disk, so the process now running
+// takes no part in the round at all — it cannot answer for that work, and no turn of it may
+// withdraw an answer given for it. The claim's part stands as the dead pod left it, answered or
+// not, until the round ends.
+//
+// A claim that records no process is not in this state. launchAfter persists a launching claim
+// with no locator before the Resume that gives it one, and nothing is known then about the pod
+// the claim comes up in, so its part in the round must stay exactly as it was.
+func (c Claim) leftPodRound() bool {
+	if !c.InPodRound() || c.Locator == nil || c.Locator.Sandbox == nil {
+		return false
+	}
+	return PodRound(c.Locator.Sandbox.PodUID) != c.UpdateRound
+}
+
 // RuleMayResume says whether the rule may resume this suspended claim: every suspension but the
 // operator's, which holds until an operator resumes the claim.
 func (c Claim) RuleMayResume() bool {
@@ -488,6 +505,13 @@ var ErrRootStop = errors.New("the tree's root claim ends only when its tree clos
 // rather than recorded against a round nobody asked this worker about (podUpdateSignalled). The
 // refusal adds both rounds and what the worker does next.
 var ErrForeignUpdateRound = errors.New("the answer names an update round this claim is not in")
+
+// ErrLeftPodRound is a ready_for_update from a process that runs in another pod than the one the
+// claim's round was opened over (Claim.leftPodRound). The answer says the round's work is pushed,
+// and this process never held that work: it came up in a pod the round asks nothing of. It is
+// refused rather than counted for a pod nobody pushed for. The refusal adds both rounds and what
+// the worker does next.
+var ErrLeftPodRound = errors.New("the answer comes from a process in another pod than the update round's own")
 
 // ErrRetryArchitectOnly is the operator's retry of a failed claim that is not an architect's: a
 // phase worker and the daemon's controller each have their own retry (operatorRetry). The refusal

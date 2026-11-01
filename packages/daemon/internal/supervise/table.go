@@ -1178,11 +1178,18 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 // at once rather than at the re-task bound hours away. Only the turn of an ask of this round
 // keeps the answer (updatesRound): that is the turn the worker answers in.
 //
+// A claim relaunched into another pod than its round's own keeps its answer whatever turn starts
+// (Claim.leftPodRound): the answer was given in the pod the round is about, and no turn of the
+// pod that replaced it can move the branch that pod held.
+//
 // The claim is written by turnStarted's own confirm or persist, so the answer goes in the same
 // write as the turn that took it back. ownTask is whether this start is the pending delivery's,
 // as turnStarted reads it.
 func (m *Machine) takeBackSignal(ownTask bool) {
 	if m.claim.UpdateRound == "" || m.claim.UpdateSignalledAt == nil {
+		return
+	}
+	if m.claim.leftPodRound() {
 		return
 	}
 	if ownTask && updatesRound(m.claim.Pending, m.claim.UpdateRound) {
@@ -1291,6 +1298,10 @@ func (m *Machine) afterTurn(ctx context.Context) error {
 // — and so is a start confirmed only because askFirst was set (turnStarted), or a turn the
 // agent's own get_state answer reported streaming (askTurnOver).
 //
+// A turn that ends in another pod than the round's own is no answer either
+// (Claim.leftPodRound): the pod the round is about is gone, and nothing this process does can
+// push the work that died with it.
+//
 // A refusal takes the ask's own clock back (UpdateTaskedAt), so the next sweep asks again at once
 // rather than at the re-task bound hours away. The ask itself is retired by the turn's own
 // settlement, as every confirmed delivery is.
@@ -1300,6 +1311,9 @@ func (m *Machine) answerByTurnEnd() {
 		return
 	}
 	if !updatesRound(p, m.claim.UpdateRound) || p.ConfirmedAt.IsZero() {
+		return
+	}
+	if m.claim.leftPodRound() {
 		return
 	}
 	if m.askFirst || m.unseenTurn {
@@ -1891,8 +1905,12 @@ func (m *Machine) dropUpdateTask(ctx context.Context) error {
 //
 // A claim below PodUpdateContract is asked too, and answers by ending the turn
 // (answerByTurnEnd).
+//
+// A claim whose process runs in another pod than the round's own is asked nothing
+// (Claim.leftPodRound): the ask names work that died with the round's pod, and the worker now
+// running holds none of it, so the ask would cost one turn and teach the round nothing.
 func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time.Time) error {
-	if m.claim.UpdateSignalledAt != nil {
+	if m.claim.UpdateSignalledAt != nil || m.claim.leftPodRound() {
 		return nil
 	}
 	if !HoldsCapability(m.claim.State) && m.claim.State != StateSuspended {
@@ -2074,6 +2092,10 @@ func (m *Machine) clearUpdate() {
 // all is the same case: every answer names a round it is not in. The refusal names both rounds,
 // and tells the worker to end its turn and answer the task the daemon then sends.
 //
+// An answer counts only from a process in the round's own pod. A claim relaunched into another
+// pod answers for work the dead pod's disk held and this process never saw (Claim.leftPodRound),
+// so that answer is refused too, under a refusal of its own.
+//
 // The line it logs is the one durable record of the head: the claim's UpdateHead goes with the
 // round that ends (clearUpdate), and the answer is what an operator reads the replacement back
 // against — `git ls-remote` of each head a worker reported says whether the work survived the pod.
@@ -2083,6 +2105,11 @@ func podUpdateSignalled(m *Machine, ctx context.Context, ev Event) error {
 		m.log.Warn("supervise: the worker answered an update round this claim is not in; the answer is refused",
 			"answered", signal.Round, "round", m.claim.UpdateRound, "head", signal.Head)
 		return foreignRoundRefusal(m.claim, signal.Round)
+	}
+	if m.claim.leftPodRound() {
+		m.log.Warn("supervise: this claim's process runs in another pod than its update round's; the answer is refused",
+			"round", m.claim.UpdateRound, "pod", m.claim.Locator.Sandbox.PodUID, "head", signal.Head)
+		return leftPodRoundRefusal(m.claim)
 	}
 	at := m.deps.Clock.Now()
 	m.claim.UpdateSignalledAt = &at
@@ -2112,6 +2139,21 @@ func foreignRoundRefusal(c Claim, answered string) error {
 	}
 	return &RefusedError{State: c.State, Request: "ready_for_update", Err: fmt.Errorf(
 		"%w. It answers %q, and this claim is in %s. %s", ErrForeignUpdateRound, answered, in, next)}
+}
+
+// leftPodRoundRefusal is what a worker reads when it answers its claim's round from a process
+// the daemon relaunched into another pod (podUpdateSignalled). Another agent reads it, so it
+// follows ASD-STE100 as the task it answers does: one instruction per sentence, active voice,
+// and no word that has a second reading. It names the round the answer carried and the round of
+// the pod this process runs in, as the wrong-round refusal names its two rounds, and then what
+// the worker does next.
+//
+// What it does next is nothing of that round. The round asks about work on a disk that is gone,
+// which no turn of this process can push, and the daemon ends the round itself.
+func leftPodRoundRefusal(c Claim) error {
+	return &RefusedError{State: c.State, Request: "ready_for_update", Err: fmt.Errorf(
+		"%w. It answers %q. This claim's process now runs in another pod. The round of that pod is %q. Do not answer %q again. The daemon asks this claim for no answer now",
+		ErrLeftPodRound, c.UpdateRound, PodRound(c.Locator.Sandbox.PodUID), c.UpdateRound)}
 }
 
 func nothingToDo(*Machine, context.Context, Event) error { return nil }

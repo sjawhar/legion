@@ -158,6 +158,11 @@ func (c Claim) openRoundHoldsTask() bool {
 // (answeredOpenRound, opened by openPodUpdate). Starting the worker of an answered round on a
 // task it is about to lose would waste both the turn and the work. PodUpdateEnded releases that
 // task once the round is over (endPodUpdate).
+//
+// An ask of a round whose pod the claim's process no longer runs in is dropped here rather than
+// sent (Claim.leftPodRound), the way the round's own end drops one (dropUpdateTask): the worker
+// that reads it would be asked to push work that died with the pod the round was opened over,
+// and it would refuse the answer the ask asks for.
 func (m *Machine) sendPending(ctx context.Context) error {
 	// A claim holding a suspension is handed nothing (holdSuspension).
 	if state := m.claim.State; (state != StateReady && state != StateIdle) || m.held != nil {
@@ -170,6 +175,9 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	p := m.claim.Pending
 	if p == nil || !p.ConfirmedAt.IsZero() || m.send != nil {
 		return nil
+	}
+	if m.claim.leftPodRound() && updatesRound(p, m.claim.UpdateRound) {
+		return m.dropUpdateTask(ctx)
 	}
 	if _, awaiting := m.timers[TimerTurn]; awaiting {
 		return nil
