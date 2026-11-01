@@ -68,7 +68,7 @@ type routing struct {
 // and an owner waiting on a send holds back only its own events. A pending subscription command
 // (api/subscribers.go) is in no index this reads, and neither is a backed-off event of an owner
 // the batch does not choose. Every predicate on pending is spelled as the indexes spell it
-// (migration 0151), which is what lets Postgres prove the indexes' predicates from the query's.
+// (migration 0152), which is what lets Postgres prove the indexes' predicates from the query's.
 //
 // Of the rows read, the batch keeps every row before its batchSize-th due one in id order, and that
 // row: at most batchSize events are sent per batch, and each owner keeps a prefix of its events, the
