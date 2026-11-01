@@ -2,46 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-588",
-  "previousHandoff": "472bb81dbd63efd9aee46515a0dfad32d32ac0dd",
-  "completed": "2026-11-01T10:11:00Z",
-  "round": 18,
-  "head": "8a1a9a42a0d2994f4cad9f4adcd40f556a61384b",
+  "previousHandoff": "888cc42101f94dc6bd2d22c8cd975285252d71a1",
+  "completed": "2026-11-01T12:29:00Z",
+  "round": 19,
+  "head": "7edf3842636e23b65255d066f82515edb2b1e8eb",
   "codeHead": "0b2f1d887b0a",
-  "roundNote": "Round 18 is one forward merge of main d86f8de8 at code 0b2f1d88. It raises the Dispatch closing to 0157_document_edit_notices_notify (#2391 added 0151-0157); the daemon closing stays at 0067. The architect scoped it to three points (Envoy 43cc8632), and the approved diff is ed9113e7 -> 2ed37421.",
+  "roundNote": "Round 19 changes no code: the commits since my round 18 (888cc421) touch only .legion/INFRA-588/implement.json, so the code is still the merge 0b2f1d88 I tested in full in round 18. The implementer's round answers a red ci-ok at that code by re-running a flaky job. So this round is the bare gates: CI green at the code head, and a smoke check.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-read main, compared the diff file by file against the approved one, built my own 0158 and timestamp branches off the merge, and ran the named suites on my own superuser PostgreSQL 17.11 + pgvector (port 55434). All of the implementer's claims hold."
+    "how": "I read the check runs at 8a1a9a42, the push carrying code 0b2f1d88 (888cc421 and the later heads are handoff-only and have no runs). envoy-go-race-api failed in job 124818887175, and ci-ok failed with it in 124840191133. The re-run passed envoy-go-race-api in 124841853837, and ci-ok passed in 124845414599. lint, typecheck, changes and pr-title are success. The failing test is in packages/envoy/internal/dispatch/api, which this pull request does not change."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "(1) The closings equal main's highest numbered migrations, re-read from origin/main now",
-      "surface": "main@origin after jj git fetch at about 09:58Z, read again at 10:10Z (both d86f8de8); migrationid.go at the merge",
-      "command": "the newest numbered *.up.sql of each migrations directory on main@origin; the closings in migrationid.go",
-      "observed": "main's newest are packages/daemon/internal/store/migrations/0067_phase_assignment.up.sql and packages/envoy/internal/dispatch/store/migrations/0157_document_edit_notices_notify.up.sql, with no timestamped migration on main. The closings are 0067_phase_assignment.up.sql at 67 and 0157_document_edit_notices_notify.up.sql at 157. main@origin had not moved by 10:10Z",
-      "headSha": "8a1a9a42a0d2994f4cad9f4adcd40f556a61384b",
-      "negativeControl": "the 0158 branch below"
+      "criterion": "Nothing outside .legion/ changed since the tested code, and main has added no migration that would need a closing raise",
+      "surface": "jj diff of the branch, and main@origin after a fetch at 12:27Z (0cf0edcd)",
+      "command": "jj diff --from 888cc42101f9 --to 7edf3842636e --name-only; the newest *.up.sql of each migrations directory on main@origin; git merge-tree 0b2f1d88 with main@origin",
+      "observed": "only .legion/INFRA-588/implement.json changed. Main's newest numbered migrations are still 0067_phase_assignment and 0157_document_edit_notices_notify, which the closings name. The code merges with main's tip 0cf0edcd cleanly (exit 0)",
+      "headSha": "7edf3842636e23b65255d066f82515edb2b1e8eb",
+      "negativeControl": "round 18: a 0068/0158 branch is refused on its own (code unchanged since)"
     },
     {
-      "criterion": "(2) Outside the conflict, the diff against main equals the approved diff at 2ed37421, plus the closing edits",
-      "surface": "git diff in a scratch clone: approved = ed9113e7 (2ed37421's merge base with main) -> 2ed37421; merged = main d86f8de8 -> 0b2f1d88; .legion/ and docs/solutions/ left out",
-      "command": "the changed-file lists of both diffs, then for each file the sha1 of its -U0 added and removed lines, and a line diff of any that differ",
-      "observed": "54 files in each, the same 54; 52 identical. The 2 that differ are the closing edits alone: migrationid.go's Dispatch entry (0150_dpop_proofs.up.sql/150 -> 0157_document_edit_notices_notify.up.sql/157) and the one line of packages/envoy/cmd/dispatch/README.md naming that file",
-      "headSha": "8a1a9a42a0d2994f4cad9f4adcd40f556a61384b",
-      "negativeControl": "the comparison flags those two files"
+      "criterion": "CI is green at the code head",
+      "surface": "GitHub check runs at 8a1a9a42 (code 0b2f1d88)",
+      "command": "gh api repos/sjawhar/legion/commits/8a1a9a42.../check-runs?filter=all",
+      "observed": "ci-ok success (124845414599), envoy-go-race-api success (124841853837), lint, typecheck and changes success, pr-title success",
+      "headSha": "7edf3842636e23b65255d066f82515edb2b1e8eb",
+      "negativeControl": "the first attempt: envoy-go-race-api failure (124818887175), ci-ok failure (124840191133)"
     },
     {
-      "criterion": "(3) migrationid, pgmigrate, the daemon and Dispatch store suites and the red tests pass; a 0158 branch is refused alone and a timestamp branch passes",
-      "surface": "branches in a scratch clone off 0b2f1d88; go test in the workspace against my PostgreSQL 17.11 + pgvector, role postgres a superuser with replication allowed",
-      "command": "branch nx adds daemon 0068_t588_nx and Dispatch 0158_t588_nx (+census); branch ta adds 20261101100000 to both; the daemon migrations package and Dispatch's identifier tests on each. At the merge: go test ./migrationid/ ./internal/pgmigrate/..., ./internal/store/... (daemon), the full ./internal/dispatch/store/, ./cmd/dispatch -run 'Healthz|Census|Migrat', and the two red tests by name",
-      "observed": "nx refused in both: 'migration 0068_t588_nx.up.sql takes version 68: the numbered migrations ended at 67…' and 'migration 0158_t588_nx.up.sql takes version 158: the numbered migrations ended at 157…'. ta: ok in both. migrationid, pgmigrate, pgmigratetest ok; daemon store ok (113.9 s), migrations ok; Dispatch store full ok (307.5 s), the superuser census tests included; cmd/dispatch ok (12.9 s); TestLoadRefusesANewMigrationNumberedAfterTheShippedSet and TestMigrationSetRefusesANewMigrationNumberedAfterTheShippedSet PASS",
-      "headSha": "8a1a9a42a0d2994f4cad9f4adcd40f556a61384b",
-      "negativeControl": "the nx refusals above"
+      "criterion": "Smoke check at the head",
+      "surface": "the workspace at the head",
+      "command": "bun scripts/conflicts/measure.ts --from-json before.json --branch-prefix legion/; go test ./migrationid/, Dispatch's two identifier tests, the daemon migrations package; release-push.sh fold-orphans over .github/changelog-packages",
+      "observed": "P1 126 read, 80 carrying, 253 conflicting; all tests ok; fold-orphans exit 0",
+      "headSha": "7edf3842636e23b65255d066f82515edb2b1e8eb",
+      "negativeControl": "round 13: a daemon fragment fails fold-orphans (code unchanged since)"
     }
   ],
   "observations": [
-    "CI at 8a1a9a42 (10:09Z): pr-title success (one earlier run cancelled), changes queued, no ci-ok yet. The reviewer approves once ci-ok and pr-title are green.",
-    "Any numbered migration merged to main before #2411 lands means another closing raise. The merge lane is holding such pull requests for this one."
+    "The heads after 8a1a9a42 carry skip-checks and have no runs of their own; the daemon carries the code head's verdict to them.",
+    "Main moved to 0cf0edcd with no new migration; any numbered migration that lands before #2411 means another closing raise."
   ]
 }
