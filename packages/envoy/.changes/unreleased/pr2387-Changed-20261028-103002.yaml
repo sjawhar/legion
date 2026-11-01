@@ -1,0 +1,24 @@
+kind: Changed
+body: |-
+    GitHub's rate limits are shared by every Dispatch process. A limit one process meets is written
+    to the new table `github_rate_limits` (migration `0160`), under the App's scope (`app`: token
+    mints, installation lookups, the webhook delivery endpoints) or one installation's
+    (`installation:<id>`), for the wait GitHub asked, and until it passes by the database's clock no
+    process sends GitHub a request under that scope. The webhook redelivery sweep's own doubling
+    backoff moved from the NATS KV bucket into the same table (scope `redelivery`), so a limit met
+    on redelivery requests no longer holds token mints past GitHub's own wait. A database that
+    cannot be read or written leaves each process to GitHub's answers, with a log line. The GitHub
+    proxy (`/api/github/rest/...`) answers a rate limit, met now or recorded by any process,
+    `503 GITHUB_RATE_LIMITED` with `Retry-After` in whole seconds (at least one), where it answered
+    `502 GITHUB_UPSTREAM` or passed GitHub's `403` through. A request a recorded limit holds fails
+    with `GitHub rate limit on <scope> recorded at <time> is in force; the request was not sent`,
+    the same text for as long as one limit lasts, so an architecture source synced under it emits
+    one `architecture.sync_failed`, not one per sync. The repository-to-installation lookup a
+    process remembers now expires after 10 minutes, so an App moved to another installation is
+    found within that rather than when the process restarts; callers that need one repository's
+    installation at once share one lookup, and one of them going away (a closed browser tab) no
+    longer fails it for the others. Installation tokens stay in each process's memory and are
+    never written to the database.
+time: 2026-10-28T10:30:02.000000000Z
+custom:
+    Issue: pr2387

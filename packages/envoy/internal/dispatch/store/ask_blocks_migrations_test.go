@@ -10,13 +10,14 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// beforeAskBlocks is the last migration before an ask's parts are blocks, the number the series
-// closed at (0157_document_edit_notices_notify): 20261101143211_ask_blocks and
-// 20261101143212_asks_block_parts_trigger are timestamped, so they sort after it and apply after
-// it. askBlockTables is 20261101143211, which creates the tables 20261101143212 attaches its
-// trigger to and seeds.
+// beforeAskBlocks is the last migration before an ask's parts are blocks, the highest numbered
+// one the set holds (0161_delivery_run_warnings): 20261101143211_ask_blocks and
+// 20261101143212_asks_block_parts_trigger are timestamped, so they sort after every number and
+// apply after it. askBlockTables is 20261101143211, which creates the tables 20261101143212
+// attaches its trigger to and seeds. A numbered migration that merges above this one moves it:
+// it must name the version this pair applies directly after.
 const (
-	beforeAskBlocks = 157
+	beforeAskBlocks = 161
 	askBlockTables  = 20261101143211
 )
 

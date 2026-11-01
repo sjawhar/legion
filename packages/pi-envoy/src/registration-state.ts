@@ -7,6 +7,7 @@ import {
   type Interest,
   newClientInstanceID,
   type SubscribeInput,
+  type SubscribeResult,
 } from "@legion/envoy-client/transport";
 import type { RoleRegainReason } from "@legion/pi-shared/role-claim-bridge";
 import type { NatsConnection } from "nats";
@@ -142,7 +143,7 @@ export interface TaskHandle {
 
   // — registration —
   /** Registers the session at the listener, carrying this instance's client instance id. */
-  readonly register: (input: RegistrationInput) => Promise<Interest>;
+  readonly register: (input: RegistrationInput) => Promise<SubscribeResult>;
 
   // — the session a pass converges to —
   /** Records that this session's agent subject, registration and Dispatch binding are converged. */
@@ -268,7 +269,7 @@ export interface RegistrationState {
    * registration moves the session's `last_seen` at the listener even when its answer is lost. On
    * the answer, that session is the one registered and the registration clock is now.
    */
-  readonly refreshRegistration: (input: RegistrationInput) => Promise<Interest>;
+  readonly refreshRegistration: (input: RegistrationInput) => Promise<SubscribeResult>;
   /** Whether a registration this process made for `sessionID` was accepted less than `ms` ago. A
    *  registration accepted for another session, or none at all, reads as older than any age. */
   readonly registrationFresherThan: (sessionID: string, ms: number) => boolean;
@@ -400,7 +401,7 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
     await deps.client().unsubscribe({ sessionID, topics: [topic] });
   };
 
-  const refreshRegistration = (input: RegistrationInput): Promise<Interest> => {
+  const refreshRegistration = (input: RegistrationInput): Promise<SubscribeResult> => {
     for (const [key, hold] of abandonedHolds) {
       if (hold.id !== input.sessionID) continue;
       abandonedHolds.delete(key);

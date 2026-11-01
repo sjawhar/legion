@@ -1,0 +1,8 @@
+kind: Fixed
+body: |-
+  A server that closes a connection during a reconnect's handshake, as a restarting NATS server
+  does, is logged as a failed reconnect attempt (`envoy nats reconnect attempt failed`, WARN, on the
+  reconnect throttle) rather than as an `envoy nats async error` at ERROR, while the connection is still
+  connecting or reconnecting; every other async error stays an ERROR. nats.go reports that
+  handshake's `EOF` to the async error callback alone, so a NATS restart could leave an ERROR line
+  in the listener's log.

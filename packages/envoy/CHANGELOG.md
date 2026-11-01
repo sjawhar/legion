@@ -1,5 +1,58 @@
 # Changelog
 
+## [27.0.0] - 2026-11-01
+
+### Added
+
+- The secrets broker serves the page a person approves a secret request on, and a secret request
+  is approved nowhere else. `GET /approve/{record}` prints the broker's own record of a request
+  and every other one waiting on the signed-in person, with Approve and Deny posting back to
+  `POST /approve` from the broker's own origin alone; a person signs in to the broker itself with
+  OpenID Connect through an OAuth client of the broker's own (authorization code with PKCE S256,
+  a nonce and state, no refresh token kept), and the broker keeps that sign-in as a session of
+  its own in Postgres, 24 hours at most and never extended. `BROKER_SIGNIN_ISSUER`,
+  `BROKER_SIGNIN_CLIENT_ID`, `BROKER_SIGNIN_CLIENT_SECRET_FILE` and `BROKER_SIGNIN_DOMAIN` are
+  required: a broker without one of them does not start and names the ones it misses.
+  `BROKER_SIGNIN_SESSION_SECONDS` sets how long a sign-in lasts, 86400 by default and at most.
+  `GET /signin/status` reports, to a caller with no credential and in words from two closed sets,
+  what the hourly check of the broker's client at its provider found and when, when a person last
+  signed in, when a sign-in last failed and the coded reason, and when a decision was last made
+  on the page. `envoy-broker end-sessions <login>`, run in a broker pod, ends every browser
+  session that login holds. `POST /v1/credential-requests/{record}/approve` and `/deny` now
+  answer `403 DECIDE_ON_BROKER_PAGE`, naming that page, for every caller when the record is a
+  secret request, before any credential is checked, and `agent-secrets-devrelay` has lost
+  `approve` and `deny`, the two commands the broker refuses. A machine login is decided exactly
+  as before, by an account `BROKER_API_ACCOUNTS` lists sending the login's typed code from
+  Dispatch's machine-login page, `BROKER_MACHINE_LOGIN_URL` is still required and still a machine
+  login's `verification_uri`, `agent-secrets-devrelay machine-approve` still decides one on the
+  local stack, and revokes of grants and machine logins are unchanged. `agent-secrets` prints the
+  broker's `approve_url` while it waits for a secret, as
+  `waiting for <approver> to approve it on the secrets broker: <url>`; against a broker that
+  names none it prints what it printed before.
+
+## [26.2.0] - 2026-11-01
+
+### Changed
+
+- A Dispatch migration added from now on is named for the UTC moment its author created it,
+  `YYYYMMDDHHMMSS` (`date -u +%Y%m%d%H%M%S`), with its census under the same timestamp, instead
+  of the next free number: two pull requests open at once each took the next number, nothing
+  conflicted in git, and the clash showed only once one of them merged. The numbered versions
+  keep the numbers they landed with, a timestamp orders after every number, and a migration that
+  merges below one a database has already applied still runs there exactly once, since the
+  runner applies every version `schema_migrations` does not record. A migration must therefore
+  not depend on its order relative to one written in a concurrent pull request: a deployed
+  database applies each one as the release carrying it deploys, so it can apply them in the
+  other order than a fresh database does. `schema_migrations.version` is now a `bigint`, which a
+  14-digit version needs; a database that has the table as an `integer` keeps it until the first
+  boot whose set holds a timestamped migration, which widens it once, in the locked transaction
+  the runner creates the table in, so the previous release's health probe keeps answering during
+  this one's roll. Roll this release out before any release that carries a timestamped
+  migration. `schema_version` in `/healthz` is unchanged, the highest version applied rather
+  than proof that every version below it is applied; the auto-deployer's rollback guard now
+  compares the whole set of versions `schema_migrations` records, and records it in
+  `compose/.env` as `ENVOY_IMAGE_SCHEMA=<tag>:<max>-<count>-<digest>`.
+
 ## [26.1.1] - 2026-11-01
 
 ### Changed
