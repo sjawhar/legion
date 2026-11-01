@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-593",
-  "previousHandoff": "4454d6b06259a59efa7128f9b72e2f122632924e",
-  "round": 21,
-  "headTested": "95ef78087492a3b5090986869215f31cad567838",
-  "prHead": "923c7fc137246e894548ac8137b42cb2553f4159",
-  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-21-txt",
-  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-21-tar-gz",
+  "previousHandoff": "bf20433e34f67125d356c1f0d34dbfed6d513fd1",
+  "round": 22,
+  "headTested": "fccd461afa15311f91a9419defaaebd842e61924",
+  "prHead": "8a5243e6b16fd1fc902a36d9893e6877cdc54952",
+  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-22-txt",
+  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-22-tar-gz",
   "previousRounds": [
     "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-2-txt",
@@ -28,57 +28,47 @@
     "dispatch://INFRA-593/artifact/infra-593-tester-round-17-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-18-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-19-txt",
-    "dispatch://INFRA-593/artifact/infra-593-tester-round-20-txt"
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-20-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-21-txt"
   ],
   "roundShape": {
-    "tool": "dispatch://INFRA-592/artifact/round-shape-py version 1 (sanity: same head -> 0; fce9e43b->f533f33c -> round 20's 19)",
-    "oldHead": "f533f33ce137a1c0ca3524656fedc27277a64b12",
-    "newHead": "95ef78087492a3b5090986869215f31cad567838",
-    "merge": "f533f33c -> 13f952a8 (main 0642a37a): only .legion/ differs; file set 78 -> 78, nothing appears or disappears",
-    "fileSet": "78 -> 81: cmd/dispatch/storedorder.go, cmd/dispatch/storedorder_test.go, docs/storedorder_test.go appear (main's files b3a91c12 now changes); none disappear; changelog fragments: only pr2444-document-load-and-compaction.yaml",
-    "runtime": "compactRoom passes the lock on a failed read; lockRoom takes a non-waiting caller's connection before its in-process lock; noteAppended notes as it goes; the checker counts versions_compacted and reports a document with none compared unchecked",
-    "round": "full, on the architect's call"
+    "tool": "dispatch://INFRA-592/artifact/round-shape-py version 1 (sanity: same head -> 0; f533f33c->95ef7808 -> round 21's 16)",
+    "oldHead": "95ef78087492a3b5090986869215f31cad567838",
+    "newHead": "fccd461afa15311f91a9419defaaebd842e61924",
+    "differs": "cmd/dispatch/README.md (the merge: the PR's sentences re-broken to main's lines; four sentences now main's own, so no longer additions) and docs/compaction_test.go (+188, the two tests)",
+    "fileSet": "81 -> 81 (merge) -> 81; nothing appears or disappears; changelog fragments: only pr2444-document-load-and-compaction.yaml",
+    "round": "narrow, on the architect's call"
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove both checkers on compacted documents on the real binary, probed the two lock minors at the head and at f533f33c, re-ran the eight tests 300x under race, #2496's acceptance 1 with the 200-round soak, and the replay harness."
+    "how": "Reverted each fix on its own copy of the head and saw only its test fail; ran both tests 20x plain and 20x under CGO_ENABLED=1 -race; ran the compaction tests once under race."
   },
   "failed": 0,
   "failures": [],
-  "departureJudged": "A version recording update 0 is one inserted while the document had no doc_updates row (coalesce(max(version),0) in api/issue_create.go:388, api/artifacts.go:382, mutation.go:1997): text from before any stored history, which no fold starts from, so skipping it hides no stored-order mismatch; every version recording a stored row is compared, and a document with no stored update is unchecked. README cmd/dispatch/README.md:1500-1501 states it. Correct.",
-  "testGap": "No committed test pins the two lock minors (a non-waiting compaction holds no room lock while it waits for a pool connection; a waiting compaction passes the lock on a failed read): f533f33c passed its CI test lanes with both gaps and 95ef7808 adds none. My two probes (zz_minors_probe_test.go in the rig) fail at f533f33c and pass at the head; reported to the architect, not recorded as a failure since the head behaves correctly.",
   "memory": {
-    "cap": "go test -p 1, GOMAXPROCS=2, GOMEMLIMIT=12GiB, CGO_ENABLED=1 -race -timeout 50m",
-    "sampler": "named job mem-sampler-infra-593-r21 over check 4, bounded at 3,000 samples, stopped via proc://mem-sampler-infra-593-r21/kill",
-    "samples": 557,
-    "sampledPeakGiB": 4.29,
-    "leftoverCheck": "After the kill returned, ran ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|seq 1 3000|mem21|bin21/' and it listed nothing."
+    "cap": "go test -p 1, GOMAXPROCS=2, GOMEMLIMIT=12GiB, CGO_ENABLED=1 -race -timeout 30m/40m",
+    "sampler": "named job mem-sampler-infra-593-r22, bounded at 1,500 samples, stopped via proc://mem-sampler-infra-593-r22/kill",
+    "samples": 94,
+    "sampledPeakGiB": 4.25,
+    "leftoverCheck": "After the kill returned, ran ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|seq 1 1500|mem22' and it listed nothing."
   },
   "proof": [
     {
-      "criterion": "Architect check 2: the checker on the real binary - versions on both sides of the base clean on what it compared with versions_compacted; all below the base unchecked, exit 1; the old checker clean on both.",
-      "surface": "envoy-dispatch 95ef7808 (and f533f33c's stored-order) as real processes on Postgres 18.6, agent HTTP edits and a browser typing client on the document websocket",
-      "command": "bash scenV21.sh; bash scenW21.sh (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-21-tar-gz)",
-      "observed": "A (base 5, versions 1..5 and 6,7 after the fold): head 'updates_checked=2 versions_checked=3 versions_compacted=4 ... compacted=\"4 versions record updates below the compaction base 5 and were not compared\"' clean exit 0. D (browser typing every 500 ms, queue folded to base 97, versions record 1..4, head 346): head 'updates_checked=249 versions_checked=0 versions_compacted=4' unchecked=1 exit 1, with and without --since.",
-      "headSha": "95ef78087492a3b5090986869215f31cad567838",
-      "negativeControl": "f533f33c's checker: A 'versions_skipped=4' with no reason; D 'updates_checked=251 versions_checked=0 versions_skipped=4' clean=1 exit 0."
+      "criterion": "Architect check 2: each new test fails with its fix reverted and passes 20 times, also under race; they pin what the probes did.",
+      "surface": "internal/dispatch/docs at fccd461a and at two copies of it with one fix reverted each, on Postgres 18.6",
+      "command": "go test ./internal/dispatch/docs -run '^(TestACompactionThatDoesNotWaitHoldsNoRoomLockWhileItWaitsForAConnection|TestAWaitingCompactionWhoseReadFailedStillWaitsForTheRoomsLock)$' -count=20 (and CGO_ENABLED=1 -race -count=20 -timeout 30m) (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-22-tar-gz)",
+      "observed": "Head: 20/20 each plain, 20/20 each under race, ok, 0 DATA RACE. The tests drive the probes' shapes (both compaction-pool connections held during the fold while a room append runs; doc_updates renamed while a held advisory lock is waited on) and wait on events bounded by roomWait rather than fixed sleeps.",
+      "headSha": "fccd461afa15311f91a9419defaaebd842e61924",
+      "negativeControl": "lockRoom reverted to the room lock before the connection: the first test fails at compaction_test.go:577 'the append never landed while the compaction waited for a compaction-pool connection'; passRoomLock skipped on a read error: the second fails at :605 'returned ... without waiting for the document's lock'. Each other test passes."
     },
     {
-      "criterion": "Architect check 3: a non-waiting compaction that cannot get a connection holds no room lock and a room write proceeds; passRoomLock on a read error.",
-      "surface": "package docs at 95ef7808 and f533f33c against Postgres 18.6",
-      "command": "go test ./internal/dispatch/docs -run '^TestZZProbe' (zz_minors_probe_test.go in dispatch://INFRA-593/artifact/infra-593-tester-rig-round-21-tar-gz)",
-      "observed": "Head: with both compaction-pool connections held during the fold, a room AppendUpdate (withRoomLock, as AppendRoomFlush) took 4.7 ms; a waiting compaction whose read failed ('relation \"doc_updates\" does not exist') returned after 2.05 s, once the advisory-lock holder let go, with the read's error.",
-      "headSha": "95ef78087492a3b5090986869215f31cad567838",
-      "negativeControl": "f533f33c: the append still waited after 3 s and finished only after the connections were released; the failed read returned in 9 ms without waiting for the lock."
-    },
-    {
-      "criterion": "Architect check 4: eight tests 300x under race, #2496's acceptance 1 with the 200-round soak, the replay harness on a compacted room.",
-      "surface": "internal/dispatch/docs and cmd/dispatch at 95ef7808 on Postgres 18.6; INFRA-707's ygoexp at sami.3",
-      "command": "CGO_ENABLED=1 go test -race -count=300 -timeout 50m -run '^<test>$' (x8); go test -run '^TestStoredOrder'; -run '^TestStoredOrderSoak$' -args -stored-order-rounds=200; go run . / ./localonly / ./compacted",
-      "observed": "Eight tests 300 PASS each, 0 DATA RACE, ok. 15 TestStoredOrder* PASS, cmd StoredOrder PASS; soak rounds=200 counted=200 mismatches=0 (p50 79 ms, p99 288 ms). Harness 0/0 mixed and local-only; compacted variant 0/0 over 120,000 loads. go vet clean.",
-      "headSha": "95ef78087492a3b5090986869215f31cad567838",
-      "negativeControl": "Compacted variant folding with cleanup on: 413/38."
+      "criterion": "Architect check 3: the compaction tests once.",
+      "surface": "internal/dispatch/docs and cmd/dispatch at fccd461a on Postgres 18.6",
+      "command": "CGO_ENABLED=1 go test -race -p 1 -count=1 -timeout 40m ./internal/dispatch/docs ./cmd/dispatch -run 'Test.*Compaction.*|Test.*Compact.*|Test.*Sweep.*|<two format tests>'",
+      "observed": "67 PASS (both new tests included), both packages ok, 0 DATA RACE. Round 21's evidence stands for the rest.",
+      "headSha": "fccd461afa15311f91a9419defaaebd842e61924",
+      "negativeControl": "The two reverts above."
     }
   ],
-  "ci": "Read on GitHub at 95ef7808 at 21:59 UTC, run 41351722573: no red; changes, ci-filters, pr-title, typecheck, test, docs/build, broker-multiprocess, dispatch-multiprocess, envoy-e2e-local, envoy-go-race-pmdoc, listener-server-change, worker-image/build green; dispatch, dispatch-memory, envoy-go-race-docs, envoy-session-stall, lint, pi-legion in progress; dispatch-browser-multiprocess, envoy-go, envoy-go-race, envoy-go-race-api, envoy-infra-go, envoy-smoke queued; ci-ok not posted. Those are unread."
+  "ci": "Read on GitHub at fccd461a at 22:34 UTC: run 41356973556 (created 22:24:29Z) queued; changes success, pr-title cancelled and pending; every other lane queued, ci-ok not posted. Every lane unread."
 }
