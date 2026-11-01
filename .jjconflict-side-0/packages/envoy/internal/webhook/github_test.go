@@ -1,0 +1,1183 @@
+package webhook
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/bus/bustest"
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/testnats"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestGitHubHandler(t *testing.T) {
+	// Minimal issue_comment payload (no mention)
+	issueCommentNoMention := `{
+		"action": "created",
+		"issue": {"number": 42, "title": "test issue"},
+		"comment": {"body": "just a comment", "user": {"login": "octocat"}},
+		"sender": {"login": "octocat", "type": "User"},
+		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
+	}`
+
+	// issue_comment with @legion mention
+	issueCommentWithMention := `{
+		"action": "created",
+		"issue": {"number": 42, "title": "test issue"},
+		"comment": {"body": "hey @legion please fix this", "user": {"login": "octocat"}},
+		"sender": {"login": "octocat", "type": "User"},
+		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
+	}`
+
+	// Bot sender on comment event
+	botComment := `{
+		"action": "created",
+		"issue": {"number": 42, "title": "test issue"},
+		"comment": {"body": "automated response", "user": {"login": "github-actions[bot]"}},
+		"sender": {"login": "github-actions[bot]", "type": "Bot"},
+		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
+	}`
+
+	// sub_issues event from a user sender
+	subIssuesUser := `{
+		"action": "sub_issue_added",
+		"parent_issue": {"number": 42, "title": "parent issue"},
+		"sub_issue": {"number": 99, "title": "child issue"},
+		"sender": {"login": "octocat", "type": "User"},
+		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
+	}`
+
+	// sub_issues event from a bot sender
+	subIssuesBot := `{
+		"action": "sub_issue_added",
+		"parent_issue": {"number": 42, "title": "parent issue"},
+		"sub_issue": {"number": 99, "title": "child issue"},
+		"sender": {"login": "linear[bot]", "type": "Bot"},
+		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
+	}`
+
+	// Push event
+	pushEvent := `{
+		"ref": "refs/heads/main",
+		"sender": {"login": "octocat", "type": "User"},
+		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
+	}`
+
+	// Custom mention trigger
+	issueCommentCustomMention := `{
+		"action": "created",
+		"issue": {"number": 7, "title": "custom"},
+		"comment": {"body": "hey @mybot do this", "user": {"login": "dev"}},
+		"sender": {"login": "dev", "type": "User"},
+		"repository": {"name": "widgets", "owner": {"login": "acme"}, "full_name": "acme/widgets"}
+	}`
+
+	checkRun := `{
+		"action": "completed",
+		"check_run": {
+			"id": 987654321,
+			"name": "unit-tests",
+			"status": "completed",
+			"conclusion": "failure",
+			"head_sha": "deadbeef",
+			"pull_requests": [{"number": 42}]
+		},
+		"sender": {"login": "github-actions[bot]", "type": "Bot"},
+		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
+	}`
+
+	// A finished GitHub Actions job on the default branch, of a run with no pull request.
+	actionsJob := `{
+		"action": "completed",
+		"check_run": {
+			"id": 114758907253,
+			"name": "release",
+			"status": "completed",
+			"conclusion": "success",
+			"started_at": "2026-10-12T10:01:21Z",
+			"completed_at": "2026-10-12T10:02:02Z",
+			"head_sha": "f15b4562bb3b9ba82cf4c25a82ff0a312fc3e80b",
+			"html_url": "https://github.com/sjawhar/legion/actions/runs/38230245571/job/114758907253",
+			"details_url": "https://github.com/sjawhar/legion/actions/runs/38230245571/job/114758907253",
+			"app": {"id": 15368, "slug": "github-actions"},
+			"check_suite": {"id": 103576905558, "head_branch": "main", "head_sha": "f15b4562bb3b9ba82cf4c25a82ff0a312fc3e80b"},
+			"pull_requests": []
+		},
+		"sender": {"login": "github-actions[bot]", "type": "Bot"},
+		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion", "default_branch": "main"}
+	}`
+
+	cases := []struct {
+		name           string
+		method         string
+		body           string
+		delivery       string
+		event          string
+		secret         string
+		signature      string
+		mentionTrigger string
+		publishErr     error
+		recordErr      error
+		wantStatus     int
+		wantPublished  int
+		wantRecorded   int
+		wantTopics     []string
+	}{
+		{
+			name:       "non-POST returns 200",
+			method:     "GET",
+			secret:     "s",
+			wantStatus: 200,
+		},
+		{
+			name:       "missing delivery header",
+			method:     "POST",
+			body:       issueCommentNoMention,
+			event:      "issue_comment",
+			secret:     "s",
+			wantStatus: 400,
+		},
+		{
+			name:       "missing event header",
+			method:     "POST",
+			body:       issueCommentNoMention,
+			delivery:   "d-1",
+			secret:     "s",
+			wantStatus: 400,
+		},
+		{
+			name:       "invalid signature",
+			method:     "POST",
+			body:       issueCommentNoMention,
+			delivery:   "d-1",
+			event:      "issue_comment",
+			secret:     "s",
+			signature:  "sha256=invalid",
+			wantStatus: 401,
+		},
+		{
+			name:          "valid issue_comment no mention",
+			method:        "POST",
+			body:          issueCommentNoMention,
+			delivery:      "d-1",
+			event:         "issue_comment",
+			secret:        "s",
+			wantStatus:    200,
+			wantPublished: 1,
+		},
+		{
+			name:          "valid issue_comment with @legion mention — 3 envelopes",
+			method:        "POST",
+			body:          issueCommentWithMention,
+			delivery:      "d-2",
+			event:         "issue_comment",
+			secret:        "s",
+			wantStatus:    200,
+			wantPublished: 3,
+		},
+		{
+			name:          "bot sender on comment event — publishes 1 envelope",
+			method:        "POST",
+			body:          botComment,
+			delivery:      "d-3",
+			event:         "issue_comment",
+			secret:        "s",
+			wantStatus:    200,
+			wantPublished: 1,
+		},
+		{
+			name:          "sub_issues user sender — publishes 1 envelope",
+			method:        "POST",
+			body:          subIssuesUser,
+			delivery:      "d-sub-1",
+			event:         "sub_issues",
+			secret:        "s",
+			wantStatus:    200,
+			wantPublished: 1,
+			wantTopics:    []string{"notifications.github.sjawhar.legion.issue.42.sub_issue"},
+		},
+		{
+			name:          "sub_issues bot sender — publishes 1 envelope",
+			method:        "POST",
+			body:          subIssuesBot,
+			delivery:      "d-sub-2",
+			event:         "sub_issues",
+			secret:        "s",
+			wantStatus:    200,
+			wantPublished: 1,
+			wantTopics:    []string{"notifications.github.sjawhar.legion.issue.42.sub_issue"},
+		},
+		{
+			name:          "push event — publishes 1 envelope",
+			method:        "POST",
+			body:          pushEvent,
+			delivery:      "d-4",
+			event:         "push",
+			secret:        "s",
+			wantStatus:    200,
+			wantPublished: 1,
+		},
+		{
+			name:          "check_run records without publishing a raw observation",
+			method:        "POST",
+			body:          checkRun,
+			delivery:      "d-ci-table",
+			event:         "check_run",
+			secret:        "s",
+			wantStatus:    200,
+			wantPublished: 0,
+			wantRecorded:  1,
+		},
+		{
+			name:          "a finished Actions job on the default branch, of a run with no pull request, publishes its job topic and records nothing",
+			method:        "POST",
+			body:          actionsJob,
+			delivery:      "d-job",
+			event:         "check_run",
+			secret:        "s",
+			wantStatus:    200,
+			wantPublished: 1,
+			wantTopics:    []string{"notifications.github.sjawhar.legion.job.38230245571.completed"},
+		},
+		{
+			name:          "publish failure returns 503",
+			method:        "POST",
+			body:          pushEvent,
+			delivery:      "d-5",
+			event:         "push",
+			secret:        "s",
+			publishErr:    fmt.Errorf("nats down"),
+			wantStatus:    503,
+			wantPublished: 1,
+		},
+		{
+			// An envelope NATS cannot take whole is refused the same way on every redelivery while
+			// the server's limits stand, so it is answered 422 rather than 503.
+			name:          "a publish refused as too large returns 422",
+			method:        "POST",
+			body:          pushEvent,
+			delivery:      "d-too-large",
+			event:         "push",
+			secret:        "s",
+			publishErr:    fmt.Errorf("publish: %w", bus.ErrTooLarge),
+			wantStatus:    422,
+			wantPublished: 1,
+		},
+		{
+			name:          "a publish NATS refuses for its subject returns 422",
+			method:        "POST",
+			body:          pushEvent,
+			delivery:      "d-bad-subject",
+			event:         "push",
+			secret:        "s",
+			publishErr:    fmt.Errorf("publish: %w", bus.ErrInvalidSubject),
+			wantStatus:    422,
+			wantPublished: 1,
+		},
+		{
+			// The CI store refuses a check its head's record has no room left for, and a
+			// redelivery would find none either.
+			name:         "a check the CI store refuses as too large returns 422",
+			method:       "POST",
+			body:         checkRun,
+			delivery:     "d-ci-too-large",
+			event:        "check_run",
+			secret:       "s",
+			recordErr:    fmt.Errorf("record: %w", bus.ErrTooLarge),
+			wantStatus:   422,
+			wantRecorded: 1,
+		},
+		{
+			name:           "custom mention trigger fan-out",
+			method:         "POST",
+			body:           issueCommentCustomMention,
+			delivery:       "d-6",
+			event:          "issue_comment",
+			secret:         "s",
+			mentionTrigger: "@mybot",
+			wantStatus:     200,
+			wantPublished:  3,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := &mockPublisher{err: tc.publishErr}
+			recorder := &mockRecorder{err: tc.recordErr}
+			trigger := tc.mentionTrigger
+			if trigger == "" {
+				trigger = "@legion"
+			}
+			handler := GitHubHandler(tc.secret, trigger, "", pub, recorder)
+
+			body := []byte(tc.body)
+			req := httptest.NewRequest(tc.method, "/webhook/github", strings.NewReader(tc.body))
+			if tc.delivery != "" {
+				req.Header.Set("X-GitHub-Delivery", tc.delivery)
+			}
+			if tc.event != "" {
+				req.Header.Set("X-GitHub-Event", tc.event)
+			}
+			sig := tc.signature
+			if sig == "" && tc.secret != "" && len(body) > 0 {
+				sig = githubSign(tc.secret, body)
+			}
+			if sig != "" {
+				req.Header.Set("X-Hub-Signature-256", sig)
+			}
+
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if len(pub.published) != tc.wantPublished {
+				t.Errorf("published = %d, want %d", len(pub.published), tc.wantPublished)
+			}
+			if len(recorder.calls) != tc.wantRecorded {
+				t.Errorf("recorder calls = %d, want %d", len(recorder.calls), tc.wantRecorded)
+			}
+			if len(tc.wantTopics) > 0 {
+				if len(pub.published) != len(tc.wantTopics) {
+					t.Fatalf("published topics = %d, want %d", len(pub.published), len(tc.wantTopics))
+				}
+				for i, wantTopic := range tc.wantTopics {
+					if pub.published[i].Topic != wantTopic {
+						t.Errorf("published[%d].Topic = %q, want %q", i, pub.published[i].Topic, wantTopic)
+					}
+				}
+			}
+		})
+	}
+}
+
+// An alert pages on the `<source> publish failed` line, which says a publish did not complete and
+// may on a redelivery. An envelope refused as too large never will, so it is logged as a refusal
+// and pages no one, while a publish that failed still logs the failure.
+func TestAPublishRefusedAsTooLargeIsNotLoggedAsAFailure(t *testing.T) {
+	var logged bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	push := []byte(`{"ref":"refs/heads/main","repository":{"name":"legion","owner":{"login":"sjawhar"},"full_name":"sjawhar/legion"}}`)
+	for _, tc := range []struct {
+		name      string
+		err       error
+		want, not string
+	}{
+		{"a refusal", fmt.Errorf("publish: %w", bus.ErrTooLarge), "github publish refused:", "github publish failed"},
+		{"a failure", errors.New("nats: no response from stream"), "github publish failed:", "github publish refused"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logged.Reset()
+			handler := GitHubHandler("s", "@legion", "", &mockPublisher{err: tc.err}, &mockRecorder{})
+			req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(push))
+			req.Header.Set("X-GitHub-Delivery", "d-log")
+			req.Header.Set("X-GitHub-Event", "push")
+			req.Header.Set("X-Hub-Signature-256", githubSign("s", push))
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+			if got := logged.String(); !strings.Contains(got, tc.want) || strings.Contains(got, tc.not) {
+				t.Fatalf("log = %q, want a %q line and no %q line", got, tc.want, tc.not)
+			}
+		})
+	}
+}
+
+// Dispatch's redelivery sweep asks for a failed delivery again for 72 hours, under the same
+// X-GitHub-Delivery. The listener's alarms count `<action> refused` and `github publish failed`,
+// so each delivery logs that line at its first failure only and every redelivery's failure as
+// `redelivery <delivery>: …`, which no alarm counts, while the answer stays the same. Another
+// delivery that fails the same way logs the counted line again.
+func TestARedeliveredGitHubFailureLogsTheCountedLineOnce(t *testing.T) {
+	var logged bytes.Buffer
+	previous, flags := log.Writer(), log.Flags()
+	log.SetOutput(&logged)
+	log.SetFlags(log.LstdFlags)
+	t.Cleanup(func() { log.SetOutput(previous); log.SetFlags(flags) })
+	push := `{"ref":"refs/heads/main","repository":{"name":"legion","owner":{"login":"sjawhar"},"full_name":"sjawhar/legion"}}`
+	checkRun := `{"action":"completed","check_run":{"id":600,"name":"build","status":"completed","conclusion":"failure",` +
+		`"head_sha":"abcdef1234567890abcdef1234567890abcdef12","pull_requests":[{"number":42}]},` +
+		`"repository":{"name":"example-repo","owner":{"login":"example-org"}}}`
+	checkSuite := `{"action":"completed","check_suite":{"id":900,"status":"completed","conclusion":"success",` +
+		`"updated_at":"2026-09-07T03:01:00Z","head_sha":"abcdef1234567890abcdef1234567890abcdef12","app":{"id":77},` +
+		`"pull_requests":[{"number":42}]},"repository":{"name":"example-repo","owner":{"login":"example-org"}}}`
+	tooLarge := fmt.Errorf("publish: %w", bus.ErrTooLarge)
+	unavailable := errors.New("nats: no response from stream")
+	for _, tc := range []struct {
+		name, event, body string
+		publisher         *mockPublisher
+		recorder          *mockRecorder
+		line              string
+		status            int
+	}{
+		{"a refused publish", "push", push, &mockPublisher{err: tooLarge}, &mockRecorder{}, "github publish refused", http.StatusUnprocessableEntity},
+		{"a failed publish", "push", push, &mockPublisher{err: unavailable}, &mockRecorder{}, "github publish failed", http.StatusServiceUnavailable},
+		{"a refused CI record", "check_run", checkRun, &mockPublisher{}, &mockRecorder{err: tooLarge}, "github ci record refused", http.StatusUnprocessableEntity},
+		{"a refused CI suite record", "check_suite", checkSuite, &mockPublisher{}, &mockRecorder{suiteErr: tooLarge}, "github ci suite record refused", http.StatusUnprocessableEntity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logged.Reset()
+			handler := GitHubHandler("s", "@legion", "", tc.publisher, tc.recorder)
+			for _, delivery := range []string{"d-again", "d-again", "d-other"} {
+				req := httptest.NewRequest(http.MethodPost, "/webhook/github", strings.NewReader(tc.body))
+				req.Header.Set("X-GitHub-Delivery", delivery)
+				req.Header.Set("X-GitHub-Event", tc.event)
+				req.Header.Set("X-Hub-Signature-256", githubSign("s", []byte(tc.body)))
+				rr := httptest.NewRecorder()
+				handler.ServeHTTP(rr, req)
+				if rr.Code != tc.status {
+					t.Fatalf("delivery %s answered %d, want %d; body = %s", delivery, rr.Code, tc.status, rr.Body.String())
+				}
+			}
+			// The alarms' filters read the words after the line's date and time.
+			var counted, repeated []string
+			for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
+				words := strings.SplitN(line, " ", 3)
+				if len(words) < 3 {
+					t.Fatalf("log line %q has no date and time", line)
+				}
+				switch rest := words[2]; {
+				case strings.HasPrefix(rest, tc.line+": "):
+					counted = append(counted, rest)
+				case strings.HasPrefix(rest, "redelivery d-again: "+tc.line+": "):
+					repeated = append(repeated, rest)
+				default:
+					t.Fatalf("unexpected log line %q", line)
+				}
+			}
+			if len(counted) != 2 || len(repeated) != 1 {
+				t.Fatalf("log = %q, want %q logged for d-again's first failure and d-other's, and its redelivery's logged once as `redelivery d-again: …`",
+					logged.String(), tc.line)
+			}
+		})
+	}
+}
+
+// The memory of logged failures is bounded: past its size the oldest delivery is forgotten, and a
+// delivery is forgotten once Dispatch's sweep has stopped asking for it, so its next failure is
+// counted again.
+func TestFailedDeliveriesForgetTheOldestAndTheExpired(t *testing.T) {
+	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	f := newFailedDeliveries(2, githubFailureAge)
+	f.now = func() time.Time { return now }
+	first := func(delivery string) bool { return f.first(failedDelivery{delivery, "github publish refused"}) }
+	for _, step := range []struct {
+		delivery string
+		advance  time.Duration
+		want     bool
+	}{
+		{"d-1", 0, true},
+		{"d-1", 0, false},
+		{"d-2", time.Hour, true},
+		{"d-3", time.Hour, true}, // forgets d-1, the oldest of two
+		{"d-2", 0, false},
+		{"d-1", time.Hour, true},                    // forgets d-2
+		{"d-3", githubFailureAge - time.Hour, true}, // d-3, logged 72 h ago, is forgotten; d-1, 71 h ago, is not
+		{"d-1", 0, false},
+	} {
+		now = now.Add(step.advance)
+		if got := first(step.delivery); got != step.want {
+			t.Fatalf("at %s, first(%s) = %t, want %t", now.Format(time.RFC3339), step.delivery, got, step.want)
+		}
+	}
+}
+
+// An X-GitHub-Delivery longer than GitHub's 36-character delivery GUID is no delivery GitHub sent,
+// and it never becomes a key in the failure memory: the key is what tells a redelivery from a first
+// delivery, so a key cut down to githubDeliveryKeyMax bytes would be shared by every header that
+// begins the same way, and the second delivery's first failure would be logged
+// `redelivery <delivery>: …`, which no alarm counts. Such a delivery is answered as any other, and
+// the memory holds nothing of it, so every one of its failures logs the counted line.
+func TestAnOverLongGitHubDeliveryIsNeverRememberedAsAFailure(t *testing.T) {
+	t.Run("the memory keeps no key for it", func(t *testing.T) {
+		f := newFailedDeliveries(githubFailuresKept, githubFailureAge)
+		for _, delivery := range []string{strings.Repeat("d", githubDeliveryKeyMax+1), ""} {
+			for attempt := 1; attempt <= 2; attempt++ {
+				if !f.first(failedDelivery{delivery, "github publish refused"}) {
+					t.Fatalf("failure %d of a %d-byte delivery was taken for a redelivery, want every failure of it counted", attempt, len(delivery))
+				}
+			}
+		}
+		if len(f.logged) != 0 || len(f.order) != 0 {
+			t.Fatalf("the memory holds %d keys and %d entries, want none: an over-long or empty delivery must never become a key", len(f.logged), len(f.order))
+		}
+		kept := failedDelivery{strings.Repeat("d", githubDeliveryKeyMax), "github publish refused"}
+		if !f.first(kept) || f.first(kept) {
+			t.Fatalf("a delivery of exactly %d bytes is not remembered, want its first failure counted and its next not", githubDeliveryKeyMax)
+		}
+	})
+
+	t.Run("the handler answers it as today and counts both failures", func(t *testing.T) {
+		var logged bytes.Buffer
+		previous, flags := log.Writer(), log.Flags()
+		log.SetOutput(&logged)
+		log.SetFlags(log.LstdFlags)
+		t.Cleanup(func() { log.SetOutput(previous); log.SetFlags(flags) })
+		body := `{"ref":"refs/heads/main","repository":{"name":"legion","owner":{"login":"sjawhar"},"full_name":"sjawhar/legion"}}`
+		handler := GitHubHandler("s", "@legion", "", &mockPublisher{err: fmt.Errorf("publish: %w", bus.ErrTooLarge)}, &mockRecorder{})
+		delivery := strings.Repeat("d", githubDeliveryKeyMax+1)
+		for attempt := 1; attempt <= 2; attempt++ {
+			req := httptest.NewRequest(http.MethodPost, "/webhook/github", strings.NewReader(body))
+			req.Header.Set("X-GitHub-Delivery", delivery)
+			req.Header.Set("X-GitHub-Event", "push")
+			req.Header.Set("X-Hub-Signature-256", githubSign("s", []byte(body)))
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("attempt %d answered %d, want %d; body = %s", attempt, rr.Code, http.StatusUnprocessableEntity, rr.Body.String())
+			}
+		}
+		// The alarms' filters read the words after the line's date and time.
+		var counted int
+		for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
+			words := strings.SplitN(line, " ", 3)
+			if len(words) < 3 {
+				t.Fatalf("log line %q has no date and time", line)
+			}
+			if !strings.HasPrefix(words[2], "github publish refused: ") {
+				t.Fatalf("log line %q is not the counted line: nothing of an over-long delivery is remembered, so each of its failures logs that line", line)
+			}
+			counted++
+		}
+		if counted != 2 {
+			t.Fatalf("log = %q, want both failures logged `github publish refused: …`", logged.String())
+		}
+	})
+}
+
+// A delivery whose publish finds the stream full is answered 503, which GitHub redelivers, and not
+// the 422 of a refusal, which it takes as final; it is logged as a failed publish naming the full
+// stream, and the stream keeps every message it held (a real server, a small byte limit).
+func TestADeliveryToAFullStreamIsAnswered503(t *testing.T) {
+	const limit = 16 << 10
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithStreamMaxBytes(limit))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(client.Close)
+	bustest.FillStream(t, client, 64)
+	before, err := client.JS().StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the full stream: %v", err)
+	}
+
+	var logged bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	push := []byte(`{"ref":"refs/heads/main","repository":{"name":"legion","owner":{"login":"sjawhar"},"full_name":"sjawhar/legion"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(push))
+	req.Header.Set("X-GitHub-Delivery", "d-full")
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("X-Hub-Signature-256", githubSign("s", push))
+	rec := httptest.NewRecorder()
+	GitHubHandler("s", "@legion", "", client, &mockRecorder{}).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", rec.Code, rec.Body.String())
+	}
+	if got := logged.String(); !strings.Contains(got, "github publish failed:") || !strings.Contains(got, bus.ErrStreamFull.Error()) {
+		t.Fatalf("log = %q, want a github publish failed line naming %q", got, bus.ErrStreamFull)
+	}
+	after, err := client.JS().StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the stream after the delivery: %v", err)
+	}
+	if after.State.Msgs != before.State.Msgs || after.State.FirstSeq != before.State.FirstSeq || after.State.LastSeq != before.State.LastSeq {
+		t.Fatalf("stream state after the delivery = %+v, want the state before it, %+v", after.State, before.State)
+	}
+}
+
+// GitHub asks again for a delivery the full stream refused, under the same X-GitHub-Delivery, and
+// a clustered nats-server answers that republish with an acknowledgement of a duplicate of a
+// message it never stored (bus.ErrNotStored): the bus publishes the envelope once more without its
+// Nats-Msg-Id, which no duplicate record matches, so the delivery is stored as soon as the stream
+// has room. Until then the listener answers 503, which GitHub asks again for, rather than the 422
+// it takes as final, and the counted `github publish failed` line is logged once for each
+// delivery, every redelivery's failure behind `redelivery <delivery>: `. The stored message
+// carries the delivery's dedupe key and no id (a real three-server cluster, a small byte limit).
+func TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID(t *testing.T) {
+	const limit = 16 << 10
+	cluster := testnats.StartCluster(t, 3)
+	client, err := bus.ConnectOwningStream(cluster.URLs(), bus.WithReplicas(3), bus.WithStreamMaxBytes(limit))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(client.Close)
+	js := cluster.JetStream(t)
+	testnats.AwaitSettledStream(t, js, bus.Stream)
+
+	// push is the body GitHub sends for a push to branch, and envelope the one envelope the
+	// handler publishes for it, under a Nats-Msg-Id of that envelope's dedupe key and topic.
+	push := func(branch string) []byte {
+		return []byte(`{"ref":"refs/heads/` + branch + `","repository":{"name":"legion","owner":{"login":"sjawhar"},"full_name":"sjawhar/legion"}}`)
+	}
+	envelope := func(guid, branch string) contracts.Envelope {
+		t.Helper()
+		var body map[string]any
+		if err := json.Unmarshal(push(branch), &body); err != nil {
+			t.Fatal(err)
+		}
+		items := contracts.GithubEnvelopes(contracts.GithubEnvelopeInput{
+			Event: "push", Delivery: guid, Body: body, EventID: "event-" + guid, TraceID: "trace-" + guid,
+		}, "@legion")
+		if len(items) != 1 || !contracts.DedupeKeyNamesTheUpstreamEvent(items[0]) {
+			t.Fatalf("a push to %s makes %d envelopes, want one published under a Nats-Msg-Id", branch, len(items))
+		}
+		return items[0]
+	}
+
+	bustest.FillStream(t, client, 64)
+
+	var logged bytes.Buffer
+	previous, flags := log.Writer(), log.Flags()
+	log.SetOutput(&logged)
+	log.SetFlags(log.LstdFlags)
+	t.Cleanup(func() { log.SetOutput(previous); log.SetFlags(flags) })
+	handler := GitHubHandler("s", "@legion", "", client, &mockRecorder{})
+	// post delivers guid's push to branch as GitHub sends it and answers the status and the lines
+	// it logged, each without the date and time the alarms' filters read past.
+	post := func(guid, branch string) (int, []string) {
+		t.Helper()
+		logged.Reset()
+		body := push(branch)
+		req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+		req.Header.Set("X-GitHub-Delivery", guid)
+		req.Header.Set("X-GitHub-Event", "push")
+		req.Header.Set("X-Hub-Signature-256", githubSign("s", body))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		var lines []string
+		for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
+			if line == "" {
+				continue
+			}
+			words := strings.SplitN(line, " ", 3)
+			if len(words) < 3 {
+				t.Fatalf("log line %q has no date and time", line)
+			}
+			lines = append(lines, words[2])
+		}
+		return rr.Code, lines
+	}
+
+	// The full stream refuses the delivery: 503, and the counted line once.
+	status, lines := post("d-full", "refused")
+	if status != http.StatusServiceUnavailable || len(lines) != 1 || !strings.HasPrefix(lines[0], "github publish failed: ") {
+		t.Fatalf("the delivery answered %d and logged %v, want 503 and one `github publish failed: …` line", status, lines)
+	}
+
+	// GitHub asks again under the same delivery: the server holds its id with no message under it,
+	// so the bus publishes the envelope once more without the id, which the full stream refuses
+	// too. Still a 503, and the failure is logged only behind the uncounted prefix.
+	status, lines = post("d-full", "refused")
+	if status != http.StatusServiceUnavailable || len(lines) != 1 || !strings.HasPrefix(lines[0], "redelivery d-full: github publish failed: ") {
+		t.Fatalf("the redelivery answered %d and logged %v, want 503 and one `redelivery d-full: …` line", status, lines)
+	}
+	if !strings.Contains(lines[0], bus.ErrNotStored.Error()) || !strings.Contains(lines[0], bus.ErrStreamFull.Error()) {
+		t.Fatalf("the redelivery logged %q, want it to name %q and %q", lines[0], bus.ErrNotStored, bus.ErrStreamFull)
+	}
+
+	// Another delivery the full stream refused, asked for again once the stream has room: the
+	// republish without the id is stored, so the listener answers 200 and logs nothing.
+	stored := envelope("d-room", "stored")
+	if status, lines = post("d-room", "stored"); status != http.StatusServiceUnavailable || len(lines) != 1 {
+		t.Fatalf("the delivery into the full stream answered %d and logged %v, want 503 and one counted line", status, lines)
+	}
+	if err := js.PurgeStream(bus.Stream); err != nil {
+		t.Fatalf("purge the stream: %v", err)
+	}
+	if status, lines = post("d-room", "stored"); status != http.StatusOK || len(lines) != 0 {
+		t.Fatalf("after the purge, the redelivery answered %d and logged %v, want 200 and no line", status, lines)
+	}
+	info, err := js.StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the stream: %v", err)
+	}
+	if info.State.Msgs != 1 {
+		t.Fatalf("the stream holds %d messages, want only the republished delivery", info.State.Msgs)
+	}
+	msg, err := js.GetLastMsg(bus.Stream, stored.Topic)
+	if err != nil {
+		t.Fatalf("read %s: %v", stored.Topic, err)
+	}
+	var held contracts.Envelope
+	if err := json.Unmarshal(msg.Data, &held); err != nil {
+		t.Fatalf("decode the stored message: %v", err)
+	}
+	if held.DedupeKey != stored.DedupeKey || msg.Header.Get(nats.MsgIdHdr) != "" {
+		t.Fatalf("stored %s = dedupe key %q, id %q; want %q and no id",
+			stored.Topic, held.DedupeKey, msg.Header.Get(nats.MsgIdHdr), stored.DedupeKey)
+	}
+}
+
+// githubSign computes HMAC SHA256 signature matching GitHub's format.
+func githubSign(secret string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+// TestGitHubHandlerSubIssuesFixture exercises a production-shaped sub_issues webhook payload
+// (captured from GitHub's documented schema) end-to-end through GitHubHandler and asserts
+// the published topic matches the parent issue's number, not the child's.
+func TestGitHubHandlerSubIssuesFixture(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("testdata", "sub_issues_added.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	pub := &mockPublisher{}
+	handler := GitHubHandler("s", "@legion", "", pub, &mockRecorder{})
+
+	req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(string(body)))
+	req.Header.Set("X-GitHub-Delivery", "d-fixture-sub-issues")
+	req.Header.Set("X-GitHub-Event", "sub_issues")
+	req.Header.Set("X-Hub-Signature-256", githubSign("s", body))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("published = %d, want 1", len(pub.published))
+	}
+	want := "notifications.github.sjawhar.legion.issue.641.sub_issue"
+	if got := pub.published[0].Topic; got != want {
+		t.Errorf("Topic = %q, want %q", got, want)
+	}
+}
+
+// TestGitHubHandlerMergeGroup asserts GitHub's merge-queue event is acknowledged with 200 and
+// neither published nor recorded: a merge group names no pull request head and nothing in
+// Legion routes on it (LEGION-99). The fixture is production-shaped from GitHub's documented
+// merge_group payload; the signature check still runs before the skip.
+func TestGitHubHandlerMergeGroup(t *testing.T) {
+	checksRequested, err := os.ReadFile(filepath.Join("testdata", "merge_group_checks_requested.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	destroyed := []byte(`{
+		"action": "destroyed",
+		"reason": "merged",
+		"merge_group": {
+			"head_sha": "9e1c7d2a4b6f8e0c1d3a5b7c9e1f2a4b6c8d0e2f",
+			"head_ref": "refs/heads/gh-readonly-queue/main/pr-1050-7f60bbfb57cb2a1d0e9f8a7b6c5d4e3f2a1b0c9d",
+			"base_sha": "7f60bbfb57cb2a1d0e9f8a7b6c5d4e3f2a1b0c9d",
+			"base_ref": "refs/heads/main"
+		},
+		"sender": {"login": "github-merge-queue[bot]", "type": "Bot"},
+		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
+	}`)
+	for i, tc := range []struct {
+		name       string
+		body       []byte
+		signature  string // "" signs the body with the handler's secret
+		wantStatus int
+	}{
+		{name: "checks_requested is acknowledged and not published", body: checksRequested, wantStatus: 200},
+		{name: "destroyed is acknowledged and not published", body: destroyed, wantStatus: 200},
+		{name: "an unsigned merge_group is still refused", body: checksRequested, signature: "sha256=invalid", wantStatus: 401},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := &mockPublisher{}
+			recorder := &mockRecorder{}
+			handler := GitHubHandler("s", "@legion", "", pub, recorder)
+			req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(string(tc.body)))
+			req.Header.Set("X-GitHub-Delivery", fmt.Sprintf("d-merge-group-%d", i))
+			req.Header.Set("X-GitHub-Event", "merge_group")
+			sig := tc.signature
+			if sig == "" {
+				sig = githubSign("s", tc.body)
+			}
+			req.Header.Set("X-Hub-Signature-256", sig)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if len(pub.published) != 0 {
+				t.Errorf("published = %d, want 0; first topic %q", len(pub.published), pub.published[0].Topic)
+			}
+			if n := len(recorder.calls) + len(recorder.suiteCalls); n != 0 {
+				t.Errorf("recorder calls = %d, want 0", n)
+			}
+		})
+	}
+}
+
+// TestGitHubHandlerCIRecordsObservations asserts a check_run webhook records
+// one state fact per associated PR and never publishes the obsolete raw topic.
+func TestGitHubHandlerCIRecordsObservations(t *testing.T) {
+	checkRun := `{
+		"action": "completed",
+		"check_run": {
+			"id": 987654321,
+			"name": "unit-tests",
+			"status": "completed",
+			"conclusion": "failure",
+			"completed_at": "2026-09-07T03:00:00Z",
+			"head_sha": "deadbeef",
+			"check_suite": {"id": 900},
+			"pull_requests": [{"number": 42}, {"number": 43}]
+		},
+		"sender": {"login": "github-actions[bot]", "type": "Bot"},
+		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
+	}`
+
+	t.Run("check_run records without publishing raw observations", func(t *testing.T) {
+		pub := &mockPublisher{}
+		rec := &mockRecorder{}
+		handler := GitHubHandler("s", "@legion", "", pub, rec)
+		body := []byte(checkRun)
+		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(checkRun))
+		req.Header.Set("X-GitHub-Delivery", "d-ci-1")
+		req.Header.Set("X-GitHub-Event", "check_run")
+		req.Header.Set("X-Hub-Signature-256", githubSign("s", body))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != 200 {
+			t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+		}
+		if len(pub.published) != 0 {
+			t.Fatalf("raw CI envelope published: %+v", pub.published)
+		}
+		if len(rec.calls) != 2 {
+			t.Fatalf("recorder calls = %d, want 2 (one per PR)", len(rec.calls))
+		}
+		if rec.calls[0].Number != "42" || rec.calls[1].Number != "43" {
+			t.Fatalf("recorded PR numbers = %q, %q", rec.calls[0].Number, rec.calls[1].Number)
+		}
+		if rec.calls[0].ObservedAt != "2026-09-07T03:00:00Z" || rec.calls[1].ObservedAt != "2026-09-07T03:00:00Z" {
+			t.Fatalf("check observation timestamps = %q, %q", rec.calls[0].ObservedAt, rec.calls[1].ObservedAt)
+		}
+	})
+
+	t.Run("check_suite records without publishing raw observations", func(t *testing.T) {
+		checkSuite := `{
+			"action": "completed",
+			"check_suite": {
+				"id": 900,
+				"status": "completed",
+				"conclusion": "success",
+				"updated_at": "2026-09-07T03:01:00Z",
+				"head_sha": "abcdef1234567890abcdef1234567890abcdef12",
+				"app": {"id": 77},
+				"pull_requests": [{"number": 42}]
+			},
+			"repository": {"name": "example-repo", "owner": {"login": "example-org"}}
+		}`
+		pub := &mockPublisher{}
+		rec := &mockRecorder{}
+		handler := GitHubHandler("s", "@legion", "", pub, rec)
+		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(checkSuite))
+		req.Header.Set("X-GitHub-Delivery", "d-ci-suite")
+		req.Header.Set("X-GitHub-Event", "check_suite")
+		req.Header.Set("X-Hub-Signature-256", githubSign("s", []byte(checkSuite)))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+		}
+		if len(pub.published) != 0 {
+			t.Fatalf("raw CI envelope published: %+v", pub.published)
+		}
+		if len(rec.suiteCalls) != 1 {
+			t.Fatalf("suite recorder calls = %d, want 1", len(rec.suiteCalls))
+		}
+		if got := rec.suiteCalls[0]; got != (contracts.CIObservation{
+			Owner:      "example-org",
+			Repo:       "example-repo",
+			Number:     "42",
+			SHA:        "abcdef1234567890abcdef1234567890abcdef12",
+			SuiteID:    "900",
+			AppID:      "77",
+			Status:     "completed",
+			Conclusion: "success",
+			ObservedAt: "2026-09-07T03:01:00Z",
+		}) {
+			t.Fatalf("suite recorder call = %+v", got)
+		}
+	})
+
+	t.Run("recorder error returns 503", func(t *testing.T) {
+		pub := &mockPublisher{}
+		rec := &mockRecorder{err: fmt.Errorf("kv down")}
+		handler := GitHubHandler("s", "@legion", "", pub, rec)
+		body := []byte(checkRun)
+		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(checkRun))
+		req.Header.Set("X-GitHub-Delivery", "d-ci-2")
+		req.Header.Set("X-GitHub-Event", "check_run")
+		req.Header.Set("X-Hub-Signature-256", githubSign("s", body))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != 503 {
+			t.Fatalf("status = %d, want 503", rr.Code)
+		}
+	})
+
+	t.Run("non-CI event publishes and does not record", func(t *testing.T) {
+		push := `{"ref": "refs/heads/main", "sender": {"login": "octocat", "type": "User"}, "repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}}`
+		pub := &mockPublisher{}
+		rec := &mockRecorder{}
+		handler := GitHubHandler("s", "@legion", "", pub, rec)
+		body := []byte(push)
+		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(push))
+		req.Header.Set("X-GitHub-Delivery", "d-push-1")
+		req.Header.Set("X-GitHub-Event", "push")
+		req.Header.Set("X-Hub-Signature-256", githubSign("s", body))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != 200 {
+			t.Fatalf("status = %d, want 200", rr.Code)
+		}
+		if len(pub.published) != 1 || len(rec.calls) != 0 {
+			t.Fatalf("non-CI published=%d recorded=%d", len(pub.published), len(rec.calls))
+		}
+	})
+}
+
+func TestGitHubHandlerFiltersReviewerVerdicts(t *testing.T) {
+	const (
+		secret        = "s"
+		reviewerAppID = "12345"
+	)
+	checkRun := func(name, appID string) string {
+		return fmt.Sprintf(`{
+			"action": "completed",
+			"check_run": {
+				"id": 987654321,
+				"name": %q,
+				"status": "completed",
+				"conclusion": "success",
+				"head_sha": "deadbeef",
+				"app": {"id": %s},
+				"pull_requests": [{"number": 42}]
+			},
+			"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
+		}`, name, appID)
+	}
+	post := func(t *testing.T, handler http.HandlerFunc, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(body))
+		req.Header.Set("X-GitHub-Delivery", "d-reviewer-verdict")
+		req.Header.Set("X-GitHub-Event", "check_run")
+		req.Header.Set("X-Hub-Signature-256", githubSign(secret, []byte(body)))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != 200 {
+			t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+		}
+		return rr
+	}
+
+	for _, name := range []string{"tester", "architect"} {
+		t.Run("right-App "+name+" verdict is recorded without raw publication", func(t *testing.T) {
+			pub := &mockPublisher{}
+			rec := &mockRecorder{}
+			handler := GitHubHandler(secret, "@legion", reviewerAppID, pub, rec)
+			post(t, handler, checkRun(name, reviewerAppID))
+
+			if len(pub.published) != 0 {
+				t.Fatalf("published = %d, want 0", len(pub.published))
+			}
+			if len(rec.calls) != 1 {
+				t.Fatalf("recorder calls = %d, want 1", len(rec.calls))
+			}
+			if got := rec.calls[0]; got.CheckName != name || got.Conclusion != "success" {
+				t.Fatalf("unexpected recorded verdict: %+v", got)
+			}
+		})
+	}
+
+	t.Run("wrong-App tester verdict is dropped", func(t *testing.T) {
+		pub := &mockPublisher{}
+		rec := &mockRecorder{}
+		handler := GitHubHandler(secret, "@legion", reviewerAppID, pub, rec)
+		post(t, handler, checkRun("tester", "98765"))
+		if len(rec.calls) != 0 {
+			t.Fatalf("recorder calls = %d, want 0 for wrong-App tester", len(rec.calls))
+		}
+		if len(pub.published) != 0 {
+			t.Fatalf("published = %d, want 0 for wrong-App tester", len(pub.published))
+		}
+	})
+
+	t.Run("missing reviewer App ID drops bare verdict", func(t *testing.T) {
+		pub := &mockPublisher{}
+		rec := &mockRecorder{}
+		handler := GitHubHandler(secret, "@legion", "", pub, rec)
+		post(t, handler, checkRun("tester", reviewerAppID))
+		if len(rec.calls) != 0 {
+			t.Fatalf("recorder calls = %d, want 0 without a reviewer App ID", len(rec.calls))
+		}
+		if len(pub.published) != 0 {
+			t.Fatalf("published = %d, want 0 without a reviewer App ID", len(pub.published))
+		}
+	})
+
+	t.Run("ordinary CI check is recorded from another App", func(t *testing.T) {
+		pub := &mockPublisher{}
+		rec := &mockRecorder{}
+		handler := GitHubHandler(secret, "@legion", reviewerAppID, pub, rec)
+		post(t, handler, checkRun("unit-tests", "98765"))
+		if len(rec.calls) != 1 {
+			t.Fatalf("recorder calls = %d, want 1", len(rec.calls))
+		}
+		if got := rec.calls[0].CheckName; got != "unit-tests" {
+			t.Fatalf("recorded check name = %q, want unit-tests", got)
+		}
+		if len(pub.published) != 0 {
+			t.Fatalf("published = %d, want 0", len(pub.published))
+		}
+	})
+}
+
+// largePushPayload is a push listing commits commits, each carrying the fields GitHub sends for
+// one and touching several files, the shape of a large branch push.
+func largePushPayload(t *testing.T, commits int) []byte {
+	t.Helper()
+	list := make([]map[string]any, commits)
+	for i := range list {
+		sha := fmt.Sprintf("%040x", i+1)
+		person := map[string]any{"name": "Example Author", "email": "author@example.com", "username": "example-author"}
+		paths := make([]string, 12)
+		for j := range paths {
+			paths[j] = fmt.Sprintf("services/component-%03d/internal/package-%02d/source_file_%02d.go", i%50, j, j)
+		}
+		list[i] = map[string]any{
+			"id":        sha,
+			"tree_id":   fmt.Sprintf("%040x", i+1_000_000),
+			"distinct":  true,
+			"message":   fmt.Sprintf("Change %d\n\n%s", i, strings.Repeat("A longer commit message body line. ", 68)),
+			"timestamp": "2026-09-24T01:29:00Z",
+			"url":       "https://example-host/acme/widgets/commit/" + sha,
+			"author":    person,
+			"committer": person,
+			"added":     paths[:4],
+			"removed":   paths[4:6],
+			"modified":  paths[6:],
+		}
+	}
+	body, err := json.Marshal(map[string]any{
+		"ref":         "refs/heads/main",
+		"before":      fmt.Sprintf("%040x", 0),
+		"after":       fmt.Sprintf("%040x", commits),
+		"compare":     "https://example-host/acme/widgets/compare",
+		"commits":     list,
+		"head_commit": list[len(list)-1],
+		"pusher":      map[string]any{"name": "example-author"},
+		"sender":      map[string]any{"login": "example-author", "type": "User"},
+		"repository":  map[string]any{"name": "widgets", "owner": map[string]any{"login": "acme"}, "full_name": "acme/widgets"},
+	})
+	if err != nil {
+		t.Fatalf("marshal push: %v", err)
+	}
+	return body
+}
+
+// A push of about a thousand commits is a delivery of several megabytes, well inside the 25 MB
+// GitHub delivers. The handler publishes it like any other push; refusing it loses the event for
+// good, since a redelivery is the same body.
+func TestGitHubHandlerPublishesAPushOfSeveralMegabytes(t *testing.T) {
+	const secret = "s"
+	body := largePushPayload(t, 1000)
+	if len(body) < 3_500_000 {
+		t.Fatalf("the push is %d bytes, want the ~3.6 MB of a thousand-commit push", len(body))
+	}
+	pub := &mockPublisher{}
+	handler := GitHubHandler(secret, "@legion", "", pub, &mockRecorder{})
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+	req.Header.Set("X-GitHub-Delivery", "delivery-large-push")
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("X-Hub-Signature-256", githubSign(secret, body))
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("published = %d, want 1", len(pub.published))
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(pub.published[0].Payload), &payload); err != nil {
+		t.Fatalf("decode the push payload: %v", err)
+	}
+	if payload["commit_count"] != "1000" || payload["changed_paths_truncated"] != "true" {
+		t.Fatalf("push payload commit_count = %q, changed_paths_truncated = %q; want 1000 and true",
+			payload["commit_count"], payload["changed_paths_truncated"])
+	}
+}
+
+// Git bounds no ref's length, and a push's subject names its ref, so a ref of a few thousand bytes
+// once made a subject past what the bus publishes: GitHub was answered 422 for that push on every
+// delivery, and the event was never stored. The subject now cuts such a ref to fit, and the push
+// is answered 200 and stored by a real NATS server.
+func TestGitHubHandlerStoresAPushWhoseRefIsFiveThousandBytes(t *testing.T) {
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect the bus: %v", err)
+	}
+	defer client.Close()
+
+	const secret = "s"
+	ref := "refs/heads/" + strings.Repeat("a", 5000)
+	body, err := json.Marshal(map[string]any{
+		"ref":        ref,
+		"before":     strings.Repeat("0", 40),
+		"after":      strings.Repeat("1", 40),
+		"pusher":     map[string]any{"name": "octocat"},
+		"commits":    []any{},
+		"repository": map[string]any{"name": "widgets", "full_name": "acme/widgets", "owner": map[string]any{"login": "acme"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal push: %v", err)
+	}
+	handler := GitHubHandler(secret, "@legion", "", client, &mockRecorder{})
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+	req.Header.Set("X-GitHub-Delivery", "delivery-long-ref")
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("X-Hub-Signature-256", githubSign(secret, body))
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stored, err := client.NextStoredMessage(ctx, "notifications.github.acme.widgets.push.branch.>", 0)
+	if err != nil {
+		t.Fatalf("read the stored push: %v", err)
+	}
+	var envelope contracts.Envelope
+	if err := json.Unmarshal(stored.Data, &envelope); err != nil {
+		t.Fatalf("decode the stored push: %v", err)
+	}
+	if envelope.SourceEventID != "delivery-long-ref" || len(stored.Subject) > contracts.SubjectMaxBytes {
+		t.Fatalf("stored delivery %q on a %d-byte subject, want delivery-long-ref within %d bytes",
+			envelope.SourceEventID, len(stored.Subject), contracts.SubjectMaxBytes)
+	}
+}

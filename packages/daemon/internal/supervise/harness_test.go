@@ -456,15 +456,67 @@ func (h *harness) restart() {
 	h.start(h.store.load(h.token))
 }
 
+// handle posts one event and waits for the decision it starts, with the agent answering a turn's
+// end as Oh My Pi does: the prompt_result of the prompt whose turn it was, written right behind
+// that agent_end (resultAfterTurn).
 func (h *harness) handle(ev Event) error {
+	return h.post(ev, true)
+}
+
+// handleQuiet is handle for a turn that was not the pending prompt's — a role's own background
+// result waking a settled session — whose end no prompt_result follows.
+func (h *harness) handleQuiet(ev Event) error {
+	return h.post(ev, false)
+}
+
+func (h *harness) post(ev Event, result bool) error {
+	ran := ""
+	if _, ending := ev.(StreamTurnEnd); ending && result {
+		ran = h.promptInTurn()
+	}
 	err := h.m.Handle(h.ctx, ev)
 	h.m.Wait()
+	if ran != "" {
+		// Oh My Pi writes the prompt's result right behind the agent_end of the turn that ran it.
+		err = errors.Join(err, h.m.Handle(h.ctx, StreamPromptResult{Claim: h.token, DeliveryID: ran, AgentInvoked: true}))
+		h.m.Wait()
+	}
 	return err
+}
+
+// promptInTurn is the delivery of the prompt the agent took and has not reported the end of: the
+// one whose work the turn now ending did. It is read before the end reaches the machine, so a
+// task that end re-sends is the next turn's prompt rather than this one's. A prompt the
+// connection refused reports nothing, and neither does one the agent has already refused late:
+// Oh My Pi answers a prompt once, a failure or a result, and the machine stops waiting for the
+// result at exactly the moment it takes that task back (awaitingResult).
+func (h *harness) promptInTurn() string {
+	conn, ok := h.conns.Conn(h.token)
+	if !ok {
+		return ""
+	}
+	reporter, ok := conn.(interface{ TakePromptResult() (string, bool) })
+	if !ok {
+		return ""
+	}
+	delivery, _ := reporter.TakePromptResult()
+	if delivery != h.m.awaitingResult {
+		return ""
+	}
+	return delivery
 }
 
 func (h *harness) must(ev Event) {
 	h.t.Helper()
 	if err := h.handle(ev); err != nil {
+		h.t.Fatalf("handle %T: %v", ev, err)
+	}
+}
+
+// mustQuiet is must for a turn whose end no prompt_result follows (handleQuiet).
+func (h *harness) mustQuiet(ev Event) {
+	h.t.Helper()
+	if err := h.handleQuiet(ev); err != nil {
 		h.t.Fatalf("handle %T: %v", ev, err)
 	}
 }

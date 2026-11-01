@@ -32,10 +32,49 @@ session that subscribed to an issue's topic subscribed for exactly that activity
 `quiet` was published before Dispatch stated it and is judged by `notify`, so a replay of the 72
 hours the stream still holds shows no receipts.
 
+## Consumer delivery
+
+`createConsumerDelivery` (`@legion/envoy-client/consumer-delivery`) is a session's side of the
+listener's relay of its durable consumer ("Session consumers" in `packages/envoy/AGENTS.md`). A
+host makes one per session, subscribes its `subject` (`notifications.envoy.deliver.<session id>`)
+before it registers, passes `registration()` as the registration's `delivery` field, and gives the
+registration's answer and the topics it carried to `answered`, which returns `consumer` or `core`,
+records the stored topics the listener relays (`relays`, `relaying`) and puts the replay engine in
+or out of consumer mode. It hands `receive` each relay message. The delivery decodes the frame's
+`Envoy-*` headers (`decodeRelayFrame`), answers `received` on the frame's reply subject before any
+host work, and hands the host the frames one at a time in stream order
+(`ConsumerDeliveryHost.deliver`): the next waits until `deliver` returns or the host calls
+`release`, `done` or `nak`. The host calls `done` once it wrote the frame, or skipped or refused
+it, and `nak` when the session cannot take it; `progress` goes out every 20 s until then. A frame
+whose `deliver` throws is answered `nak`, and from its third delivery `done`, with the replay
+ledger's `liveFailed` showing its failure notice instead. A frame the replay ledger holds, one on
+a subject no followed topic matches, and one stored more than 2 s before its topic was followed
+(`setFollowed`) whose subject no replay cursor on the frame's stream followed from below the
+frame's sequence either (`since`) are answered `done` and never handed over. A frame delivered
+before, or stored before the current epoch began, is `late`, and a host runs no side turn for it.
+`beginEpoch` starts a new epoch for each new NATS connection. `resumePoint` is the stream id and
+the sequence below which the session holds nothing unwritten; `snapshot` and `restore` carry it
+and the follow times across a restart, and the `persist` option is offered a snapshot whenever it
+changed, so a host writes only changes. A session with no resume point of its own, one moving
+from the core path, registers the lowest cursor the replay ledger holds over its agent subject
+and the followed topics the stream stores: its first consumer starts there instead of at the
+stream's end, so nothing stored while it was away is acked away unshown. Such a session has no
+follow times either, so every topic it follows is stamped at the resume time; the replay cursors
+are what say it followed the topic before then, so its frames are shown and not dropped.
+A registration answer that reports a gap
+or names another stream, and a frame that carries `Envoy-Gap`, call the host's `gap` once. `close`
+answers every unsettled frame, and every later one, `nak`, and leaves consumer mode.
+`streamStores` (`@legion/envoy-client/stream-topics`) says whether the stream stores a topic, so a
+host knows which of its subscriptions the relay carries. On `core` a host runs the replay engine
+below, and `setConsumerMode(true)` stops its `POST /v1/replay` calls while the relay serves the
+session.
+
 ## Missed messages
 
-`createReplayEngine` (`@legion/envoy-client/replay`) shows a session, once, each message the
-notification stream stored on a subject it follows while its own NATS subscription was down. A
+`createReplayEngine` (`@legion/envoy-client/replay`) is the core fallback's recovery, for a
+listener that answers `core` and for a plugin of an earlier release: it shows a session, once,
+each message the notification stream stored on a subject it follows while its own NATS
+subscription was down. A
 host makes one per session process and hands it its live path's `createDeliveryDedupe`, the
 listener client and callbacks (`ReplayHost`): the session id, the followed subjects, how to show
 a stored frame (as a card that runs nothing), a failure notice and a one-time notice, and how to
@@ -43,7 +82,7 @@ persist a change. `sweep()` asks the listener's `POST /v1/replay` for each follo
 messages after its cursor, merges them by stream sequence and hands the host each frame neither
 path showed; it never rejects, and one runs at a time with at most one queued behind it. A
 subject with no cursor starts at the stream's end, so a new follow brings up no history. Role
-forwards are passed over: role messages stay live only.
+forwards are passed over: on this path, role messages stay live only.
 
 The ledger holds the identity of each frame the session finished with (its `event_id`, and its
 `dedupe_key` when that names its event, `replayLedgerIdentity`), each expiring 72 hours after it
@@ -150,9 +189,13 @@ means carrying the patch to the new version.
 tests run: a TCP proxy whose `freeze()` stops forwarding on, and stops reading, the connections
 open at that moment without closing either side, and which records when each connection was
 accepted, first subscribed and closed; a real natsd and listener that each stack builds with
-`go build` from `packages/envoy` into its own scratch directory; and `runFreezeScenario`, the
-freeze both plugins' stall tests put their session through. A test that uses the stack runs only
-with `LEGION_E2E_ENVOY_STACK=1`.
+`go build` from `packages/envoy` into its own scratch directory (its `monitorUrl` is natsd's
+monitoring port); and `runFreezeScenario`, the freeze both plugins' stall tests put their session
+through. The stack's listener answers `consumer`, so the scenario checks consumer delivery across
+the freeze: the connection nats.js dials in place of the frozen one subscribes the relay subject
+again (`/connz`), the session's `envoy_sessions` entry names a new epoch, and the message sent
+during the freeze and one sent after it are each shown once, neither as a replay. A test that
+uses the stack runs only with `LEGION_E2E_ENVOY_STACK=1`.
 
 ## HTTP transport
 
@@ -166,9 +209,23 @@ listener's bearer is the `token` the client is given (`envoySettings`); without 
 
 `subscribe` sends the host's `plugin` (`{name, version}`, required) as `plugin` and
 `plugin_version` on every registration, and exposes listener warnings, including a topic that has
-no event in the configured stream. `getRole` returns a role holder with its last-seen timestamp,
+no event in the configured stream. It sends the client instance driving the session
+(`clientInstanceID`: one Oh My Pi Envoy extension instance, one Claude Code channel-server
+process, minted once when that instance starts) as `client_instance_id`, omitted when the host
+has none so an older listener sees an unchanged body; the listener stores it on the session's
+registry entry. `getRole` returns a role holder with its last-seen timestamp,
 and `listSessions` accepts optional directory and title filters; its rows carry `plugin` and
 `plugin_version` when the session registered them.
+
+A `setRole` soft claim (`soft`) naming a predecessor (`previousSessionID`) takes the role from it
+only when that predecessor has no live registry entry, when its live entry carries this client
+instance's own instance id, or when either side carries no instance id; any other live holder
+keeps the role and is answered as `{claimed: false, holder}`. `unregisterSession({sessionID,
+clientInstanceID?})` deletes the session's registry entry: with an instance id the listener
+deletes it only when the entry carries the same id or none, so a departing client instance never
+deletes the registration a successor instance made under the same session id, and without one it
+deletes the entry as before. The answer says whether the entry stayed, and the call resolves
+`void` because no caller acts on it: a deregistering client has nothing to retry either way.
 
 `replay` posts `POST /v1/replay` once, with no retry and a 10 s timeout, and returns the
 listener's answer in its wire shape; an error body's `code` (such as `REPLAY_UNAVAILABLE`) is on
@@ -197,18 +254,17 @@ Every client and command reads one envoy.json holding a `dispatch` section and a
 
 `envoyConfigPath(harness, env)` (`envoy-config.ts`) picks the file. A plugin reads its own
 harness's directory and no other harness's: Oh My Pi's `$PI_CODING_AGENT_DIR/envoy.json` when
-`OMP_PROFILE` names a profile other than `default`, Claude Code's `$CLAUDE_CONFIG_DIR/envoy.json`,
-OpenCode's `$OPENCODE_CONFIG_DIR/envoy.json`. Without that directory it reads the file
-`ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`. A script
-outside any plugin (harness `command`: `scripts/dispatch/ask-census.ts`, the e2e operator scripts,
-`claude-envoy`'s `envoy-send`) reads `ENVOY_CONFIG_FILE` first, then the Oh My Pi, Claude Code and
-OpenCode directories in that order (Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`, which
-Claude Code alone sets, in every Bash it runs), then the same neutral file. A relative
-`ENVOY_CONFIG_FILE`, harness directory or `XDG_CONFIG_HOME` is refused, naming it and its value,
-when the rule would use it. Each plugin hands the path it chose to the commands its session runs in
-`ENVOY_CONFIG_FILE` (Oh My Pi sets it in `process.env` at load, Claude Code's `SessionStart` hook
-appends it to `$CLAUDE_ENV_FILE`, OpenCode's `shell.env` hook sets it), beside `DISPATCH_HOST`; the
-innermost session's value wins.
+`OMP_PROFILE` names a profile other than `default`, Claude Code's `$CLAUDE_CONFIG_DIR/envoy.json`.
+Without that directory it reads the file `ENVOY_CONFIG_FILE` names, else
+`${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`. A script outside any plugin (harness
+`command`: `scripts/dispatch/ask-census.ts`, the e2e operator scripts, `claude-envoy`'s
+`envoy-send`) reads `ENVOY_CONFIG_FILE` first, then the Oh My Pi and Claude Code directories in
+that order (Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`, which Claude Code alone sets,
+in every Bash it runs), then the same neutral file. A relative `ENVOY_CONFIG_FILE`, harness
+directory or `XDG_CONFIG_HOME` is refused, naming it and its value, when the rule would use it.
+Each plugin hands the path it chose to the commands its session runs in `ENVOY_CONFIG_FILE` (Oh My
+Pi sets it in `process.env` at load, Claude Code's `SessionStart` hook appends it to
+`$CLAUDE_ENV_FILE`), beside `DISPATCH_HOST`; the innermost session's value wins.
 
 The `dispatch` command reads the file its session's plugin chose: with `DISPATCH_HOST` set, the
 file `ENVOY_CONFIG_FILE` names, else its host's own rule (`envoyConfigPath(host)`). A Bash that
@@ -326,8 +382,9 @@ empty `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED` is refused, naming it. `inbound`
 takes inbound messages: `{ natsUrls, natsSeed }`, never with an empty `natsUrls`, or `{ off }`, `off`
 saying why: `Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)` when nothing names one, a
 seed's refusal (below), or `this session opens no NATS connection` for a caller that opens none
-(`{ nats: false }`, OpenCode's plugin). The seed is resolved only when there are NATS servers to
-use it on, so that caller resolves none. A set `_FILE` pointer that
+(`{ nats: false }`: the `dispatch` command, `claude-envoy`'s `envoy-send`,
+pi-legion's extension). The seed is resolved only when there are NATS servers
+to use it on, so that caller resolves none. A set `_FILE` pointer that
 cannot be read is refused, never a fallback. The file's `envoy.token` goes with `ENVOY_URL` only
 when it names the origin of the listener written in the file (`http://127.0.0.1:9020` when it names
 none), and is otherwise refused with `ENVOY_URL names <origin>, but <file>'s envoy.token is for
@@ -540,8 +597,8 @@ the ref). It reads neither Dispatch nor this session's state, so it runs with Di
 and a call it passed can still stop on either.
 
 `runDispatchCli` (`dispatch-cli.ts`) runs one call per process. The host plugin sets
-`DISPATCH_HOST` (`omp`, `claude` or `opencode`) and the session's id (`CLAUDE_CODE_SESSION_ID`
-under Claude Code, `DISPATCH_SESSION_ID` elsewhere); with either missing the command exits 2
+`DISPATCH_HOST` (`omp` or `claude`) and the session's id (`CLAUDE_CODE_SESSION_ID` under Claude
+Code, `DISPATCH_SESSION_ID` elsewhere); with either missing the command exits 2
 naming it, and an empty variable counts as unset. `DISPATCH_SESSION_TITLE`, or the session
 directory's `title` file, names the session on what it writes. It resolves Dispatch from the
 envoy.json its session's plugin chose (above): with Dispatch off it prints `dispatch: <notice>` for

@@ -40,6 +40,22 @@ type StreamTurnStart struct {
 // StreamTurnEnd is the agent's turn ending.
 type StreamTurnEnd struct{ Claim claim.Token }
 
+// StreamPromptResult is Oh My Pi saying how one prompt's work ended (shimwire.PromptResult): the
+// one frame that names the prompt a turn belonged to, where agent_start and agent_end name none.
+// It arrives on the heels of the agent_end of the turn the prompt ran, so a turn that ends with
+// the prompt's result still to come is a turn the prompt did not run: a background result's own,
+// which is what wakes a settled session with background work on.
+//
+// AgentInvoked is false for a prompt that ran no turn at all — one a slash command or an
+// extension answered locally — which is the definitive form of what the wait for the turn
+// (TimerTurn) otherwise only times out on.
+type StreamPromptResult struct {
+	Claim        claim.Token
+	DeliveryID   string
+	AgentInvoked bool
+	Error        string
+}
+
 // StreamClosed is the claim's connection closing. It says nothing about the process by itself.
 type StreamClosed struct{ Claim claim.Token }
 
@@ -195,11 +211,10 @@ type RequestStop struct{ Claim claim.Token }
 type RequestTreeClose struct{ Claim claim.Token }
 
 // RequestIssueClose is the workflow closing a child issue as done (workflow's leave): the claim
-// ends as a tree close ends it, and drops the session it recorded, since the issue is finished
-// and the pod that session lived on goes with the close (record.IssueSuspend). It is not a lost
-// workspace: nothing is recovered, and the issue's next run, should a person set it todo again,
-// starts fresh on a pod and a disk of its own. Like the tree's close it is the workflow's own
-// decision and is not put to TreeClosable.
+// ends as a tree close ends it, retaining its session id as volume-reap evidence while clearing its
+// resume path. It is not a lost workspace: nothing is recovered, and the issue's next run, should
+// a person set it todo again, starts fresh on a pod and a disk of its own. Like the tree's close it
+// is the workflow's own decision and is not put to TreeClosable.
 type RequestIssueClose struct{ Claim claim.Token }
 
 // RequestOperatorClose is the operator closing a tree through the API, through its root claim; the
@@ -244,6 +259,12 @@ type RequestDeliver struct {
 	// Generation is the issue generation the task belongs to, and is what a completion reported
 	// for it is attributed to. An operator's own task names none.
 	Generation uint64
+	// Assignment is the task the issue's current phase hands the role, which the workflow minted
+	// for the start that queued this delivery (record.SuperviseRequest.Assignment). A completion is
+	// held to it as well as to the run, since every phase entry of one run carries that run. A task
+	// of no assignment — an operator's own, a resume, a production check's look — names none, and
+	// leaves the assignment the claim is serving alone.
+	Assignment string
 }
 
 // RequestExit is the agent reporting its own end.
@@ -258,6 +279,7 @@ func (RuntimeObservation) isEvent()   {}
 func (StreamHello) isEvent()          {}
 func (StreamTurnStart) isEvent()      {}
 func (StreamTurnEnd) isEvent()        {}
+func (StreamPromptResult) isEvent()   {}
 func (StreamClosed) isEvent()         {}
 func (StreamLateRefusal) isEvent()    {}
 func (PromptAcked) isEvent()          {}
@@ -289,6 +311,7 @@ const (
 	onHello         eventKind = "stream_hello"
 	onTurnStart     eventKind = "stream_turn_start"
 	onTurnEnd       eventKind = "stream_turn_end"
+	onPromptResult  eventKind = "stream_prompt_result"
 	onClosed        eventKind = "stream_closed"
 	onLateRefusal   eventKind = "stream_late_refusal"
 	onAcked         eventKind = "prompt_acked"
@@ -330,6 +353,8 @@ func kindOf(ev Event) eventKind {
 		return onTurnStart
 	case StreamTurnEnd:
 		return onTurnEnd
+	case StreamPromptResult:
+		return onPromptResult
 	case StreamClosed:
 		return onClosed
 	case StreamLateRefusal:
@@ -486,7 +511,7 @@ func fillTable(t *builder) {
 
 	// The prompt's own outcome, from the send's goroutine.
 	t.row(onAcked, "the prompt was acknowledged: wait for its turn", acked, nil, prompted...)
-	t.ignore(onAcked, "a turn already confirmed the delivery", StateWorking)
+	t.row(onAcked, "a turn already confirmed the delivery: the prompt is still outstanding until its result", ackedInTurn, nil, StateWorking)
 	t.ignore(onAcked, noSend, unready...)
 	t.ignore(onAcked, noSend, gone...)
 
@@ -510,6 +535,11 @@ func fillTable(t *builder) {
 	t.ignore(onTurnEnd, "no turn is in flight", prompted...)
 	t.ignore(onTurnEnd, "the agent is not ready, so no turn of a delivery is in flight", unready...)
 	t.ignore(onTurnEnd, noProcess, gone...)
+
+	t.row(onPromptResult, "the prompt's work ended: that names the turn it ran, and ends its delivery", promptResulted,
+		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, StateReady, StateIdle, StateWorking)
+	t.ignore(onPromptResult, noSend, unready...)
+	t.ignore(onPromptResult, noSend, gone...)
 
 	// Timers.
 	t.row(onBootTimer, "the boot interval: probe the unregistered process", bootInterval,
@@ -606,9 +636,9 @@ func fillTable(t *builder) {
 	t.row(onTreeClose, "the workflow's close of the tree: release the claim and retire it", treeClose, []ClaimState{StateRetired}, stoppable...)
 	t.row(onTreeClose, "already retired", nothingToDo, nil, StateRetired)
 
-	t.row(onIssueClose, "the workflow's close of the issue as done: release the claim, drop its session and retire it", issueClose,
+	t.row(onIssueClose, "the workflow's close of the issue as done: release the claim, retain its session id as volume-reap evidence, clear its resume path, and retire it", issueClose,
 		[]ClaimState{StateRetired}, stoppable...)
-	t.row(onIssueClose, "already retired: the session it kept goes with the issue", issueCloseRetired, nil, StateRetired)
+	t.row(onIssueClose, "already retired: retain the session id and clear its resume path", issueCloseRetired, nil, StateRetired)
 
 	t.row(onOperatorClose, "the operator's close of the tree, if no workflow issue backs it", operatorClose, []ClaimState{StateRetired}, stoppable...)
 	// A close of a tree already retired is the outcome the operator asked for, so it answers as
@@ -785,12 +815,28 @@ func reprobe(m *Machine, ctx context.Context, _ Event) error {
 	return m.probe(ctx, nothing, TimerProbe, m.deps.Timeouts.Probe)
 }
 
+// acked is the prompt taken: the task is marked read, the wait for its turn is armed, and the
+// prompt is outstanding until Oh My Pi reports how its work ended (awaitingResult), which is
+// what says which of the turns that follow was this prompt's.
 func acked(m *Machine, ctx context.Context, _ Event) error {
 	m.helloDuringSend = false
+	m.awaitingResult = m.claim.Pending.ID
 	p := m.claim.Pending
 	m.markRead(p)
 	m.arm(TimerTurn, m.deps.Timeouts.RPC, p.ID)
 	return m.putPending(ctx)
+}
+
+// ackedInTurn is the acknowledgement of a prompt whose turn the stream reported first: Oh My Pi's
+// agent_start can land before the answer to the prompt that caused it, and that start has already
+// confirmed the delivery (turnStarted). The mark and the wait for a turn are that turn's to need,
+// and it has started — but the prompt itself is still outstanding, and which of the turns that
+// follow is its own is still a question only its result answers, so it is recorded here too.
+// Nothing else moves, and nothing is written.
+func ackedInTurn(m *Machine, _ context.Context, _ Event) error {
+	m.helloDuringSend = false
+	m.awaitingResult = m.claim.Pending.ID
+	return nil
 }
 
 // refused is a prompt that did not reach a turn from its own send: the agent refused it
@@ -958,14 +1004,17 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	return m.persist(ctx)
 }
 
-// turnEnded is the turn over: the delivery it confirmed retires, and one queued meanwhile goes —
-// unless a suspension is held for this turn (holdSuspension), which runs instead; a stop the
-// runtime refuses leaves the claim idle, still holding it. A turn interrupted for a start that takes
-// over the issue's phase lets that start go on (Quiesce). The agent just said where it is, so
-// nothing is left to ask it after a restart.
+// turnEnded is the turn over: the delivery whose turn it was retires (settle), and one queued
+// meanwhile goes — unless a suspension is held for this turn (holdSuspension), which runs
+// instead; a stop the runtime refuses leaves the claim idle, still holding it. The agent just
+// said where it is, so nothing is left to ask it after a restart.
+//
+// Whose turn it was is a question background work made real, and settle is where it is answered:
+// a turn that ends while the task's prompt is still outstanding retires nothing, because Oh My
+// Pi's agent_end names no prompt and a role's own background result starts turns the daemon
+// never prompted.
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	m.askFirst = false
-	m.interruptOver()
 	if m.held != nil {
 		if err := m.suspendHeld(ctx); err != nil {
 			if m.held == nil {
@@ -986,6 +1035,57 @@ func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 		return err
 	}
 	return m.sendPending(ctx)
+}
+
+// promptResulted is Oh My Pi's answer to the one question the turn frames cannot settle: which
+// turn was this prompt's. The prompt's work is over, so the delivery's life is over with it —
+// whether the claim is idle because the turn already ended (the usual order, the result landing
+// milliseconds after that turn's agent_end) or still working because the result came first. The
+// retire itself is settle's, which runs around this decision as it does around every other.
+//
+// A prompt that ran no turn at all (AgentInvoked false) is the definitive form of what the wait
+// for the turn (TimerTurn) otherwise only times out on: it is charged the same, and the task goes
+// back to waiting with its read mark, since a prompt the agent took and answered without a turn
+// may still have been read.
+//
+// A result for a delivery the claim no longer holds — retired, or taken back under a new id — is
+// fenced out before this runs (fence).
+func promptResulted(m *Machine, ctx context.Context, ev Event) error {
+	r := ev.(StreamPromptResult)
+	m.awaitingResult = ""
+	if !r.AgentInvoked {
+		why := "acknowledged, and Oh My Pi ran no turn for it"
+		if r.Error != "" {
+			why += ": " + r.Error
+		}
+		return m.promptFailed(ctx, why, taskRead)
+	}
+	if p := m.claim.Pending; p.ConfirmedAt.IsZero() {
+		// No turn was ever matched to this prompt — each one the claim saw was taken for another's
+		// — and yet Oh My Pi ran one for it: the agent did read the task.
+		m.log.Info("supervise: the task's prompt ran a turn the daemon never matched to it; confirming it from the result",
+			"delivery", r.DeliveryID)
+		if err := m.confirm(ctx); err != nil {
+			return err
+		}
+	}
+	return m.sendPending(ctx)
+}
+
+// resultPending is whether the claim is still waiting on the result of a prompt it has had
+// acknowledged: the window in which a turn that ends may be any turn at all. It is open only
+// while the agent can still answer — a claim whose process a suspension, a death or a retirement
+// has taken is told nothing more, and the turn's end is all the answer there will ever be.
+func (m *Machine) resultPending() bool {
+	p := m.claim.Pending
+	if p == nil || m.awaitingResult == "" || p.ID != m.awaitingResult {
+		return false
+	}
+	switch m.claim.State {
+	case StateReady, StateIdle, StateWorking:
+		return true
+	}
+	return false
 }
 
 func bootInterval(m *Machine, ctx context.Context, _ Event) error {
@@ -1183,28 +1283,26 @@ func treeClose(m *Machine, ctx context.Context, _ Event) error { return m.end(ct
 // disk it owns go with the separately fenced IssueSuspend, or with the tree cleanup once every
 // claim of the tree has retired. That is why a merged close leaves the implementer's pod standing:
 // its five siblings take this close and no IssueSuspend is queued (workflow/linger.go). The claim
-// ends as a tree close ends it, and the session it recorded goes first — the session is a row in
-// the session database rather than a file on any disk, so what is dropped is the record of which
-// session this claim held. Nothing of the workspace is recovered, and a later start of the issue,
-// re-entered by a person's todo, is a fresh spawn on a pod and a disk of its own. A release that
-// fails changes nothing, so the close can be asked again.
+// keeps its session id as the reaping guard's evidence but clears its resume path because the
+// volume is gone. Nothing of the workspace is recovered, and a later start of the issue, re-entered
+// by a person's todo, is a fresh spawn on a pod and a disk of its own. A release that fails changes
+// nothing, so the close can be asked again.
 func issueClose(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.release(ctx); err != nil {
 		return err
 	}
-	m.forgetSession()
+	m.clearIssueResumePath()
 	return m.retire(ctx)
 }
 
 // issueCloseRetired is the issue's close reaching a claim already retired (a tree's close retired it
-// with its session kept): the issue is finished, so the session goes with it — a later start of the
-// issue, re-entered by a person's todo, is a fresh one — and a claim recording none is left as it
-// is.
+// with its session kept): the issue is finished, so its resume path goes with the volume while the
+// session id remains as reaping evidence. Once its resume path is gone, it is left as it is.
 func issueCloseRetired(m *Machine, ctx context.Context, _ Event) error {
-	if m.claim.Session == "" && m.claim.SessionFile == "" {
+	if m.claim.SessionFile == "" {
 		return nil
 	}
-	m.forgetSession()
+	m.clearIssueResumePath()
 	return m.persist(ctx)
 }
 
@@ -1220,6 +1318,12 @@ func forgetSession(m *Machine, ctx context.Context, ev Event) error {
 	}
 	m.forgetSession()
 	return m.persist(ctx)
+}
+
+// clearIssueResumePath leaves the session id as the reaping guard's durable evidence but clears its
+// resume path, so a later admission starts fresh once the volume is gone.
+func (m *Machine) clearIssueResumePath() {
+	m.claim.SessionFile = ""
 }
 
 // operatorClose is the operator's own close, asked of a claim through the API. TreeClosable is

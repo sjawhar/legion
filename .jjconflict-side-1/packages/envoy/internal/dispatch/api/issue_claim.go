@@ -1,0 +1,628 @@
+package api
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/dispatch/envoy"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+)
+
+// An issue's claim is the session that intends to implement it, so two sessions never take
+// the same work. It is never a record of contact: one issue legitimately has one implementer
+// holding the claim while coordinators gate its pull requests, and those gates must neither
+// claim it nor collide with it.
+//
+// The claim and the issue's status are separate, because humans may use the status to keep track
+// of work. So claiming an issue never moves its status, and the only thing that creates a claim is
+// POST /api/v1/issues/{key}/claim (the `dispatch claim` command). Messages, comments, asks,
+// labels, links, priority, route and component writes, and every read, leave the claim alone;
+// closing an issue is the one status move that touches it, clearing it because the work is
+// over.
+//
+// The claimant is the request's own actor, the same identity every other write carries: a
+// human's login from their signed cookie (a body that names a session is ignored for a cookie
+// caller), or, for a bearer, the session the caller declares in `actor` — what the token
+// proves is its owner or its service subject, not which session it is running. So a bearer
+// could name another session here exactly as it could on any other write; what makes a claim
+// trustworthy is that `dispatch claim` fills `actor` from the host's own runtime, so no model
+// chooses it, and that the request has no second parameter for claiming on someone's behalf.
+// The body is closed to unknown fields, so an invented one is refused rather than ignored.
+//
+// The taking rule lives in claimBlockedBy alone: a claim whose session the Envoy listener
+// still lists as live belongs to that session until it releases it or a human forces it; a
+// claim whose session is gone may be taken by any agent without asking, and the takeover is
+// recorded on the issue and delivered to the session that lost it.
+//
+// Every claim write is the resolve-then-lock pair envoy_resolve.go owns, because the listener
+// lookup never runs inside a transaction (fetchHolderLiveness carries the reason): judgeHolder
+// reads the holder and takes the liveness snapshot with nothing held, then claimWrite locks
+// the row, re-reads it, and decides with claimBlockedBy under that lock; a holder that
+// changed in between sends the write around the cycle once more. claimCycle is that pair and
+// the answer both routes make of it.
+
+// claimHolder names a holder in one phrase for an error message: a human by login, a session
+// by its id and the title it is running under. It is not the dashboard's label (which shows
+// the title alone, through @legion/contracts' actorLabel) — an API refusal names the session
+// id too, because that is what the refused caller needs to reach it. liveTitle is the
+// listener's own title for that session when the caller has it; it wins over the title the
+// session stamped on the claim, which may be hours old.
+func claimHolder(actor model.Actor, liveTitle string) string {
+	if actor.Kind != "session" {
+		return actor.Kind + " " + actor.ID
+	}
+	title := strings.TrimSpace(liveTitle)
+	if title == "" && actor.Origin != nil {
+		title = strings.TrimSpace(actor.Origin.SessionTitle)
+	}
+	if title == "" {
+		return "session " + actor.ID
+	}
+	return "session " + actor.ID + " (" + title + ")"
+}
+
+// claimConflict refuses to take or clear a claim its holder still holds. It carries the claim
+// so the 409 names the holder, its title and when it claimed, and so a caller that wants the
+// claim itself has it without a second read.
+type claimConflict struct {
+	claim model.IssueClaim
+	// liveTitle is the title the listener reported for the holder, and only a refusal that
+	// came from a liveness lookup has one. A human holder is refused without any lookup and
+	// leaves it empty, which costs nothing: claimHolder names a non-session by kind and id
+	// and reads no title at all.
+	liveTitle string
+	// forcible is humanRule.forcible, carried through so the refusal offers only what its
+	// caller can use.
+	forcible bool
+}
+
+// Error is the refusal a caller reads, and it never says more than was established. A live
+// session is named with the title it is running under and can be asked to release the issue;
+// a human holder had no liveness to check and no session to message, so the text names the
+// person to ask instead.
+func (c *claimConflict) Error() string {
+	at := c.claim.At.UTC().Format(time.RFC3339)
+	alternative := "or any human can"
+	if c.forcible {
+		alternative = "or a human can force the claim"
+	}
+	if c.claim.Actor.Kind != "session" {
+		return fmt.Sprintf("%s claimed this issue at %s; ask %s to release it, %s",
+			claimHolder(c.claim.Actor, ""), at, c.claim.Actor.ID, alternative)
+	}
+	return fmt.Sprintf(
+		"%s claimed this issue at %s and is still running; ask that session to release it, %s",
+		claimHolder(c.claim.Actor, c.liveTitle), at, alternative,
+	)
+}
+
+// writeClaimError answers a claim refusal: the 409 ISSUE_CLAIMED body carries the claim
+// itself, and every other failure follows the usual handler mapping.
+func (s *server) writeClaimError(w http.ResponseWriter, err error) {
+	var conflict *claimConflict
+	if errors.As(err, &conflict) {
+		WriteJSON(w, http.StatusConflict, map[string]any{
+			"error": conflict.Error(),
+			"code":  "ISSUE_CLAIMED",
+			"claim": conflict.claim,
+		})
+		return
+	}
+	s.writeHandlerError(w, err)
+}
+
+// holderLiveness is what the listener answered about the claim's holder, read with no
+// transaction open and no pooled connection held. `holder` is that session's own record, or
+// nil when the session store holds none, because that one session is the only thing the
+// decision asks about. `fetched` is false when the caller never needed it, which is every
+// claim of an issue nobody else holds.
+type holderLiveness struct {
+	fetched bool
+	holder  *envoy.Session
+}
+
+// errHolderUnjudged says the decision needs a liveness snapshot this caller did not take,
+// because the holder appeared (or changed) after the pre-lock read. The write redoes its
+// cycle rather than deciding from a snapshot that does not describe the holder.
+var errHolderUnjudged = errors.New("claim holder was not covered by the liveness snapshot")
+
+// fetchHolderLiveness asks the listener about the holder's own session, by id, and answers
+// with that one session's record, or with none when the session store holds no record of it.
+// It must be called with nothing held: it is a cross-service HTTP call of up to five seconds,
+// and each process's pool is bounded (store.sharedPoolSize), so a connection held across it is
+// one fewer for that process's other requests, and a row lock held across it stalls every
+// process that writes the issue. An unreachable or unconfigured listener is a 503, never
+// "unknown, therefore free" — Dispatch does not hand one session's work to another on a
+// transport error. Only a session holder is ever asked about: judgeHolder reaches this
+// through errHolderUnjudged, which a holder of any other kind never produces, so no read is
+// made for a human's claim.
+func (s *server) fetchHolderLiveness(ctx context.Context, holder model.IssueClaim) (holderLiveness, error) {
+	if s.deps.Envoy == nil {
+		return holderLiveness{}, errorf(http.StatusServiceUnavailable, "ENVOY_UNAVAILABLE",
+			"ENVOY_URL is not configured, so Dispatch cannot tell whether %s is still working", claimHolder(holder.Actor, ""))
+	}
+	session, err := s.deps.Envoy.Session(ctx, holder.Actor.ID)
+	if errors.Is(err, envoy.ErrNotFound) {
+		return holderLiveness{fetched: true}, nil
+	}
+	if err != nil {
+		if errors.Is(err, envoy.ErrUnavailable) {
+			return holderLiveness{}, errorf(http.StatusServiceUnavailable, "ENVOY_UNAVAILABLE", "%s", err.Error())
+		}
+		return holderLiveness{}, err
+	}
+	return holderLiveness{fetched: true, holder: &session}, nil
+}
+
+// humanRule is how a route treats a human caller, the one difference between claiming and
+// releasing. override is whether being human is itself enough to act over a live holder:
+// releasing a claim is any human's to do, while claiming over a live holder takes an explicit
+// {force: true}. forcible is whether the route has that force at all, so a refusal offers only
+// what its caller can use — POST /api/v1/issues/{key}/claim has one, DELETE has none.
+type humanRule struct {
+	override bool
+	forcible bool
+}
+
+// judgement is what the pre-lock half read: the holder it found and the liveness snapshot it
+// took about that holder. The two travel together because the snapshot speaks for that holder
+// alone; apart, they are two loose arguments a caller can pair wrongly.
+type judgement struct {
+	holder *model.IssueClaim
+	live   holderLiveness
+}
+
+// claimBlockedBy is the whole taking rule, and it runs under the issue's row lock: the caller
+// brings what it judged before the lock, this decides against the row. It returns the conflict
+// that stops actor from taking or clearing current, nil when nothing does, or errHolderUnjudged
+// when the judgement cannot speak for the holder the row shows.
+//
+// A liveness snapshot speaks only for the holder that was read before it was taken, so the
+// first check is that the row still shows that holder: a session-to-session change in between
+// would otherwise be judged against a snapshot that predates the new holder, read as a
+// session the store no longer holds, and let a live session's claim be taken without force.
+//
+// A human's claim has no session to end, so it is held until that human or another releases
+// it. A session's claim is held while the session store still holds that session's record,
+// read by id. The listener's live list is not that record: it is one process's in-memory
+// cache, and it cannot tell a cache that is still refilling from a session that has ended, so
+// a working session reads as absent from it for as long as the refill takes. Handing that
+// session's issue to someone else is not a mistake the next read undoes — two sessions then
+// work the same issue, and whatever the first wrote is already another's to overwrite — so
+// the holder's own record decides.
+func claimBlockedBy(
+	current *model.IssueClaim, actor model.Actor, rule humanRule, judged judgement,
+) error {
+	if judged.live.fetched && !sameHolder(judged.holder, current) {
+		return errHolderUnjudged
+	}
+	if current == nil || current.Actor.SameAs(actor) {
+		return nil
+	}
+	if rule.override && actor.Kind == "user" {
+		return nil
+	}
+	if current.Actor.Kind != "session" {
+		return &claimConflict{claim: *current, forcible: rule.forcible}
+	}
+	if !judged.live.fetched {
+		return errHolderUnjudged
+	}
+	if judged.live.holder == nil {
+		return nil
+	}
+	return &claimConflict{
+		claim: *current, liveTitle: judged.live.holder.Title, forcible: rule.forcible,
+	}
+}
+
+// sameHolder reports whether two nullable claims name the same holder.
+func sameHolder(left, right *model.IssueClaim) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.Actor.SameAs(right.Actor)
+}
+
+// judgeHolder is the pre-lock half: read who holds the issue on a pooled connection, release
+// that connection, and take the liveness snapshot with nothing held — but only when the taking
+// rule says it needs one, which it establishes by asking that rule about what it just read
+// rather than by re-deriving when a holder must be judged. It decides nothing; claimBlockedBy
+// does, under the lock, against the row as it stands then.
+func (s *server) judgeHolder(
+	ctx context.Context, key string, actor model.Actor, rule humanRule,
+) (judgement, error) {
+	holder, err := s.readIssueClaim(ctx, key)
+	if err != nil {
+		return judgement{}, err
+	}
+	judged := judgement{holder: holder}
+	if !errors.Is(claimBlockedBy(holder, actor, rule, judged), errHolderUnjudged) {
+		return judged, nil
+	}
+	judged.live, err = s.fetchHolderLiveness(ctx, *holder)
+	if err != nil {
+		return judgement{}, err
+	}
+	return judged, nil
+}
+
+// readIssueClaim reads one issue's claim on a pooled connection.
+func (s *server) readIssueClaim(ctx context.Context, key string) (*model.IssueClaim, error) {
+	var claim claimScan
+	if err := s.deps.Store.Pool.QueryRow(ctx, `
+		select `+issueClaimColumns+` from issues i where i.key = $1
+	`, key).Scan(claim.targets()...); err != nil {
+		return nil, err
+	}
+	return claim.resolve(key)
+}
+
+// issueClaimedNow is the value a claim write stamps updated_at with: the transaction's now(),
+// never below what the row already holds, as issueUpdatedNow is never below it. A claim writes
+// three times the reader compares - claimed_at, updated_at and its issue.claimed event's
+// created_at - and all three are that transaction's now(); issueUpdatedNow's clock_timestamp()
+// would put updated_at past the other two, which the one write produced together.
+const issueClaimedNow = "greatest(updated_at, now())"
+
+// writeIssueClaim sets the issue's claim to holder, or clears it when holder is nil. The two claim
+// columns always move together, and the issue's status is never touched here. claimed_at is the
+// transaction's now(): each process's host keeps its own clock, and a claim's time is compared
+// with times other processes wrote.
+func writeIssueClaim(ctx context.Context, tx pgx.Tx, key string, holder *model.Actor) error {
+	if holder == nil {
+		_, err := tx.Exec(ctx, `
+			update issues set claimed_by = null, claimed_at = null, updated_at = `+issueClaimedNow+` where key = $1
+		`, key)
+		return err
+	}
+	actor, err := encodeJSON(*holder)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+		update issues set claimed_by = $2, claimed_at = now(), updated_at = `+issueClaimedNow+` where key = $1
+	`, key, actor)
+	return err
+}
+
+// claimEvent is the issue.claimed or issue.released record: what the claim became, whose claim
+// it replaced or cleared, and why.
+func claimEvent(
+	eventType string, key string, actor model.Actor, after model.Issue,
+	previous *model.IssueClaim, reason string,
+) model.Event {
+	return issueOwner(key).event(eventType, actor, model.IssueClaimEventPayload{
+		Key:          key,
+		Status:       after.Status,
+		Repo:         after.Repo,
+		ResolvedRepo: after.ResolvedRepo,
+		Claim:        after.Claim,
+		Previous:     previous,
+		Reason:       reason,
+	})
+}
+
+// claimChange is what the locked decision asks for: the holder to store (nil clears the claim),
+// the event to append, whose claim it replaced, and why. changed false means there is nothing to
+// write.
+type claimChange struct {
+	holder    *model.Actor
+	eventType string
+	previous  *model.IssueClaim
+	reason    string
+	changed   bool
+}
+
+// claimApplied is the outcome of one locked attempt: the issue as it stands, whether the Legion
+// daemon owns its status, and the event to publish, which is the zero event when nothing was
+// written.
+type claimApplied struct {
+	issue model.Issue
+	// legionManagedStatus is nil when the walk failed: the claim still stands, so the answer
+	// says nothing rather than losing it (claimWrite).
+	legionManagedStatus *bool
+	event               model.Event
+}
+
+// claimAnswer is what both claim routes write: the issue, flat, with whether the Legion daemon
+// owns its status beside it. The field is resolved on read from the issue's labels and its
+// parents', stored nowhere, and never part of an event payload, which is why it sits beside
+// Issue in the response rather than in it — model.Issue is embedded in model.IssueEventPayload,
+// the payload of every issue.* event. The JSON stays flat because a caller merges the body
+// straight into the issue it already holds.
+//
+// The field is omitted when the walk failed (claimWrite logs that and keeps the claim), exactly
+// as writeAdvice.LegionManagedStatus is omitted when it was not asked (write_advice.go). A
+// client reads an absent field as "not Legion-managed", the wording every client had before
+// this field existed and the safe direction: it prints the status guidance rather than
+// suppressing it.
+type claimAnswer struct {
+	model.Issue
+	LegionManagedStatus *bool `json:"legion_managed_status,omitempty"`
+}
+
+// claimLegionManagedStatus answers whether Legion owns key's status for a claim answer, or nil
+// when the walk failed. It runs in a savepoint of the claim's own transaction rather than on it
+// directly, because a failed statement aborts the transaction it ran in: on the transaction
+// itself, a failed advisory walk would make the claim's COMMIT a rollback and lose a claim that
+// had otherwise succeeded. The savepoint is the same device writeAdvice uses to keep a write
+// whose advice query failed (write_advice.go), and the failure is logged once there too
+// (logAdviceError). It is never retried: the field is a hint, the claim is the write.
+//
+// A statement's failure is therefore never the claim's. A cancelled request and a lost
+// connection are not statement failures, and they used to be the claim's: a context cancelled
+// under the walk left the savepoint open and made the claim's COMMIT fail. So the walk runs on
+// a context no cancellation reaches (context.WithoutCancel), and what bounds it once
+// cancellation cannot is the 500 ms statement timeout below - the same bound, for the same
+// reason, as the one writeAdvice puts on this very predicate (write_advice.go). A connection
+// that dies under the walk still fails the claim, as it fails every other statement in it.
+func claimLegionManagedStatus(ctx context.Context, tx pgx.Tx, key string) *bool {
+	// Detached from the caller's cancellation, so a client hang-up or a write deadline landing
+	// here cannot skip the savepoint's rollback and leave the claim's transaction holding an
+	// aborted savepoint that its COMMIT would then refuse.
+	walkCtx := context.WithoutCancel(ctx)
+	walk, err := tx.Begin(walkCtx)
+	if err != nil {
+		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
+		return nil
+	}
+	// Healthy walks complete in single-digit milliseconds. Bound this one at 500 ms, as the
+	// advice path bounds the same predicate, so neither a future plan regression nor the
+	// detached context above can hold the issue row lock and a pool connection indefinitely.
+	if _, err := walk.Exec(walkCtx, "set local statement_timeout = '500ms'"); err != nil {
+		_ = walk.Rollback(walkCtx)
+		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
+		return nil
+	}
+	managed, err := legionManagedStatus(walkCtx, walk, key)
+	if err != nil {
+		_ = walk.Rollback(walkCtx)
+		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
+		return nil
+	}
+	// SET LOCAL crosses a released savepoint, so restore the claim transaction's default before
+	// releasing this one, exactly as writeAdvice does. An error path rolls the savepoint back,
+	// which clears the setting.
+	if _, err := walk.Exec(walkCtx, "set local statement_timeout = default"); err != nil {
+		_ = walk.Rollback(walkCtx)
+		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
+		return nil
+	}
+	if err := walk.Commit(walkCtx); err != nil {
+		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
+		return nil
+	}
+	return &managed
+}
+
+// claimWrite is the locked half of every claim write - resolveThenLock's `write` - and the
+// only place that opens a transaction: lock the issue, re-read it, hand the decision to
+// `decide` (which calls the one taking rule, claimBlockedBy, with what its caller judged),
+// and commit. No listener call happens inside this function, so no pool connection is ever
+// held across one. A decision the judgement cannot make is errHolderUnjudged, which this
+// reports as errStaleResolution once the rollback has run, for the cycle to redo.
+func (s *server) claimWrite(
+	ctx context.Context,
+	key string,
+	actor model.Actor,
+	decide func(before model.Issue) (claimChange, error),
+) (claimApplied, error) {
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return claimApplied{}, err
+	}
+	defer tx.Rollback(ctx)
+	if err := tx.QueryRow(ctx, `select key from issues where key = $1 for no key update`, key).Scan(new(string)); err != nil {
+		return claimApplied{}, err
+	}
+	before, err := s.loadIssue(ctx, tx, key)
+	if err != nil {
+		return claimApplied{}, err
+	}
+	change, err := decide(before)
+	if errors.Is(err, errHolderUnjudged) {
+		return claimApplied{}, errStaleResolution
+	}
+	if err != nil {
+		return claimApplied{}, err
+	}
+	// A claim writes neither labels nor parent_key, so the walk answers the same whether the
+	// claim changed or not, and the same on either side of the write: one query, either way,
+	// under the issue's row lock this transaction already holds. It runs here, before the
+	// write, so that nothing at all sits between appendEvent and COMMIT. The row lock is not
+	// what makes the answer stable - it holds the issue's own row, not its ancestors' - so the
+	// chain is read as it stands, which is enough for a sentence of guidance. A statement that
+	// fails or times out costs the field alone: claimLegionManagedStatus runs it in a savepoint,
+	// on a context no cancellation reaches, bounded by its own statement timeout, and a claim is
+	// what stops two sessions working one issue.
+	managed := claimLegionManagedStatus(ctx, tx, key)
+	applied := claimApplied{issue: before, legionManagedStatus: managed}
+	if change.changed {
+		if err := writeIssueClaim(ctx, tx, key, change.holder); err != nil {
+			return claimApplied{}, err
+		}
+		after, err := s.loadIssue(ctx, tx, key)
+		if err != nil {
+			return claimApplied{}, err
+		}
+		after.LastSeq++
+		event, err := s.appendEvent(ctx, tx, claimEvent(change.eventType, key, actor, after, change.previous, change.reason))
+		if err != nil {
+			return claimApplied{}, err
+		}
+		applied = claimApplied{issue: after, legionManagedStatus: managed, event: event}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return claimApplied{}, err
+	}
+	return applied, nil
+}
+
+// errClaimContended is what the bounded cycle answers with when the holder changed under
+// every attempt. It never reaches a client as itself: claimCycle turns it into the
+// CLAIM_CONTENDED answer answerContendedClaim writes.
+var errClaimContended = errors.New("the issue's claim changed under every attempt")
+
+// claimCycle is the whole of both claim routes past their own decision: resolve the holder
+// and its liveness with nothing held, decide under the issue's row lock, and answer. The
+// cycle is bounded at one redo (resolutionAttempts) because a holder that changes twice means
+// a genuinely contended issue whose current holder the caller should simply be told about.
+func (s *server) claimCycle(
+	w http.ResponseWriter,
+	r *http.Request,
+	key string,
+	actor model.Actor,
+	rule humanRule,
+	decide func(before model.Issue, judged judgement) (claimChange, error),
+) {
+	applied, err := resolveThenLock(r.Context(),
+		func(ctx context.Context) (judgement, error) {
+			return s.judgeHolder(ctx, key, actor, rule)
+		},
+		func(ctx context.Context, judged judgement) (claimApplied, error) {
+			return s.claimWrite(ctx, key, actor, func(before model.Issue) (claimChange, error) {
+				return decide(before, judged)
+			})
+		},
+		errClaimContended,
+	)
+	if errors.Is(err, errClaimContended) {
+		s.answerContendedClaim(w, r, key)
+		return
+	}
+	if err != nil {
+		s.writeClaimError(w, err)
+		return
+	}
+	if applied.event.ID != 0 {
+		s.publish(applied.event)
+	}
+	WriteJSON(w, http.StatusOK, claimAnswer{Issue: applied.issue, LegionManagedStatus: applied.legionManagedStatus})
+}
+
+// claimIssue is POST /api/v1/issues/{key}/claim: this session (or human) takes the issue.
+func (s *server) claimIssue(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Actor *model.Actor `json:"actor"`
+		Force bool         `json:"force"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	actor, ok := s.requireActor(w, r, input.Actor)
+	if !ok {
+		return
+	}
+	if input.Force && actor.Kind != "user" {
+		writeError(w, "HUMAN_ONLY", http.StatusForbidden, "only a human may force a claim away from a live session")
+		return
+	}
+	key := r.PathValue("key")
+	rule := humanRule{override: input.Force, forcible: true}
+	s.claimCycle(w, r, key, actor, rule, func(before model.Issue, judged judgement) (claimChange, error) {
+		if before.ClosedAt != nil {
+			return claimChange{}, errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
+		}
+		if blocked := claimBlockedBy(before.Claim, actor, rule, judged); blocked != nil {
+			return claimChange{}, blocked
+		}
+		if before.Claim != nil && before.Claim.Actor.SameAs(actor) {
+			// This session already holds it: the claim keeps the time work started, and
+			// the repeated claim stays out of the issue's log.
+			return claimChange{}, nil
+		}
+		reason := "claimed"
+		previous := before.Claim
+		if previous != nil {
+			reason = "takeover"
+			if input.Force {
+				reason = "forced"
+			}
+		}
+		return claimChange{
+			holder:    &actor,
+			eventType: "issue.claimed",
+			previous:  previous,
+			reason:    reason,
+			changed:   true,
+		}, nil
+	})
+}
+
+// answerContendedClaim ends the bounded cycle: the holder changed twice while this request
+// ran, so no verdict was applied. It is never ISSUE_CLAIMED — nothing on this path established
+// that the holder is running, and naming a live title would mean another listener call — so it
+// has its own code, and carries the claim the row shows for any caller that wants it.
+func (s *server) answerContendedClaim(w http.ResponseWriter, r *http.Request, key string) {
+	current, err := s.readIssueClaim(r.Context(), key)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	message := "the claim on " + key + " changed twice while this request ran, so nothing was applied; read the issue and try again"
+	if current != nil {
+		message = claimHolder(current.Actor, "") + " holds the claim on " + key +
+			" as of this read; it changed twice while this request ran, so nothing was applied — read the issue and try again"
+	}
+	WriteJSON(w, http.StatusConflict, map[string]any{
+		"error": message,
+		"code":  "CLAIM_CONTENDED",
+		"claim": current,
+	})
+}
+
+// releaseIssueClaim is DELETE /api/v1/issues/{key}/claim: the holder gives the issue up, a
+// human releases anyone's claim, or anyone clears a claim whose session is gone. Releasing
+// never moves the status — the work stays where it got to.
+func (s *server) releaseIssueClaim(w http.ResponseWriter, r *http.Request) {
+	actor, human, err := s.optionalActor(r)
+	if err != nil {
+		s.writeAuthenticationError(w, err)
+		return
+	}
+	if !human {
+		// A bearer names its own session in the body, as it does on every other write.
+		var input struct {
+			Actor *model.Actor `json:"actor"`
+		}
+		if err := decodeJSON(r, &input); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		actor, err = bearerSessionActor(r, actor, input.Actor)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	key := r.PathValue("key")
+	// Releasing a claim is any human's to do, and this route has no force to point a refused
+	// caller at.
+	rule := humanRule{override: true}
+	s.claimCycle(w, r, key, actor, rule, func(before model.Issue, judged judgement) (claimChange, error) {
+		if before.Claim == nil {
+			// Nothing to release, including on a closed issue, whose close already cleared
+			// the claim: the answer is the issue, so an agent releasing what it stopped
+			// working never has to care which happened first.
+			return claimChange{}, nil
+		}
+		if blocked := claimBlockedBy(before.Claim, actor, rule, judged); blocked != nil {
+			return claimChange{}, blocked
+		}
+		return claimChange{
+			eventType: "issue.released",
+			previous:  before.Claim,
+			reason:    "released",
+			changed:   true,
+		}, nil
+	})
+}

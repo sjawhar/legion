@@ -1,0 +1,522 @@
+// gen.ts — regenerate testdata/fixtures.json from testdata/corpus/*.md using the fork's headless engine.
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { setBlockIdGenerator } from "@legion/proof-editor";
+import { createHeadlessProof } from "@legion/proof-editor/headless";
+import type { Node as ProseMirrorNode } from "prosemirror-model";
+import { Transform } from "prosemirror-transform";
+import { prosemirrorToYXmlFragment } from "y-prosemirror";
+import * as Y from "yjs";
+
+const here = import.meta.dir;
+const corpus = join(here, "..", "testdata", "corpus");
+const out = join(here, "..", "testdata", "fixtures.json");
+const spliceOut = join(here, "..", "testdata", "splices.json");
+const check = process.argv.includes("--check");
+const blockSchema = JSON.parse(readFileSync(join(here, "..", "schema", "blocks.json"), "utf8"));
+
+const fixtures = [];
+for (const file of readdirSync(corpus)
+  .filter((f) => f.endsWith(".md"))
+  .sort()) {
+  let blockNumber = 0;
+  setBlockIdGenerator(() => `b-${String(++blockNumber).padStart(6, "0")}`);
+  const engine = await createHeadlessProof({ blockSchema });
+  const markdown = readFileSync(join(corpus, file), "utf8");
+  const doc = engine.parseMarkdown(markdown);
+  const ydoc = new Y.Doc();
+  ydoc.clientID = 1;
+  prosemirrorToYXmlFragment(doc, ydoc.getXmlFragment("prosemirror"));
+  fixtures.push({
+    name: file.replace(/\.md$/, ""),
+    markdown,
+    pm_json: doc.toJSON(),
+    yjs_update_v1_b64: Buffer.from(Y.encodeStateAsUpdate(ydoc)).toString("base64"),
+    rendered_by_milkdown: engine.serializeMarkdown(doc),
+  });
+}
+
+let spliceBlockNumber = 0;
+setBlockIdGenerator(() => `b-${String(++spliceBlockNumber).padStart(6, "0")}`);
+const engine = await createHeadlessProof({ blockSchema });
+
+// These are browser-oracle replaceRange cases. A single paragraph replacement
+// is sliced open to model Splice's inline paragraph replacement contract.
+type ReplaceRangeTextCase = {
+  name: string;
+  markdown: string;
+  from: string;
+  to: string;
+  replacement: string;
+  inline?: boolean;
+};
+
+type ReplaceRangeDocumentPointCase = {
+  name: string;
+  markdown: string;
+  point: "doc-start" | "doc-end";
+  replacement: string;
+  inline?: boolean;
+};
+
+type ReplaceRangeAnchoredPointCase = {
+  name: string;
+  markdown: string;
+  at: string;
+  point: "after" | "before" | "after-textblock" | "before-textblock";
+  replacement: string;
+  inline?: boolean;
+};
+
+type ReplaceRangeCase =
+  | ReplaceRangeTextCase
+  | ReplaceRangeDocumentPointCase
+  | ReplaceRangeAnchoredPointCase;
+
+const replaceRangeCases: ReplaceRangeCase[] = [
+  {
+    name: "paragraph-inline",
+    markdown: "Alpha first.\n\nSecond omega.\n",
+    from: "first.",
+    to: "Second",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "paragraph-multiblock",
+    markdown: "Alpha first.\n\nSecond omega.\n",
+    from: "first.",
+    to: "Second",
+    replacement: "X\n\nY\n",
+  },
+  {
+    name: "paragraph-list",
+    markdown: "Alpha first.\n\nSecond omega.\n",
+    from: "first.",
+    to: "Second",
+    replacement: "- X\n- Y\n",
+  },
+  {
+    name: "list-item-code",
+    markdown: "- target\n- next\n",
+    from: "target",
+    to: "target",
+    replacement: "```\ncode\n```\n",
+  },
+  {
+    name: "list-items-paragraph",
+    markdown: "- one\n- two\n- three\n",
+    from: "one",
+    to: "two",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "task-list-open-checked",
+    markdown: "- [ ] keep\n- [x] one\n- [ ] two\n",
+    from: "one",
+    to: "two",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "task-list-open-unchecked",
+    markdown: "- [x] keep\n- [ ] one\n- [x] two\n",
+    from: "one",
+    to: "two",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "list-items-join-inline",
+    markdown: "- a one\n- two b\n",
+    from: "one",
+    to: "two",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "table-cells-join-inline",
+    markdown: "| left | right |\n| :--- | :--- |\n| a one | two b |\n",
+    from: "one",
+    to: "two",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "nested-list-item-to-parent-next-inline",
+    markdown: "- parent\n  - nested tail\n- head sibling\n",
+    from: "tail",
+    to: "head",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "heading-into-paragraph-inline",
+    markdown: "# Heading tail\n\nParagraph head after\n",
+    from: "tail",
+    to: "head",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "blockquote-last-paragraph-to-following-paragraph-inline",
+    markdown: "> first\n>\n> tail\n\nhead after\n",
+    from: "tail",
+    to: "head",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "open-side-deeper-than-close-side-inline",
+    markdown: "- parent\n  - child tail\n- head sibling\n",
+    from: "tail",
+    to: "head",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "close-side-deeper-than-open-side-inline",
+    markdown: "- parent tail\n  - head child\n- sibling\n",
+    from: "tail",
+    to: "head",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "task-list-replacement-in-plain-bullet",
+    markdown: "- a target c\n- keep\n",
+    from: "target",
+    to: "target",
+    replacement: "- [x] done\n- [ ] todo\n",
+  },
+  {
+    name: "heading-into-following-list-item-inline",
+    markdown: "# Heading tail\n\n- head item\n- after\n",
+    from: "tail",
+    to: "head",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "list-item-into-following-heading-inline",
+    markdown: "- tail\n\n# head after\n",
+    from: "tail",
+    to: "head",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "blockquote-into-following-list-inline",
+    markdown: "> tail\n\n- head item\n- after\n",
+    from: "tail",
+    to: "head",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "blockquote-last-paragraph-into-following-list-inline",
+    markdown: "> first\n>\n> tail\n\n- head item\n- after\n",
+    from: "tail",
+    to: "head",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "blockquote-list",
+    markdown: "> alpha\n>\n> beta\n",
+    from: "alpha",
+    to: "beta",
+    replacement: "- X\n- Y\n",
+  },
+  {
+    name: "headings-paragraph",
+    markdown: "# Alpha first.\n\n## Second omega.\n",
+    from: "first.",
+    to: "Second",
+    replacement: "X\n",
+  },
+  {
+    name: "code-blocks-paragraph",
+    markdown: "```go\nAlpha first.\n```\n\n```js\nSecond omega.\n```\n",
+    from: "first.",
+    to: "Second",
+    replacement: "X\n",
+  },
+  {
+    name: "heading-code",
+    markdown: "# a target c\n",
+    from: "target",
+    to: "target",
+    replacement: "```\ncode\n```\n",
+  },
+  {
+    name: "code-list",
+    markdown: "```\na target c\n```\n",
+    from: "target",
+    to: "target",
+    replacement: "- X\n- Y\n",
+  },
+  {
+    name: "table-cell-code",
+    markdown: "| head |\n| :--- |\n| a target c |\n",
+    from: "target",
+    to: "target",
+    replacement: "```\ncode\n```\n",
+  },
+  {
+    name: "table-cell-inline",
+    markdown: "| head |\n| :--- |\n| a target c |\n",
+    from: "target",
+    to: "target",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "table-header-into-first-body-cell-inline",
+    markdown: "| a tail |\n| :--- |\n| head b |\n| after |\n",
+    from: "tail",
+    to: "head",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "insert-inline-after-quote",
+    markdown: "Alpha first. omega.\n",
+    at: "first.",
+    point: "after",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "insert-inline-at-textblock-start",
+    markdown: "Alpha omega.\n",
+    at: "Alpha",
+    point: "before",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "insert-inline-at-textblock-end",
+    markdown: "Alpha omega.\n",
+    at: "omega.",
+    point: "after",
+    replacement: "X\n",
+    inline: true,
+  },
+  {
+    name: "insert-blocks-after-quote-splits-paragraph",
+    markdown: "Alpha first. omega.\n",
+    at: "first.",
+    point: "after",
+    replacement: "- X\n- Y\n",
+  },
+  {
+    name: "insert-block-at-doc-start",
+    markdown: "Body.\n",
+    point: "doc-start",
+    replacement: "# Title\n",
+  },
+  {
+    name: "insert-block-at-doc-end",
+    markdown: "Body.\n",
+    point: "doc-end",
+    replacement: "Tail.\n",
+  },
+  {
+    name: "insert-block-after-heading-textblock",
+    markdown: "# Title\n\nBody.\n",
+    at: "Title",
+    point: "after-textblock",
+    replacement: "Intro.\n",
+  },
+  {
+    name: "insert-block-before-heading-textblock",
+    markdown: "# Title\n\nBody.\n",
+    at: "Title",
+    point: "before-textblock",
+    replacement: "Lead.\n",
+  },
+  {
+    name: "insert-paragraph-after-list-item-textblock",
+    markdown: "- one\n- two\n",
+    at: "one",
+    point: "after-textblock",
+    replacement: "extra\n",
+  },
+  {
+    name: "callout-paragraph-and-code",
+    markdown: "Intro.\n\n:::callout{#c1}\nWhich one?\n:::\n",
+    from: "Which",
+    to: "one?",
+    replacement: "Which?\n\n```\ncode\n```\n",
+  },
+  {
+    name: "callout-paragraph-and-list",
+    markdown: ":::callout{#c1}\nWhich one?\n:::\n",
+    from: "Which",
+    to: "one?",
+    replacement: "Which?\n\n- X\n- Y\n",
+  },
+  {
+    name: "callout-paragraph-and-heading",
+    markdown: ":::callout{#c1}\nWhich one?\n:::\n",
+    from: "Which",
+    to: "one?",
+    replacement: "Which?\n\n## Heading\n",
+  },
+  {
+    name: "callout-in-list-item-code",
+    markdown: "- item\n\n  :::callout{#c1}\n  Which one?\n  :::\n",
+    from: "Which",
+    to: "one?",
+    replacement: "Which?\n\n```\ncode\n```\n",
+  },
+  {
+    name: "callout-in-blockquote-code",
+    markdown: "> :::callout{#c1}\n> Which one?\n> :::\n",
+    from: "Which",
+    to: "one?",
+    replacement: "Which?\n\n```\ncode\n```\n",
+  },
+  {
+    name: "nested-callout-code",
+    markdown: ":::callout{#outer}\nOuter.\n\n:::callout{#inner}\nWhich one?\n:::\n",
+    from: "Which",
+    to: "one?",
+    replacement: "Which?\n\n```\ncode\n```\n",
+  },
+  {
+    name: "callout-across-paragraphs-code",
+    markdown: ":::callout{#c1}\nFirst tail.\n\nhead second.\n:::\n",
+    from: "tail",
+    to: "head",
+    replacement: "X\n\n```\ncode\n```\n",
+  },
+].map((replace) => {
+  const { name, markdown, replacement, inline = false } = replace;
+  const doc = engine.parseMarkdown(markdown);
+  const inserted = engine.parseMarkdown(replacement);
+  const transformed = new Transform(doc);
+  const pointPosition =
+    replace.point === undefined
+      ? undefined
+      : (() => {
+          switch (replace.point) {
+            case "doc-start":
+              return 0;
+            case "doc-end":
+              return doc.content.size;
+            case "after":
+              return quotePosition(doc, replace.at) + replace.at.length;
+            case "before":
+              return quotePosition(doc, replace.at);
+            case "after-textblock":
+              return doc.resolve(quotePosition(doc, replace.at)).after();
+            case "before-textblock":
+              return doc.resolve(quotePosition(doc, replace.at)).before();
+          }
+        })();
+  const fromPos = pointPosition === undefined ? quotePosition(doc, replace.from) : pointPosition;
+  const toPos =
+    pointPosition === undefined ? quotePosition(doc, replace.to) + replace.to.length : fromPos;
+  const slice = inline
+    ? inserted.slice(1, inserted.content.size - 1)
+    : inserted.slice(0, inserted.content.size);
+  transformed.replaceRange(fromPos, toPos, slice);
+  return {
+    name,
+    markdown,
+    from: replace.from,
+    to: replace.to,
+    at: replace.at,
+    point: replace.point,
+    replacement,
+    pm_json: transformed.doc.toJSON(),
+  };
+});
+// Cases conform to the pmdoc/replace-range-oracle/v1 schema: {schema, cases},
+// each case a browser-oracle ProseMirror replaceRange result Splice must match.
+const replaceRangeOracle = {
+  schema: "pmdoc/replace-range-oracle/v1",
+  cases: replaceRangeCases,
+};
+const nextSplices = `${JSON.stringify(replaceRangeOracle, null, 2)}\n`;
+
+function quotePosition(doc: ProseMirrorNode, quote: string): number {
+  let result = -1;
+  doc.descendants((node, pos) => {
+    if (node.isText) {
+      const offset = node.text?.indexOf(quote) ?? -1;
+      if (offset >= 0) {
+        result = pos + offset;
+        return false;
+      }
+    }
+    return result < 0;
+  });
+  if (result < 0) throw new Error(`quote not found: ${quote}`);
+  return result;
+}
+// Where the browser editor's parser ends a typed block. Each case is a tree and the markdown the Go
+// renderer writes for it: a callout, alone or inside a blockquote, a list item, a footnote
+// definition or another callout, whose code holds a line of colons, inside the container the case
+// names. The engine reads whether the markdown keeps the tree's blocks - the callout holding its
+// code - or ends a typed block at the line. The renderer's fences are held to keeping every case
+// whole (directive_fence_test.go).
+type TreeJSON = { type: string; content?: TreeJSON[]; text?: string };
+const treeShape = (node: TreeJSON): string =>
+  node.type === "code_block"
+    ? `code_block${JSON.stringify((node.content ?? []).map((child) => child.text ?? "").join(""))}`
+    : node.type === "text" || node.type === "hardbreak" || node.type === "footnote_reference"
+      ? ""
+      : `${node.type}(${(node.content ?? []).map(treeShape).filter(Boolean).join(",")})`;
+const docShape = (node: ProseMirrorNode): string => {
+  if (node.type.name === "code_block") return `code_block${JSON.stringify(node.textContent)}`;
+  if (node.isInline) return "";
+  const children: string[] = [];
+  node.forEach((child) => {
+    const shape = docShape(child);
+    if (shape) children.push(shape);
+  });
+  return `${node.type.name}(${children.join(",")})`;
+};
+const fenceOut = join(here, "..", "testdata", "typed-fence-lines.json");
+const fenceCases: { name: string; tree: TreeJSON; markdown: string }[] = JSON.parse(
+  readFileSync(fenceOut, "utf8")
+);
+// One case per line, so a changed verdict is one changed line.
+const nextFences = `[\n${fenceCases
+  .map(({ name, tree, markdown }) =>
+    JSON.stringify({
+      name,
+      tree,
+      markdown,
+      engine_closes: docShape(engine.parseMarkdown(markdown)) !== treeShape(tree),
+    })
+  )
+  .map((line) => `  ${line}`)
+  .join(",\n")}\n]\n`;
+
+const next = `${JSON.stringify(fixtures, null, 2)}\n`;
+if (check) {
+  const current = readFileSync(out, "utf8");
+  const currentSplices = readFileSync(spliceOut, "utf8");
+  if (
+    current !== next ||
+    currentSplices !== nextSplices ||
+    readFileSync(fenceOut, "utf8") !== nextFences
+  ) {
+    console.error("generated pmdoc fixtures are stale: run `bun run gen`");
+    process.exit(1);
+  }
+  console.log(
+    `fixtures up to date (${fixtures.length} documents, ${replaceRangeCases.length} splice cases)`
+  );
+} else {
+  writeFileSync(out, next);
+  writeFileSync(spliceOut, nextSplices);
+  writeFileSync(fenceOut, nextFences);
+  console.log(`wrote ${fixtures.length} documents and ${replaceRangeCases.length} splice cases`);
+}
+setBlockIdGenerator(null);

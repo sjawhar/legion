@@ -1,0 +1,14 @@
+kind: Added
+body: |-
+    A typed block's schema can declare an attribute of kind `block[]` that points at blocks of
+    documents: its value is canonical block references joined by exactly one space, anything else
+    refused (a block of a comment or a message with a reason of its own), and each block it names
+    is a graph edge from the typed block of a kind named by the attribute,
+    which `GET /api/v1/references?kind=` accepts. Its `targets` limit the block types it points at:
+    an agent's or API write introducing a pointer to an existing block of another type is refused
+    (`400 INVALID_MARKDOWN`, or `INVALID_OP` on `attributes` from `POST /edits`), a browser's edit
+    never is, and every block-aware read lists a pointer's edge only while its target has an allowed
+    type (migration `20261101144855_block_pointer_links`). No shipped block type declares one yet.
+time: 2026-10-28T10:40:00.000000000Z
+custom:
+    Issue: pr2394

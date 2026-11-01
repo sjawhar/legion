@@ -1,0 +1,21 @@
+-- 0116_project_default_assignee.up.sql — a project's default assignee.
+--
+-- The last step of the assignee chain an issue create walks (api.defaultAssignee): the create's
+-- own assignee, the person who created it, the person the creating session acts for, the parent's
+-- assignee, and then this. It holds a person's lowercase email, the name `people` and
+-- `issues.assignee` use, with the same check `people.email` carries (0068) so a stored default is
+-- always canonical.
+--
+-- No foreign key to `people`, as `issues.assignee` has none: a value left stale by a restore or a
+-- direct write must fall through to nobody rather than break a create or block a sign-out. The
+-- chain checks that the stored default still names a person who has signed in, and ignores it
+-- when it does not.
+--
+-- A plain nullable add: it rewrites no row, refuses nothing, and its census answers 0. The ALTER
+-- takes ACCESS EXCLUSIVE on `projects` only for the catalog write, so no lock block and no
+-- refusal is needed and the rolling-deploy rule (cmd/dispatch/README.md, "Database migrations")
+-- is satisfied by the column being invisible to the release running now: an older server selects
+-- its own columns and writes rows whose default_assignee is null, which the chain reads as no
+-- default.
+alter table projects add column default_assignee text
+  check (default_assignee <> '' and default_assignee = lower(default_assignee));

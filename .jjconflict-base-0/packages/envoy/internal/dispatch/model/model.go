@@ -1,0 +1,1923 @@
+// Package model defines Dispatch's persisted and wire entities.
+package model
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+)
+
+// Actor identifies the user or agent session that caused a change. Service is
+// the verified Kubernetes subject of the projected service-account token a
+// session authenticated with ("system:serviceaccount:<namespace>:<name>"), set
+// by the server from the token and never from a request body. Project is the
+// one project key a broker-issued access token lets its session write, set by
+// the server from that token and never from a request body; it is nil for
+// every other credential and for a token whose scope names no single project.
+type Actor struct {
+	Kind    string       `json:"kind"`
+	ID      string       `json:"id"`
+	Origin  *ActorOrigin `json:"origin,omitempty"`
+	Owner   *string      `json:"owner,omitempty"`
+	Service *string      `json:"service,omitempty"`
+	Project *string      `json:"project,omitempty"`
+}
+
+// SameAs reports whether two actors are the same writer: one session id, or one human login.
+// Dispatch compares actors in exactly this way wherever it has to decide "is this the same
+// session" — a claim's holder against a caller, and an event's actor against the claimant it
+// names.
+func (a Actor) SameAs(other Actor) bool {
+	return a.Kind == other.Kind && a.ID == other.ID
+}
+
+// CanonicalLogin is the stored form of a person's email: trimmed and lowercased, the form the
+// identity implementations name a person by and the people table holds.
+func CanonicalLogin(login string) string {
+	return strings.ToLower(strings.TrimSpace(login))
+}
+
+// ActorOrigin describes the client environment of a session actor.
+type ActorOrigin struct {
+	Host         string `json:"host,omitempty"`
+	Machine      string `json:"machine,omitempty"`
+	Cwd          string `json:"cwd,omitempty"`
+	Tmux         string `json:"tmux,omitempty"`
+	Pane         string `json:"pane,omitempty"`
+	SessionTitle string `json:"session_title,omitempty"`
+}
+
+// AgentToken is the safely displayable metadata for a human-owned agent token.
+type AgentToken struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Prefix     string     `json:"prefix"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at"`
+	RevokedAt  *time.Time `json:"revoked_at"`
+}
+
+// Anchor identifies a document mark at a particular named version.
+type Anchor struct {
+	ArtifactID string  `json:"artifact_id"`
+	BlockID    *string `json:"block_id"`
+	MarkID     string  `json:"mark_id"`
+	Version    int     `json:"version"`
+	Quote      string  `json:"quote"`
+	Orphaned   bool    `json:"orphaned"`
+}
+
+// DecodeAnchor decodes a stored anchor row, reading artifact_id only where the stored value is a
+// JSON string. No release writes a non-string artifact_id - the server writes a document's id,
+// which is text - but a row an earlier release wrote could hold one, and a read of such a row
+// must answer the ask or comment it belongs to rather than 500 for the whole route, which
+// decoding a number into ArtifactID's string field would. Any other JSON value - a number, null,
+// an object, a bool - leaves ArtifactID empty, which names no document, the same answer the SQL
+// read gives for a value that casts to no uuid. Every other field decodes as its struct tag says,
+// errors included, and encoding is unchanged.
+//
+// This is a function and not an UnmarshalJSON method on Anchor: a method makes encoding/json scan
+// every anchor an extra time before calling it, which costs every well-formed anchor a read
+// decodes. Here the plain decode runs first, so a well-formed anchor costs exactly a plain
+// json.Unmarshal. Only the type error artifact_id itself raises takes the second decode, which
+// reads that one field as raw JSON; any other error is the decode's answer.
+func DecodeAnchor(data []byte, anchor *Anchor) error {
+	err := json.Unmarshal(data, anchor)
+	if err == nil {
+		return nil
+	}
+	var wrongType *json.UnmarshalTypeError
+	if !errors.As(err, &wrongType) || wrongType.Field != "artifact_id" {
+		return err
+	}
+	// The embedded anchorFields decodes every field but artifact_id as before; the field beside
+	// it shadows artifact_id and reads it as raw JSON.
+	type anchorFields Anchor
+	decoded := struct {
+		*anchorFields
+		ArtifactID json.RawMessage `json:"artifact_id"`
+	}{anchorFields: (*anchorFields)(anchor)}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var artifactID string
+	if err := json.Unmarshal(decoded.ArtifactID, &artifactID); err != nil {
+		anchor.ArtifactID = ""
+		return nil
+	}
+	anchor.ArtifactID = artifactID
+	return nil
+}
+
+// AnchorInput selects document text by quote or identifies a browser-owned mark.
+type AnchorInput struct {
+	Artifact   string  `json:"artifact"`
+	Quote      *string `json:"quote,omitempty"`
+	Occurrence *int    `json:"occurrence,omitempty"`
+	MarkID     *string `json:"mark_id,omitempty"`
+}
+
+// Project groups native issues under a short key.
+type Project struct {
+	Key       string    `json:"key"`
+	Name      string    `json:"name"`
+	OpenAsks  int       `json:"open_asks"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// RepoProject assigns an external repository to a native Dispatch project. Default marks the one
+// mapping of the project an issue with no repository of its own, and none on its parent chain,
+// resolves to; at most one mapping of a project is its default.
+type RepoProject struct {
+	Repo      string    `json:"repo"`
+	Project   string    `json:"project"`
+	Default   bool      `json:"default"`
+	CreatedBy Actor     `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ArchitectureSource names a repository and branch a project's architecture
+// documents are imported from; a project has one per repository, and its
+// component model is every source's components together. ID names the source
+// within its project (the first source of a project before sources were per
+// repository is 0) and is a server detail kept out of the JSON shape, as the
+// repository already addresses a source. InstallationID caches the GitHub App
+// installation the access check resolved — the importer re-resolves it on
+// sync — and is kept out of the JSON shape too. The sync bookkeeping fields
+// stay null until the importer runs; Components is how many components the
+// source currently projects.
+type ArchitectureSource struct {
+	Project        string     `json:"project"`
+	ID             int64      `json:"-"`
+	Repo           string     `json:"repo"`
+	Branch         string     `json:"branch"`
+	Enabled        bool       `json:"enabled"`
+	InstallationID int64      `json:"-"`
+	CreatedBy      Actor      `json:"created_by"`
+	CreatedAt      time.Time  `json:"created_at"`
+	LastSyncAt     *time.Time `json:"last_sync_at"`
+	LastCommit     *string    `json:"last_commit"`
+	LastError      *string    `json:"last_error"`
+	// LastTreeSha is the architecture directory's tree object id at the last
+	// successful import: importer bookkeeping for the unchanged-model
+	// short-circuit, kept out of the JSON shape.
+	LastTreeSha *string `json:"-"`
+	Components  int     `json:"components"`
+}
+
+// ExternalLink connects a native issue to an external tracker item.
+type ExternalLink struct {
+	URL  string `json:"url"`
+	Kind string `json:"kind,omitempty"`
+}
+
+// IssueComponents is an issue's effective component attachment, resolved on
+// read: the nearest ancestor with its own attachment (either mode) decides,
+// and InheritedFrom names it when that ancestor is not the issue itself. Mode
+// "inherit" with no InheritedFrom means no issue on the parent chain chose —
+// the issue is unassigned. IDs is the effective set of live component ids;
+// Unknown the effective member ids a re-import has since retired (kept, never
+// dropped). Reason is set for mode "none".
+type IssueComponents struct {
+	Mode          string   `json:"mode"`
+	IDs           []string `json:"ids"`
+	Unknown       []string `json:"unknown"`
+	Reason        *string  `json:"reason"`
+	InheritedFrom *string  `json:"inherited_from"`
+}
+
+// IssueClaim is the session or human currently working an issue: the actor that claimed it
+// and when. At most one issue claim exists at a time. It is not the issue's Route (where
+// messages on the issue are delivered, which may be a role) and not its Assignee (the human
+// who answers its asks).
+type IssueClaim struct {
+	Actor Actor     `json:"actor"`
+	At    time.Time `json:"at"`
+}
+
+// IssueClaimEventPayload is the payload of issue.claimed and issue.released. Claim is the
+// claim now in force (nil on a release); Previous is the claim this one replaced or cleared,
+// so a takeover names whose work was taken and the outbox can tell that session. Reason is
+// "claimed", "takeover", "forced", "released", or "closed". Repo and ResolvedRepo are the
+// issue's, as on every issue event.
+type IssueClaimEventPayload struct {
+	Key          string      `json:"key"`
+	Status       string      `json:"status"`
+	Repo         *string     `json:"repo"`
+	ResolvedRepo *string     `json:"resolved_repo"`
+	Claim        *IssueClaim `json:"claim"`
+	Previous     *IssueClaim `json:"previous_claim,omitempty"`
+	Reason       string      `json:"reason"`
+}
+
+// ProgressCount is done of total: the task items of a spec, or the direct children of an issue.
+// Done is at most Total.
+type ProgressCount struct {
+	Done  int `json:"done"`
+	Total int `json:"total"`
+}
+
+// IssueProgress is an issue's progress as GitHub counts an issue's: Tasks the task-list items
+// (`- [ ]` / `- [x]`, nested lists included) of its primary document as its latest version
+// renders, nil when that document has none (or has not been counted yet, which the background
+// count after a deploy closes); Children its direct children (every status, icebox included),
+// done being `status = 'done'`, nil when it has none. Tasks is read from the counts a version
+// write stores on the issue (tasks_done, tasks_total); Children is computed from the children's
+// statuses on every read. It sits on every issue of the read, the list and the pinned list, and
+// never on an event payload, which is why it is a field of IssueSummary and of the read response
+// rather than of Issue.
+type IssueProgress struct {
+	Tasks    *ProgressCount `json:"tasks"`
+	Children *ProgressCount `json:"children"`
+}
+
+// Issue is the complete native issue record.
+type Issue struct {
+	Key           string          `json:"key"`
+	Project       string          `json:"project"`
+	Number        int             `json:"number"`
+	Title         string          `json:"title"`
+	Status        string          `json:"status"`
+	Priority      *int            `json:"priority"`
+	Rank          string          `json:"rank"`
+	Labels        []string        `json:"labels"`
+	Parent        *string         `json:"parent"`
+	BlockedBy     []string        `json:"blocked_by"`
+	Assignee      *string         `json:"assignee"`
+	Claim         *IssueClaim     `json:"claim"`
+	Components    IssueComponents `json:"components"`
+	ExternalLinks []ExternalLink  `json:"external_links"`
+	Route         *string         `json:"route"`
+	// Repo is the issue's own repository, owner/name, a mapping of its project; nil when it inherits.
+	Repo *string `json:"repo"`
+	// ResolvedRepo is the repository the issue targets, resolved on read: its own Repo, else its
+	// nearest ancestor's, else its project's default mapping, else nil.
+	ResolvedRepo      *string    `json:"resolved_repo"`
+	CreatedBy         *Actor     `json:"created_by"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	ClosedAt          *time.Time `json:"closed_at"`
+	PrimaryArtifactID string     `json:"primary_artifact_id"`
+	LastSeq           int        `json:"last_seq"`
+}
+
+// Route statuses: whether an issue's route reaches a running session right now.
+const (
+	// RouteLive is a role with a live holder, or a session the listener lists as live.
+	RouteLive = "live"
+	// RouteNoHolder is a role nobody live holds (unclaimed, or its holder's session lapsed), or
+	// a session the listener does not list.
+	RouteNoHolder = "no_holder"
+	// RouteUnknown is a route read while the listener did not answer; it is never read as live.
+	RouteUnknown = "unknown"
+)
+
+// IssueRouteReach is whether an issue's route reaches anyone: resolved on read from the one stored
+// copy of the listener's session list every server process judges by, at most 5 s old, never
+// stored on the issue and never part of an event payload, which is why it sits beside Issue in a
+// read response rather than in it. Both fields are null for an issue with no route; RouteHolder
+// names the session only when RouteStatus is RouteLive.
+type IssueRouteReach struct {
+	RouteStatus *string `json:"route_status"`
+	RouteHolder *string `json:"route_holder"`
+}
+
+// IssueSummary is the lightweight issue listing representation.
+type IssueSummary struct {
+	Key        string          `json:"key"`
+	Title      string          `json:"title"`
+	Status     string          `json:"status"`
+	Priority   *int            `json:"priority"`
+	Rank       string          `json:"rank"`
+	Labels     []string        `json:"labels"`
+	Parent     *string         `json:"parent"`
+	BlockedBy  []string        `json:"blocked_by"`
+	Assignee   *string         `json:"assignee"`
+	Claim      *IssueClaim     `json:"claim"`
+	Components IssueComponents `json:"components"`
+	Route      *string         `json:"route"`
+	// Repo and ResolvedRepo are Issue's.
+	Repo         *string `json:"repo"`
+	ResolvedRepo *string `json:"resolved_repo"`
+	IssueRouteReach
+	UpdatedAt         time.Time     `json:"updated_at"`
+	LastSeq           int           `json:"last_seq"`
+	PrimaryArtifactID string        `json:"primary_artifact_id"`
+	OpenAsks          int           `json:"open_asks"`
+	Progress          IssueProgress `json:"progress"`
+}
+
+// IssueSummaryPage is one page of GET /api/v1/issues?limit=&offset=: the issues at [offset,
+// offset+limit) of the filtered listing, in its order, and Total, how many the filters matched.
+type IssueSummaryPage struct {
+	Issues []IssueSummary `json:"issues"`
+	Total  int            `json:"total"`
+	Limit  int            `json:"limit"`
+	Offset int            `json:"offset"`
+}
+
+// SearchOwner identifies the issue or standalone project document that owns a search result.
+// An issue owner carries Key, Title and Status; a document owner carries Project, Slug,
+// ArtifactID and Name.
+type SearchOwner struct {
+	Kind       string `json:"kind"`
+	Key        string `json:"key,omitempty"`
+	Title      string `json:"title,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Project    string `json:"project,omitempty"`
+	Slug       string `json:"slug,omitempty"`
+	ArtifactID string `json:"artifact_id,omitempty"`
+	Name       string `json:"name,omitempty"`
+}
+
+// SearchArtifact identifies an artifact attached to a global search result.
+type SearchArtifact struct {
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+}
+
+// SearchIssue is the legacy issue-owner shape of a search hit.
+type SearchIssue struct {
+	Key    string `json:"key"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+}
+
+// SearchAsk is where an ask hit stands, read when the search ran, so a reader of the hit knows
+// whether the question still waits on a human and, once it does not, how it was settled.
+// Answer is the ask's current answer when it is answered; on a resolved ask it is the last
+// answer its ask.answered events recorded, the only place the answer survives on a row that
+// document settlement retracted while it was answered, and nil when nobody answered.
+// Answer.Selected is an empty list, never null, when the answer chose no option.
+type SearchAsk struct {
+	State      string         `json:"state"` // "open" | "answered" | "resolved"
+	Answer     *AskAnswer     `json:"answer,omitempty"`
+	Resolution *AskResolution `json:"resolution,omitempty"`
+}
+
+// SearchResult is one ranked Dispatch search hit.
+type SearchResult struct {
+	Kind  string      `json:"kind"`
+	Owner SearchOwner `json:"owner"`
+	// Issue mirrors Owner for issue-owned hits so agent clients built before the owner-only
+	// shape (#1119) keep rendering; remove once no installed pi-legion-envoy /
+	// opencode-legion-envoy / claude-envoy (or a legacy claude-envoy-bridge install) predates it.
+	Issue    *SearchIssue    `json:"issue,omitempty"`
+	Artifact *SearchArtifact `json:"artifact,omitempty"`
+	ID       string          `json:"id"`
+	Snippet  string          `json:"snippet"`
+	Rank     float64         `json:"rank"`
+	Href     string          `json:"href"`
+	// Ask is set on ask hits and nil on every other kind; an ask removed between the search and
+	// the read of its state keeps it nil too.
+	Ask *SearchAsk `json:"ask,omitempty"`
+}
+
+// SearchResponse is one page of the fused search result list.
+type SearchResponse struct {
+	Results []SearchResult `json:"results"`
+	// Total counts every match of every kind. Reachable is how many of them the pages can return,
+	// since each kind lists only its best contracts.SearchKindDepth; an offset at or past it
+	// returns no results.
+	Total     int   `json:"total"`
+	Reachable int   `json:"reachable"`
+	Limit     int   `json:"limit"`
+	Offset    int   `json:"offset"`
+	TookMS    int64 `json:"took_ms"`
+	// Degraded names why search fell back to keyword-only ranking this request - today only
+	// "embedder_unavailable" (contracts.SearchDegradedEmbedderUnavailable; LEGION-549: no
+	// embedder configured, the query's own embedding timed out, or the model service answered an
+	// error) - and is empty when meaning search ran normally.
+	Degraded string `json:"degraded,omitempty"`
+}
+
+// SearchCoverage is how much of what meaning search covers has a current vector from the
+// configured embedder (INFRA-393, GET /api/v1/search/coverage). Identity is the embedder's
+// identity (embed.Embedder.Identity), Place ("bedrock" or "azure") and Model are read from it;
+// all three are null when no embedder is configured, and then nothing is current.
+type SearchCoverage struct {
+	Identity *string              `json:"identity"`
+	Place    *string              `json:"place"`
+	Model    *string              `json:"model"`
+	Total    SearchCoverageCounts `json:"total"`
+	Kinds    SearchCoverageKinds  `json:"kinds"`
+}
+
+// SearchCoverageKinds is SearchCoverage's counts for each kind meaning search ranks.
+type SearchCoverageKinds struct {
+	Issue    SearchCoverageCounts `json:"issue"`
+	Document SearchCoverageCounts `json:"document"`
+	Comment  SearchCoverageCounts `json:"comment"`
+	Ask      SearchCoverageCounts `json:"ask"`
+	Message  SearchCoverageCounts `json:"message"`
+}
+
+// SearchCoverageCounts splits Items, the searchable items of a kind (or of all of them), into
+// Current (embedded at the item's current text by the configured identity), Failed (dead and not
+// current) and Lacking (the rest). An item whose text is empty or only white space is not
+// searchable by meaning and is in none of them: it needs no vector. OldestLackingSeconds is how
+// long the longest-waiting lacking item has waited for its vector, counted from when its row last
+// became pending or from when the item was written, whichever is later; null when nothing lacks.
+type SearchCoverageCounts struct {
+	Items                int64  `json:"items"`
+	Current              int64  `json:"current"`
+	Lacking              int64  `json:"lacking"`
+	Failed               int64  `json:"failed"`
+	OldestLackingSeconds *int64 `json:"oldest_lacking_seconds"`
+}
+
+// DuplicateCandidate is a potential duplicate issue proposed before creation.
+type DuplicateCandidate struct {
+	Key         string `json:"key"`
+	Title       string `json:"title"`
+	Status      string `json:"status"`
+	Snippet     string `json:"snippet"`
+	SharedTerms int    `json:"shared_terms"`
+	Href        string `json:"href"`
+}
+
+// WriteSuggestion is one item the related-item check judges like what was just filed:
+// a search hit over the same project. Ask is where an ask item stands (its latest answer, who gave
+// it, when and the options chosen; or its resolution; or open). AnsweredBy and AnsweredAt repeat
+// the answer's user and time on the ask Suggestions.Decision names, for clients built before Ask.
+type WriteSuggestion struct {
+	Kind       string          `json:"kind"`
+	Owner      SearchOwner     `json:"owner"`
+	Artifact   *SearchArtifact `json:"artifact,omitempty"`
+	ID         string          `json:"id"`
+	Snippet    string          `json:"snippet"`
+	Href       string          `json:"href"`
+	Ask        *SearchAsk      `json:"ask,omitempty"`
+	AnsweredBy string          `json:"answered_by,omitempty"`
+	AnsweredAt *time.Time      `json:"answered_at,omitempty"`
+}
+
+// Suggestions is the related-item check's result on a newly created issue or ask: the
+// three items most like it (Related, one per owner) and, when an answered ask already settles the
+// same question, that decision (Decision). The check never refuses the write; it waits at most
+// five seconds, and says what it did.
+//
+// Outcome is "found" (Related holds at least one item), "none" (it searched and found nothing) or
+// "not_made" (it did not search to the end). Search is how it searched, "meaning_and_keywords" or
+// "keywords_only", empty when not made; SearchNote says why it searched by keywords alone.
+// Missing is set, to the reason the check was not made, exactly when Outcome is "not_made", so a
+// client built before Outcome still says the check was skipped. SearchQuery is two or three of
+// the words the keyword search used, spelled as the text spells them, for a reader to search with
+// by hand. TitleMatches is the issues whose titles near-duplicate a new issue's when the create
+// was forced past that refusal. Related is always an array, never null.
+type Suggestions struct {
+	Outcome      string               `json:"outcome"`
+	Search       string               `json:"search,omitempty"`
+	SearchNote   string               `json:"search_note,omitempty"`
+	SearchQuery  string               `json:"search_query,omitempty"`
+	Related      []WriteSuggestion    `json:"related"`
+	Decision     *WriteSuggestion     `json:"decision,omitempty"`
+	Missing      string               `json:"missing,omitempty"`
+	TitleMatches []DuplicateCandidate `json:"title_matches,omitempty"`
+}
+
+// RelatedChecksReport is GET /api/v1/related-checks: how the related-item checks recorded in
+// related_checks within one window went, so a deploy's checks can be counted against
+// its targets. Project, SourceKind, From and To echo the filters, each null when not given (every
+// project, every source kind, no lower or upper bound); From is inclusive and To exclusive.
+//
+// BySourceKind, ByOutcome, BySearch and ByReason count the checks by each column; BySearch counts
+// a check not made under "not_made", and ByReason leaves out the checks that had no reason (those
+// searched by meaning and keywords). Each map holds only the values seen, and is {} for none.
+// Completed is the checks that searched to the end (found or none, whatever the search mode),
+// SkippedForTime those not made because the search ran out of time (reason timeout).
+type RelatedChecksReport struct {
+	Project        *string            `json:"project"`
+	SourceKind     *string            `json:"source_kind"`
+	From           *time.Time         `json:"from"`
+	To             *time.Time         `json:"to"`
+	Total          int                `json:"total"`
+	BySourceKind   map[string]int     `json:"by_source_kind"`
+	ByOutcome      map[string]int     `json:"by_outcome"`
+	BySearch       map[string]int     `json:"by_search"`
+	ByReason       map[string]int     `json:"by_reason"`
+	Completed      int                `json:"completed"`
+	SkippedForTime int                `json:"skipped_for_time"`
+	KeywordMS      RelatedCheckTiming `json:"keyword_ms"`
+	TotalMS        RelatedCheckTiming `json:"total_ms"`
+}
+
+// RelatedCheckTiming summarizes one of related_checks' millisecond columns over the checks that
+// hold a value in it (Count): its 50th and 95th percentiles, each a time some check took (a
+// discrete percentile, never one between two checks), its largest value, and how many took more
+// than 300 ms, the keyword search's target. P50, P95 and Max are null when Count is 0.
+type RelatedCheckTiming struct {
+	Count     int  `json:"count"`
+	P50       *int `json:"p50"`
+	P95       *int `json:"p95"`
+	Max       *int `json:"max"`
+	Over300MS int  `json:"over_300ms"`
+}
+
+// IssueChild is a child item embedded in an issue detail response. The subtree counts
+// include the child itself, every status (icebox included); done is `status = 'done'`.
+// ActiveAt is the newest updated_at anywhere in the child's subtree.
+type IssueChild struct {
+	Key           string         `json:"key"`
+	Title         string         `json:"title"`
+	Status        string         `json:"status"`
+	SubtreeDone   int            `json:"subtree_done"`
+	SubtreeTotal  int            `json:"subtree_total"`
+	ActiveAt      time.Time      `json:"active_at"`
+	ExternalLinks []ExternalLink `json:"external_links"`
+}
+
+// ArchitectureTree is GET /api/v1/projects/{key}/architecture: the project's
+// component model — every source's components together — with the work
+// attached to it. Counting rule: a component
+// counts every distinct issue whose effective set names it or any component it
+// contains (transitively over parent), parents and icebox included, each once;
+// Own* restricts that to issues whose effective set names this component
+// itself. Unassigned lists issues no ancestor chain attached; NotArchitectural
+// those resolving to a `none` row; RetiredLinks those whose effective set names
+// a component a re-import retired.
+type ArchitectureTree struct {
+	Sources          []ArchitectureTreeSource    `json:"sources"`
+	Totals           ArchitectureTreeTotals      `json:"totals"`
+	Components       []ArchitectureTreeComponent `json:"components"`
+	Unassigned       []ArchitectureTreeIssueRef  `json:"unassigned"`
+	NotArchitectural []ArchitectureTreeNone      `json:"not_architectural"`
+	RetiredLinks     []ArchitectureTreeRetired   `json:"retired_links"`
+}
+
+// ArchitectureTreeSource is one source row's sync bookkeeping; the tree lists
+// them in the order the project added its sources.
+type ArchitectureTreeSource struct {
+	Repo       string     `json:"repo"`
+	Branch     string     `json:"branch"`
+	LastCommit *string    `json:"last_commit"`
+	LastSyncAt *time.Time `json:"last_sync_at"`
+	LastError  *string    `json:"last_error"`
+}
+
+// ArchitectureTreeTotals are project-level counts: every filed issue (icebox
+// and closed included), and the sizes of the three side lists plus the
+// components that count no work.
+type ArchitectureTreeTotals struct {
+	IssuesDone            int `json:"issues_done"`
+	IssuesTotal           int `json:"issues_total"`
+	Unassigned            int `json:"unassigned"`
+	NotArchitectural      int `json:"not_architectural"`
+	ComponentsWithoutWork int `json:"components_without_work"`
+	RetiredLinks          int `json:"retired_links"`
+}
+
+// ArchitectureTreeComponent is one component with its counts and the issues
+// counted, each saying how it qualified. Source is the repository of the
+// source whose files define it.
+type ArchitectureTreeComponent struct {
+	ID        string                  `json:"id"`
+	Source    string                  `json:"source"`
+	Title     string                  `json:"title"`
+	Parent    *string                 `json:"parent"`
+	DependsOn []string                `json:"depends_on"`
+	Paths     []string                `json:"paths"`
+	External  bool                    `json:"external"`
+	Prose     string                  `json:"prose"`
+	Done      int                     `json:"done"`
+	Total     int                     `json:"total"`
+	OwnDone   int                     `json:"own_done"`
+	OwnTotal  int                     `json:"own_total"`
+	Issues    []ArchitectureTreeIssue `json:"issues"`
+}
+
+// ArchitectureTreeIssue is an issue counted for a component. Attached is how:
+// "direct" (its own row names the component), "inherited" (an ancestor's row
+// does), or "contained" (its effective set names a component this one
+// contains; Via is that component). When several apply the strongest wins.
+type ArchitectureTreeIssue struct {
+	Key           string         `json:"key"`
+	Title         string         `json:"title"`
+	Status        string         `json:"status"`
+	Priority      *int           `json:"priority"`
+	Parent        *string        `json:"parent"`
+	ExternalLinks []ExternalLink `json:"external_links"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	Attached      string         `json:"attached"`
+	Via           *string        `json:"via,omitempty"`
+}
+
+// ArchitectureTreeIssueRef is an issue in the unassigned list.
+type ArchitectureTreeIssueRef struct {
+	Key    string `json:"key"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+}
+
+// ArchitectureTreeNone is an issue declared not architectural, with the reason
+// and, when the declaration is an ancestor's, that ancestor.
+type ArchitectureTreeNone struct {
+	Key           string  `json:"key"`
+	Title         string  `json:"title"`
+	Status        string  `json:"status"`
+	Reason        string  `json:"reason"`
+	InheritedFrom *string `json:"inherited_from"`
+}
+
+// ArchitectureTreeRetired is an issue whose effective set names retired
+// components; IDs are those ids.
+type ArchitectureTreeRetired struct {
+	Key    string   `json:"key"`
+	Title  string   `json:"title"`
+	Status string   `json:"status"`
+	IDs    []string `json:"ids"`
+}
+
+// Artifact is an issue-attached document or binary blob, an unlinked project document, or a
+// file an agent's conversation owns (SessionID set; IssueKey nil and Project empty, its RefKey
+// `agent/<session id>/<slug>`).
+type Artifact struct {
+	ID        string    `json:"id"`
+	IssueKey  *string   `json:"issue_key"`
+	Project   string    `json:"project"`
+	SessionID *string   `json:"session_id"`
+	RefKey    string    `json:"ref_key"`
+	Slug      string    `json:"slug"`
+	Name      string    `json:"name"`
+	Kind      string    `json:"kind"`
+	Primary   bool      `json:"primary"`
+	CreatedBy Actor     `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+	Versions  []Version `json:"versions"`
+	// Approval is the document's approval as of its latest version, derived from
+	// version-pinned reviews and any open approval ask; nil for non-documents.
+	Approval *ArtifactApproval `json:"approval,omitempty"`
+}
+
+// ArtifactReview is one human review of a document, pinned to the version it was
+// given on: an approval, or a request for changes with a reason. EventSeq is the
+// sequence of the artifact.* event the review appended on its document's owner, nil
+// for a review recorded before Dispatch kept it; the approval read returns it as
+// ArtifactApproval.Seq, and the review list does not carry it.
+type ArtifactReview struct {
+	ID         string    `json:"id"`
+	ArtifactID string    `json:"artifact_id"`
+	Version    int       `json:"version"`
+	State      string    `json:"state"`
+	Actor      Actor     `json:"actor"`
+	Reason     *string   `json:"reason"`
+	AskID      *string   `json:"ask_id"`
+	CreatedAt  time.Time `json:"created_at"`
+	EventSeq   *int64    `json:"-"`
+}
+
+// ArtifactApproval is a document's approval state as of its latest version:
+// draft (never reviewed or requested), awaiting (an approval ask is open),
+// approved (approved at the latest version), stale (approved at an older
+// version), or changes_requested (the latest review asks for changes). An
+// awaiting approval carries its request's WaitingOn: agent once a version moved
+// the request past the one its agent handed to the human, or a reply left it with
+// the agent; human otherwise (the ask reads' waiting_on). Seq is the latest
+// review's event sequence on the document's owner, absent for a review recorded
+// before Dispatch kept it and on every read the release before that serves during
+// a rollout or a rollback, so a missing Seq does not prove an older review: the
+// owner's row lock orders its events as they commit, so Seq places the review
+// among them where At, its transaction's start, cannot. Seq orders; Version, not
+// Seq, says which version the review covers.
+type ArtifactApproval struct {
+	State         string  `json:"state"`
+	LatestVersion int     `json:"latest_version"`
+	Version       *int    `json:"version,omitempty"`
+	By            *Actor  `json:"by,omitempty"`
+	At            *string `json:"at,omitempty"`
+	Seq           *int64  `json:"seq,omitempty"`
+	Reason        *string `json:"reason,omitempty"`
+	AskID         *string `json:"ask_id,omitempty"`
+	RequestedBy   *Actor  `json:"requested_by,omitempty"`
+	WaitingOn     string  `json:"waiting_on,omitempty"`
+}
+
+// ArtifactReviewEventPayload is the payload of artifact.approved and
+// artifact.changes_requested: the review pinned to its version, and the approval
+// ask it answered (nil when given from the document header with no request open at
+// that version).
+type ArtifactReviewEventPayload struct {
+	ArtifactID string  `json:"artifact_id"`
+	Name       string  `json:"name"`
+	Version    int     `json:"version"`
+	Actor      Actor   `json:"actor"`
+	Reason     *string `json:"reason"`
+	AskID      *string `json:"ask_id"`
+}
+
+// ArtifactHumanEditedEventPayload is the payload of artifact.human_edited, which Dispatch appends
+// once a document has been quiet for a while after a person's settled browser edit: the versions
+// the quiet window spans (FromVersion is the one before the window's first person's version,
+// ToVersion the window's last person's version), the people who wrote them, and the unified diff
+// of the two versions' stored markdown, cut at its last line end within 4,096 bytes, with
+// DiffTruncated saying it was cut.
+type ArtifactHumanEditedEventPayload struct {
+	ArtifactID    string   `json:"artifact_id"`
+	Name          string   `json:"name"`
+	FromVersion   int      `json:"from_version"`
+	ToVersion     int      `json:"to_version"`
+	Editors       []string `json:"editors"`
+	Diff          string   `json:"diff"`
+	DiffTruncated bool     `json:"diff_truncated"`
+}
+
+// ArtifactBlock is an addressable document block and its byte range in canonical markdown. Table
+// lists a table block's rows and cells; nil for every other block.
+type ArtifactBlock struct {
+	ID            string          `json:"id"`
+	Type          string          `json:"type"`
+	From          int             `json:"from"`
+	To            int             `json:"to"`
+	Token         string          `json:"token"`
+	References    BlockReferences `json:"references"`
+	Table         *BlockTable     `json:"table,omitempty"`
+	DescendantIDs []string        `json:"-"`
+}
+
+// BlockTable is a table block's rows in child order, the header row first, as GET
+// /api/v1/artifacts/{id}/blocks lists them under the table: each row and cell placed as GET
+// /api/v1/artifacts/{id}/blocks/{block_id} places it, from the same live tree.
+type BlockTable struct {
+	Rows []BlockTableRow `json:"rows"`
+}
+
+// BlockTableRow is one row of a table: its block id ("" for a row the live document has not
+// stamped yet), its index among the table's rows (0 the header row, the index delete_row takes)
+// and its cells in child order.
+type BlockTableRow struct {
+	ID    string           `json:"id"`
+	Index int              `json:"index"`
+	Cells []BlockTableCell `json:"cells"`
+}
+
+// BlockTableCell is one cell of a table row: its block id ("" for a cell the live document has not
+// stamped yet), its row index, its column (its index in its row, the index delete_column takes, so
+// a cell spanning columns counts once), the opening words of the header cell drawn above it ("" where
+// none is) and its own opening words.
+type BlockTableCell struct {
+	ID     string `json:"id"`
+	Row    int    `json:"row"`
+	Column int    `json:"column"`
+	Header string `json:"header"`
+	Text   string `json:"text"`
+}
+
+// BlockReferences counts rows whose inline anchor is pinned to a document block;
+// table blocks include anchors pinned to descendant cells.
+type BlockReferences struct {
+	Comments int `json:"comments"`
+	Asks     int `json:"asks"`
+}
+
+// BlockPath is where a block stands in its document: GET /api/v1/artifacts/{id}/blocks/{block_id}'s
+// answer, and the anchor_block a comment's or ask's single read carries for its anchor's block.
+// Derived from the live document at read time; nothing stores it.
+type BlockPath struct {
+	ID    string           `json:"id"`
+	Type  string           `json:"type"`
+	Path  []BlockPathEntry `json:"path"`
+	Table *TablePosition   `json:"table,omitempty"`
+}
+
+// BlockPathEntry is one node on a block's path from the document's top-level block down to the
+// block: its type, block id ("" for a node the live document has not stamped yet) and index
+// among its parent's children.
+type BlockPathEntry struct {
+	Type  string `json:"type"`
+	ID    string `json:"id"`
+	Index int    `json:"index"`
+}
+
+// TablePosition places a block in the table holding it. Row is the row's index (0 the header row)
+// and Column the cell's index in its row, the indexes delete_row and delete_column take; Row is
+// nil for the table block, Column and Header for the table and a row block. Header is the text of
+// the header cell drawn above the cell's column once colspans and rowspans take their places, ""
+// where no header cell covers it. Cells is each cell of the row as its opening words; nil for the
+// table block.
+type TablePosition struct {
+	ID     string   `json:"id"`
+	Row    *int     `json:"row"`
+	Column *int     `json:"column"`
+	Header *string  `json:"header"`
+	Cells  []string `json:"cells"`
+}
+
+// AnchorPosition is where a comment's or an ask's anchor's block stands in the live document. Set
+// by the single-record reads alone (GET /api/v1/comments/{id}, GET /api/v1/asks/{id}), never by
+// lists or events.
+type AnchorPosition struct {
+	// AnchorBlock is nil when there is no anchor, the anchor names no block, the block has left
+	// the document, or the document could not be read, which AnchorBlockError then names.
+	AnchorBlock *BlockPath `json:"anchor_block,omitempty"`
+	// AnchorBlockError is why AnchorBlock is absent when the document could not be read: the code
+	// the API answers that error with elsewhere (DOC_SERVICE_UNAVAILABLE, DOC_SCHEMA,
+	// DOCUMENT_UNLOADABLE, INTERNAL);
+	// empty otherwise.
+	AnchorBlockError string `json:"anchor_block_error,omitempty"`
+}
+
+// Version is an immutable artifact version.
+type Version struct {
+	Number    int       `json:"number"`
+	Named     bool      `json:"named"`
+	Summary   *string   `json:"summary"`
+	Authors   []Actor   `json:"authors"`
+	CreatedAt time.Time `json:"created_at"`
+	// Size is how many bytes the version stores: a file's or an image's bytes, or a document's
+	// markdown, the rendering the version recorded.
+	Size   *int    `json:"size,omitempty"`
+	MIME   *string `json:"mime,omitempty"`
+	SHA256 *string `json:"sha256,omitempty"`
+}
+
+// VersionSize is the SQL a version's Size is selected with, over artifact_versions aliased v. A
+// file or image row records its size; a document row holds its markdown, whose length octet_length
+// takes from the stored value's header, so reading a document's size neither renders the document
+// nor reads its markdown, out of TOAST or otherwise.
+const VersionSize = `coalesce(v.size, octet_length(v.markdown))`
+
+// Ask is a question with either a human answer or a recorded closure reason.
+type Ask struct {
+	ID         string  `json:"id"`
+	IssueKey   *string `json:"issue_key"`
+	ArtifactID *string `json:"artifact_id"`
+	// BlockID is the typed block this indexed ask represents; nil is a row-only ask.
+	BlockID *string `json:"block_id"`
+	// BlockArtifactID identifies the document holding BlockID. It is internal to
+	// Dispatch's answer write-back; row ownership remains issue or unlinked document.
+	BlockArtifactID *string            `json:"-"`
+	AnchorArtifact  *AskAnchorArtifact `json:"anchor_artifact,omitempty"`
+	BlockArtifact   *AskBlockArtifact  `json:"block_artifact,omitempty"`
+	Author          Actor              `json:"author"`
+	// Kind is "question" for ordinary asks, whose asker chooses the options, and
+	// "approval" for server-created document reviews.
+	Kind     string      `json:"kind"`
+	Question string      `json:"question"`
+	Options  []AskOption `json:"options"`
+	Multiple bool        `json:"multiple"`
+	Urgency  string      `json:"urgency"`
+	Anchor   *Anchor     `json:"anchor"`
+	AnchorPosition
+	State         string         `json:"state"`
+	Answer        *AskAnswer     `json:"answer"`
+	Resolution    *AskResolution `json:"resolution,omitempty"`
+	OpenedEventID *int64         `json:"opened_event_id,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+	// ReferencedByCount is batched with ask-list reads so a card can suppress an empty backlink
+	// disclosure without issuing one graph request per ask. It is absent from mutation responses.
+	ReferencedByCount *int    `json:"referenced_by_count,omitempty"`
+	EditedAt          *string `json:"edited_at"`
+	// Approval names the document an approval ask is about; nil for questions.
+	Approval *AskApproval `json:"approval,omitempty"`
+	// ApprovalArtifact is the document Approval.ArtifactID names, hydrated the same way
+	// AnchorArtifact and BlockArtifact are: live, by its current slug and primary flag, not a
+	// snapshot from when the request opened. nil for questions, and for an approval ask whose
+	// document has since been deleted.
+	ApprovalArtifact *AskAnchorArtifact `json:"approval_artifact,omitempty"`
+	// WaitingOn is whose reply an open ask needs next: a moved approval request stays with its
+	// agent while RequestedVersion is below Version, and a hand-back returns it to the human until
+	// a reply newer than the one it answered decides it. Set on ask reads only (inbox rows, ask lists,
+	// the ask detail), never on the ask.* event payloads; empty for answered and resolved asks.
+	WaitingOn string `json:"waiting_on,omitempty"`
+}
+
+// AskAnchorArtifact is the document containing an ask's quoted anchor.
+type AskAnchorArtifact struct {
+	Project string `json:"project"`
+	Slug    string `json:"slug"`
+	Name    string `json:"name"`
+	Primary bool   `json:"primary"`
+}
+
+// AskBlockArtifact is the document containing a typed ask block.
+type AskBlockArtifact struct {
+	ID      string `json:"id"`
+	Slug    string `json:"slug"`
+	Primary bool   `json:"primary"`
+}
+
+// AskApproval is the document an approval ask names. Version follows the document's latest
+// settled version while the ask remains open. RequestedVersion is the version the agent most
+// recently handed to a human, so a lower value means the agent is revising the moved request.
+// Approved names the document's newest approval as the request was opened, so a request to
+// approve again says which approval it follows; a request on a document nobody has approved
+// carries none. A version move re-encodes the whole approval, so it survives it unchanged.
+type AskApproval struct {
+	ArtifactID       string               `json:"artifact_id"`
+	Name             string               `json:"name"`
+	Version          int                  `json:"version"`
+	RequestedVersion int                  `json:"requested_version"`
+	Approved         *AskApprovalApproved `json:"approved,omitempty"`
+}
+
+// AskApprovalApproved is the approval a request follows: the version a human approved, when
+// (RFC 3339 UTC, the review's created_at) and who.
+type AskApprovalApproved struct {
+	Version int    `json:"version"`
+	At      string `json:"at"`
+	By      Actor  `json:"by"`
+}
+
+// AskEditPrevious is the mutable content of an ask before an edit.
+type AskEditPrevious struct {
+	Question string      `json:"question"`
+	Options  []AskOption `json:"options"`
+	Multiple bool        `json:"multiple"`
+	Urgency  string      `json:"urgency"`
+}
+
+// NewAskEditPrevious is the mutable content ask asks as it stands: what an edit records as the
+// ask's previous content, and what a copied ask block is compared with.
+func NewAskEditPrevious(ask Ask) AskEditPrevious {
+	return AskEditPrevious{Question: ask.Question, Options: ask.Options, Multiple: ask.Multiple, Urgency: ask.Urgency}
+}
+
+// AskEdit is one recorded rewording of an ask, read back from its ask.edited
+// events: the question as it stood before the edit, who edited it, and when.
+type AskEdit struct {
+	Previous AskEditPrevious `json:"previous"`
+	EditedBy Actor           `json:"edited_by"`
+	At       string          `json:"at"`
+}
+
+// AskFollower is a session that receives an ask's answer, edits, resolution, and
+// replies on its own topic: the asker, every session that replied, and any session
+// a human added. A session may leave; a human may add or remove any session.
+type AskFollower struct {
+	SessionID string    `json:"session_id"`
+	Since     time.Time `json:"since"`
+}
+
+// AskFollowerEventPayload is the payload of ask.follower_added and
+// ask.follower_removed: which session joined or left which ask, and who did it.
+type AskFollowerEventPayload struct {
+	AskID     string `json:"ask_id"`
+	SessionID string `json:"session_id"`
+	By        Actor  `json:"by"`
+}
+
+// AskLastReply is the newest comment in an ask's thread, carried on inbox rows and on the issue
+// detail's open asks so a human can see who spoke last. Its Turn decides an ordinary ask's
+// WaitingOn; a moved approval request and one handed back after this reply override it.
+type AskLastReply struct {
+	Author    Actor  `json:"author"`
+	CreatedAt string `json:"created_at"`
+}
+
+// AskEventPayload is the wire payload of every `ask.*` event that carries the ask row: the ask
+// itself, flat, plus what the write moved in the reference graph. NewAskEventPayload is the only
+// way to build one, and it takes the changes, so a producer whose question text can cite
+// something cannot append an event that stays silent about it. Restored marks the `ask.opened` or
+// `ask.answered` settlement appends when a person's edit restores a decision block it retracted:
+// the ask returns to the state it had, and the event records no new answer (an `ask.answered`
+// restore carries the answer given before the retraction, credited to the editor who restored it).
+type AskEventPayload struct {
+	Ask
+	ReferenceChangesPayload
+	Restored bool `json:"restored,omitempty"`
+	// ThreadLogins is carried by ask.opened, ask.answered and ask.resolved: every login with a
+	// Replies row (user_threads) on the ask's thread once the write is in, read in its own
+	// transaction (events.ThreadLogins), so a viewer knows whether their Replies count can have
+	// moved. Absent on every other ask event; [] when nobody has a row.
+	ThreadLogins []string `json:"thread_logins,omitzero"`
+}
+
+// NewReferenceChangesPayload states what a write moved on a typed event payload.
+func NewReferenceChangesPayload(changes ReferenceChanges) ReferenceChangesPayload {
+	return ReferenceChangesPayload{
+		ReferencesChanged:               changes.Targets,
+		ReferencesChangedTruncated:      changes.Truncated(),
+		ReferencesChangedTruncatedKinds: changes.TruncatedKinds,
+	}
+}
+
+// NewAskEventPayload builds the payload of an `ask.*` event. A transition that writes no text
+// (answered, resolved, an anchor refresh) passes an empty ReferenceChanges.
+func NewAskEventPayload(ask Ask, changes ReferenceChanges) AskEventPayload {
+	return AskEventPayload{
+		Ask:                     ask,
+		ReferenceChangesPayload: NewReferenceChangesPayload(changes),
+	}
+}
+
+// AskAnsweredEventPayload is an ask.answered payload. PreviousAnswer is set only when a human
+// replaces their earlier answer; the asker and every follower receive it through the same event
+// path as the first answer.
+type AskAnsweredEventPayload struct {
+	AskEventPayload
+	PreviousAnswer *AskAnswer `json:"previous_answer,omitempty"`
+}
+
+// IssueEventPayload is the wire payload of every `issue.*` event: the issue's own fields, flat,
+// plus what the write moved in the reference graph. A new issue's spec text is indexed in the
+// creating transaction, so `issue.created` names the nodes that body cited.
+//
+// issue.created, issue.updated and issue.closed also say what the write changed, read in its own
+// transaction: Changed names each field whose value the write moved (title, status, closed_at
+// for a close or a reopen, rank, priority, assignee, parent, labels, route, repo, components,
+// blocked_by, external_links; for issue.created every field the new issue holds a value in),
+// Ancestors the issue's parent chain,
+// parent first up to the root ([] for a root), and ThreadLogins, only when the status moved,
+// whose Replies count the move can change: for a close or a reopen every login with a Replies row
+// on one of the issue's open asks (events.IssueLoginsOf), for any other status move [].
+// Each is absent from an event written before them.
+type IssueEventPayload struct {
+	Issue
+	ReferenceChangesPayload
+	Changed      []string `json:"changed,omitzero"`
+	Ancestors    []string `json:"ancestors,omitzero"`
+	ThreadLogins []string `json:"thread_logins,omitzero"`
+}
+
+// NewIssueEventPayload builds the payload of an `issue.*` event. A write that indexes no text
+// (a patch, a close) passes an empty ReferenceChanges.
+func NewIssueEventPayload(issue Issue, changes ReferenceChanges) IssueEventPayload {
+	return IssueEventPayload{
+		Issue:                   issue,
+		ReferenceChangesPayload: NewReferenceChangesPayload(changes),
+	}
+}
+
+// WithOwnerLastSeq is the payload carrying seq as the issue's last_seq. An issue event's payload
+// holds the issue row as the event leaves it, and the event's own sequence is what that row's
+// last_seq becomes when it is appended, so the append derives both from one expression
+// (events.Broker.QueueAppend) and no writer counts the events queued before its own.
+func (p IssueEventPayload) WithOwnerLastSeq(seq int) any {
+	p.LastSeq = seq
+	return p
+}
+
+// AskEditEventPayload is the full edited ask plus its prior mutable content, the actor who made
+// the edit, and what the new question text moved in the reference graph.
+type AskEditEventPayload struct {
+	Ask
+	ReferenceChangesPayload
+	Previous AskEditPrevious `json:"previous"`
+	EditedBy Actor           `json:"edited_by"`
+	// Quiet marks a version move of an approval request that an earlier version already moved
+	// since it was opened or last handed back (requested_version below the version it named): it
+	// changes only the version the request names, so like a human's unnamed artifact.version it
+	// wakes nobody (events.Broker.Notify) and reaches no follower (the outbox's follower routes),
+	// while the event log and the event feed carry it as they carry every event. The first move
+	// after an opening or a hand-back is not quiet, even when a thread reply left the request
+	// waiting on its agent.
+	Quiet bool `json:"quiet,omitempty"`
+}
+
+// NewAskEditEventPayload builds the payload of an `ask.edited` event.
+func NewAskEditEventPayload(
+	ask Ask,
+	previous AskEditPrevious,
+	editedBy Actor,
+	changes ReferenceChanges,
+) AskEditEventPayload {
+	return AskEditEventPayload{
+		Ask:                     ask,
+		ReferenceChangesPayload: NewReferenceChangesPayload(changes),
+		Previous:                previous,
+		EditedBy:                editedBy,
+	}
+}
+
+// BlockRepairedEventPayload records one server-owned typed-block repair in a version.
+type BlockRepairedEventPayload struct {
+	BlockID     string `json:"block_id"`
+	Version     int    `json:"version"`
+	DisturbedBy Actor  `json:"disturbed_by"`
+}
+
+// BlockInvalidEventPayload records an ask block that browser editing left malformed.
+type BlockInvalidEventPayload struct {
+	BlockID     string `json:"block_id"`
+	Version     int    `json:"version"`
+	Reason      string `json:"reason"`
+	DisturbedBy Actor  `json:"disturbed_by"`
+}
+
+// AskOption is an answer choice.
+type AskOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+// AskAnswer is a human response to an ask.
+type AskAnswer struct {
+	User     string    `json:"user"`
+	Selected []string  `json:"selected"`
+	Text     *string   `json:"text"`
+	At       time.Time `json:"at"`
+}
+
+// UnmarshalJSON decodes an answer and reads a null or absent selected as an empty list: an answer
+// that chose no option sends `"selected":[]`, never null, though rows and ask.answered events
+// written before answers stored an empty list hold null there.
+func (a *AskAnswer) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	type plain AskAnswer
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if value.Selected == nil {
+		value.Selected = []string{}
+	}
+	*a = AskAnswer(value)
+	return nil
+}
+
+// OpenAskOwner identifies the issue or standalone project document holding an ask.
+type OpenAskOwner struct {
+	Issue    *OpenAskIssue    `json:"issue,omitempty"`
+	Document *OpenAskDocument `json:"document,omitempty"`
+}
+
+// OpenAskIssue is the issue shape an ask-owned list row needs.
+type OpenAskIssue struct {
+	Key   string `json:"key"`
+	Title string `json:"title"`
+}
+
+// OpenAskDocument is the project document shape an ask-owned list row needs.
+type OpenAskDocument struct {
+	Project string `json:"project"`
+	Slug    string `json:"slug"`
+	Name    string `json:"name"`
+}
+
+// MyAnswerReply is the reply carried by a row in a person's answer history.
+type MyAnswerReply struct {
+	ID   string `json:"id"`
+	Body string `json:"body"`
+}
+
+// MyAnswerRow is one answer or reply written by the caller, newest first.
+type MyAnswerRow struct {
+	Kind     string         `json:"kind"`
+	At       time.Time      `json:"at"`
+	AskID    string         `json:"ask_id"`
+	Ref      string         `json:"ref"`
+	Question string         `json:"question"`
+	AskKind  string         `json:"ask_kind"`
+	AskState string         `json:"ask_state"`
+	EditedAt *string        `json:"edited_at"`
+	Owner    OpenAskOwner   `json:"owner"`
+	Answer   *AskAnswer     `json:"answer,omitempty"`
+	Current  bool           `json:"current"`
+	Reply    *MyAnswerReply `json:"reply,omitempty"`
+}
+
+// MyAnswersResponse is a page of the caller's answers and ask replies.
+type MyAnswersResponse struct {
+	Rows   []MyAnswerRow `json:"rows"`
+	Total  int           `json:"total"`
+	Limit  int           `json:"limit"`
+	Offset int           `json:"offset"`
+}
+
+// MyReplyReply is the newest write someone else made in a thread on the Replies page: a reply (a
+// comment or a message), or the ask's answer, whose ID is the ask's, whose author is the answerer
+// and whose first line is the answer's options and text.
+type MyReplyReply struct {
+	ID        string    `json:"id"`
+	Kind      string    `json:"kind"`
+	Author    Actor     `json:"author"`
+	FirstLine string    `json:"first_line"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// MyReplyRow is one thread the caller wrote in where someone else has written since the caller
+// last read it: an ask's thread, a comment thread by its root, or an issue message thread by its
+// root. Ref is the SPA route of the thread's root, never the reply's.
+type MyReplyRow struct {
+	ThreadID string           `json:"thread_id"`
+	Kind     string           `json:"kind"`
+	Ref      string           `json:"ref"`
+	Issue    *OpenAskIssue    `json:"issue,omitempty"`
+	Document *OpenAskDocument `json:"document,omitempty"`
+	Subject  string           `json:"subject"`
+	Reply    MyReplyReply     `json:"reply"`
+}
+
+// MyRepliesResponse is a page of the caller's unread threads, newest reply first, and how many
+// there are in all.
+type MyRepliesResponse struct {
+	Rows   []MyReplyRow `json:"rows"`
+	Total  int          `json:"total"`
+	Limit  int          `json:"limit"`
+	Offset int          `json:"offset"`
+}
+
+// SessionAnswer kinds: an ask's current answer (its ID is the ask's), a comment, or a message.
+const (
+	SessionAnswerKindAnswer  = "answer"
+	SessionAnswerKindComment = "comment"
+	SessionAnswerKindMessage = "message"
+)
+
+// SessionAnswer relations: what an item is to the session Dispatch delivered it to, spelled as
+// SESSION_ANSWER_RELATIONS in packages/contracts/src/dispatch-api.ts spells them.
+const (
+	SessionAnswerRelationAnsweredYourAsk        = "answered_your_ask"
+	SessionAnswerRelationRepliedOnYourAsk       = "replied_on_your_ask"
+	SessionAnswerRelationRepliedInCommentThread = "replied_in_a_comment_thread"
+	SessionAnswerRelationCommentedOnDocument    = "commented_on_a_document"
+	SessionAnswerRelationCommentedOnIssue       = "commented_on_an_issue"
+	SessionAnswerRelationMentionedYou           = "mentioned_you"
+	SessionAnswerRelationSentYouMessage         = "sent_you_a_message"
+	SessionAnswerRelationRepliedToYourMessage   = "replied_to_your_message"
+)
+
+// SessionAnswerAsk is the ask a session answer item answers or replies in, with the session's
+// whole question.
+type SessionAnswerAsk struct {
+	ID       string `json:"id"`
+	Question string `json:"question"`
+}
+
+// SessionAnswer is one thing a person wrote that Dispatch delivered to a session, on
+// GET /api/v1/agents/{session_id}/answers: an ask's current answer, a comment at its current
+// body, or a message, each (Kind, ID) once. Author is always a user. Text is the person's words in
+// full ("" for an answer that chose options only). Selected and Replaced are an answer's, each
+// omitted when empty or false; EditedAt is an edited comment's; Ask is set on an answer and on a
+// reply in an ask's thread. Owner and Ref are nil for a direct message, which is on no issue and
+// has no dispatch:// address; Href is then /agents/<session>/live.
+type SessionAnswer struct {
+	Kind     string            `json:"kind"`
+	Relation string            `json:"relation"`
+	ID       string            `json:"id"`
+	At       time.Time         `json:"at"`
+	EditedAt *time.Time        `json:"edited_at,omitempty"`
+	Author   Actor             `json:"author"`
+	Text     string            `json:"text"`
+	Selected []string          `json:"selected,omitempty"`
+	Replaced bool              `json:"replaced,omitempty"`
+	Ask      *SessionAnswerAsk `json:"ask,omitempty"`
+	Owner    *OpenAskOwner     `json:"owner"`
+	Ref      *string           `json:"ref"`
+	Href     string            `json:"href"`
+}
+
+// SessionAnswersResponse is what people wrote to one session since Since, newest first by At,
+// then by ID. Total counts every item in the window, also when max_chars stopped Items early.
+type SessionAnswersResponse struct {
+	SessionID string          `json:"session_id"`
+	Since     time.Time       `json:"since"`
+	Total     int             `json:"total"`
+	Items     []SessionAnswer `json:"items"`
+}
+
+// AskResolution records why a question no longer needs a human answer.
+type AskResolution struct {
+	Kind   string    `json:"kind"`
+	Reason string    `json:"reason"`
+	Actor  Actor     `json:"actor"`
+	At     time.Time `json:"at"`
+}
+
+// Comment is a collaboration comment, optionally with an edit suggestion. A comment
+// replies to at most one of another comment (ReplyTo) or an ask (AskID). Comment
+// threads store their root ID in ReplyTo, and ask threads store their ask ID in
+// AskID, so both thread forms remain flat.
+// Mention is one canonical session or role target resolved when its comment is created.
+type Mention struct {
+	Target    string  `json:"target"`
+	Delivery  string  `json:"delivery"`
+	SessionID *string `json:"session_id"`
+}
+
+// DeliveryClaimLapse is the lease on a pending delivery attempt (a comment_deliveries or
+// message_deliveries row): a sender's claim older than this was left by a sender that never came
+// back. Two readers depend on the one window and must agree. The API's claimLapsed
+// (internal/dispatch/api) lets another sender resume or settle an attempt whose claim is older,
+// and the outbox's mentionDeliveryQuery (internal/dispatch/outbox) stops holding a mentioned
+// session's own-topic copy back for a pending mention attempt whose claim - or creation, when no
+// sender claimed it - is older, so the outbox never waits on an attempt a sender may no longer
+// finish. Both judge it in Postgres against Postgres's own timestamps, through
+// DeliveryClaimLapseInterval.
+const DeliveryClaimLapse = time.Minute
+
+// DeliveryClaimLapseInterval is DeliveryClaimLapse as a Postgres interval literal in whole
+// seconds, for SQL that compares a delivery's claimed_at or created_at against now().
+var DeliveryClaimLapseInterval = fmt.Sprintf("interval '%d seconds'", int64(DeliveryClaimLapse/time.Second))
+
+// CommentDelivery records one attempt to deliver a mention to its resolved session.
+type CommentDelivery struct {
+	CommentID  string  `json:"comment_id"`
+	Target     string  `json:"target"`
+	Attempt    int     `json:"attempt"`
+	Delivery   string  `json:"delivery"`
+	SessionID  *string `json:"session_id"`
+	EnvelopeID *string `json:"envelope_id"`
+	// Duplicate reports that the stream already held this message when the attempt was sent: an
+	// earlier attempt landed, so this one is a repeat the recipient is not handed again
+	// (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). EnvelopeID is then nil.
+	Duplicate    bool      `json:"duplicate"`
+	State        string    `json:"state"`
+	Error        *string   `json:"error"`
+	ResolveError *string   `json:"resolve_error"`
+	ReplyID      *string   `json:"reply_id"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// CommentDeliveryEventPayload is the durable outcome of one mention delivery attempt.
+type CommentDeliveryEventPayload struct {
+	CommentID string `json:"comment_id"`
+	// AskID is the ask whose thread holds the comment, so a consumer keyed on the ask
+	// (the Inbox row, the ask card) sees a receipt that changes the thread it renders.
+	// Nil when the comment belongs to no ask.
+	AskID     *string `json:"ask_id"`
+	Target    string  `json:"target"`
+	Attempt   int     `json:"attempt"`
+	Delivery  string  `json:"delivery"`
+	SessionID *string `json:"session_id"`
+	State     string  `json:"state"`
+	// Duplicate reports that the stream already held this message: an earlier attempt landed, so
+	// this one is a repeat the mentioned session is not handed again.
+	Duplicate bool    `json:"duplicate,omitempty"`
+	Error     string  `json:"error,omitempty"`
+	ReplyID   *string `json:"reply_id"`
+}
+
+type Comment struct {
+	ID         string  `json:"id"`
+	IssueKey   *string `json:"issue_key"`
+	ArtifactID *string `json:"artifact_id"`
+	Author     Actor   `json:"author"`
+	Body       string  `json:"body"`
+	Anchor     *Anchor `json:"anchor"`
+	AnchorPosition
+	ReplyTo *string `json:"reply_to"`
+	AskID   *string `json:"ask_id"`
+	// Turn is set on a reply to an open ask (AskID non-nil) and names whose turn the reply hands
+	// over: "human" when the human needs to act, "agent" when the comment is a progress note and
+	// the asking agent still owes the next move. A human's reply always hands the turn to the
+	// agent. The ask's WaitingOn follows its newest reply's Turn except where an approval request
+	// overrides it (moved, or handed back after this reply). Nil on replies under a closed ask
+	// (nothing is waiting) and on every other comment.
+	Turn       *string           `json:"turn"`
+	Resolved   bool              `json:"resolved"`
+	ResolvedBy *Actor            `json:"resolved_by"`
+	ResolvedAt *string           `json:"resolved_at"`
+	EditedAt   *string           `json:"edited_at"`
+	Suggestion *Suggestion       `json:"suggestion"`
+	CreatedAt  time.Time         `json:"created_at"`
+	Mentions   []Mention         `json:"mentions"`
+	Deliveries []CommentDelivery `json:"deliveries"`
+	// ReplyBlock is the block of the comment this reply answers, when it names one
+	// (reply_to_block); null on every other comment.
+	ReplyBlock *ReplyBlock `json:"reply_block"`
+	// RepliesToBlock is the node id comments.replies_to_block stores, null for a comment that
+	// names no block; ReplyBlock is read from it, and only for a comment that names one.
+	RepliesToBlock *string `json:"-"`
+}
+
+// ReplyBlock is the block a reply answers: its node id ('<item kind>/<item id>#<block id>') and
+// reference (none for a block of a direct message, which has no address), its id, its stored
+// excerpt (its text cut to refs.BlockExcerptRunes, the last text it held once removed), and
+// whether its item's current revision no longer holds it.
+type ReplyBlock struct {
+	Node    string `json:"node"`
+	Ref     string `json:"ref,omitempty"`
+	BlockID string `json:"block_id"`
+	Text    string `json:"text"`
+	Removed bool   `json:"removed"`
+}
+
+// ItemBlocks is the answer of GET /api/v1/comments/{id}/blocks and GET
+// /api/v1/messages/{id}/blocks: the comment or message as a graph node, the comment's revision (a
+// message, which is never edited, has none), whether its blocks are indexed from the body it
+// stores, and its current blocks in body order. While the item is owed an index, or its index was
+// made from another body than the stored one, Indexed is false and Blocks is empty: a read writes
+// nothing, and the dashboard's editor then edits the comment without carrying block ids.
+type ItemBlocks struct {
+	Item     GraphNode   `json:"item"`
+	Revision *int        `json:"revision,omitempty"`
+	Indexed  bool        `json:"indexed"`
+	Blocks   []ItemBlock `json:"blocks"`
+}
+
+// ItemBlock is one current block of a comment or message: its id, its Proof type, its whole text as
+// its author wrote it, its reference (none for a block of a direct message, which has no address),
+// and From and To, where it starts and ends in the stored body in UTF-16 code units (a JavaScript
+// string index). A comment block also carries the revision its text last changed in and that
+// revision's time; a message block has neither.
+type ItemBlock struct {
+	ID              string     `json:"id"`
+	Type            string     `json:"type"`
+	Text            string     `json:"text"`
+	Ref             string     `json:"ref,omitempty"`
+	From            int        `json:"from"`
+	To              int        `json:"to"`
+	ChangedRevision *int       `json:"changed_revision,omitempty"`
+	ChangedAt       *time.Time `json:"changed_at,omitempty"`
+}
+
+// Suggestion carries a proposed document replacement and its resolution.
+type Suggestion struct {
+	ReplaceWith string `json:"replace_with"`
+	Accepted    *bool  `json:"accepted"`
+}
+
+// ReferenceChanges is what one write moved in the reference graph, in the shape every event
+// that reports it carries: the counted targets it touched, and TruncatedKinds, the kinds (issue,
+// ask, artifact, block) of which it touched more than an event names, for which the reader
+// refreshes every read wholesale while it still refreshes the named targets of the other kinds.
+type ReferenceChanges struct {
+	Targets        []ChangedReference
+	TruncatedKinds []string
+}
+
+// Truncated is whether the write touched more targets of some kind than the event names.
+func (c ReferenceChanges) Truncated() bool {
+	return len(c.TruncatedKinds) > 0
+}
+
+// The three wire keys every event that reports reference changes carries. A typed payload spells
+// them in its struct tags through ReferenceChangesPayload and a map payload through
+// NameReferenceChanges, and model_test.go pins the two spellings together.
+// ReferencesChangedTruncatedKey stays beside the kinds for a reader written before them, which
+// falls back for every kind.
+const (
+	ReferencesChangedKey               = "references_changed"
+	ReferencesChangedTruncatedKey      = "references_changed_truncated"
+	ReferencesChangedTruncatedKindsKey = "references_changed_truncated_kinds"
+)
+
+// ReferencedByCountKey is the wire key carrying how many graph_edges rows point at an ask. Ask
+// struct tag, the issue detail's ask rows and the map-shaped event payloads all spell it here,
+// and model/reference_changes_test.go pins the spelling against the struct.
+const ReferencedByCountKey = "referenced_by_count"
+
+// ReferenceChangesPayload is the fields a typed event payload carries, embedded so every payload
+// spells them once.
+type ReferenceChangesPayload struct {
+	ReferencesChanged               []ChangedReference `json:"references_changed,omitempty"`
+	ReferencesChangedTruncated      bool               `json:"references_changed_truncated,omitempty"`
+	ReferencesChangedTruncatedKinds []string           `json:"references_changed_truncated_kinds,omitempty"`
+}
+
+// NameReferenceChanges records what a write moved on a map-shaped event payload, in the same
+// keys the typed payloads carry.
+func NameReferenceChanges(payload map[string]any, changes ReferenceChanges) {
+	if len(changes.Targets) > 0 {
+		payload[ReferencesChangedKey] = changes.Targets
+	}
+	if changes.Truncated() {
+		payload[ReferencesChangedTruncatedKey] = true
+		payload[ReferencesChangedTruncatedKindsKey] = changes.TruncatedKinds
+	}
+}
+
+// ChangedReference is a node whose inbound reference edges one write moved, addressed the way
+// the lists that carry its backlink count are keyed: an issue by key, an ask by id together
+// with the issue or document whose ask list holds its row. A document or file (kind "artifact")
+// is named by its uuid, the id its Referenced by panel's read reports for the node, and by Ref,
+// its dispatch:// address as refs.ArtifactRef spells it (the reference that panel is opened on);
+// Ref is empty for an artifact whose owner names no address. An artifact entry carries neither
+// IssueKey nor ArtifactID, which address an ask's row list. A block of a document (kind "block")
+// is named by its node id (`<document ref_key>#<block id>`, the id its graph read reports), by Ref,
+// its reference as refs.BlockRef spells it, and by ArtifactID, its document's uuid, whose panel
+// lists the edges at its blocks; a write names one whose inbound edges, or whose text, it moved.
+type ChangedReference struct {
+	Kind       string  `json:"kind"`
+	ID         string  `json:"id"`
+	IssueKey   *string `json:"issue_key,omitempty"`
+	ArtifactID *string `json:"artifact_id,omitempty"`
+	Ref        string  `json:"ref,omitempty"`
+}
+
+// CommentEventPayload is the wire payload of comment.* and suggestion.* events:
+// the comment's own fields plus the anchored artifact's name. Comment is
+// embedded so the JSON stays flat, which is the shape every consumer reads.
+type CommentEventPayload struct {
+	Comment
+	ArtifactName string `json:"artifact_name"`
+	// ProjectKey and ArtifactSlug identify the document owning an artifact comment,
+	// including direct author routes whose topic no longer carries document details.
+	ProjectKey   string `json:"project_key,omitempty"`
+	ArtifactSlug string `json:"artifact_slug,omitempty"`
+	// AskQuestion is the question text of the ask this comment replies to
+	// (Comment.AskID), carried alongside the id-shaped in_reply_to so a
+	// notification renderer can show "re: <question>" instead of a bare UUID.
+	// Empty when the comment does not reply to an ask.
+	AskQuestion string `json:"ask_question,omitempty"`
+	// AskState is that ask's state when the comment was posted. A human reply
+	// while the ask is still "open" is a request for clarification: the asker
+	// answers in the thread or rewords the question. Empty when the comment does
+	// not reply to an ask.
+	AskState string `json:"ask_state,omitempty"`
+	// AskWaitingOn is the open ask's Ask.WaitingOn once this comment is its newest
+	// reply, so a stream consumer can move the ask between "waiting on you" and
+	// "waiting on the agent" without re-reading it. Empty when the comment does not
+	// reply to an open ask.
+	AskWaitingOn string `json:"ask_waiting_on,omitempty"`
+	// ThreadRootID is the id of the head of the thread the comment joined, which is also
+	// what Comment.ReplyTo stores for it. Carried by comment.created and by the
+	// comment.answered a delivery callback appends; empty when the comment replies to an
+	// ask or is a root comment.
+	ThreadRootID string `json:"thread_root_id,omitempty"`
+	// SuppressRoute is resolved before the comment event commits, so the outbox can deduplicate
+	// without consulting the live session registry. It names a candidate only: the session the
+	// route resolved to when the comment was written, which the comment's mentions also resolved
+	// to. The mention's send runs after the commit and can fail, so the outbox skips the route's
+	// copy only once comment_deliveries shows the mention was sent to that session, holds the copy
+	// back while the send is still pending, and publishes it when the send failed or was
+	// abandoned. SuppressedRoute is the route that resolved to SuppressedRouteSessionID. The
+	// outbox's session routes read the comment's own mentions for the same rule.
+	SuppressRoute            bool    `json:"suppress_route"`
+	SuppressedRoute          string  `json:"suppressed_route,omitempty"`
+	SuppressedRouteSessionID *string `json:"suppressed_route_session_id,omitempty"`
+	// MentionsDecideRoutes records that the comment reaches sessions beyond its mentions - the
+	// issue had a route or a session claimant, the comment replies to a thread or joins an ask's
+	// thread that has followers, it is on a document, or it is on an issue whose primary document
+	// credits a session - so its mentions were resolved, through a listener take-over, before it
+	// committed, and the route above and the outbox's session routes were decided on those
+	// resolutions. Each mention's first attempt keeps its resolution for whichever sender finishes
+	// it: a mention resolved again after the commit could reach a session one of those routes
+	// reaches too. Omitted when false.
+	MentionsDecideRoutes bool `json:"mentions_decide_routes,omitempty"`
+	// ReferenceChangesPayload names the nodes whose inbound reference edges this write moved,
+	// so a reader carrying their batched backlink counts refreshes exactly those rows.
+	ReferenceChangesPayload
+	// ThreadLogins is carried by comment.created and comment.answered: every login with a
+	// Replies row on the comment's thread (its ask, else its root) once the comment is in, read
+	// in its own transaction (events.ThreadLogins). Absent on every other comment event.
+	ThreadLogins []string `json:"thread_logins,omitzero"`
+}
+
+// Message is a short update, optionally linked to an issue and threaded under another message.
+type Message struct {
+	ID        string  `json:"id"`
+	IssueKey  *string `json:"issue_key"`
+	Author    Actor   `json:"author"`
+	Body      string  `json:"body"`
+	Target    *string `json:"target"`
+	InReplyTo *string `json:"in_reply_to"`
+	// BroadcastID names the broadcast this message is one recipient's copy of, and is null for
+	// every other message.
+	BroadcastID *string           `json:"broadcast_id"`
+	CreatedAt   time.Time         `json:"created_at"`
+	Deliveries  []MessageDelivery `json:"deliveries"`
+	// ReplyBlock is the block of the message this reply answers, when it names one
+	// (in_reply_to_block); null on every other message.
+	ReplyBlock *ReplyBlock `json:"reply_block"`
+	// RepliesToBlock is the node id messages.replies_to_block stores, null for a message that
+	// names no block; ReplyBlock is read from it, and only for a message that names one.
+	RepliesToBlock *string `json:"-"`
+}
+
+// MessageDelivery records one attempt to reach a live agent with a targeted message.
+type MessageDelivery struct {
+	MessageID  string  `json:"message_id"`
+	Attempt    int     `json:"attempt"`
+	Delivery   string  `json:"delivery"`
+	SessionID  string  `json:"session_id"`
+	EnvelopeID *string `json:"envelope_id"`
+	// Duplicate reports that the stream already held this message when the attempt was sent: an
+	// earlier attempt landed, so this one is a repeat the recipient is not handed again
+	// (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). EnvelopeID is then nil: the envelope
+	// this send minted is the one JetStream discarded.
+	Duplicate bool      `json:"duplicate"`
+	State     string    `json:"state"`
+	Error     *string   `json:"error"`
+	ReplyID   *string   `json:"reply_id"`
+	CreatedAt time.Time `json:"created_at"`
+	// RequestedBy is the actor whose send opened the attempt: the person who wrote or retried
+	// the message, or the session a bearer's retry named. A resume keeps it. Nil on an attempt
+	// written before Dispatch recorded it, which is never read as a person's.
+	RequestedBy *Actor `json:"requested_by"`
+	// AcceptedAt and AcceptedAs record that the attempt's session took the message
+	// (POST /api/v1/messages/{id}/deliveries/{attempt}/accept), and as what: "user_turn", the
+	// session's own user turn. At most one attempt of a message is ever accepted.
+	AcceptedAt *time.Time `json:"accepted_at"`
+	AcceptedAs *string    `json:"accepted_as"`
+}
+
+// MessageEventPayload wraps a Message with the reply target's body preview (first 160
+// characters, ReplyBody), or the preview of the block it names (ReplyBlock), so a reply can
+// render "re: <preview>" without a second lookup.
+type MessageEventPayload struct {
+	Message
+	ReplyBody string `json:"reply_body,omitempty"`
+	// ThreadTarget is the target of the reply's thread root: the conversation the reply
+	// lands in, for a consumer that groups a thread under its root. A session replying to a
+	// message aimed at that session inherits no target of its own (the target would be
+	// itself), so its own Target names no conversation. Empty on a root message, whose
+	// Target already names one, and on a reply under an untargeted thread. It is the root's
+	// target column verbatim, so it is whatever a target may be - "session:<id>" or the
+	// "role:<role>" route the thread was aimed at - and never resolved to a session.
+	ThreadTarget string `json:"thread_target,omitempty"`
+	// ReferenceChangesPayload carries the same signal comment events do.
+	ReferenceChangesPayload
+	// ThreadLogins is every login with a Replies row on the message's thread (its root, up
+	// in_reply_to) once the message is in, read in its own transaction (events.ThreadLogins).
+	// Carried by an issue message's message.created and message.answered; absent on a direct
+	// (issue-less) conversation's, which has no Replies thread, and on a delivery frame.
+	ThreadLogins []string `json:"thread_logins,omitzero"`
+}
+
+// UserAgentStateEventPayload is `user_agent_state.updated`: one viewer's Clear or read mark on
+// one session's conversation changed. It names the viewer so their other open tabs and devices
+// refresh their unread badge; like the other issue-less conversation events it is owned by the
+// session, so it is ordered with that session's messages.
+type UserAgentStateEventPayload struct {
+	Login     string `json:"login"`
+	SessionID string `json:"session_id"`
+}
+
+// UserThreadStateEventPayload is `user_thread_state.updated`: one viewer's read mark on one thread
+// of the Replies page moved. It names the viewer so their other open tabs and devices drop the row;
+// it is owned by the thread's project, like `user_state.updated`, and never notifies.
+type UserThreadStateEventPayload struct {
+	Login    string `json:"login"`
+	ThreadID string `json:"thread_id"`
+}
+
+// MessageDeliveryEventPayload is the user-visible result of one target delivery attempt.
+type MessageDeliveryEventPayload struct {
+	MessageID string `json:"message_id"`
+	Attempt   int    `json:"attempt"`
+	Delivery  string `json:"delivery"`
+	SessionID string `json:"session_id"`
+	Target    string `json:"target"`
+	Title     string `json:"title"`
+	State     string `json:"state"`
+	// Duplicate reports that the stream already held this message, so the recipient gained
+	// nothing from this attempt. Absent means false.
+	Duplicate bool   `json:"duplicate,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// MessageAcceptedEventPayload is `message.accepted`: the session an attempt went to took the
+// message as AcceptedAs. It is never a second `message.delivery` receipt; the attempt's send
+// still appends its own. Target is the message's own, `session:<recipient>` for a direct
+// message, which is where an issue-less event takes its owner from.
+type MessageAcceptedEventPayload struct {
+	MessageID  string `json:"message_id"`
+	Attempt    int    `json:"attempt"`
+	SessionID  string `json:"session_id"`
+	AcceptedAs string `json:"accepted_as"`
+	Target     string `json:"target"`
+}
+
+// ReferencedBy identifies a post or artifact that mentions an artifact.
+type ReferencedBy struct {
+	Kind     string  `json:"kind"`
+	ID       string  `json:"id"`
+	IssueKey *string `json:"issue_key"`
+	Project  string  `json:"project"`
+	Excerpt  string  `json:"excerpt"`
+	RefKey   string  `json:"ref_key,omitempty"`
+}
+
+// ReferenceVia identifies the item or artifact through which a reference was reached.
+type ReferenceVia struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
+
+// ReferenceMember is one artifact in an issue's reference closure.
+type ReferenceMember struct {
+	Artifact Artifact     `json:"artifact"`
+	Depth    int          `json:"depth"`
+	Via      ReferenceVia `json:"via"`
+}
+
+// IssueReferences is an issue's artifact reference closure.
+type IssueReferences struct {
+	Members   []ReferenceMember `json:"members"`
+	Truncated bool              `json:"truncated"`
+}
+
+// OutgoingReference is a target edge from an artifact.
+type OutgoingReference struct {
+	Kind     string    `json:"kind"`
+	ToID     string    `json:"to_id"`
+	Artifact *Artifact `json:"artifact,omitempty"`
+}
+
+// ArtifactReferences describes an artifact's outgoing and incoming reference edges.
+type ArtifactReferences struct {
+	Outgoing     []OutgoingReference `json:"outgoing"`
+	ReferencedBy []ReferencedBy      `json:"referenced_by"`
+}
+
+// GraphNode is one end of a reference-graph edge. IssueKey and Project locate it; an artifact an
+// agent's conversation owns has neither and is located by Ref alone
+// (`dispatch://agent/<session id>/artifact/<slug>`). Ref is its dispatch:// address and is empty
+// for session nodes, which have none. The edges into and out of a node are the reads `?to=` and
+// `?from=` of its Ref.
+//
+// Every node carries six facts, whatever its kind: MadeBy and MadeAt, who made it and when;
+// ChangedBy and ChangedAt, who last changed its own text or fields and when (its maker while
+// nothing has changed it since); Parent, the node it belongs to; and ParentVersion, the version of
+// the parent it belongs to. A fact Dispatch never recorded is empty: MadeBy and ChangedBy are then
+// `[]`, never null, and the others null.
+//
+// A block node (kind `block`, id `<document ref_key>#<block id>`) also carries BlockID, its
+// document's reference as Document, and ChangedVersion, the document version in which its text
+// last changed (ChangedAt is that version's time). Text and Pin are set only on the node a
+// reference read names: Text is the block's whole current text, and Pin answers a reference pinned
+// to a version.
+type GraphNode struct {
+	Kind           string      `json:"kind"`
+	ID             string      `json:"id"`
+	BlockID        string      `json:"block_id,omitempty"`
+	IssueKey       *string     `json:"issue_key,omitempty"`
+	Project        string      `json:"project,omitempty"`
+	Ref            string      `json:"ref,omitempty"`
+	Document       string      `json:"document,omitempty"`
+	ChangedVersion int         `json:"changed_version,omitempty"`
+	MadeBy         []Actor     `json:"made_by"`
+	MadeAt         *time.Time  `json:"made_at"`
+	ChangedBy      []Actor     `json:"changed_by"`
+	ChangedAt      *time.Time  `json:"changed_at"`
+	Parent         *NodeParent `json:"parent"`
+	ParentVersion  *int        `json:"parent_version"`
+	Text           string      `json:"text,omitempty"`
+	Pin            *BlockPin   `json:"pin,omitempty"`
+}
+
+// NodeParent names the node a graph node belongs to: its kind and its node id (an artifact's
+// uuid, an issue's key, a component's `<project>/<id>`), and Ref, its dispatch:// address,
+// absent for a parent that has none (a session, a direct message, a document no project owns).
+type NodeParent struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+	Ref  string `json:"ref,omitempty"`
+}
+
+// BlockPin is a block reference pinned to a version of its document (`#b-<id>@v<N>`): the
+// pinned reference, the block's whole text at that version, and how the block stands now. State
+// is "unchanged" when its current text equals Text, "changed" when it differs, and "removed"
+// when no current version holds the block; RemovedVersion is then the version that deleted it.
+type BlockPin struct {
+	Version        int    `json:"version"`
+	Ref            string `json:"ref"`
+	Text           string `json:"text"`
+	State          string `json:"state"`
+	RemovedVersion int    `json:"removed_version,omitempty"`
+}
+
+// GraphExcerpt is the text shown for an edge: the block containing a document mention (with its
+// block id), or the head of the other node's own text.
+type GraphExcerpt struct {
+	BlockID string `json:"block_id,omitempty"`
+	Text    string `json:"text"`
+}
+
+// GraphEdgeKinds is every structural edge kind graph_edges emits. A typed block's `block[]`
+// attribute makes edges of a kind named by the attribute (pmdoc.LinkKinds), which is never one of
+// these: a schema name equal to one would merge silently with it in every reader.
+var GraphEdgeKinds = []string{"mentions", "child_of", "blocked_by", "attached_to", "anchored_to", "owned_by", "replies_to", "followed_by", "part_of", "depends_on", "affects"}
+
+// GraphEdge is one typed, timestamped edge of graph_edges seen from the queried node: Node is
+// the other end, Direction is "in" for edges pointing at the queried node and "out" for edges
+// it writes. SourceSeq is the events.id that introduced a mention; nil for structural edges.
+// Block, on a document's read, names the document's block at the queried end: the block an
+// inbound edge points at, or the block that holds an outbound link.
+type GraphEdge struct {
+	Kind      string        `json:"kind"`
+	Direction string        `json:"direction"`
+	Node      GraphNode     `json:"node"`
+	Block     *GraphNode    `json:"block,omitempty"`
+	Excerpt   *GraphExcerpt `json:"excerpt,omitempty"`
+	CreatedAt time.Time     `json:"created_at"`
+	SourceSeq *int64        `json:"source_seq"`
+}
+
+// GraphReferences is the read of one node's edges, newest first.
+type GraphReferences struct {
+	Node  GraphNode   `json:"node"`
+	Edges []GraphEdge `json:"edges"`
+}
+
+// BlockLink is one link from a block of one document to a block of a document: its edge kind,
+// both block nodes, and when and in which version of its document the source block first held
+// it.
+type BlockLink struct {
+	Kind           string    `json:"kind"`
+	From           GraphNode `json:"from"`
+	To             GraphNode `json:"to"`
+	CreatedAt      time.Time `json:"created_at"`
+	CreatedVersion int       `json:"created_version"`
+}
+
+// BlockLinks is GET /api/v1/block-links: the two documents and the links from blocks of From to
+// blocks of To, newest first.
+type BlockLinks struct {
+	From  GraphNode   `json:"from"`
+	To    GraphNode   `json:"to"`
+	Links []BlockLink `json:"links"`
+}
+
+// Event is the immutable event-log record for a Dispatch mutation.
+type Event struct {
+	ID         int64     `json:"id"`
+	IssueKey   *string   `json:"issue_key"`
+	ArtifactID *string   `json:"artifact_id"`
+	ProjectKey *string   `json:"-"`
+	Project    string    `json:"project"`
+	Seq        int       `json:"seq"`
+	Type       string    `json:"type"`
+	Actor      Actor     `json:"actor"`
+	Notify     bool      `json:"notify"`
+	CreatedAt  time.Time `json:"created_at"`
+	Payload    any       `json:"payload"`
+}
+
+// EditPrecondition asks Dispatch to apply document operations only against the
+// document or blocks the caller read.
+type EditPrecondition struct {
+	Document string                  `json:"document,omitempty"`
+	Blocks   []EditBlockPrecondition `json:"blocks,omitempty"`
+}
+
+// EditBlockPrecondition identifies one stable block and its canonical-content token.
+type EditBlockPrecondition struct {
+	ID    string `json:"id"`
+	Token string `json:"token"`
+}
+
+// EditPreconditionMismatch names a stale document or block and its current token.
+// Current is nil when the expected block no longer exists.
+type EditPreconditionMismatch struct {
+	Scope    string  `json:"scope"`
+	BlockID  string  `json:"block_id,omitempty"`
+	Expected string  `json:"expected"`
+	Current  *string `json:"current"`
+}
+
+// EditOp is one agent document editing operation.
+type EditOp struct {
+	Op         string          `json:"op"`
+	Find       string          `json:"find,omitempty"`
+	With       string          `json:"with,omitempty"`
+	Occurrence *int            `json:"occurrence,omitempty"`
+	Markdown   string          `json:"markdown,omitempty"`
+	After      string          `json:"after,omitempty"`
+	Before     string          `json:"before,omitempty"`
+	Block      string          `json:"block,omitempty"`
+	Index      json.RawMessage `json:"index,omitempty"`
+	Type       string          `json:"type,omitempty"`
+	Attributes map[string]any  `json:"attributes,omitempty"`
+}
+
+// Route is a validated issue delivery route.
+type Route struct {
+	Kind string
+	ID   string
+}
+
+// IssueStatusTriage is the status every issue is created in: nobody has decided yet whether the
+// work is wanted. It is named because a write's advice reads it (api.computeWriteAdvice resolves
+// who owns the status only there), and one spelling is better than two.
+const IssueStatusTriage = "triage"
+
+// IssueStatuses is the canonical Legion issue lifecycle.
+var IssueStatuses = []string{
+	IssueStatusTriage,
+	"icebox",
+	"backlog",
+	"todo",
+	"in_progress",
+	"testing",
+	"needs_review",
+	"retro",
+	"done",
+}
+
+var issueStatusSet = func() map[string]struct{} {
+	statuses := make(map[string]struct{}, len(IssueStatuses))
+	for _, status := range IssueStatuses {
+		statuses[status] = struct{}{}
+	}
+	return statuses
+}()
+
+// IsIssueStatus reports whether status belongs to the Legion lifecycle.
+func IsIssueStatus(status string) bool {
+	_, ok := issueStatusSet[status]
+	return ok
+}
+
+var (
+	roleRoutePattern    = regexp.MustCompile(`^role:([a-z0-9-]+)$`)
+	sessionRoutePattern = regexp.MustCompile(`^session:([A-Za-z0-9_-]+)$`)
+)
+
+// ParseRoute validates and decomposes one supported issue delivery route.
+func ParseRoute(s string) (Route, error) {
+	if match := roleRoutePattern.FindStringSubmatch(s); match != nil {
+		return Route{Kind: "role", ID: match[1]}, nil
+	}
+	if match := sessionRoutePattern.FindStringSubmatch(s); match != nil {
+		return Route{Kind: "session", ID: match[1]}, nil
+	}
+	return Route{}, fmt.Errorf("invalid route %q", s)
+}

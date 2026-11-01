@@ -1,0 +1,85 @@
+# Every git pathspec whose files can change main's Claude Code plugin build (dist/ and legion/,
+# built by scripts/build.ts and checked by scripts/verify-build.sh).
+#
+# Format: one git pathspec per line, relative to the repository root. A line that is empty or
+# starts with # is ignored. Nothing else is special: a pathspec line holds the pathspec alone, with
+# no trailing comment.
+#
+# Who reads it:
+# - .github/scripts/release-push.sh push-built, with git alone (the push job runs no dependency
+#   code): `git show <base>:packages/claude-envoy/scripts/build-inputs.txt`, then
+#   `git diff --no-renames --name-only <base> <tip> -- <pathspecs>` to decide whether main moved by
+#   a build input since the base the build was made from.
+# - tests/build-inputs.test.ts, which runs the build and fails when a file the bundles or the
+#   Legion plugin read is not matched: each bundle's sources, the manifest, tsconfig and license
+#   files of each workspace package they reach, the lockfile, root manifest and patches that decide
+#   what bun install puts in node_modules, and the skills and agents buildLegionPlugin reads. The
+#   rest is listed by hand and no test checks it: .bun-version, bunfig.toml, the .gitignore and
+#   .gitattributes files, scripts/third-party-notices.ts (and any other module build.ts imports
+#   from outside the packages below), scripts/pi-plugin-prepack.sh and the four .github paths at
+#   the end. A change that makes build.ts, verify-build.sh or the workflow read a new file adds it
+#   here.
+#
+# The rule: whole package directories are listed and only known non-inputs are excluded, so a file
+# nobody thought of counts as an input. That is the safe direction: a false "changed" costs one
+# extra rebuild run, while a false "unchanged" leaves main's build one run behind its inputs with no
+# catch-up run queued.
+#
+# This file is inside packages/claude-envoy, listed below, so a change to the list is itself an
+# input change.
+
+# build.ts assertPinnedBun refuses any other Bun; .github/actions/setup-bun installs this version.
+.bun-version
+
+# bun install: decides node_modules, which the bundles inline and whose licenses the notices carry.
+bun.lock
+package.json
+bunfig.toml
+patches
+
+# verify-build.sh's ignore check copies the .gitignore files; push-built's `git add` applies these
+# .gitignore and .gitattributes files to the files it commits.
+.gitignore
+.gitattributes
+packages/.gitignore
+packages/.gitattributes
+
+# The bundles' sources and the workspace packages they reach: sources, manifests, tsconfig, license
+# and notice files (scripts/third-party-notices.ts). Also this package's build.ts, verify-build.sh
+# and this list.
+packages/claude-envoy
+packages/envoy-client
+packages/contracts
+packages/pi-shared
+
+# The build's outputs themselves, not inputs.
+:(exclude)packages/claude-envoy/dist
+:(exclude)packages/claude-envoy/legion
+
+# Known non-inputs inside the packages above: changelogs, guides and tests, which no build reads.
+:(exclude,glob)packages/*/.changes/**
+:(exclude,glob)packages/*/CHANGELOG.md
+:(exclude,glob)packages/*/AGENTS.md
+:(exclude,glob)packages/*/README.md
+:(exclude,glob)packages/*/tests/**
+:(exclude,glob)packages/*/test/**
+:(exclude,glob)packages/**/__tests__/**
+:(exclude,glob)packages/**/*.test.ts
+
+# build.ts buildLegionPlugin converts these into legion/agents.
+packages/pi-legion/agents
+
+# scripts/pi-plugin-prepack.sh --stage-skills stages pi-legion's skills into legion/skills. All of
+# skills/ rather than pi-legion's share, so the partition is kept in that script alone.
+skills
+
+# build.ts runs these: the notices of the inlined packages, and the skill staging.
+scripts/third-party-notices.ts
+scripts/pi-plugin-prepack.sh
+
+# The rebuild workflow's build job runs these through verify-build.sh, and its push job runs
+# release-push.sh push-built.
+.github/scripts/check-private-names.sh
+.github/scripts/release-push.sh
+.github/workflows/claude-envoy-rebuild.yaml
+.github/actions/setup-bun

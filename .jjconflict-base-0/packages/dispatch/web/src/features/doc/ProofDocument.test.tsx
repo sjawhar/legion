@@ -1,0 +1,1047 @@
+import { expect, spyOn, test } from "bun:test";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
+
+import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import {
+  answerTextReadsWithTheSeededText,
+  artifact,
+  createQueryClient,
+  renderProofDocument,
+} from "../../__tests__/proof-document";
+import { ApiError, api } from "../../api/client";
+import type { Ask, IssueDetails } from "../../api/types";
+import { heldSends } from "../conversation/held-sends";
+import { marginComposeSendKey } from "../margin/margin-context";
+import { appKeymap } from "../shell/keymap";
+import { colorForLogin } from "./connection";
+
+answerTextReadsWithTheSeededText();
+
+test("ProofDocument creates the editor on the synced document as the signed-in user", async () => {
+  const { connections, editors, sync, toolbar, view } = renderProofDocument();
+
+  try {
+    expect(toolbar.current?.connection).toBe("connecting");
+    await sync();
+    expect(connections).toHaveLength(1);
+    await waitFor(() => expect(editors).toHaveLength(1));
+    expect(editors[0]?.options).toMatchObject({
+      awareness: connections[0]?.awareness,
+      heatMapMode: "hidden",
+      readOnly: false,
+      user: { color: colorForLogin("alice"), name: "alice" },
+      ydoc: connections[0]?.doc,
+    });
+    expect(editors[0]?.root.textContent).toContain("The live document");
+    expect(editors[0]?.root.getAttribute("aria-label")).toBe("Document editor");
+    expect(editors[0]?.root.getAttribute("aria-multiline")).toBe("true");
+    expect(editors[0]?.root.getAttribute("role")).toBe("textbox");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("ProofDocument focuses a block named by the document hash after the editor is ready", async () => {
+  const originalHash = window.location.hash;
+  window.history.replaceState(null, "", "#b-block-1");
+  const { editors, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors[0]?.focusedBlocks).toEqual(["block-1"]));
+  } finally {
+    window.history.replaceState(null, "", originalHash || "/");
+    view.unmount();
+  }
+});
+
+test("ProofDocument copies a block link whose fragment names the block as encodeBlockId writes it", async () => {
+  const originalClipboard = navigator.clipboard;
+  const copied: string[] = [];
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => void copied.push(text) },
+  });
+  const { editors, sync, toolbar, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const editor = editors[0];
+    if (editor === undefined) throw new Error("editor missing");
+    editor.selectedBlock = "ship_it";
+    expect(await toolbar.current?.copyBlockLink()).toBe(true);
+    expect(copied).toEqual([`${window.location.origin}${window.location.pathname}#b-ship%5Fit`]);
+  } finally {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+    view.unmount();
+  }
+});
+
+test("ProofDocument clears the parent's toolbar bag on unmount", () => {
+  const { toolbar, view } = renderProofDocument();
+
+  expect(toolbar.current).not.toBeUndefined();
+  view.unmount();
+  expect(toolbar.current).toBeUndefined();
+});
+
+// Dispatch named the version and lost its answer (`409 KEY_COMMITTED`): a landing, not a refusal.
+// The dialog closes with no refusal, so a second press names nothing twice, and the document says
+// what was made.
+test("a version named with its answer lost closes the dialog and says it was made", async () => {
+  const createArtifactVersion = spyOn(api, "createArtifactVersion").mockRejectedValue(
+    new ApiError(409, { code: "KEY_COMMITTED", error: "made; the answer was lost" })
+  );
+  const { toolbar, view } = renderProofDocument();
+  try {
+    act(() => toolbar.current?.requestNamedVersion());
+    const dialog = await screen.findByRole("dialog", { name: "Name this version" });
+    fireEvent.change(within(dialog).getByLabelText("What changed?"), {
+      target: { value: "Settled the rollout" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    const made = await screen.findByTestId("landed-without-answer");
+    expect(made.textContent).toBe(
+      "The version “Settled the rollout” was made, but Dispatch lost its answer, so it may take a moment to appear."
+    );
+    expect(screen.queryByRole("dialog", { name: "Name this version" })).toBeNull();
+    expect(screen.queryByText("Could not name this version. Try again.")).toBeNull();
+    expect(createArtifactVersion).toHaveBeenCalledTimes(1);
+  } finally {
+    createArtifactVersion.mockRestore();
+    view.unmount();
+  }
+});
+
+test("ProofDocument highlights a routed search term again after route and document changes", async () => {
+  class TestHighlight {
+    readonly ranges: Range[];
+
+    constructor(...ranges: Range[]) {
+      this.ranges = ranges;
+    }
+  }
+  const styleApi = window as unknown as {
+    CSS?: { highlights?: Map<string, TestHighlight> };
+    Highlight?: typeof TestHighlight;
+  };
+  const originalCss = Object.getOwnPropertyDescriptor(styleApi, "CSS");
+  const originalHighlight = Object.getOwnPropertyDescriptor(styleApi, "Highlight");
+  const highlights = new Map<string, TestHighlight>();
+  Object.defineProperties(styleApi, {
+    CSS: { configurable: true, value: { highlights } },
+    Highlight: { configurable: true, value: TestHighlight },
+  });
+  const { connections, editors, margin, rerender, sync, view } = renderProofDocument({
+    fake: fakeDocumentRuntime({ text: "The astrolabe reads altitude." }),
+    highlightTerm: "astrolabe",
+  });
+
+  try {
+    await sync();
+    await waitFor(() => expect(margin.current?.documentBridge).toBeDefined());
+    await waitFor(() => {
+      const highlight = highlights.get("dispatch-search");
+      expect(highlight?.ranges.map((range) => range.toString())).toEqual(["astrolabe"]);
+    });
+
+    editors[0]?.root.replaceChildren(document.createTextNode("The sextant reads altitude."));
+    rerender({ highlightTerm: "sextant" });
+    await waitFor(() => {
+      const highlight = highlights.get("dispatch-search");
+      expect(highlight?.ranges.map((range) => range.toString())).toEqual(["sextant"]);
+    });
+    const routeHighlight = highlights.get("dispatch-search");
+
+    editors[0]?.root.replaceChildren(document.createTextNode("The compass reads altitude."));
+    act(() => connections[0]?.doc.getXmlFragment("prosemirror").delete(0, 1));
+    await waitFor(() => {
+      const highlight = highlights.get("dispatch-search");
+      expect(highlight).not.toBe(routeHighlight);
+      expect(highlight?.ranges).toEqual([]);
+    });
+  } finally {
+    view.unmount();
+    if (originalHighlight === undefined) {
+      delete styleApi.Highlight;
+    } else {
+      Object.defineProperty(styleApi, "Highlight", originalHighlight);
+    }
+    if (originalCss === undefined) {
+      delete styleApi.CSS;
+    } else {
+      Object.defineProperty(styleApi, "CSS", originalCss);
+    }
+  }
+});
+
+test("ProofDocument opens a hover card for a dispatch:// link in the live editor and navigates in-app", async () => {
+  const issue: IssueDetails = {
+    route_status: null,
+    route_holder: null,
+    artifacts: [],
+    children: [],
+    closed_at: null,
+    created_at: "2026-09-09T00:00:00Z",
+    created_by: { id: "alice", kind: "user" },
+    external_links: [],
+    key: "CORE-1",
+    labels: [],
+    last_seq: 1,
+    number: 1,
+    parent: null,
+    blocked_by: [],
+    assignee: null,
+    claim: null,
+    components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
+    primary_artifact_id: "artifact-1",
+    project: "CORE",
+    referenced_by_count: 0,
+    route: null,
+    repo: null,
+    resolved_repo: null,
+    status: "testing",
+    priority: null,
+    rank: "U",
+    title: "Ship the release",
+    open_asks: [],
+    progress: { tasks: null, children: null },
+    updated_at: "2026-09-09T00:00:00Z",
+  };
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const { editors, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const root = editors[0]?.root;
+    if (root === undefined) throw new Error("editor root missing");
+    // The fake runtime never runs Markdown through the real proof-editor serializer (its
+    // createEditor stub just dumps a debug string), so this stands in for what that serializer
+    // now actually emits for a dispatch:// link mark: href sanitized to "", the real target
+    // carried in data-dispatch-href. `doc.e2e.ts` proves the real serializer produces this shape
+    // and that clicking it navigates in a genuinely live document.
+    act(() => {
+      root.innerHTML =
+        '<p><a href="" data-dispatch-href="dispatch://CORE-1">dispatch://CORE-1</a></p>';
+    });
+    const anchor = root.querySelector("a");
+    if (anchor === null) throw new Error("anchor missing");
+    // Triggers are delegated document-wide, so an anchor inserted after mount is one too:
+    // keyboard focus opens the card at once, with the target's title once fetched.
+    act(() => {
+      anchor.focus();
+    });
+    const card = await screen.findByRole("tooltip");
+    await waitFor(() => expect(card.textContent).toContain("Ship the release"));
+    expect(anchor.getAttribute("aria-describedby")).toBe(card.id);
+    act(() => {
+      anchor.blur();
+    });
+    expect(screen.queryByRole("tooltip")).toBeNull();
+
+    fireEvent.click(anchor);
+    expect(within(view.container).getByTestId("current-route").textContent).toBe("/issues/CORE-1");
+  } finally {
+    getIssue.mockRestore();
+    view.unmount();
+  }
+});
+
+// A link's target is a node its author named, so a click on a link to a document whose name is
+// past the bound text is held to (2683 characters, which a new upload's reference key still
+// holds) opens that document in-app, rather than leaving the browser to follow the sanitized
+// mark's empty href.
+test("ProofDocument opens an explicit link to a long-named document in-app", async () => {
+  const slug = "a".repeat(2683);
+  const { editors, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const root = editors[0]?.root;
+    if (root === undefined) throw new Error("editor root missing");
+    // What the proof-editor serializer emits for a dispatch:// link mark (the test above says why).
+    act(() => {
+      root.innerHTML = `<p><a href="" data-dispatch-href="dispatch://CORE-1/artifact/${slug}">design</a></p>`;
+    });
+    const anchor = root.querySelector("a");
+    if (anchor === null) throw new Error("anchor missing");
+
+    fireEvent.click(anchor);
+    expect(within(view.container).getByTestId("current-route").textContent).toBe(
+      `/issues/CORE-1/artifacts/${slug}`
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
+test("ProofDocument reports connection status and pending edits through the toolbar bag", async () => {
+  const { editors, pending, rerender, status, sync, toolbar, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    act(() => status("connected"));
+    await waitFor(() => expect(toolbar.current?.connection).toBe("connected"));
+    act(() => {
+      pending({
+        count: 2,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      });
+      status("offline");
+    });
+    await waitFor(() =>
+      expect(toolbar.current?.pending).toEqual({
+        count: 2,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
+    await waitFor(() => expect(toolbar.current?.connection).toBe("offline"));
+    rerender({ isClosed: true });
+    expect(editors[0]?.readOnly).toBe(true);
+    expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
+    expect(
+      within(view.container).getByText("This issue is closed. Its document is read-only.")
+    ).toBeDefined();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("the margin's wait for this browser's edits is answered by a report taken after it, and by its bound", async () => {
+  const { margin, pending, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(margin.current?.documentBridge).toBeDefined());
+    const bridge = margin.current?.documentBridge;
+    if (bridge === undefined) throw new Error("expected a registered document");
+
+    // The mark the margin has just written is an update of its own, and the store counts a local
+    // update only once its IndexedDB write is through. So the report that says this browser holds
+    // nothing has to be one taken after the wait began: the last report before it was taken
+    // without that mark in it, and on a quiet document it says nothing pending, which would send
+    // the retry straight back into the refusal it is recovering from.
+    act(() =>
+      pending({
+        count: 0,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
+    let answered = false;
+    const waiting = bridge.whenSent(5000).then(() => {
+      answered = true;
+    });
+    await Promise.resolve();
+    expect(answered).toBe(false);
+
+    act(() =>
+      pending({
+        count: 1,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
+    await Promise.resolve();
+    expect(answered).toBe(false);
+
+    act(() =>
+      pending({
+        count: 0,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
+    await waiting;
+    expect(answered).toBe(true);
+
+    // A read-only admission cannot send the row it holds, and a row another tab holds is not
+    // this page's to send either: the bound is what ends the wait, and the margin sends again
+    // whatever it answers.
+    act(() =>
+      pending({
+        count: 1,
+        readOnly: true,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
+    await bridge.whenSent(0);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("ProofDocument keeps the live editor mounted while a version is shown and destroys it once", async () => {
+  const versionedArtifact = {
+    ...artifact,
+    versions: [
+      {
+        authors: [{ id: "alice", kind: "user" as const }],
+        created_at: "2026-09-09T00:00:00Z",
+        named: false,
+        number: 1,
+        summary: null,
+      },
+    ],
+  };
+  const queryClient = createQueryClient();
+  queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  queryClient.setQueryData(["artifact", artifact.id, "version", 1], {
+    authors: [{ id: "alice", kind: "user" }],
+    created_at: "2026-09-09T00:00:00Z",
+    markdown: "Version one",
+    named: false,
+    number: 1,
+    summary: null,
+  });
+  const { connections, editors, rerender, sync, view } = renderProofDocument({
+    document: versionedArtifact,
+    queryClient,
+  });
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    rerender({ version: 1 });
+    await within(view.container).findByTestId("version-view");
+    expect(
+      view.container
+        .querySelector("section[aria-label='Document editor'] article")
+        ?.hasAttribute("hidden")
+    ).toBe(true);
+    expect(editors[0]?.destroyed).toBe(false);
+  } finally {
+    view.unmount();
+  }
+  expect(editors[0]?.destroyed).toBe(true);
+  expect(connections[0]?.destroyed).toBe(true);
+});
+
+test("ProofDocument compares a selected version with the current settled text when showDiff is true", async () => {
+  const document = {
+    ...artifact,
+    versions: [
+      {
+        authors: [{ id: "alice", kind: "user" as const }],
+        created_at: "2026-09-09T00:00:00Z",
+        named: false,
+        number: 1,
+        summary: null,
+      },
+    ],
+  };
+  const queryClient = createQueryClient();
+  queryClient.setQueryData(["artifact", artifact.id, "text"], {
+    markdown: "Use Postgres",
+    version: 2,
+  });
+  queryClient.setQueryData(["artifact", artifact.id, "version", 1], {
+    authors: [{ id: "alice", kind: "user" }],
+    created_at: "2026-09-09T00:00:00Z",
+    markdown: "Use SQLite",
+    named: false,
+    number: 1,
+    summary: null,
+  });
+  queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  const { sync, view } = renderProofDocument({ document, queryClient, showDiff: true, version: 1 });
+
+  try {
+    await sync();
+    await waitFor(() => {
+      const diff = within(view.container).getByTestId("change-view");
+      expect(diff.querySelector("del")?.textContent).toBe("SQLite");
+      expect(diff.querySelector("ins")?.textContent).toBe("Postgres");
+    });
+  } finally {
+    view.unmount();
+  }
+});
+
+test("ProofDocument shows the current document when Version changes back to Current", async () => {
+  const queryClient = createQueryClient();
+  queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  queryClient.setQueryData(["artifact", artifact.id, "version", 1], {
+    authors: [{ id: "alice", kind: "user" }],
+    created_at: "2026-09-09T00:00:00Z",
+    markdown: "Historical document",
+    named: false,
+    number: 1,
+    summary: null,
+  });
+  const { rerender, sync, view } = renderProofDocument({ queryClient });
+
+  try {
+    await sync();
+    rerender({ version: 1 });
+    await within(view.container).findByTestId("version-view");
+    rerender({ version: undefined });
+    await waitFor(() =>
+      expect(within(view.container).getByRole("article").textContent).toContain("The live document")
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
+test("the block reference gutter filters the margin and focuses its block", async () => {
+  const queryClient = createQueryClient();
+  queryClient.setQueryData(
+    ["artifact", artifact.id, "blocks"],
+    [
+      {
+        from: 0,
+        id: "block-1",
+        references: { asks: 1, comments: 1 },
+        to: 17,
+        type: "paragraph",
+      },
+    ]
+  );
+  const { editors, margin, sync, view } = renderProofDocument({ queryClient });
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    fireEvent.click(
+      await within(view.container).findByRole("button", { name: "2 references on block" })
+    );
+    expect(editors[0]?.focusedBlocks).toEqual(["block-1"]);
+    expect(margin.current?.blockFilterId).toBe("block-1");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a margin block focus request focuses and pulses the block once", async () => {
+  const { editors, margin, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    act(() => margin.current?.focusBlock("block-1"));
+    await waitFor(() => expect(editors[0]?.focusedBlocks).toContain("block-1"));
+    // The editor is reached on the next frame; one frame more lets any later request through.
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    expect(editors[0]?.focusedBlocks).toEqual(["block-1"]);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("ProofDocument links to the current version when a historic version is unavailable", async () => {
+  const getArtifactVersion = spyOn(api, "getArtifactVersion").mockRejectedValue(
+    new Error("version not found")
+  );
+  const { view } = renderProofDocument({ version: 9 });
+
+  try {
+    await within(view.container).findByText("No version 9 of spec.md.");
+    expect(
+      within(view.container)
+        .getByRole("link", { name: "View current version" })
+        .getAttribute("href")
+    ).toBe("/issues/CORE-1/spec");
+  } finally {
+    view.unmount();
+    getArtifactVersion.mockRestore();
+  }
+});
+
+test("a selection-bar action opens the margin composer for the mark and settles the library promise", async () => {
+  const queryClient = createQueryClient();
+  const { editors, margin, sync, view } = renderProofDocument({ queryClient });
+  const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
+  const openCompose = () => {
+    const open = margin.current?.pendingCompose;
+    if (open === undefined) throw new Error("expected an open compose");
+    return open;
+  };
+  /** Sends the compose the margin has open, as its composer's Send does: from then on the
+   *  compose is its send's, and the library's promise resolves. */
+  const sendOpenCompose = () => {
+    const { anchor, kind } = openCompose();
+    heldSends(queryClient).send(marginComposeSendKey(anchor.artifact), {
+      anchor,
+      ask: { multiple: false, options: [], urgency: "med" },
+      draft: { body: "Why?", mentions: [], replacement: "" },
+      edit: undefined,
+      kind,
+      owner: { issueKey: "CORE-1", kind: "issue" },
+      plainDelivery: "steer",
+      replyTo: null,
+      sendKey: "send-1",
+    });
+  };
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const onMarkAction = editors[0]?.options.onMarkAction;
+    if (onMarkAction === undefined) {
+      throw new Error("The editor did not receive an onMarkAction handler.");
+    }
+
+    let comment: Promise<void> | undefined;
+    act(() => {
+      comment = Promise.resolve(
+        onMarkAction({
+          from: 11,
+          kind: "comment",
+          markId: "m-9",
+          placement: { blockId: "b-1", prefix: "The quick ", readings: 1, suffix: " fox" },
+          quote: "brown",
+          to: 16,
+        })
+      );
+      void comment.catch(() => {});
+    });
+    if (comment === undefined) {
+      throw new Error("The comment action did not return a promise.");
+    }
+    expect(margin.current?.pendingCompose).toMatchObject({
+      anchor: {
+        artifact: artifact.id,
+        mark_id: "m-9",
+        placement: { blockId: "b-1", prefix: "The quick ", readings: 1, suffix: " fox" },
+        quote: "brown",
+      },
+      kind: "comment",
+    });
+    act(() => sendOpenCompose());
+    await expect(comment).resolves.toBeUndefined();
+    // The send lands before the next selection-bar action, which would otherwise wait on it.
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+
+    let suggest: Promise<void> | undefined;
+    act(() => {
+      suggest = Promise.resolve(
+        onMarkAction({
+          from: 11,
+          kind: "suggest",
+          markId: "m-10",
+          placement: null,
+          quote: "brown",
+          to: 16,
+        })
+      );
+      void suggest.catch(() => {});
+    });
+    if (suggest === undefined) {
+      throw new Error("The suggestion action did not return a promise.");
+    }
+    expect(margin.current?.pendingCompose?.kind).toBe("suggestion");
+    act(() => sendOpenCompose());
+    await expect(suggest).resolves.toBeUndefined();
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+
+    let ask: Promise<void> | undefined;
+    act(() => {
+      ask = Promise.resolve(
+        onMarkAction({
+          from: 11,
+          kind: "ask",
+          markId: "m-11",
+          placement: null,
+          quote: "brown",
+          to: 16,
+        })
+      );
+      void ask.catch(() => {});
+    });
+    if (ask === undefined) {
+      throw new Error("The ask action did not return a promise.");
+    }
+    expect(margin.current?.pendingCompose?.kind).toBe("ask");
+    act(() => margin.current?.cancelCompose(openCompose().seq));
+    await expect(ask).rejects.toThrow("composer closed");
+
+    let unsupported: unknown;
+    try {
+      const outcome = onMarkAction({ kind: "resolve", markId: "m-9" });
+      if (outcome instanceof Promise) {
+        void outcome.catch(() => {});
+      }
+    } catch (error) {
+      unsupported = error;
+    }
+    expect(unsupported).toEqual(
+      new Error("Dispatch renders mark threads in the margin; popover action resolve cannot fire")
+    );
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+test("a highlight click focuses its margin item and hover identifies its matching margin item", async () => {
+  const { editors, margin, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const onMarkClick = editors[0]?.options.onMarkClick;
+    const onMarkHover = editors[0]?.options.onMarkHover;
+    if (onMarkClick === undefined || onMarkHover === undefined) {
+      throw new Error("The editor did not receive mark interaction handlers.");
+    }
+    const span = document.createElement("span");
+    span.dataset.id = "m-9";
+    editors[0]?.root.replaceChildren(span);
+
+    act(() => onMarkClick("m-9"));
+    expect(margin.current?.focusRequest?.markId).toBe("m-9");
+
+    act(() => onMarkHover("m-9"));
+    expect(margin.current?.hoveredMarkId).toBe("m-9");
+    act(() => onMarkHover(null));
+    expect(margin.current?.hoveredMarkId).toBeUndefined();
+
+    act(() => margin.current?.documentBridge?.focusMark("m-9"));
+    expect(editors[0]?.focused).toEqual(["m-9"]);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("the marks projection reaches the editor on sync and on every change", async () => {
+  const fake = fakeDocumentRuntime({ text: "The live document" });
+  const projected: { metadata: object; options: { hydrateAnchors?: boolean } | undefined }[] = [];
+  const createEditor = fake.runtime.createEditor;
+  fake.runtime.createEditor = async (root, options) => {
+    const handle = await createEditor(root, options);
+    const applyRemoteMarks = handle.applyRemoteMarks.bind(handle);
+    handle.applyRemoteMarks = (metadata, applyOptions) => {
+      projected.push({ metadata, options: applyOptions });
+      applyRemoteMarks(metadata, applyOptions);
+    };
+    return handle;
+  };
+  const { connections, editors, sync, view } = renderProofDocument({ fake });
+  const storedMark = {
+    by: "user:alice",
+    kind: "comment",
+    replies: [],
+    resolved: false,
+    text: "why?",
+  };
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    act(() => connections[0]?.doc.getMap("marks").set("c-1", storedMark));
+    await waitFor(() =>
+      expect(projected.at(-1)).toEqual({
+        metadata: { "c-1": storedMark },
+        options: { hydrateAnchors: false },
+      })
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
+test("mark placements are published to the margin after document changes", async () => {
+  const schema = new Schema({
+    marks: {
+      dispatchAsk: { attrs: { by: {}, id: {} } },
+      proofComment: { attrs: { by: {}, id: {} } },
+    },
+    nodes: {
+      doc: { content: "paragraph+" },
+      paragraph: { content: "inline*", group: "block" },
+      text: { group: "inline" },
+    },
+  });
+  const comment = schema.marks.proofComment.create({ by: "alice", id: "c-1" });
+  const ask = schema.marks.dispatchAsk.create({ by: "bob", id: "a-1" });
+  const initialDocument = schema.node("doc", undefined, [
+    schema.node("paragraph", undefined, [schema.text("The "), schema.text("quick", [comment])]),
+  ]);
+  const changedDocument = schema.node("doc", undefined, [
+    schema.node("paragraph", undefined, [schema.text("The "), schema.text("quick", [ask])]),
+  ]);
+  const fake = fakeDocumentRuntime({ text: "The live document" });
+  let editorState: { doc: ProseMirrorNode } | undefined;
+  const createEditor = fake.runtime.createEditor;
+  fake.runtime.createEditor = async (root, options) => {
+    const handle = await createEditor(root, options);
+    editorState = handle.view.state as unknown as { doc: ProseMirrorNode };
+    editorState.doc = initialDocument;
+    handle.markOffsets = () =>
+      new Map([
+        ["c-1", 40],
+        ["a-1", 72],
+      ]);
+    return handle;
+  };
+  const { connections, editors, margin, sync, view } = renderProofDocument({ fake });
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    await waitFor(() =>
+      expect(margin.current?.markPlacements.get("c-1")).toEqual({ pos: 5, top: 40 })
+    );
+
+    if (editorState === undefined) {
+      throw new Error("The editor state was not captured.");
+    }
+    editorState.doc = changedDocument;
+    act(() => connections[0]?.doc.getXmlFragment("prosemirror").delete(0, 1));
+    await waitFor(() => {
+      expect(margin.current?.markPlacements.get("c-1")).toBeUndefined();
+      expect(margin.current?.markPlacements.get("a-1")).toEqual({ pos: 5, top: 72 });
+    });
+  } finally {
+    view.unmount();
+  }
+});
+
+/** Presses Control+Alt+M on `target` through the application's registry, as `KeymapProvider`'s
+ *  window listener does, and answers whether a binding claimed it. */
+function pressCommentChord(target: Element): boolean {
+  const event = new KeyboardEvent("keydown", {
+    altKey: true,
+    bubbles: true,
+    cancelable: true,
+    code: "KeyM",
+    ctrlKey: true,
+    key: "m",
+  });
+  target.dispatchEvent(event);
+  appKeymap.handleKeyDown(event);
+  return event.defaultPrevented;
+}
+
+test("Ctrl+Alt+M comments on the selection while the editor has focus, and nowhere else", async () => {
+  const { editors, rerender, sync, view } = renderProofDocument();
+  const composer = document.body.appendChild(document.createElement("textarea"));
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const editor = editors[0];
+    if (editor === undefined) throw new Error("no editor");
+    expect(
+      appKeymap.describe().filter((entry) => entry.id === "comment-on-selection")
+    ).toMatchObject([{ keys: ["$mod+Alt+m"], label: "Comment on selection", scope: "document" }]);
+    editor.root.contentEditable = "true";
+    editor.root.tabIndex = 0;
+    editor.root.focus();
+
+    // A caret, not a selection: the bar offers no Comment, so neither does the chord.
+    expect(pressCommentChord(editor.root)).toBe(false);
+    editor.selectionEmpty = false;
+    expect(pressCommentChord(editor.root)).toBe(true);
+    expect(editor.commented).toBe(1);
+
+    // Focus in a comment composer: the key is the composer's, and the chord does nothing.
+    composer.focus();
+    expect(pressCommentChord(composer)).toBe(false);
+    expect(editor.commented).toBe(1);
+
+    // A closed issue's document is read-only, where the bar offers nothing.
+    editor.root.focus();
+    rerender({ isClosed: true });
+    expect(pressCommentChord(editor.root)).toBe(false);
+    expect(editor.commented).toBe(1);
+  } finally {
+    composer.remove();
+    view.unmount();
+  }
+  expect(appKeymap.describe().some((entry) => entry.id === "comment-on-selection")).toBe(false);
+});
+
+// ---------------------------------------------------------------------------------------------
+// `surface="pane"`: the same live document drawn in a reading column beside a list (the Inbox's).
+// It takes no edits, publishes no presence, and claims none of the page-level singletons.
+// ---------------------------------------------------------------------------------------------
+
+const openDecision: Ask = {
+  anchor: null,
+  answer: null,
+  author: { id: "01a086ad", kind: "session", origin: { session_title: "Architect for CORE-1" } },
+  block_artifact: { id: "artifact-1", primary: true, slug: "spec" },
+  block_id: "ship_it",
+  created_at: "2026-09-09T00:00:00Z",
+  edited_at: null,
+  id: "ask-1",
+  issue_key: "CORE-1",
+  kind: "question",
+  multiple: false,
+  opened_event_id: 1,
+  options: [{ label: "Ship" }, { label: "Hold" }],
+  question: "Should we ship?",
+  state: "open",
+  urgency: "high",
+};
+
+test("a pane's editor is read-only and publishes no presence, where the page's takes edits and does", async () => {
+  const pane = renderProofDocument({ surface: "pane" });
+  try {
+    await pane.sync();
+    await waitFor(() => expect(pane.editors).toHaveLength(1));
+    expect(pane.editors[0]?.options).toMatchObject({ awareness: null, readOnly: true });
+    expect(pane.editors[0]?.readOnly).toBe(true);
+  } finally {
+    pane.view.unmount();
+  }
+
+  const page = renderProofDocument();
+  try {
+    await page.sync();
+    await waitFor(() => expect(page.editors).toHaveLength(1));
+    expect(page.editors[0]?.options).toMatchObject({
+      awareness: page.connections[0]?.awareness,
+      readOnly: false,
+    });
+    expect(page.editors[0]?.readOnly).toBe(false);
+  } finally {
+    page.view.unmount();
+  }
+});
+
+test("a read-only admission and a close each leave a pane read-only", async () => {
+  const { admit, editors, rerender, sync, view } = renderProofDocument({ surface: "pane" });
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    act(() => admit(false));
+    expect(editors[0]?.readOnly).toBe(true);
+    act(() => rerender({ isClosed: true }));
+    expect(editors[0]?.readOnly).toBe(true);
+    act(() => rerender({ isClosed: false }));
+    expect(editors[0]?.readOnly).toBe(true);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a pane registers no document with the margin, reports no toolbar and shows no Open-decisions navigator", async () => {
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([
+    { ...openDecision, last_reply: null },
+  ]);
+  const paneClient = createQueryClient();
+  paneClient.setQueryData(["asks", "CORE-1"], [openDecision]);
+  const pane = renderProofDocument({ queryClient: paneClient, surface: "pane" });
+  try {
+    await pane.sync();
+    await waitFor(() => expect(pane.editors).toHaveLength(1));
+    expect(pane.margin.current?.documentBridge).toBeUndefined();
+    expect(pane.toolbarChanges).toEqual([]);
+    expect(
+      within(pane.view.container).queryByRole("navigation", { name: "Open decisions" })
+    ).toBeNull();
+  } finally {
+    pane.view.unmount();
+  }
+  // Not even the unmount's "there is no toolbar now", which would clear a host's own controls.
+  expect(pane.toolbarChanges).toEqual([]);
+
+  // The same document on its own page claims all three.
+  const pageClient = createQueryClient();
+  pageClient.setQueryData(["asks", "CORE-1"], [openDecision]);
+  const page = renderProofDocument({ queryClient: pageClient });
+  try {
+    await page.sync();
+    await waitFor(() => expect(page.margin.current?.documentBridge).toBeDefined());
+    expect(page.toolbar.current).not.toBeUndefined();
+    expect(
+      await within(page.view.container).findByRole("navigation", { name: "Open decisions" })
+    ).toBeDefined();
+  } finally {
+    page.view.unmount();
+    listIssueAsks.mockRestore();
+  }
+});
+
+test("a pane writes no dispatch-search highlight, where the page writes one for the same term", async () => {
+  class TestHighlight {
+    readonly ranges: Range[];
+
+    constructor(...ranges: Range[]) {
+      this.ranges = ranges;
+    }
+  }
+  const styleApi = window as unknown as {
+    CSS?: { highlights?: Map<string, TestHighlight> };
+    Highlight?: typeof TestHighlight;
+  };
+  const originalCss = Object.getOwnPropertyDescriptor(styleApi, "CSS");
+  const originalHighlight = Object.getOwnPropertyDescriptor(styleApi, "Highlight");
+  const highlights = new Map<string, TestHighlight>();
+  Object.defineProperties(styleApi, {
+    CSS: { configurable: true, value: { highlights } },
+    Highlight: { configurable: true, value: TestHighlight },
+  });
+
+  try {
+    const pane = renderProofDocument({
+      fake: fakeDocumentRuntime({ text: "The astrolabe reads altitude." }),
+      highlightTerm: "astrolabe",
+      surface: "pane",
+    });
+    try {
+      await pane.sync();
+      await waitFor(() => expect(pane.editors).toHaveLength(1));
+      // Each of the three ways a page writes the registry: the bind, a routed term, a document
+      // change.
+      pane.rerender({ highlightTerm: "altitude" });
+      act(() => pane.connections[0]?.doc.getXmlFragment("prosemirror").delete(0, 1));
+      expect(highlights.has("dispatch-search")).toBe(false);
+    } finally {
+      pane.view.unmount();
+    }
+
+    const page = renderProofDocument({
+      fake: fakeDocumentRuntime({ text: "The astrolabe reads altitude." }),
+      highlightTerm: "astrolabe",
+    });
+    try {
+      await page.sync();
+      await waitFor(() =>
+        expect(highlights.get("dispatch-search")?.ranges.map(String)).toEqual(["astrolabe"])
+      );
+    } finally {
+      page.view.unmount();
+    }
+  } finally {
+    if (originalHighlight === undefined) {
+      delete styleApi.Highlight;
+    } else {
+      Object.defineProperty(styleApi, "Highlight", originalHighlight);
+    }
+    if (originalCss === undefined) {
+      delete styleApi.CSS;
+    } else {
+      Object.defineProperty(styleApi, "CSS", originalCss);
+    }
+  }
+});
+
+test("a pane pushes no document keymap scope and registers no binding of its own", async () => {
+  const { editors, sync, view } = renderProofDocument({ surface: "pane" });
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    expect(appKeymap.describe().some((entry) => entry.id === "comment-on-selection")).toBe(false);
+  } finally {
+    view.unmount();
+  }
+});

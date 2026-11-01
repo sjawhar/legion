@@ -1,0 +1,570 @@
+/**
+ * Proof Editor — standalone library entry point.
+ *
+ * Constructs the Milkdown editor + Proof's mark/collab plugin stack WITHOUT
+ * the app shell singleton in src/editor/index.ts (ProofEditorImpl) and
+ * without any of its ../bridge, ../agent, ../analytics, ../ui imports for
+ * auth/websocket/dialogs/analytics.
+ *
+ * The host owns the Y.Doc and its transport (e.g. HocuspocusProvider); this
+ * factory only binds to what it is given via `opts.ydoc` / `opts.awareness`.
+ * Mark-affecting user actions (Comment/Suggest/Ask on the selection bar,
+ * Reply/Resolve/Accept/Reject on the mark popover) are reported through
+ * `opts.onMarkAction` instead of being applied unconditionally — see
+ * ./dispatch-action-bar.ts and ./dispatch-popover-hook.ts for the two
+ * distinct interception mechanisms this required.
+ *
+ * Construction and collab-wiring below is adapted from src/editor/index.ts's
+ * `ProofEditorImpl.init()` (plugin `.use()` chain) and `initFromShare()`'s
+ * collab activation + `installCollabCursorsWhenReady()` — copied, not
+ * imported, so this file has zero dependency on the ProofEditorImpl class or
+ * any app-shell singleton.
+ */
+
+import { BLOCK_ID_DOM_ATTR, blockIdOf, blockIdPlugins } from './editor/schema/block-ids';
+import { withoutLeafMarks } from './editor/schema/leaf-marks';
+import { blockSchemaPlugins, type BlockSchema, type HostBlockRenderer } from './block-schema';
+import { createTypedBlockCommands, type TypedBlockCommands } from './typed-block-commands';
+import {
+  Editor,
+  rootCtx,
+  defaultValueCtx,
+  editorViewCtx,
+  parserCtx,
+  remarkCtx,
+  schemaCtx,
+  serializerCtx,
+  remarkStringifyOptionsCtx,
+  prosePluginsCtx,
+} from '@milkdown/core';
+import { ParserState } from '@milkdown/transformer';
+import { commonmark } from '@milkdown/preset-commonmark';
+import { gfm } from '@milkdown/preset-gfm';
+import { history } from '@milkdown/plugin-history';
+import { collab, collabServiceCtx, type CollabService } from '@milkdown/plugin-collab';
+import { listener } from '@milkdown/plugin-listener';
+import { cursor } from '@milkdown/plugin-cursor';
+import { clipboard } from '@milkdown/plugin-clipboard';
+import { nord } from '@milkdown/theme-nord';
+import { yCursorPluginKey, ySyncPluginKey } from 'y-prosemirror';
+import { collabCursorPlugin } from './collab-cursor-plugin';
+import type { Awareness } from 'y-protocols/awareness';
+import type * as Y from 'yjs';
+import type { EditorView } from '@milkdown/kit/prose/view';
+import type { Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
+import type { Ctx, MilkdownPlugin } from '@milkdown/ctx';
+
+import { proofMarkPlugins } from 'proof-sdk-upstream/src/editor/schema/proof-marks';
+import { codeBlockExtPlugins } from 'proof-sdk-upstream/src/editor/schema/code-block-ext';
+import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmatter';
+import { libraryRemarkFrontmatterPlugin } from './lib-remark-frontmatter-plugin';
+import { libraryRemarkDirectivePlugin } from './lib-remark-directive-plugin';
+import { libraryRemarkNestedLinksPlugin } from './nested-links';
+import { liveTypedBlocksRemarkPlugin } from './read-only-directives';
+import { brokenAskInputGuards, keepUnselectedAskBlocks, relaxAskContentCheck } from './ask-content';
+import { remarkProofMarksPlugin } from 'proof-sdk-upstream/src/editor/schema/remark-proof-marks-plugin';
+import { proofMarkHandler } from 'proof-sdk-upstream/src/formats/remark-proof-marks';
+
+import { authoredTrackerPlugin } from 'proof-sdk-upstream/src/editor/plugins/authored-tracker';
+import { heatmapPlugin, heatmapCtx } from 'proof-sdk-upstream/src/editor/plugins/heatmap-decorations';
+import type { HeatMapMode } from 'proof-sdk-upstream/src/editor/plugins/heatmap-decorations';
+import { agentCursorPlugin, agentCursorCtx } from 'proof-sdk-upstream/src/editor/plugins/agent-cursor';
+import { setCurrentActor } from 'proof-sdk-upstream/src/editor/actor';
+import { suggestionsPlugins } from 'proof-sdk-upstream/src/editor/plugins/suggestions';
+import { markPopoverPlugin } from 'proof-sdk-upstream/src/editor/plugins/mark-popover';
+import { arrowCommentPlugin } from 'proof-sdk-upstream/src/editor/plugins/arrow-comment';
+import { findHighlightsPlugin } from 'proof-sdk-upstream/src/editor/plugins/find-highlights';
+import { markdownLinkClickPlugin } from 'proof-sdk-upstream/src/editor/plugins/markdown-link-click';
+import { mermaidCodeBlockPlugin } from './mermaid-code-block-view';
+import type { MermaidDrawer } from './mermaid-svg';
+import { taskCheckboxesPlugin } from 'proof-sdk-upstream/src/editor/plugins/task-checkboxes';
+import { tableKeyboardPlugin } from 'proof-sdk-upstream/src/editor/plugins/table-keyboard';
+import { placeholderPlugin } from 'proof-sdk-upstream/src/editor/plugins/placeholder';
+import { collabCursorBuilder, collabSelectionBuilder } from 'proof-sdk-upstream/src/editor/plugins/collab-cursors';
+import {
+  marksPlugins,
+  setDefaultMarkdownParser,
+  applyRemoteMarks as applyRemoteMarksMutation,
+  type StoredMark,
+} from 'proof-sdk-upstream/src/editor/plugins/marks';
+
+import { dispatchMarkPlugins, remarkDispatchMarksPlugin, dispatchMarkHandler } from './dispatch-marks';
+import type { MarkAction, RecordMarkPlacement, SelectionBarActionKind } from './dispatch-marks';
+import { commentOnSelection, dispatchActionBarPlugin } from './dispatch-action-bar';
+import { registerPopoverHookInstance } from './dispatch-popover-hook';
+import { dispatchMarkEventsPlugin } from './dispatch-mark-events';
+import { remarkSoftBreakAsSpace } from './dispatch-soft-breaks';
+import { configureDispatchLinks } from './dispatch-links';
+import { trailingNewlineInputPlugin } from './trailing-newline-input';
+import { recordMarkHistoryPlugin } from './record-mark-history';
+import { editorHighlightsPlugin, pulseHighlight, setActiveHighlights } from './editor-highlights';
+import {
+  editorChangeDecorationsPlugin,
+  setChangeDecorations as applyChangeDecorations,
+} from './editor-change-decorations';
+import type { ChangeDecorations } from './editor-change-decorations';
+import { removeRecordMark, remarkRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
+import type { RemarkOutcome, RetypeOutcome } from './record-mark-retype';
+
+export type { MarkAction, RecordMarkPlacement, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
+export type { RemarkOutcome, RemarkRefusal, RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
+export type { BlockWidget, ChangeDecorations, TextDecoration } from './editor-change-decorations';
+export type {
+  BlockAttributeKind,
+  BlockAttributeSchema,
+  BlockSchema,
+  BlockTypeSchema,
+  HostBlockRenderer,
+} from './block-schema';
+export type { StoredMark } from 'proof-sdk-upstream/src/editor/plugins/marks';
+export { BLOCK_ID_ATTR, BLOCK_ID_DOM_ATTR, blockIdOf, isIdentifiedBlock, setBlockIdGenerator } from './editor/schema/block-ids';
+export { createTypedBlockCommands } from './typed-block-commands';
+export type {
+  TypedBlockAttributeValue,
+  TypedBlockAttributes,
+  TypedBlockCommandContext,
+  TypedBlockCommands,
+  TypedBlockMenuItem,
+} from './typed-block-commands';
+
+export interface ProofEditorUser {
+  name: string;
+  color: string;
+}
+
+export interface CreateProofEditorOptions {
+  /** Host-owned Yjs document. Must contain (or will lazily grow) an XmlFragment
+   *  named 'prosemirror' — see CollabService#bindDoc, which calls
+   *  `doc.getXmlFragment('prosemirror')` for us. */
+  ydoc: Y.Doc;
+  /** Host-owned awareness instance (e.g. from HocuspocusProvider#awareness).
+   *  Pass null/undefined to run without collaborative cursors. */
+  awareness?: Awareness | null;
+  /** Local user identity for cursor labels. */
+  user: ProofEditorUser;
+  /** Render the document read-only. Defaults to false. */
+  readOnly?: boolean;
+  /** Fired for every mark-affecting user action: Comment/Suggest/Ask on the
+   *  selection bar (the editor has already applied the mark locally with a
+   *  fresh markId over [from,to]; a rejected promise removes it), and
+   *  Reply/Resolve/Unresolve/Accept/Reject/Delete on the mark popover (no
+   *  local mutation is applied for these — the host's server is expected to
+   *  mutate and the change arrives back through the shared Y.Doc). */
+  onMarkAction?: (action: MarkAction) => void | Promise<void>;
+  /** Margin mode: report clicks and hover on mark spans and register neither
+   *  the mark popover nor the arrow-comment plugin; the host renders threads
+   *  itself. */
+  onMarkClick?: (markId: string) => void;
+  onMarkHover?: (markId: string | null) => void;
+  /** Heatmap rendering mode. Defaults to 'background'. */
+  heatMapMode?: HeatMapMode;
+  /** Typed block schema fetched from the document service before editor construction. */
+  blockSchema?: BlockSchema;
+  /** Renders a host-owned typed block node when the schema declares `render: "host"`. */
+  renderBlock?: HostBlockRenderer;
+  /** The open document's unversioned Dispatch reference (`dispatch://<ISSUE>/spec`, or
+   *  `dispatch://<ISSUE or PROJECT>/artifact/<slug>`), so the typed-block commands refuse a
+   *  `block[]` pointer to one of its own blocks whose type the attribute does not allow. */
+  documentRef?: string;
+  /** The host's Mermaid renderer, which draws each mermaid code block's diagram. Without one a
+   *  document's mermaid blocks show their source. */
+  drawMermaid?: MermaidDrawer;
+}
+
+export interface ProofEditorHandle extends TypedBlockCommands {
+  view: EditorView;
+  /** Serialize the current document to markdown via the configured serializer. */
+  getMarkdown(): string;
+  /** Replace the current document with parsed markdown. */
+  setMarkdown(markdown: string): void;
+  /** Top offset of each mark's first span relative to the library root. */
+  markOffsets(): Map<string, number>;
+  /** Toggle editability (e.g. for a readOnly flag change post-construction). */
+  setReadOnly(readOnly: boolean): void;
+  /** Apply mark metadata received from a peer, re-anchoring by quote. Unified
+   *  Proof marks (comment/suggestion/flagged/approved) only — see
+   *  ./dispatch-marks.ts's module doc for why dispatchAsk marks are outside
+   *  this system. */
+  applyRemoteMarks(metadata: Record<string, StoredMark>, options?: { hydrateAnchors?: boolean }): void;
+  /** Removes the margin composer's provisional record mark - a comment, suggestion or ask - from
+   *  every span it covers, text and inline atoms alike. The removal is the composer's own, so it
+   *  is never an undo step, and it leaves no tombstone and touches no metadata the way upstream's
+   *  `deleteMark` does; it is not for a recorded mark. See ./record-mark-retype.ts. */
+  removeMark(markId: string): void;
+  /** Replaces a provisional record mark with a fresh one of `kind` over the same text, as the
+   *  margin composer's kind switch needs; a refusal names why nothing changed. */
+  retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome;
+  /** Writes a fresh mark of `kind` over `quote` - the words the composer that owns the provisional
+   *  record mark `markId` is anchored to - wherever they are now: under the mark while the
+   *  document still holds it, else where those words read, which `placement` - the one the
+   *  `MarkAction` for that mark carried - narrows by the text the reader had around them. Answers
+   *  it under a new id, as the margin needs when the server refuses a send whose mark the document
+   *  has lost; a refusal names why nothing changed. */
+  remarkMark(
+    markId: string,
+    kind: SelectionBarActionKind,
+    quote: string,
+    placement: RecordMarkPlacement | null
+  ): RemarkOutcome;
+  /** Starts a comment on the current selection exactly as the selection bar's Comment button
+   *  does, `onMarkAction` included, and answers whether it did: false for an empty selection and
+   *  while the document is read-only, where the bar offers no Comment. */
+  commentOnSelection(): boolean;
+  /** Scrolls a mark's anchor into view and pulses it. Works for both the
+   *  unified marks system and dispatchAsk marks: both render `data-id`. */
+  focusMark(markId: string): void;
+  /** Scrolls a block into view by its stable `blockId` and pulses it. */
+  focusBlock(blockId: string): void;
+  /** Highlights the marks a host has selected without changing the document. */
+  setActiveMarks(markIds: readonly string[]): void;
+  /** Highlights the blocks a host has selected without changing the document. */
+  setActiveBlocks(blockIds: readonly string[]): void;
+  /** Draws what changed over and beside the document, without changing it: one text entry per
+   *  run, naming its top-level block by index and the run by character offsets into that block's
+   *  text, or the whole block where it names no range; one widget per piece of text the document
+   *  no longer holds, drawn at a character offset inside the block it names, for words that
+   *  block lost, before that block where it names no offset or the block holds no text of its
+   *  own, and at the end of the document where it names the index past the last block.
+   *  Replaces what was drawn before; an empty set draws nothing.
+   *  See ./editor-change-decorations.ts. */
+  setChangeDecorations(decorations: ChangeDecorations): void;
+  /** The stable id of the block containing the selection head, if any. */
+  blockIdAtSelection(): string | null;
+  /** Tear down the editor and any collab bindings. */
+  destroy(): void;
+}
+
+function installCollabCursorsWhenReady(
+  view: EditorView,
+  ctx: Ctx,
+  collabService: CollabService,
+  awareness: Awareness,
+  isAlive: () => boolean,
+): void {
+  const hasCursorPlugin = () => view.state.plugins.some((plugin) => plugin.spec.key === yCursorPluginKey);
+
+  const maxAttempts = 120;
+  const attemptInstall = (attempt: number) => {
+    if (!isAlive() || hasCursorPlugin()) return;
+
+    let mappingReady = false;
+    try {
+      // y-prosemirror types ySyncPluginKey as PluginKey<any>; its state carries
+      // a ProsemirrorBinding whose `mapping` is a Map<Y type, PM node>.
+      const ystate = ySyncPluginKey.getState(view.state);
+      const mapping = ystate?.binding?.mapping;
+      if (mapping && typeof mapping.size === 'number' && mapping.size > 0) mappingReady = true;
+    } catch {
+      // ignore and retry
+    }
+
+    if (!mappingReady) {
+      if (attempt < maxAttempts) requestAnimationFrame(() => attemptInstall(attempt + 1));
+      return;
+    }
+
+    try {
+      collabService.setAwareness(awareness);
+    } catch {
+      // ignore; cursor plugin can still work with direct awareness reference
+    }
+
+    try {
+      const cursorPlugin = collabCursorPlugin(awareness);
+      const nextPlugins = view.state.plugins.concat(cursorPlugin);
+      ctx.set(prosePluginsCtx, nextPlugins);
+      view.updateState(view.state.reconfigure({ plugins: nextPlugins }));
+    } catch (error) {
+      console.warn('[@sjawhar/proof-editor] failed to install yCursor plugin', error);
+    }
+  };
+
+  attemptInstall(0);
+}
+
+function cssEscapeAttrValue(value: string): string {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value);
+  return value.replace(/["\\]/g, '\\$&');
+}
+
+/**
+ * Replaces `parserCtx`'s value with a self-healing wrapper (LEGION-566). Milkdown's own `parser`
+ * plugin builds `parserCtx`'s `ParserState` once, at boot, and never rebuilds it
+ * (`@milkdown/core`: `ctx.set(parserCtx, ParserState.create(schema, remark))`); a parse it
+ * refuses - a mark span of a kind this schema has no parser for, the same throw
+ * `markdown-engine.ts`'s headless parser guards against for the display surfaces - leaves that
+ * `ParserState`'s stack open, so every later call through it throws too, for the editor's whole
+ * life. `@milkdown/plugin-clipboard` reads `ctx.get(parserCtx)` fresh on every text/plain paste
+ * (uncaught), so one refused paste broke every later paste in the same document until a reload;
+ * `defaultMarkdownParser` (`proof-sdk-upstream`'s marks plugin) holds whatever function this call
+ * passes it, so it heals the same way. The wrapper itself never changes once installed: it
+ * rebuilds its own closed-over parser from the schema and remark processor the broken one used,
+ * keeps the fresh one for the next call, and rethrows the original error, so the one refused
+ * parse still fails exactly as it did before and only the shared state is what recovers. Every
+ * document it returns is read through `withoutLeafMarks` first, so no inline leaf of a paste or
+ * an editor parse carries a mark (./editor/schema/leaf-marks.ts).
+ */
+function installSelfHealingParser(ctx: Ctx): void {
+  const schema = ctx.get(schemaCtx);
+  const remark = ctx.get(remarkCtx);
+  let parse = ctx.get(parserCtx);
+  ctx.set(parserCtx, (markdown) => {
+    let parsed: ProseMirrorNode;
+    try {
+      parsed = parse(markdown);
+    } catch (error) {
+      parse = ParserState.create(schema, remark);
+      throw error;
+    }
+    return withoutLeafMarks(parsed);
+  });
+}
+
+export async function createProofEditor(
+  root: HTMLElement,
+  opts: CreateProofEditorOptions,
+): Promise<ProofEditorHandle> {
+  root.classList.add('proof-editor');
+  setCurrentActor(`human:${opts.user.name}`);
+  let alive = true;
+  const heatMapMode: HeatMapMode = opts.heatMapMode ?? 'background';
+
+  const builder = Editor.make()
+    .config((ctx) => {
+      ctx.set(rootCtx, root);
+      ctx.set(defaultValueCtx, '');
+      configureDispatchLinks(ctx);
+    })
+    .config(nord)
+    .use(commonmark)
+    .use(gfm)
+    // Frontmatter and typed directives register before their node schemas claim their AST nodes.
+    .use(libraryRemarkFrontmatterPlugin)
+    .use(libraryRemarkDirectivePlugin)
+    .use(frontmatterSchema)
+    // `use` flattens its argument twice, so an array of composed schemas — each of them a pair
+    // of plugins — is an argument Milkdown accepts but its own signature cannot express.
+    .use(codeBlockExtPlugins as unknown as MilkdownPlugin[])
+    // Every block carries a stable blockId (see ./editor/schema/block-ids.ts).
+    .use(opts.blockSchema ? (blockSchemaPlugins(opts.blockSchema, opts.renderBlock) as unknown as MilkdownPlugin[]) : [])
+    .use(blockIdPlugins)
+    .use(history)
+    .use(listener)
+    .use(collab)
+    .use(cursor)
+    .use(clipboard)
+    // Register proof mark schemas, plus this library's own dispatchAsk mark
+    .use(proofMarkPlugins as unknown as MilkdownPlugin[])
+    .use(dispatchMarkPlugins as unknown as MilkdownPlugin[])
+    // Register remark plugins for proof marks and dispatchAsk parsing
+    .use(remarkProofMarksPlugin)
+    .use(remarkDispatchMarksPlugin)
+    // Last of the remark plugins that shape inline content, so the links it splits are every link
+    // the tree holds: a link inside a link label (an autolink, the only nesting CommonMark allows)
+    // is hoisted beside the runs around it (./nested-links.ts). `$remark` puts it in `remarkCtx`,
+    // which is the processor behind both the shared `parserCtx` and the `ParserState`
+    // `setMarkdown` builds, and `stringify` runs no transformer, so the editor's output is as it was.
+    .use(libraryRemarkNestedLinksPlugin)
+    // After the mark plugins, so a block-level mark span is a mark node when the fit check reads it.
+    .use(opts.blockSchema ? liveTypedBlocksRemarkPlugin(opts.blockSchema) : [])
+    // Register contexts
+    .use(heatmapCtx)
+    .use(agentCursorCtx)
+    // Register plugins
+    .use(authoredTrackerPlugin)
+    .use(heatmapPlugin)
+    .use(agentCursorPlugin)
+    .use(suggestionsPlugins);
+
+  const marginMode = Boolean(opts.onMarkClick || opts.onMarkHover);
+  if (marginMode) {
+    builder.use(dispatchMarkEventsPlugin({ onMarkClick: opts.onMarkClick, onMarkHover: opts.onMarkHover }));
+  } else {
+    builder.use(markPopoverPlugin).use(arrowCommentPlugin);
+  }
+
+  const editor = await builder
+    // This library's own Comment/Suggest/Ask bar replaces upstream's
+    // markSelectionBarPlugin, which has no extension point for Ask or a hook
+    // for Comment/Suggest.
+    .use(dispatchActionBarPlugin({ by: opts.user.name, onMarkAction: opts.onMarkAction }))
+    .use(findHighlightsPlugin)
+    .use(taskCheckboxesPlugin)
+    .use(mermaidCodeBlockPlugin(opts.drawMermaid))
+    .use(markdownLinkClickPlugin)
+    // Register unified marks plugin
+    .use(marksPlugins)
+    // Allow Backspace to delete empty table rows
+    .use(tableKeyboardPlugin)
+    // Firefox puts text typed over a code block's last line before its newline
+    .use(trailingNewlineInputPlugin)
+    // The composer's own record-mark writes are never undo steps
+    .use(recordMarkHistoryPlugin)
+    .use(editorHighlightsPlugin)
+    .use(editorChangeDecorationsPlugin)
+    .use(placeholderPlugin)
+    .use(keepUnselectedAskBlocks) // no read-back edit drops an unselected block of an off-rule ask (./ask-content.ts)
+    .config((ctx) => {
+      ctx.update(remarkStringifyOptionsCtx, (prev) => ({
+        ...prev,
+        handlers: {
+          ...(prev.handlers ?? {}),
+          proofMark: proofMarkHandler,
+          dispatchMark: dispatchMarkHandler,
+        },
+      }));
+      ctx.set(heatmapCtx.key, { mode: heatMapMode });
+    })
+    .create();
+
+  editor.action((ctx) => {
+    installSelfHealingParser(ctx);
+    setDefaultMarkdownParser(ctx.get(parserCtx));
+  });
+
+  const view = editor.ctx.get(editorViewCtx);
+
+  let currentReadOnly = Boolean(opts.readOnly);
+  view.setProps({ editable: () => !currentReadOnly });
+  view.setProps(brokenAskInputGuards); // no input throws in an off-rule ask (./ask-content.ts)
+  const setReadOnly = (readOnly: boolean) => {
+    currentReadOnly = readOnly;
+    view.setProps({ editable: () => !currentReadOnly });
+  };
+
+  // --- Collab binding -------------------------------------------------
+  // Adapted from ProofEditorImpl's initFromShare() collab-activation block.
+  // The awareness/yCursor plugin is intentionally installed *after* first
+  // connecting without it: y-prosemirror's cursor plugin can throw (nodeSize
+  // on undefined) if it evaluates awareness state before the ySync plugin's
+  // mapping is populated.
+  editor.action((ctx) => {
+    const collabService = ctx.get(collabServiceCtx);
+    // Before the shared document renders: an ask two collaborators left off its content rule
+    // must not be deleted from it (see ./ask-content.ts).
+    relaxAskContentCheck(ctx.get(schemaCtx));
+    collabService.bindDoc(opts.ydoc);
+    collabService.mergeOptions({
+      yCursorOpts: { cursorBuilder: collabCursorBuilder, selectionBuilder: collabSelectionBuilder },
+    });
+    collabService.connect();
+
+    if (opts.awareness) {
+      // Mirrors CollabClient#setLocalUser: yCursorPlugin's cursor builder reads
+      // `awareness.getStates().get(clientId).user`.
+      opts.awareness.setLocalStateField('user', opts.user);
+      installCollabCursorsWhenReady(view, ctx, collabService, opts.awareness, () => alive);
+    }
+  });
+
+  const unregisterPopoverHook = marginMode
+    ? () => {}
+    : registerPopoverHookInstance(view, opts.onMarkAction);
+
+  const typedBlockCommands = createTypedBlockCommands({
+    blockSchema: opts.blockSchema,
+    documentRef: opts.documentRef,
+    getState: () => view.state,
+    dispatch: (transaction) => {
+      view.dispatch(transaction);
+    },
+  });
+
+  return {
+    view,
+    ...typedBlockCommands,
+    getMarkdown(): string {
+      const serializer = editor.ctx.get(serializerCtx);
+      return serializer(view.state.doc);
+    },
+    setMarkdown(markdown: string): void {
+      // Markdown import only: soft line breaks become spaces here and in the headless parser,
+      // never in the shared parserCtx, which the clipboard plugin also runs text/plain pastes
+      // through - a pasted "alpha\nbeta" must keep its line break. The commonmark preset's own
+      // remark-inline-links resolves reference-style links here already, as it does in the
+      // headless parser for the display surfaces; remarkCtx holds a frozen processor, so calling
+      // it yields an unfrozen copy to extend.
+      const importParser = ParserState.create(
+        editor.ctx.get(schemaCtx),
+        editor.ctx.get(remarkCtx)().use(remarkSoftBreakAsSpace),
+      );
+      // This parser is its own, so the shared parserCtx's rule is applied here too: no inline
+      // leaf of an imported document carries a mark (./editor/schema/leaf-marks.ts).
+      const parsed = withoutLeafMarks(importParser(markdown));
+      const { state } = view;
+      view.dispatch(state.tr.replaceWith(0, state.doc.content.size, parsed.content));
+    },
+    markOffsets(): Map<string, number> {
+      const offsets = new Map<string, number>();
+      const rootTop = root.getBoundingClientRect().top;
+      for (const span of view.dom.querySelectorAll<HTMLElement>('[data-id]')) {
+        const id = span.dataset.id;
+        if (id && !offsets.has(id)) offsets.set(id, span.getBoundingClientRect().top - rootTop);
+      }
+      return offsets;
+    },
+    setReadOnly,
+    applyRemoteMarks(metadata: Record<string, StoredMark>, options?: { hydrateAnchors?: boolean }): void {
+      applyRemoteMarksMutation(view, metadata, options);
+    },
+    removeMark(markId: string): void {
+      removeRecordMark(view, markId);
+    },
+    retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome {
+      return retypeRecordMark(view, markId, kind, opts.user.name);
+    },
+    remarkMark(
+      markId: string,
+      kind: SelectionBarActionKind,
+      quote: string,
+      placement: RecordMarkPlacement | null
+    ): RemarkOutcome {
+      return remarkRecordMark(view, markId, kind, opts.user.name, quote, placement);
+    },
+    commentOnSelection(): boolean {
+      return commentOnSelection(view);
+    },
+    focusMark(markId: string): void {
+      const escaped = cssEscapeAttrValue(markId);
+      const elements = view.dom.querySelectorAll<HTMLElement>(`[data-id="${escaped}"]`);
+      if (elements.length === 0) return;
+      elements[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+      pulseHighlight(view, 'mark', markId);
+    },
+    focusBlock(blockId: string): void {
+      const escaped = cssEscapeAttrValue(blockId);
+      const element = view.dom.querySelector<HTMLElement>(`[${BLOCK_ID_DOM_ATTR}="${escaped}"]`);
+      if (element === null) return;
+      element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      pulseHighlight(view, 'block', blockId);
+    },
+    setActiveMarks(markIds: readonly string[]): void {
+      setActiveHighlights(view, 'mark', markIds);
+    },
+    setActiveBlocks(blockIds: readonly string[]): void {
+      setActiveHighlights(view, 'block', blockIds);
+    },
+    setChangeDecorations(decorations: ChangeDecorations): void {
+      applyChangeDecorations(view, decorations);
+    },
+    blockIdAtSelection(): string | null {
+      const $head = view.state.selection.$head;
+      for (let depth = $head.depth; depth > 0; depth -= 1) {
+        const id = blockIdOf($head.node(depth));
+        if (id !== null) return id;
+      }
+      return null;
+    },
+    destroy(): void {
+      alive = false;
+      unregisterPopoverHook();
+      editor.action((ctx) => {
+        const collabService = ctx.get(collabServiceCtx);
+        collabService.disconnect();
+      });
+      void editor.destroy();
+    },
+  };
+}
+
+export default createProofEditor;

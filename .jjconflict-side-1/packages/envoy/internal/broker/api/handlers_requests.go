@@ -1,0 +1,337 @@
+package api
+
+import (
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/broker/requests"
+	"github.com/sjawhar/envoy/internal/broker/secrets"
+)
+
+// createRequestBody is POST /v1/requests's exact shape: a signed
+// request object plus an optional,
+// unsigned session_id (wake-only). The v8 "secrets"/"reason"/"issue" top-level fields are gone —
+// they now live inside the signed request object itself.
+type createRequestBody struct {
+	// The session's signed request: a compact ES256 JWS, signed with the session's key and
+	// addressed to the broker's public URL, naming the secrets (authorization_details) and the
+	// reason.
+	Request string `json:"request"`
+	// Optional: the Envoy session the broker notifies if this request expires undecided.
+	SessionID *string `json:"session_id"`
+}
+
+// createRequestResponse is POST /v1/requests's exact wire shape: request_id, state, secrets,
+// grant_id, record_id, approver, lifetime_seconds, coalesced — nothing else. requests.Request itself
+// carries additional fields (decided_at, decided_by, detail) this route's contract does not define,
+// so the handler below builds this dedicated response rather than marshaling the Request it gets
+// back from Machine.Create directly.
+type createRequestResponse struct {
+	// The request's id, which GET /v1/requests/{id} and its cancel route take.
+	RequestID string `json:"request_id"`
+	// "granted", "pending" (a person must decide it) or "denied".
+	State string `json:"state"`
+	// How the policy decided each name asked for.
+	Secrets []requests.SecretDecision `json:"secrets"`
+	// Once granted, the grant to read the values from; null otherwise.
+	GrantID *string `json:"grant_id"`
+	// The credential-request record the approver decides; null when nobody needs to.
+	RecordID *string `json:"record_id"`
+	// Who decides it, as its record names them: a person's login (their lowercase email), or
+	// "anyone" for a shared secret, which anyone signed in to the broker's approval page may
+	// decide. While it is pending it is listed in that person's Dispatch Inbox, or in everyone's
+	// for "anyone", linking approve_url. Null when the policy decided it at once, so no record
+	// names one.
+	Approver *string `json:"approver"`
+	// How many seconds its grant lasts, as the signed request asked; null when it asked for no
+	// lifetime, and the grant lasts until the session ends. A reused or coalesced request answers
+	// its own, which equals the one asked for. A client that asked for a lifetime and reads null,
+	// or no such field from a broker before it, was not given that lifetime.
+	LifetimeSeconds *int `json:"lifetime_seconds"`
+	// True when the request joined an identical one this session already had pending.
+	Coalesced bool `json:"coalesced,omitempty"`
+	// While it is pending, its record's page on the broker, <BROKER_PUBLIC_URL>/approve/<record>,
+	// where a person signed in to the broker decides it; absent when the policy decided it at once.
+	ApproveURL string `json:"approve_url,omitempty"`
+}
+
+// createRequest requests secrets for the proof-verified caller, never for an enrollment named in
+// the body: a session may only ever request secrets for itself. The request object itself (not
+// this handler) names the secrets, the reason, and — implicitly, via the policy — the approver.
+func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmentID string) {
+	var body createRequestBody
+	if !readJSON(w, r, &body, "INVALID_REQUEST") {
+		return
+	}
+	req, err := s.deps.Machine.Create(r.Context(), enrollmentID, body.Request, derefOr(body.SessionID, ""))
+	switch {
+	case errors.Is(err, record.ErrRequestInvalid):
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", err.Error())
+		return
+	case errors.Is(err, requests.ErrMixedApprovers):
+		writeError(w, http.StatusBadRequest, "MIXED_APPROVERS", err.Error())
+		return
+	case errors.Is(err, requests.ErrGrantRequiresLifetime):
+		// A secret's max-grant tag bounds the lifetime its request may sign.
+		writeError(w, http.StatusBadRequest, "GRANT_REQUIRES_LIFETIME", err.Error())
+		return
+	case errors.Is(err, requests.ErrRequestPending):
+		writeError(w, http.StatusConflict, "REQUEST_PENDING", err.Error())
+		return
+	case errors.Is(err, requests.ErrSessionIDInvalid):
+		writeError(w, http.StatusBadRequest, "SESSION_ID_INPUT", err.Error())
+		return
+	case errors.Is(err, policy.ErrUnknownSecret):
+		writeError(w, http.StatusBadRequest, "UNKNOWN_SECRET", err.Error())
+		return
+	case errors.Is(err, pgx.ErrNoRows):
+		// The proof was verified moments ago against a live enrollment, but it was revoked (or
+		// its lease lapsed) before Create read it or locked it to write — the same race
+		// enroll.Renew guards against. The caller's proof is no longer good for anything.
+		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "enrollment is not live")
+		return
+	case err != nil:
+		writeInternal(w, "create request", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, createRequestResponse{
+		RequestID:       req.ID,
+		State:           req.State,
+		Secrets:         req.Secrets,
+		GrantID:         req.GrantID,
+		RecordID:        req.RecordID,
+		Approver:        req.Approver,
+		LifetimeSeconds: req.LifetimeSeconds,
+		Coalesced:       req.Coalesced,
+		ApproveURL:      s.pendingApproveURL(req.State, req.RecordID),
+	})
+}
+
+// requestDecision is GET /v1/requests/{id}'s nested "decision" object: who decided the request
+// and when.
+type requestDecision struct {
+	// Who decided it: the approver's login, "session:<enrollment id>" (the session cancelled it),
+	// "launcher:<credential id>" (its launcher ended the session, or its operator ended its machine
+	// login from one of their machines) or "broker" (the session's lease lapsed).
+	By string `json:"by"`
+	// When it was decided.
+	At time.Time `json:"at"`
+}
+
+// requestStatusResponse is GET /v1/requests/{id}'s answer.
+type requestStatusResponse struct {
+	// "pending", "granted", "denied", "expired" or "cancelled".
+	State string `json:"state"`
+	// Once granted, the grant to read the values from; null otherwise.
+	GrantID *string `json:"grant_id"`
+	// The credential-request record the approver decides; null when nobody needs to.
+	RecordID *string `json:"record_id"`
+	// Who decides it, as its record names them: a person's login (their lowercase email), or
+	// "anyone" for a shared secret, which anyone signed in to the broker's approval page may
+	// decide. The record fixes it when the request is made, so a later change to the secret's
+	// owner does not move it, and it stays once the request is decided. Null when the policy
+	// decided it at once, so no record names one.
+	Approver *string `json:"approver"`
+	// How many seconds its grant lasts, as the signed request asked; null for a grant that lasts
+	// until the session ends.
+	LifetimeSeconds *int `json:"lifetime_seconds"`
+	// When it left "pending"; null while pending.
+	DecidedAt *time.Time `json:"decided_at"`
+	// Who decided it and when; null while pending, when the policy decided it at once, and when it
+	// expired.
+	Decision *requestDecision `json:"decision"`
+	// While it is pending, its record's page on the broker, <BROKER_PUBLIC_URL>/approve/<record>,
+	// where a person signed in to the broker decides it; absent once it is no longer pending, and
+	// when the policy decided it at once.
+	ApproveURL string `json:"approve_url,omitempty"`
+}
+
+// grantValuesBody is POST /v1/grants/{id}/values's optional body: no body at all, or one with no
+// github_app, releases every value as the grant holds it.
+type grantValuesBody struct {
+	// Optional: narrows the token of every github-app secret the grant holds to one account's
+	// installation and, within it, to named repositories, to read access, or to both. A grant
+	// that holds no github-app secret refuses it (NARROWING_NOT_APPLICABLE), and one whose
+	// github-app secret does not list the account refuses it (NARROWING_OWNER_NOT_LISTED). It
+	// narrows this release alone: the grant's next release without it is owner-wide.
+	GitHubApp *githubNarrowing `json:"github_app"`
+}
+
+// githubNarrowing is one release's narrowing of its GitHub App tokens: as the request names it,
+// and as the answer names what the broker applied.
+type githubNarrowing struct {
+	// The one GitHub account whose installation the token is minted for: a login the secret's
+	// github-owners lists, compared without regard to case. The answer names it lowercased.
+	Owner string `json:"owner"`
+	// Optional: names of the account's repositories, without the account, at least one and at most
+	// 100: the token reaches those repositories alone, but keeps every permission the App holds, its
+	// organization permissions among them, unless read_only is set too. The answer names them
+	// sorted, each once.
+	Repositories []string `json:"repositories,omitempty"`
+	// Optional: true limits the token to contents: read and metadata: read. A machine that must
+	// only read needs it, with or without repositories.
+	ReadOnly bool `json:"read_only,omitempty"`
+}
+
+// grantValuesResponse is POST /v1/grants/{id}/values's answer.
+type grantValuesResponse struct {
+	// When the grant expires; the session can read the values again until then. Null for a grant
+	// that lasts until the session ends.
+	ExpiresAt *time.Time `json:"expires_at"`
+	// Each granted name's value, read fresh from the secret store.
+	Values map[string]string `json:"values"`
+	// The narrowing this release applied to its GitHub App tokens, absent when it applied none. A
+	// client that asked for one and finds none here is answered by a broker from before
+	// narrowing, which released the owner-wide tokens.
+	GitHubApp *githubNarrowing `json:"github_app,omitempty"`
+}
+
+func (s *server) readRequest(w http.ResponseWriter, r *http.Request, enrollmentID string) {
+	ctx := r.Context()
+	id, ok := pathUUID(w, r, "id", "REQUEST_ID_INPUT", "request")
+	if !ok {
+		return
+	}
+	owner, err := s.deps.Machine.OwnerOf(ctx, id)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such request")
+		return
+	case err != nil:
+		writeInternal(w, "read request owner", err)
+		return
+	}
+	if owner != enrollmentID {
+		writeError(w, http.StatusForbidden, "NOT_YOURS", "this request belongs to another session")
+		return
+	}
+
+	req, err := s.deps.Machine.Get(ctx, id)
+	if err != nil {
+		writeInternal(w, "read request", err)
+		return
+	}
+	resp := requestStatusResponse{
+		State: req.State, GrantID: req.GrantID, RecordID: req.RecordID, Approver: req.Approver, LifetimeSeconds: req.LifetimeSeconds,
+		DecidedAt: req.DecidedAt, ApproveURL: s.pendingApproveURL(req.State, req.RecordID),
+	}
+	if req.DecidedBy != nil && req.DecidedAt != nil {
+		resp.Decision = &requestDecision{By: *req.DecidedBy, At: *req.DecidedAt}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *server) cancelRequest(w http.ResponseWriter, r *http.Request, enrollmentID string) {
+	id, ok := pathUUID(w, r, "id", "REQUEST_ID_INPUT", "request")
+	if !ok {
+		return
+	}
+	err := s.deps.Machine.Cancel(r.Context(), id, enrollmentID)
+	switch {
+	case errors.Is(err, requests.ErrNotYours):
+		writeError(w, http.StatusForbidden, "NOT_YOURS", err.Error())
+		return
+	case errors.Is(err, requests.ErrTerminal):
+		writeError(w, http.StatusConflict, "REQUEST_TERMINAL", err.Error())
+		return
+	case errors.Is(err, pgx.ErrNoRows):
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such request")
+		return
+	case err != nil:
+		writeInternal(w, "cancel request", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, stateResponse{State: "cancelled"})
+}
+
+func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentID string) {
+	id, ok := pathUUID(w, r, "id", "GRANT_ID_INPUT", "grant")
+	if !ok {
+		return
+	}
+	var body grantValuesBody
+	if r.ContentLength != 0 && !readJSON(w, r, &body, "INVALID_NARROWING") {
+		return
+	}
+	var narrowing *secrets.GitHubNarrowing
+	var applied *githubNarrowing
+	if body.GitHubApp != nil {
+		n, refusal := policy.ParseGitHubNarrowing(body.GitHubApp.Owner, body.GitHubApp.Repositories, body.GitHubApp.ReadOnly)
+		if refusal != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_NARROWING", "github_app."+refusal.Field+" "+refusal.Reason)
+			return
+		}
+		narrowing = &n
+		applied = &githubNarrowing{Owner: n.Owner, Repositories: n.Repositories, ReadOnly: n.ReadOnly}
+	}
+	values, expires, err := s.deps.Machine.Values(r.Context(), id, enrollmentID, narrowing)
+	switch {
+	case errors.Is(err, requests.ErrNotYours):
+		writeError(w, http.StatusForbidden, "NOT_YOURS", err.Error())
+		return
+	case errors.Is(err, requests.ErrGrantNotLive):
+		writeError(w, http.StatusForbidden, "GRANT_NOT_LIVE", err.Error())
+		return
+	case errors.Is(err, requests.ErrGrantChainInvalid):
+		writeError(w, http.StatusForbidden, "GRANT_CHAIN_INVALID", err.Error())
+		return
+	case errors.Is(err, requests.ErrSecretNotInStore):
+		writeError(w, http.StatusNotFound, "SECRET_NOT_IN_STORE", err.Error())
+		return
+	case errors.Is(err, requests.ErrNarrowingNotApplicable):
+		writeError(w, http.StatusBadRequest, "NARROWING_NOT_APPLICABLE", err.Error())
+		return
+	case errors.Is(err, requests.ErrNarrowingOwnerNotListed):
+		// The narrowing names an account a github-app secret of the grant does not list; no minter
+		// ran and GitHub was not asked. The caller's input, so a 4xx and never MINT_FAILED.
+		writeError(w, http.StatusForbidden, "NARROWING_OWNER_NOT_LISTED", err.Error())
+		return
+	case errors.Is(err, secrets.ErrMintNarrowingRefused):
+		// GitHub refused the narrowed token (a repository the installation does not reach, or a
+		// permission the App does not hold); its message names the narrowing's likely mistake. The
+		// caller's input, so a 4xx and never MINT_FAILED.
+		writeError(w, http.StatusUnprocessableEntity, "NARROWING_REFUSED", err.Error())
+		return
+	case errors.Is(err, requests.ErrMintFailed):
+		// The kind's upstream (GitHub or Google) refused or failed a mint the narrowing, if any, is
+		// not at fault: an App with no installation, a Google login that needs a new sign-in, an
+		// upstream that could not be asked. Its message says why and never holds the stored value.
+		writeError(w, http.StatusBadGateway, "MINT_FAILED", err.Error())
+		return
+	case err != nil:
+		writeInternal(w, "read grant values", err)
+		return
+	}
+	if values == nil {
+		values = map[string]string{}
+	}
+	writeJSON(w, http.StatusOK, grantValuesResponse{ExpiresAt: expires, Values: values, GitHubApp: applied})
+}
+
+// revokeGrant ends a grant for the session that holds it — session proof only, per the shared
+// broker contract (human revocation is the UI's revoke-by-approver route, which Dispatch's server
+// calls with the human's login).
+func (s *server) revokeGrant(w http.ResponseWriter, r *http.Request, enrollmentID string) {
+	id, ok := pathUUID(w, r, "id", "GRANT_ID_INPUT", "grant")
+	if !ok {
+		return
+	}
+	err := s.deps.Machine.RevokeGrant(r.Context(), id, enrollmentID)
+	switch {
+	case errors.Is(err, requests.ErrNotYours):
+		writeError(w, http.StatusForbidden, "NOT_YOURS", err.Error())
+		return
+	case errors.Is(err, pgx.ErrNoRows):
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such grant")
+		return
+	case err != nil:
+		writeInternal(w, "revoke grant", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, stateResponse{State: "revoked"})
+}

@@ -1,0 +1,1497 @@
+# Changelog
+
+## [14.1.0] - 2026-11-01
+
+### Added
+
+- Consumer delivery. While a session's agent subject is open, the plugin subscribes its relay
+  subject, `notifications.envoy.deliver.<session id>`, before it registers, and every registration
+  asks the listener for the session's durable consumer, with an epoch per NATS connection and the
+  resume point it persisted. Answered `consumer`, the session takes its agent subject and every
+  followed topic the stream stores from the listener's relay, in stream order: each frame is
+  answered `received` as it decodes, `progress` every 20 s while Oh My Pi holds its card or turn
+  unwritten, and `done` once Oh My Pi wrote it (the message's `message_end`), or at once for a
+  frame skipped, suppressed, already shown, or rejected (after the rejection reply is posted). A
+  frame the host dropped unwritten (a switch away, an interrupt that withdrew a person's turn) is
+  answered `nak` and comes again. The core copies of those subjects then show nothing and only
+  answer a role lane's receipt, and the replay engine makes no `/v1/replay` call. So a message
+  published while the session was killed, restarting or disconnected, a role message to a role it
+  holds included, is shown once when it is back, for up to 72 hours. A nats.js reconnect begins a
+  new epoch and registers at once, so the listener restarts the relay at the consumer's ack floor;
+  the resume point is kept in the session file (`envoy-consumer-state`), with each topic's follow
+  time whenever it changes, so a resumed session's missing consumer starts where it stopped. A
+  session coming from the previous plugin has no resume point of its own: its first consumer
+  starts at the replay cursors its session file holds, so the messages stored while it was away
+  are shown instead of acked away. A BTW
+  that arrives late (delivered before, or stored before the connection's epoch began) is one inert
+  card and starts no side turn. Answered `core`, or by a listener of an earlier release, delivery
+  works as before (INFRA-594).
+
+### Changed
+
+- A BTW's side turn and every Dispatch reply run off the frame that started them, so the frames
+  after it wait for neither the model call nor the reply, on the core path and the consumer path
+  alike (INFRA-594).
+
+### Fixed
+
+- `envoy_sessions`' `machine` filter finds a session by the listener it registered through as
+  well as by the machine its process runs on: it matched only the latter, so a filter by a hub's
+  machine id (`envoy-hub`, `gke`) listed nothing for the sessions registered through it
+  (INFRA-594).
+
+## [14.0.0] - 2026-11-01
+
+### Changed
+
+- The shipped `dispatch` command accepts only `omp` and `claude` as `DISPATCH_HOST`, and reads
+  `OPENCODE_CONFIG_DIR` no longer; `envoy_publish`'s description no longer names an OpenCode
+  agent as the kind of session a serve port reaches. Legion no longer supports OpenCode.
+
+## [13.13.1] - 2026-11-01
+
+### Added
+
+- Every model request shows each Envoy card with `delivered:`, the time the session got it, after its send time (`at:` on a card, `published_at:` on the notice that names a message the session could not be shown), and with `waited:` in words once the two are 15 minutes or more apart, so a session reading its inbox late does not take a card's send time for the present time. The two lines name their clocks: the send time is the Envoy server's, `delivered:` is the session's machine's. When the machine's clock runs 15 minutes or more ahead of or behind the Envoy listener's, read from the listener's replies, the card says so in `clocks:` and `waited:` leaves that difference out, so a skewed clock neither makes a wait nor hides one, and a card still dated after its delivery once that difference is taken off says the sending server's own clock runs ahead of the listener's. A difference under 15 minutes is not shown and stays in the stated wait. Each time is kept per session, so a session the host moves to that is shown the same message reads when it got it there. The card stored in the transcript is unchanged.
+
+### Fixed
+
+- Every Envoy card but an inert one goes to Oh My Pi as an aside with `triggerTurn`, busy session or idle, so no such card waits in the steering queue a person's typed message waits in. A card handed to an idle session as a steer joined that queue whenever the session turned busy first, and the queue releases one message per model turn. The startup phase keeps its follow-up, and an inert card (a replayed BTW, or a failure notice naming one) stays a steer with no turn, handed only to a settled session. This needs Oh My Pi 18.13.2-sami.20261027-235348 or later; `.omp-pin` moves to 18.13.3-sami.20261029-115123.
+
+## [13.13.0] - 2026-11-01
+
+### Changed
+
+- `dispatch`, "References": a local path is not a reference, and outside Dispatch (a chat reply, Slack, a pull request, an email) neither is a `dispatch://` reference, which opens nothing there; give the `https://` link `dispatch` printed. To stay under the 2,000-word guard, "A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`" is cut: `dispatch-first` says it ("an ask block for a design question its document records, else `dispatch ask`").
+- The `dispatch-writing-specs` skill now says to `wait` for the read-only fact check it runs
+  before each approval request: that `task(agent="scout")` runs as a background job under Oh My
+  Pi's own defaults, so its findings arrive from the `wait` rather than from the dispatch.
+
+## [13.11.1] - 2026-10-31
+
+### Changed
+
+- Each extension instance mints a client instance id when it starts and sends it on every registration and on the deregistration at shutdown. A soft role claim that names a forked, branched or resumed predecessor now takes the role only when that predecessor has no live registration, when its live registration carries the same instance id, or when either side carries no instance id, so a claim no longer takes a role from another process that is running the named session. A refused session keeps running and stays registered, without the role. The two serial task queues, each task deadline and fence, and the registration and role state the queued tasks write now live in one module, `src/registration-state.ts`, where a queued task acts through a handle that refuses every step past its deadline or once its session is no longer the open session.
+
+## [13.10.1] - 2026-10-31
+
+### Fixed
+
+- The `dispatch` command (`dist/dispatch.js`) and the session's start notice name the lost `DISPATCH_URL` when `DISPATCH_TOKEN_FILE` is set and nothing names the server: `DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for`. In a Legion pod, which has no envoy.json and whose session keeps one shell, a command that ran `unset DISPATCH_URL` made every later `dispatch` say `no envoy.json at <path>: Dispatch is off`.
+
+## [13.10.0] - 2026-10-31
+
+### Added
+
+- Two skills every session with Dispatch now loads: `outside-message`, which holds when the
+  operator approves text that reaches a person outside the company, the two exclusions, the four
+  steps before the ask and what the ask carries; and `plain-words`, which holds the empty verb
+  phrases to delete from any text a person reads. Neither counts toward the 2,000-word budget of
+  the three Dispatch skills.
+
+### Changed
+
+- The `dispatch` skill tells a session to write each ask or comment id whole in a reference,
+  taking it from `dispatch read`'s `Ask id:` or from the page URL, because the command accepts
+  a prefix while a person's link does not. It said an ask or comment id could be an 8-hex
+  prefix, and a reference built from one opens nothing for the person who clicks it.
+  `dispatch-writing-specs` carries the same rule where a citation is written. Three pieces of
+  text that the same skills state elsewhere pay for it: the 8-hex licence, `Decisions are
+  asks.` in the `dispatch` skill's "Structure over stream", and that skill's
+  `DOC_SERVICE_UNAVAILABLE` line. The three Dispatch skills hold 1,995 words, under the
+  2,000-word guard.
+
+## [13.8.0] - 2026-10-30
+
+### Added
+
+- AskGate's rules check: a second model call judges only the new asks a Dispatch write opens
+  against two rules. A new ask is a `dispatch ask`, an ask block that a `doc-edit` inserts or a
+  block that it retypes into an ask, and an ask block in an issue spec or in a markdown upload. One
+  rule refuses an ask whose own recommendation is to change nothing. The other refuses an ask for a
+  step the person must do with their own hands when the agent did not try its own access first. A
+  match refuses the call in `warn` mode as well as in `block` mode, and mints no marker for it. The
+  check runs only on a call AskGate reads, which is one literal `dispatch` command: a call in any
+  other form reaches no gate at all, so the `dispatch` CLI refuses it for want of a marker in
+  `block` mode and posts it with a warning in `warn` mode, and the check never sees it.
+  `--advisor-rebuttal '<line>'` on a command, `"advisor_rebuttal": "<line>"` in a device's JSON,
+  or the third attempt at the same thing on the same target sends the call anyway. Each such flag
+  is kept as a shell comment where the command's line ends, after everything that runs, so
+  dispatch never sees it and the agent's record of its call still shows it, and the acknowledgement
+  quotes every override as the agent sent it and records every line: told only that the flag was
+  removed, agents read their own call back without it and reported a rebuttal they never wrote.
+  Every word of that comment is quoted, and the comment stands at the end of the command's line
+  because that is the one place bash reads it as a comment at all: written anywhere else, inside a
+  single-quoted value that is still open, the quotes would pair around the agent's own line and
+  leave it outside them. AskGate reads the commented command back as the same call before it hands
+  it over: an override no word of the form it reads can carry is removed instead, and the
+  acknowledgement says so. That command sent again is
+  read as the same rebuttal and comes back unchanged, any other comment leaves the command outside
+  the form AskGate reads, and the run-end self-check counts it as the one `dispatch` command it is,
+  so it owes no check. A device's field is removed before the call runs, and both refusals say
+  which happens. The breaker counts only the calls the gate refused, so a charter revise in `warn`
+  mode, which sends the call, never moves it. It counts each thing apart: each new ask a call
+  opens, or the call as a whole when it opens none, so its free pass covers only the thing that was
+  refused twice, and an ask refused once on a target whose other ask was refused twice is still
+  reviewed. An upload's ask block is new only while the version it replaces does not already hold
+  it, and when that version cannot be read the blocks carrying an `#id` are left out of the check
+  (`ruleAsksPartial`), so a re-upload of an unchanged document is never refused for an ask block
+  it already held. When every block of such an upload carries an `#id`, the rules check asks no
+  model and refuses nothing, but it is not silent: `ruleOutcome` reads `unjudged`, with
+  `ruleAsksPartial`, and the decision record and the report count it. The `advisor-gate` entry
+  gains `rule`, `ruleAsk`, `ruleQuote`, `ruleOutcome`, `ruleModel`, `ruleLatencyMs`,
+  `ruleTextMissing`, `ruleError`, `ruleAsksCut`, `ruleAsksPartial` and `target`, and
+  `scripts/askgate-report.ts` reports the rules check's matches, outcomes and errors and the
+  refusals the agent overrode; it reads its command line with `node:util`'s `parseArgs` and refuses
+  a flag given twice by name, rather than reading only its last value. Three rules calls in a row
+  with no verdict raise one warning saying those calls' new asks went unchecked and that the check
+  still runs.
+- AskGate publishes each rule decision, each refused call the agent sent again with a rebuttal or
+  the breaker (recorded with `ruleOutcome: null` and the refusal's own target), and each write that
+  reached the `dispatch` CLI outside the form the gate reads while carrying an ask for a person
+  (`outcome: "unmarked"`, with `asksCarried` above zero), to a Dispatch project document of the
+  session's own, `askgate-decisions-<session id>.md`, so a session holding a Dispatch token and
+  nothing else can count the refusals, the overrides, the unreviewed writes that carried an ask and
+  the rules-call errors a fortnight of sessions made. The record carries the time, the session,
+  an `id` of its own (the gated call's tool call id, and for an unmarked write the CLI ledger
+  line's place in its tool call), `source` (`pod` or `machine`), the project, the call's tool and
+  target, the rule fields, the decision, the mode, `asksCarried` and the two latencies, and **no
+  ask text and no quote**. The
+  CLI counts an unmarked write's asks from the write's own text, so a re-upload of ask blocks the
+  stored version already holds counts them as carried. `OMP_ASKGATE_RECORD_PROJECT` names the
+  project, else `LEGION_PROJECT` does, and with neither set nothing is written. The record runs
+  once the gate has answered the call, never inside its `tool_call` handler, and never changes
+  the decision; an unmarked write's runs behind that write's own entry, and the tool result waits
+  on none of it. Its write runs until Dispatch has answered it or the session's shutdown cuts it,
+  under the `Idempotency-Key` the write carries, so a Dispatch slow under load is
+  waited out rather than given up. A record that fails or that the session's shutdown cuts writes
+  one line to the host's log and appends one
+  `advisor-gate-record` entry carrying `toolCallId`, `tool`, `recordError` and, for an unmarked
+  write, the record's own `recordId`, which is what ties it to that write's entry alone; the
+  call's own `advisor-gate` entry stands as written, and `--sessions` counts each follow-up as one
+  decision record the session could not confirm.
+  At shutdown the one `session_shutdown` handler the gate binds gives the records 1.25 s from
+  that moment and then cuts them, whether or not the gate loaded, and the gate waits for what is
+  still pending, so a record still lands, and the entry of one that could not, before the session
+  is sealed; a record cut there says the shutdown cut it. The document is created once and
+  appended to ever after: the create carries a header paragraph and no record, and every record,
+  the session's first included, is appended through `docEdit`, since an upload of a name Dispatch
+  already holds stores a new version of that document and the reader reads that in place of
+  everything the versions before it held. A process holding no id for the session reads the
+  document by name — one request of a few bytes, rather than every document of the project — and
+  creates one only where that read answers 404. The create carries an `Idempotency-Key` of the
+  document's own (`askgate-doc.` and the sha256 of the project and the name) and a body fixed for
+  the session, the header alone, so every attempt of it, in this process or another, is one
+  intent Dispatch runs once: a key that finished is replayed, `409 KEY_COMMITTED` and
+  `422 KEY_REUSED` send the recorder to the read and then the append, and no create of a session's
+  document given up here can replace the records written since by committing late. Each append
+  carries a key of its own, the sha256 of the session and the record's id, so an append Dispatch
+  ran late is replayed rather than written twice, and the same record sent again with another time
+  in its body gets `422 KEY_REUSED` and is not written. Keys belong to the login that sent them — every
+  Legion pod writes under the shared agent token, which is one login — and Dispatch keeps one
+  24 h, well past the 10 minutes a create's run can hold it.
+  The records of one session are written one at a time, each carrying the time the gate made it,
+  which is what the reader counts and sorts by.
+  `scripts/askgate-report.ts
+  --dispatch-project <KEY> --since <RFC 3339> [--json]` reads those documents back and counts
+  them, split by `source`, with the unmarked writes on a line of their own, by mode and with the
+  asks they carried, counted as neither a rules call nor an override; one `(session, id)` is one
+  decision, and a second copy of it — a write given up here that Dispatch ran all the same — is
+  counted as a duplicate and in nothing else.
+  Because no call waits for the record, the review's deadline keeps its 5,000 ms margin under
+  `extensionHandlers.toolCallTimeoutMs` — the room the handler needs for the aborted call's usage
+  report and the entry — so Oh My Pi's 30 s default still gives a 25,000 ms deadline, and the key
+  must be at least 15,000 ms: set below that, the gate does not load, and so refuses every
+  Dispatch write it would have reviewed.
+- The `advisor-gate` entry gains `charterLatencyMs`, the charter call's own time on the clock
+  `ruleLatencyMs` uses: the two calls run side by side, and the entry's `latencyMs` alone never
+  said which of them the gate waited on. It also gains `mintSkipped: "call-ended"`, on a call whose
+  decision let the write out but whose own tool ended while the gate still held it: no marker is
+  minted there, since no command of that call can run, and `scripts/askgate-report.ts` prints the
+  count of those entries.
+
+### Fixed
+
+- A model request against a Dispatch build older than the answers route, which answers its own
+  `404 NOT_FOUND` "no route for …", carries no line about people's answers when no list read
+  before from that Dispatch has an item to show. Before, every request carried a line saying the
+  answers could not be read and telling the agent to run `dispatch answers`, a command that fails
+  against that same Dispatch. A list read before from that Dispatch is still carried, its
+  left-out line naming no command. The extension logs once per session and Dispatch URL, with
+  `logger.warn`, that the Dispatch has no answers route, and again only after a read of it
+  answered with a list. A proxy's 404 page, a 200 that is no answers list, a 503 and every other
+  failed read still carry the line naming why.
+
+## [13.6.0] - 2026-10-30
+
+### Added
+
+- Every model request of a session's conversation with Dispatch — a top-level session, a Legion
+  pane or a `task` subagent — carries, as its last message, what people wrote to the session in
+  the last 72 hours that Dispatch delivered to it, newest first and word for word: answers to its
+  asks, replies on them and in its comment threads, comments on its documents and routed issues,
+  mentions and messages. A subagent carries its parent's list. The message
+  stays under 8,000 characters (at most 7,999), leaving the oldest items out with a line that
+  counts them and names `dispatch answers`. Each request waits at most 800 ms for Dispatch,
+  then carries the last list read from that Dispatch, with its read time and why this read
+  failed, or, when that list shows nothing, a line saying the list could not be read and why;
+  a Dispatch older than this release, which answers its own 404 "no route for …", adds no such
+  line, is logged once per session, and is not asked again for 5 minutes, and no `!` token
+  command runs for the read. The list is a separate user message after the
+  conversation, so a change in it leaves the cached conversation byte for byte and Oh My Pi puts
+  no cache anchor on it; the `dispatch-first` skill stays at the head as before. Requests Oh My
+  Pi builds from the conversation that are not its turns carry no list and wait on no read: a
+  side turn (a Dispatch BTW, the stop-time self-check, `/btw`) and the handoff keep their own
+  prompt last, and a remote compaction's request ends at its cut. Two copies of the extension
+  make one read per request, a list or none.
+
+### Fixed
+
+- A session following `notifications.dispatch.issue.<KEY>.>` is now shown the comments,
+  documents and asks the agents on that issue write, live and on replay, and records each in
+  its ledger so no sweep shows it twice. Before, the renderer skipped every Dispatch frame
+  marked `notify: false` on an owner topic, which is every event an agent wrote, and a skipped
+  frame is not recorded while its cursor still moves past it: a subscribed session saw a
+  person's activity and none of its peers'.
+
+## [13.5.1] - 2026-10-30
+
+### Changed
+
+- `dispatch-first` says that a result a person asked for is like a blocker: a document or artifact notifies nobody, so the document that holds the result ends with an ask block asking their next step, else a `dispatch ask`. Its rule that each ask and message stands alone is gone, since `dispatch-writing-specs` carries it where an ask is written; the three Dispatch skills stay under their 2,000-word budget.
+
+## [13.5.0] - 2026-10-30
+
+### Added
+
+- The Dispatch tools take a block reference in `reply_to` and `in_reply_to` to answer one block of a comment or message, and read a block of a comment or message by its reference.
+
+## [13.3.0] - 2026-10-29
+
+### Changed
+
+- `dispatch read` asks for each referenced document's latest version only (`GET /api/v1/issues/{key}/references?versions=latest`), so Dispatch builds a fraction of the answer; the printed `References:` section is unchanged, also against a Dispatch that does not know the parameter.
+
+## [13.2.0] - 2026-10-29
+
+### Changed
+
+- The shipped `envoy` skill and the bundled `envoy_publish` description say when a publish errs,
+  now that the listener confirms a role or ad-hoc topic message with its recipients before it
+  answers: a role message errs when its holder did not confirm it within about 4 seconds (seen
+  after about 8, since the client tries once more), and a team or other ad-hoc topic errs naming
+  each session registered on it, the sender excepted, that did not confirm; a session named with
+  `receipt_timeout` gets the message back from its inbox through the replay once its connection
+  returns. The README, `AGENTS.md` and the delivery comment say the listener's publish route
+  waits for the receipt the session sends for a forwarded frame.
+
+## [12.0.0] - 2026-10-29
+
+### Added
+
+- Every Dispatch write a session makes carries one `Idempotency-Key` and is asked again under it after a transport failure, a 5xx, a 408, a 429, a `409 KEY_IN_FLIGHT` or an attempt that hears nothing for 20 s (INFRA-258, through `@sjawhar/envoy-client`'s `DispatchClient`). The accept behind a person's direct Send or Aside (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`) retries inside its own 10 s bound, at 0, 1, 3 and 7 s, so an accept whose `200` was lost becomes the person's turn on the replay where it used to leave the message as a card; every refusal, error and the timeout still keep the card.
+
+## [11.9.0] - 2026-10-29
+
+### Fixed
+
+- A person's Send from Dispatch's live view no longer waits behind Envoy notifications, and an
+  interrupt no longer drops the notifications queued when it lands. Every card (an Envoy
+  notification, an issue message, a comment mention, a Dispatch Steer that was not accepted as the
+  person's own turn) went into the host's steering queue, which the host drains one message per
+  step, so a session that received many cards took a person's Send minutes later, and an Esc
+  emptied that queue. While a turn runs a card now goes as an aside, which the host folds in at the
+  next step, after the Send, without ending the running tool batch; a card still queued at an
+  interrupt is folded into the context with no run and read at the next turn. On an idle session a
+  card is still a steer with `triggerTurn`, so it starts a turn as before; a targeted Aside stays
+  an aside, and a host context without `ctx.isIdle()` keeps every other card a steer. A card the
+  host folds into the context with no turn, as it does for an aside that lands as a run ends in a
+  session interrupted earlier, or in plan mode, now gets one hidden wake that starts a turn to read
+  it, unless an interrupt is still in effect or the card was a targeted Aside; a card sent while
+  the session sets up a prompt is left to that prompt's run, so an interrupt there starts no turn
+  either. The limits are in the package's `AGENTS.md`.
+- The Legion controller's start message is its session's first turn, ahead of any Envoy card that
+  arrived while the session started. A card that reached the operator's controller in a terminal
+  before `/legion-controller-start` ran started its own turn ahead of the start message, and in RPC
+  mode a startup card's wake could fire once the host was idle after its startup, before the
+  daemon's start prompt arrived. While the plugin interface's `startupTurn` names the session (the
+  start sent under 30 s ago, or due and not sent yet for under 30 s), a card that finds it idle goes
+  as a follow-up that starts no turn, in any mode, and the startup wake waits for the start turn:
+  once that turn ends, one wake starts a turn for every card that arrived meanwhile, counted even
+  though the start turn's reply follows them, unless a later reply read them. A start that never
+  comes holds the cards back for 30 s, and a start claim refused before the send releases them
+  within a second. A mark naming another session, or one whose start was sent 30 s ago or more,
+  changes nothing. Plugin interface version 5, which pi-envoy reads; install it with the
+  `@sjawhar/pi-legion` released beside it.
+- A card that reaches an RPC session while Oh My Pi starts no longer holds back every RPC command
+  until the turn it started ends. Oh My Pi settles every extension send of its startup before RPC
+  mode reads its input, and an idle card's send lasted its whole turn, so a Legion worker's
+  `get_state` and task waited for it (once 72 minutes). Such a card now goes into the context with
+  no turn, and the wake starts its turn once the host is idle after its startup. Print, json and
+  terminal sessions keep the idle steer.
+
+## [11.8.0] - 2026-10-28
+
+### Added
+
+- Every registration names the plugin: `plugin` `@sjawhar/pi-envoy` and `plugin_version` this
+  package's version, which the listener's `GET /v1/sessions` and `GET /v1/registry/<id>`, and
+  `envoy_sessions`, show.
+
+### Fixed
+
+- A session whose NATS path freezes (packets stop, neither side closes) reconnects within 30 s,
+  52 s when its first redial also hangs, instead of after up to 6 minutes: it dials with
+  `@legion/envoy-client/nats-connection`'s options, a ping every 10 s and the connection dropped
+  after two unanswered pings, in place of nats.js's default 120 s ping. The reconnect runs the
+  catch-up, so the session shows the messages sent meanwhile once.
+- A NATS redial that hangs (its TCP connect, or a server that never sends `INFO`) is closed once
+  nats.js gives up on it at its 20 s dial timeout, instead of keeping its socket open for the
+  process's life: the bundle carries `patches/nats@2.29.3.patch`, which makes nats.js destroy the
+  socket of a transport that never finished connecting. The patch also makes nats.js close a stale
+  connection without flushing it first, so a session that published agent-stream frames after its
+  path froze still reconnects: the flush never completed behind data the dead path never
+  acknowledged, and the session never redialed.
+
+## [11.7.0] - 2026-10-28
+
+### Changed
+
+- The `dispatch` skill this plugin ships says what a claim delivers, where it said a claim delivers
+  no comments: a person's answers, comments and messages on the claimed issue reach the session,
+  and a new comment that mentions it arrives as the mention alone once that mention was delivered,
+  or twice when the mention's receipt timed out. A `session:` route to the session brings a
+  person's answers, comments and messages as a claim does; a subscription to the issue brings
+  other agents' activity, beyond a reply in an ask the session follows.
+- `dispatch issue-update --help` says closing an issue withdraws its open asks (record kind
+  `withdrawn`, naming the closer, written only by Dispatch) and a reopen brings back exactly those,
+  and `dispatch resolve-ask --help` says an ask on a closed issue is refused (`409 ISSUE_CLOSED`)
+  until the issue reopens.
+- Plugin interface version 4: the interface carries `startupTurn`, the session whose
+  first turn a start that runs after Oh My Pi's startup owns and when that start was sent, which
+  `@sjawhar/pi-legion` sets for its controller's start message and clears at that session's first
+  run or shutdown. Install it with the `@sjawhar/pi-legion` released beside it.
+
+## Before changelog fragments
+
+### Added
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by …` with the
+  options chosen and `Answer text: …`, `Closed with no answer: …`, `Closed after an answer: …` with
+  `Last answer by …`, or `Open: no answer yet.`; against a Dispatch older than this release, which
+  reports no state, `Answer state not reported by this Dispatch; open the link to read the ask.`
+  Its description says an ask hit says whether it is answered (INFRA-569).
+
+- AskGate's marker checks at the `dispatch` CLI (no matching marker, a file changed after the
+  review, a file missing when the gate ran) warn by default: the write posts with its warning and
+  an entry the report counts. They refuse only when the session chose block (`OMP_ASKGATE=block`,
+  or its `experiments` entry's `askgate_block` arm on). A model's revise verdict still blocks by
+  default, and no model role or a gate that did not load still refuses in both modes.
+- A session shows once each Envoy message it missed while its NATS connection or a subscription
+  was down, NATS was restarting or the session was not running. It asks its listener's new
+  `POST /v1/replay` for what the notification stream (72 hours) stored on its own agent subject
+  and on every topic it follows after where it last read, when a pass opens its agent subject (a
+  start, a switch, a resume), after a subscription is reopened, on each NATS reconnect, on every
+  heartbeat and after `envoy_subscribe`, and shows each message neither the live path nor an
+  earlier sweep showed as a card saying it was published while the connection was down. A
+  replayed BTW, Aside, Steer or person's Send is that card only: it runs no side turn, takes no
+  user turn and posts no Dispatch reply. Role messages and team or other ad-hoc topics stay live
+  only, and nothing from before the session followed a topic, or older than 72 hours, comes back.
+  A message counts as shown once Oh My Pi wrote its card, or the person's turn it became, to the
+  session file (the message's `message_end`): a card or turn handed over while a turn streams,
+  which Oh My Pi holds in memory until the turn takes it, is recorded only then, so a process that
+  ends first (a SIGKILL, a pod stopped mid-turn) shows it after the restart instead of losing it.
+  A card Oh My Pi drops unwritten while the process lives on is shown again: one an interrupt
+  (Escape, RPC `abort_and_restore_queue`) withdrew is handed again at the next heartbeat, once
+  the host is idle and holds no message (`ctx.isIdle()`, `ctx.hasPendingMessages()`), and one a
+  switch away dropped is released, so that session's sweep shows it once the host is back on it
+  or resumes it, never recorded before its card is written. A person's Send run as typed input
+  that an interrupt withdrew unwritten (Oh My Pi hands it back to whoever interrupted) is
+  released at that heartbeat, so the next sweep shows it as a card that runs nothing. A BTW is
+  recorded by its event id the moment it arrives, before its side turn and before any reply is
+  posted, in the session's file even while it shuts down, so no sweep shows it as a card again,
+  whether its answer or refusal fails, is still in flight, or the process ends mid-turn or
+  mid-reply and the session is resumed; a Retry of it still runs. Whatever the record, a BTW that
+  reaches replay is shown as one notice that starts no turn, saying it runs nothing, and so is a
+  failure notice naming a BTW: it is handed only once the host is idle with nothing queued, since a
+  streaming turn would run another model turn for it, and waits for the first such heartbeat while
+  a turn runs. The replay's one-time notices (the stream was recreated, older messages may be
+  missing) wait for an idle host the same way. A held notice is recorded in the session file
+  and shown after a restart, or a switch away and back, that cut the hold short. A replayed
+  subscription removal takes the topic out of the listener's registry too, so a later restart
+  does not follow it again.
+  The session file keeps what the session was shown (`envoy-replay-delivered`, and the written
+  cards themselves, read back by the event they name) and where it read to
+  (`envoy-replay-state`), so a restart shows nothing again (up to 20,000 frames in 72 hours) — a
+  live repeat of a frame shown before the restart is dropped too — and a session stopped past the
+  listener's grace follows its topics again; a person's turn written just before the process
+  ended, its record not, can come back once as a card, never lost. A frame that fails to show is
+  retried, and its third failure, or a live failure no sweep will retry (a frame received before
+  its subject's cursor started included, stamped when it arrived even behind a slow delivery),
+  shows one card naming it and how to read it, where a
+  failed injection was only logged before. A recreated stream (its `stream.id` changed, or, from a
+  listener that answers no id, its creation time; a restore moves the creation time under the same
+  id, as can a leader election after a clustered restore, and that is no recreation) or a cursor
+  older than the stream's
+  oldest message is said once as a card, also after a restart that came before it was said; a
+  listener without the route (404) or unable to read the
+  stream (503 `REPLAY_UNAVAILABLE`, 401, 403) is said once as a warning, and live delivery goes
+  on as before. The session registers and replays no followed topic reaching a private stream
+  subject, by the listener's own rule: another session's agent subject (a fork parent's until a
+  pass closes it), a failed-delivery lane, a `notifications.legion.` controller lane, or a
+  wildcard reaching one such as `notifications.agent.*`, which the listener refuses to store; it
+  still follows it live.
+  `scripts/smoke-replay.sh` proves it against a real session, listener and JetStream (INFRA-439).
+
+- A person's browser edit of a spec a session wrote reaches that session as one Envoy card, 30
+  seconds after the person stops editing: the card names the document, the two versions and each
+  editor, and the diff follows it in a fenced `diff` block. An idle session starts a turn on it.
+- The `dispatch` command this plugin ships reads one block of a document:
+  `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
+  `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
+  last changed in, its text, for a pinned reference its text at that version and whether it
+  changed or was removed since, and what cites it. `dispatch read --help` lists the block forms
+  and the id's percent-encoding, `dispatch ask --help` takes a block reference, and
+  `dispatch doc-edit --help` says a block id past 256 bytes is stored but its block is no graph
+  node.
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line.
+- The `dispatch` skill never claims an issue with the `legion` label unless the session is a
+  Legion role of its tree, even when its claim reads `not running`: the Legion daemon suspends a
+  root's architect while the root waits on a person, and taking that claim takes the tree out of
+  the workflow.
+- `dispatch-first`'s blocker rule says a design question that a document records is an ask block in that document, and any other blocker a `dispatch ask`. `packages/pi-shared/test/skills-partition.test.ts` now fails when a shipped skill or a daemon prompt names a `skill://` that neither plugin ships.
+- The agent stream reports the model and thinking level the session runs now, so Dispatch's live
+  view can show and switch them: a `settings` frame carrying the current model (`provider/id`),
+  every model the session lists as available, the configured thinking level `/effort` reports
+  (`null` for the model's default) and the levels `/effort` offers (`thinking: null` for a model
+  with no adjustable thinking), read from the live `AgentSession`'s own getters. Ids are never
+  truncated and the list is never cut. A host that cannot be read (no `AgentRegistry` export, no
+  live session under this id, or a missing getter) sends `reported: false`. The session re-reads
+  the getters on every replay and watch, on `turn_start` and `retry_fallback_applied`, and after a
+  person's typed input runs, before its reply is posted, and publishes the frame only when it
+  changed and a viewer is attached; a getter that throws is logged and never blocks the replay
+  answer. A replay ends with the history, the settings, then the commands; the settings frame is
+  paid for first and whole, and the commands keep the prefix that fits what is left (INFRA-195).
+- The `dispatch` skill this plugin ships teaches the board move as a command: a card moves with
+  `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue,
+  `--after <OTHER>`, which puts it below, or both together, which land it between them, where the
+  issues reference spelled out a hand-built `PATCH` carrying a `rank` body. Its reorder rule now
+  names the agent that keeps each project's order — in a Legion deployment the controller, at
+  `notifications.role.legion-<project>-controller` — in place of the retired `backlog-order`
+  address, and says to raise a wrong order on the issue itself where no Legion controller runs
+  (INFRA-188).
+- The `dispatch` command's `architecture-sync` imports every architecture source of the project,
+  one per repository, and prints a line for each, or with `--repo <owner/name>` that one source
+  alone (INFRA-391). Against a Dispatch older than this release,
+  `dispatch architecture-sync --project <KEY>` falls back to that server's single-source sync and
+  prints its one line, and `--repo` needs a Dispatch of this release. The `dispatch` skill this
+  plugin ships says an issue's component ids may come from any of its project's source
+  repositories, and its issues reference gives the per-source output and `--repo`.
+
+- AskGate reviews each Dispatch write of a session's main agent before the write posts, and sends
+  back a write that breaks its rules with the reason and the fix. It runs in each session unless
+  `{"askgate":{"enabled":false}}` in the session's own envoy.json turns it off. A checkout cannot
+  turn it off. `OMP_ASKGATE=warn|block` sets the mode, and else the session's `experiments` entry
+  does (`block` when there is none). The gate asks the `askgate` model role, else the `default`
+  role, and refuses the write when neither is set. A switch that does not parse, and a gate that
+  does not load, are said at session start. A gate that does not load (a host module, an
+  `OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler time limit too short for a
+  verdict) refuses each write it would review, in both modes, naming the error and the switch.
+- AskGate reviews an upload of a markdown document (`dispatch artifact` with inline text, a
+  `--path` file whose name ends in `.md` or `.markdown`, or a `--name` that ends in `.md`) against
+  its rule on the person's words alone. A name or path read from a file (`--name-file`) is decided
+  from the dry run, and one that holds an expansion is outside the form the gate reads. Each posted
+  file is read in place and reviewed, and the call runs as written; the marker binds each file's
+  sha256, and the CLI refuses a file that changed after the review. A file missing when the gate
+  runs (one a call earlier in the same message writes) is refused in block mode with the advice to
+  send the call again in a later message, and runs unreviewed with that note in warn mode. A
+  missing or non-regular file is refused before AskGate reads it,
+  and the refusal names `--content-file -` for an upload's text from standard input.
+  The gate cuts all arguments at 64 KiB as one JSON block, so it reviews only part of a long
+  document. Its rules now also send back a fact the reader does not need and text longer than its
+  decision needs, and a claim about what the person said is sourced only by a link to where they
+  wrote it.
+- AskGate reads one form of a Dispatch write: `[cd <literal path> && ] dispatch <subcommand>
+  <literal words…> [2>&1] [<<'DELIM' … DELIM] [| head|tail [-n N]]`, with every word literal and
+  nothing else in the call; a quoted word may run over several lines (double quotes with no `$`,
+  backtick or backslash), a backslash-newline continues the command, and the one trailing `head`
+  or `tail` stage is left out of the dry run. `bun <path>/dispatch.js` and any path ending in
+  `dispatch` or `dispatch.js` are the CLI.
+  It refuses no call by reading any other form and reads no eval cell: the `dispatch` CLI enforces
+  the review. While the gate is bound, pi-envoy keeps one owner-only record file for its process
+  in the `askgate/` directory of the CLI state directory of each session id it binds, and the
+  gate mints one single-use marker for each literal call it lets run, bound to the CLI's argv and,
+  behind a review, to the dry run's arguments and each named file's sha256. Under a live record
+  the CLI posts a gated write only when it consumes a matching marker; block mode refuses one with
+  none, warn mode posts it with a warning, and either is recorded as an `unmarked` entry. A pipe
+  other than one trailing `head` or `tail`, `xargs`, a script, an alias, `python3 -c`, `node -e`
+  or an eval cell's process is therefore refused by the CLI in block mode, and text that only
+  names a write (a commit message, a search pattern) runs. A task subagent's literal write gets an
+  argv-only marker. A gate that did not load mints nothing, and a session with no model role still
+  refuses in both modes.
+- When the CLI refuses (or in warn mode warns about) a write with no marker from a `bash` call
+  outside the literal form, AskGate appends a note to the call's result that names the first cause
+  it found (an expansion, a program that runs the write, a pipe, a second command, an assignment,
+  a redirect) with the call's own text, and the literal form to send.
+- pi-envoy sets `DISPATCH_STATE_DIR` in the session's environment when it is unset, so a command
+  that changes `HOME` or `XDG_STATE_HOME` still finds the session's ledger and AskGate record. A
+  record AskGate cannot write after a session switch is a notice at once, not only a log line.
+- An upload whose `--name` ends in `.md` after trimming is judged with the CLI's own markdown
+  predicate, so the gate reviews every upload the CLI asks a marker for.
+- AskGate says it when a write posts unreviewed. A timeout, a model error, an answer with no
+  verdict, a handler exception, a dry run that failed, the pause after three failures, a session
+  on another provider, a rebuttal and a breaker trip each record their outcome and tell the agent
+  that the write went out unreviewed and why, in a headless session too. A failed review hands
+  back the agent's own command, so a gate that fails breaks no valid write.
+- AskGate refuses a posted path that reaches a file descriptor of whichever process opens it, by
+  its own spelling (`/dev/stdin`, `/dev/fd/N`, `/proc/self/fd/N`, `/proc/thread-self/fd/N`,
+  `/proc/<n>/task/<m>/fd/N`) or through a symbolic link to one: AskGate would open it in Oh My
+  Pi's process and the command in its own shell. It walks each operand one component at a time,
+  follows every link itself, refuses a component that reaches `/proc` or `/dev`, and opens with
+  `O_NOFOLLOW`. A `--path-file` is refused for the same reason. A `--<field>-file` operand goes
+  to the kernel as written, so a `..` after a symbolic link names the file the CLI opens. An
+  `--image` file is not reviewed: the model reads its path, and the CLI names the upload after the
+  file it opens when it sends.
+- AskGate refuses in both modes when no model role resolves, on every path: a rebuttal, a halt, a
+  breaker trip, a shutdown and a dry run that failed each allowed the write before this.
+- Every note AskGate hands back rides on the call's own result as well as the loop's context, so
+  a write made from an eval cell, which has no loop context, tells the agent what happened.
+- A write that no review stands behind is refused in both modes when AskGate cannot record it:
+  the record is the whole account of what posted unreviewed. A write the model allowed still
+  posts.
+- AskGate keeps a marker until the call it was minted for ends. A call the host backgrounds
+  (`async: true`, or `bash.autoBackground`) reports its start before the shell runs, so its
+  marker stays until the session shuts down; a session switch or branch keeps it.
+- AskGate binds only in a session that has Dispatch, read from the session's own envoy.json and
+  the variables over it; a checkout's file can turn it on and never off. A session or a pod with
+  no Dispatch has no write to review, gets no gate and no record. The test runs at load: a session
+  that turns Dispatch on afterwards has no gate until it starts again.
+- `scripts/askgate-report.ts` prints a count for each outcome and names every session that had a
+  write the gate did not review, with its counts. It counts as sent back every entry whose
+  decision is `revise` — a revise verdict, `no-model-role`, and in block mode `abandoned`,
+  `shutdown` and `unmarked` — and every `unreadable`, `unmarked` or `load-failed` entry; as a
+  refusal a write that did not post; and as unreviewed every `allow` whose outcome is no verdict,
+  warn mode's `abandoned` and `shutdown` among them. Its printed header says the same.
+- AskGate needs `extensionHandlers.toolCallTimeoutMs` at 120000 or more in the session's settings.
+  At the 30 s default its deadline is 25 s, a review of a long session often times out, and the
+  write posts unreviewed. A deadline under 30 s is one warning at start that names the key.
+- AskGate reviews the writes of a cooperating agent and is no sandbox: a process of the same user
+  can turn the gate off in its own envoy.json, or point the session at another envoy.json through
+  the launching shell. The CLI's
+  check does not cover a direct HTTP request to Dispatch, an older or a different CLI, or a
+  same-user process that removes the record or a marker, acts as another session id or state
+  directory, or otherwise goes around the CLI. claude-envoy has no Dispatch write tool over MCP;
+  Claude Code writes through the CLI under host `claude`, where no record exists. The README and
+  AGENTS.md say so.
+- An upload's absolute `--path` resolves as the CLI resolves it, which removes a `..` before the
+  kernel follows a link, so the gate reviews and posts the file the CLI opens.
+- In warn mode a write whose review the gate gave up (`abandoned`, `shutdown`) carries the same
+  note as every other unreviewed outcome.
+- The core's header says that `O_NOFOLLOW` guards the last path component only.
+- A leading `cd` is resolved as Oh My Pi resolves it: the dry run and its directory probe run
+  with no `CDPATH`, and a leading `cd /` in a call that names no directory runs in the session's
+  own directory.
+
+### Fixed
+
+- AskGate's rules no longer push a reviewer to shorten an ask below what its concrete case needs.
+  They say a rewritten `dispatch ask` or `dispatch edit-ask` question is at most 2,000 characters
+  (`ASK_QUESTION_MAX`), cut to fit and never below it to save room. Content failure 12 exempts the
+  concrete case, what each option does and to whom, and the recommendation, and content failure
+  13 now names padding (a preamble, a restatement, a process account, a closing offer), never
+  length alone. A question about a credential, grant or permission only the person can give is a
+  question for them, and a claim about what the person said may be restated as the agent's own
+  dated reading of a named source when no link reaches their words. A full-length rewrite now
+  reaches the agent whole: the revise reason handed to it is capped at 8 KiB, from 2 KiB, which
+  clipped the end of a rewrite (its options and recommendation), and the review's output budget is
+  4,096 tokens, from 1,200, which a rewrite of a 1,450-character question already used 1,106 of,
+  thinking included; an answer cut off there holds no verdict and the write posts unreviewed.
+- A live view held open while its session is relaunched with `--resume` now shows the resumed
+  process's model, thinking level and command changes. Two things stopped it. Every process
+  numbered its agent-stream frames from 0, and the page keeps a `settings` or `commands` frame only
+  when its `seq` beats the one it already applied, so it ignored everything the resumed process sent
+  below the earlier process's count: the publisher now seeds `seq` from its clock (milliseconds ×
+  1,000) and never moves it back on a reset, so a later process of the session numbers above every
+  frame an earlier one sent. And the page's relay asks the new process for no replay, only re-arms
+  it with bare watches, so the settings and commands the process read before the first watch never
+  reached the page: a control message that arms a publisher nobody was watching now also sends the
+  settings and commands as they stand (INFRA-195).
+- A pass or a role move that never settles no longer stops the registration heartbeat. Both serial
+  queues (`passes`, `roleMoves`) give each task a deadline, never shorter than the heartbeat
+  interval: past it the caller's call rejects, the queue starts the next task, and the abandoned
+  task is fenced, so its late continuation writes nothing over what ran after it. The heartbeat
+  tick also re-posts the registration itself, outside the queues, while a pass is still running
+  and the last accepted registration is a whole refresh interval old, so a pane whose pass is
+  wedged keeps its `envoy ps` row and stays resolvable for its role instead of being dropped five
+  minutes in. A stall counts as a failed registration: the next healthy tick re-asserts the role
+  and fires the regain hook (`"reregistered"`), which re-runs a Legion claim's readiness. The pane
+  is told once per episode — one notification and one warning line, not one per tick.
+
+- A role the listener granted is no longer pinned to a session that refuses its traffic. When a
+  role move was abandoned at its deadline while its claim was in flight, `envoy_role_set` threw
+  and discarded the grant, so the listener named that session as the role's holder while this
+  process had opened none of the role's notices and no pass knew of a hold to hand back: every
+  task and notice addressed to the role went to a pane that never showed one, for the life of the
+  process. The granted hold is now recorded as a pending hand-back before the throw, so the next
+  pass hands it back, or keeps it for the session that wants it.
+
+- A pass abandoned mid-hand-back no longer takes over the hand-backs a session event left for the
+  move that replaced it. `settleEndedHolds` reads its fence at the top of each loop iteration, now
+  before its `delete` rather than after the hand-back: a `Map` iterator visits entries inserted
+  after it was created, so an abandoned move could adopt a hold a session event had just ended and
+  record it as the role this process holds. The next pass then found that role unwanted and handed
+  it back, which closes every subject another plugin opened while the role was held — subjects only
+  that plugin reopens, on its next session switch or restart.
+
+- A NATS dial that lands after its pass was abandoned no longer becomes the session's shared
+  connection. `ensureConnection` re-checks its fence, the shutdown flag and whether another pass
+  established a connection meanwhile before assigning the shared field, and closes the dial it
+  loses with. A late dial used to displace the connection a newer pass had established: that one
+  held the session's live subscriptions and went unreferenced, so nothing drained it at session
+  end and `maxReconnectAttempts: -1` kept it reconnecting for the life of the process, while the
+  shared field named a connection carrying no subscriptions at all.
+
+- The run-end self-check's prompt counts as PROCEEDING a wait for a message, an answer or an event
+  a human already said they will send and that is on its way: such a reply is an event, not an
+  open question. Its WAITING case covered any information from a human, so an agent waiting for
+  the go-ahead message its user had promised answered WAITING, and the `dispatch-ask-reminder`
+  steer then told it to open a Dispatch ask for that message. Something a human put off for later,
+  or promised and then did not send, still counts as WAITING. WAITING now excludes a wait the
+  session's listed asks cover, and PROCEEDING counts a wait any open ask covers, another session's
+  included. With no open asks of its own, the prompt says the session has none, where it said
+  Dispatch had none: when another session's open ask covered the wait, that line denied the ask
+  existed, the check answered WAITING, and the steer told the agent to open an ask the other
+  session's ask already covered. The one-word WAITING/PROCEEDING answer and its parse are
+  unchanged.
+
+- The `dispatch` command waits at most 1 s for tmux to name the session's pane, then kills the tmux
+  client and sends the call without the pane. A tmux client waiting to connect to a tmux server too
+  busy to accept caught the SIGTERM of the lookup's 5 s timeout and kept waiting, and the command
+  waited for it, so a `dispatch` call from a pane of a loaded shared tmux server took up to 85 s.
+
+- A Dispatch write's cadence advice (three or more messages on an issue with no human
+  response) opens with `Posted.` and is the result's last line, so a tail of the output shows the
+  write went through instead of reading as a refusal. `dispatch_issue`'s `priority` says it takes
+  a number from 0 to 3, 0 highest, where it named P0 to P3.
+
+- `dispatch read` of an issue's document prints the document's summary, including the links
+  `dispatch search` returns, where it printed the issue's summary. Owner arguments that disagree
+  or that a command would drop (a document `comment` posts past without `--quote`, `ask` without
+  `--anchor`, `--issue` beside another issue's ref, and the rest) are refused, naming the
+  spelling that does each. `dispatch://KEY/artifact/<slug>/comment/<id>` is refused with one
+  problem naming `dispatch://KEY/comment/<id>`. An ask or comment a reference names is held to
+  the issue or document it names by `read`, `resolve-comment`, `resolve-ask`, `edit-ask` and
+  `follow`, and `dispatch ask` beside `--issue` or `--project` may cite any other issue or
+  document.
+- The `dispatch` skill: `dispatch read` of a document prints its summary, and a document hit
+  names its issue on `Issue:`.
+- The `dispatch-first` skill: scout, the spec checker it names, has no shell, so the Dispatch, gh
+  and git output a spec's claims rest on is saved to files and handed to it.
+- A `dispatch` write ends with `(not subscribed to KEY; …)` only when none of the session's Envoy
+  subscriptions, as the listener records them, receives every event on the issue or document; it
+  used to end every write that way. With Envoy off or the listener not answering, the write says
+  nothing about subscriptions. An ask or an ask reply names its `envoy_subscribe` line under the
+  same rule.
+- `dispatch read --ref dispatch://KEY/ask/<id>` finds an ask in a spec by its `:::ask{#<id>}`
+  block id too, whole or as a unique 8+ hex prefix, where it answered `matches none of the asks`
+  or `not found`, and prints the ask's own id (`Ask id:`).
+- The `dispatch` skill: a typed answer that disagrees with the selected option is the answer; a
+  changed decision on an answered ask is a new ask, since an answered ask cannot be retracted;
+  repeated measurements go in one artifact edited in place; and `dispatch read` takes an ask
+  block's id, while the writes to an ask take the ask's own.
+- The `dispatch` command waits for its stdout and stderr writes before it exits. Bun's
+  `process.exit` dropped whatever a pipe had not yet taken, so every omp session, which reads the
+  command through one, lost the end of any output over the pipe's buffer (8 KB to 16 KB) with exit
+  code 0.
+
+### Changed
+
+- `dispatch-writing-specs`, "Old specs": text kept in a rewrite follows the text rules, and each
+  retelling, quotation or unlinked attribution in the old spec is restated as design or cut; a
+  requirement's linked `From:` source stays. Rewrites kept passages such as "You asked if …" word
+  for word, because the agent carried them over rather than wrote them. To stay under the
+  2,000-word guard, lines another loaded text already says are cut or merged: "Write about the
+  design, never the person" joins "State the current design, never how people reached it" as
+  "Write about the current design, never the person or how people reached it"; the list of
+  reference forms after "Link each source where the person wrote it" (`dispatch`, "References",
+  lists them); "A person's decision is their answered ask block" (`dispatch`: "Decisions are
+  asks"); and "approved spec's" in "The plan" (`dispatch-first`'s table says when to plan).
+
+- `dispatch-writing-specs` adds two rules for the text. A spec cites code by file and symbol, never
+  a line number, since a line number is stale at the next edit. A sentence that cites a gate
+  passing (a test, review, check or proof) also says, in that sentence, what the pass does not
+  show, so a reader does not take it as evidence of more. To stay under the 2,000-word guard, lines
+  another loaded text already says are cut: the Legion reviewer names in "Each version" and the
+  design-gate pointer in "Approval" (`skill://legion-architect` holds both), the description's
+  pointer to `skill://legion-architect` (`dispatch-first`'s table names it), the approval Dispatch
+  carries (the version it carries to is approved, so "Approval" already asks for none), "The spec
+  is the issue's primary document" and "Name an issue by its `dispatch://` link" (`dispatch` says
+  both), "resolve the ask it answers" (`dispatch`, "Close what you opened"), "Write what is true
+  now", and "Length scales with the change".
+
+- `dispatch-writing-specs`, `dispatch` and `dispatch-first` tell a session to name the concrete
+  case in an ask first (which machines, files, sessions or people, and the numbers) and to ask the
+  choice in those terms, never "Which option?". The ask block template shows that shape. To stay
+  under the 2,000-word guard, lines another of the three skills already says are cut.
+
+- `dispatch` and `dispatch-first` say that a Legion session files no issue for a finding outside its
+  own issue, and point to `legion-worker/references/findings.md`: a defect with a clear fix in code
+  the session's own tree touches is fixed in that tree's pull request, any other goes to the
+  Legion controller, and a finding that needs a decision is an ask.
+
+- `dispatch request-approval --help` names both reviewers a Legion architect runs before an
+  approval request, `plan-gap-analyst` and `plan-reviewer`. `--summary` says that a Legion
+  architect ends it with one sentence giving the two reviews' results.
+
+- Three Dispatch skills ship, under 2,000 words together, from four skills and the
+  dispatch skill's eight references of 10,908 words. `dispatch-writing-specs` replaces
+  `dispatch-brainstorming`, and `skill://dispatch-brainstorming` no longer resolves. It sets a
+  spec's seven parts (Summary, Problem, Goals and non-goals, Requirements, Design, Decisions,
+  Acceptance), the rules for text a person reads, which questions go to a person, the check before
+  each version, where the agent records its own decisions, and the plan as the issue's `plan.md`
+  written with superpowers' `writing-plans`. `dispatch-first` says which of the three to read
+  before which step, and that a person sees an agent's need only through an ask or an approval
+  request. `dispatch` keeps only what `dispatch <command> --help` does not say: its `references/`
+  directory goes, and the rules about one command moved into that command's help. These rules
+  are gone: keep a person's words in the spec, write a decision quoted and dated, a first version
+  holds only what the person settled, ask in stages, "density is the problem, not length", and
+  "sections follow the topic". `src/skills-guard.test.ts` fails the build when the three skills
+  reach 2,000 words.
+- `dispatch-writing-specs` after a fresh-agent dry run on a real issue's messages: the
+  Design gives a value for each limit, size and time; a choice the person's messages favour is
+  settled; each design choice no source states is a decision entry; the fresh reader gets the whole
+  spec pasted before every spec write; an ask block names a requirement by what it is; unbuilt
+  acceptance checks never delay approval; and text is about the design, never the person.
+- `dispatch-writing-specs`, "The outline": a small change gets a few sentences per part, no matrix,
+  and the Summary names the change in the reader's own terms, never in a category the writer
+  coined.
+- `dispatch-first`, which every session holds, says: the moment a person blocks your work, open a
+  `dispatch ask` for it, and run `dispatch open-asks` before you say you wait on a person; and record
+  every request you accept in Dispatch before you start it, read that record before a turn ends, and
+  drop no item. `src/skills-guard.test.ts` holds both rules to the context a session receives.
+- `dispatch-writing-specs`: say in a clause what each issue you name does for the reader; and when a
+  person's answer, comment or edit changes a text, never narrate the edit or what used to be there,
+  since versions and comments hold the history. In `dispatch`, three lines that repeat what the
+  command prints are gone: the meaning of `You've sent N messages`, "never progress or status"
+  (`dispatch message --help`) and the read-back after an inserted block (`dispatch doc-edit
+  --help`).
+- `dispatch-writing-specs`, "Approval": after a person approves a spec, an agent makes a new version
+  only for a change to scope, acceptance, cost, risk or a decision the person made, and puts all
+  such changes into one version. Any other fix goes in the plan or a comment, so the person is not
+  asked to approve the spec again for a small change.
+- The `dispatch` command's notice after a primary spec with no ask block says that a person does
+  not watch the session's chat and sees its need only through an open ask or a spec that waits for
+  approval. The notice for a typed-block opening stored as text cites
+  `dispatch-writing-specs`, "Questions". `dispatch issue --spec` and `dispatch doc-edit` point at
+  `skill://dispatch-writing-specs`.
+- The `envoy` skill this plugin ships and the `envoy_publish` description say a team topic, any
+  `notifications.` topic the stream does not store, reaches a session on a serve port through its
+  machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`;
+  the shared hub's listener does not), where they said such a session received none. A session of
+  this plugin holds its own NATS connection and receives such a topic as before (INFRA-122).
+
+- The `envoy` skill is rewritten to the minimum text that carries its instructions (INFRA-353),
+  from 21,146 bytes to about 7,500, with the delivery fields, role-claim lifetime, Legion lanes,
+  Slack, Ghost Wispr and WhatsApp topics and the check-settlement contract moved whole to
+  `references/`. Its topic table now names the Dispatch and `agent.<id>` topics, the two that
+  sessions subscribe to most after GitHub's.
+
+- The `dispatch`, `dispatch-first` and `dispatch-brainstorming` skills are rewritten shorter
+  (the dispatch skill and its references from about 20,300 words to 9,400), with detail moved to
+  references and `dispatch <command> --help`; a blind comparison of old and new text on each
+  skill's main situations found the same decisions. Two kinds of rule are new: `dispatch` says to
+  ask once (an open ask is the request; do not raise it again in each message), and
+  `dispatch-brainstorming` says how to hand a spec or plan to the human: the reply leads with each
+  open decision, then each unsettled point with a line reference, then the link; it asks for no
+  review when nothing is new; it says "ready for review", never "complete"; "plan only" stops after
+  the plan; and the spec stays a record of the current design, not of how it was reached.
+- The model's `envoy_role_set` and `envoy_unsubscribe` no longer close a subscription another
+  plugin opened for the role the session holds (`whileHolding`), which used to leave the session
+  deaf to that role's notices without saying so. `envoy_role_set` refuses to move off such a role,
+  naming the role and the subscriptions; a move off any other role names the role it released
+  (`details.released`). `envoy_unsubscribe` keeps them open, listing them as kept
+  (`details.kept`), and an empty `topics` list closes nothing.
+- A role is no longer lost, claimed twice or claimed for the wrong session when role moves and
+  session switches race. Every session event and heartbeat tick now converges pi-envoy to the
+  session Oh My Pi is on, whatever order the events came in: that session's agent subject is the
+  one open and registered, and it holds the role its own records name (a fork's copy of its
+  parent's, none after a `/new`, its own after a resume), every other role handed back at the
+  listener. A `/fork` keeps the role whatever overtakes it; a `/new` or resume never carries it,
+  ends it as the switch lands, and receives no message addressed to the session it replaced; a
+  resumed session whose records name the role takes it back; a switch Oh My Pi rolls back, or one
+  that fails before its event, settles on the session the host stays on. A role the session moves
+  off is handed back under the session the listener names for it (a fork's parent, until the fork
+  carried it). A role ended by a move no session event announced is warned of, naming who claims
+  it again. The agent is told of each id change a fork or branch makes once, in the session it
+  names.
+- `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
+  `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
+  address.
+- Plugin interface version 3 (sjawhar/legion#1998): in the daemon-launched controller's process
+  (`roleClaim.slackRoleOwned`), a resumed session restores its registered interests after
+  dropping every Slack topic among them, from the listener and from what it restores, since a
+  restored one would outlive the controller role. Install it with the `@sjawhar/pi-legion` released
+  beside it.
+- `dispatch issue` prints the new issue's dashboard link on its `Created` line.
+- `envoy_sessions`' `machine` filter now matches a session's real `host` (falling back to
+  `machine_id` for a session whose plugin predates the field) rather than the listener that
+  registered it, so filtering by machine finds a session on its own machine again even when every
+  session shares one listener.
+- A session reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707): an Oh My Pi
+  profile's `$PI_CODING_AGENT_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
+  `~/.config/legion/envoy.json`. `~/.config/opencode/envoy.json` is not read: while it is there and
+  the session's file is missing, the start notice says so and names the move
+  (`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`), or, for a
+  profile's own file, the file to copy or link it to; under a relocated `XDG_CONFIG_HOME` it says
+  only that the old file is not read there. A top-level `natsUrls` is refused, naming
+  `envoy.natsUrls`.
+- No notice gives a `mv` across a mount: where the old file's directory is on another filesystem than the new file's nearest existing directory (an agent box's bind-mounted `~/.config/opencode`), it names the file to create and says to move the old one on the machine that owns it.
+- The extension hands the file it read to every shell command as `ENVOY_CONFIG_FILE`, so the `dispatch` command reads the same one.
+- Each section turns on and off on its own; a missing file contributes nothing, so a section is then on only when its variables name it, and with Envoy off the session has no Envoy tools, no `/whoami` and no NATS connection, and a listener call is refused with `Envoy is off for this session: <why>`.
+- A `token` or `natsSeed` starting with `!` is a command whose output is the value. A checkout's
+  `.envoy/envoy.json` configures Dispatch alone and cannot run one; its `.opencode/envoy.json` is
+  not read, and while `.envoy/envoy.json` is absent the start notice names the rename. A checkout's
+  file that is not valid refuses Dispatch only while `DISPATCH_URL` is unset. A checkout's
+  `dispatch.token` needs its own `dispatch.serverUrl` beside it.
+- `DISPATCH_URL`, `ENVOY_URL` and `ENVOY_NATS_URL` take a file's token or seed only for that file's own server; another server needs its own token or seed variable.
+- One rule for `enabled` in both sections (envoy-client's README): `enabled: false` turns a section off; otherwise it is on when its address resolves, from the file or a variable, so an `envoy` section with `url` and `token` and no `enabled` is on with its bearer. A checkout's file is not read while `DISPATCH_URL` is set, so its token never goes to the server `DISPATCH_URL` names, and its `dispatch.enabled: true` alone turns nothing on.
+- A refused NATS seed (one that pairs with other servers than the file's, compared as normalised URLs, a failing `natsSeed` command, or a seed variable that cannot be read) turns off inbound messages alone: the tools and `/whoami` stay, and the start notice says `Envoy's inbound messages are off: <refusal>; the Envoy tools still work`. It turned all of Envoy off.
+- With inbound messages off (no NATS server, or a refused seed), `envoy_subscribe` and the Legion interface's `subscribe` refuse with `inbound messages are off for this session: <why>` and connect to nothing. They connected to `127.0.0.1:4222`, nats.js's default for an empty server list, and so attached the session to whatever NATS ran on that machine.
+- With inbound messages off, the Legion role claim refuses with the same `inbound messages are off for this session: <why>` before any listener call, so a Legion process fails its boot instead of holding a role whose every task and notice, sent to the role's topic over NATS, reaches nobody. With no NATS server it registered the session and took the role.
+- One start notice replaces the `Dispatch disabled` and `ENVOY_NATS_URL is not set` warnings: the missing file, a section's error, what a checkout's files hold that is not read, or that inbound messages are off.
+- A relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `PI_CODING_AGENT_DIR` no longer stops the extension loading: both sections are off and the notice says why.
+
+### Added
+
+- The plugin ships a fifth skill, `asd-ste100`: the ASD-STE100 rules (Simplified Technical
+  English) for text a reader must not misread, which a session reads before it writes text a
+  person reads. It is Legion's copy of the MIT-licensed `danyuchn/asd-ste100-skill` at 32511c69,
+  with its licence and without its linter.
+- `dispatch_read` takes `events` (the issue's last N events) and `all_events` (every one) for an
+  issue read and its `dispatch://KEY/log`, which list the last 10 without either; the `dispatch`
+  command spells them `--events N` and `--all-events`. Both together, or either beside a read
+  that lists no events, are refused before any request. The `dispatch` skill's reading reference
+  names them.
+- `ENVOY_PASS_DEADLINE_MS` sets how long a queued session pass or role move may run before the
+  queue abandons it; the default is the heartbeat interval, or 30 s, whichever is longer.
+- The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
+  `dispatch read` prints the issue's `Repository:` line. Against a Dispatch server older than the
+  repository fields the read prints `Repository: unknown (…)`, with a warning on stderr.
+- The `slack_post` tool (sjawhar/legion#1998): a reply in a Slack thread as the Legion Slack app,
+  with the bot token the secrets broker grants the session (`LEGION_SLACK_BOT_TOKEN`), which only
+  the posting process holds. The project's controller answers its Slack channels' mentions with
+  it.
+- A controller the Go daemon launches itself (`controller: daemon` in `legion.yaml`, LEGION-592)
+  runs as a controller session: a session with `LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE`
+  registers on `/legion/v1/claims/register` with that boot token in place of a controller
+  capability, claims `legion-<project>-controller`, subscribes to the controller topic, and then
+  calls `/legion/v1/claims/ready`, when the daemon sends its start message. A claim step that fails
+  exits Oh My Pi, so the daemon relaunches it. The operator-launched controller is unchanged.
+- Pictures reach the model (LEGION-541): a `dispatch` command writes each picture its result
+  carries to a file and prints a `- picture: <path>` line for the agent to open, and an Inbox
+  delivery of a message, comment, ask or answer that embeds pictures carries them beside its text
+  (a card with a `Pictures:` section, a person's own turn with its text unchanged), at most 8 and
+  10 MiB of them, each read with the session's own Dispatch bearer within 20 s; a picture Dispatch
+  cannot serve leaves the delivery its text. A session is shown each picture once: a later
+  delivery or `dispatch read` that embeds one it was already shown names it as shown earlier
+  instead of sending it again, because every request carries the session's history and Anthropic
+  refuses one over 32 MB; `dispatch doc-read` shows it again. A delivery's pictures count as shown
+  once the host took the message that carries them, so the delivery Dispatch retries after a send
+  that failed shows them again. A session that moves onto a transcript (`/fork`, `/handoff`,
+  `/resume`, a restart) counts the pictures that transcript already shows: those a `dispatch read`
+  or `dispatch doc-read` result or a card names as shown, and a person's own turn whose every
+  picture was shown beside it. The session id the extension leaves or shuts down is forgotten.
+- A person's Send or Aside from Dispatch's Agents page runs as if typed at the session's terminal
+  (LEGION-394), on an Oh My Pi with `pi.sendUserInput` (our fork): `/compact`, `/session` and the
+  other built-ins the host runs headless, extension and custom commands, file commands and prompt
+  templates, and `/skill:<name>` run as they would there, and any other text, an unknown `/foo`
+  included, reaches the model as the person's message, carrying its Dispatch id as the host's
+  `tag`. What a command printed, or why it did not run (a built-in only the terminal runs, such as
+  `/new`, or a host mode that cannot run typed input), is the session's reply to that message on
+  Dispatch, including what a built-in prints before the prompt it submits
+  (`/force:<tool> <prompt>`). On a host without the method a message starting with `/` is not
+  sent, and the reply names the host's Oh My Pi version; other text arrives as before. The pictures
+  a message embeds reach the host through the extension's `input` handler, and count as shown only
+  once the host's message carrying that Dispatch id starts, so a prompt the host dropped leaves
+  them for the next delivery that names them.
+- The live agent conversation stream lists the slash commands a person can send the session (a
+  `commands` frame, the last of every replay): the host's built-ins, `/new` and the others only the
+  terminal runs marked as such; extension, custom and skill commands; and the file commands and
+  prompt templates the live session expands. Each name is listed once, in the terminal picker's
+  order, so a name a built-in answers to by name or alias, or an earlier source already takes, is
+  not offered again (LEGION-394); a name holding whitespace or a control character is not offered,
+  and the list keeps the commands that fit the replay's byte budget. A host without
+  `pi.sendUserInput` lists none.
+- The live agent conversation stream names the `provider/model` that produced each assistant turn
+  (LEGION-548), read off the host's own assistant message: the Dispatch live view shows it next to
+  the session's title and on the turn itself, and it switches within one turn of `/model`. Absent
+  for a client whose assistant message carries no model identity.
+- `plan-gap-analyst` also reads a spec before a human does, and reports every finding of a fourth
+  kind: a claim about how a system works today that the code, its documentation or command output
+  it was given does not show (a claim about live state it cannot read is reported as unverified),
+  and, when the caller gave it the owner's words to check against, a requirement that traces to
+  neither them nor a cited fact; a requirement in a version a human approved has its source. The
+  `dispatch-first` skill, which every session with Dispatch carries, says in "Design in the spec" to
+  have it check a spec against the code, the human's words and any command output a claim rests on,
+  before the first version and each approval request, and to resolve what it flags (LEGION-577).
+- A `dispatch-brainstorming` skill ships beside `dispatch` and `dispatch-first` (LEGION-475). In a
+  session with Dispatch it replaces superpowers' `brainstorming` and `writing-plans`: the design
+  conversation runs in the issue's spec, the first version holds only established facts and every
+  ready question as a decision block, each answer is folded in, approval is requested once with
+  nothing new in it, and the plan is the issue's `plan.md` document, never a repository file. The
+  `dispatch-first` skill every session with Dispatch carries sends each design conversation and plan
+  to it, even when the user invokes superpowers' `brainstorming` by name, and the `dispatch` skill's
+  "Design changes are brainstormed here" points at it. The `dispatch` skill's brainstorming
+  reference (`references/brainstorming.md`) is gone; its process is in the new skill.
+
+### Changed
+
+- The `dispatch` skill and its documents reference say what follows a human's answer to a decision
+  block in a document they approved (LEGION-573): when the answer is the whole change since the
+  version they approved, Dispatch records an `approved` review in their name at the new version
+  and emits `artifact.approved`, so the agent requests nothing; when the answer changes text
+  outside the block, the agent rewrites that text, runs the fresh reader on the new version and
+  requests approval again with a one-sentence `--summary` naming what changed since the earlier
+  approval, which the request names in `ask.approval.approved` (`{version, at, by}`) and the card
+  shows with its `Show diff` control. The reference lists what still
+  leaves an approval stale: a change outside the blocks, a block added or answered since the approval
+  without the human's own answer, a decided block whose wording was changed, a removed block, a newer request for changes, or a document they never approved.
+
+- The `dispatch` skill's example of a to-do handed to a human is a certificate only its owner can
+  renew, no longer an ask for approval to deploy (LEGION-447): a deploy goes to the agent the
+  deployment names, never to a person for approval.
+
+- `@legion/pi-shared`'s plugin interface is at version 2 (LEGION-394): a turn sent as typed input
+  is found by its tag alone, a `/skill:`'s tagged `skill-prompt` message counts as the person's
+  turn in a Legion phase worker, and such a turn is still found after the run's `agent_end` (the
+  Send the host runs as a turn of its own no longer shows twice or counts as the daemon's
+  assignment). Install this release together with the `@sjawhar/pi-legion` built from the same
+  commit: the daemon's boot gate and the Legion entry refuse a pair at different versions.
+
+- `@sjawhar/pi-envoy` now bundles the `dispatch` command (LEGION-588) instead of registering
+  native Dispatch tools. Its sibling `@sjawhar/pi-legion` declares daemon API contract 17, which
+  makes the daemon's role prompts name that command; install both packages from the same commit.
+- The `dispatch` skill's "Following" and its asks reference say what reaches a session directly
+  besides its asks: a person's reply to a comment it started, and a person's new comment on a
+  document it wrote, which Dispatch now delivers to the document's writers (LEGION-681).
+
+- `legion.daemonApiVersion` is 13 (LEGION-583). Contract 13 adds an optional `push` bool to the
+  claim form of `POST /legion/v1/grants`: the extension sends `push: true` only for a bash command
+  it judges to invoke `legion push` (alone, as a compound command's one segment, or a pipeline's
+  last stage), so the daemon mints that one grant with the longer `credential.pushTTL` (5 minutes)
+  rather than the ordinary 60-second `ttl` — jj's own working-copy snapshot before the network
+  push can outrun the ordinary grant on a near-full tree volume. Install this release together
+  with a Go `legion` built from the same commit: a daemon at 12 refuses the unknown field, and this
+  release against a daemon at 12 fails every grant mint, blocking every bash command in every pane.
+  Contract 13 also covers the worker image's `LEGION_REMOVABLE_WORKSPACES` payload, which the
+  image's own `legion` decodes strictly, so the daemon's image probe refuses an image that would
+  read a later shape of it the old way.
+
+- Each Legion role gets one set of instructions (LEGION-414). The skills and role prompts drop the
+  steps the daemon no longer runs: no role pushes a `.legion/` deletion, the reviewer approves the
+  clean head that still carries `.legion/`, the merger hands its READY packet to the daemon, which
+  posts it, and every push is `legion push`. A sub-architect ends with `sign_off` rather than a
+  phase completion the daemon refuses, a `gates.design: off` root still registers its spec, and
+  the controller skill names only the wakes the daemon sends. The `legion` tool's description says
+  the merger's `summary` is its READY packet and that the daemon accepts no architect's completion.
+- The `dispatch`, `legion-architect`, `legion-controller` and `legion-retro` skills, and the
+  dispatch issues reference, name no one by first name: every literal `Sami` reference becomes
+  `the human` or `the operator`, matching each file's own existing convention for the person an
+  agent asks for a decision or finds at the controller's tmux pane, and the two provenance-quoted
+  rulings keep their rule stated plainly, with the quote and attribution dropped. The shipped
+  skill reaches every installed user of this package, not only its author.
+- **Breaking:** the package is renamed `@sjawhar/pi-envoy` and carries the Envoy entry alone
+  (LEGION-247). `@sjawhar/pi-legion-envoy` gets no further release. What stays here is
+  `extensions/envoy.ts` (published as `dist/envoy.js`): Envoy messaging, subscriptions, delivery,
+  the `dispatch` command and the `dispatch-first` context, with the four skills every session
+  with Dispatch reads (`dispatch`, `dispatch-first`, `dispatch-brainstorming`, `envoy`) at
+  `dist/skills`. The Legion entry (`extensions/legion.ts`), its modules (the former `src/legion/`),
+  the task agents in `agents/`, the eight Legion skills and the `legion.daemonApiVersion` manifest
+  field moved to `@sjawhar/pi-legion` (`packages/pi-legion`), which a Legion pane loads beside this
+  package; this manifest has no `legion` key. The two entries meet through a versioned in-process
+  interface in the private workspace package `@legion/pi-shared` (`packages/pi-shared`, version 1,
+  one object on `globalThis` under `Symbol.for("legion.pi-shared.envoy-plugin-interface")`): this
+  entry publishes it at factory time, and the Legion entry claims roles, matches injected user turns
+  and reads the bootstrapped session through it, refusing to run in a Legion session when no
+  `@sjawhar/pi-envoy` is loaded, when the loaded one speaks another interface version, or when
+  `@sjawhar/pi-legion-envoy` is still installed beside it. Both plugins release from one commit and
+  the daemon's boot gate refuses a pair whose interface versions differ. A person who installed the
+  one package reinstalls once:
+  `omp plugin uninstall @sjawhar/pi-legion-envoy && omp plugin install @sjawhar/pi-envoy`; a Legion
+  deployment also runs `omp plugin install @sjawhar/pi-legion` in the daemon's profile, and the
+  worker image carries both at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`.
+- The architect and worker skills and the daemon's role prompts say what the daemon does: it
+  starts and orders every phase from its fixed workflow table (LEGION-223). Nothing tells an agent
+  to call `spawn_worker`, `release_wave` or `set_status`, which the `legion` tool no longer has.
+  `skill://legion-architect` releases children with `release_children`, signs off with `sign_off`,
+  sends re-filing, capacity and cross-tree conflicts to the controller's topic, and drops the wake
+  rows for notices the daemon never sends (`child-adopted`, `children-complete`, `worker-queued`,
+  `worker-started`, `worker-recovered`, `pr-review`). It says the daemon does not order the root's
+  tester after its children, so the parent's integration check is a final child released once the
+  others close; corrections after `pr-blocked` go through the worker holding the phase; and a
+  worker waiting on a missing surface is told to continue when that child closes. The worker skill,
+  the headless worker prompt and the implementer and tester prompts say the daemon, not the
+  architect, starts the next role, and that a worker is suspended when its phase ends, so a
+  finished role is not running to answer questions.
+- The root architect's post-approval spec-edit rule is canonical in
+  `skill://legion-architect`, section 1 (LEGION-476). The root prompt and the worker skill point
+  there. A planner records every design departure in the issue's `plan.md` document and in the
+  required, bounded `specDepartures` field in `.legion/plan.json`: `[]` means no departure; every
+  nonempty record names the spec, plan, evidence and whether the Summary, Acceptance, scope or a
+  settled decision changes. `legion handoff write` refuses an omitted, malformed or oversized
+  record, including undeclared nested fields. The reviewer reads the plan beside the spec.
+- The role prompts (`roles/`) move into the daemon module, `packages/daemon/internal/prompts/roles`,
+  which the `legion` binary embeds (LEGION-223). The package never shipped them (its `files` is
+  `dist` and `agents`), so a commit that changes only a role prompt no longer cuts a plugin release.
+- Brainstorming happens in the spec (LEGION-475). When a session has Dispatch, the `dispatch`
+  skill's "Design changes are brainstormed here" replaces the brainstorming skill's chat questions
+  and its spec file: the first version holds only what the conversation has established and every
+  question that is ready, each as a decision block at the end of the section that sets it up, and
+  each next version folds the answers in, in the human's words with the date. An approval request
+  carries nothing new: it goes out only once the human has agreed to every point in the spec, a
+  point they have not agreed to getting its own decision block first or leaving the spec, and its
+  `summary` says only what the human is approving, with no commentary. A lane's technical decisions
+  are made in the plan or the code, not the spec. The `legion-architect` skill, both root architect
+  role prompts and `dispatch_request_approval`'s description say the same, and `dispatch-first`
+  sends an agent to the `dispatch` skill before its first design question. A root architect's spec
+  adds only the evidence each decision needs and what the human decides, each as a decision block;
+  the architect's decomposition, its waves, how each outcome is proven and the integration test go
+  in the child issues and the planner's `.legion/plan.json`, so the design gate never asks the
+  human to approve the architect's own calls. The `dispatch` skill, its approval reference and
+  `legion-architect` describe the approval request as Dispatch keeps it: a new version moves the
+  open request and leaves it waiting on the agent, whose next request, once the human has agreed
+  to every point in the new version, hands the same request back; an answer closes it, so the
+  request after an answer opens a new one. A reply under an open ask whose next move is the
+  agent's, such as an approval request it must revise or hand back, goes with `reply_to_ask` and
+  `turn: "agent"`, since a default-turn reply hands the request back to the human unchanged.
+- The plugin speaks one daemon (LEGION-223): every Legion session boots through the Go daemon's
+  claim routes (`claims/register`, `claims/ready`) and mints its grants there, whatever its
+  environment holds. The TypeScript daemon's client, its `legion` tool (`spawn_worker`,
+  `release_wave`, `set_status`, `escalate`), its controller handshake (`/controller/ready`), its
+  secret recovery (`/worker-session`), the root's `/process/exit` report and the NATS control
+  directives are removed. The manifest declares one contract, `legion.daemonApiVersion` at 12, in
+  place of `legion.daemonApiVersion` 9 and `legion.goDaemonApiVersion` 11: a daemon at contract 11
+  or a TypeScript daemon refuses this release, and a daemon at 12 refuses an earlier one. Install
+  this release together with a Go `legion` built from the same commit and, under
+  `runtime: kubernetes`, pin the worker image built from that commit: a daemon at 12 refuses the
+  previous image at its image probe.
+- A spec is the design conversation (LEGION-387). The `dispatch` skill's "Writing a spec" drops
+  the eight required headings: a spec starts as the problem and its evidence, puts each open
+  question in a decision block at the end of the section that discusses it, records a settled
+  point in the human's words with the date, and is rewritten in place as it changes. "Approval of
+  a spec" says to request approval only once no decision block is open and the spec proposes
+  something the human hasn't settled. The `dispatch_issue` and `dispatch_doc_edit` descriptions
+  point at that section instead of listing headings.
+- `dispatch_request_approval` requires `summary`: the proposals in the document's latest version
+  the human hasn't already agreed to, in one to three sentences. The Inbox shows it after "Approve
+  spec.md (version N)?", and the result text quotes the question the human sees. It needs a
+  Dispatch server that accepts `summary`; an older one refuses the call.
+- `dispatch_request_approval` is refused while the document holds an open decision block, even
+  when a human asked for approval, and the refusal names each block. "Approval of a spec" says
+  what to do instead: name the open block and ask the human to answer or waive it; a waived block
+  is closed with `dispatch_resolve_ask`. It also says to request approval in the pass that
+  finishes a spec whose remaining choices are the agent's own, rather than making each of them a
+  decision block.
+- `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` would take a
+  decision block out of the document while its ask is open, even in a batch that inserts it
+  again; the refusal names `replace`, `move` and, for the session that asked, `dispatch_edit_ask` instead. A whole-document
+  replace through `dispatch_artifact` is not refused, so it can still remove an open block.
+- The root architect's role text, its Go-daemon part and `legion-architect` settle the spec's
+  decision blocks first, as "Approval of a spec" defines settled, then request approval with a
+  summary of what the tree will do. `legion-architect` states that condition once.
+- The run-end nudge that tells an agent to open an ask no longer offers
+  `dispatch_request_approval` as a way to wait on a human.
+- The `dispatch` skill makes a halt condition (a change to IAM, deletion or exposure of production
+  data, anything that reaches a customer) the lane's own `dispatch_ask` to Sami on its own issue,
+  in "Before you ask" gate 1, "Writing a spec" and "When you need a human". A contract between two
+  lanes is settled by those two lanes over Envoy, and nobody audits or retracts another session's
+  asks.
+- Design questions stay in the spec (LEGION-470). The `dispatch` skill and the `dispatch_ask` and
+  `dispatch_message` descriptions put a decision about a document's design in a decision block in
+  that document, at every phase and whether or not it was approved; `dispatch_ask` is for a to-do
+  or permission only a human can give. Legion phase workers send a product, scope or design
+  decision to their architect, which writes the block (`legion-worker`, the headless role text); a
+  new version of an approved root spec closes the design gate, so the root architect requests
+  approval again once the answer is folded in (`legion-architect`, the architect role texts).
+- `dispatch_request_approval`'s description says the request is handed back once per revision,
+  when the revision is complete, never after each edit, that `Approve` and `Request changes` close
+  it, and that a new version of a Legion root spec closes its armed design gate (LEGION-470).
+- The run-end nudge offers a decision block in the document a question concerns, or `dispatch_ask`
+  for a to-do. A `dispatch_doc_edit` whose result reports a decision block the edit added
+  (`advice.decision_blocks_added`) spends the nudge's check, as `dispatch_ask` does, and so does a
+  `dispatch_issue` or `dispatch_artifact` whose stored document the server counted a decision block
+  in (answered blocks too, so a re-upload of a document whose blocks are all answered spends it).
+  Both counts are the Dispatch server's own reading of the document, so an example of the syntax in
+  code leaves the check owed wherever it is fenced or indented, and a block in a blockquote or a
+  list item spends it; the extension reads no markdown itself. An edit result from a server that
+  does not report the count spends nothing.
+
+### Fixed
+
+- The `legion-retro` skill brings the pull request body's path-derived content up to date before
+  the retro pushes its `docs/solutions/` commit (LEGION-592). A repository can require body content
+  that follows from the paths a diff touches, read by a required check; the retro commit can add a
+  path the approved body never accounted for, so that check failed at the retro head and the
+  merger, which reports a stale body rather than rewriting it, stopped before READY. The retro now
+  computes that content the way the repository's instructions say, for the files the pull request
+  changes at its commit, does the work any line of it affirms (inside `docs/solutions/` only, so
+  the approval stands), and writes only those lines into the live body before `legion push`, so
+  the push's checks read it. When it cannot, or its read of the body fails or comes back empty, it
+  pushes nothing and tells the architect, whose skill says how to answer; a push refused after the
+  body edit puts the body back. The
+  implementer's daemon prompt names `skill://legion-retro` for `Phase: retro`, and the merge-gate
+  reference, the architect skill, `skills/AGENTS.md` and the docs site name the body edit among
+  retro's outputs. The retro skill's opening no longer says its `docs/...` paths are in
+  sjawhar/legion: `docs/solutions/` and `.legion/` are on the issue branch of the repository being
+  worked in.
+- The run-end nudge no longer counts a tool-device `write` to a Dispatch device (`xd://dispatch_*`)
+  as work. Oh My Pi reports the tool such a `write` ran first, and that report alone spends or owes
+  the check; before, the `write` counted as work, so a `dispatch_ask` or a decision block made
+  through a device re-armed the check it had just spent, and every Dispatch call made that way owed
+  a new one. A help write (`?`) to a Dispatch device runs nothing and spends nothing (LEGION-470).
+- An architect, reviewer or merger may write to a tool device with the scheme in any case
+  (`XD://dispatch_doc_edit`), as Oh My Pi routes it; the mutation gate refused it as a file write
+  (LEGION-470).
+- A controller now displays its project token in canonical uppercase
+  (`Legion controller · PROJ`), rather than the lowercase token the Go daemon carries in
+  `LEGION_PROJECT` (LEGION-480).
+- A `task` subagent whose first transcript publish loses Oh My Pi's session publish lock to
+  another writer no longer fails every tool call for the rest of its life (LEGION-491). The
+  subagent check asks the host's agent roster first, which needs no publish; where the roster
+  gives no opinion and the publish fails, it answers from the transcript on disk, logs a warning,
+  and asks again at the next check instead of keeping the failure.
+- Every Legion role may launch `task` subagents (LEGION-551). The `tool_call` hook refused the
+  `task` tool to a root architect, a sub-architect and the merger; a subagent shares its parent's
+  identity and claims no role, so nothing it does clashes with its parent's claim. The architect
+  keeps its `edit`, `write`, `apply_patch` and general `bash` refusals and the merger its `edit`,
+  `write` and `apply_patch` refusals. Both architect role prompts say an architect may dispatch
+  subagents, for example to measure or investigate before the design gate opens, and the
+  interactive mechanics fragment no longer tells a coordinator's subagent to dispatch none of its
+  own. A root architect's pane now carries the operation-log rule its subagent's `bash` was
+  missing: every issue workspace, a root architect's included, is a jj workspace of one shared
+  clone, so `jj undo`/`jj op restore`/`jj abandon` there would rewrite other trees' commits too.
+  The same rule now also refuses the root architect's own `eval` and `hub` calls that spell out a
+  rewrite, which were never gated by the architect's `bash`-only rule.
+- Oh My Pi 18.3 replaced the `hub` tool with `wait`, `proc://` and `agent://`, and Legion's pinned
+  build is 18.6.0 (LEGION-555). The pane rules now hold the stdin a `write` sends to a supervised
+  service (`proc://<id>`) to the plain-text rule `eval` code is held to, so `legion handoff complete`
+  or a jj operation-log rewrite typed into a service's shell is refused as it was through a `hub`
+  send; a service starts as a `bash` command and is tokenised like any other. An architect,
+  reviewer or merger may `write` to `agent://` (a message to an agent of its own process) and to
+  `proc://` (job and service control), which the mutation gate refused as file writes. Both
+  checks read the target as Oh My Pi's `write` routes it: a path pasted as a `read` header
+  (`[proc://shell]`, `[proc://shell#ABCD]`) is the same target, and `<prefix>:conflict://N` is the
+  `conflict://N` file write it routes to, which the gate refuses whatever the prefix.
+- The Envoy tool results for a `task` subagent and the `envoy`, `legion-worker` and `dispatch`
+  skills name a `write` to `agent://` where they named `hub`, which Oh My Pi 18.3 removed.
+
+### Added
+
+- Every Legion session names itself when it starts, so Dispatch and Envoy show who wrote what
+  instead of a bare session id (LEGION-480): `Legion <role> · <ISSUE>` for a root architect or a
+  phase worker (`Legion implementer · LEGION-370`) and `Legion controller · <PROJECT>` for a
+  controller, under either daemon, in a tmux pane or a pod. Each Dispatch write stamps it as
+  `origin.session_title`, and the Envoy registration sent with the role claim carries it. A
+  resumed session keeps its title, a person's rename is never replaced, and a title Oh My Pi
+  generated from a first message gives way to the Legion one.
+- `dispatch_read` of a comment or ask anchored in a document says where its quote sits, as a
+  `Position:` line after the quote: in a table, the row (0 is the header), the cells before the
+  anchored one and the column's header, so a reader can name the row and column a comment on a
+  table cell is about without reading the document; outside a table, the path down to the block.
+  When Dispatch could not read the document it prints `Position: unavailable (<code>)`, and the
+  read still answers. An ask's read also prints its quote (LEGION-460).
+- The planner checks its plan twice, as it did in June (LEGION-421). Before it drafts, it runs
+  `task(agent="plan-gap-analyst")`, which finds the hidden requirements, ambiguities, and
+  acceptance criteria no machine could check that the issue leaves unsaid, each with what the plan
+  must answer. After it drafts, it runs `task(agent="plan-reviewer")`, which checks that the plan
+  can be carried out as written, approves when in doubt, and names at most three blocking issues,
+  each with its evidence. The planner revises for at most three rounds, then proceeds with the
+  issues still standing; a check whose model call fails is recorded and never blocks the plan. The
+  plan handoff records both results (`gapAnalysis`, `planReview`). Both agents ship in `agents/`
+  with read-only file tools: the gap analyst runs on the operator's `@oracle` role and the reviewer
+  on `@review`, the roles the Go daemon's boot gate already requires for `oracle` and the
+  reviewer's pair. Oh My Pi also gives each the Dispatch and Envoy tools; their prompts forbid
+  writing through them, and nothing enforces it (LEGION-428). The Go daemon build's role prompts
+  dispatch `plan-gap-analyst` and `plan-reviewer`, and its boot gate refuses a plugin that ships
+  neither, so install the plugin first on either runtime: on the Sandbox runtime, the worker image
+  built from this release before the Go daemon build; on the tmux runtime, this
+  `@sjawhar/pi-legion-envoy` release before restarting the Go daemon. An old daemon build boots on
+  the new plugin.
+- Every Legion pull request body opens with a `## For the reviewer` brief — `Outcome`, `Why`,
+  `Change`, `Look at first`, `Proven by`, `Not proven / risk`, `Size` — above the `## Verification`
+  ledger, and the merger's READY packet leads with the brief's `Outcome:` and `Not proven / risk:`
+  lines quoted from the published head. The implementer writes the brief when the
+  PR opens and keeps it true; the reviewer fills `Look at first` and `Not proven / risk` each
+  round; a body with no brief still publishes, with one line saying so.
+
+- The implementer orchestrates its change rather than writing it (LEGION-415). The package ships
+  `deep-worker` in `agents/`, an autonomous coding agent on the deployment's `deep` model role
+  (`@deep`): given a goal, the workspace and files in scope, the skills to follow and the checks
+  that must pass, it makes the change, runs the checks and reports what it changed. Its prompt
+  tells it to make no commit, push or GitHub write. Nothing enforces that: the implementer's
+  review of each result can catch a worker's commit, but not a push or a GitHub write
+  (LEGION-428). The implementer's role text plans the change as todos,
+  hands each coding task (the plan's change and each review round's fixes) to
+  `task(agent="deep-worker")` one at a time, and verifies every result itself, running the plan's
+  checks and reading the diff, before it builds on or commits it; the commits, pushes, pull
+  request, review-thread answers and production check stay the implementer's. The Go daemon's
+  boot gate resolves `deep-worker` as it does the other shipped agents, so an operator route that
+  gives `deep` no model (`modelRoles.deep`, or a `task.agentModelOverrides` entry) refuses the
+  boot, naming `deep-worker`; the TypeScript daemon has no such gate, and there Oh My Pi runs an
+  unmapped `deep-worker` on the implementer's own model. Map `deep` in the operator route first,
+  then install the worker image built from this release, then the Go daemon build; the refusal
+  comes from that daemon build's own role prompts, which dispatch `deep-worker`, so a new daemon
+  build on an older image is refused, since that image's plugin ships no `deep-worker`, and an old
+  daemon build on the new image boots.
+- Every session with the Dispatch tools, Legion panes and `task` subagents included, now carries the
+  `dispatch-first` skill in every model request: search Dispatch before planning, filing, asking or
+  starting work; extend the issue that already tracks the work; cite the decision a human already
+  made; close duplicates naming the survivor; write asks and messages that stand on their own; and
+  read `skill://dispatch` before writing a spec (LEGION-386). The extension inserts it as a user
+  message after any compaction summaries on each request, so it survives turn 2 and compaction;
+  a message that quotes its marker never switches it off, and a copy is looked for only where the
+  extension inserts one. It is read once at load, so a package without
+  `dist/skills/dispatch-first/SKILL.md` fails to load naming the file. A session without Dispatch
+  configured gets nothing.
+- The reviewer's pair runs an explicit security pass. The `thermonuclear-deep-review` rubric gains
+  Security Guidelines: six tagged rows (`authz`, `secret`, `untrusted-input`, `prompt`,
+  `supply-chain`, `sandbox`), each answered with a file:line citation when the diff touches its
+  surface and summed up in one `Security:` line. Every security finding that states an exploit path
+  stands at its own priority, prefixed `Security[<tag>]:`, and only hardening is capped, at two
+  items. The rubric also gains a section on attacking the PR body's safety claims. The reviewer's
+  core role text has it write that `Security:` line into every review body, every round, and the
+  review body template carries it. The tester's core text makes the call made as the party a new
+  or moved authorization boundary must refuse that change's negative control. Both pair agents
+  declare their rubric in `autoloadSkills`, so the subagent starts with it rather than being told
+  to read it. Each still names it as `skill://<name>`, the form the Go daemon's boot gate
+  resolves, and `src/legion/shipped-agents.test.ts` fails an autoloaded name with no such token.
+- The planner, tester, reviewer and implementer role texts, and the worker skill's push procedure
+  they point to, each say that under the Go daemon the issue branch is pushed with `legion push`,
+  which runs that procedure and decides whether the push skips CI: a handoff push that a later push
+  follows starts no CI run, and every other push runs CI in full. A worker that pushed with the
+  skill's commands by hand would run full CI on every handoff. Under the TypeScript daemon, whose
+  `legion` has no `push` command, the commands stay hand-run (LEGION-208).
+- The session publishes its own conversation for Dispatch's agent conversation view (LEGION-232):
+  every turn, tool call and streamed update becomes a frame on `agentstream.<session id>.frames`
+  over core NATS, a subject family the notification stream does not capture, so the bus retains
+  none of it. It publishes only while a viewer is attached — the Dispatch relay asks on
+  `agentstream.<session id>.control`, and a session that hears nothing for thirty seconds goes
+  quiet — and a viewer's replay is answered from a bounded in-memory ring (200 messages, 512 KiB)
+  that never leaves the process. Nothing about it is written to Dispatch's database.
+- The dispatch skill's documents reference says a `|` in a table cell, inside inline code and
+  links too, is written `\|`, and that a row holding text in a cell past its table's width is
+  refused on every write path rather than stored short, naming each path's error code. Its
+  document-edits reference says how an insert at a table-cell quote decides it holds table rows,
+  in three steps: every line yields a cell and an unescaped `|` and none is a delimiter row of
+  three hyphens or more a cell; what the rows parse refuses is refused; and the rows are inserted
+  only when that parse reads one table holding every line. Any other fragment, such as
+  `- | a | b |`, is read on its own as blocks.
+
+- The run-end silent self-check now runs on every normal settle of an eligible session, including
+  sessions that already hold open asks. Its one prompt names the first line of up to five open ask
+  questions (or says there are none), truncates each at about 120 characters, and normalizes
+  Unicode line separators and C0/C1 controls so a question cannot add prompt lines. It asks
+  whether the agent is waiting on a human for something those asks do not cover. A WAITING verdict
+  produces the same one `dispatch-ask-reminder` steer for every session; PROCEEDING remains silent.
+  The existing normal-settle, UI-host, Legion-managed/task-subagent, period, budget,
+  stale-generation, open-mid-check abort, and one-check-at-a-time guards are unchanged.
+- The package ships the task agents Legion's skills dispatch, in `agents/`: `oracle` (`legion-oracle`) and `thermonuclear-deep-review` and `thermonuclear-code-quality` (the reviewer's pair in `legion-worker`), copied from the operator's definitions. Oh My Pi finds an installed plugin's `agents/` in a pane and an explicit extension root's in a pod, so a worker's `task(agent="…")` no longer depends on agent files in the operator's profile. Before, a worker without them got `Unknown agent … Available: scout, reviewer, …` and carried on, usually by substituting `reviewer` (LEGION-200). Each declares an Oh My Pi model role the operator's `modelRoles` maps: `@review` for the pair, `@oracle` for `oracle`.
+- The skills those prompts load ship with the others under `dist/skills`: the pair's rubrics (`thermonuclear-deep-review`, `thermonuclear-code-quality`) and the implementer's simplify pass (`ce-simplify-code`, Legion's copy of the MIT-licensed Compound Engineering skill, dispatching its personas to the bundled `reviewer`). Before, the pair loaded a rubric only an operator profile carrying the dotfiles had, and reviewed from a five-step outline without it (LEGION-200).
+- Under the Go daemon, the operator-launched controller (`legion controller start`) runs as a controller session instead of being refused: it registers on `/legion/v1/claims/register` with its controller capability, claims `legion-<project>-controller`, and mints each bash command's grant from the `/grants` controller-session form with the secret its registration was issued.
+- Under the Go daemon, the controller subscribes to its project's controller topic (`notifications.legion.<project>.controller`, `legionControllerNoticeSubject` in `@legion/contracts`, the project from `LEGION_PROJECT`) once it claims its role, for as long as it holds the role; what the daemon publishes there is listed at the Go daemon's `notify.ControllerTopic`. A controller that a later `legion controller start` replaces closes the subscription when its next heartbeat finds the role held by the new session, so it stops taking wakes within one heartbeat, and a dropped connection's retries do not reopen it once the role has ended; a `/new` or `/resume` keeps it open whichever extension handles the switch first; the subscription is never registered with the listener, so the replaced session resumed later does not get it back. Before registering, the controller reads the daemon's project from `GET /legion/v1/state` and refuses a `LEGION_PROJECT` that is unset or names another project's controller role, since a registration replaces the running controller. The subscription is a live wake: an Oh My Pi session subscribes over core NATS, so a notice published while no controller runs never reaches one, and the controller skill reads `legion state` at every start for held issues and failed tree architects, and Dispatch's triage listing for roots created while none ran. A controller on an earlier release never runs against this daemon: the daemon refuses its registration with 409 (contract 7).
+- Under the Go daemon, the architect's `legion` tool gains `park_child` and `rerun_child` (`POST /legion/v1/children/park` and `/rerun`). `park_child` takes a running child of the architect's tree out of the workflow by moving it to `backlog`; `rerun_child` runs a parked or signed-off child again from planning by moving it to `todo`. Each is the Dispatch move a human would make, and the daemon reacts to it as to the human's: the child's workers are suspended, or its next run starts under the tree. Neither takes the tree root.
+- Phase workers end their phase with the `legion` tool: `handoff_write`, `handoff_read`, and `handoff_complete` run the daemon's own `legion handoff` commands (the TypeScript-daemon tool is now registered for every worker), and the role prompts, the worker skills, and the Go daemon's per-role prompt parts say so. A phase worker whose run settles with its phase still open gets one follow-up in its own session (run `handoff_complete`, or reply WAITING), which names a tool call the model wrote as text (LEGION-208 4b.15).
+- The Legion extension refuses `legion handoff complete` outside the `legion` tool in a phase-worker pane (a sub-architect's included, and any `task` subagent's) and in a root architect's: a `bash` command in any position of a chain, `eval` code, and a `hub` process start, by the same tokenised and plain-text rules as the jj operation-log guard. A completion run from the shell never reached the phase stall, which then asked the worker to complete again. `legion handoff write` and `read` stay open to the shell. The tool's `handoff_write` sends its payload on stdin, so a handoff over the 128 KiB cap on one argv string no longer fails with E2BIG; the Go CLI's `legion handoff write` reads stdin when `--data` is omitted, as the TypeScript CLI does. The tool carries no message action: a question for another live role goes to its role topic with `envoy_publish` (LEGION-208 4b.15b).
+- The Legion extension refuses `jj undo`, `jj abandon`, and `jj op restore|revert|abandon|undo` in every phase-worker pane before they run — a `bash` command in any position of a pipeline or `&&` chain, with or without `-R`, judged on each `jj` invocation's whole argument list (so `jj --repository <path> undo` and `jj operation restore` count); `eval` code; and a `hub` process start, both by a plain-text rule (the text mentions `jj` with one of the words) — from the worker's own tool calls and from any `task` subagent it spawns, the one gate that binds a subagent (it runs in the same pane, against the same log). Every Legion issue workspace is a `jj workspace` of one clone, so those commands rewrite the operation log for every tree at once (LEGION-45: on 2026-09-12 one worker's `jj undo` rewrote nine of another tree's commits). `jj restore <paths>`, `jj op log`, and `jj op show` stay allowed; the refusal names the command, says the log is shared, and gives the recovery rule. The root architect and controller panes are unaffected.
+- Added the nine native Dispatch tools and automatic subscriptions to each mutation result's issue topic.
+- Reviewer, implementer, and merger role prompts (and the `legion-worker` skill) name the three thread reply forms — `Accepted: fixed in <commit> — <one line>`, `Accepted: not a defect — <reason>`, `Still open: <what remains>` — and `legion threads resolve --pr <n> --repo <owner>/<repo>`, which the implementer runs after every push that answers a review and the merger before READY to resolve the threads the reviewer accepted (the review App cannot; LEGION-34).
+- The implementer's core role prompt says its reply on a review thread names what changed (`Fixed in <commit>: <one line>` or `Declined: <reason>`) and never begins with `Accepted:`. `legion threads resolve` resolves a thread whose newest reply is an `Accepted:` from the opener's account, so when the implementer and the reviewer post as one account, an implementer's `Accepted:` closed a thread the reviewer never answered (LEGION-208 4b.15b). It also says to write nothing further on a thread its opener has answered `Accepted:`, since a later reply becomes the newest comment and leaves the thread open.
+
+### Changed
+
+- The reviewer approves once each thread it opened, and each thread a bot opened that is none of
+  Legion's role Apps, has its own `Accepted:` as the newest submitted comment, resolved or not, and every
+  other unresolved thread its opener's (LEGION-316). Only the pull request's author's App resolves
+  a thread. An acceptance posted after the implementer's last run is resolved by the merger,
+  which starts only after the approval, so approval never waits on `isResolved`. A thread someone
+  else opened and a person resolved with GitHub's button, with
+  no `Accepted:`, blocks nothing, since neither `legion threads resolve` nor the merge queue's gate
+  counts a resolved thread. A bot's finding the reviewer cannot accept becomes its own, and it
+  requests changes, so no bot thread reaches the merger unanswered. The implementer runs
+  `legion threads resolve` after the push that answers a review and before its completion, so the
+  output it pastes into the PR body describes the head it pushed; the merger's run before READY
+  resolves any accepted thread still open (LEGION-386).
+- A person's direct Send or Aside from Dispatch's Agents page arrives as that person's own user
+  turn, as if typed at the terminal, instead of an Envoy card with a `reply_with` hint
+  (LEGION-394). The extension asks Dispatch, with its own bearer, to accept the frame's attempt
+  (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`, which takes only a person's own fresh
+  Send or Aside to this session; its conditions are that route's row in
+  `packages/envoy/cmd/dispatch/AGENTS.md`), and only on that 200 sends the body Dispatch stored,
+  never the frame's text: Send (no `deliverAs`, as Enter does) or Aside (`deliverAs: "aside"`), as
+  the accepted attempt says. Its own checks can only keep a card: it never accepts an attempt it
+  already delivered, as a card or as a turn, recording each one in the session's transcript
+  (`envoy-dispatch-handled-attempt`) before it goes out and reading every such entry back on
+  restore, so a replayed frame, or one forged for a Send that arrived as a card, is a card, even
+  after a restart, while a person's retry of that Send can still be their turn. Anything else, a
+  refused accept, an error, a timeout or a Dispatch configuration that no longer resolves, keeps
+  its card and posts nothing. The live stream tags that user message with `dispatchMessageId`, so
+  Dispatch's conversation view shows it once, and in a Legion phase worker it counts as an inbound
+  event, as its card did, except a Send or an Aside sent in between the run's last queue or aside
+  poll and its `agent_end`, which the host runs as a turn of its own: that one shows twice and
+  counts as an assignment (`packages/pi-envoy/AGENTS.md`).
+- The `dispatch` and `legion-worker` skills state each rule without the incident story, provenance
+  quote or attribution that came with it; every rule, command and example stays, and a decision
+  keeps its bare `dispatch://` link (LEGION-386). The legion-worker skill now names the four rules
+  deployment instructions never override: no deferrals, bringing the base in only on a real
+  conflict or a retarget, the implementer's own proof on a production-like surface at the head
+  that merges (an applied simplify head included), and the implementer's production check after
+  the merge.
+- The `dispatch` skill's gate 2 states as instructions what only its deleted story implied: put
+  the measurement and the size of the affected population in the ask, and when the measurement
+  shows one fix cannot repair most of that population and another fix can, drop the first rather
+  than offer it cut down to the part it reaches; an option not to act, such as a permission ask's
+  Hold, is not a fix and stays (LEGION-386). On the skill scenario rig, an agent asked which of
+  three options to take, where an export shows one reaches 18 of 430, left it out in 7 of 10 runs
+  with the rule's first wording ("drops an option the measurement shows cannot work"), against 1
+  of 10 with the story and 0 of 10 with gate 2's sentences deleted. With this final wording it
+  left the option out in 10 of 10 runs, five run by the implementer and five independently by the
+  acceptance tester. That is no improvement over the first wording's 7 of 10 (one-sided Fisher
+  p ≈ 0.11), and it says nothing about the clause that keeps an option not to act, which no
+  scenario exercises (LEGION-444).
+- The `legion-worker` skill names the six fields of a handoff `proof` entry (`criterion`,
+  `surface`, `command`, `observed`, `headSha`, `negativeControl`) where it describes
+  `handoff_write`, and the tester's role text points there (LEGION-386); before, a tester found
+  them in the implement handoff it read or in the CLI's refusal of its write.
+- `dispatch_search` refuses a `query` over 1,000 characters (LEGION-386) and a `project` that is
+  not a project key such as CORE before any request, naming the rule. Both ride in the search URL,
+  which the load balancer in front of production Dispatch answers with a bare HTML `414` when it
+  is too long, so this refusal is what stops a pasted passage from becoming that error; a
+  lowercased key, which used to come back as no results, is now refused by name.
+- The `dispatch` skill arrives whole (LEGION-386): its body is under 500 lines and its detail lives
+  in step-linked `skill://dispatch/references/*.md` files, each under Oh My Pi's 51,200-byte spill
+  threshold, where the 75 KB single file used to reach agents with its middle cut out.
+  `src/skills-guard.test.ts` now holds every skill to that: it fails when any skill file reaches
+  the threshold, any skill body reaches 500 lines, a skill's frontmatter name is not its
+  directory's, or a `skill://<name>/<path>` link names a missing file or heading.
+- The `legion-worker` skill arrives whole (LEGION-386). At 55,020 bytes it was over Oh My Pi's
+  51,200-byte spill threshold, so a phase worker read it with its middle cut out. Its body is now
+  under 500 lines, and the PR-body template and proofs, review threads, conflicts and fingerprints,
+  and the merge gate are references under `skill://legion-worker/references/`, each linked from
+  the step that needs it. The reviewer's role prompt approves the `.legion/` deletion head with
+  the skill's head-pinned review submission, and the implementer, reviewer and tester role
+  prompts point at the reference that now holds each procedure they name. `src/skills-guard.test.ts`
+  keeps every legion-worker file under the threshold and every `skill://legion-worker/` link and
+  reference resolved, and every change under `skills/` now runs this package's tests in CI.
+- `legion.goDaemonApiVersion` is 11. Contract 11 adds `legionAppLogins` to the Go daemon's `POST /legion/v1/gh-token` answer, each Legion role App's login keyed by its App role (`{implement, review}`), which the Go client's strict `LegionGoGitHubTokenResponse` now accepts (LEGION-208). Nothing in the extension calls `githubToken`, but the credential shapes are part of the contract.
+- `legion threads resolve` also resolves a thread a bot account opened that is none of Legion's
+  role Apps once the Legion review App's `Accepted:` is its newest submitted comment. A CI bot
+  never posts `Accepted:`, so the merger's zero-open-threads check could never pass on a
+  repository whose CI bot opens review threads; the reviewer, the independent party, now decides
+  such a finding. GitHub cannot tell a CI bot from a person whose `gh` is routed to an App, so the
+  reviewer may accept a finding such a person raised, and each `resolved <url>` line says whose
+  acceptance closed the thread. The pull request author's reply closes nothing. A Legion App's
+  thread and a person's still close only on the opener's `Accepted:`. Legion's role Apps are the
+  logins the daemon now names on `/legion/v1/gh-token`, keyed by App role (`legionAppLogins`,
+  optional, in both daemons). Without them (`--gh`, which has no grant, or a daemon that could not
+  read every App) no thread counts as a bot's, and a bot's left-open line says the session cannot
+  identify the review App. The implementer, reviewer and merger role texts say so (LEGION-208).
+- `legion.goDaemonApiVersion` is 10. Contract 9 adds the daemon's own agent-secrets machine login
+  state (`agentSecretsLogin`) to `GET /legion/v1/state`. Contract 10 adds
+  `POST /legion/v1/roots/close`, the Go `legion` tool's `close_root`: a tree root's own architect
+  ends its admitted tree before any phase has started, and the daemon posts the architect's reason
+  on the issue before it writes `done` (LEGION-208).
+- The worker skill gives a reviewer round that writes a handoff one order: write, commit and push
+  the handoff, submit the review of that head by its SHA, then complete. An approval waits for the
+  CI verdict to settle green at that head first, and a red that settles there makes the round a
+  request for changes naming the failing checks; a request for changes does not wait. A review of a
+  head the handoff push then replaces named a head the pull request no longer had (LEGION-208).
+- The worker skill says which GitHub App each role pushes as, and it, the retro skill and the
+  implementer and reviewer role texts each say once that every path they cite is in sjawhar/legion
+  (LEGION-208).
+- The `envoy` skill says a `pr.<n>.checks` settlement is published for every commit of the pull
+  request whose checks settle and names its `sha`, so an agent waiting on CI compares it with its
+  head (LEGION-208).
+- `legion.goDaemonApiVersion` is 8. Contract 8 adds `NATS_NKEY_SEED_FILE` to the Go daemon's pane environment when the daemon has the `legion-pane` NATS nkey seed (LEGION-279): a 0600 file of the pane's own under tmux, the providers Secret's `NATS_NKEY_SEED` file on a Sandbox pod, and the operator file's `nats_nkey_seed_file` under `legion controller start`. The extension's Envoy connections authenticate with it. A Go daemon at 8 refuses to boot beside a plugin at 7.
+- Under the Go daemon, a claim no longer subscribes to an issue's notice topic (`notifications.legion.<project>.<issue>`): the architect's tree root and each phase worker's issue used to be subscribed. The Go daemon now sends every notice to the owning architect's role topic, which the architect already claims as its Envoy role, and a phase worker receives none. A plugin from this release beside a Go daemon that still publishes notices on issue topics hears none of them.
+- `legion.goDaemonApiVersion` is 7. Contract 7 adds `holdReason` to an issue on `/legion/v1/state` (`escalated` while an escalated issue stays held in a tree that runs; absent while its tree lingers or is closed), which the controller skill reads at every start. A plugin at 6 refuses a state response carrying it, and a Go daemon at 7 refuses to boot beside a plugin at 6.
+- A targeted Dispatch BTW and the stop-time self-check run on the extension context's `runEphemeralTurn` (Oh My Pi 18.3) when the host has it, with the question in the /btw prompt that `pi.askEphemeral` added itself. `pi.askEphemeral` stays the fallback for fork releases before 18.3, which Legion pins (18.2.9, `packages/daemon/src/daemon/omp-pin.ts`). The check now runs on the host's managed timer after `agent_end` returns: on 18.3 a side turn started inside a running handler inherits that handler's abort signal, which the host fires at its 30 s handler budget. A host with only the upstream call, which is every upstream release from 18.3.0, now advertises and answers BTW; before, it advertised `aside` and `steer` only.
+- `legion.goDaemonApiVersion` is 6. Contract 6 adds `phase` to a claim's pending delivery on
+  `/legion/v1/state` (the issue phase the task was queued for; absent for an operator's or an
+  architect's task, which belong to none) and `unrecorded` as the phase and status the state route
+  reads for an issue the workflow does not record. The phase-backward request takes the workflow's
+  phases alone, so `unrecorded` is not one of its values. The handoff completion request is
+  unchanged; the daemon now attributes each completion to the run of the task the worker took and
+  refuses one whose run the issue has left, or one from a claim that has taken no task.
+- Every role pushes its own commits to the issue branch (LEGION-285): the planner its plan handoff, the tester the red tests it writes for each defect it finds and its handoff, the reviewer its handoff. The role prompts and `legion-worker` said only the implementer pushes, and that other roles' commits rode its next push; the review App can push, and Sami's answer on LEGION-200 is that its roles should. Thread resolution does not move: GitHub grants resolving a review thread to the pull request's author's App, and the implementer opens every Legion pull request, so the implementer and the merger still run `legion threads resolve`. The App permissions, and those readings, are stated once, in `packages/daemon/src/daemon/AGENTS.md`. Every role pushes with one procedure, which refuses unless `@-` descends from `legion/<KEY>@origin`. Without that check, `--allow-backwards` moves the remote branch sideways over another role's push, which the shared clone makes visible at once (measured on jj 0.45.1). A rebase, a retarget, or a squash into a pushed commit records the pushed tip first; the same push then accepts that tip and refuses any other, so a rewritten chain goes out only when no role pushed in between.
+- `legion.goDaemonApiVersion` is 5. Contract 5 adds `LEGION_GRANT_FILE` to the Go daemon's pane environment (tmux panes and Sandbox pods alike); the extension no longer sets it itself once the claim registers. Install this release before starting a Go daemon that requires contract 5; its boot gate refuses a plugin that declares 4, and this release on a pane a daemon at 4 launched refuses every bash command and every call Oh My Pi serves with `gh` with `LEGION_GRANT_FILE is not set on this pane`, until the pane is relaunched from a daemon at 5 (a restarted daemon re-adopts a live pane as it was launched).
+- `legion.goDaemonApiVersion` is 4. Contract 4 adds the Go daemon's operator-launched controller: `POST /legion/v1/controller/secret`, the controller registration on `claims/register`, the `/grants` controller-session form, and `controllerLocator` on `/legion/v1/state`. Install this release before starting a Go daemon that requires contract 4; its boot gate refuses a plugin that declares 3.
+- `legion.daemonApiVersion` is 7. Contract 7 removes `/gh-token` merge intent because Legion never
+  merges; install this release before starting a daemon that requires contract 7.
+
+### Fixed
+
+- A session drops a repeated dedupe key only when the key names its event
+  (`dedupeKeyNamesItsEvent` in `@legion/contracts`: every Dispatch key, a webhook key of its
+  delivery id, a key the listener or the shared transport minted once for its message), and
+  remembers it for the 72-hour duplicate window (`DELIVERY_DUPLICATE_WINDOW_MS`). It kept every key
+  among the latest 1,000, which failed both ways: a session that follows a busy repository's topics
+  saw those 1,000 in about an hour, so a Dispatch Retry made later than that reached the agent a
+  second time while the dashboard promised it would not; and two distinct events under one key (the
+  MCP bridge's content hash, the Go daemon's outbox row id, which starts over with each new store)
+  lost the later one. A second copy of one publish, which a session that follows overlapping topics
+  (a pull request's whole thread and its checks) receives once per subscription, is recognised by
+  the `event_id` the copies share whatever its key, so a CI settlement is injected once. The keys
+  still live in memory, at most 250,000 of them with the oldest forgotten first, so a restarted
+  session no longer recognises a frame it received before the restart. A frame is now recorded
+  before its delivery awaits anything, where it was recorded once the delivery finished, so a
+  repeat that arrives while a BTW answer or a Dispatch reply is still in flight is dropped too; a
+  delivery that throws, or that ends in an error reply (a BTW whose side turn failed, a malformed
+  frame), releases what its own claim recorded, so the Retry Dispatch offers for that failed
+  attempt runs the side turn again. Before, that Retry was dropped as a repeat and nothing
+  answered it.
+- A frame whose `event_id` is empty, or a `dispatch` frame whose `dedupe_key` is, no longer counts
+  as a copy of an earlier frame with the same empty field. The session recorded `""` as an event
+  id or a Dispatch key and dropped every later frame that carried it, distinct events included. A
+  frame is now claimed under each identity field read on its own by the rule
+  `DedupeIdentitySchema` (`@legion/envoy-client/delivery`) gives it, so an empty `event_id` or
+  `dedupe_key` identifies nothing while a valid sibling still recognises a repeat. No listener or
+  bus envelope carries an empty one; only a raw NATS publisher can send it.
+- The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
+  (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
+  passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot
+  reach refuses the call naming the lookup and the reference, and a call from anyone but the tree
+  root's own architect for its own issue is refused before any lookup (LEGION-208).
+- The Dispatch tools refuse a bare document reference that is one document's slug and another's
+  filename, on an issue or a project, naming both ids, where they took the slug's document; on a
+  project an id also outranks another document's slug. A `dispatch://` document reference, or a
+  dashboard document URL, still resolves by its slug.
+- A `task` subagent's `envoy_whoami`, `/whoami`, `envoy_send`, and `envoy_publish` now name the session that spawned it as the reply address, instead of reporting an empty id and sending an empty `source_session` the listener erased — which reached the recipient as `from: agent` with no reply address, and a reply attempt as `no live session`. A subagent still registers nothing (no listener registration, no agent-subject subscription, no heartbeat); every top-level instance publishes its own session on a process-wide record keyed by its transcript path (`src/envoy-session.ts`), dropping its previous key whenever its id or transcript changes, and a subagent resolves its own by walking OMP's transcript layout up, a nested subagent included. An ACP host running several top-level sessions in one process therefore answers each subagent with the session that actually spawned it. A session is recorded from its `session_start` even before the host mints its id, and dropped at `session_shutdown`, so a subagent never names a session that has no id yet or has already deregistered. `envoy_whoami` reports that address as `session_id` and the subagent's own host session id under `subagent`. Where the walk matches nothing and more than one top-level session is recorded, there is no reply address: `session_id` is empty, the `subagent` note says why, and `@legion/envoy-client`'s transport now omits `source_session` rather than sending an empty one. The `envoy_publish` result also names the delivery a subagent cannot get: the listener drops a message whose source session is its recipient, so a publish to a role the parent holds reaches nobody, and hub is that hop.
+- The TypeScript daemon keeps a reviewer's `changes_requested` decision across the reviewer's own handoff-only push (`.legion/review.json`), so its completion returns the issue to `in_progress` rather than `retro`, and the corrective implementer's completion writes `testing` (LEGION-285). A new head that changes anything outside `.legion/`, or whose push cannot be classified, still ends the round unless the review App pushed it (none of its commits answers a request made of the implementer; resync keeps a range whose every commit GitHub attributes to the review App), and a head whose push webhook never arrives, or that resync's read finds first, is settled by the reviewer's next review of that head or by resync from GitHub's compare of the round's head against it (a compare it cannot read drops the decision); an approval is still dropped on every new head. The reviewer's clean COMMENT round at a later head ends its own request, and a late changes-requested review of an earlier commit is settled from that commit. A push by the review App, a tester's red tests included, is never a fix attempt, and neither is the implementer's fix after the red those red tests earned, so tester rounds consume no `max_fix_attempts`; after the tester's handoff-only push onto the implementer's red, the implementer's next push still counts. The Go daemon counts the same way (it reads the pusher and stores `planned_red`), and both daemons refuse to boot when one GitHub App is configured for both roles. Daemon state is v34 (`PrState.reviewDecisionUnsettledFrom`, `changesRequest`, `plannedRed`, `pendingPush.before` and `byReviewApp`); a v33 file migrates on load and is kept as `<state>.v33.bak`.
+- The refusal on a pane without `LEGION_GRANT_FILE` now names its remedy: relaunch the pane from a daemon on the matching release, since a daemon restart keeps a live pane as it was launched.
+- A `read`, `grep`, `glob`, `ast_grep`, or `ast_edit` of a `pr://` or `issue://` URL (alone, in a `;`-, `,`- or whitespace-separated path list, or in one pair of double quotes: every shape Oh My Pi's path pipeline hands to `gh`), and every call of Oh My Pi's `github` tool, now mints the pane's grant first, as a bash command does: Oh My Pi serves them by running `gh`, which on a Legion pane is the shim that runs `legion gh`, and a grant lives 60 seconds, so one made long after the pane's last bash command failed its redemption. Under the Go daemon they failed every time with `LEGION_GRANT_FILE is missing`, because Oh My Pi copies its environment for `gh` when it starts and the extension set the variable only after the claim registered; a root architect signed off without the pull request read it tried (LEGION-262). The grant file's directory is created 0700 when absent, as it is in an Agent Sandbox pod's empty state volume.
+- The empty receipt on the direct agent subject now goes only to a role-lane frame (envelope `topic` other than the direct subject — the shape the listener forwards to a role holder). Every other publish to that subject with a reply inbox is a JetStream publish whose inbox belongs to the server's PubAck; the receipt landing there made the publisher fail with `nats: invalid jetstream publish response` (31 Dispatch outbox `publish author route` failures in 24 h in production).
+- `envoy_unsubscribe` now leaves the session's role claim intact, so cleaning up normal notification topics cannot stop the registration heartbeat from restoring a lost role.
+- A phase worker or root architect whose registration the daemon refuses with the same-agent 409 (`Worker respawn must resume the same agent session` at `/worker/started` or `/process/started` — a resumed process that arrived as a different session, under a database session store Oh My Pi having started fresh at a path whose row is gone) now exits like a 403 boot-token refusal does, so the daemon counts the launch failure and retires the role instead of a live pod sitting unregistered under the boot watchdog forever; a 5xx or transport failure still propagates without exiting (LEGION-81).
+- Phase workers, the root architect, and the controller pane now receive their one-time grant through a 0600 file named by `LEGION_GRANT_FILE`, written by the extension before each bash command and read first by `legion credential`, `legion gh`, and `legion handoff complete` — replacing both the prepended command text the model imitated with stale ids (LEGION-12; `legion gh`, `legion handoff complete`, and `jj git push` no longer fail with 403 as a session goes on) and the 1.17.1 `env` delivery (the `secretsd` plugin's bash replacement discarded it, so every `legion` command failed with `LEGION_GRANT is missing`). The static `GH_CONFIG_DIR`, worker-bin `PATH`, and cleared `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST` now come from the daemon's pane environment; the daemon strips any inherited `worker-bin` PATH entry at its own boundary, so a daemon started from a Legion pane never resolves its `gh` to the shim (LEGION-54).
+- Envoy roles now survive `omp --resume` — including after stale-session cleanup — and follow `/fork`, `/branch`, or other transcript-carrying switches to the new session id until released.
+- Legion agents now refresh their Envoy registration before claiming a role, so claims made after registration expiry are accepted.
+
+### Removed
+
+- The filesystem and signal boundary (LEGION-121) is removed. The `tool_call` hook no longer
+  parses a phase worker's or root architect's `bash` commands, `eval` code, or `hub` process
+  starts (or a `task` subagent's) to refuse deleting, moving, truncating, overwriting, or
+  recursively `chmod`/`chown`ing a path outside the issue workspace and `/tmp`, or signalling a
+  process the pane did not start (`kill`, `pkill`, `killall`, `fuser -k`, `tmux kill-*`), and the
+  bundled `unbash` parser is gone. The pane rules stay: a phase-worker pane still refuses the jj
+  operation-log rewrites, and a phase-worker or root-architect pane still refuses
+  `legion handoff complete` from the shell.
+- `before_agent_start` no longer injects the authored-ask summary (`dispatch-open-asks`) into
+  every turn. It reads open asks only to arm the run-end self-check, while an agent reads its own
+  open asks with `dispatch_open_asks`.
+- Removed the NATS-based `{type:"shutdown"}` Legion control directive (`LegionControlDirective`, `requestShutdown`) — the daemon now gracefully stops every process, including the root architect, over its own `legion worker-shim` unix socket instead of publishing a control-subject directive.
+- The `pi.askEphemeral` fallback for fork releases before Oh My Pi 18.3 (LEGION-555). A targeted
+  Dispatch BTW and the stop-time self-check run on the extension context's `runEphemeralTurn`,
+  which Legion's pinned build and the fork's releases from 18.3 serve; the fork no longer ships
+  `pi.askEphemeral`. A host without `runEphemeralTurn` advertises `aside` and `steer` only.

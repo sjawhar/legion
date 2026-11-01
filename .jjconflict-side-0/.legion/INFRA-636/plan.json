@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-636",
+  "completed": "2026-10-27T14:21:50Z",
+  "planDocument": "dispatch://INFRA-636/artifact/plan-md",
+  "summary": "Each Dispatch write transaction gets a read phase holding no xid (owner lock becomes pg_advisory_xact_lock on the owner, taken as its own statement before the reads it guards; other owner-scoped row locks become plain reads under it; all document CPU and write advice run there) and a write phase where every write statement runs back to back in today's order from an ordered queue in docs.Ledger, then commit. Scope: every transaction that holds an xid across document work or advice (plan section 3). Proof: per-route xid-window tests (pgx tracer plus backend_xid polling, red at base), a pg_stat_activity xid-hold sampler in the INFRA-589 harness, >=5 runs per side at 0.5x and 1x with a before-INFRA-591 build at 0.5x.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, push and handoff; its pr-body reference defines each proof entry and the simplify pass, its conflicts-and-rewrites reference governs merging forward over the seven open branches that touch the same files",
+      "envoy: the plan's section 11 requires agreeing file boundaries with INFRA-592, INFRA-605, INFRA-556, INFRA-512, INFRA-562 and INFRA-589 owners over Envoy before editing their files",
+      "dispatch: the measurement tables and any harness patch are attached to dispatch://INFRA-636 with dispatch artifact",
+      "ce-simplify-code: the change touches every write route and the docs ledger; the simplify pass on the settled diff keeps the queue and lock helpers minimal",
+      "asd-ste100: coordination messages to sibling trees' agents are written in ASD-STE100 per the deployment instructions"
+    ],
+    "test": [
+      "legion-worker: the tester re-runs the plan's section 6 commands, the 7.2 smoke and two runs of each 7.3 step, and records proofs with negative controls as its pr-body reference defines",
+      "dispatch: the tester's measurement summary is attached to the issue with dispatch artifact"
+    ],
+    "review": [
+      "legion-worker: its merge-gate and review-threads references govern the review of the head by SHA; the plan's section 13 lists what the reviewer checks (owner-lock inventory, queue order and error mapping, no CPU between write-phase statements, read-after-write list)",
+      "ce-simplify-code: the reviewer checks the queue, the owner-lock helper and the route changes for needless abstraction in a large cross-cutting diff"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "1. Taking the advisory lock in the same statement as the status read reads the pre-wait snapshot under READ COMMITTED and misses a close committed while waiting.", "answer": "Plan 2.1: the lock and the read it guards are separate statements (one pgx batch, one round trip). Test T2 closes the issue while a writer waits and requires 409 ISSUE_CLOSED."},
+      {"finding": "2. The owner-locker list was incomplete (issue_claim.go:413, issue_create.go:432, replies.go:245,247 putThreadRead, task_progress.go ReconcileTaskProgress, the projects owner kind); putThreadRead's for share would deadlock against a writer's read phase.", "answer": "Plan 2.1 lists every helper and direct site, adds the project kind, converts putThreadRead to pg_advisory_xact_lock_shared, ReconcileTaskProgress to pg_try_advisory_xact_lock; the existing lock_level_test.go scan is extended to refuse owner-table row locks outside lockEventOwner; test T3 covers the thread read."},
+      {"finding": "3. Plain reads collide with documented lock-order rules (owner row before room lock; copy lock before pending rows); comment_mentions/comment_deliveries are written without the owner lock.", "answer": "Plan 2.1 restates the order (gate, owner advisory, slot, copy lock, room lock, then write-phase row locks), keeps the copy lock in the read phase with pending rows queued after it, updates copy_lock_order_test.go and live_write_lock_order_test.go (task 7), and leaves replyComment's mention/delivery row locks as they are (no document work)."},
+      {"finding": "4. Deferring AppendUpdateTx breaks the head checks (withOwnAppends) and widens the room-lock window, raising ErrRoomBehindHead.", "answer": "Plan 2.2/2.3 item 5: the room lock, head read and cursor check stay in the read phase at today's point, only the insert/owed/authors writes are queued; withOwnAppends counts pending appends. Test T7."},
+      {"finding": "5. Reads observe the transaction's own earlier writes (advice count, created_at, reply chain, openAnchoredMarks, head, accept, namedVersionDiff, version number, last_seq, Stamp, MoveApprovalAsk clock_timestamp, createIssue).", "answer": "Plan 2.3 resolves each from memory (advice +1 for counted types, now() written explicitly, chain plus new reply, pending anchored rows in the ledger, pending appends, version max+1 under the owner lock); write-phase dependencies stay in order in the queue; the PR lists every such read."},
+      {"finding": "6. Writes whose outcome steers flow (createIssue's next_number update and external-link unique violation; EXTERNAL_LINK_TAKEN; docs append errors) and per-write error mapping.", "answer": "Plan 2.2 error mapping: queued steps return today's typed errors through Commit; section 3: createIssue moves its CPU before the next_number update, which stays inline; patchIssue keeps its writes inline and only moves advice. Test T6."},
+      {"finding": "7. 'Every route's first xid is the owner row lock' is false for createIssue, project/session uploads, ownerless messages; lock_level_test's 17 is a comment.", "answer": "Plan section 3 handles createIssue and project/session uploads (artifact insert queued) and messages specifically; the plan no longer relies on the 17 count."},
+      {"finding": "8. Existing tests use raw owner row locks as gates and would pass vacuously or hang.", "answer": "Plan task 7 lists each test file and line; each is rewritten to hold the owner advisory lock so it still blocks the writer's read phase."},
+      {"finding": "9. Mixed-version rollout: old and new pods do not exclude each other's read phases.", "answer": "Decision D3 for the architect: ship before INFRA-63 replicas or roll with Recreate (production is one replica, Recreate)."},
+      {"finding": "10. hashtext collisions and two-key namespaces.", "answer": "Plan 2.1: multi-owner callers sort and deduplicate by lock key; a new namespace distinct from COPY, duty's lease, INFRA-556's and 6900; copied_asks.go's comment corrected."},
+      {"finding": "11. Dependency on INFRA-591 (#2392 open): xid-before-nextval invariant; SSE criterion meaningless without the horizon.", "answer": "Plan 2.1 keeps pg_current_xact_id() in lockEventOwner's row statement after the advisory lock; decision D1: implement now, measure after #2392 merges or on a local merge."},
+      {"finding": "12. Acceptance line 1 not checkable as written; SQL-text whitelists are fragile.", "answer": "Decision D6 (threshold: gaps at most 5 ms, sum at most statement time, fixture with at least 50 ms of moved work at base); task 1 detects the xid window by polling backend_xid from a second connection, not by SQL text."},
+      {"finding": "13. Named metrics (xact_start to commit, idle in transaction, created_at-based SSE) include the read phase.", "answer": "Decision D7: pass/fail on backend_xid hold from the new sampler (7.1); the named metrics are reported beside it."},
+      {"finding": "14. 'No slower than before INFRA-591' cannot be met or decided as written (before p50 from response 0 ms; statistic, baseline commit undefined).", "answer": "Decision D2 and plan 7.3: median over at least 5 runs of per-run p50/p99, before-591 = first parent of #2392's merge commit, strict comparison, a miss explained only by the horizon's proof time goes to the architect with numbers; collapsed runs reported and a sixth run added."},
+      {"finding": "15. Measurement validity: same-checkout builds, seed migration order, sampler resolution and cost.", "answer": "Plan 7.1/7.3: sampler copied into every checkout, seed made with the oldest build, 10 ms pg_stat_activity sampler with no pg_locks, one on/off control pair at 1x, fallback to 50 ms."},
+      {"finding": "16. Scope unsaid (editAsk SetAskBlockText, rebuild, block-index backfill, ReconcileTaskProgress, copy restoration; outcome vs acceptance wording).", "answer": "Plan section 3 includes each; decision D5 and a spec departure record the scope."},
+      {"finding": "17. Lane conflicts with INFRA-592, 512, 605, 556, 591, 568, 562.", "answer": "Plan section 11 names each overlap, the agreed order, and that whichever merges second adapts; sent to the architect."},
+      {"finding": "18. Unsourced spec claims: INFRA-605 owning DR-10, 'mostly idle in transaction', advice assignment.", "answer": "Decision D4, overruled by the architect (Envoy 2026-10-27 14:20Z): INFRA-605's spec carries DR-10 and its implementer is adding the batched anchor update and appends; this change queues refreshAnchors' writes as they are and agrees with INFRA-605's implementer how that batch sits in the write phase. The measurement (7.1) reports idle-in-transaction time with and without an xid, which tests the claim; INFRA-512's architect is told advice is placed here."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Acceptance line 1: 'Each write route that records an event' takes its transaction id only for its database statements.",
+      "plan": "Covers every transaction that holds an xid across document work or advice, background ones included (settlement version write, edit-notice sweep, block-index backfill, copy restoration, ReconcileTaskProgress, document rebuild, ask block edit), as the outcome sentence ('a Dispatch write transaction') says.",
+      "evidence": "INFRA-591's horizon proves an event id safe only once every xid below its observer's has ended, anywhere on the instance (wt/591 events/horizon.go:46-52); the background transactions hold xids across renders and anchor walks (gap analysis finding 16).",
+      "outcome": {"kind": "changed", "scope": "Adds background write transactions that record no HTTP route to the work; decision D5, accepted by the architect on Envoy 2026-10-27 14:20Z."}
+    },
+    {
+      "spec": "Acceptance line 1: 'no statement-free gap inside the transaction longer than the database round trips themselves'.",
+      "plan": "The test asserts that in the xid window every statement-free gap is at most 5 ms and the gaps' sum is at most the window's statement time, on a fixture whose moved work is at least 50 ms at base, the window found by polling backend_xid.",
+      "evidence": "Go code that binds arguments and reads results between statements always takes longer than a local Postgres round trip (about 0.1-0.5 ms), so the literal comparison fails on any implementation (gap analysis finding 12).",
+      "outcome": {"kind": "changed", "acceptance": "Acceptance line 1's check becomes the stated threshold; decision D6, accepted by the architect on Envoy 2026-10-27 14:20Z."}
+    },
+    {
+      "spec": "Acceptance line 2: transaction id hold time per write 'from pg_stat_activity, xact_start to commit, and idle in transaction time'.",
+      "plan": "Pass/fail on the backend_xid hold time per transaction from a 10 ms pg_stat_activity sampler; xact_start to commit and idle-in-transaction time (with and without an xid) are reported beside it.",
+      "evidence": "After the change the read phase stays inside the transaction holding a connection but no xid, so xact_start to commit and idle in transaction barely move while the xid hold, the quantity the horizon waits on, falls (gap analysis finding 13).",
+      "outcome": {"kind": "changed", "acceptance": "Acceptance line 2's decisive metric is the backend_xid hold; decision D7, accepted by the architect on Envoy 2026-10-27 14:20Z."}
+    }
+  ]
+}

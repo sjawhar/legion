@@ -1,0 +1,71 @@
+{
+  "version": 2,
+  "types": [
+    {
+      "name": "callout",
+      "content": "block+",
+      "render": "host",
+      "attributes": {
+        "kind": {
+          "kind": "enum",
+          "choices": ["note", "warning"],
+          "default": "note"
+        },
+        "title": {
+          "kind": "string",
+          "default": ""
+        }
+      }
+    },
+    {
+      "name": "ask",
+      "content": "paragraph+ bullet_list?",
+      "render": "host",
+      "attributes": {
+        "urgency": {
+          "kind": "enum",
+          "choices": ["low", "med", "high", "blocking"],
+          "default": "med"
+        },
+        "multiple": {
+          "kind": "bool",
+          "default": false
+        },
+        "state": {
+          "kind": "enum",
+          "choices": ["open", "answered", "resolved"],
+          "default": "open",
+          "server": true
+        },
+        "answered_by": {
+          "kind": "actor",
+          "server": true
+        },
+        "answered_at": {
+          "kind": "timestamp",
+          "server": true
+        },
+        "selected": {
+          "kind": "string[]",
+          "server": true
+        },
+        "answer": {
+          "kind": "string",
+          "server": true
+        },
+        "invalid": {
+          "kind": "string",
+          "server": true
+        },
+        "copied_from": {
+          "kind": "string",
+          "server": true
+        },
+        "copied_from_document": {
+          "kind": "string",
+          "server": true
+        }
+      }
+    }
+  ]
+}

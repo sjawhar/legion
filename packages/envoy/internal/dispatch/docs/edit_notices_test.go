@@ -1070,7 +1070,9 @@ func TestEditNoticeASessionPeerEditingBesideAConnectedPersonNamesNobody(t *testi
 
 // The re-read's finding 2: a person's joined write edits the document, and another person types
 // in the browser before that write commits its named version. The browser edit is the later one,
-// so the notice names the person who made it, not the write's own actor.
+// so once a version holds it the notice names the person who made it, not the write's own actor.
+// The named version holds the write's own state alone (captureWrite): the browser edit came after
+// the write read the document, so the settlement that follows the write versions it.
 func TestEditNoticeABrowserEditAfterAJoinedWriteNamesTheBrowserEditor(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -1086,17 +1088,20 @@ func TestEditNoticeABrowserEditAfterAJoinedWriteNamesTheBrowserEditor(t *testing
 		}
 		// Zoe types in the browser while adam's transaction is still open, so her edit is the
 		// later one. Her append waits on the document's advisory lock adam's write holds until it
-		// commits, so her credit is still in flight when adam's named version takes its authors:
-		// that version carries both people, ordered by the room sequence each edit took.
+		// commits, and adam's named version, his write's own state, does not hold it.
 		editAsConnectedPeer(t, service, artifactID, 1, zoe, replaceRun("Second.", "Second, typed by zoe."))
 		_, err := service.NamedVersion(ctx, artifactID, "adam checkpoint", adam)
 		return err
 	}); err != nil {
 		t.Fatalf("adam's joined write with zoe's browser edit inside it: %v", err)
 	}
+	if row, open := readEditNotice(t, service, artifactID); !open || row.lastEditor != adam {
+		t.Fatalf("after adam's named version, notice open=%t last editor = %+v, want adam, whose edit alone it holds", open, row.lastEditor)
+	}
+	settleCurrentGeneration(t, service, artifactID)
 	row, open := readEditNotice(t, service, artifactID)
 	if !open {
-		t.Fatal("the version over adam's write and zoe's browser edit opened no edit notice")
+		t.Fatal("the versions over adam's write and zoe's browser edit opened no edit notice")
 	}
 	if row.lastEditor != zoe {
 		t.Fatalf("last editor = %+v, want zoe, who typed after adam's write", row.lastEditor)

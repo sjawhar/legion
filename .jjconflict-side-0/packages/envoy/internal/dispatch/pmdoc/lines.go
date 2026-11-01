@@ -1,0 +1,962 @@
+package pmdoc
+
+import (
+	"bytes"
+	"regexp"
+	"strings"
+
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	extensionast "github.com/yuin/goldmark/extension/ast"
+	"github.com/yuin/goldmark/parser"
+	gmtext "github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
+)
+
+// segmentsText is the text segments cover in source. Goldmark's own Segments.Value appends a
+// forced line feed into the buffer it reads, past the segment's end; this copies instead.
+func segmentsText(segments *gmtext.Segments, source []byte) string {
+	var text strings.Builder
+	for index := 0; index < segments.Len(); index++ {
+		segment := segments.At(index)
+		text.WriteString(strings.Repeat(" ", segment.Padding))
+		value := source[segment.Start:segment.Stop]
+		text.Write(value)
+		if segment.ForceNewline && (len(value) == 0 || value[len(value)-1] != '\n') {
+			text.WriteByte('\n')
+		}
+	}
+	return text.String()
+}
+
+// origin is where a parsed source stands in what the caller wrote: line is the number its first
+// line has there, which a refusal names its line from, and server is how many bytes it opens with
+// that the server wrote ahead of the caller's text (parseTableRows's header), which charge the
+// write's elements nothing.
+type origin struct{ line, server int }
+
+// fromStart is the origin of a source that is the caller's from its first byte.
+var fromStart = origin{line: 1}
+
+// parse parses source, which stands at at in what the caller wrote. unclosedFrontmatter says
+// source opens a document with a front-matter opener no later line closes, after which no container
+// opens at the document's level (frontmatterAttempt). Its tables' short rows are padded, and its
+// elements counted, on budget.
+func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budget *WriteBudget, at origin) (ast.Node, error) {
+	root, count, pc, err := reader.read(source, unclosedFrontmatter, budget, at.server)
+	if err != nil {
+		return nil, err
+	}
+	count.weigh(root, source)
+	if refusal := count.refusal(source, at.line); refusal != nil {
+		return nil, refusal
+	}
+	if err, _ := pc.Get(tablePaddingErrorKey).(error); err != nil {
+		return nil, err
+	}
+	return root, nil
+}
+
+// read is goldmark's tree of source, its tables padded and its elements counted on budget, the
+// source's first server bytes the server's (origin), with the count and the parser context it
+// kept, or the refusal of markdown nested past either of parseSource's bounds, before anything else
+// refuses it.
+func (reader markdownReader) read(source []byte, unclosedFrontmatter bool, budget *WriteBudget, server int) (ast.Node, *parseCount, parser.Context, error) {
+	pc := parser.NewContext()
+	if unclosedFrontmatter {
+		pc.Set(unclosedFrontmatterKey, true)
+	}
+	pc.Set(writeBudgetKey, budget)
+	count := budget.elements.countParse(pc, server)
+	root, err := parseSource(reader.md.Parser(), source, pc)
+	return root, count, pc, err
+}
+
+// maxReferenceLines is how many of a paragraph's lines goldmark's link reference definition
+// transformer reads (linkReferenceDefinitions).
+const maxReferenceLines = 1_024
+
+// linkReferenceDefinitions is goldmark's link reference definition transformer reading no more of a
+// paragraph than its first maxReferenceLines lines. Goldmark takes each definition it parses out of
+// the paragraph's lines by copying every line after it (parser/link_ref.go:41-50 at v1.8.6), so a
+// paragraph of n definitions costs n² line copies: a mebibyte of `[a]: b` lines took a minute to
+// refuse. Every document holding a definition is refused at the first one in document order
+// (convertedBlocks), which those first lines hold, so the paragraph's later lines stay its text and
+// the refusal is the one a whole read makes.
+type linkReferenceDefinitions struct{ parser.ParagraphTransformer }
+
+func (t linkReferenceDefinitions) Transform(node *ast.Paragraph, reader gmtext.Reader, pc parser.Context) {
+	lines := node.Lines()
+	if lines.Len() <= maxReferenceLines {
+		t.ParagraphTransformer.Transform(node, reader, pc)
+		return
+	}
+	parent, next := node.Parent(), node.NextSibling()
+	rest := lines.Sliced(maxReferenceLines, lines.Len())
+	head := gmtext.NewSegments()
+	head.AppendAll(lines.Sliced(0, maxReferenceLines))
+	node.SetLines(head)
+	t.ParagraphTransformer.Transform(node, reader, pc)
+	if node.Parent() == nil {
+		// Every line it read was a definition, and goldmark took the paragraph out: the rest is a
+		// paragraph of its own where that one stood.
+		node = ast.NewParagraph()
+		node.SetLines(gmtext.NewSegments())
+		if next != nil {
+			parent.InsertBefore(parent, next, node)
+		} else {
+			parent.AppendChild(parent, node)
+		}
+	}
+	kept := node.Lines()
+	kept.AppendAll(rest)
+	node.SetLines(kept)
+}
+
+// unclosedFrontmatterKey marks the parse of a document that opens with a front-matter opener no
+// later line closes.
+var unclosedFrontmatterKey = parser.NewContextKey()
+
+// frontmatterAttempt is a container's parser - a list's, a quote's, a footnote definition's or a
+// typed block's - that opens nothing at the document's level in a document opening with a
+// front-matter opener no later line closes (unclosedFrontmatterKey). The browser editor's parser
+// tries front matter from that opener to the document's end, and front matter is a construct no
+// container opens in, so on none of those lines does a container open at the document's level.
+// With no line closing it, that parser reads the lines again as the blocks they form without those
+// containers: `---\n- a\n- b` is a rule and one paragraph holding both lines, `---\n> a` a rule
+// and the paragraph `> a`, and `---\n:::callout{kind="note" title="T"}\na\n:::` a rule and one
+// paragraph holding the three lines after it.
+type frontmatterAttempt struct{ parser.BlockParser }
+
+func (p frontmatterAttempt) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	if parent.Kind() == ast.KindDocument && pc.Get(unclosedFrontmatterKey) != nil {
+		return nil, parser.NoChildren
+	}
+	return p.BlockParser.Open(parent, reader, pc)
+}
+
+// bareMarkerLine is a line holding only a list marker.
+var bareMarkerLine = regexp.MustCompile(`^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]*$`)
+
+// emptyItemGuard is a list parser that opens no list whose first item could not interrupt a
+// paragraph - an empty item, a marker with nothing after it on its line, or an ordered item
+// numbered anything but a lone `1` (orderedCannotInterrupt) - where it would, as the browser
+// editor's parser reads it. Goldmark refuses one only while the paragraph is the block last opened,
+// and there lets an item numbered `01.` interrupt it; that parser also refuses one opening a
+// container on a line that already interrupted the paragraph, so `- a\n  - -` is an item holding
+// the text `-`, `- a\n  > -` a quote holding it, and `a\n> 2. b` a quote holding the paragraph
+// `2. b`, and refuses one after indented code (interruptsOpenBlock), so `    code\n> 2. b` is a
+// quote holding that paragraph too.
+type emptyItemGuard struct{ parser.BlockParser }
+
+func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	line, segment := reader.PeekLine()
+	if !bareMarkerLine.Match(bytes.TrimRight(line, "\n")) && !orderedCannotInterrupt(line) {
+		return p.BlockParser.Open(parent, reader, pc)
+	}
+	if last, paragraph := pc.LastOpenedBlock().Node.(*ast.Paragraph); paragraph && last.Parent() == parent {
+		return nil, parser.NoChildren
+	}
+	if interruptsOpenBlock(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
+		return nil, parser.NoChildren
+	}
+	return p.BlockParser.Open(parent, reader, pc)
+}
+
+// Continue keeps the list open for a line holding its empty last item's content, as the browser
+// editor's parser reads it: an item whose marker line holds nothing takes its content from the
+// next line when that line, with no blank line between, reaches the item's content column, a list
+// marker there included. Goldmark closes the list when that marker cannot continue it - another
+// bullet character, or an ordered marker under a bullet - so `-\n  1.` read as two lists and
+// `> 1.\n>    2) a` as two quoted lists.
+func (p emptyItemGuard) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	state := p.BlockParser.Continue(node, reader, pc)
+	item, ok := node.LastChild().(*ast.ListItem)
+	if state != parser.Close || !ok || item.ChildCount() != 0 {
+		return state
+	}
+	line, segment := reader.PeekLine()
+	source := reader.Source()
+	start := lineStart(source, segment.Start)
+	if util.IsBlank(line) || start == 0 || markersOrWhitespace(source[lineStart(source, start-1):start]) {
+		return state
+	}
+	if indent, _ := util.IndentWidth(line, reader.LineOffset()); indent < item.Offset {
+		return state
+	}
+	return parser.Continue | parser.HasChildren
+}
+
+// orderedMarkerStart is an ordered list marker opening a line, its number captured.
+var orderedMarkerStart = regexp.MustCompile(`^ {0,3}([0-9]{1,9})[.)](?:[ \t]|\n|$)`)
+
+// orderedCannotInterrupt reports whether line opens an ordered list item the browser editor's
+// parser lets interrupt no paragraph: one numbered anything but a lone `1`, so `01.`, `001)` and
+// `10.` as well as `2.`, where goldmark takes the number's value and lets `01.` interrupt one.
+func orderedCannotInterrupt(line []byte) bool {
+	match := orderedMarkerStart.FindSubmatch(line)
+	return match != nil && string(match[1]) != "1"
+}
+
+// tabIndented is a block parser reading a line whose indentation holds a tab as CommonMark and the
+// browser editor's parser do, when what follows the indentation matches opens: the tab spans the
+// columns to the next multiple of four, so after a quote's `> ` it spans two. Goldmark measures such
+// a line's indentation as if it began the line, or takes a list marker or a setext underline only
+// after spaces, and read `> \t- a` and `> a\n> \t===` as paragraph text; and it counts a fence's
+// indentation in bytes, a tab as one, so it kept a column of each code line's indentation that the
+// fence's own removes (`> \t```` over `> \tc` read ` c`). Before the parser looks at such a line,
+// its indentation is taken as the columns it spans, as padding. With no opens, the parser reads
+// the line as goldmark's does, and only the block's position is corrected (Open).
+type tabIndented struct {
+	parser.BlockParser
+	opens *regexp.Regexp
+}
+
+// Open also leaves goldmark the block's position where its text starts: goldmark places an opened
+// block at the line's start plus the block offset, which counts the columns a tab spans as bytes,
+// so a block after a tab stood a character or two past its text, or on the next line.
+func (p tabIndented) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	_, start := reader.PeekLine()
+	if p.opens != nil {
+		expandTabIndentation(reader, p.opens)
+	}
+	line, segment := reader.PeekLine()
+	text := util.FirstNonSpacePosition(line)
+	if text >= 0 {
+		pc.SetBlockOffset(text)
+	}
+	node, state := p.BlockParser.Open(parent, reader, pc)
+	if node != nil && text >= segment.Padding {
+		pc.SetBlockOffset(segment.Start + text - segment.Padding - start.Start)
+	}
+	return node, state
+}
+
+func (p tabIndented) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	if p.opens != nil {
+		expandTabIndentation(reader, p.opens)
+	}
+	return p.BlockParser.Continue(node, reader, pc)
+}
+
+// endsContainers is a container's block parser - a list's, a list item's, a quote's or a footnote
+// definition's - recording the line its container's lines last ended at (recordEndedContainer),
+// by which a paragraph inside tells a lazy continuation line from one that continues it
+// (lazilyEnded).
+type endsContainers struct{ parser.BlockParser }
+
+func (p endsContainers) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	state := p.BlockParser.Continue(node, reader, pc)
+	recordEndedContainer(node, state, reader, pc)
+	return state
+}
+
+// endedContainerKey holds the list, list item, quote or footnote definition whose lines last ended
+// at a line that is not blank, and that line: goldmark reads such a line as continuing a paragraph
+// the container holds (lazyTypedParagraph) where it opens no block.
+var endedContainerKey = parser.NewContextKey()
+
+type endedContainer struct {
+	node ast.Node
+	line int
+}
+
+func recordEndedContainer(node ast.Node, state parser.State, reader gmtext.Reader, pc parser.Context) {
+	if line, _ := reader.PeekLine(); state&parser.Close == 0 || util.IsBlank(line) {
+		return
+	}
+	row, _ := reader.Position()
+	pc.Set(endedContainerKey, endedContainer{node: node, line: row})
+}
+
+// lazyTypedParagraphAttr marks a typed block holding a paragraph goldmark continued with a line from
+// outside a container around the typed block. The browser editor's parser continues no paragraph
+// in a typed block so; the line ends the typed block there (parseTypedDirective refuses it).
+var lazyTypedParagraphAttr = []byte("pmdoc-lazy-typed-paragraph")
+
+// lazilyEnded is the container around paragraph whose lines ended at the line goldmark is
+// continuing paragraph with (endedContainerKey): goldmark's lazy continuation line, which continues
+// the paragraph and no container that ended there. It is nil where the line continues them all.
+func lazilyEnded(paragraph ast.Node, reader gmtext.Reader, pc parser.Context) ast.Node {
+	ended, ok := pc.Get(endedContainerKey).(endedContainer)
+	if row, _ := reader.Position(); !ok || ended.line != row || !isAncestor(ended.node, paragraph) {
+		return nil
+	}
+	return ended.node
+}
+
+// lazyTypedParagraph marks the typed block between paragraph and ended, the container a lazy
+// continuation line ended (lazilyEnded), if one stands there (lazyTypedParagraphAttr).
+func lazyTypedParagraph(paragraph, ended ast.Node) {
+	if ended == nil {
+		return
+	}
+	for parent := paragraph.Parent(); parent != ended; parent = parent.Parent() {
+		if typed, ok := parent.(*typedDirective); ok {
+			typed.SetAttribute(lazyTypedParagraphAttr, true)
+			return
+		}
+	}
+}
+
+// lazyLinesAttr holds, on a paragraph, where each of its lazy continuation lines starts (lazilyEnded),
+// so a table made of the paragraph can tell which of its rows are such lines (lazyTableRows).
+var lazyLinesAttr = []byte("pmdoc-lazy-lines")
+
+// listItemColumns is goldmark's list item parser measuring the spaces and tabs after an item's
+// marker from the column they stand at. Goldmark measures them from their place in what is left of
+// the line, as if it began where the containers around the item leave off, so inside a quote or a
+// list item whose text does not start at a multiple of four columns a tab there spans the wrong
+// columns: `> -\t\ta` read `  a` as its code, where the browser editor's parser reads `a`.
+type listItemColumns struct{ parser.BlockParser }
+
+// listMarkerOpening is a list item's marker opening what is left of a line.
+var listMarkerOpening = regexp.MustCompile(`^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])`)
+
+func (p listItemColumns) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	// The line starts with a partly taken tab's padding as spaces, at the reader's offset.
+	line, _ := reader.PeekLine()
+	column := reader.LineOffset()
+	marker := listMarkerOpening.FindIndex(line)
+	if marker == nil || column%4 == 0 {
+		return p.BlockParser.Open(parent, reader, pc)
+	}
+	after := line[marker[1]:]
+	if indent := bytes.IndexFunc(after, func(char rune) bool { return char != ' ' && char != '\t' }); bytes.IndexByte(after[:max(indent, 0)], '\t') < 0 {
+		return p.BlockParser.Open(parent, reader, pc)
+	}
+	row, position := reader.Position()
+	node, state := p.BlockParser.Open(parent, reader, pc)
+	item, ok := node.(*ast.ListItem)
+	if !ok || state != parser.HasChildren {
+		return node, state
+	}
+	// Goldmark's placement of the item's text, with the tabs' stops where they are.
+	reader.SetPosition(row, position)
+	from := column + marker[1]
+	offset, _ := util.IndentWidth(after, from)
+	if offset > 4 {
+		offset = 1
+	}
+	advance, padding := util.IndentPosition(after, from, offset)
+	item.Offset = marker[1] + offset
+	reader.AdvanceAndSetPadding(marker[1]+advance, padding)
+	return node, state
+}
+
+// Continue takes no more than the item's own columns from a blank line, as the browser editor's
+// parser does, and leaves the rest of the line to the blocks inside the item. Goldmark takes the
+// whole line, so a fenced or indented code block in a list item lost what a blank line held past
+// the item's indentation: `- a\n\n  ```\n  c\n    \n  ```` holds the code `c\n  `.
+func (p listItemColumns) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	line, _ := reader.PeekLine()
+	if !util.IsBlank(line) {
+		return p.BlockParser.Continue(node, reader, pc)
+	}
+	if position, padding := util.IndentPosition(line, reader.LineOffset(), node.(*ast.ListItem).Offset); position >= 0 {
+		reader.AdvanceAndSetPadding(position, padding)
+	} else {
+		reader.AdvanceToEOL()
+	}
+	return parser.Continue | parser.HasChildren
+}
+
+// fenceClosure is goldmark's fenced code parser recording on a block whether a closing fence closed
+// it (fenceClosedAttr), which the browser editor's parser reads its trailing blank line by
+// (fencedCodeText), and reading a whitespace-only line as that parser does: it takes up to as many
+// columns from each line of the code as the opening fence stands past its container's content, so
+// a whitespace-only line holding fewer is an empty line of the code. Goldmark keeps all such a line
+// holds, so `  ~~~\n \nx` held the code ` \nx`, where that parser reads `\nx`. A last line of the
+// document with no line feed that holds nothing past the fence's indentation is no line of the code
+// to that parser (fenceEndsEmptyAttr): `  ~~~\nx\n ` holds the code `x`, and in a quote, which takes
+// a blank line from the code's end, the quote takes that line (fencedCodeText).
+type fenceClosure struct{ parser.BlockParser }
+
+var (
+	fenceClosedAttr = []byte("pmdoc-fence-closed")
+	// fenceEndsEmptyAttr marks a fenced code block whose last line is the document's, with no line
+	// feed, holding nothing past the fence's indentation. The line stays among the code's lines, as
+	// goldmark appends it, so the counters of blank lines read it as main did; only the code's text
+	// drops it (fencedCodeText).
+	fenceEndsEmptyAttr = []byte("pmdoc-fence-ends-empty")
+	// fenceIndentAttr is how many columns a fenced code block's opening fence stands past its
+	// container's content, as goldmark measures them (fenceClosure.Open).
+	fenceIndentAttr = []byte("pmdoc-fence-indent")
+)
+
+func (p fenceClosure) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	indent := pc.BlockOffset()
+	node, state := p.BlockParser.Open(parent, reader, pc)
+	if node != nil {
+		node.SetAttribute(fenceIndentAttr, indent)
+	}
+	return node, state
+}
+
+func (p fenceClosure) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	line, segment := reader.PeekLine()
+	offset := reader.LineOffset()
+	state := p.BlockParser.Continue(node, reader, pc)
+	if state == parser.Close {
+		node.SetAttribute(fenceClosedAttr, true)
+		return state
+	}
+	if !util.IsBlank(line) {
+		return state
+	}
+	last := node.Lines().Len() - 1
+	code := node.Lines().At(last)
+	indent, _ := node.Attribute(fenceIndentAttr)
+	if position, _ := util.IndentPositionPadding(line, offset, segment.Padding, indent.(int)); position < 0 {
+		// Goldmark appended the whole line; the code's line is empty but for its line feed.
+		code = lineFeedOnly(segment, reader.Source())
+		code.ForceNewline = true
+	}
+	if code.Start >= code.Stop && code.Padding == 0 && !bytes.HasSuffix(line, []byte("\n")) {
+		node.SetAttribute(fenceEndsEmptyAttr, true)
+	}
+	node.Lines().Set(last, code)
+	return state
+}
+
+// codeColumns is goldmark's indented code parser measuring a blank line's indentation from the
+// column it stands at, as it measures a line of code's: four columns are the code's indentation,
+// and what the line holds past them, a tab split there written as the columns it has left, is the
+// code's text. Goldmark counts every tab on a blank line as four columns wherever it stands, so in
+// a list item, where the line starts past the item's columns, a tab short of the code's indentation
+// left a space in the code (`- x\n  \n      a\n   \t\n      b` read `a\n \nb`).
+//
+// It also ends the code where the browser editor's parser does: at the last line that is code - a
+// line of text, or a blank line holding four columns or more past the code's container - with the
+// shorter blank lines between, where goldmark drops every blank line after the last line of text
+// (`    code\n      \nx` holds the code `code\n  `). Code right after a list outside it, or right
+// after a quote with no blank line between them, keeps goldmark's end: that parser holds the list
+// or quote open there (heldOpenBy). The blank lines the code keeps past goldmark's end are
+// its held lines (codeHeldAttr), which space no list (sourceLines.held).
+type codeColumns struct{ parser.BlockParser }
+
+var (
+	// codeKeptAttr is how many of an indented code block's lines run to its last blank line of four
+	// columns or more, as codeColumns.Continue reads them.
+	codeKeptAttr = []byte("pmdoc-code-kept")
+	// codeHeldAttr is the index of an indented code block's first held line: its lines from there
+	// on are blank lines goldmark drops and the browser editor's parser keeps (codeColumns).
+	codeHeldAttr = []byte("pmdoc-code-held")
+)
+
+func (p codeColumns) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	line, segment := reader.PeekLine()
+	if !util.IsBlank(line) {
+		return p.BlockParser.Continue(node, reader, pc)
+	}
+	position, padding := util.IndentPosition(line, reader.LineOffset(), 4)
+	if position >= 0 {
+		reader.AdvanceAndSetPadding(position, padding)
+		_, segment = reader.PeekLine()
+	} else {
+		// Nothing past the code's indentation: the line is empty but for its line feed.
+		segment = lineFeedOnly(segment, reader.Source())
+	}
+	node.Lines().Append(segment)
+	if position >= 0 {
+		node.SetAttribute(codeKeptAttr, node.Lines().Len())
+	}
+	reader.AdvanceToEOL()
+	return parser.Continue | parser.NoChildren
+}
+
+// Close drops the code's trailing blank lines as goldmark does, then takes back those up to the
+// last one codeKeptAttr counts, unless the code stands right after a list or a quote the browser
+// editor's parser holds open there.
+func (p codeColumns) Close(node ast.Node, reader gmtext.Reader, pc parser.Context) {
+	p.BlockParser.Close(node, reader, pc)
+	if heldOpenBy(node) != nil {
+		return
+	}
+	kept, ok := node.Attribute(codeKeptAttr)
+	if !ok {
+		return
+	}
+	// Goldmark's Close only reslices the lines, so those it dropped are still past their end.
+	if trimmed := node.Lines().Len(); kept.(int) > trimmed {
+		node.Lines().SetSliced(0, kept.(int))
+		node.SetAttribute(codeHeldAttr, trimmed)
+	}
+}
+
+// heldOpenBy is the list right before indented code, outside it, or the quote right before it with
+// no blank line between them, which the browser editor's parser holds open across the code's first
+// line; nil when neither stands there. Close keeps goldmark's end of such code, interruptsOpenBlock
+// reads such code as holding nothing open, and the refusal of such code holding more than one line
+// names what it holds (refuseBlocks), so all three read the one shape.
+func heldOpenBy(code ast.Node) ast.Node {
+	switch previous := code.PreviousSibling().(type) {
+	case *ast.List:
+		return previous
+	case *ast.Blockquote:
+		if !code.HasBlankPreviousLines() {
+			return previous
+		}
+	}
+	return nil
+}
+
+// setPadding sets reader's padding and drops the line it has peeked, which goldmark's
+// SetPadding keeps: a zero advance drops it.
+func setPadding(reader gmtext.Reader, padding int) {
+	reader.SetPadding(padding)
+	reader.Advance(0)
+}
+
+// lineFeedOnly is segment's line emptied but for its line feed.
+func lineFeedOnly(segment gmtext.Segment, source []byte) gmtext.Segment {
+	start := segment.Stop
+	if start > segment.Start && source[start-1] == '\n' {
+		start--
+	}
+	return gmtext.NewSegment(start, segment.Stop)
+}
+
+var (
+	// fenceStart is a code fence's opening run of backticks or tildes.
+	fenceStart = regexp.MustCompile("^(?:```|~~~)")
+	// listMarkerStart is a list marker opening a line's text: a bullet, or an ordered item's number
+	// and delimiter, followed by a space, a tab or the line's end.
+	listMarkerStart = regexp.MustCompile(`^(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|\n|$)`)
+	// listMarker is a list item's marker alone: a bullet, or an ordered item's number and
+	// delimiter.
+	listMarker = regexp.MustCompile(`^(?:[-+*]|[0-9]{1,9}[.)])`)
+	// setextUnderline is a setext heading's underline.
+	setextUnderline = regexp.MustCompile(`^(?:=+|-+)[ \t]*(?:\n|$)`)
+)
+
+// expandTabIndentation takes the indentation of reader's line as the columns it spans, as padding,
+// when it holds a tab, spans fewer than four columns, and what follows it matches opens; the line
+// reads the same, with spaces where a tab stood.
+func expandTabIndentation(reader gmtext.Reader, opens *regexp.Regexp) {
+	line, _ := reader.PeekLine()
+	end := 0
+	for end < len(line) && (line[end] == ' ' || line[end] == '\t') {
+		end++
+	}
+	if bytes.IndexByte(line[:end], '\t') < 0 || !opens.Match(line[end:]) {
+		return
+	}
+	if width, _ := util.IndentWidth(line, reader.LineOffset()); width < 4 {
+		reader.AdvanceAndSetPadding(end, width)
+	}
+}
+
+// tabExpandedLines is lines with each one's indentation, where it holds a tab, taken as the columns
+// it spans on its source line, as padding: goldmark's table transformer measures a row's indentation
+// as if the row began its line, so `> \t| a |` read as paragraph text.
+func tabExpandedLines(lines *gmtext.Segments, source []byte) *gmtext.Segments {
+	expanded := gmtext.NewSegments()
+	for index := range lines.Len() {
+		expanded.Append(tabExpandedLine(lines.At(index), source))
+	}
+	return expanded
+}
+
+// tabExpandedLine is one line of tabExpandedLines.
+func tabExpandedLine(line gmtext.Segment, source []byte) gmtext.Segment {
+	end := line.Start
+	for end < line.Stop && (source[end] == ' ' || source[end] == '\t') {
+		end++
+	}
+	if line.Padding == 0 && bytes.IndexByte(source[line.Start:end], '\t') >= 0 {
+		from := lineStart(source, line.Start)
+		width, _ := util.IndentWidth(source[line.Start:end], columnOf(source[from:line.Start]))
+		line = gmtext.Segment{Start: end, Stop: line.Stop, Padding: width, ForceNewline: line.ForceNewline}
+	}
+	return line
+}
+
+// columnOf is the column text, the start of a line, ends at, a tab advancing to the next multiple
+// of four.
+func columnOf(text []byte) int {
+	column := 0
+	for _, char := range text {
+		if char == '\t' {
+			column += 4 - column%4
+		} else {
+			column++
+		}
+	}
+	return column
+}
+
+// interruptsOpenBlock reports whether a list opening in parent on the line starting at start
+// interrupts a block the browser editor's parser holds open there, other than a paragraph parent
+// holds, which goldmark names: a paragraph ending on the line before, reached across the containers
+// the line opens first, that forms no table, or an indented code block with only blank lines after
+// it. That parser decides once per line whether it interrupts, from the construct it holds open,
+// before opening the containers the line starts with, and keeps indented code open to the line -
+// except code right after a list, or right after a quote with no blank line between them. The list
+// stays open across the blank lines before the code, and the quote across the code's first line;
+// neither continues the line after it, and that parser ends indented code at a line no open
+// container continues, so the code has ended and the line interrupts nothing (which is also why it
+// reads a second code line there as a second code block). A container opened on a line after the
+// code, such as a typed block's fence, starts a flow of its own that holds nothing open.
+func interruptsOpenBlock(parent ast.Node, source []byte, start int) bool {
+	previous := parent.LastChild()
+	opensContainers := previous == nil
+	for node := parent; previous == nil && node != nil && node.Kind() != ast.KindDocument; node = node.Parent() {
+		previous = node.PreviousSibling()
+	}
+	switch previous := previous.(type) {
+	case *ast.Paragraph:
+		// A table goldmark makes of the paragraph is no paragraph to that parser, and holds
+		// nothing open a line could interrupt.
+		if !opensContainers || previous.Lines().Len() == 0 {
+			return false
+		}
+		if table, _ := formsTable(previous, source); table {
+			return false
+		}
+		last := previous.Lines().At(previous.Lines().Len() - 1)
+		return bytes.Count(source[last.Start:start], []byte("\n")) <= 1
+	case *ast.CodeBlock:
+		if heldOpenBy(previous) != nil {
+			return false
+		}
+		if previous.Lines().Len() == 0 {
+			return false
+		}
+		last := previous.Lines().At(previous.Lines().Len() - 1)
+		between := source[last.Start:start]
+		between = between[bytes.IndexByte(between, '\n')+1:]
+		for _, line := range bytes.Split(bytes.TrimSuffix(between, []byte("\n")), []byte("\n")) {
+			if len(line) > 0 && !markersOrWhitespace(line) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// taskList reads a task list item's marker as the browser editor's parser does: `[ ]`, `[x]` or
+// `[X]` opening a list item's first paragraph, followed by a space or a tab and then more text on
+// the line, or by a line ending, after any spaces and tabs, that the paragraph continues past. The
+// marker takes the one space or tab after it, or the line ending when the line holds nothing more
+// but a hard break's spaces, which stay a hard break. Goldmark's reads a marker with anything after it, and takes every space
+// after it, so it read a link opening a list item (`- [x](https://…)`) as a checked task.
+type taskList struct{}
+
+func (taskList) Extend(m goldmark.Markdown) {
+	m.Parser().AddOptions(parser.WithInlineParsers(util.Prioritized(taskMarkerParser{}, 0)))
+}
+
+type taskMarkerParser struct{}
+
+func (taskMarkerParser) Trigger() []byte { return []byte{'['} }
+
+func (taskMarkerParser) Parse(parent ast.Node, block gmtext.Reader, _ parser.Context) ast.Node {
+	if _, ok := parent.Parent().(*ast.ListItem); !ok || parent.Parent().FirstChild() != parent || parent.HasChildren() {
+		return nil
+	}
+	line, _ := block.PeekLine()
+	if len(line) < 4 || !strings.ContainsRune(" \txX", rune(line[1])) || line[2] != ']' {
+		return nil
+	}
+	rest := line[3:]
+	blank := len(rest) - len(bytes.TrimLeft(rest, " \t"))
+	width := 4
+	switch {
+	case blank > 0 && !util.IsBlank(rest):
+	case rest[blank] == '\n':
+		row, segment := block.Position()
+		block.AdvanceLine()
+		next, _ := block.PeekLine()
+		block.SetPosition(row, segment)
+		if next == nil {
+			return nil
+		}
+		width = len(line)
+		if spaces := len(rest) - len(bytes.TrimLeft(rest, " ")); spaces >= 2 {
+			width = 3
+		}
+	default:
+		return nil
+	}
+	block.Advance(width)
+	return extensionast.NewTaskCheckBox(line[1] == 'x' || line[1] == 'X')
+}
+
+// lineRecordingParagraph is goldmark's paragraph parser, recording each line it takes as the
+// containers left it, before the paragraph trims its leading whitespace, keyed by where the
+// trimmed line starts. The browser editor's parser keeps that whitespace in a code span
+// (multilineCodeSpanText). Recording as the lines are taken keeps them whatever the paragraph
+// becomes: a tight list item's text block, or a setext heading, whose paragraph is trimmed before
+// any paragraph transformer sees it.
+type lineRecordingParagraph struct{ parser.BlockParser }
+
+// untrimmedLinesKey holds the recorded lines while a document parses, and untrimmedLinesAttr on
+// the parsed document root afterwards (parseSource).
+var (
+	untrimmedLinesKey  = parser.NewContextKey()
+	untrimmedLinesAttr = []byte("pmdoc-untrimmed-lines")
+)
+
+func (p lineRecordingParagraph) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	_, segment := reader.PeekLine()
+	node, state := p.BlockParser.Open(parent, reader, pc)
+	if node != nil {
+		recordLine(segment, reader.Source(), pc)
+	}
+	return node, state
+}
+
+func (p lineRecordingParagraph) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	_, segment := reader.PeekLine()
+	ended := lazilyEnded(node, reader, pc)
+	lazyTypedParagraph(node, ended)
+	state := p.BlockParser.Continue(node, reader, pc)
+	if state != parser.Close {
+		recordLine(segment, reader.Source(), pc)
+		if ended != nil {
+			lazy, _ := node.Attribute(lazyLinesAttr)
+			starts, _ := lazy.([]int)
+			node.SetAttribute(lazyLinesAttr, append(starts, lineStart(reader.Source(), segment.Start)))
+		}
+	}
+	return state
+}
+
+func recordLine(line gmtext.Segment, source []byte, pc parser.Context) {
+	recorded, _ := pc.Get(untrimmedLinesKey).(map[int]gmtext.Segment)
+	if recorded == nil {
+		recorded = make(map[int]gmtext.Segment)
+		pc.Set(untrimmedLinesKey, recorded)
+	}
+	recorded[line.TrimLeftSpace(source).Start] = line
+}
+
+// parseSource is pmdoc's one parse of markdown: it parses source with context, puts each footnote
+// definition where it is written (definitionsInPlace), and leaves the lines lineRecordingParagraph
+// recorded on the document root. It refuses markdown nested past either bound - a block
+// nestingGuard refused, or a textblock's inline marks past maxInlineNesting (nestingRefusal) -
+// before anything walks the tree, and goldmark's own walk through a link's label inside the parse
+// meets each image imageNesting held to the inline bound. Goldmark runs an AST transformer inside
+// its parse, so pmdoc registers none, and takes the backslash out of a cell's escaped pipes itself
+// once the bounds hold (unescapeTablePipes).
+func parseSource(p parser.Parser, source []byte, context parser.Context) (ast.Node, error) {
+	reader := &lastLineColumns{Reader: gmtext.NewReader(source)}
+	root := p.Parse(reader, parser.WithContext(context))
+	if reader.kept {
+		root.SetAttribute(lastLineKeptAttr, true)
+	}
+	definitionsInPlace(root, context)
+	if recorded := context.Get(untrimmedLinesKey); recorded != nil {
+		root.SetAttribute(untrimmedLinesAttr, recorded)
+	}
+	if err := nestingRefusal(root, source, context); err != nil {
+		return nil, err
+	}
+	unescapeTablePipes(root, source)
+	return root, nil
+}
+
+// lastLineColumns is goldmark's reader keeping the document's last line where it has no line feed
+// and its containers' markers leave only columns of a tab they took part of: goldmark reads no
+// line past the source's end, so it dropped that line, where the browser editor's parser reads the
+// columns left as the line's (`> ```\n> x\n>\t` holds the code `x\n  `, as it does with a line
+// feed after the tab). The line is the columns, as goldmark's reader writes a padded line's value
+// (Segment.Value); a last line its containers leave nothing of stays no line to either parser.
+type lastLineColumns struct {
+	gmtext.Reader
+	// kept is whether it served such a line, which parseSource records on the document
+	// (lastLineKeptAttr).
+	kept bool
+}
+
+// lastLineKeptAttr marks a document whose last line lastLineColumns kept, which goldmark dropped:
+// the refusals that read the lines as before read it as the blank line it was then
+// (blanksOutsideCode).
+var lastLineKeptAttr = []byte("pmdoc-last-line-kept")
+
+func (r *lastLineColumns) PeekLine() ([]byte, gmtext.Segment) {
+	line, segment := r.Reader.PeekLine()
+	if line == nil && segment.Padding > 0 && segment.Start == len(r.Source()) {
+		r.kept = true
+		return segment.Value(r.Source()), segment
+	}
+	return line, segment
+}
+
+// AdvanceLine drops the columns left at the source's end, which goldmark's reader keeps there, so
+// the last line is read once.
+func (r *lastLineColumns) AdvanceLine() {
+	r.Reader.AdvanceLine()
+	if _, segment := r.Reader.Position(); segment.Start >= len(r.Source()) {
+		r.Reader.SetPadding(0)
+	}
+}
+
+// AdvanceToEOL takes every column left at the source's end, as it takes the rest of any line, so
+// an item whose content stands past them takes them all (`> -  ```\n>    x\n>\t` holds the code
+// `x`).
+func (r *lastLineColumns) AdvanceToEOL() {
+	r.Reader.AdvanceToEOL()
+	if _, segment := r.Reader.Position(); segment.Start >= len(r.Source()) && segment.Padding > 0 {
+		r.Reader.Advance(0) // forgets the line offset and the peeked line
+		r.Reader.SetPadding(0)
+	}
+}
+
+// Advance takes n of the columns left at the source's end, where goldmark's reader takes none, so
+// a container inside the one that left them takes its own columns from them too (`> - ```\n>   x\n>\t`
+// leaves the item nothing, and holds the code `x`).
+func (r *lastLineColumns) Advance(n int) {
+	_, segment := r.Reader.Position()
+	if segment.Start < len(r.Source()) || segment.Padding == 0 {
+		r.Reader.Advance(n)
+		return
+	}
+	r.Reader.Advance(0) // forgets the line offset and the peeked line
+	r.Reader.SetPadding(max(segment.Padding-n, 0))
+}
+
+func (r *lastLineColumns) AdvanceAndSetPadding(n, padding int) {
+	r.Advance(n)
+	if _, segment := r.Reader.Position(); padding > segment.Padding {
+		r.Reader.SetPadding(padding)
+	}
+}
+
+// multilineCodeSpanText is the text of a code span that runs over more than one line, as the
+// browser editor's parser reads it: each later line from just after the containers' prefix, where
+// goldmark's paragraph trimmed the whitespace before it - a line holding only whitespace before
+// the closer included, for which goldmark keeps no text at all - and then one space or line ending
+// taken from each end when both ends hold one and something else stands between, after the whole
+// span is put together. The columns left of a tab a container's marker took part of are written as
+// spaces, but that parser reads them as text, not spaces: they stand between the ends, and where
+// they end the span nothing is taken off. ok is false for a span on one line, whose goldmark
+// reading stands.
+func multilineCodeSpanText(span *ast.CodeSpan, source []byte) (text string, ok bool) {
+	first, _ := span.FirstChild().(*ast.Text)
+	last, _ := span.LastChild().(*ast.Text)
+	if first == nil || last == nil {
+		return "", false
+	}
+	// Goldmark takes one character off each end when both are whitespace; put them back.
+	trimmed := first.Segment.Start > 0 && source[first.Segment.Start-1] != '`'
+	stop := last.Segment.Stop
+	if trimmed {
+		stop++
+	}
+	closerAlone := stop > last.Segment.Start && source[stop-1] == '\n'
+	if first == last && !closerAlone {
+		return "", false
+	}
+	var content strings.Builder
+	split, endsSplit := false, false
+	indent := func(start int) {
+		columns, whitespace := untrimmedIndent(span, start, source)
+		content.WriteString(strings.Repeat(" ", columns) + whitespace)
+		split = split || columns > 0
+		endsSplit = columns > 0 && whitespace == ""
+	}
+	for child := span.FirstChild(); child != nil; child = child.NextSibling() {
+		line := child.(*ast.Text).Segment
+		from, to := line.Start, line.Stop
+		if child == span.FirstChild() && trimmed {
+			from--
+		} else if child != span.FirstChild() {
+			indent(line.Start)
+		}
+		if child == span.LastChild() && trimmed {
+			to++
+		}
+		content.Write(source[from:to])
+		endsSplit = endsSplit && from == to
+	}
+	if closerAlone {
+		endsSplit = false
+		if next := bytes.IndexByte(source[stop:], '`'); next >= 0 {
+			indent(stop + next)
+		}
+	}
+	text = content.String()
+	if !endsSplit && (codeSpanPadded(text) || split && len(text) >= 2 && isCodePadding(text[0]) && isCodePadding(text[len(text)-1])) {
+		text = text[1 : len(text)-1]
+	}
+	return text, true
+}
+
+// codeSpanPadded reports whether a code span's text is one the parser takes a character off each
+// end of: both ends a space or a line feed, and something else between.
+func codeSpanPadded(text string) bool {
+	return len(text) >= 2 && isCodePadding(text[0]) && isCodePadding(text[len(text)-1]) && strings.Trim(text, " \n") != ""
+}
+
+// isCodePadding reports whether char is a space or a line feed, what a code span sheds at each end.
+func isCodePadding(char byte) bool { return char == ' ' || char == '\n' }
+
+// untrimmedIndent is the whitespace goldmark's paragraph trimmed from the line whose text now
+// starts at start: what lies between the containers' prefix and it (lineRecordingParagraph), as
+// the columns left of a tab a container's marker took part of, and the whitespace after them.
+func untrimmedIndent(node ast.Node, start int, source []byte) (columns int, whitespace string) {
+	root := node
+	for root.Parent() != nil {
+		root = root.Parent()
+	}
+	attribute, _ := root.Attribute(untrimmedLinesAttr)
+	recorded, _ := attribute.(map[int]gmtext.Segment)
+	line, ok := recorded[start]
+	if !ok {
+		return 0, ""
+	}
+	return line.Padding, string(source[line.Start:start])
+}
+
+// lineStart is where the line holding position begins in source.
+func lineStart(source []byte, position int) int {
+	for position > 0 && source[position-1] != '\n' {
+		position--
+	}
+	return position
+}
+
+// insideImage reports whether node is part of an image's alt text.
+func insideImage(node ast.Node) bool {
+	for parent := node.Parent(); parent != nil; parent = parent.Parent() {
+		if _, ok := parent.(*ast.Image); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// parseFrontmatterBlock reads the front matter a document opens with in source, as the
+// browser editor's parser does: a first line that is `---` and any spaces or tabs opens it, and
+// the first later line that is the same closes it. The node's text is the lines between, joined
+// with line feeds between plain `---` fences, as that parser stores it. rest is where the
+// document after the closing line begins; a document with no closed front matter has none, and
+// rest is 0. unclosed reports an opener nothing closes, which that parser tries as front matter to
+// the document's end (blockReader.parse).
+func parseFrontmatterBlock(source []byte) (front *Node, rest int, unclosed bool) {
+	var content []string
+	for start, index := 0, 0; start < len(source); index++ {
+		end := len(source)
+		if next := bytes.IndexByte(source[start:], '\n'); next >= 0 {
+			end = start + next + 1
+		}
+		line := strings.TrimRight(string(bytes.TrimSuffix(source[start:end], []byte("\n"))), " \t")
+		switch {
+		case index == 0 && line != "---":
+			return nil, 0, false
+		case index > 0 && line == "---":
+			text := "---\n---"
+			if joined := strings.Join(content, "\n"); joined != "" {
+				text = "---\n" + joined + "\n---"
+			}
+			return &Node{Type: "frontmatter", Children: []*Node{{Type: "text", Text: text}}}, end, false
+		case index > 0:
+			content = append(content, string(bytes.TrimSuffix(source[start:end], []byte("\n"))))
+		}
+		start = end
+	}
+	return nil, 0, len(source) > 0
+}

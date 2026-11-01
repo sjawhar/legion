@@ -1,0 +1,111 @@
+import { afterAll, afterEach } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+// happy-dom has no IndexedDB; the store of a document's unsent edits (`pending-edits.ts`) runs on
+// this in-memory one, which keeps IndexedDB's transaction ordering.
+import "fake-indexeddb/auto";
+import { notifyManager } from "@tanstack/react-query";
+import serverBlockSchema from "../../../../envoy/internal/dispatch/pmdoc/schema/blocks.json";
+import { resetReachability } from "../api/reachability";
+import type { BlockSchema } from "../api/types";
+import { blockSchemaCache } from "../features/doc/schema";
+import { resetAnswerDrafts } from "../features/inbox/answer-drafts";
+import { resetOutstandingAnswers } from "../features/inbox/outstanding-answers";
+import { resetReplyDrafts } from "../features/inbox/reply-drafts";
+import { resetPinState } from "../features/issue/pin-write";
+import { resetWriteStorage } from "../features/writes/write-storage";
+import { type Writes, watchWriteStores } from "../features/writes/write-store";
+import { guardWritesToNetwork, writesThatReachedNetwork } from "./network-guard";
+import { resetRouteAnswers } from "./send-answers";
+
+GlobalRegistrator.register();
+
+// Unit tests have no Dispatch server to answer GET /api/v1/schema/blocks, so the session cache
+// starts already holding the checked-in server schema: every MarkdownBody, ask card, and
+// document surface renders through the real schema without a network request, and a test that
+// wants a different schema replaces it through its own `api.getBlockSchema` spy before the
+// first render in its file.
+void blockSchemaCache.load(async () => serverBlockSchema as unknown as BlockSchema);
+
+// A route a test answers (`answerRoute`) is that test's: the next test answers its own.
+afterEach(resetRouteAnswers);
+
+// A unit test's write that reaches the network fails its test (`network-guard.ts`: `fetch` and
+// the uploads' `XMLHttpRequest` both), and one a write loop makes after the file's last test -
+// a retry no test is left to fail - fails the file.
+guardWritesToNetwork();
+const reportReachedNetwork = () => {
+  const reached = writesThatReachedNetwork();
+  if (reached.length === 0) return;
+  throw new Error(`writes reached the network, answered by nothing: ${reached.join(", ")}`);
+};
+afterEach(reportReachedNetwork);
+afterAll(reportReachedNetwork);
+
+class WebSocketStub {
+  binaryType = "arraybuffer";
+  identifier = 0;
+  readyState = 0;
+
+  addEventListener(..._args: unknown[]): void {}
+
+  close(): void {
+    this.readyState = 3;
+  }
+
+  removeEventListener(..._args: unknown[]): void {}
+
+  send(..._args: unknown[]): void {}
+}
+
+globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
+
+// A failing assertion prints the values it compared, and happy-dom's DOM nodes print as their
+// whole object graph - megabytes for one element, which buries or replaces the failure. Nodes
+// print as their own markup instead. Bun asks a value for this only when a single-value matcher
+// reports (`toBe`, `toBeNull`, `toBeUndefined`, `toContain`); the diff matchers
+// (`toEqual`, `toStrictEqual`, `toMatchObject`, `toHaveBeenCalledWith`) and snapshots walk the
+// object themselves and ignore it, so compare a node with `toBe` or map it to a string first.
+Object.defineProperty(Node.prototype, Bun.inspect.custom, {
+  configurable: true,
+  value(this: Node): string {
+    // A document has no markup and an empty `textContent`, so the node name is what is left to
+    // print for one.
+    return this instanceof Element
+      ? this.outerHTML
+      : `${this.nodeName} ${JSON.stringify(this.textContent)}`;
+  },
+  writable: true,
+});
+
+// TanStack batches observer notifications through a scheduler that happy-dom does not
+// drive promptly; flushing synchronously keeps query updates inside React's act() scope
+// so assertions after setQueryData do not wait on a stalled timer.
+notifyManager.setScheduler((callback) => callback());
+
+// Ask-reply and ask-answer drafts live in module-level stores that outlive every render, so a
+// draft one test leaves behind would pre-fill the next test's composer or answer box for the
+// same ask id. An answer still out when a test ends is held in one of its own
+// (`outstanding-answers.ts`), which would keep the next test's reading column on that ask id.
+afterEach(resetReplyDrafts);
+afterEach(resetAnswerDrafts);
+afterEach(resetOutstandingAnswers);
+
+// A write a test leaves out keeps writing what it keeps, and the next test's signed-in app would
+// take it up again (`Writes.resume`): each test's are let go, their trying stopped first, since a
+// store outlives its test and would go on retrying into the tests and files after it
+// (`watchWriteStores`). Without this, one process running every file leaves writes retrying into
+// later files - sends to an agent session (`POST /api/v1/agents/<session>/messages`) and asks'
+// answers (`POST /api/v1/asks/<id>/answer`), in numbers that vary from run to run - each reaching
+// the network guard in whichever test is running then, and every such run fails. So is the issue
+// state the last pin answered let go, which the next pin would otherwise write over.
+const madeStores = new Set<Writes>();
+watchWriteStores((store) => madeStores.add(store));
+afterEach(() => {
+  for (const store of madeStores) store.clear();
+  madeStores.clear();
+});
+afterEach(resetWriteStorage);
+afterEach(resetPinState);
+// Whether Dispatch could be reached is the page's to learn afresh: a request one test failed would
+// otherwise make the next test's first answer start every waiting write's backoff over.
+afterEach(resetReachability);

@@ -1,0 +1,1060 @@
+package pmdoc
+
+import (
+	"errors"
+	"reflect"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/reearth/ygo/crdt"
+)
+
+func TestFindQuoteDisambiguatesByOccurrenceAndNearest(t *testing.T) {
+	doc, err := Parse("brown X brown Y brown\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FindQuote(doc, "brown", nil, nil); !errors.As(err, new(*ErrTargetAmbiguous)) {
+		t.Fatalf("want ambiguity, got %v", err)
+	}
+
+	one := 1
+	rangeAtOccurrence, err := FindQuote(doc, "brown", &one, nil)
+	if err != nil || rangeAtOccurrence.From != 1+len16("brown X ") {
+		t.Fatalf("occurrence 1: %v %v", rangeAtOccurrence, err)
+	}
+
+	near := 1 + len16("brown X brown Y b")
+	rangeNearHint, err := FindQuote(doc, "brown", nil, &near)
+	if err != nil || rangeNearHint.From != 1+len16("brown X brown Y ") {
+		t.Fatalf("nearest: %v %v", rangeNearHint, err)
+	}
+	if _, err := FindQuote(doc, "purple", nil, nil); !errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("want not found, got %v", err)
+	}
+
+	normalized, err := Parse("the quick\nbrown fox\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalizedRange, err := FindQuote(normalized, "quick brown", nil, nil)
+	if err != nil || normalizedRange != (Range{From: 5, To: 16}) {
+		t.Fatalf("normalized whitespace range = %v, %v", normalizedRange, err)
+	}
+}
+
+func TestFindQuoteStripsInlineMarkdownFromQuote(t *testing.T) {
+	tests := []struct {
+		name     string
+		markdown string
+		quote    string
+		want     Range
+	}{
+		{
+			name:     "inline code",
+			markdown: "Use `config` with care.\n",
+			quote:    "Use `config`",
+			want:     Range{From: 1, To: 11},
+		},
+		{
+			name:     "strong emphasis",
+			markdown: "A **bold** statement.\n",
+			quote:    "**bold**",
+			want:     Range{From: 3, To: 7},
+		},
+		{
+			name:     "underscore emphasis",
+			markdown: "A __quiet__ statement.\n",
+			quote:    "__quiet__",
+			want:     Range{From: 3, To: 8},
+		},
+		{
+			name:     "link",
+			markdown: "Read [the guide](https://example.com).\n",
+			quote:    "Read [the guide](https://example.com)",
+			want:     Range{From: 1, To: 15},
+		},
+		{
+			name:     "autolink",
+			markdown: "See <https://example.com>.\n",
+			quote:    "See <https://example.com>",
+			want:     Range{From: 1, To: 24},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := Parse(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := FindQuote(doc, test.quote, nil, nil)
+			if err != nil {
+				t.Fatalf("FindQuote(%q) = %v", test.quote, err)
+			}
+			if got != test.want {
+				t.Fatalf("FindQuote(%q) = %v, want %v", test.quote, got, test.want)
+			}
+		})
+	}
+}
+
+func TestFindQuoteDoesNotStripLiteralMarkdownCharacters(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		markdown string
+		quote    string
+	}{
+		{name: "intraword underscore", markdown: "snakecase\n", quote: "snake_case"},
+		{name: "URL underscore", markdown: "https://x/ab\n", quote: "https://x/a_b"},
+		{name: "code block", markdown: "```text\ncode\n```\n", quote: "`code`"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := Parse(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := FindQuote(doc, test.quote, nil, nil); !errors.Is(err, ErrTargetNotFound) {
+				t.Fatalf("FindQuote(%q) = %v, want ErrTargetNotFound", test.quote, err)
+			}
+		})
+	}
+}
+
+func TestFindQuoteMissNamesThreeNearestBlocksInOrder(t *testing.T) {
+	doc, err := Parse("Closest rendered block.\n\nA distant block.\n\nClosest but later.\n\nClose enough.\n\nZebra.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = FindQuote(doc, "Closest unmatched quote", nil, nil)
+	if !errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("FindQuote miss = %v, want ErrTargetNotFound", err)
+	}
+	var missing *ErrQuoteNotFound
+	if !errors.As(err, &missing) {
+		t.Fatalf("FindQuote miss = %T, want *ErrQuoteNotFound", err)
+	}
+	want := []string{"Closest rendered block.", "Closest but later.", "Close enough."}
+	if !reflect.DeepEqual(missing.Nearest, want) {
+		t.Fatalf("nearest = %q, want %q", missing.Nearest, want)
+	}
+}
+
+func TestFindQuoteMissWithOneBlockNamesOne(t *testing.T) {
+	doc, err := Parse("Only block.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = FindQuote(doc, "missing", nil, nil)
+	var missing *ErrQuoteNotFound
+	if !errors.As(err, &missing) {
+		t.Fatalf("FindQuote miss = %v, want *ErrQuoteNotFound", err)
+	}
+	if want := []string{"Only block."}; !reflect.DeepEqual(missing.Nearest, want) {
+		t.Fatalf("nearest = %q, want %q", missing.Nearest, want)
+	}
+}
+
+func TestFindQuoteMatchesHeadingWrittenWithATXMarker(t *testing.T) {
+	doc, err := Parse("# Decisions needed\n\nDecisions needed\n\n## Decisions needed\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FindQuote(doc, "Decisions needed", nil, nil); !errors.As(err, new(*ErrTargetAmbiguous)) {
+		t.Fatalf("bare text matches the paragraph and both headings: err = %v, want ErrTargetAmbiguous", err)
+	}
+	var ambiguous *ErrTargetAmbiguous
+	_, err = FindQuote(doc, "# Decisions needed", nil, nil)
+	if !errors.As(err, &ambiguous) || len(ambiguous.Candidates) != 2 {
+		t.Fatalf("# quote matches only the two headings: err = %v", err)
+	}
+	occurrence := 1
+	second, err := FindQuote(doc, "## Decisions needed", &occurrence, nil)
+	if err != nil {
+		t.Fatalf("FindQuote(## heading, occurrence 1) = %v", err)
+	}
+	heading, err := FindHeading(doc, "Decisions needed", &occurrence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.From != heading.From+1 || second.To != heading.To-1 {
+		t.Fatalf("heading quote = %+v, want the text range inside heading %+v", second, heading)
+	}
+	if _, err := FindQuote(doc, "#Decisions needed", nil, nil); !errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("a # without a space is not a heading marker: err = %v, want ErrTargetNotFound", err)
+	}
+	if _, err := FindQuote(doc, "# ", nil, nil); !errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("an empty heading quote matches nothing: err = %v, want ErrTargetNotFound", err)
+	}
+}
+
+func TestFindQuoteHeadingMarkerToleratesInlineMarkdownAndWhitespace(t *testing.T) {
+	doc, err := Parse("# Use `config` with care\n\nUse config with care in the body.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	heading, err := FindHeading(doc, "Use config with care", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, quote := range []string{"# Use `config` with care", "#  Use  config   with care", "## Use config with care"} {
+		got, err := FindQuote(doc, quote, nil, nil)
+		if err != nil {
+			t.Fatalf("FindQuote(%q) = %v", quote, err)
+		}
+		if got.From != heading.From+1 || got.To != heading.To-1 {
+			t.Fatalf("FindQuote(%q) = %+v, want the heading text range inside %+v", quote, got, heading)
+		}
+	}
+}
+
+func TestFindHeadingMatchesTitleAcrossLevels(t *testing.T) {
+	doc, err := Parse("# A\n\ntext\n\n## A\n\n# B\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FindHeading(doc, "A", nil); !errors.As(err, new(*ErrTargetAmbiguous)) {
+		t.Fatalf("two headings titled A: err = %v, want ErrTargetAmbiguous", err)
+	}
+	one := 1
+	r, err := FindHeading(doc, "A", &one)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// doc = h1("A")[0,3) p("text")[3,9) h2("A")[9,12) h1("B")[12,15)
+	if r != (Range{From: 9, To: 12}) {
+		t.Fatalf("second A = %v, want [9,12)", r)
+	}
+	if r, err := FindHeading(doc, "B", nil); err != nil || r != (Range{From: 12, To: 15}) {
+		t.Fatalf("B = %v %v", r, err)
+	}
+	if _, err := FindHeading(doc, "text", nil); !errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("paragraph text is not a heading: %v", err)
+	}
+	if got := Size(doc); got != 15 {
+		t.Fatalf("Size = %d, want 15", got)
+	}
+}
+
+func TestListMarksAndMarkAttrs(t *testing.T) {
+	doc, err := FromJSON(fixtureNamed(t, "marks").PMJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Marked{
+		{MarkRef{"proofComment", "c1"}, "user:sami"},
+		{MarkRef{"dispatchAsk", "a1"}, "session:01a0"},
+		{MarkRef{"proofSuggestion", "s1"}, "session:01a0"},
+	}
+	if got := ListMarks(doc); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListMarks = %v, want %v", got, want)
+	}
+	attrs, ok := MarkAttrs(doc, "proofSuggestion", "s1")
+	if !ok || attrs["kind"] != "replace" || attrs["by"] != "session:01a0" {
+		t.Fatalf("MarkAttrs = %v %v", attrs, ok)
+	}
+	if _, ok := MarkAttrs(doc, "proofComment", "nope"); ok {
+		t.Fatal("unknown id must not resolve")
+	}
+}
+
+func TestMarkRangeThenFindMark(t *testing.T) {
+	doc := crdt.New()
+	frag := doc.GetXmlFragment("prosemirror")
+	want, err := Parse("The quick brown fox.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Transact(func(txn *crdt.Transaction) {
+		err = Update(txn, frag, want)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rangeBrown, err := FindQuote(want, "brown", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Transact(func(txn *crdt.Transaction) {
+		err = MarkRange(txn, frag, rangeBrown, Mark{Type: "dispatchAsk", Attrs: Attrs{"id": "a1", "by": "session:x"}})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tree, err := Read(frag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, quote, ok := FindMark(tree, "dispatchAsk", "a1")
+	if !ok || quote != "brown" || got != rangeBrown {
+		t.Fatalf("FindMark = %v %q %v", got, quote, ok)
+	}
+
+	doc.Transact(func(txn *crdt.Transaction) {
+		err = Unmark(txn, frag, "dispatchAsk", "a1")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err = Read(frag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := FindMark(tree, "dispatchAsk", "a1"); ok {
+		t.Fatal("mark still present after Unmark")
+	}
+	markdown, err := Render(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "The quick brown fox.\n" {
+		t.Fatalf("text changed by marking: %q", markdown)
+	}
+}
+
+func TestFindMarkSpansTextblocks(t *testing.T) {
+	doc := crdt.New()
+	fragment := doc.GetXmlFragment("prosemirror")
+	tree, err := Parse("one\n\ntwo\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Transact(func(txn *crdt.Transaction) {
+		err = Update(txn, fragment, tree)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	range_, err := FindQuote(tree, "one two", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Transact(func(txn *crdt.Transaction) {
+		err = MarkRange(txn, fragment, range_, Mark{Type: "proofComment", Attrs: Attrs{"id": "c1", "by": "user:alice"}})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	marked, err := Read(fragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, quote, found := FindMark(marked, "proofComment", "c1")
+	if !found || quote != "one two" || got != range_ {
+		t.Fatalf("FindMark = %v %q %t, want %v %q true", got, quote, found, range_, "one two")
+	}
+}
+
+// Two readers' record marks of one type may cover one character: Bob's comment over "quick brown",
+// Alice's over "brown fox". Whichever order the shared run lists them in, each reads as its own
+// whole text.
+func TestFindMarkReadsEachOfTwoMarksOfOneTypeOnOneRun(t *testing.T) {
+	bob := Mark{Type: "proofComment", Attrs: Attrs{"id": "c1", "by": "user:bob"}}
+	alice := Mark{Type: "proofComment", Attrs: Attrs{"id": "c2", "by": "user:alice"}}
+	for name, shared := range map[string][]Mark{"bob first": {bob, alice}, "alice first": {alice, bob}} {
+		t.Run(name, func(t *testing.T) {
+			doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
+				{Type: "text", Text: "quick ", Marks: []Mark{bob}},
+				{Type: "text", Text: "brown", Marks: shared},
+				{Type: "text", Text: " fox", Marks: []Mark{alice}},
+			}}}}
+			if got, quote, ok := FindMark(doc, "proofComment", "c1"); !ok || quote != "quick brown" || got != (Range{From: 1, To: 12}) {
+				t.Fatalf("FindMark(c1) = %v %q %t, want {1 12} \"quick brown\" true", got, quote, ok)
+			}
+			if got, quote, ok := FindMark(doc, "proofComment", "c2"); !ok || quote != "brown fox" || got != (Range{From: 7, To: 16}) {
+				t.Fatalf("FindMark(c2) = %v %q %t, want {7 16} \"brown fox\" true", got, quote, ok)
+			}
+			if attrs, ok := MarkAttrs(doc, "proofComment", "c2"); !ok || attrs["by"] != "user:alice" {
+				t.Fatalf("MarkAttrs(c2) = %v %t, want Alice's", attrs, ok)
+			}
+			covering := AnchorMarksCovering(doc, Range{From: 7, To: 12})
+			if len(covering) != 2 || !containsSameMark(covering, bob) || !containsSameMark(covering, alice) {
+				t.Fatalf("AnchorMarksCovering(brown) = %v, want both comments", covering)
+			}
+			bobsRef := Marked{MarkRef{Type: "proofComment", ID: "c1"}, "user:bob"}
+			alicesRef := Marked{MarkRef{Type: "proofComment", ID: "c2"}, "user:alice"}
+			if refs := ListMarks(doc); !reflect.DeepEqual(refs, []Marked{bobsRef, alicesRef}) &&
+				!reflect.DeepEqual(refs, []Marked{alicesRef, bobsRef}) {
+				t.Fatalf("ListMarks = %v, want each comment once with its author", refs)
+			}
+		})
+	}
+}
+
+// The server writing a second record mark of one type over text the first covers keeps both: each
+// is its own Y attribute key, and removing one leaves the other whole.
+func TestMarkRangeKeepsAnotherMarkOfTheTypeOnTheSameText(t *testing.T) {
+	for _, markType := range []string{"proofComment", "proofSuggestion", "dispatchAsk"} {
+		t.Run(markType, func(t *testing.T) {
+			first := Mark{Type: markType, Attrs: Attrs{"id": "m1", "by": "user:bob"}}
+			second := Mark{Type: markType, Attrs: Attrs{"id": "m2", "by": "user:alice"}}
+			marked := func(t *testing.T) (*crdt.Doc, *crdt.YXmlFragment) {
+				t.Helper()
+				doc := crdt.New()
+				frag := doc.GetXmlFragment("prosemirror")
+				tree, err := Parse("The quick brown fox\n")
+				if err != nil {
+					t.Fatal(err)
+				}
+				doc.Transact(func(txn *crdt.Transaction) { err = Update(txn, frag, tree) })
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, step := range []struct {
+					quote string
+					mark  Mark
+				}{{"quick brown", first}, {"brown", second}} {
+					r, err := FindQuote(tree, step.quote, nil, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					doc.Transact(func(txn *crdt.Transaction) { err = MarkRange(txn, frag, r, step.mark) })
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				return doc, frag
+			}
+			quoteOf := func(t *testing.T, frag *crdt.YXmlFragment, id string) (string, bool) {
+				t.Helper()
+				tree, err := Read(frag)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, quote, ok := FindMark(tree, markType, id)
+				return quote, ok
+			}
+
+			_, frag := marked(t)
+			if quote, ok := quoteOf(t, frag, "m1"); !ok || quote != "quick brown" {
+				t.Fatalf("first mark reads %q %t, want \"quick brown\"", quote, ok)
+			}
+			if quote, ok := quoteOf(t, frag, "m2"); !ok || quote != "brown" {
+				t.Fatalf("second mark reads %q %t, want \"brown\"", quote, ok)
+			}
+			var brownKeys []string
+			spans, err := yTextRanges(frag)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, span := range spans {
+				operations, err := yTextDeltaInTransaction(span.text)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, operation := range operations {
+					if operation.Insert == "brown" {
+						for key := range operation.Attributes {
+							brownKeys = append(brownKeys, key)
+						}
+					}
+				}
+			}
+			if len(brownKeys) != 2 || brownKeys[0] == brownKeys[1] || yattrToMarkName(brownKeys[0]) != markType || yattrToMarkName(brownKeys[1]) != markType {
+				t.Fatalf("the shared run's Y attribute keys = %v, want two distinct keys that both read as %s", brownKeys, markType)
+			}
+
+			for _, removed := range []struct{ id, keptID, keptQuote string }{{"m1", "m2", "brown"}, {"m2", "m1", "quick brown"}} {
+				doc, frag := marked(t)
+				doc.Transact(func(txn *crdt.Transaction) { err = Unmark(txn, frag, markType, removed.id) })
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := quoteOf(t, frag, removed.id); ok {
+					t.Fatalf("Unmark(%s) left it in the document", removed.id)
+				}
+				if quote, ok := quoteOf(t, frag, removed.keptID); !ok || quote != removed.keptQuote {
+					t.Fatalf("after Unmark(%s), %s reads %q %t, want %q", removed.id, removed.keptID, quote, ok, removed.keptQuote)
+				}
+			}
+		})
+	}
+}
+
+func TestSpliceInlineKeepsNeighbourMarks(t *testing.T) {
+	doc, err := Parse("Keep **this** and change that.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rangeChange, err := FindQuote(doc, "change that", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	with, err := Parse("*alter* those")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := splice(doc, rangeChange, with)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, err := Render(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "Keep **this** and *alter* those.\n" {
+		t.Fatalf("md = %q", markdown)
+	}
+}
+
+func TestSpliceAcrossBlocksReplacesBlocks(t *testing.T) {
+	doc, err := Parse("# Title\n\nOne.\n\nTwo.\n\nThree.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	from, err := FindQuote(doc, "One.", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	to, err := FindQuote(doc, "Two.", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	with, err := Parse("- a\n- b\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := splice(doc, Range{From: from.From, To: to.To}, with)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, err := Render(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "# Title\n\n- a\n- b\n\nThree.\n" {
+		t.Fatalf("md = %q", markdown)
+	}
+}
+
+func TestSpliceNestedTextblocks(t *testing.T) {
+	tests := []struct {
+		name     string
+		markdown string
+		quote    string
+		want     string
+	}{
+		{
+			name:     "list item",
+			markdown: "- one\n- two\n",
+			quote:    "one",
+			want:     "- uno\n- two\n",
+		},
+		{
+			name:     "nested list item",
+			markdown: "- outer\n  - one\n  - two\n",
+			quote:    "one",
+			want:     "- outer\n  - uno\n  - two\n",
+		},
+		{
+			name:     "blockquote paragraph",
+			markdown: "> one\n>\n> two\n",
+			quote:    "one",
+			want:     "> uno\n>\n> two\n",
+		},
+		{
+			name:     "table cell",
+			markdown: "| one |\n| :--- |\n| two |\n",
+			quote:    "one",
+			want:     "| uno |\n| :--- |\n| two |\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := Parse(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := FindQuote(doc, test.quote, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			with, err := Parse("uno\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := splice(doc, r, with)
+			if err != nil {
+				t.Fatal(err)
+			}
+			markdown, err := Render(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.want {
+				t.Fatalf("Splice() = %q, want %q", markdown, test.want)
+			}
+		})
+	}
+}
+
+func TestSpliceCrossListItemsReplacesOnlySelectedItems(t *testing.T) {
+	doc, err := Parse("- one\n- two\n- three\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	from, err := FindQuote(doc, "one", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	to, err := FindQuote(doc, "two", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	with, err := Parse("- uno\n- dos\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := splice(doc, Range{From: from.From, To: to.To}, with)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, err := Render(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "- uno\n- dos\n- three\n" {
+		t.Fatalf("Splice() = %q", markdown)
+	}
+}
+
+func TestSpliceAcrossTextblocksKeepsPartialBoundaries(t *testing.T) {
+	doc, err := Parse("a b c\n\nd e f\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	from, err := FindQuote(doc, "b c", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	to, err := FindQuote(doc, "d e", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	with, err := Parse("X\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := splice(doc, Range{From: from.From, To: to.To}, with)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, err := Render(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "a X f\n" {
+		t.Fatalf("Splice() = %q, want %q", markdown, "a X f\n")
+	}
+}
+
+func spliceRange(t *testing.T, doc *Node, fx spliceFixture) Range {
+	t.Helper()
+	if fx.Point == "" {
+		from, err := FindQuote(doc, fx.From, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		to, err := FindQuote(doc, fx.To, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Range{From: from.From, To: to.To}
+	}
+	var pos int
+	switch fx.Point {
+	case "doc-start":
+		pos = 0
+	case "doc-end":
+		pos = Size(doc)
+	default:
+		at, err := FindQuote(doc, fx.At, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		block := textblockContaining(doc, at.From)
+		if block.To == 0 {
+			t.Fatalf("point %q is not in a textblock", fx.Point)
+		}
+		switch fx.Point {
+		case "after":
+			pos = at.To
+		case "before":
+			pos = at.From
+		case "after-textblock":
+			pos = block.To
+		case "before-textblock":
+			pos = block.From
+		default:
+			t.Fatalf("unknown point %q", fx.Point)
+		}
+	}
+	return Range{From: pos, To: pos}
+}
+
+func textblockContaining(doc *Node, position int) Range {
+	var block Range
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if isTextblock(node.Type) && pos+1 <= position && position <= end-1 {
+			block = Range{From: pos, To: end}
+			return false
+		}
+		return true
+	})
+	return block
+}
+
+func TestSpliceMatchesEngineReplaceRange(t *testing.T) {
+	installCounterBlockIDs(t)
+	for _, fx := range loadSpliceFixtures(t) {
+		t.Run(fx.Name, func(t *testing.T) {
+			doc, err := Parse(fx.Markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := spliceRange(t, doc, fx)
+			with, err := Parse(fx.Replacement)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := splice(doc, r, with)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := FromJSON(fx.PMJSON)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.Equal(want) {
+				actual, _ := got.JSON()
+				t.Fatalf("Splice() differs from engine replaceRange\n got: %s\nwant: %s", actual, fx.PMJSON)
+			}
+		})
+	}
+}
+
+func TestSpliceBlockReplacementDoesNotFlattenIntoParagraph(t *testing.T) {
+	doc, err := Parse("a b c\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := FindQuote(doc, "b", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	with, err := Parse("```\ncode\n```\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := splice(doc, r, with)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Children) != 3 || got.Children[0].Type != "paragraph" || got.Children[1].Type != "code_block" || got.Children[2].Type != "paragraph" {
+		t.Fatalf("Splice() blocks = %#v, want paragraph/code_block/paragraph", got.Children)
+	}
+	if got.Children[0].Children[0].Text != "a " || got.Children[1].Children[0].Text != "code" || got.Children[2].Children[0].Text != " c" {
+		t.Fatalf("Splice() did not preserve paragraph boundaries: %#v", got.Children)
+	}
+}
+
+func TestSpliceDoesNotJoinTextblocksWithDifferentAttrs(t *testing.T) {
+	tests := []struct {
+		name     string
+		markdown string
+		from     string
+		to       string
+		want     []string
+	}{
+		{
+			name:     "heading levels",
+			markdown: "# a b\n\n## c d\n",
+			from:     "b",
+			to:       "c",
+			want:     []string{"heading", "paragraph", "heading"},
+		},
+		{
+			name:     "code languages",
+			markdown: "```go\na b\n```\n\n```js\nc d\n```\n",
+			from:     "b",
+			to:       "c",
+			want:     []string{"code_block", "paragraph", "code_block"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := Parse(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			from, err := FindQuote(doc, test.from, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			to, err := FindQuote(doc, test.to, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			with, err := Parse("X\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := splice(doc, Range{From: from.From, To: to.To}, with)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Children) != len(test.want) {
+				t.Fatalf("Splice() has %d blocks, want %d", len(got.Children), len(test.want))
+			}
+			for index, nodeType := range test.want {
+				if got.Children[index].Type != nodeType {
+					t.Fatalf("Splice() block %d = %q, want %q", index, got.Children[index].Type, nodeType)
+				}
+			}
+		})
+	}
+}
+
+func TestSpliceAtBlockBoundariesAndDeletes(t *testing.T) {
+	doc, err := Parse("One.\n\nTwo.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	with, err := Parse("Replacement.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := splice(doc, Range{From: 0, To: 6}, with)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, err := Render(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "Replacement.\n\nTwo.\n" {
+		t.Fatalf("Splice(block boundary) = %q", markdown)
+	}
+
+	empty, err := Parse("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = splice(doc, Range{From: 0, To: 6}, empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, err = Render(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "Two.\n" {
+		t.Fatalf("Splice(delete block) = %q", markdown)
+	}
+
+	only, err := Parse("One.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = splice(only, Range{From: 0, To: 6}, empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Equal(empty) {
+		t.Fatalf("Splice(delete all blocks) = %#v, want one empty paragraph", got)
+	}
+}
+
+func TestMarkRangeSupportsCodeBlocksAndMultipleBlocks(t *testing.T) {
+	doc, err := Parse("```\ncode\n```\n\none\n\ntwo\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state := crdt.New()
+	frag := state.GetXmlFragment("prosemirror")
+	state.Transact(func(txn *crdt.Transaction) {
+		err = Update(txn, frag, doc)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := FindQuote(doc, "code", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Transact(func(txn *crdt.Transaction) {
+		err = MarkRange(txn, frag, code, Mark{Type: "proofComment", Attrs: Attrs{"id": "code", "by": "session:x"}})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	one, err := FindQuote(doc, "one", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := FindQuote(doc, "two", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Transact(func(txn *crdt.Transaction) {
+		err = MarkRange(txn, frag, Range{From: one.From, To: two.To}, Mark{Type: "dispatchAsk", Attrs: Attrs{"id": "both", "by": "session:x"}})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(frag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasMark(got, "proofComment") || !hasMark(got, "dispatchAsk") {
+		t.Fatal("marks were not applied across every selected text span")
+	}
+}
+
+// A mark the schema allows nowhere its text stands - an ask in a code block, any anchor in the front
+// matter - is refused as ErrMarkNotAllowed, still ErrSchema to a caller that only knows that, and
+// names the place for a person. A refusal of the mark itself (an unknown type, an empty range) is
+// not ErrMarkNotAllowed: no text a caller wrote causes it.
+func TestAMarkNotAllowedWhereItsTextStandsIsTheOnlyErrMarkNotAllowed(t *testing.T) {
+	doc, err := Parse("---\ntitle: Hello world\n---\n\n```\nrun the tests\n```\n\nIntro.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := crdt.New()
+	frag := state.GetXmlFragment("prosemirror")
+	writeUpdate(t, state, frag, doc)
+	quote := func(text string) Range {
+		t.Helper()
+		found, err := FindQuote(doc, text, nil, nil)
+		if err != nil {
+			t.Fatalf("find %q: %v", text, err)
+		}
+		return found
+	}
+	mark := func(r Range, markType string) error {
+		var err error
+		state.Transact(func(txn *crdt.Transaction) {
+			err = MarkRange(txn, frag, r, Mark{Type: markType, Attrs: Attrs{"id": "m1", "by": "session:x"}})
+		})
+		return err
+	}
+	for _, test := range []struct {
+		name, markType, place string
+		r                     Range
+	}{
+		{name: "an ask in a code block", markType: "dispatchAsk", r: quote("run the tests"), place: "a code block"},
+		{name: "a comment in the front matter", markType: "proofComment", r: quote("Hello world"), place: "the front matter"},
+		{name: "an ask in the front matter", markType: "dispatchAsk", r: quote("Hello world"), place: "the front matter"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := mark(test.r, test.markType)
+			var notAllowed *MarkNotAllowedError
+			if !errors.Is(err, ErrMarkNotAllowed) || !errors.Is(err, ErrSchema) || !errors.As(err, &notAllowed) || notAllowed.Place() != test.place {
+				t.Fatalf("mark %s = %v, want ErrMarkNotAllowed and ErrSchema in %q", test.markType, err, test.place)
+			}
+		})
+	}
+	if err := mark(quote("run the tests"), "proofComment"); err != nil {
+		t.Fatalf("a comment in a code block = %v, want it marked", err)
+	}
+	for _, test := range []struct {
+		name     string
+		r        Range
+		markType string
+	}{
+		{name: "an unknown mark type", r: quote("Intro."), markType: "bogus"},
+		{name: "an empty range", r: Range{From: 3, To: 3}, markType: "proofComment"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := mark(test.r, test.markType); !errors.Is(err, ErrSchema) || errors.Is(err, ErrMarkNotAllowed) {
+				t.Fatalf("%s = %v, want ErrSchema that is not ErrMarkNotAllowed", test.name, err)
+			}
+		})
+	}
+}
+
+// NearestFirst lists every match of a quote in the order Find with near chooses among them: its
+// first is Find's answer, the nearest to near, and of two as near the earlier comes first. A quote
+// that matches nothing is ErrTargetNotFound itself, not a miss describing the document's nearest
+// blocks, which a caller dropping the miss would pay another walk for. The first paragraph holds an
+// even number of positions, so the two matches in it and the next paragraph stand an even number of
+// positions apart and the position halfway between them is as near each: the tie is a real one, not
+// one the fixture can miss.
+func TestNearestFirstListsEveryMatchInFindsOrderOfChoice(t *testing.T) {
+	doc, err := Parse("brown ones\n\nbrown two\n\nbrown three\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finder := NewQuoteFinder(doc)
+	all, err := finder.NearestFirst("brown", 0)
+	if err != nil || len(all) != 3 {
+		t.Fatalf("NearestFirst(brown) = %v, %v; want three matches", all, err)
+	}
+	middle := all[1].From
+	nearMiddle, err := finder.NearestFirst("brown", middle+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := FindQuote(doc, "brown", nil, &[]int{middle + 1}[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nearMiddle[0] != want || nearMiddle[0].From != middle {
+		t.Fatalf("NearestFirst near the middle starts %v, want Find's %v at %d", nearMiddle[0], want, middle)
+	}
+	gap := func(r Range) int { return max(r.From-(middle+1), middle+1-r.From) }
+	for index := 1; index < len(nearMiddle); index++ {
+		before, after := nearMiddle[index-1], nearMiddle[index]
+		if gap(before) > gap(after) || (gap(before) == gap(after) && before.From > after.From) {
+			t.Fatalf("NearestFirst near %d = %v, want nearer first and, as near, earlier first", middle+1, nearMiddle)
+		}
+	}
+	if (all[1].From-all[0].From)%2 != 0 {
+		t.Fatalf("the first two matches at %d and %d stand an odd number of positions apart; want a fixture where a position is as near each", all[0].From, all[1].From)
+	}
+	halfway := (all[0].From + all[1].From) / 2
+	tie, err := finder.NearestFirst("brown", halfway)
+	if err != nil || tie[0] != all[0] {
+		t.Fatalf("NearestFirst halfway between the first two matches, at %d = %v, %v; want the earlier %v first", halfway, tie, err, all[0])
+	}
+	if found, err := FindQuote(doc, "brown", nil, &halfway); err != nil || found != all[0] {
+		t.Fatalf("FindQuote halfway between the first two matches, at %d = %v, %v; want NearestFirst's first %v", halfway, found, err, all[0])
+	}
+	if _, err := finder.NearestFirst("purple", 0); err != ErrTargetNotFound {
+		t.Fatalf("NearestFirst(purple) = %v, want ErrTargetNotFound itself", err)
+	}
+}
+
+// A quote is matched by its text, and the cells a table's short rows are padded with hold none, so
+// a quote's table is read as markdown only while its rows need no padding: neither a quote of a
+// table whose 99-cell header holds `**bold**` over 99 one-cell rows, nor one whose one-cell header
+// holding it stands over a two-column delimiter row, is the text of a paragraph reading
+// `A **bold** word.`, and matching either pads no cell. Each operation of an edit batch resolves
+// its quotes, so a quote padded for each would cost the batch as many cells as it has operations.
+func TestFindQuoteReadsNoTablePaddingInAQuote(t *testing.T) {
+	doc, err := Parse("A **bold** word.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, quote := range []string{
+		"| **bold** " + strings.Repeat("|  ", 98) + "|\n" + strings.Repeat("| --- ", 99) + "|\n" + strings.Repeat("| |\n", 99),
+		"| **bold** |\n| --- | --- |\n| |\n",
+	} {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		_, err = FindQuote(doc, quote, nil, nil)
+		runtime.ReadMemStats(&after)
+		allocated := after.TotalAlloc - before.TotalAlloc
+		t.Logf("allocated=%d", allocated)
+		if !errors.Is(err, ErrTargetNotFound) {
+			t.Errorf("FindQuote(%q) = %v, want ErrTargetNotFound", quote, err)
+		}
+		if allocated > 4<<20 {
+			t.Errorf("FindQuote(%q) allocated %d bytes, want at most %d", quote, allocated, 4<<20)
+		}
+	}
+}

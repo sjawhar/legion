@@ -1,0 +1,758 @@
+// Package tmux is the runtime that runs every agent as a pane on the daemon's private tmux server:
+// `legion worker-shim` in the pane, dialing the daemon's worker stream listener, with the agent's
+// harness under it — Oh My Pi, or another the role's backend names, each run by its Launcher.
+//
+// One window per issue: the issue's first process opens a window named for it, and a later one
+// splits into it while a pane recorded there still verifies as its recorded process. A pane is
+// never known by its id alone — a recreated server reissues ids from %0, and the kernel reissues
+// pids — so every locator records the pane's root pid and that process's /proc start ticks at
+// launch (its incarnation), and nothing is reported alive, killed, or shared until pid, start
+// ticks, and a command line naming a configured harness all check out again.
+//
+// The tmux runtime launches nothing but its Launchers: a third harness is an entry in
+// runtime.Backends, a Launcher here, and a boot resolver in the daemon.
+//
+// The behaviour was ported from the TypeScript runtime LEGION-223 removed; a `tmux.ts:N` or
+// `runtime-tmux.ts:N` citation at a rule names that runtime's source in this repository's history.
+// The structure is Go's.
+package tmux
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/lookpath"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+)
+
+var _ runtime.Runtime = (*Runtime)(nil)
+
+// defaultCommandTimeout bounds one tmux client invocation. A client that has not returned by then
+// — a server not responding — is killed, and whatever it was asked is unanswered, never answered
+// by a guess (the shipped runner's generic budget).
+const defaultCommandTimeout = 30 * time.Second
+
+// pollInterval is how often a stop or a resume re-checks a process it is waiting to see gone.
+const pollInterval = 100 * time.Millisecond
+
+// pipeDrainDelay bounds how long a tmux invocation's output is waited for once the client has
+// exited or been killed. A tmux client hands its stdout and stderr to the server over the socket,
+// so a server that accepted and never answered holds the client's pipes open after the client is
+// gone; without this bound the command timeout would kill the client and still wait forever.
+const pipeDrainDelay = time.Second
+
+// Options is what a Runtime is built from. Every field without a stated default is required.
+type Options struct {
+	// Project names the private server: its socket, its session, and the owner marker on every
+	// window are all `legion-<Project>` (tmux.ts:8-16).
+	Project string
+	// StateDir is the daemon's state directory: the secrets live under it, and the panes' XDG base
+	// directories under its `home`.
+	StateDir string
+	// StreamAddress is the worker stream listener's address, `unix://<path>` or `tcp://host:port`,
+	// passed to every pane's shim as `--connect`.
+	StreamAddress string
+	// DaemonURL, EnvoyURL, and NatsURLs are what every pane is told (LEGION_DAEMON_URL, ENVOY_URL,
+	// ENVOY_NATS_URL); NatsURLs may be empty, and the pane then carries no ENVOY_NATS_URL.
+	DaemonURL string
+	EnvoyURL  string
+	NatsURLs  []string
+	// DispatchURL and DispatchTokenFile are the configured Dispatch service and the daemon-held
+	// 0600 bearer file every pane is told as DISPATCH_URL and DISPATCH_TOKEN_FILE. Both or neither:
+	// without them, a pane's Dispatch is the one in the envoy.json of the omp profile it runs under
+	// (OMP_PROFILE, set in omp_launch_prefix). A pane in the default profile reads
+	// <state_dir>/home/.config/legion/envoy.json, since its XDG_CONFIG_HOME is under the daemon's
+	// home (xdgDirectories), never the operator's own file, so it has Dispatch only when
+	// dispatch_url is set.
+	DispatchURL       string
+	DispatchTokenFile string
+	// GitHubCredential is the daemon's function for a role's gh bundle (runtime.GitHubCredential):
+	// one directory of gh files per GitHub owner of the project. A launch calls it for the pane's
+	// role and its repository's owner and writes the bundle under the claim's root
+	// (runtime.GHConfigDir), the pane's LEGION_GH_OWNERS_DIR, whose default owner's directory is the
+	// pane's GH_CONFIG_DIR, and the refresher started by Observe (refreshGitHubCredentials) calls it
+	// again for every tracked pane's default and rewrites each owner's hosts.yml when its render
+	// changed; the controller's pane is one like any other's, since it acts as the review App
+	// (appauth.AppRoleFor). Nil is a daemon with no GitHub Apps (Stage 2's, which configures no
+	// workflow): its panes are told no gh variable, hold no gh files, and the refresher does
+	// nothing.
+	GitHubCredential runtime.GitHubCredential
+	// GH is the real gh's absolute path, which the daemon resolves at boot and every pane is told
+	// as LEGION_GH_PATH: the `legion gh` wrapper first on the pane's PATH runs it with the gh
+	// directory of the owner a command names. Required with GitHubCredential.
+	GH string
+	// RepositoryOwner is the owner of the repository a claim's issue works, from the daemon's own
+	// state (its claims, then the issue's record, or the project's default repository for an issue
+	// the workflow does not record): the owner whose directory of a pane's gh bundle holds the
+	// write token. The refresher asks it for a tree pane the runtime adopted after a restart, whose
+	// launch's owner it never saw, and never reads that from the pane's gh directory, which the
+	// pane's own user can write. Required with GitHubCredential.
+	RepositoryOwner func(ctx context.Context, token claim.Token) (string, error)
+	// Launchers are how a pane runs each harness the daemon resolved at boot (Launcher), by backend:
+	// a spec whose backend (runtime.Of) has none is refused. At least one, and only backends the
+	// tmux runtime launches (runtime.Backends).
+	Launchers map[runtime.Backend]Launcher
+	// StopGrace is how long Suspend and Release wait for a process to end itself after its
+	// shutdown frame, and how long Resume waits for a previous incarnation to be gone
+	// (worker_stop_timeout_seconds).
+	StopGrace time.Duration
+	// ProbeInterval is the sweep's period (probe_interval_seconds).
+	ProbeInterval time.Duration
+	// AdoptTimeout bounds a working-copy adoption (slow_command_timeout_seconds).
+	AdoptTimeout time.Duration
+	// ProviderEnvDir is the daemon-held directory of provider keys (config.ProviderEnvDir), one
+	// 0600 file per key: every pane's shim is started with `--provider-env-dir` on it and exports
+	// each file into OMP's environment alone. "" is none. New reads the key names once.
+	ProviderEnvDir string
+	// PaneEnv is the operator's `runtime.tmux.pane_env`: plain variables added to every pane's
+	// environment, after the runtime's own and before the spec's. New refuses a name the runtime
+	// sets itself, the git identity a launch sets, a provider key or its pointer, a credential-shaped
+	// name, and every variable runtime.PaneVariableRefusal refuses. Nil is none.
+	PaneEnv map[string]string
+	// PiConfigFiles is the operator's `runtime.tmux.pi_config_files`: absolute paths of Oh My Pi
+	// settings overlays every pane names first in PI_CONFIG_FILES. Nil is none.
+	PiConfigFiles []string
+	// RoleConfigFiles is the operator's `role_config_files`: absolute paths of Oh My Pi settings
+	// overlays a pane of that role alone names in PI_CONFIG_FILES, after PiConfigFiles, so each
+	// outranks those, by role, the controller's pane included. Nil is none.
+	RoleConfigFiles map[claim.Role][]string
+	// TakeOver is the operator's `runtime.tmux.take_over`: TakeOverKubernetes to take over the
+	// claims a daemon running the project under runtime kubernetes left in the store (foreign), ""
+	// to refuse them, as every locator of another runtime is refused without it.
+	TakeOver string
+	// CommandTimeout bounds each tmux invocation; 30 s when zero.
+	CommandTimeout time.Duration
+	// Conns is the directory of agent connections (the worker stream listener): a stop's graceful
+	// half and AdoptWorkingCopy go through it.
+	Conns runtime.Conns
+	// Environ is the daemon's own environment, in os.Environ() form; os.Environ() when nil. Only
+	// the allow-listed names are used (PaneEnvironment).
+	Environ []string
+	// Executable resolves the `legion` binary a pane runs `worker-shim` from; os.Executable when
+	// nil. It is called once, by New.
+	Executable func() (string, error)
+	// Now stamps observations and ages orphans; time.Now when nil.
+	Now func() time.Time
+	// Log receives what the runtime decides without being asked; slog.Default() when nil.
+	Log *slog.Logger
+}
+
+// Runtime is the tmux runtime. Build one with New.
+type Runtime struct {
+	socket           string
+	stateDir         string
+	streamAddress    string
+	daemonURL        string
+	envoyURL         string
+	natsURLs         []string
+	dispatchURL      string
+	dispatchToken    string
+	gitHubCredential runtime.GitHubCredential
+	gh               string
+	repositoryOwner  func(ctx context.Context, token claim.Token) (string, error)
+	launchers        map[runtime.Backend]Launcher
+	markers          []string
+	agents           string
+	stopGrace        time.Duration
+	probeInterval    time.Duration
+	adoptTimeout     time.Duration
+	commandTimeout   time.Duration
+	conns            runtime.Conns
+	paneEnv          map[string]string
+	environ          []string
+	tmuxPath         string
+	legion           string
+	now              func() time.Time
+	log              *slog.Logger
+	providerEnvDir   string
+	providerKeys     []string
+	operatorEnv      map[string]string
+	piConfigFiles    []string
+	roleConfigFiles  map[claim.Role][]string
+	// takeOver is the runtime whose locators this runtime takes over (Options.TakeOver):
+	// runtime.RuntimeSandbox under TakeOverKubernetes, "" for none.
+	takeOver string
+
+	// run executes one tmux argv. A field so an in-package test can record every argv the
+	// runtime hands tmux; New sets it to runTmux.
+	run func(ctx context.Context, argv []string) (result, error)
+	// readProc reads a /proc file; a field for the same reason.
+	readProc func(path string) ([]byte, error)
+
+	// launchMu serializes everything that decides which window a pane lands in and every change
+	// to the private server's set of panes the runtime must not race: session creation, a launch's
+	// refusal of a claim whose process still runs and the files it then writes for the claim, window
+	// choice, the pane's opening and recording, orphan reaping, and the scrub.
+	launchMu sync.Mutex
+
+	trackedMu sync.Mutex
+	// tracked is every process the runtime watches, keyed by incarnation: the panes it opened,
+	// and those it was told of by ReconcileOrphans. An entry leaves when its process is stopped
+	// or a sweep has reported it gone for good.
+	tracked map[string]*trackedProcess
+	// displaced is every known claim's locator another runtime recorded (foreign), by claim, as the
+	// last ReconcileOrphans read them: the next sweep reports each Gone and Displaced and lets it
+	// go. Keyed by claim, not incarnation: the roles of one issue share its pod, so two of them at
+	// one generation share a sandbox incarnation (`PodUID/Generation`). Guarded by trackedMu.
+	displaced map[claim.Token]runtime.Locator
+}
+
+// trackedProcess is one watched process: its locator, the issue it works on when the runtime
+// opened it (empty for one it adopted, whose window is then not offered to later panes), and
+// ghWriter, the owner its launch minted the gh bundle's write token for, lowercased: its
+// repository's owner, or empty for a launch on no repository and for the controller, whose bundle
+// is read-only for every owner. An adopted tree pane's write owner is the daemon's record of its
+// claim (Options.RepositoryOwner).
+type trackedProcess struct {
+	locator  runtime.Locator
+	issue    string
+	ghWriter string
+}
+
+// New builds a runtime from opts, resolving the tmux and legion binaries now so a daemon that
+// cannot launch anything refuses at boot rather than at its first spawn.
+func New(opts Options) (*Runtime, error) {
+	switch {
+	case opts.Project == "":
+		return nil, errors.New("tmux runtime: no project")
+	case !filepath.IsAbs(opts.StateDir):
+		return nil, fmt.Errorf("tmux runtime: state directory %q is not an absolute path", opts.StateDir)
+	case !strings.HasPrefix(opts.StreamAddress, "unix://") && !strings.HasPrefix(opts.StreamAddress, "tcp://"):
+		return nil, fmt.Errorf("tmux runtime: stream address %q is neither unix:// nor tcp://", opts.StreamAddress)
+	case opts.DaemonURL == "":
+		return nil, errors.New("tmux runtime: no daemon URL")
+	case opts.EnvoyURL == "":
+		return nil, errors.New("tmux runtime: no Envoy URL")
+	case len(opts.Launchers) == 0:
+		return nil, errors.New("tmux runtime: no launcher")
+	case opts.StopGrace <= 0 || opts.ProbeInterval <= 0 || opts.AdoptTimeout <= 0:
+		return nil, errors.New("tmux runtime: the stop grace, probe interval, and adoption timeout must be positive")
+	case opts.Conns == nil:
+		return nil, errors.New("tmux runtime: no connection directory")
+	case (opts.DispatchURL == "") != (opts.DispatchTokenFile == ""):
+		return nil, errors.New("tmux runtime: the Dispatch URL and token file must be configured together")
+	case opts.DispatchTokenFile != "" && !filepath.IsAbs(opts.DispatchTokenFile):
+		return nil, fmt.Errorf("tmux runtime: Dispatch token file %q is not an absolute path", opts.DispatchTokenFile)
+	case opts.GitHubCredential != nil && !filepath.IsAbs(opts.GH):
+		return nil, fmt.Errorf("tmux runtime: the real gh a pane's `legion gh` runs is %q, not an absolute path", opts.GH)
+	case opts.GitHubCredential != nil && opts.RepositoryOwner == nil:
+		return nil, errors.New("tmux runtime: a GitHub credential function needs the daemon's record of each claim's repository owner (RepositoryOwner)")
+	case opts.TakeOver != "" && opts.TakeOver != TakeOverKubernetes:
+		return nil, fmt.Errorf("tmux runtime: take_over %q is not a runtime it takes claims over from (%s)", opts.TakeOver, TakeOverKubernetes)
+	}
+	takeOver := ""
+	if opts.TakeOver == TakeOverKubernetes {
+		takeOver = runtime.RuntimeSandbox
+	}
+	environ := opts.Environ
+	if environ == nil {
+		environ = os.Environ()
+	}
+	executable := opts.Executable
+	if executable == nil {
+		executable = os.Executable
+	}
+	legion, err := executable()
+	if err != nil {
+		return nil, fmt.Errorf("tmux runtime: resolve the legion binary panes run: %w", err)
+	}
+	paneEnv := PaneEnvironment(environ, opts.StateDir)
+	var providerKeys []string
+	if opts.ProviderEnvDir != "" {
+		if providerKeys, err = readProviderKeyNames(opts.ProviderEnvDir, opts.DispatchTokenFile != ""); err != nil {
+			return nil, err
+		}
+	}
+	if err := checkPaneEnv(opts.PaneEnv, providerKeys); err != nil {
+		return nil, err
+	}
+	overlays := slices.Clone(opts.PiConfigFiles)
+	for _, files := range opts.RoleConfigFiles {
+		overlays = append(overlays, files...)
+	}
+	for _, path := range overlays {
+		if !filepath.IsAbs(path) || strings.Contains(path, ":") {
+			return nil, fmt.Errorf("tmux runtime: Oh My Pi overlay %q is not an absolute path PI_CONFIG_FILES can name", path)
+		}
+	}
+	tmuxPath, ok := lookpath.On(paneEnv["PATH"], "tmux")
+	if !ok {
+		return nil, fmt.Errorf("tmux runtime: tmux is not on the daemon's PATH (%s)", paneEnv["PATH"])
+	}
+	for backend := range opts.Launchers {
+		if !runtime.Backends[backend].LaunchedBy(runtime.RuntimeTmux) {
+			return nil, fmt.Errorf("tmux runtime: a launcher for %q, which the tmux runtime does not launch", backend)
+		}
+	}
+	markers, agents := agentMarkers(opts.Launchers)
+	r := &Runtime{
+		socket:           "legion-" + opts.Project,
+		stateDir:         opts.StateDir,
+		streamAddress:    opts.StreamAddress,
+		daemonURL:        opts.DaemonURL,
+		envoyURL:         opts.EnvoyURL,
+		natsURLs:         opts.NatsURLs,
+		dispatchURL:      opts.DispatchURL,
+		dispatchToken:    opts.DispatchTokenFile,
+		gitHubCredential: opts.GitHubCredential,
+		gh:               opts.GH,
+		repositoryOwner:  opts.RepositoryOwner,
+		launchers:        opts.Launchers,
+		markers:          markers,
+		agents:           agents,
+		stopGrace:        opts.StopGrace,
+		probeInterval:    opts.ProbeInterval,
+		adoptTimeout:     opts.AdoptTimeout,
+		commandTimeout:   opts.CommandTimeout,
+		conns:            opts.Conns,
+		paneEnv:          paneEnv,
+		tmuxPath:         tmuxPath,
+		legion:           legion,
+		now:              opts.Now,
+		log:              opts.Log,
+		providerEnvDir:   opts.ProviderEnvDir,
+		providerKeys:     providerKeys,
+		operatorEnv:      opts.PaneEnv,
+		piConfigFiles:    opts.PiConfigFiles,
+		roleConfigFiles:  opts.RoleConfigFiles,
+		takeOver:         takeOver,
+		readProc:         os.ReadFile,
+		tracked:          map[string]*trackedProcess{},
+		displaced:        map[claim.Token]runtime.Locator{},
+	}
+	if r.commandTimeout == 0 {
+		r.commandTimeout = defaultCommandTimeout
+	}
+	if r.now == nil {
+		r.now = time.Now
+	}
+	if r.log == nil {
+		r.log = slog.Default()
+	}
+	for name, value := range paneEnv {
+		r.environ = append(r.environ, name+"="+value)
+	}
+	sort.Strings(r.environ)
+	r.run = r.runTmux
+	if r.takeOver != "" {
+		// One line at boot, in the log an operator reads first: while the key is set the
+		// same-agent refusal is off for the whole project — every session found nowhere starts a
+		// fresh agent (takingOverSession) — and a forgotten key leaves it off with no other trace
+		// than a per-launch warning and `take_over` in `legion state --json`.
+		r.log.Warn("tmux runtime: runtime.tmux.take_over is set, so every session found nowhere starts a fresh agent and no launch is charged for it; remove the key once the move is done (docs/deployment.md, \"Moving a project onto tmux\", step 5)",
+			"takeOver", opts.TakeOver, "takesOver", r.takeOver)
+	}
+	return r, nil
+}
+
+// Socket is the private server's socket and session name, `legion-<project>`.
+func (r *Runtime) Socket() string { return r.socket }
+
+// ProvisionsWorkspaces is false: a pane runs in a workspace the daemon provisioned under its own
+// state directory before the launch.
+func (r *Runtime) ProvisionsWorkspaces() bool { return false }
+
+// ProvisionBound is zero: a pane starts the agent at once, with no init phase to provision
+// first.
+func (r *Runtime) ProvisionBound() time.Duration { return 0 }
+
+// LaunchBound is zero, no bound stated: a pane start is a local tmux command with no cluster wait,
+// each invocation already bounded by its own command timeout (runTmux).
+func (r *Runtime) LaunchBound() time.Duration { return 0 }
+
+// CleanupTree holds nothing per tree: each pane is one claim's process, ended by its Release, and
+// each workspace is the outbox's to remove (workspace_remove).
+func (r *Runtime) CleanupTree(context.Context, string) error { return nil }
+
+// result is one tmux invocation's outcome. timedOut is the budget the client was killed at, zero
+// when it returned on its own.
+type result struct {
+	stdout, stderr string
+	exitCode       int
+	timedOut       time.Duration
+}
+
+// runTmux runs one argv against the private server under the pane environment, bounded by the
+// command timeout. A client that ran and failed is a result; one that could not run at all, or
+// whose caller's context ended, is an error.
+func (r *Runtime) runTmux(ctx context.Context, argv []string) (result, error) {
+	bounded, cancel := context.WithTimeout(ctx, r.commandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(bounded, r.tmuxPath, argv[1:]...)
+	cmd.Env = r.environ
+	cmd.WaitDelay = pipeDrainDelay
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	res := result{stdout: stdout.String(), stderr: stderr.String()}
+	if err == nil {
+		return res, nil
+	}
+	if ctx.Err() != nil {
+		return result{}, ctx.Err()
+	}
+	if bounded.Err() != nil {
+		res.exitCode, res.timedOut = -1, r.commandTimeout
+		return res, nil
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		res.exitCode = exit.ExitCode()
+		return res, nil
+	}
+	return result{}, fmt.Errorf("run tmux %s: %w", verb(argv), err)
+}
+
+// verb is the tmux command an argv runs: the word after `-L <socket>`.
+func verb(argv []string) string {
+	for i := 0; i+2 < len(argv); i++ {
+		if argv[i] == "-L" {
+			return argv[i+2]
+		}
+	}
+	return strings.Join(argv, " ")
+}
+
+// failure is the detail every error message about a tmux command carries: its stderr, trimmed —
+// never stdout, which for show-environment is the value dump — and said out loud when empty
+// (tmux.ts:48-56).
+func failure(res result) string {
+	if res.timedOut > 0 {
+		return fmt.Sprintf(": timed out after %s", res.timedOut)
+	}
+	if detail := strings.TrimSpace(res.stderr); detail != "" {
+		return ": " + detail
+	}
+	return ": tmux printed nothing on stderr"
+}
+
+// incarnation is a pane's process identity: its root pid and that process's start ticks.
+type incarnation struct {
+	pid   int
+	ticks uint64
+}
+
+func (i incarnation) String() string {
+	return strconv.Itoa(i.pid) + ":" + strconv.FormatUint(i.ticks, 10)
+}
+
+func parseIncarnation(s string) (incarnation, error) {
+	pidText, ticksText, ok := strings.Cut(s, ":")
+	pid, pidErr := strconv.Atoi(pidText)
+	ticks, ticksErr := strconv.ParseUint(ticksText, 10, 64)
+	if !ok || pidErr != nil || ticksErr != nil || pid <= 0 {
+		return incarnation{}, fmt.Errorf("incarnation %q is not <pane pid>:<start ticks>", s)
+	}
+	return incarnation{pid: pid, ticks: ticks}, nil
+}
+
+// paneOf is a locator's pane and incarnation, or the reason nothing can be done with it. A locator
+// another runtime recorded names no pane here: without runtime.tmux.take_over, the refusal names
+// the key that lets this daemon take the claim over, which boot's ReconcileOrphans returns for
+// every such claim of a store a Kubernetes daemon ran.
+func (r *Runtime) paneOf(loc runtime.Locator) (string, incarnation, error) {
+	if err := loc.Validate(); err != nil {
+		return "", incarnation{}, err
+	}
+	if loc.Runtime != runtime.RuntimeTmux {
+		if r.takeOver == "" && loc.Runtime == runtime.RuntimeSandbox {
+			return "", incarnation{}, fmt.Errorf("tmux runtime cannot act on a %q locator (%s): a daemon that ran the project under runtime kubernetes recorded it; once every pod of that daemon is stopped, runtime.tmux.take_over: %s lets this daemon take the claim over",
+				loc.Runtime, loc.Claim, TakeOverKubernetes)
+		}
+		return "", incarnation{}, fmt.Errorf("tmux runtime cannot act on a %q locator (%s): its process is no pane of this daemon's tmux server", loc.Runtime, loc.Claim)
+	}
+	inc, err := parseIncarnation(loc.Incarnation)
+	if err != nil {
+		return "", incarnation{}, fmt.Errorf("locator %s: %w", loc.Claim, err)
+	}
+	return loc.Tmux.Pane, inc, nil
+}
+
+// TakeOverKubernetes is Options.TakeOver taking over the claims a daemon running the project
+// under runtime kubernetes left in the store (`runtime.tmux.take_over: kubernetes`).
+const TakeOverKubernetes = "kubernetes"
+
+// foreign is whether loc is a valid locator of the runtime this one takes over
+// (runtime.tmux.take_over): a Sandbox role process left in the store by a daemon that ran the
+// project under runtime kubernetes before this one. This runtime cannot see that process, stop it,
+// or wait it out — the operator stops the other runtime's processes before a tmux daemon boots on
+// its store with the key set (docs/deployment.md, "Moving a project onto tmux") — so its claim is
+// reported Gone and Displaced (Probe, the sweep after ReconcileOrphans), and relaunched here at
+// once on its recorded session, charging nothing; a resume over it whose session file is found
+// nowhere on this host starts a fresh agent (Resume). Without the key nothing is foreign, and every
+// locator of another runtime is refused (paneOf), as before the takeover existed.
+func (r *Runtime) foreign(loc runtime.Locator) bool {
+	return r.takeOver != "" && loc.Runtime == r.takeOver && loc.Validate() == nil
+}
+
+// displacedObservation is a foreign locator's one verdict: Gone, Displaced.
+func (r *Runtime) displacedObservation(loc runtime.Locator) runtime.Observation {
+	return runtime.Observation{
+		Locator: loc, Kind: runtime.Gone, At: r.now(), Displaced: true,
+		Detail: fmt.Sprintf("its %s is another runtime's (%s) process, no pane of this daemon's tmux server: this daemon takes the claim over (runtime.tmux.take_over) and relaunches it here", loc.Label(), loc.Runtime),
+	}
+}
+
+func (r *Runtime) track(loc runtime.Locator, issue, ghWriter string) {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	if existing, ok := r.tracked[loc.Incarnation]; ok && existing.issue != "" {
+		issue, ghWriter = existing.issue, existing.ghWriter
+	}
+	r.tracked[loc.Incarnation] = &trackedProcess{locator: loc, issue: issue, ghWriter: ghWriter}
+}
+
+func (r *Runtime) untrack(loc runtime.Locator) {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	delete(r.tracked, loc.Incarnation)
+}
+
+// adoptExactly makes what the runtime watches because a sweep told it of — an adopted process —
+// exactly the located known claims: each is watched, and one adopted before that the sweep no
+// longer names is let go. A sweep reads the daemon's claims before it reconciles, so one that read
+// them just before a claim's Release adopts the pane that Release let go; the next sweep, which no
+// longer names the retired claim, lets it go again and reaps it. The panes this runtime opened stay
+// watched until they are stopped or found gone.
+func (r *Runtime) adoptExactly(located []runtime.Locator) {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	named := map[string]bool{}
+	for _, loc := range located {
+		named[loc.Incarnation] = true
+	}
+	for incarnation, entry := range r.tracked {
+		if entry.issue == "" && !named[incarnation] {
+			delete(r.tracked, incarnation)
+		}
+	}
+	for _, loc := range located {
+		entry := &trackedProcess{locator: loc}
+		if existing, ok := r.tracked[loc.Incarnation]; ok {
+			entry.issue, entry.ghWriter = existing.issue, existing.ghWriter
+		}
+		r.tracked[loc.Incarnation] = entry
+	}
+}
+
+// untrackClaim stops watching every process of the claim, its displaced one included.
+func (r *Runtime) untrackClaim(token claim.Token) {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	for incarnation, entry := range r.tracked {
+		if entry.locator.Claim == token {
+			delete(r.tracked, incarnation)
+		}
+	}
+	delete(r.displaced, token)
+}
+
+// displaceExactly makes the displaced set exactly the foreign locators of the known claims a
+// sweep read (ReconcileOrphans): one the store no longer records is not reported again.
+func (r *Runtime) displaceExactly(foreigners []runtime.Locator) {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	r.displaced = make(map[claim.Token]runtime.Locator, len(foreigners))
+	for _, loc := range foreigners {
+		r.displaced[loc.Claim] = loc
+	}
+}
+
+// forgetDisplaced lets go of a foreign locator, reported or stopped: the claim's displaced entry
+// when it is still that locator, never a newer one a later ReconcileOrphans read.
+func (r *Runtime) forgetDisplaced(loc runtime.Locator) {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	if held, ok := r.displaced[loc.Claim]; ok && held.Incarnation == loc.Incarnation {
+		delete(r.displaced, loc.Claim)
+	}
+}
+
+// displacedLocators is the displaced set, ordered by claim.
+func (r *Runtime) displacedLocators() []runtime.Locator {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	out := make([]runtime.Locator, 0, len(r.displaced))
+	for _, loc := range r.displaced {
+		out = append(out, loc)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Claim < out[j].Claim })
+	return out
+}
+
+// trackedProcesses is every watched process, ordered by claim then incarnation, so a sweep and a
+// window choice visit them the same way every time.
+func (r *Runtime) trackedProcesses() []trackedProcess {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	out := make([]trackedProcess, 0, len(r.tracked))
+	for _, entry := range r.tracked {
+		out = append(out, *entry)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].locator.Claim != out[j].locator.Claim {
+			return out[i].locator.Claim < out[j].locator.Claim
+		}
+		return out[i].locator.Incarnation < out[j].locator.Incarnation
+	})
+	return out
+}
+
+// Suspend stops the process within the configured stop grace; the claim's session file is the
+// caller's to keep, and a later Resume continues from it.
+func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
+	return r.stop(ctx, loc)
+}
+
+// Release ends the claim. A pane holds nothing of a claim but its process, so a claim with no
+// locator — suspended, failed, never launched — has no process to stop, and one with a locator is
+// released by stopping that process within the stop grace. What the runtime holds for the claim
+// is its watch, and Release lets go of all of it whether or not the stop succeeds: a pane Release
+// could not stop, or one a failed Suspend left running before the claim's Release with no locator,
+// is then the orphan sweep's once the daemon retires the claim, never protected by the watch until
+// it ends itself. A claim the daemon still knows with its locator — a stop the operator will ask
+// again — is watched again at the next sweep, which adopts exactly the located known claims.
+func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
+	if err := k.Validate(); err != nil {
+		return fmt.Errorf("release: %w", err)
+	}
+	defer r.untrackClaim(k.Claim)
+	if k.Locator == nil {
+		return nil
+	}
+	return r.stop(ctx, *k.Locator)
+}
+
+// stop ends the locator's process (runtime-tmux.ts:884-951). When the recorded process still
+// verifies and the claim has a connection, the connection carries a shutdown frame — the shim
+// ends OMP itself — and stop waits up to the stop grace for the process to go. Whatever is left
+// then is killed with kill-pane, and only a pane that verifies as the recorded process is ever
+// killed.
+//
+// The connection is used only while the recorded process verifies: a claim's connection belongs
+// to its live incarnation, and a stale locator must not shut down the claim's newer process. A
+// pane that is gone, or now holds some other process, is already stopped as far as this locator
+// is concerned, and is not killed. A pane that cannot be verified either way — tmux could not be
+// listed — is an error: a process nobody can confirm stopped is never reported stopped. A locator
+// of the runtime this one takes over (foreign) names no pane here: there is nothing of it this
+// runtime can stop, and it is let go; without runtime.tmux.take_over, such a locator is refused
+// (paneOf).
+func (r *Runtime) stop(ctx context.Context, loc runtime.Locator) error {
+	if r.foreign(loc) {
+		r.log.Info("tmux runtime: nothing to stop for a process another runtime recorded", "claim", loc.Claim, "process", loc.Label())
+		r.forgetDisplaced(loc)
+		return nil
+	}
+	pane, inc, err := r.paneOf(loc)
+	if err != nil {
+		return err
+	}
+	v, err := r.verifyPane(ctx, pane, inc)
+	if err != nil {
+		return fmt.Errorf("stop %s: %w", loc.Claim, err)
+	}
+	if !v.verified() {
+		return r.settleUnverified(loc, pane, inc, v)
+	}
+	if conn, ok := r.conns.Conn(loc.Claim); ok {
+		if err := conn.Shutdown(ctx); err != nil {
+			r.log.Warn("tmux runtime: shutdown frame not sent; killing the pane", "claim", loc.Claim, "pane", pane, "err", err)
+		} else {
+			// The wait's last verdict is the kill gate: taken after the grace, not before it.
+			if v, err = r.awaitNotRunning(ctx, pane, inc, r.stopGrace); err != nil {
+				return fmt.Errorf("stop %s: %w", loc.Claim, err)
+			}
+			if !v.verified() {
+				return r.settleUnverified(loc, pane, inc, v)
+			}
+		}
+	}
+	res, err := r.run(ctx, killPaneArgv(r.socket, pane))
+	if err != nil {
+		return fmt.Errorf("stop %s: %w", loc.Claim, err)
+	}
+	if res.exitCode != 0 && !paneGoneStderr.MatchString(res.stderr) {
+		return fmt.Errorf("stop %s: kill-pane %s exited %d%s", loc.Claim, pane, res.exitCode, failure(res))
+	}
+	r.untrack(loc)
+	return nil
+}
+
+// settleUnverified finishes a stop whose recorded process is not in its pane: gone, or replaced,
+// is stopped; unverifiable is an error.
+func (r *Runtime) settleUnverified(loc runtime.Locator, pane string, inc incarnation, v verdict) error {
+	switch v.reason {
+	case reasonListingFailed:
+		return fmt.Errorf("stop %s: %s", loc.Claim, describeVerdict(pane, inc, v))
+	case reasonPaneGone:
+	default:
+		r.log.Warn("tmux runtime: not killing a pane that is not the recorded process; treating it as gone",
+			"claim", loc.Claim, "detail", describeVerdict(pane, inc, v))
+	}
+	r.untrack(loc)
+	return nil
+}
+
+// awaitNotRunning re-verifies the pane until the recorded process no longer verifies, or grace
+// is spent, and returns the last verdict. A verdict that cannot be reached — tmux not answering
+// — keeps the wait going; it proves nothing either way.
+func (r *Runtime) awaitNotRunning(ctx context.Context, pane string, inc incarnation, grace time.Duration) (verdict, error) {
+	deadline := time.NewTimer(grace)
+	defer deadline.Stop()
+	tick := time.NewTicker(pollInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return verdict{}, ctx.Err()
+		case <-deadline.C:
+			return r.verifyPane(ctx, pane, inc)
+		case <-tick.C:
+			v, err := r.verifyPane(ctx, pane, inc)
+			if err != nil {
+				return verdict{}, err
+			}
+			if !v.verified() && v.reason != reasonListingFailed {
+				return v, nil
+			}
+		}
+	}
+}
+
+// AdoptWorkingCopy has the agent's shim set the author of its working copy — the shared
+// `jj metaedit --update-author` run in the pane's own workspace — over the claim's connection,
+// bounded by the adoption timeout. The recorded process must still verify: the connection is its.
+func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id runtime.GitIdentity) error {
+	pane, inc, err := r.paneOf(loc)
+	if err != nil {
+		return err
+	}
+	v, err := r.verifyPane(ctx, pane, inc)
+	if err != nil {
+		return fmt.Errorf("adopt %s's working copy: %w", loc.Claim, err)
+	}
+	if !v.verified() {
+		return fmt.Errorf("adopt %s's working copy: %s", loc.Claim, describeVerdict(pane, inc, v))
+	}
+	conn, ok := r.conns.Conn(loc.Claim)
+	if !ok {
+		return fmt.Errorf("adopt %s's working copy: the claim has no connection to ask over", loc.Claim)
+	}
+	if err := conn.AdoptWorkingCopy(ctx, id, r.adoptTimeout); err != nil {
+		return fmt.Errorf("adopt %s's working copy for %s <%s>: %w", loc.Claim, id.Name, id.Email, err)
+	}
+	return nil
+}

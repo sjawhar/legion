@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "entries": {
+    "packages/daemon/src/daemon": ["daemon/promoted-sessions-persistence-pattern.md"],
+    "packages/daemon/src/daemon/feedback.ts": ["daemon/promoted-sessions-persistence-pattern.md"],
+    "packages/daemon/src/daemon/server.ts": ["daemon/promoted-sessions-persistence-pattern.md"],
+    "packages/daemon/src/cli": ["daemon/promoted-sessions-persistence-pattern.md"],
+    "tag:promoted-sessions": ["daemon/promoted-sessions-persistence-pattern.md"],
+    "tag:feedback-events": ["daemon/promoted-sessions-persistence-pattern.md"],
+    "tag:envoy": ["daemon/promoted-sessions-persistence-pattern.md"],
+    "tag:startup": ["daemon/promoted-sessions-persistence-pattern.md"]
+  }
+}

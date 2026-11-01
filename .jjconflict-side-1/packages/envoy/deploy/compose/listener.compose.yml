@@ -1,0 +1,40 @@
+services:
+  listener:
+    image: ghcr.io/sjawhar/legion/envoy:${ENVOY_IMAGE_TAG:?set ENVOY_IMAGE_TAG (see deploy/README.md)}
+    build:
+      context: ../../../..
+      dockerfile: packages/envoy/docker/Dockerfile
+    network_mode: host
+    command: ["/usr/local/bin/envoy-listener"]
+    restart: unless-stopped
+    # A SIGTERM runs the listener's ordered shutdown: up to 10 s for HTTP, up to 3 s to drain the
+    # live topics lane when it is on, then up to 13 s to drain NATS, about 26 s in all. Docker's
+    # 10 s default would SIGKILL it before the drain starts.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9020/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    environment:
+      PORT: ${ENVOY_LISTENER_PORT:-9020}
+      ENVOY_LISTEN_HOST: ${ENVOY_LISTEN_HOST:-127.0.0.1}
+      ENVOY_API_TOKEN: ${ENVOY_API_TOKEN:-}
+      ENVOY_MACHINE_ID: ${ENVOY_MACHINE_ID}
+      NATS_URLS: ${NATS_URLS}
+      # This listener owns ENVOY_NOTIFICATIONS on the NATS above, which is the fleet's shared
+      # server rather than this host's. Every connect refuses a NATS that is not the machine's
+      # own without this (packages/envoy/internal/bus/reach.go).
+      ENVOY_ALLOW_REMOTE_NATS: "1"
+      ENVOY_HOST_BRIDGE: 127.0.0.1
+      # A host's own listener, whose NATS user holds the host grant (a plain notifications.>
+      # subscribe): it takes every topic the stream does not store, a team topic for one, off the
+      # bus for the sessions on this machine that registered a port. A user without that grant
+      # refuses the subscription and the start exits naming this variable.
+      ENVOY_SUBSCRIBE_ALL_TOPICS: "1"
+      ENVOY_WEBHOOKS: ${ENVOY_WEBHOOKS:-}
+      ENVOY_GITHUB_WEBHOOK_SECRET: ${ENVOY_GITHUB_WEBHOOK_SECRET:-}
+      ENVOY_GITHUB_MENTION_TRIGGER: ${ENVOY_GITHUB_MENTION_TRIGGER:-@legion}
+      ENVOY_SLACK_SIGNING_SECRET: ${ENVOY_SLACK_SIGNING_SECRET:-}
+      ENVOY_GHOSTWISPR_SIGNING_SECRET: ${ENVOY_GHOSTWISPR_SIGNING_SECRET:-}

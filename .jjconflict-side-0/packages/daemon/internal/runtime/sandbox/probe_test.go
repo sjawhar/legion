@@ -1,0 +1,1940 @@
+package sandbox
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
+)
+
+// The probe Sandbox testImage gets in testProject: the project, then the digest's first 12 hex.
+const (
+	probeSandboxName = "legion-probe-legion-1d10089a0000"
+	testDigestHex    = "1d10089a0000000000000000000000000000000000000000000000000000beef"
+)
+
+var sandboxesResource = schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"}
+
+// probeRig is a rig whose controller stand-in leaves the pods it creates Pending, with a stand-in
+// for the probe's container finishing (finish, applied once to each probe pod whose name held does
+// not hold back), for the garbage collector (a probe pod whose owning Sandbox is gone is deleted),
+// and for the pod's log and the API's answers to the probe's own requests.
+type probeRig struct {
+	*rig
+	creates atomic.Int32
+
+	mu          sync.Mutex
+	finish      func(*corev1.Pod)
+	held        func(name string) bool
+	log         string
+	logErr      error
+	createErr   error
+	finishedUID map[types.UID]bool
+}
+
+func newProbeRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *probeRig {
+	t.Helper()
+	g := &probeRig{rig: newRig(t, objects, options...), finishedUID: map[types.UID]bool{}}
+	g.autoStart.Store(false)
+	g.kube.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if action.GetSubresource() != "log" {
+			return false, nil, nil
+		}
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.logErr != nil {
+			return true, nil, g.logErr
+		}
+		return true, &k8sruntime.Unknown{Raw: []byte(g.log)}, nil
+	})
+	g.dyn.PrependReactor("create", "sandboxes", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		g.creates.Add(1)
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.createErr != nil {
+			return true, nil, g.createErr
+		}
+		return false, nil, nil
+	})
+	go g.containerAndCollector()
+	return g
+}
+
+// with edits what the stand-ins answer.
+func (g *probeRig) with(edit func()) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	edit()
+}
+
+// succeeds finishes the probe's container with exit 0 and log; fails with exit 1 and log.
+func (g *probeRig) succeeds(log string) *probeRig { return g.ends(corev1.PodSucceeded, 0, log) }
+func (g *probeRig) fails(log string) *probeRig    { return g.ends(corev1.PodFailed, 1, log) }
+
+func (g *probeRig) ends(phase corev1.PodPhase, exit int32, log string) *probeRig {
+	g.mu.Lock()
+	g.log = log
+	g.mu.Unlock()
+	reason := map[int32]string{0: "Completed", 1: "Error"}[exit]
+	return g.finishes(func(p *corev1.Pod) {
+		p.Status = corev1.PodStatus{Phase: phase, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: probeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: exit, Reason: reason}},
+		}}}
+	})
+}
+
+// finishes ends the probe's pod as finish writes its status, on a node.
+func (g *probeRig) finishes(finish func(*corev1.Pod)) *probeRig {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.finish = func(p *corev1.Pod) {
+		p.Spec.NodeName = "ip-192-0-2-7"
+		finish(p)
+	}
+	return g
+}
+
+// waits leaves the probe's container waiting for reason.
+func (g *probeRig) waits(reason string) *probeRig { return g.waitsSaying(reason, "") }
+
+// waitsSaying leaves the probe's container waiting for reason, the kubelet's message message.
+func (g *probeRig) waitsSaying(reason, message string) *probeRig {
+	return g.finishes(func(p *corev1.Pod) {
+		p.Status = corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: probeContainer, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: message}},
+		}}}
+	})
+}
+
+// pullFails leaves the probe's container waiting for reason, ErrImagePull or ImagePullBackOff,
+// with the kubelet's message for a pull that failed with code and cause (pullFailure), and records
+// the kubelet's Failed event for two such pulls, as it records one at every failed pull: so a row
+// is judged by its message, never retried merely for want of a second pull.
+func (g *probeRig) pullFails(reason, code, cause string) *probeRig {
+	return g.waitsSaying(reason, pullFailure(reason, code, cause)).pullsFailed(2, code, cause)
+}
+
+// pullsFailed records the kubelet's Failed event for count pulls of testImage that failed with
+// code and cause (pullFailure), folded into one event as the kubelet folds a repeat.
+func (g *probeRig) pullsFailed(count int32, code, cause string) *probeRig {
+	if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".pull-failed", Namespace: testNamespace},
+		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+		Reason:         "Failed", Type: corev1.EventTypeWarning, Count: count,
+		Message: `Failed to pull image "` + testImage + `": ` + pullFailure("ErrImagePull", code, cause),
+	}, metav1.CreateOptions{}); err != nil {
+		g.t.Fatal(err)
+	}
+	return g
+}
+
+// pullFailure is the kubelet's waiting message for a pull of testImage that failed with cause,
+// containerd's error after its `failed to pull and unpack image "<ref>": `, prefixed by the gRPC
+// code code when the message carries one ("" when it carries none): as ErrImagePull, the error
+// itself; as ImagePullBackOff, the error after the back-off's own words
+// (pkg/kubelet/images/image_manager.go). Each case's code and cause are containerd 2.0.2's own,
+// read off a kind node's pods with the registry's host and repository swapped for testImage's. Any
+// other reason panics: a misspelt one would leave the container waiting for a reason no pull has,
+// and a row expecting the probe to retry would pass without reading the message.
+func pullFailure(reason, code, cause string) string {
+	failed := `failed to pull and unpack image "` + testImage + `": ` + cause
+	if code != "" {
+		failed = "rpc error: code = " + code + " desc = " + failed
+	}
+	switch reason {
+	case "ErrImagePull":
+		return failed
+	case "ImagePullBackOff":
+		return `Back-off pulling image "` + testImage + `": ErrImagePull: ` + failed
+	default:
+		panic("pullFailure: " + reason + " is not a pull's waiting reason")
+	}
+}
+
+// resolving is containerd's error for a pull that failed resolving testImage's manifest, for
+// cause.
+func resolving(cause string) string {
+	return `failed to resolve reference "` + testImage + `": ` + cause
+}
+
+// testManifest is testImage's manifest URL, as containerd quotes it.
+const testManifest = "https://ghcr.io/v2/sjawhar/legion-worker/manifests/sha256:" + testDigestHex
+
+func (g *probeRig) containerAndCollector() {
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-g.ctx.Done():
+			return
+		case <-tick.C:
+		}
+		for _, pod := range g.probePods() {
+			if owner := g.sandbox(pod.Name); owner == nil || !ownedBy(&pod, owner.UID) {
+				if len(pod.OwnerReferences) > 0 {
+					_ = g.kube.Tracker().Delete(podsGVR, testNamespace, pod.Name)
+				}
+				continue
+			}
+			g.mu.Lock()
+			finish, done := g.finish, g.finishedUID[pod.UID]
+			ready := finish != nil && !done && (g.held == nil || !g.held(pod.Name))
+			if ready {
+				g.finishedUID[pod.UID] = true
+			}
+			g.mu.Unlock()
+			if ready {
+				g.update(&pod, finish)
+			}
+		}
+	}
+}
+
+// probePods are the namespace's pods carrying the probe label, whoever's probe each is.
+func (g *probeRig) probePods() []corev1.Pod {
+	object, err := g.kube.Tracker().List(podsGVR, corev1.SchemeGroupVersion.WithKind("Pod"), testNamespace)
+	if err != nil {
+		return nil
+	}
+	list, _ := object.(*corev1.PodList)
+	if list == nil {
+		return nil
+	}
+	var pods []corev1.Pod
+	for _, pod := range list.Items {
+		if pod.Labels[labelProbe] != "" {
+			pods = append(pods, pod)
+		}
+	}
+	return pods
+}
+
+// testRoleReferences are role prompts' references, and testRoleReferencesJSON the encoding
+// Names.Encode writes for them: the daemon always hands the probe some.
+var testRoleReferences = promptrefs.Names{
+	promptrefs.TaskAgents: {"oracle": {"roles/core/planner.md"}}, promptrefs.Skills: {},
+}
+
+const testRoleReferencesJSON = `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/core/planner.md"]},"LEGION_PROMPT_SKILLS":{}}`
+
+// probeOptions allow two attempts, so a definitive verdict shows as one attempt and a transient one
+// as two. Each attempt's budget is long enough that a pod the stand-ins answer at once is judged
+// within it on a loaded machine too; an attempt ends as soon as the pod answers, so it costs a
+// passing test nothing. A test whose attempt must run out sets unfinishedBudget.
+func probeOptions(t *testing.T) ImageProbe {
+	return ImageProbe{
+		Contract: 3, Budget: 10 * time.Second, RoleReferences: testRoleReferences,
+		commandReserve: time.Millisecond, startupBudget: unfinishedBudget,
+		Retry: bootprobe.Retry{Initial: time.Millisecond, Max: time.Millisecond, Attempts: 2},
+	}
+}
+
+// unfinishedBudget is the attempt budget of a test in which no pod ever answers, so the attempt
+// runs out.
+const unfinishedBudget = 300 * time.Millisecond
+
+// probe runs the image probe through the rig's Prober when it has one, else its runtime.
+func (g *probeRig) probe(p ImageProbe) error {
+	g.t.Helper()
+	var err error
+	if g.p != nil {
+		_, err = g.p.ProbeImage(g.ctx, p)
+	} else {
+		_, err = g.r.ProbeImage(g.ctx, p)
+	}
+	return err
+}
+
+func wantContains(t *testing.T, err error, wants ...string) {
+	t.Helper()
+	for _, want := range wants {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want one saying %q", err, want)
+		}
+	}
+}
+
+// okLine is the OK line an image prints when every probe passed, confirming contract, the
+// prompt-named agents' models resolved, the capability list checked, model fallback off.
+func okLine(contract int) string {
+	return bootprobe.OKLine("/opt/omp/bin/omp", contract, bootprobe.AgentModelsResolved, bootprobe.CapabilitiesAll, "off")
+}
+
+// Role references whose encoding the image's Decode refuses would fail the probe pod, and the
+// failure would be blamed on the image, so ProbeImage refuses them before it creates anything: the
+// zero Names (every kind nil, written as `null`) by name, and with the decoder's own reason one
+// kind left nil and a name no prompt can write, which no check of the kinds alone would catch. The
+// rig's pod would pass each one.
+func TestProbeImageRefusesRoleReferencesTheImageWouldRefuseBeforeAnyPod(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		references promptrefs.Names
+		// want is the refusal's own words; empty, the image's decoder's refusal of the encoding.
+		want string
+	}{
+		{"zero", promptrefs.Names{}, "ImageProbe.RoleReferences is required"},
+		{"a kind left nil", promptrefs.Names{promptrefs.TaskAgents: {"oracle": {"roles/core/planner.md"}}}, ""},
+		{"a name no prompt can write", promptrefs.Names{
+			promptrefs.TaskAgents: {"not a name": {"roles/core/planner.md"}}, promptrefs.Skills: {},
+		}, ""},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			want := testCase.want
+			if want == "" {
+				_, decoded := promptrefs.Decode(testCase.references.Encode())
+				if decoded == nil {
+					t.Fatal("the image's decoder accepts these references, so the case proves nothing")
+				}
+				want = decoded.Error()
+			}
+			g := newProbeRig(t, nil)
+			g.succeeds(okLine(3) + "\n")
+			p := probeOptions(t)
+			p.RoleReferences = testCase.references
+
+			wantContains(t, g.probe(p), "ImageProbe.RoleReferences", want)
+			if n := g.creates.Load(); n != 0 {
+				t.Errorf("created the probe Sandbox %d times, want none: the references are refused first", n)
+			}
+		})
+	}
+}
+
+// The probe is a Sandbox named for the project and the image, running the image's Go `legion
+// probe-image` with the daemon's contract on the Legion pool; it passes on the OK line confirming
+// that contract — which names no model: Legion's probe makes no model round trip — and it deletes
+// its Sandbox when it is done.
+func TestProbeImagePassesOnTheOKLineConfirmingTheContract(t *testing.T) {
+	g := newProbeRig(t, nil)
+	g.succeeds("[legion] OMP pi.agents probe failed transiently\n" + okLine(3) + "\n")
+
+	if err := g.probe(probeOptions(t)); err != nil {
+		t.Fatalf("ProbeImage = %v, want a pass", err)
+	}
+
+	if n := g.creates.Load(); n != 1 {
+		t.Errorf("created the probe Sandbox %d times, want once", n)
+	}
+	var created *action
+	for _, a := range g.writes() {
+		if a.verb == "create" && a.resource == "sandboxes" {
+			created = &a
+		}
+	}
+	if created == nil || created.name != probeSandboxName {
+		t.Fatalf("created %+v, want the Sandbox %s", created, probeSandboxName)
+	}
+	g.eventually("the probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
+}
+
+func TestProbeImagePassesTheRemainingAttemptBudgetToItsCommand(t *testing.T) {
+	g := newProbeRig(t, nil)
+	now := time.Date(2026, 10, 28, 13, 30, 0, 0, time.UTC)
+	g.r.now = func() time.Time { return now }
+	g.succeeds(okLine(3) + "\n")
+	probe := probeOptions(t)
+	probe.Budget = 300 * time.Second
+	probe.startupBudget = 0
+	probe.commandReserve = 0
+
+	if _, err := g.r.ProbeImage(g.ctx, probe); err != nil {
+		t.Fatalf("ProbeImage = %v, want a pass", err)
+	}
+	var created probeSandbox
+	for _, write := range g.writes() {
+		if write.verb != "create" || write.resource != "sandboxes" {
+			continue
+		}
+		if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(write.object.(*unstructured.Unstructured).Object, &created); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command := created.Spec.PodTemplate.Spec.Containers[0].Command
+	flag := slices.Index(command, "--probe-budget")
+	if flag < 0 || flag+1 == len(command) {
+		t.Fatalf("probe command = %q, want --probe-budget", command)
+	}
+	if got, want := command[flag+1], (240 * time.Second).String(); got != want {
+		t.Fatalf("probe budget = %q, want the 300s attempt budget less the 60s reserve %q", got, want)
+	}
+	if got, want := created.Spec.ShutdownTime.Time, now.Add(probeStartupBudget+probe.Budget+apiTimeout).UTC().Truncate(time.Second); !got.Equal(want) {
+		t.Fatalf("probe shutdown time = %s, want startup budget plus command budget and API cleanup %s", got, want)
+	}
+}
+
+func TestProbeCommandBudgetKeepsTheFullReserveBelowFourMinutes(t *testing.T) {
+	if got, want := probeCommandBudget(180*time.Second), 120*time.Second; got != want {
+		t.Fatalf("probeCommandBudget(180s) = %s, want 120s after the 60s reserve", got)
+	}
+}
+
+func TestProbeImageRefusesABudgetWithoutCommandTime(t *testing.T) {
+	g := newProbeRig(t, nil)
+	probe := probeOptions(t)
+	probe.Budget = probeCommandReserve
+	probe.commandReserve = 0
+
+	_, err := g.r.ProbeImage(g.ctx, probe)
+	if err == nil || !strings.Contains(err.Error(), "budget") || !strings.Contains(err.Error(), "command reserve") {
+		t.Fatalf("ProbeImage() = %v, want a refusal naming the budget and command reserve", err)
+	}
+	if got := g.creates.Load(); got != 0 {
+		t.Fatalf("created %d probe sandboxes, want a budget refusal before a pod", got)
+	}
+}
+
+func TestProbeImageRefusesAProbePodThatDoesNotStart(t *testing.T) {
+	g := newProbeRig(t, nil).waits("ErrImagePull")
+	phases := make(chan string, 1)
+	releaseStartup := make(chan struct{})
+	probe := probeOptions(t)
+	probe.Budget = 100 * time.Millisecond
+	probe.startupBudget = 100 * time.Millisecond
+	probe.Retry.Attempts = 1
+	probe.onPhase = func(phase string) {
+		phases <- phase
+		if phase == "startup" {
+			<-releaseStartup
+		}
+	}
+	result := make(chan error, 1)
+	go func() { result <- g.probe(probe) }()
+
+	if phase := <-phases; phase != "startup" {
+		t.Fatalf("first phase = %q, want startup", phase)
+	}
+	g.eventually("the probe pod pending before the startup bound", func() bool {
+		pod := g.pod(probeSandboxName)
+		return pod != nil && pod.Status.Phase == corev1.PodPending && probeWaiting(pod) != nil
+	})
+	close(releaseStartup)
+	wantContains(t, <-result, "did not start within 100ms", "phase Pending", "container probe waiting: ErrImagePull")
+}
+
+func TestProbeImageCollectsAProbeDeadlineAfterStartup(t *testing.T) {
+	g := newProbeRig(t, nil)
+	g.with(func() {
+		g.log = "worker TLS probe failed: curl cannot verify refusal of the AAA chain: unavailable (probe deadline)"
+	})
+	phases := make(chan string, 2)
+	probe := probeOptions(t)
+	probe.Retry.Attempts = 1
+	probe.onPhase = func(phase string) { phases <- phase }
+	result := make(chan error, 1)
+	go func() { result <- g.probe(probe) }()
+
+	if phase := <-phases; phase != "startup" {
+		t.Fatalf("first phase = %q, want startup", phase)
+	}
+	g.eventually("the probe pod pending before startup completes", func() bool {
+		pod := g.pod(probeSandboxName)
+		return pod != nil && pod.Status.Phase == corev1.PodPending
+	})
+	g.update(g.pod(probeSandboxName), func(pod *corev1.Pod) {
+		pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: probeContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}}
+	})
+	if phase := <-phases; phase != "command" {
+		t.Fatalf("second phase = %q, want command", phase)
+	}
+	g.update(g.pod(probeSandboxName), func(pod *corev1.Pod) {
+		pod.Status = corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: probeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}},
+		}}}
+	})
+	wantContains(t, <-result, "curl cannot verify refusal of the AAA chain", "probe deadline")
+}
+
+// A passing probe reports what its OK line said of the image: the model-fallback mark, as the
+// line carries it, on the table the pod printed before it.
+func TestProbeImageReportsTheModelFallbackMark(t *testing.T) {
+	for _, mark := range []string{"off", "on", bootprobe.ModelFallbackUnread} {
+		t.Run(mark, func(t *testing.T) {
+			g := newProbeRig(t, nil)
+			g.succeeds("probe-image: capability eval-js: present (Oh My Pi is its JavaScript runtime, and the launch probes ran it)\n" +
+				"probe-image: capability model-fallback: reported (the daemon reports it from the deployment's configuration)\n" +
+				bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsResolved, bootprobe.CapabilitiesAll, mark) + "\n")
+
+			report, err := g.r.ProbeImage(g.ctx, probeOptions(t))
+
+			if err != nil {
+				t.Fatalf("ProbeImage = %v, want a pass", err)
+			}
+			if report.ModelFallback != mark {
+				t.Errorf("report.ModelFallback = %q, want %q", report.ModelFallback, mark)
+			}
+		})
+	}
+}
+
+// A pod that ran is judged by its log: only a Succeeded pod whose OK line confirms this daemon's
+// contract passes, and every other ending is an answer no retry changes — so the probe runs once.
+func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		setup func(*probeRig)
+		want  []string
+	}{
+		{"a Failed pod", func(g *probeRig) {
+			g.fails("legion probe-image: pi-legion at /home/legion/.omp/… speaks daemon API contract 2; this daemon requires 3")
+		}, []string{"worker image sha256:" + testDigestHex + " failed its probe", "pod " + probeSandboxName + " Failed", "exit code 1", "speaks daemon API contract 2"}},
+		{"no OK line", func(g *probeRig) { g.succeeds("hello") },
+			[]string{"Succeeded without printing probe-image: OK", "hello"}},
+		{"a CLI that predates the session-storage probe", func(g *probeRig) { g.succeeds("probe-image: OK (/opt/omp/bin/omp)") },
+			[]string{"without confirming daemon API contract 3 (its legion CLI predates the check)"}},
+		{"another contract", func(g *probeRig) { g.succeeds(okLine(2)) },
+			[]string{"confirmed daemon API contract 2, this daemon requires 3"}},
+		{"a CLI that predates the agent-model check", func(g *probeRig) {
+			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=3")
+		}, []string{"without resolving the prompt-named agents' models (its OK line's agent-models mark: none, where the daemon's probe requires resolved)"}},
+		{"a CLI that predates the capability check", func(g *probeRig) {
+			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=resolved daemon-api-version=3")
+		}, []string{"Succeeded without checking the capability list (its legion CLI predates the check): build the image from this daemon's commit", "log tail: probe-image: OK"}},
+		{"a CLI that predates a flag the probe passes", func(g *probeRig) {
+			g.fails("flag provided but not defined: -role-references\nUsage of legion probe-image:")
+		}, []string{"Failed (container probe terminated", "its legion CLI has no -role-references, a flag this daemon's probe passes: build the image from this daemon's commit"}},
+		{"a capability the image lacks", func(g *probeRig) {
+			g.fails("probe-image: capability browser: missing (/nonexistent/chromium (PUPPETEER_EXECUTABLE_PATH) --version: fork/exec /nonexistent/chromium: no such file or directory)\n" +
+				"legion probe-image: capability browser is missing: /nonexistent/chromium (PUPPETEER_EXECUTABLE_PATH) --version: fork/exec /nonexistent/chromium: no such file or directory")
+		}, []string{"Failed (container probe terminated", "exit code 1", "capability browser is missing"}},
+		{"a build-time probe's result", func(g *probeRig) {
+			g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsSkipped, bootprobe.CapabilitiesAll, "off"))
+		},
+			[]string{"without resolving the prompt-named agents' models (its OK line's agent-models mark: skipped, where the daemon's probe requires resolved)"}},
+		{"a probe that left the browser row unchecked", func(g *probeRig) {
+			g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsResolved, bootprobe.CapabilitiesBrowserSkipped, "off"))
+		},
+			[]string{"Succeeded without checking the whole capability list (its OK line's capabilities mark: browser-skipped, where the daemon's probe requires checked)"}},
+		{"a CLI that predates the discovery-on pod lane", func(g *probeRig) {
+			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved capabilities=checked model-fallback=on daemon-api-version=3")
+		}, []string{"Succeeded without the extensions=discovered mark: its legion CLI predates the discovery-on pod lane and its profile links the plugins a pod names explicitly, which a pod of this daemon would load twice — build the image from this daemon's commit"}},
+		{"an image name the kubelet cannot use", func(g *probeRig) { g.waits("InvalidImageName") },
+			[]string{"container probe waiting: InvalidImageName"}},
+		{"an image the node may never pull", func(g *probeRig) { g.waits("ErrImageNeverPull") },
+			[]string{"container probe waiting: ErrImageNeverPull"}},
+		// The registry answered 404 for the reference: no retry of the pull finds the image, on the
+		// first pull or the back-off after it, once the kubelet has met that answer on two pulls.
+		{"an image the registry does not have", func(g *probeRig) {
+			g.pullFails("ErrImagePull", "NotFound", resolving(testImage+": not found"))
+		}, []string{"worker image sha256:" + testDigestHex + " failed its probe: the registry does not have image " + testImage + ": pod " + probeSandboxName + " Pending, container probe waiting: ErrImagePull: rpc error: code = NotFound desc = failed to pull and unpack image", ": " + testImage + ": not found"}},
+		{"an image the registry does not have, in back-off", func(g *probeRig) {
+			g.pullFails("ImagePullBackOff", "NotFound", resolving(testImage+": not found"))
+		}, []string{"the registry does not have image " + testImage + ": pod " + probeSandboxName + " Pending, container probe waiting: ImagePullBackOff: Back-off pulling image"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil)
+			testCase.setup(g)
+			p := probeOptions(t)
+
+			err := g.probe(p)
+
+			wantContains(t, err, testCase.want...)
+			if n := g.creates.Load(); n != 1 {
+				t.Errorf("ran the probe %d times for a definitive answer, want once", n)
+			}
+			g.eventually("the probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
+		})
+	}
+}
+
+// With a NATS nkey seed, the probe passes only on a pod that named the user of the daemon's own
+// seed (Options.NATSUser, bootprobe.NATSUser): one that named none is an image whose CLI predates
+// the user line — a current CLI whose pointer holds a blank or invalid seed exits 1 instead, and a
+// missing key never mounts — so it is refused naming the rebuild; one that named another user is
+// refused naming both public keys; each once.
+func TestProbeImageHoldsTheProvidersSecretToTheDaemonsSeed(t *testing.T) {
+	const daemons, other = "UDAEMONSUSERPUBLICKEY", "UANOTHERUSERPUBLICKEY"
+	for _, testCase := range []struct {
+		name string
+		log  string
+		want []string
+	}{
+		{"the daemon's user", bootprobe.NATSUserLine(daemons) + "\n" + okLine(3), nil},
+		{"no user", okLine(3), []string{
+			"pod " + probeSandboxName + " named no nkey user, where the pane seed the daemon hands every pod is user " + daemons +
+				": its legion CLI predates the probe's nats-nkey-user line: build the image from this daemon's commit — log tail: ",
+		}},
+		{"another user", bootprobe.NATSUserLine(other) + "\n" + okLine(3),
+			[]string{"read nkey user " + other + " through its NATS_NKEY_SEED_FILE, the providers Secret legion-" + testProject + "-providers's NATS_NKEY_SEED", "where the pane seed the daemon hands every pod is user " + daemons}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil, withOptions(func(o *Options) {
+				o.LaunchSecrets = append(o.LaunchSecrets, "NATS_NKEY_SEED")
+				o.ProvidersSecrets, o.NATSUser = []string{"NATS_NKEY_SEED"}, daemons
+			}))
+			g.succeeds(testCase.log + "\n")
+
+			err := g.probe(probeOptions(t))
+
+			if testCase.want == nil {
+				if err != nil {
+					t.Fatalf("ProbeImage = %v, want a pass", err)
+				}
+			} else {
+				wantContains(t, err, testCase.want...)
+			}
+			if n := g.creates.Load(); n != 1 {
+				t.Errorf("ran the probe %d times, want once", n)
+			}
+		})
+	}
+}
+
+// A pod that never finished within the budget, or a Sandbox that never got one, says nothing
+// about the image: the probe runs again, and gives up only when its retry does.
+func TestProbeImageRetriesAProbeThatNeverFinished(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		setup func(*probeRig)
+		want  []string
+	}{
+		{"an image still being pulled", func(g *probeRig) { g.waits("ImagePullBackOff") },
+			[]string{"probe pod " + probeSandboxName + " did not start within 300ms (phase Pending) (container probe waiting: ImagePullBackOff)"}},
+		// A pull that failed for any reason but the registry not having the image says nothing
+		// about the image: credentials, the network and a rate limit may all change by the next
+		// attempt.
+		{"the kubelet's image-pull QPS is exceeded", func(g *probeRig) {
+			g.waitsSaying("ErrImagePull", "pull QPS exceeded")
+		}, []string{"(container probe waiting: ErrImagePull)"}},
+		{"a pull the registry refused credentials for", func(g *probeRig) {
+			g.pullFails("ErrImagePull", "", resolving("pull access denied, repository does not exist or may require authorization: authorization failed: no basic auth credentials"))
+		}, []string{"(container probe waiting: ErrImagePull)"}},
+		{"a pull the registry forbade", func(g *probeRig) {
+			g.pullFails("ImagePullBackOff", "", resolving("unexpected status from HEAD request to "+testManifest+": 403 Forbidden"))
+		}, []string{"(container probe waiting: ImagePullBackOff)"}},
+		{"a pull that timed out", func(g *probeRig) {
+			g.pullFails("ErrImagePull", "DeadlineExceeded", resolving(`failed to do request: Head "`+testManifest+`": dial tcp 192.0.2.10:443: i/o timeout`))
+		}, []string{"(container probe waiting: ErrImagePull)"}},
+		{"a pull whose connection was reset", func(g *probeRig) {
+			g.pullFails("ImagePullBackOff", "", resolving(`failed to do request: Head "`+testManifest+`": read tcp 192.0.2.7:46192->192.0.2.10:443: read: connection reset by peer`))
+		}, []string{"(container probe waiting: ImagePullBackOff)"}},
+		{"a pull the registry rate-limited", func(g *probeRig) {
+			g.pullFails("ErrImagePull", "", resolving("unexpected status from HEAD request to "+testManifest+": 429 Too Many Requests"))
+		}, []string{"(container probe waiting: ErrImagePull)"}},
+		{"a pull the registry rate-limited fetching the manifest", func(g *probeRig) {
+			g.pullFails("ImagePullBackOff", "", "failed to copy: httpReadSeeker: failed open: unexpected status code "+testManifest+": 429 Too Many Requests - Server message: toomanyrequests: You have reached your pull rate limit.")
+		}, []string{"(container probe waiting: ImagePullBackOff)"}},
+		{"a pull the registry answered with a server error", func(g *probeRig) {
+			g.pullFails("ImagePullBackOff", "", resolving("unexpected status from HEAD request to "+testManifest+": 500 Internal Server Error"))
+		}, []string{"(container probe waiting: ImagePullBackOff)"}},
+		// The manifest resolved and its fetch then answered 404: NotFound past resolution, which is
+		// not the registry saying it lacks the reference.
+		{"a manifest the registry lost after resolving it", func(g *probeRig) {
+			g.pullFails("ImagePullBackOff", "NotFound", "failed to copy: httpReadSeeker: failed open: content at "+testManifest+" not found: not found")
+		}, []string{"(container probe waiting: ImagePullBackOff)"}},
+		// The resolver's other ErrNotFound answers are the node's registry configuration and
+		// containerd's manifest size limit, not the registry's contents (containerd's
+		// core/remotes/docker/resolver.go, Resolve).
+		{"a node with no host to resolve the reference on", func(g *probeRig) {
+			g.pullFails("ErrImagePull", "NotFound", resolving("no resolve hosts: not found"))
+		}, []string{"(container probe waiting: ErrImagePull)"}},
+		{"a manifest past containerd's size limit", func(g *probeRig) {
+			g.pullFails("ErrImagePull", "NotFound", resolving("rejecting 8388609 byte manifest for "+testImage+": not found"))
+		}, []string{"(container probe waiting: ErrImagePull)"}},
+		// A not-found message under another waiting reason is not a pull's, so it is not read.
+		{"a not-found message on a container that is not pulling", func(g *probeRig) {
+			g.waitsSaying("ContainerCreating", pullFailure("ErrImagePull", "NotFound", resolving(testImage+": not found"))).pullsFailed(2, "NotFound", resolving(testImage+": not found"))
+		}, []string{"(container probe waiting: ContainerCreating)"}},
+		// The manifest-404 met on one pull only: containerd 2 also answers it for a manifest
+		// request the network cut followed by a blob request the registry answered 404, so it waits
+		// for the kubelet's next pull.
+		{"a missing manifest met on one pull", func(g *probeRig) {
+			g.waitsSaying("ErrImagePull", pullFailure("ErrImagePull", "NotFound", resolving(testImage+": not found"))).pullsFailed(1, "NotFound", resolving(testImage+": not found"))
+		}, []string{"(container probe waiting: ErrImagePull)"}},
+		{"no pod at all", func(g *probeRig) { g.hold.Store(true) },
+			[]string{"probe pod " + probeSandboxName + " did not start within 300ms: no pod"}},
+		// A pod whose probe outlasts the attempt: what it logged so far is quoted.
+		{"a pod still probing", func(g *probeRig) {
+			g.with(func() {
+				g.log = "probe-image: pi.agents answered\nprobe-image: the load probe is waiting"
+			})
+			g.finishes(func(p *corev1.Pod) {
+				p.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+					Name: probeContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				}}}
+			})
+		}, []string{"probe pod " + probeSandboxName + " still Running after 300ms", "log tail: probe-image: pi.agents answered",
+			"the load probe is waiting"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil)
+			testCase.setup(g)
+
+			p := probeOptions(t)
+			p.Budget = unfinishedBudget
+
+			err := g.probe(p)
+
+			wantContains(t, err, append([]string{"the worker image probe never completed within its retry budget (2 attempts)"}, testCase.want...)...)
+			if n := g.creates.Load(); n != 2 {
+				t.Errorf("ran the probe %d times, want the retry's 2", n)
+			}
+			g.eventually("the probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
+		})
+	}
+}
+
+// A pod the kubelet failed for reasons of its own — evicted under node pressure, stopped by a node
+// shutdown, refused at node admission — never ran the image to its end, so it says nothing about
+// the image: the probe runs again. Only a pod whose probe container exited on its own is the
+// image's answer (TestProbeImageRefusesWhatTheProbePodAnswered).
+func TestProbeImageRetriesAPodTheKubeletFailed(t *testing.T) {
+	killed := []corev1.ContainerStatus{{Name: probeContainer, State: corev1.ContainerState{
+		Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "Error"},
+	}}}
+	for _, testCase := range []struct {
+		name   string
+		status corev1.PodStatus
+		want   string
+	}{
+		{"evicted under node pressure", corev1.PodStatus{
+			Phase: corev1.PodFailed, Reason: "Evicted", Message: "The node was low on resource: memory.",
+			ContainerStatuses: killed,
+		}, "Evicted: The node was low on resource: memory."},
+		{"stopped by a node shutdown", corev1.PodStatus{
+			Phase: corev1.PodFailed, Reason: "Terminated", Message: "Pod was terminated in response to imminent node shutdown.",
+			Conditions:        []corev1.PodCondition{{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: "TerminationByKubelet"}},
+			ContainerStatuses: killed,
+		}, "Terminated: Pod was terminated in response to imminent node shutdown."},
+		{"marked a disruption target with no reason", corev1.PodStatus{
+			Phase:             corev1.PodFailed,
+			Conditions:        []corev1.PodCondition{{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: "DeletionByTaintManager"}},
+			ContainerStatuses: killed,
+		}, "disruption target (DeletionByTaintManager)"},
+		{"refused at node admission", corev1.PodStatus{
+			Phase: corev1.PodFailed, Reason: "OutOfcpu", Message: "Pod was rejected: Node didn't have enough resource: cpu",
+		}, "OutOfcpu: Pod was rejected"},
+		{"failed before its container ran", corev1.PodStatus{Phase: corev1.PodFailed}, "its container probe never ran to an exit"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil)
+			status := testCase.status
+			g.finishes(func(p *corev1.Pod) { p.Status = status })
+
+			err := g.probe(probeOptions(t))
+
+			wantContains(t, err, "never completed within its retry budget (2 attempts)", "pod "+probeSandboxName+" Failed", testCase.want)
+			if n := g.creates.Load(); n != 2 {
+				t.Errorf("ran the probe %d times, want the retry's 2", n)
+			}
+			g.eventually("the probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
+		})
+	}
+}
+
+// The API refusing what the probe sent — RBAC, credentials, a manifest it rejects, a namespace
+// that does not exist — refuses it again, so the probe stops naming it; anything else is the
+// cluster's moment, retried.
+func TestProbeImageClassifiesTheAPIsAnswers(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		setup      func(*probeRig)
+		definitive bool
+		want       string
+	}{
+		{"create forbidden", func(g *probeRig) {
+			g.with(func() {
+				g.createErr = apierrors.NewForbidden(sandboxesResource, probeSandboxName, errors.New("no RBAC"))
+			})
+		}, true, "create probe sandbox " + probeSandboxName},
+		{"create in a namespace that does not exist", func(g *probeRig) {
+			g.with(func() {
+				g.createErr = apierrors.NewNotFound(schema.GroupResource{Resource: "namespaces"}, testNamespace)
+			})
+		}, true, "not found"},
+		{"create invalid", func(g *probeRig) {
+			g.with(func() {
+				g.createErr = apierrors.NewInvalid(schema.GroupKind{Group: "agents.x-k8s.io", Kind: "Sandbox"}, probeSandboxName, nil)
+			})
+		}, true, "is invalid"},
+		{"create failing on the server", func(g *probeRig) {
+			g.with(func() { g.createErr = apierrors.NewInternalError(errors.New("etcd leader changed")) })
+		}, false, "etcd leader changed"},
+		{"the log forbidden", func(g *probeRig) {
+			g.succeeds(okLine(3))
+			g.with(func() {
+				g.logErr = apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, probeSandboxName, errors.New("no pods/log"))
+			})
+		}, true, "read probe pod " + probeSandboxName + "'s log"},
+		{"the log failing on the server", func(g *probeRig) {
+			g.succeeds(okLine(3))
+			g.with(func() { g.logErr = apierrors.NewServiceUnavailable("kubelet unreachable") })
+		}, false, "kubelet unreachable"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil)
+			testCase.setup(g)
+
+			err := g.probe(probeOptions(t))
+
+			attempts := int32(2)
+			if testCase.definitive {
+				attempts = 1
+				wantContains(t, err, "failed its probe", testCase.want)
+			} else {
+				wantContains(t, err, "never completed within its retry budget (2 attempts)", testCase.want)
+			}
+			if n := g.creates.Load(); n != attempts {
+				t.Errorf("ran the probe %d times, want %d", n, attempts)
+			}
+		})
+	}
+}
+
+// A probe Sandbox of this project and image left by a crashed boot is replaced; one carrying
+// another project's label, or none, is not this daemon's to delete, and the probe says so.
+func TestProbeImageReplacesOnlyItsOwnProjectsLeftover(t *testing.T) {
+	t.Run("this project's", func(t *testing.T) {
+		labels := map[string]string{labelProject: testProject, labelProbe: "image"}
+		g := newProbeRig(t, []k8sruntime.Object{
+			sandboxObject(t, probeSandboxName, "uid-leftover", modeRunning, labels),
+			podObject(probeSandboxName, "uid-leftover-pod", "uid-leftover", labels, corev1.PodStatus{Phase: corev1.PodSucceeded}),
+		})
+		g.succeeds(okLine(3))
+
+		if err := g.probe(probeOptions(t)); err != nil {
+			t.Fatalf("ProbeImage = %v, want the leftover replaced and a pass", err)
+		}
+		var sequence []string
+		for _, a := range g.writes() {
+			if a.resource == "sandboxes" {
+				sequence = append(sequence, a.verb)
+			}
+		}
+		if got := strings.Join(sequence, " "); got != "create delete create delete" {
+			t.Errorf("sandbox writes = %q, want the refused create, the leftover's delete, the probe's create, and its delete", got)
+		}
+	})
+	for name, labels := range map[string]map[string]string{
+		"another project's": {labelProject: "widgets", labelProbe: "image"},
+		"an unlabelled one": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			// No pod: the fakes' watches ignore label selectors, so a pod of another project's
+			// Sandbox would reach the runtime's store, which a real API server never sends it.
+			g := newProbeRig(t, []k8sruntime.Object{sandboxObject(t, probeSandboxName, "uid-foreign", modeRunning, labels)})
+			g.hold.Store(true)
+
+			err := g.probe(probeOptions(t))
+
+			owner := "no Legion project"
+			if labels != nil {
+				owner = "project widgets"
+			}
+			wantContains(t, err, "probe sandbox "+probeSandboxName+" already exists and belongs to "+owner+", not "+testProject+"; not deleting it")
+			if s := g.sandbox(probeSandboxName); s == nil || s.UID != "uid-foreign" {
+				t.Errorf("the other Sandbox is %+v, want it untouched", s)
+			}
+		})
+	}
+}
+
+// Every boot probes the image: no pass is remembered, since the probe pod's spec cannot show the
+// operator's ConfigMap and Secret contents, which decide whether the agents' models resolve. A
+// second boot on the same image creates its own probe pod, and refuses when the operator's
+// configuration stopped resolving an agent's model in between.
+func TestEveryBootProbesTheImage(t *testing.T) {
+	g := newProbeRig(t, nil)
+	g.succeeds(okLine(3))
+	if err := g.probe(probeOptions(t)); err != nil {
+		t.Fatalf("the first boot's probe = %v, want a pass", err)
+	}
+	g.eventually("the first probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
+	g.fails("legion probe-image: Oh My Pi, loading the plugins from /opt/legion/pi-envoy and /opt/legion/pi-legion with discovery on, as a pod does, " +
+		"cannot run task agent oracle (dispatched by roles/core/planner.md) on its model @oracle: role oracle is not configured.")
+
+	err := g.probe(probeOptions(t))
+
+	wantContains(t, err, "task agent oracle", "role oracle is not configured")
+	if n := g.creates.Load(); n != 2 {
+		t.Errorf("created the probe Sandbox %d times over two boots, want once each", n)
+	}
+}
+
+// A providers Secret the kubelet cannot mount leaves the probe pod Pending, never Failed: a
+// FailedMount event saying the Secret, or one of the keys provider_keys asks of it, is missing is
+// the answer, a refusal naming the Secret, the keys, and the kubelet's message, given once rather
+// than retried to the budget. Any other FailedMount on the volume is one the kubelet retries (its
+// Secret watch not yet synced, kubernetes/kubernetes#99475), and the attempt runs to its budget.
+func TestProbeImageRefusesAProvidersSecretThePodCannotMount(t *testing.T) {
+	mount := `MountVolume.SetUp failed for volume "providers" : `
+	for _, testCase := range []struct {
+		name, message string
+		refused       bool
+	}{
+		{"the Secret missing", mount + `secret "` + ProvidersSecretName(testProject) + `" not found`, true},
+		{"the Secret missing, as the API server says it", mount + `secrets "` + ProvidersSecretName(testProject) + `" not found`, true},
+		{"a key missing", mount + "references non-existent secret key: ANTHROPIC_API_KEY", true},
+		{"the kubelet's secret cache not synced", mount + "failed to sync secret cache: timed out waiting for the condition", false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil, withOptions(func(o *Options) { o.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"} }))
+			g.waits("ContainerCreating")
+			if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+				ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+				InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+				Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: testCase.message,
+			}, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			p := probeOptions(t)
+			p.Budget = unfinishedBudget
+
+			err := g.probe(p)
+
+			if testCase.refused {
+				wantContains(t, err, "cannot mount the providers Secret "+ProvidersSecretName(testProject), "(SESSION_DSN, anthropic)", testCase.message)
+				if n := g.creates.Load(); n != 1 {
+					t.Errorf("ran the probe %d times for a Secret the pod cannot mount, want once", n)
+				}
+				return
+			}
+			wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)")
+			if err != nil && strings.Contains(err.Error(), "cannot mount the providers Secret") {
+				t.Errorf("ProbeImage = %v, refused a mount failure the kubelet retries", err)
+			}
+			if n := g.creates.Load(); n != 2 {
+				t.Errorf("ran the probe %d times, want the retry's 2", n)
+			}
+		})
+	}
+}
+
+// An operator volume the kubelet cannot mount — a ConfigMap or Secret runtime.kubernetes.pod.volumes
+// gives the pod — leaves the probe pod Pending, never Failed: a FailedMount event saying the
+// ConfigMap or Secret, or one of the keys the volume asks of it, is missing is the answer, a
+// refusal naming the volume, the object the pod block gives it from, and the kubelet's message,
+// given once rather than retried to the budget. A projected volume is named by each of its
+// ConfigMap and Secret sources, its token source not among them; a volume the pod block does not
+// name is said so. Any other FailedMount is one the kubelet retries (its ConfigMap cache not yet
+// synced, the object not yet registered with its manager, the pod's volumes not all mounted yet),
+// and the attempt runs to its budget.
+func TestProbeImageRefusesAnOperatorVolumeThePodCannotMount(t *testing.T) {
+	configMap := func(volume, name string) corev1.Volume {
+		return corev1.Volume{Name: volume, VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}}}
+	}
+	secret := func(volume, name string) corev1.Volume {
+		return corev1.Volume{Name: volume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: name}}}
+	}
+	volumes := []corev1.Volume{
+		configMap("operator-route", "legion-operator-route"),
+		secret("operator-token", "legion-operator-token"),
+		configMap("operator-missing", "legion-missing"),
+		secret("operator-secret-missing", "legion-missing"),
+		// The token source first, as the operator route's own token volume has one: a refusal
+		// lists the ConfigMap and Secret sources alone.
+		{Name: "operator-projected", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{
+			{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: "operator-audience", Path: "token"}},
+			{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "a"}}},
+			{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "b"}}},
+		}}}},
+	}
+	var mounts []corev1.VolumeMount
+	for _, volume := range volumes {
+		mounts = append(mounts, corev1.VolumeMount{Name: volume.Name, MountPath: "/etc/legion-operator/" + volume.Name, ReadOnly: true})
+	}
+	mount := func(volume, failure string) string {
+		return `MountVolume.SetUp failed for volume "` + volume + `" : ` + failure
+	}
+	for _, testCase := range []struct {
+		name, message string
+		refused       bool
+		want          []string
+	}{
+		{"the ConfigMap missing", mount("operator-missing", `configmap "legion-missing" not found`), true,
+			[]string{`cannot mount volume "operator-missing"`, `ConfigMap "legion-missing"`}},
+		{"the ConfigMap missing, as the API server says it", mount("operator-missing", `configmaps "legion-missing" not found`), true,
+			[]string{`cannot mount volume "operator-missing"`, `ConfigMap "legion-missing"`}},
+		{"the Secret missing", mount("operator-secret-missing", `secret "legion-missing" not found`), true,
+			[]string{`cannot mount volume "operator-secret-missing"`, `Secret "legion-missing"`}},
+		{"a ConfigMap key missing", mount("operator-route", "configmap references non-existent config key: models.yml"), true,
+			[]string{`ConfigMap "legion-operator-route"`}},
+		{"a Secret key missing", mount("operator-token", "references non-existent secret key: token"), true,
+			[]string{`Secret "legion-operator-token"`}},
+		{"a projected volume's sources missing", mount("operator-projected", `[configmap "a" not found, secret "b" not found]`), true,
+			[]string{`ConfigMap "a" and Secret "b"`}},
+		{"a volume the pod block does not name", mount("controller-added", `configmap "x" not found`), true,
+			[]string{`cannot mount volume "controller-added", which runtime.kubernetes.pod.volumes does not name: ` + mount("controller-added", `configmap "x" not found`)}},
+		{"the kubelet's configmap cache not synced", mount("operator-route", "failed to sync configmap cache: timed out waiting for the condition"), false, nil},
+		{"the ConfigMap not registered with the kubelet's manager yet", mount("operator-route", `object "legion"/"legion-operator-route" not registered`), false, nil},
+		{"the pod's volumes not all mounted yet",
+			"Unable to attach or mount volumes: unmounted volumes=[operator-route], unattached volumes=[]: timed out waiting for the condition", false, nil},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Pod.Volumes, o.Pod.VolumeMounts = volumes, mounts }))
+			g.waits("ContainerCreating")
+			if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+				ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+				InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+				Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: testCase.message,
+			}, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			p := probeOptions(t)
+			p.Budget = unfinishedBudget
+
+			err := g.probe(p)
+
+			if testCase.refused {
+				wantContains(t, err, append(testCase.want, testCase.message)...)
+				if err != nil && strings.Contains(err.Error(), "never completed within its retry budget") {
+					t.Errorf("ProbeImage = %v, retried a volume the pod can never mount", err)
+				}
+				if n := g.creates.Load(); n != 1 {
+					t.Errorf("ran the probe %d times for a volume the pod cannot mount, want once", n)
+				}
+				return
+			}
+			wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)")
+			if err != nil && strings.Contains(err.Error(), "cannot mount volume") {
+				t.Errorf("ProbeImage = %v, refused a mount failure the kubelet retries", err)
+			}
+			if n := g.creates.Load(); n != 2 {
+				t.Errorf("ran the probe %d times, want the retry's 2", n)
+			}
+		})
+	}
+}
+
+// The kubelet's first FailedMount lands after the probe's first event read, as a rule: the pod is
+// bound, the store shows its node, and stuck reads events on that pass, before the kubelet has
+// tried the mount. The event is then found on the next read, mountRecheck later, rather than
+// waited out to the budget: with no event yet, the first read leaves the attempt waiting and no
+// read follows while the clock stands; once the event exists and the clock has moved past
+// mountRecheck, the next pass reads again and refuses, one Sandbox created, two event reads made.
+func TestProbeImageFindsAFailedMountOnTheRecheck(t *testing.T) {
+	volume := corev1.Volume{Name: "operator-route", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator-route"}}}}
+	g := newProbeRig(t, nil, withOptions(func(o *Options) {
+		o.Pod.Volumes = []corev1.Volume{volume}
+		o.Pod.VolumeMounts = []corev1.VolumeMount{{Name: volume.Name, MountPath: "/etc/legion-operator/" + volume.Name, ReadOnly: true}}
+	}))
+	var eventReads atomic.Int32
+	g.kube.PrependReactor("list", "events", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		eventReads.Add(1)
+		return false, nil, nil
+	})
+	g.waits("ContainerCreating")
+	message := `MountVolume.SetUp failed for volume "operator-route" : configmap "legion-operator-route" not found`
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go func() {
+		// The kubelet's turn: after the first read, the event, then time passes.
+		for eventReads.Load() == 0 {
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+		time.Sleep(50 * time.Millisecond) // a few passes of the wait loop with the clock still
+		if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+			InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+			Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: message,
+		}, metav1.CreateOptions{}); err != nil {
+			t.Error(err)
+			return
+		}
+		g.advance(mountRecheck)
+		if pod := g.pod(probeSandboxName); pod != nil {
+			g.update(pod, func(*corev1.Pod) {}) // nudge the wait loop rather than waiting on its tick
+		}
+	}()
+
+	err := g.probe(probeOptions(t))
+
+	wantContains(t, err, `cannot mount volume "operator-route"`, `ConfigMap "legion-operator-route"`, message)
+	if err != nil && strings.Contains(err.Error(), "never completed within its retry budget") {
+		t.Errorf("ProbeImage = %v, waited a FailedMount that landed after the first read out to the budget", err)
+	}
+	if n := g.creates.Load(); n != 1 {
+		t.Errorf("ran the probe %d times for a volume the pod cannot mount, want once", n)
+	}
+	if n := eventReads.Load(); n != 2 {
+		t.Errorf("read the pod's events %d times, want the first pass's read and the one recheck", n)
+	}
+}
+
+// A container the kubelet cannot configure — its environment or a mount reading a ConfigMap or
+// Secret that is missing, or a key of one — leaves the probe pod Pending with the container
+// waiting CreateContainerConfigError, never Failed: a waiting message saying the ConfigMap or
+// Secret, or the key, is missing is the answer, a refusal naming the container and the kubelet's
+// message, given once rather than retried to the budget. A CreateContainerConfigError saying
+// anything else is left to the budget, whose detail quotes the waiting reason.
+func TestProbeImageRefusesAContainerTheKubeletCannotConfigure(t *testing.T) {
+	for _, testCase := range []struct {
+		name, message string
+		refused       bool
+	}{
+		{"a ConfigMap missing", `configmap "legion-missing" not found`, true},
+		{"a Secret missing", `secret "legion-missing" not found`, true},
+		{"a ConfigMap key missing", "couldn't find key models.yml in ConfigMap legion/legion-operator-route", true},
+		{"a Secret key missing", "couldn't find key token in Secret legion/legion-operator-token", true},
+		{"a container spec the kubelet could not generate for another reason", `failed to generate container "probe" spec: something else`, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil)
+			g.waitsSaying("CreateContainerConfigError", testCase.message)
+			p := probeOptions(t)
+			p.Budget = unfinishedBudget
+
+			err := g.probe(p)
+
+			if testCase.refused {
+				wantContains(t, err, "cannot configure its container probe", "CreateContainerConfigError", testCase.message)
+				if err != nil && strings.Contains(err.Error(), "never completed within its retry budget") {
+					t.Errorf("ProbeImage = %v, retried a container the kubelet can never configure", err)
+				}
+				if n := g.creates.Load(); n != 1 {
+					t.Errorf("ran the probe %d times for a container the kubelet cannot configure, want once", n)
+				}
+				return
+			}
+			wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)", "(container probe waiting: CreateContainerConfigError)")
+			if err != nil && strings.Contains(err.Error(), "cannot configure its container") {
+				t.Errorf("ProbeImage = %v, refused a CreateContainerConfigError the kubelet may yet clear", err)
+			}
+			if n := g.creates.Load(); n != 2 {
+				t.Errorf("ran the probe %d times, want the retry's 2", n)
+			}
+		})
+	}
+}
+
+// A share the pod block gives the pod — an NFS export, or a PersistentVolumeClaim — whose mount the
+// kubelet ran and that failed leaves the probe pod Pending, never Failed: a FailedMount event in the
+// kubelet's `… : mount failed: …` or a CSI driver's `… : rpc error: code = …` grammar is the answer,
+// a refusal naming the volume, the share the pod block gives it from, and the kubelet's message,
+// given once. The kubelet names an NFS volume by the pod's own name for it but a claim's by the
+// PersistentVolume it is bound to, which the runtime cannot read, so an event naming no volume of
+// the pod block is the one claim's; with two claims it names the PersistentVolume and both. The
+// kubelet's `Unable to attach or mount volumes` summary is left to the budget, and so is a share
+// failure in a pod block naming no share at all. The messages are the kubelet's own, read from
+// gVisor pods on a kind node and from a gVisor pod on GKE Autopilot.
+func TestProbeImageRefusesAShareThePodCannotMount(t *testing.T) {
+	// retried is the event's count: 1 for a failure the kubelet has met once, else 2, the least
+	// the probe refuses a CSI failure at.
+	retried := func(once bool) int32 {
+		if once {
+			return 1
+		}
+		return 2
+	}
+	nfs := corev1.Volume{Name: "nas", VolumeSource: corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{Server: "10.0.0.2", Path: "/share"}}}
+	claim := func(volume, name string) corev1.Volume {
+		return corev1.Volume{Name: volume, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: name}}}
+	}
+	route := corev1.Volume{Name: "operator-route", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator-route"}}}}
+	timedOut := func(volume, export string) string {
+		return `MountVolume.SetUp failed for volume "` + volume + `" : mount failed: exit status 32
+Mounting command: mount
+Mounting arguments:  -t nfs ` + export + ` /var/lib/kubelet/pods/ea568681-eb15-45a0-838d-dfbd9d6aefb4/volumes/kubernetes.io~nfs/` + volume + `
+Output: mount.nfs: Connection timed out for ` + export + ` on /var/lib/kubelet/pods/ea568681-eb15-45a0-838d-dfbd9d6aefb4/volumes/kubernetes.io~nfs/` + volume
+	}
+	csi := `MountVolume.MountDevice failed for volume "pvc-1b2c" : rpc error: code = Internal desc = mount "/var/lib/kubelet/plugins/kubernetes.io/csi/filestore.csi.storage.gke.io/0a/globalmount" failed on node gk3-node: mount failed: exit status 32`
+	csiCode := func(code, desc string) string {
+		return `MountVolume.MountDevice failed for volume "pvc-1b2c" : rpc error: code = ` + code + ` desc = ` + desc
+	}
+	secretMissing := `MountVolume.SetUp failed for volume "pvc-1b2c" : fetching NodePublishSecretRef legion/smb-creds failed: kubernetes.io/csi: failed to find the secret smb-creds in the namespace legion with error: secrets "smb-creds" not found`
+	for _, testCase := range []struct {
+		name    string
+		volumes []corev1.Volume
+		message string
+		refused bool
+		want    []string
+		// pulledAfter records the kubelet's Pulling event after the FailedMount: every volume
+		// mounted since.
+		pulledAfter bool
+		// once records the failure once: a first failure the kubelet has not yet retried.
+		once bool
+	}{
+		{"an NFS export that never answers", []corev1.Volume{route, nfs}, timedOut("nas", "10.0.0.2:/share"), true,
+			[]string{`cannot mount volume "nas", which runtime.kubernetes.pod.volumes gives it from NFS export 10.0.0.2:/share`}, false, false},
+		{"an NFS export the server refuses", []corev1.Volume{nfs},
+			`MountVolume.SetUp failed for volume "nas" : mount failed: exit status 32` + "\nOutput: mount.nfs: access denied by server while mounting 10.0.0.2:/share", true,
+			[]string{`cannot mount volume "nas", which runtime.kubernetes.pod.volumes gives it from NFS export 10.0.0.2:/share`}, false, false},
+		{"a claim's NFS volume, named by its PersistentVolume", []corev1.Volume{route, claim("team", "team-share")}, timedOut("team-pv", "10.0.0.9:/share"), true,
+			[]string{`cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share"`}, false, false},
+		{"a claim's Filestore volume, through its CSI driver", []corev1.Volume{claim("team", "team-share")}, csi, true,
+			[]string{`cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share"`}, false, false},
+		{"one of two claims' volumes", []corev1.Volume{claim("team", "team-share"), claim("cache", "build-cache")}, timedOut("pv-7", "10.0.0.9:/share"), true,
+			[]string{`cannot mount PersistentVolume "pv-7", bound to one of the claims runtime.kubernetes.pod.volumes gives volumes team, cache from`}, false, false},
+		{"a share still waiting in the kubelet's summary", []corev1.Volume{nfs},
+			"Unable to attach or mount volumes: unmounted volumes=[nas], unattached volumes=[]: timed out waiting for the condition", false, nil, false, false},
+		{"a mount failure for a volume no share of the pod block can be", []corev1.Volume{route}, timedOut("elsewhere", "10.0.0.9:/share"), false, nil, false, false},
+		{"a CSI call the kubelet retries: Aborted", []corev1.Volume{claim("team", "team-share")}, csiCode("Aborted", "An operation with the given Volume ID projects/p/locations/l/instances/i/volumes/v already exists"), false, nil, false, false},
+		{"a CSI call the kubelet retries: DeadlineExceeded", []corev1.Volume{claim("team", "team-share")}, csiCode("DeadlineExceeded", "context deadline exceeded"), false, nil, false, false},
+		{"a CSI call the kubelet retries: Unavailable", []corev1.Volume{claim("team", "team-share")},
+			`MountVolume.SetUp failed for volume "pvc-1b2c" : rpc error: code = Unavailable desc = connection error: desc = "transport: Error while dialing: dial unix /var/lib/kubelet/plugins/filestore.csi.storage.gke.io/csi.sock: connect: connection refused"`, false, nil, false, false},
+		{"a CSI call the kubelet retries: ResourceExhausted", []corev1.Volume{claim("team", "team-share")}, csiCode("ResourceExhausted", "quota"), false, nil, false, false},
+		{"a share failure a later try cleared", []corev1.Volume{nfs}, timedOut("nas", "10.0.0.2:/share"), false, nil, true, false},
+		{"a claim's CSI Secret missing, named by its PersistentVolume", []corev1.Volume{route, claim("team", "team-share")}, secretMissing, true,
+			[]string{`cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share"`}, false, false},
+		{"an NFS export that never answers, on its first event", []corev1.Volume{nfs}, timedOut("nas", "10.0.0.2:/share"), true,
+			[]string{`cannot mount volume "nas", which runtime.kubernetes.pod.volumes gives it from NFS export 10.0.0.2:/share`}, false, true},
+		{"a CSI failure the kubelet has not yet retried", []corev1.Volume{claim("team", "team-share")}, csi, false, nil, false, true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var mounts []corev1.VolumeMount
+			for _, volume := range testCase.volumes {
+				mounts = append(mounts, corev1.VolumeMount{Name: volume.Name, MountPath: "/mnt/" + volume.Name, ReadOnly: true})
+			}
+			g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Pod.Volumes, o.Pod.VolumeMounts = testCase.volumes, mounts }))
+			g.waits("ContainerCreating")
+			at := metav1.NewTime(rigNow.Add(-time.Minute))
+			if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+				ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+				InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+				Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: testCase.message, LastTimestamp: at, Count: retried(testCase.once),
+			}, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if testCase.pulledAfter {
+				if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+					ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".pull", Namespace: testNamespace},
+					InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+					Reason:         "Pulling", Type: corev1.EventTypeNormal, Message: `Pulling image "worker"`, LastTimestamp: metav1.NewTime(at.Add(time.Second)),
+				}, metav1.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p := probeOptions(t)
+			p.Budget = unfinishedBudget
+
+			err := g.probe(p)
+
+			if testCase.refused {
+				wantContains(t, err, append(testCase.want, testCase.message)...)
+				if n := g.creates.Load(); n != 1 {
+					t.Errorf("ran the probe %d times for a share the pod cannot mount, want once", n)
+				}
+				return
+			}
+			wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)")
+			if err != nil && strings.Contains(err.Error(), "cannot mount") {
+				t.Errorf("ProbeImage = %v, refused a mount it should have left to the budget", err)
+			}
+		})
+	}
+}
+
+// A probe pod whose operator claim is missing never reaches a node: the scheduler leaves it Pending,
+// PodScheduled=False Unschedulable, saying `persistentvolumeclaim "<name>" not found` (or `is being
+// deleted`, or `bound to non-existent persistentvolume "<pv>"`), the first of them the message GKE Autopilot's scheduler gave a gVisor pod naming a claim that did not
+// exist. That is a refusal naming the volume and the claim, given on the first pass whatever the
+// pod's age, and never a capacity wait: no node the pool adds places it. A claim the pod block does
+// not name is no operator's mistake and falls to the capacity rule, and so does a claim that exists
+// but is not bound yet (`pod has unbound immediate PersistentVolumeClaims`), which is left to the
+// budget rather than counted as waiting on capacity, since it may yet bind.
+func TestProbeImageRefusesAClaimThatIsNotThere(t *testing.T) {
+	team := corev1.Volume{Name: "team", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-share"}}}
+	unplaced := func(message string, age time.Duration) func(*corev1.Pod) {
+		return func(p *corev1.Pod) {
+			p.Spec.NodeName = ""
+			p.Status = corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+				Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+				Message: message, LastTransitionTime: metav1.NewTime(rigNow.Add(-age)),
+			}}}
+		}
+	}
+	notFound := `0/17 nodes are available: persistentvolumeclaim "team-share" not found. not found`
+	for _, testCase := range []struct {
+		name, message string
+		age           time.Duration
+		refused       bool
+	}{
+		{"the claim not found", notFound, 0, true},
+		{"the claim being deleted", `0/3 nodes are available: persistentvolumeclaim "team-share" is being deleted.`, 0, true},
+		{"the claim's volume gone, past the boot timeout", `0/3 nodes are available: persistentvolumeclaim "team-share" bound to non-existent persistentvolume "team-pv".`, testOptions().BootTimeout + time.Second, true},
+		{"another claim not found", `0/3 nodes are available: persistentvolumeclaim "someone-else" not found. not found`, 0, false},
+		{"the claim not bound yet, past the boot timeout", "0/1 nodes are available: pod has unbound immediate PersistentVolumeClaims. not found", testOptions().BootTimeout + time.Second, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			logged := &lockedLog{}
+			g := newProbeRig(t, nil, withOptions(func(o *Options) {
+				o.Log = slogTo(logged)
+				o.Pod.Volumes = []corev1.Volume{team}
+				o.Pod.VolumeMounts = []corev1.VolumeMount{{Name: "team", MountPath: "/mnt/team", ReadOnly: true}}
+			}))
+			g.finishes(unplaced(testCase.message, testCase.age))
+			p := probeOptions(t)
+			p.Budget = unfinishedBudget
+
+			err := g.probe(p)
+
+			if testCase.refused {
+				wantContains(t, err, `cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share": `+testCase.message)
+				if n := g.creates.Load(); n != 1 {
+					t.Errorf("ran the probe %d times for a claim that is not there, want once", n)
+				}
+				return
+			}
+			wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)")
+			if err != nil && strings.Contains(err.Error(), "cannot mount") {
+				t.Errorf("ProbeImage = %v, blamed the pod block for a claim it does not name or that may yet bind", err)
+			}
+			if strings.Contains(testCase.message, unboundClaims) && strings.Contains(logged.String(), "waiting on capacity") {
+				t.Errorf("an unbound claim was read as a capacity wait:\n%s", logged.String())
+			}
+		})
+	}
+}
+
+// A CSI driver's final failure the kubelet has met twice is refused, whether the event records the
+// repeat in its Count or, as an events.k8s.io/v1 recorder does, in its Series alone; a CSI failure
+// met once is left to the budget.
+func TestProbeImageCountsACSIFailureBySeries(t *testing.T) {
+	message := `MountVolume.MountDevice failed for volume "pvc-1b2c" : rpc error: code = Internal desc = mount failed: exit status 32`
+	for _, testCase := range []struct {
+		name    string
+		count   int32
+		series  *corev1.EventSeries
+		refused bool
+	}{
+		{"met twice, by Count", 2, nil, true},
+		{"met twice, by Series alone", 1, &corev1.EventSeries{Count: 2, LastObservedTime: metav1.NewMicroTime(rigNow.Add(-time.Minute))}, true},
+		{"met once", 1, nil, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil, withOptions(func(o *Options) {
+				o.Pod.Volumes = []corev1.Volume{{Name: "team", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-share"}}}}
+				o.Pod.VolumeMounts = []corev1.VolumeMount{{Name: "team", MountPath: "/mnt/team", ReadOnly: true}}
+			}))
+			g.waits("ContainerCreating")
+			if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+				ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+				InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+				Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: message,
+				LastTimestamp: metav1.NewTime(rigNow.Add(-time.Minute)), Count: testCase.count, Series: testCase.series,
+			}, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			p := probeOptions(t)
+			p.Budget = unfinishedBudget
+
+			err := g.probe(p)
+
+			if testCase.refused {
+				wantContains(t, err, `cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share": `+message)
+				return
+			}
+			wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)")
+		})
+	}
+}
+
+// A ReadWriteOncePod claim another pod holds leaves the probe pod Unschedulable for as long as any
+// issue pod runs, since every Legion pod mounts the pod block's claims: the scheduler's
+// ErrReasonReadWriteOncePodConflict is a refusal naming the claims, at once, never a capacity wait.
+func TestProbeImageRefusesAReadWriteOncePodClaimInUse(t *testing.T) {
+	message := "0/3 nodes are available: 3 node(s) unavailable due to PersistentVolumeClaim with ReadWriteOncePod access mode already in-use by another pod. preemption: not eligible"
+	g := newProbeRig(t, nil, withOptions(func(o *Options) {
+		o.Pod.Volumes = []corev1.Volume{{Name: "team", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-share"}}}}
+		o.Pod.VolumeMounts = []corev1.VolumeMount{{Name: "team", MountPath: "/mnt/team", ReadOnly: true}}
+	}))
+	g.finishes(func(p *corev1.Pod) {
+		p.Spec.NodeName = ""
+		p.Status = corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+			Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+			Message: message, LastTransitionTime: metav1.NewTime(rigNow),
+		}}}
+	})
+	p := probeOptions(t)
+	p.Budget = unfinishedBudget
+
+	err := g.probe(p)
+
+	wantContains(t, err, "a ReadWriteOncePod claim it mounts is held by another pod", "gives volumes team from, so they must be ReadWriteMany: "+message)
+	if n := g.creates.Load(); n != 1 {
+		t.Errorf("ran the probe %d times, want once", n)
+	}
+}
+
+// A FailedMount for a volume an admission webhook injected into the probe pod names a volume the
+// admitted pod carries but the pod block does not: it is that volume's, never blamed on the pod
+// block's one claim as its PersistentVolume would be.
+func TestProbeImageNeverBlamesAClaimForAnInjectedVolume(t *testing.T) {
+	g := newProbeRig(t, nil, withOptions(func(o *Options) {
+		o.Pod.Volumes = []corev1.Volume{{Name: "team", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-share"}}}}
+		o.Pod.VolumeMounts = []corev1.VolumeMount{{Name: "team", MountPath: "/mnt/team", ReadOnly: true}}
+	}))
+	g.finishes(func(p *corev1.Pod) {
+		p.Spec.NodeName = "ip-192-0-2-7"
+		p.Spec.Volumes = append(p.Spec.Volumes, corev1.Volume{Name: "istiod-ca-cert", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{Driver: "mesh.example"}}})
+		p.Status = corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: probeContainer, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
+		}}}
+	})
+	message := `MountVolume.SetUp failed for volume "istiod-ca-cert" : rpc error: code = Unknown desc = mesh agent down`
+	if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+		Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: message, LastTimestamp: metav1.NewTime(rigNow.Add(-time.Minute)), Count: 3,
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	p := probeOptions(t)
+	p.Budget = unfinishedBudget
+
+	err := g.probe(p)
+
+	if err != nil && strings.Contains(err.Error(), `PersistentVolumeClaim "team-share"`) {
+		t.Fatalf("ProbeImage = %v, blamed the operator's claim for an injected volume", err)
+	}
+	wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)")
+}
+
+// A share the kubelet mounted on the node but whose root the node cannot read — an NFS server that
+// accepts the mount and fails every read after it, `Remote I/O error` — fails a gVisor container's
+// start rather than its mount: runsc cannot read the mount list its gofer wrote, and the kubelet
+// records StartError, exit code 128, `… reading mounts file: …`. That message, observed from a
+// gVisor pod on a kind node over such a server, names no volume, so with a share in the pod block
+// the refusal names every share and quotes it, and does not blame the image; without one, the same
+// failure stays the image's.
+func TestProbeImageNamesTheSharesWhenGVisorCannotReadTheMounts(t *testing.T) {
+	const message = "failed to start containerd task \"3c5f\": OCI runtime start failed: starting container: reading mounts file: error unmarshaling mounts: unexpected end of JSON input\nJSON bytes:\n"
+	nas := corev1.Volume{Name: "nas", VolumeSource: corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{Server: "10.0.0.2", Path: "/share"}}}
+	for _, testCase := range []struct {
+		name    string
+		volumes []corev1.Volume
+		want    string
+	}{
+		{"a share in the pod block", []corev1.Volume{nas}, `could not start its container probe over its mounts, which gVisor could not read: check the shares runtime.kubernetes.pod.volumes gives it, "nas" (NFS export 10.0.0.2:/share), are readable from the node: ` + message},
+		{"no share in the pod block", nil, "failed its probe: pod " + probeSandboxName + " Failed (container probe terminated: StartError, exit code 128)"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil, withOptions(func(o *Options) {
+				o.Pod.Volumes = testCase.volumes
+				for _, v := range testCase.volumes {
+					o.Pod.VolumeMounts = append(o.Pod.VolumeMounts, corev1.VolumeMount{Name: v.Name, MountPath: "/mnt/" + v.Name, ReadOnly: true})
+				}
+			}))
+			g.finishes(func(p *corev1.Pod) {
+				p.Status = corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{{
+					Name: probeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 128, Reason: "StartError", Message: message}},
+				}}}
+			})
+
+			err := g.probe(probeOptions(t))
+
+			wantContains(t, err, testCase.want)
+			if n := g.creates.Load(); n != 1 {
+				t.Errorf("ran the probe %d times, want once: either verdict is definitive", n)
+			}
+		})
+	}
+}
+
+// unschedulable leaves a probe pod as the scheduler leaves one the pool has no room for: Pending,
+// on no node, with PodScheduled=False Unschedulable and the scheduler's message, since age before
+// the rig's clock.
+func unschedulable(age time.Duration) func(*corev1.Pod) {
+	return func(p *corev1.Pod) {
+		p.Spec.NodeName = ""
+		p.Status = corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+			Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+			Message:            unschedulableMessage,
+			LastTransitionTime: metav1.NewTime(rigNow.Add(-age)),
+		}}}
+	}
+}
+
+const unschedulableMessage = "0/83 nodes are available: 25 Insufficient cpu, 58 node(s) didn't match Pod's node affinity/selector. preemption: 0/83 nodes are available: 25 No preemption victims found for incoming pod, 58 Preemption is not helpful for scheduling."
+
+// A probe pod the pool has no room for says nothing about the image, and no number of them does: a
+// pod Pending with PodScheduled=False Unschedulable for longer than the boot timeout ends the
+// attempt waiting on capacity (bootprobe.Outcome.Waiting) — well within the attempt's budget, its
+// Sandbox deleted — logged as a capacity wait and never a transient failure, so it spends none of
+// the retry's attempts; the next attempt's pod schedules and passes, and the report counts the one
+// wait with the scheduler's reason. A pod Unschedulable for less than the boot timeout is a pool
+// still adding a node: the attempt waits on it to its budget, as it does any Pending pod.
+func TestProbeImageWaitsOnAProbePodThePoolCannotPlace(t *testing.T) {
+	t.Run("unschedulable past the boot timeout, then placed", func(t *testing.T) {
+		logged := &lockedLog{}
+		g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Log = slogTo(logged) }))
+		g.with(func() { g.log = okLine(3) + "\n" })
+		var pods atomic.Int32
+		g.finishes(func(p *corev1.Pod) {
+			if pods.Add(1) == 1 {
+				unschedulable(testOptions().BootTimeout + time.Second)(p)
+				return
+			}
+			p.Status = corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{
+				Name: probeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}},
+			}}}
+		})
+		// One attempt: the pass needs two, so a wait that spent an attempt would fail the run.
+		p := probeOptions(t)
+		p.Retry.Attempts = 1
+
+		report, err := g.r.ProbeImage(g.ctx, p)
+
+		if err != nil {
+			t.Fatalf("ProbeImage = %v, want the pass after one capacity wait", err)
+		}
+		if n := g.creates.Load(); n != 2 {
+			t.Errorf("created the probe Sandbox %d times, want the unplaceable pod's and the one that passed", n)
+		}
+		wantReason := "probe pod " + probeSandboxName + " is Unschedulable: " + unschedulableMessage
+		if report.CapacityWaits != 1 || report.CapacityReason != wantReason {
+			t.Errorf("report = %d waits, reason %q; want 1 and %q", report.CapacityWaits, report.CapacityReason, wantReason)
+		}
+		if got := strings.Count(logged.String(), "boot probe is waiting on capacity; running it again"); got != 1 {
+			t.Errorf("logged %d capacity waits, want 1:\n%s", got, logged.String())
+		}
+		if !strings.Contains(logged.String(), `probe="worker image"`) || !strings.Contains(logged.String(), unschedulableMessage) {
+			t.Errorf("the wait was not logged with the probe and the scheduler's reason:\n%s", logged.String())
+		}
+		if strings.Contains(logged.String(), "failed transiently") {
+			t.Errorf("a capacity wait was logged as a transient failure:\n%s", logged.String())
+		}
+		g.eventually("the probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
+	})
+
+	t.Run("unschedulable within the boot timeout waits to the budget", func(t *testing.T) {
+		logged := &lockedLog{}
+		g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Log = slogTo(logged) }))
+		g.finishes(unschedulable(testOptions().BootTimeout / 2))
+		p := probeOptions(t)
+		p.Budget = unfinishedBudget
+
+		err := g.probe(p)
+
+		wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)",
+			"probe pod "+probeSandboxName+" did not start within 300ms (phase Pending)")
+		if strings.Contains(logged.String(), "waiting on capacity") {
+			t.Errorf("a pod unschedulable for less than the boot timeout was read as a capacity wait:\n%s", logged.String())
+		}
+		if n := g.creates.Load(); n != 2 {
+			t.Errorf("ran the probe %d times, want the retry's 2", n)
+		}
+	})
+}
+
+// The capacity stop (stuck) only fires once a probe pod's Unschedulable age passes the boot
+// timeout, and an attempt only sees that if its own budget outlives the real wall-clock time that
+// takes — the race LEGION-636 found: a deployment whose worker_boot_timeout_seconds reached
+// slow_command_timeout_seconds gave every attempt's budget no room to see it, so the daemon's six
+// attempts all timed out "still Pending" instead. Each case starts a pod Unschedulable from its
+// creation (age 0) and, after a real delay standing in for the boot timeout's wall-clock cost,
+// jumps the rig's clock once and nudges the pod so the attempt's wait notices without waiting on
+// the recheck interval; a budget shorter than that delay can never observe the jump.
+func TestProbeImagesCapacityStopNeedsTheBudgetToOutliveTheBootTimeout(t *testing.T) {
+	const bootTimeout = 600 * time.Millisecond
+	ageOutAfter := func(t *testing.T, g *probeRig, delay time.Duration) {
+		t.Helper()
+		stop := make(chan struct{})
+		t.Cleanup(func() { close(stop) })
+		go func() {
+			select {
+			case <-stop:
+				return
+			case <-time.After(delay):
+			}
+			g.advance(bootTimeout + time.Second)
+			if pod := g.pod(probeSandboxName); pod != nil {
+				g.update(pod, func(*corev1.Pod) {})
+			}
+		}()
+	}
+
+	t.Run("a budget that outlives the boot timeout ends the attempt waiting on capacity", func(t *testing.T) {
+		logged := &lockedLog{}
+		g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Log = slogTo(logged); o.BootTimeout = bootTimeout }))
+		g.with(func() { g.log = okLine(3) + "\n" })
+		var pods atomic.Int32
+		g.finishes(func(p *corev1.Pod) {
+			if pods.Add(1) == 1 {
+				unschedulable(0)(p)
+				return
+			}
+			p.Status = corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{
+				Name: probeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}},
+			}}}
+		})
+		ageOutAfter(t, g, bootTimeout)
+		p := probeOptions(t)
+		p.Budget = bootTimeout + time.Second // ProbeBudget's shape: the boot timeout plus a margin that outlasts the rig's recheckInterval.
+		p.Retry.Attempts = 1
+
+		report, err := g.r.ProbeImage(g.ctx, p)
+
+		if err != nil {
+			t.Fatalf("ProbeImage = %v, want the pass after one capacity wait", err)
+		}
+		if report.CapacityWaits != 1 {
+			t.Errorf("report = %d capacity waits, want 1", report.CapacityWaits)
+		}
+		if got := strings.Count(logged.String(), "boot probe is waiting on capacity; running it again"); got != 1 {
+			t.Errorf("logged %d capacity waits, want 1:\n%s", got, logged.String())
+		}
+	})
+
+	t.Run("a budget below the boot timeout never sees the capacity wait", func(t *testing.T) {
+		logged := &lockedLog{}
+		g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Log = slogTo(logged); o.BootTimeout = bootTimeout }))
+		g.finishes(unschedulable(0))
+		// The pod ages out exactly as above, but the one attempt's budget has run out by then.
+		ageOutAfter(t, g, bootTimeout)
+		p := probeOptions(t)
+		p.Budget = 300 * time.Millisecond // slow_command_timeout_seconds's old shape: below the boot timeout.
+		p.Retry.Attempts = 1
+
+		err := g.probe(p)
+
+		wantContains(t, err, "the worker image probe never completed within its retry budget (1 attempts)",
+			"probe pod "+probeSandboxName+" did not start within 300ms (phase Pending)")
+		if strings.Contains(logged.String(), "waiting on capacity") {
+			t.Errorf("a budget below the boot timeout read a capacity wait it never had time to see:\n%s", logged.String())
+		}
+	})
+}
+
+// The probe runs as a worker runs: it resolves the daemon's role prompts' references, always, and
+// reads the providers Secret's keys as the worker's shim does, with or without a provider key —
+// under the postgres store goldenOptions configures, the probe's pod mounts that Secret for the
+// session database's URL key at least (mountsProviders). A pod that mounts none is told no
+// directory (TestTheProvidersDirectoryIsToldWhereThePodMountsIt). It also runs a role generation's
+// namespaces over its own volume at RoleProbeDir, as an issue pod's launcher runs every role.
+func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		keys map[string]string
+		want []string
+	}{
+		{"no provider keys", nil, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON, "--role-namespaces", RoleProbeDir}},
+		{"provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON, "--role-namespaces", RoleProbeDir}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			opts := goldenOptions()
+			opts.ProviderKeys = testCase.keys
+			r, err := configure(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, RoleReferences: testRoleReferences}, time.Now()).Spec.PodTemplate.Spec.Containers[0].Command
+			base := []string{opts.Tools.Legion, "probe-image", "--daemon-api-version", "3", "--plugin-root", legionPlugin, "--envoy-plugin-root", envoyPlugin, "--pod-safety"}
+			if want := append(base, testCase.want...); !slices.Equal(command, want) {
+				t.Errorf("the probe's command = %q, want %q", command, want)
+			}
+			pod := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, RoleReferences: testRoleReferences}, time.Now()).Spec.PodTemplate.Spec
+			if mount := mountHolding(pod.Containers[0], RoleProbeDir); mount == nil || mount.MountPath != RoleProbeDir || mount.Name != roleProbeVolume {
+				t.Errorf("the probe's %s is on mount %+v, want the %s volume's own", RoleProbeDir, mount, roleProbeVolume)
+			}
+			if !slices.ContainsFunc(pod.Volumes, func(v corev1.Volume) bool {
+				return v.Name == roleProbeVolume && v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumDefault
+			}) {
+				t.Errorf("the probe pod's volumes %+v hold no disk emptyDir %s", pod.Volumes, roleProbeVolume)
+			}
+		})
+	}
+}
+
+// The daemon's probe name is scoped to the project and the image, a Prober's to its run as well, and
+// each fits a DNS label however long the project is, the run's suffix taken from the project's share.
+func TestProbeNameIsTheProjectAndTheImage(t *testing.T) {
+	if got := probeName(testProject, testDigestHex, ""); got != probeSandboxName {
+		t.Errorf("probeName = %q, want %q", got, probeSandboxName)
+	}
+	if got, want := probeName(testProject, testDigestHex, "0a1b2c3d"), probeSandboxName+"-0a1b2c3d"; got != want {
+		t.Errorf("probeName with a run = %q, want %q", got, want)
+	}
+	long := probeName(strings.Repeat("widgets", 12), testDigestHex, "")
+	if len(long) > maxNameLength || !strings.HasPrefix(long, "legion-probe-widgetswidgets") || !strings.HasSuffix(long, "-1d10089a0000") {
+		t.Errorf("probeName of a long project = %q (%d characters), want a DNS label ending in the digest", long, len(long))
+	}
+	longRun := probeName(strings.Repeat("widgets", 12), testDigestHex, "0a1b2c3d")
+	if len(longRun) > maxNameLength || !strings.HasPrefix(longRun, "legion-probe-widgetswidgets") || !strings.HasSuffix(longRun, "-1d10089a0000-0a1b2c3d") {
+		t.Errorf("probeName of a long project with a run = %q (%d characters), want a DNS label ending in the digest and the run", longRun, len(longRun))
+	}
+}
+
+// The probe container is told the operator's variables as written, as a worker's container is,
+// although the kubelet expands `$(NAME)` and `$$` in a container's env values (kubeletLiteral).
+func TestTheProbeIsToldTheOperatorsVariablesAsWritten(t *testing.T) {
+	opts := goldenOptions()
+	literal := "/etc/legion-operator/$(HOME)/a$$b.yml"
+	opts.Pod.Env = map[string]string{"PI_CONFIG_FILES": literal}
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := envOf(r.probeManifest(probeSandboxName, ImageProbe{Contract: 3}, time.Now()).Spec.PodTemplate.Spec.Containers[0])
+	if seen := kubeExpand(env["PI_CONFIG_FILES"], env); seen != literal {
+		t.Errorf("the probe process is told PI_CONFIG_FILES = %q, want %q", seen, literal)
+	}
+}
+
+// The golden pins every byte of the probe Sandbox, and every field is one the v1.0.3 CRD declares
+// with that type: the lifecycle fields the worker Sandboxes never set included. Its container
+// carries what the daemon hands it, the probe's own reservation (probeReservation).
+func TestProbeManifestGoldenAndSchema(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := encodeProbe(r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: probeReservation(), RoleReferences: testRoleReferences}, time.Date(2026, 9, 23, 12, 5, 30, 0, time.UTC)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := wire(t, u.Object)
+	if found := schemaViolations(manifest, sandboxSchema(t), ""); len(found) > 0 {
+		t.Fatalf("the probe manifest has fields the CRD does not declare as sent:\n%s", strings.Join(found, "\n"))
+	}
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(manifest); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join("testdata", "golden", "probe.json")
+	if *updateGolden {
+		if err := os.WriteFile(path, buffer.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read golden (run `go test ./internal/runtime/sandbox/ -update`): %v", err)
+	}
+	if !bytes.Equal(buffer.Bytes(), want) {
+		t.Fatalf("%s is stale\n got: %s\nwant: %s", path, buffer.Bytes(), want)
+	}
+}
+
+// The probe pod carries Karpenter's `do-not-disrupt` annotation alone; probeManifest says why.
+func TestTheProbePodCarriesNoGKEExtendedDurationAnnotation(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{doNotDisruptAnnotation: "true"}
+	manifest := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: probeReservation(), RoleReferences: testRoleReferences}, time.Date(2026, 9, 23, 12, 5, 30, 0, time.UTC))
+	if got := manifest.Spec.PodTemplate.Metadata.Annotations; !maps.Equal(got, want) {
+		t.Errorf("probe pod annotations = %v, want exactly %v", got, want)
+	}
+}
+
+// slogTo is a logger that records everything the runtime says into w.
+func slogTo(w io.Writer) *slog.Logger { return slog.New(slog.NewTextHandler(w, nil)) }
+
+// TestLastBytesKeepsTheEndOfTheTail: the probe log tail is kept from its end, not its start, so a
+// log whose OK line falls after lines longer than the keep bound still ends on that line.
+func TestLastBytesKeepsTheEndOfTheTail(t *testing.T) {
+	const keep = 64 << 10
+	line := strings.Repeat("x", 1000)
+	var log strings.Builder
+	for range 99 {
+		log.WriteString(line)
+		log.WriteByte('\n')
+	}
+	ok := okLine(3)
+	log.WriteString(ok)
+	log.WriteByte('\n')
+	full := log.String()
+
+	t.Run("keeps the end, dropping the partial first line", func(t *testing.T) {
+		got, err := lastBytes(strings.NewReader(full), keep)
+		if err != nil {
+			t.Fatalf("lastBytes = %v", err)
+		}
+		if !strings.HasSuffix(got, ok+"\n") {
+			t.Fatalf("lastBytes result does not end with the OK line: %q", got)
+		}
+		if want := keep + len("…\n"); len(got) > want {
+			t.Fatalf("len(lastBytes result) = %d, want at most %d", len(got), want)
+		}
+		if !strings.HasPrefix(got, "…\n") {
+			t.Fatalf("lastBytes result does not start with …\\n: %q", got)
+		}
+		rest := strings.TrimPrefix(got, "…\n")
+		cut := len(full) - len(rest)
+		if cut == 0 || full[cut-1] != '\n' {
+			t.Fatalf("lastBytes kept a partial first line: cut at %d, preceding byte %q", cut, full[cut-1])
+		}
+	})
+
+	t.Run("a stream shorter than keep comes back unchanged", func(t *testing.T) {
+		short := "a short log\n"
+		got, err := lastBytes(strings.NewReader(short), keep)
+		if err != nil {
+			t.Fatalf("lastBytes = %v", err)
+		}
+		if got != short {
+			t.Fatalf("lastBytes = %q, want %q unchanged", got, short)
+		}
+	})
+
+	t.Run("a stream exactly keep long comes back unchanged", func(t *testing.T) {
+		exact := strings.Repeat("y", keep)
+		got, err := lastBytes(strings.NewReader(exact), keep)
+		if err != nil {
+			t.Fatalf("lastBytes = %v", err)
+		}
+		if got != exact {
+			t.Fatalf("lastBytes of an exactly-keep stream was not returned unchanged (len %d, want %d)", len(got), keep)
+		}
+	})
+}
+
+// tailBytes holds a log's newest keep bytes and no more, however long the log: a log of a hundred
+// times keep is read to its end, its last keep bytes come back with the cut reported, and the
+// buffer never grew past the 2×keep it started with, so a log's size never decides what the daemon
+// holds (readLog's memory, which io.ReadAll let a 2000-line tail grow to its whole size).
+func TestTailBytesHoldsOnlyTheNewestBytes(t *testing.T) {
+	const keep = 4 << 10
+	var log strings.Builder
+	for i := 0; log.Len() < 100*keep; i++ {
+		fmt.Fprintf(&log, "line %d %s\n", i, strings.Repeat("x", i%300))
+	}
+	full := log.String()
+	counted := &countingReader{r: strings.NewReader(full)}
+	got, cut, err := tailBytes(counted, keep)
+	if err != nil {
+		t.Fatalf("tailBytes = %v", err)
+	}
+	if counted.n != len(full) {
+		t.Fatalf("tailBytes read %d bytes of %d, want the whole log", counted.n, len(full))
+	}
+	if !cut || string(got) != full[len(full)-keep:] {
+		t.Fatalf("tailBytes = %d bytes, cut %v; want the log's last %d bytes and the cut reported", len(got), cut, keep)
+	}
+	if cap(got) > 2*keep {
+		t.Fatalf("tailBytes' buffer grew to %d bytes reading a %d-byte log, want at most %d", cap(got), len(full), 2*keep)
+	}
+	short := "a short log\n"
+	if got, cut, err := tailBytes(strings.NewReader(short), keep); err != nil || cut || string(got) != short {
+		t.Fatalf("tailBytes of a short log = %q, cut %v, %v; want it whole and no cut", got, cut, err)
+	}
+}
+
+// countingReader counts the bytes read through it.
+type countingReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
+}
+
+// A probe pod's log a hundred lines of a kilobyte, the OK line last, still passes: probeLog keeps
+// its tail from the end, so the OK line is read however much came before it.
+func TestProbeImagePassesOnALongLogWithTheOKLineLast(t *testing.T) {
+	g := newProbeRig(t, nil)
+	line := strings.Repeat("x", 1000)
+	var log strings.Builder
+	for range 99 {
+		log.WriteString(line)
+		log.WriteByte('\n')
+	}
+	log.WriteString(okLine(3))
+	log.WriteByte('\n')
+	g.succeeds(log.String())
+
+	if _, err := g.r.ProbeImage(g.ctx, probeOptions(t)); err != nil {
+		t.Fatalf("ProbeImage = %v, want a pass: the OK line was there to read", err)
+	}
+}
+
+// TestRegistryHasNoImage accepts only containerd's whole manifest-404 grammar, naming one
+// reference throughout, in the waiting state and in the kubelet's Failed events for two pulls or
+// more, and leaves the kubelet's pull throttle, any other wording and a single pull's answer to the
+// retry (pkg/kubelet/images/image_manager.go, EnsureImageExists).
+func TestRegistryHasNoImage(t *testing.T) {
+	manifestNotFound := func(image string) string {
+		return `rpc error: code = NotFound desc = failed to pull and unpack image "` + image +
+			`": failed to resolve reference "` + image + `": ` + image + `: not found`
+	}
+	const portImage = "registry.example:5000/legion-worker@sha256:" + testDigestHex
+	failed := func(count int32, message string) corev1.Event {
+		return corev1.Event{Reason: "Failed", Type: corev1.EventTypeWarning, Count: count, Message: `Failed to pull image "` + testImage + `": ` + message}
+	}
+	twice := []corev1.Event{failed(2, manifestNotFound(testImage))}
+	for _, testCase := range []struct {
+		name, reason, message string
+		events                []corev1.Event
+		want                  bool
+	}{
+		{"a missing manifest, met on two pulls", "ErrImagePull", manifestNotFound(testImage), twice, true},
+		{"a missing manifest, met on two pulls recorded apart", "ErrImagePull", manifestNotFound(testImage),
+			[]corev1.Event{failed(1, manifestNotFound(testImage)), failed(1, manifestNotFound(testImage))}, true},
+		{"a missing manifest, met on two pulls of an event series", "ErrImagePull", manifestNotFound(testImage),
+			[]corev1.Event{{Reason: "Failed", Count: 1, Series: &corev1.EventSeries{Count: 2}, Message: `Failed to pull image "` + testImage + `": ` + manifestNotFound(testImage)}}, true},
+		{"a missing manifest, met on one pull", "ErrImagePull", manifestNotFound(testImage),
+			[]corev1.Event{failed(1, manifestNotFound(testImage))}, false},
+		{"a missing manifest, then another failure", "ErrImagePull", manifestNotFound(testImage),
+			[]corev1.Event{failed(1, manifestNotFound(testImage)), failed(1, "rpc error: code = Unknown desc = connection reset by peer")}, false},
+		{"a missing manifest, met on no pull", "ErrImagePull", manifestNotFound(testImage), nil, false},
+		{"a missing manifest with text after it", "ErrImagePull", manifestNotFound(testImage) + "\n", twice, false},
+		{"a missing manifest whose reference names a registry port", "ErrImagePull", manifestNotFound(portImage),
+			[]corev1.Event{failed(2, manifestNotFound(portImage))}, true},
+		{"a NotFound whose terminal reference differs", "ErrImagePull",
+			`rpc error: code = NotFound desc = failed to pull and unpack image "` + testImage +
+				`": failed to resolve reference "` + testImage + `": ` + portImage + `: not found`, twice, false},
+		{"a NotFound resolving another reference", "ErrImagePull",
+			`rpc error: code = NotFound desc = failed to pull and unpack image "` + testImage +
+				`": failed to resolve reference "` + portImage + `": ` + portImage + `: not found`, twice, false},
+		{"a NotFound whose resolved reference alone differs", "ErrImagePull",
+			`rpc error: code = NotFound desc = failed to pull and unpack image "` + testImage +
+				`": failed to resolve reference "` + portImage + `": ` + testImage + `: not found`, twice, false},
+		{"two Failed events naming mismatched references", "ErrImagePull", manifestNotFound(testImage),
+			[]corev1.Event{failed(2, `rpc error: code = NotFound desc = failed to pull and unpack image "`+testImage+
+				`": failed to resolve reference "`+testImage+`": `+portImage+`: not found`)}, false},
+		{"a missing manifest in the kubelet's back-off message", "ImagePullBackOff",
+			`Back-off pulling image "` + testImage + `": ErrImagePull: ` + manifestNotFound(testImage), twice, true},
+		// A pull through containerd's transfer service (2.1 and later, configured as stock),
+		// measured on 2.3.4: the resolution wrapper names no reference.
+		{"a missing manifest, pulled through the transfer service", "ErrImagePull",
+			`rpc error: code = NotFound desc = failed to pull and unpack image "` + testImage + `": failed to resolve image: ` + testImage + `: not found`,
+			[]corev1.Event{failed(2, `rpc error: code = NotFound desc = failed to pull and unpack image "`+testImage+`": failed to resolve image: `+testImage+`: not found`)}, true},
+		{"a transfer-service NotFound naming another reference", "ErrImagePull",
+			`rpc error: code = NotFound desc = failed to pull and unpack image "` + testImage + `": failed to resolve image: ` + portImage + `: not found`,
+			[]corev1.Event{failed(2, `rpc error: code = NotFound desc = failed to pull and unpack image "`+testImage+`": failed to resolve image: `+portImage+`: not found`)}, false},
+		{"a transfer-service node with no host to resolve on", "ErrImagePull",
+			`rpc error: code = NotFound desc = failed to pull and unpack image "` + testImage + `": failed to resolve image: no resolve hosts: not found`,
+			[]corev1.Event{failed(2, `rpc error: code = NotFound desc = failed to pull and unpack image "`+testImage+`": failed to resolve image: no resolve hosts: not found`)}, false},
+		{"a leading whitespace prefix", "ErrImagePull", " " + manifestNotFound(testImage), twice, false},
+		{"the kubelet's image-pull throttle", "ErrImagePull", "pull QPS exceeded", twice, false},
+		{"a throttle prefix before an old manifest error", "ImagePullBackOff",
+			"pull QPS exceeded: " + manifestNotFound(testImage), twice, false},
+		{"a not-found message on a container that is not pulling", "ContainerCreating", manifestNotFound(testImage), twice, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := registryHasNoImage(&corev1.ContainerStateWaiting{
+				Reason: testCase.reason, Message: testCase.message,
+			}, testCase.events)
+			if got != testCase.want {
+				t.Errorf("registryHasNoImage(%q, %q, %d events) = %t, want %t", testCase.reason, testCase.message, len(testCase.events), got, testCase.want)
+			}
+		})
+	}
+}

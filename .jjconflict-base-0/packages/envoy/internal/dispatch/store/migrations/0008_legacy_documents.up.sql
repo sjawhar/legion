@@ -1,0 +1,5 @@
+-- 0008_legacy_documents.up.sql
+-- Version 8 was recorded from Go by the one-time conversion of pre-Proof
+-- Y.Text document rooms and offset anchors into Proof trees and mark anchors.
+-- Every deployed database has run it, so the conversion is gone; this file
+-- keeps the version sequence contiguous for a fresh database.

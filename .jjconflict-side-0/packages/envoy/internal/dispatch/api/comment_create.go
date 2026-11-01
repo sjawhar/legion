@@ -1,0 +1,810 @@
+package api
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/asks"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+)
+
+type commentInput struct {
+	Body    string             `json:"body"`
+	Anchor  *model.AnchorInput `json:"anchor"`
+	ReplyTo *string            `json:"reply_to"`
+	// ReplyToBlock is the id of the block of comment ReplyTo the reply answers ("b2"), checked
+	// against that comment before reply_to climbs to the thread's head.
+	ReplyToBlock *string `json:"reply_to_block"`
+	AskID        *string `json:"ask_id"`
+	Mentions     []struct {
+		Target string `json:"target"`
+	} `json:"mentions"`
+	Delivery *string `json:"delivery"`
+	// Turn is who holds the turn after this ask reply: "agent" for a progress note
+	// that keeps the ask waiting on its asker, "human" (the default for a session
+	// author) when the human needs to act. Ignored for a human author, whose reply
+	// always hands the turn to the agent. Rejected on a comment that is not an ask reply.
+	Turn       *string `json:"turn"`
+	Suggestion *struct {
+		ReplaceWith string `json:"replace_with"`
+	} `json:"suggestion"`
+	Actor *model.Actor `json:"actor"`
+}
+
+// askReplyTurn is who holds the turn once an ask reply by actor is posted: a human's
+// reply always hands it to the agent; a session's reply hands it to the human unless
+// the request marks it a progress note (turn "agent").
+func askReplyTurn(actor model.Actor, requested *string) string {
+	if actor.Kind == "user" {
+		return "agent"
+	}
+	if requested != nil {
+		return *requested
+	}
+	return "human"
+}
+
+func validateCommentMentions(input commentInput) (string, []string, error) {
+	if len(input.Mentions) == 0 {
+		if input.Delivery != nil {
+			return "", nil, errorf(http.StatusBadRequest, "MENTION_INPUT", "delivery requires mentions")
+		}
+		return "", nil, nil
+	}
+	if len(input.Mentions) > 10 {
+		return "", nil, errorf(http.StatusBadRequest, "MENTION_INPUT", "mentions allow at most 10 targets")
+	}
+	delivery := "steer"
+	if input.Delivery != nil {
+		delivery = *input.Delivery
+		if !validDelivery(delivery) {
+			return "", nil, errorf(http.StatusBadRequest, "MENTION_INPUT", "delivery must be one of btw, aside, steer")
+		}
+	}
+	targets := make([]string, 0, len(input.Mentions))
+	seen := make(map[string]struct{}, len(input.Mentions))
+	for _, mention := range input.Mentions {
+		if _, err := model.ParseRoute(mention.Target); err != nil {
+			return "", nil, errorf(http.StatusBadRequest, "MENTION_INPUT", "mention target must be role:<name> or session:<id>")
+		}
+		if _, duplicate := seen[mention.Target]; duplicate {
+			return "", nil, errorf(http.StatusBadRequest, "MENTION_INPUT", "mentions must not repeat a target")
+		}
+		seen[mention.Target] = struct{}{}
+		targets = append(targets, mention.Target)
+	}
+	return delivery, targets, nil
+}
+
+type commentThreadTarget struct {
+	ReplyTo     *string
+	AskID       *string
+	ReplyRoot   *model.Comment
+	AskQuestion string
+	AskState    string
+	// AskMoved says the ask is an approval request a version moved past the one its agent last
+	// handed to the human (approvalMoved): it waits on its agent whatever a reply's turn says.
+	AskMoved bool
+	// ReplyBlock is the block of the comment reply_to named that the reply answers, nil when it
+	// names none: that comment's, not the thread head's that ReplyTo then holds.
+	ReplyBlock *namedBlock
+}
+
+// openAsk says the thread hangs under an open ask, the only kind with a turn.
+func (t commentThreadTarget) openAsk() bool {
+	return t.AskID != nil && t.AskState == "open"
+}
+
+// replyTurn is who holds the turn once a reply into this thread is posted. Only an open ask
+// has a turn to hold: a reply under an answered or resolved ask records none, so the column
+// always means "who the ask waits on after this".
+func (t commentThreadTarget) replyTurn(actor model.Actor, requested *string) *string {
+	if !t.openAsk() {
+		return nil
+	}
+	return new(askReplyTurn(actor, requested))
+}
+
+// waitingOnAfter is whom the thread's open ask waits on once a reply recording turn (replyTurn's)
+// is its newest comment; "" when the thread is not an open ask's. It is waitingOnExpression for that
+// row. The comment write holds the owner lock that every version write, hand-back and comment insert
+// takes first, so the ask describeAsk read is the one the reply commits beside, and the reply is the
+// thread's newest (migration 0065): a moved approval request waits on its agent, and otherwise the
+// reply's own turn decides, since a hand-back can only have recorded an older reply.
+func (t commentThreadTarget) waitingOnAfter(turn *string) string {
+	switch {
+	case !t.openAsk():
+		return ""
+	case t.AskMoved:
+		return "agent"
+	default:
+		return *turn
+	}
+}
+
+// eventThread is what a comment event says about the thread the comment joined, given the
+// derived ask turn after this comment is its newest reply.
+func (t commentThreadTarget) eventThread(waitingOn string) commentEventThread {
+	thread := commentEventThread{AskQuestion: t.AskQuestion, AskState: t.AskState, AskWaitingOn: waitingOn}
+	if t.ReplyTo != nil {
+		thread.ThreadRootID = *t.ReplyTo
+	}
+	return thread
+}
+
+func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
+	s.createCommentFor(w, r, issueOwner(r.PathValue("key")))
+}
+
+// commentRecovery is the recovery point a keyed comment commits with itself
+// (bindRequestKeyRecovery): the comment, whose mentions deliver it.
+type commentRecovery struct {
+	CommentID string `json:"comment_id"`
+}
+
+// replayComment answers a repeat of a keyed comment that committed: the comment with its mentions
+// and deliveries as they stand, once every mention it still owes has been delivered, in the first
+// answer's shape - its advice and ask_waiting_on kept - under the comment's own 201. A mention owes
+// its delivery when its process died after the comment committed and before the mention's one
+// attempt was sent: that attempt is still pending, and its claim, if any, has lapsed. It is resumed
+// under its own number, so the listener drops a frame that did land, and bound to it, as the
+// comment's own first delivery is (deliverResolvedCommentMention, attempt 1), so an attempt a
+// live sender holds is left to it and no second attempt is opened. A mention someone retried from
+// its card has more than one attempt, and owes nothing here.
+func (s *server) replayComment(w http.ResponseWriter, r *http.Request, point commentRecovery, stored []byte) {
+	ctx, pool := r.Context(), s.deps.Store.Pool
+	comment, err := s.loadComment(ctx, pool, point.CommentID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	owed, err := s.owedCommentMentions(ctx, comment.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if len(owed) > 0 {
+		created, err := s.loadCommentCreatedEvent(ctx, pool, comment.ID)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		// Detached from the request, as the comment's own deliveries are: a client that gives up
+		// on the repeat must not strand the mention it started.
+		sending := context.WithoutCancel(ctx)
+		for _, mention := range owed {
+			if _, err := s.deliverResolvedCommentMention(sending, comment, created, mention, comment.Author, 1); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+		}
+	}
+	hydrated, err := s.hydrateCommentSideTables(ctx, pool, []model.Comment{comment})
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.writeRefreshed(w, stored, hydrated[0])
+}
+
+// owedCommentMentions is each mention of the comment whose one attempt is pending with no live
+// claim (claimLapsed), in the mode it was opened with.
+func (s *server) owedCommentMentions(ctx context.Context, commentID string) ([]ResolvedMention, error) {
+	rows, err := s.deps.Store.Pool.Query(ctx, `
+		select target, min(delivery), count(*), coalesce(bool_and(state = 'pending' and `+claimLapsed+`), false)
+		from comment_deliveries where comment_id = $1
+		group by target
+		order by target
+	`, commentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var owed []ResolvedMention
+	for rows.Next() {
+		var target, delivery string
+		var attempts int
+		var stranded bool
+		if err := rows.Scan(&target, &delivery, &attempts, &stranded); err != nil {
+			return nil, err
+		}
+		if attempts == 1 && stranded {
+			owed = append(owed, ResolvedMention{Target: target, Delivery: delivery})
+		}
+	}
+	return owed, rows.Err()
+}
+
+func (s *server) normalizeCommentThreadTarget(
+	ctx context.Context,
+	tx pgx.Tx,
+	ledger *docs.Ledger,
+	owner owner,
+	input commentInput,
+) (commentThreadTarget, error) {
+	if input.ReplyTo != nil && input.AskID != nil {
+		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to and ask_id cannot both be set")
+	}
+	if input.Anchor != nil && (input.ReplyTo != nil || input.AskID != nil) {
+		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "replies cannot carry anchors")
+	}
+	if input.Suggestion != nil && (input.ReplyTo != nil || input.AskID != nil) {
+		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "replies cannot carry suggestions")
+	}
+	if input.ReplyToBlock != nil && input.AskID != nil {
+		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", replyBlockInAskThread)
+	}
+	if input.ReplyToBlock != nil && input.ReplyTo == nil {
+		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to_block requires reply_to, the comment whose block it names")
+	}
+	if input.ReplyTo != nil {
+		if strings.TrimSpace(*input.ReplyTo) == "" {
+			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must be a full comment id")
+		}
+		if _, err := uuid.Parse(*input.ReplyTo); err != nil {
+			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must be a full comment id")
+		}
+		parent, err := s.loadOwnedComment(ctx, tx, owner, *input.ReplyTo)
+		if err != nil {
+			return commentThreadTarget{}, err
+		}
+		target, err := s.threadHeadOf(ctx, tx, owner, parent)
+		if err != nil || input.ReplyToBlock == nil {
+			return target, err
+		}
+		if target.AskID != nil {
+			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", replyBlockInAskThread)
+		}
+		// The block is the named comment's, read under the owner's lock the climb took.
+		target.ReplyBlock, err = s.replyBlockOf(ctx, tx, ledger, refs.ItemComment, parent.ID, *input.ReplyToBlock, "reply_to_block", "INVALID_COMMENT")
+		if err != nil {
+			return commentThreadTarget{}, err
+		}
+		return target, nil
+	}
+	if input.AskID == nil {
+		return commentThreadTarget{}, nil
+	}
+	if strings.TrimSpace(*input.AskID) == "" {
+		return commentThreadTarget{}, s.askIDInputForOwner(ctx, tx, owner)
+	}
+	if _, err := uuid.Parse(*input.AskID); err != nil {
+		return commentThreadTarget{}, s.askIDInputForOwner(ctx, tx, owner)
+	}
+	return s.describeAsk(ctx, tx, owner, input.AskID)
+}
+
+// threadHeadOf climbs reply_to from a comment read under the owner's lock to the head of its
+// thread: the ask the thread hangs under, or the thread's root comment when it hangs under no ask.
+// The walk is bounded like every other parent walk (the outbox's thread walk, the issue ancestor
+// walk): comments.reply_to has no acyclicity constraint, so a cyclic chain answers 400 instead of
+// holding the transaction open.
+func (s *server) threadHeadOf(
+	ctx context.Context, tx pgx.Tx, owner owner, from model.Comment,
+) (commentThreadTarget, error) {
+	root := from
+	for depth := 1; ; depth++ {
+		if root.AskID != nil {
+			return s.describeAsk(ctx, tx, owner, root.AskID)
+		}
+		if root.ReplyTo == nil {
+			return commentThreadTarget{ReplyTo: &root.ID, ReplyRoot: &root}, nil
+		}
+		if depth >= parentDepthCap {
+			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must identify a comment on this owner")
+		}
+		next, err := s.loadOwnedComment(ctx, tx, owner, *root.ReplyTo)
+		if err != nil {
+			return commentThreadTarget{}, err
+		}
+		root = next
+	}
+}
+
+// describeAsk reads the ask on this owner that a reply joins, as the thread it heads, refusing one
+// that belongs to another.
+func (s *server) describeAsk(
+	ctx context.Context, tx pgx.Tx, owner owner, askID *string,
+) (commentThreadTarget, error) {
+	target := commentThreadTarget{AskID: askID}
+	err := tx.QueryRow(ctx, `
+		select a.question, a.state, `+approvalMoved+`
+		from asks a
+		where a.id = $1
+		  and a.issue_key is not distinct from $2
+		  and a.artifact_id is not distinct from $3
+	`, *askID, owner.IssueKey, owner.ArtifactID).Scan(&target.AskQuestion, &target.AskState, &target.AskMoved)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "ask_id must identify an ask on this owner")
+	}
+	return target, err
+}
+
+// commentRoute is the owner's delivery route as the Envoy listener resolved it before the
+// comment's transaction opened: the route string the pre-transaction read saw, and the live
+// session it names. checked is false where the write consults no route at all - a project
+// document, a comment with no mentions, an owner that does not exist - and the locked row is
+// then not compared against it.
+type commentRoute struct {
+	checked   bool
+	route     string
+	sessionID *string
+}
+
+// commentWrite is the open comment transaction and what its locked owner said: the owner's
+// lifecycle status (nil for a project document) and the route resolution that row agreed with.
+type commentWrite struct {
+	tx     pgx.Tx
+	status *string
+	route  commentRoute
+}
+
+// resolveCommentRoute reads the owner's delivery route and resolves it to a live session with
+// no transaction open, so the listener call costs no pooled connection. A route the comment
+// already mentions is resolved by that mention, so the ordinary mention comment makes no
+// second listener call at all.
+func (s *server) resolveCommentRoute(
+	ctx context.Context, owner owner, mentions []ResolvedMention,
+) (commentRoute, error) {
+	if owner.IssueKey == nil || len(mentions) == 0 {
+		return commentRoute{}, nil
+	}
+	if s.deps.Store == nil || s.deps.Store.Pool == nil {
+		return commentRoute{}, errorf(http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database unavailable")
+	}
+	var stored *string
+	err := s.deps.Store.Pool.QueryRow(ctx, `select route from issues where key = $1`, *owner.IssueKey).Scan(&stored)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The transaction answers for an owner that does not exist; there is nothing to resolve.
+		return commentRoute{}, nil
+	}
+	if err != nil {
+		return commentRoute{}, err
+	}
+	route := commentRoute{checked: true}
+	if stored != nil {
+		route.route = *stored
+	}
+	if route.route == "" {
+		return route, nil
+	}
+	for index := range mentions {
+		if mentions[index].Target == route.route {
+			route.sessionID = mentions[index].SessionID
+			return route, nil
+		}
+	}
+	route.sessionID = s.resolveMentionTargets(ctx, []string{route.route}, "steer")[0].SessionID
+	return route, nil
+}
+
+// beginCommentWrite opens the comment's transaction, takes its owner's lock, and verifies that the
+// route the listener resolved is still the one the issue row carries, read under that lock. A
+// route that moved in between leaves the resolution unusable, so the write is resolved once more
+// rather than suppressing the wrong session's fan-out.
+func (s *server) beginCommentWrite(ctx context.Context, owner owner, route commentRoute) (commentWrite, error) {
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return commentWrite{}, err
+	}
+	// The transaction is the caller's on success only, so every refusal unwinds here: a later
+	// check that forgot its own rollback would hold a pooled connection for the process's life.
+	status, err := s.lockCommentOwner(ctx, tx, owner, route)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return commentWrite{}, err
+	}
+	return commentWrite{tx: tx, status: status, route: route}, nil
+}
+
+// lockCommentOwner takes the owner's lock inside an open comment transaction and returns its
+// lifecycle status, refusing with errStaleResolution when the locked issue no longer carries the
+// route the resolution was taken for.
+func (s *server) lockCommentOwner(ctx context.Context, tx pgx.Tx, owner owner, route commentRoute) (*string, error) {
+	status, err := s.requireOpenOwnerStatus(ctx, tx, owner)
+	if err != nil {
+		return nil, err
+	}
+	if !route.checked {
+		return status, nil
+	}
+	var stored *string
+	if err := tx.QueryRow(ctx, `select route from issues where key = $1`, *owner.IssueKey).Scan(&stored); err != nil {
+		return nil, err
+	}
+	locked := ""
+	if stored != nil {
+		locked = *stored
+	}
+	if locked != route.route {
+		return nil, errStaleResolution
+	}
+	return status, nil
+}
+
+func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner owner) {
+	var input commentInput
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if input.Suggestion != nil {
+		input.Suggestion.ReplaceWith = pmdoc.LineFeeds(input.Suggestion.ReplaceWith)
+	}
+	actor, ok := s.requireActor(w, r, input.Actor)
+	if !ok {
+		return
+	}
+	if input.Suggestion == nil && strings.TrimSpace(input.Body) == "" {
+		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "comment body is required")
+		return
+	}
+	if length := len16(input.Body); length > contracts.DispatchBodyMax {
+		capExceeded(w, "body", length, contracts.DispatchBodyMax)
+		return
+	}
+	delivery, mentionTargets, err := validateCommentMentions(input)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+
+	// Every Envoy listener lookup this comment needs happens here, with no transaction and no
+	// pooled connection held: each mention, and the issue's delivery route when the comment
+	// mentions anyone. beginCommentWrite re-reads that route under the owner's lock and
+	// refuses a resolution the locked row no longer agrees with - and refuses, under that same
+	// lock, an owner this pooled read already found missing or closed, which is why a comment
+	// the write cannot accept pays for no lookup here.
+	if len(mentionTargets) > 0 {
+		if err := s.refuseClosedOwnerBeforeResolving(r.Context(), owner); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	resolvedMentions := s.resolveMentionTargets(r.Context(), mentionTargets, delivery)
+	mentions := make([]model.Mention, 0, len(resolvedMentions))
+	mentionedSessions := make(map[string]struct{}, len(resolvedMentions))
+	for _, resolved := range resolvedMentions {
+		mentions = append(mentions, model.Mention{
+			Target: resolved.Target, Delivery: resolved.Delivery, SessionID: resolved.SessionID,
+		})
+		if resolved.SessionID != nil {
+			mentionedSessions[*resolved.SessionID] = struct{}{}
+		}
+	}
+	start, err := resolveThenLock(r.Context(),
+		func(ctx context.Context) (commentRoute, error) {
+			return s.resolveCommentRoute(ctx, owner, resolvedMentions)
+		},
+		func(ctx context.Context, resolved commentRoute) (commentWrite, error) {
+			return s.beginCommentWrite(ctx, owner, resolved)
+		},
+		errorf(http.StatusConflict, "ROUTE_CHANGED",
+			"the issue's delivery route changed while this comment was being written; post it again"),
+	)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	tx, status, route := start.tx, start.status, start.route
+	defer tx.Rollback(r.Context())
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
+	threadTarget, err := s.normalizeCommentThreadTarget(r.Context(), tx, ledger, owner, input)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if input.Turn != nil {
+		if threadTarget.AskID == nil {
+			writeError(w, "TURN_REQUIRES_ASK", http.StatusBadRequest, "turn is only valid on a reply to an ask")
+			return
+		}
+		if *input.Turn != "human" && *input.Turn != "agent" {
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "turn must be human or agent")
+			return
+		}
+	}
+	input.ReplyTo = threadTarget.ReplyTo
+	input.AskID = threadTarget.AskID
+	replyRoot := threadTarget.ReplyRoot
+	suppressRoute := false
+	suppressedRoute := ""
+	var suppressedRouteSessionID *string
+	if route.sessionID != nil {
+		if _, mentioned := mentionedSessions[*route.sessionID]; mentioned {
+			suppressRoute = true
+			suppressedRoute = route.route
+			suppressedRouteSessionID = route.sessionID
+		}
+	}
+	turn := threadTarget.replyTurn(actor, input.Turn)
+	var rowID string
+	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	markKind := docs.MarkComment
+	if input.Suggestion != nil {
+		markKind = docs.MarkSuggestion
+	}
+	// Everything up to Commit is the read phase (Docs.Join): the document operations and this
+	// route queue their writes on the ledger, in the order made, and Commit sends them as one
+	// batch. Write advice is read here, before the first write is queued, so its queries hold no
+	// transaction id, and counts the comment.created this comment appends (writeAdvice).
+	var advice *writeAdvice
+	if owner.IssueKey != nil && status != nil {
+		advice = s.writeAdvice(
+			r.Context(), tx, "POST /api/v1/issues/{key}/comments", *owner.IssueKey, actor, adviceAsks{}, *status, "comment.created",
+		)
+	}
+	anchor, artifactName, snapshot, err := s.resolveAnchor(documentCtx, tx, owner, input.Anchor, markKind, rowID, actor)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+
+	projection := model.Comment{Anchor: anchor}
+	if input.Suggestion != nil {
+		projection.Suggestion = &model.Suggestion{ReplaceWith: input.Suggestion.ReplaceWith}
+	}
+	projectionKind, err := s.commentProjectionKind(documentCtx, projection)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	author, err := encodeJSON(actor)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	var anchorJSON any
+	if anchor != nil {
+		anchorJSON, err = encodeJSON(anchor)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	var suggestion *model.Suggestion
+	var suggestionJSON any
+	if input.Suggestion != nil {
+		suggestion = &model.Suggestion{ReplaceWith: input.Suggestion.ReplaceWith}
+		suggestionJSON, err = encodeJSON(suggestion)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	// The row's created_at is the clock at the insert (migration 0065's default), which orders an
+	// owner's comments as they commit because every comment insert holds the owner's lock. The
+	// insert is queued, so the clock is read here, at the insert's place and under that lock,
+	// which still orders it after every comment committed before this transaction took the lock
+	// and before every comment committed after it; it is written explicitly, so the projection
+	// below, made before the insert runs, carries the time the row will hold.
+	var comment model.Comment
+	if err := tx.QueryRow(r.Context(), `select clock_timestamp()`).Scan(&comment.CreatedAt); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := queueExec(ledger, `
+		insert into comments (id, issue_key, artifact_id, author, body, anchor, reply_to, ask_id, turn, suggestion, replies_to_block, created_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, turn, suggestionJSON,
+		threadTarget.ReplyBlock.nodeID(), comment.CreatedAt); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// The recovery point in the comment's own transaction, queued right after its insert: a repeat
+	// under the key is answered with this comment, its owed mentions delivered (replayComment),
+	// however this request ends; a repeat that took the key over meanwhile refuses it, and the
+	// comment rolls back.
+	if err := ledger.Queue(func(b *store.WriteBatch) error {
+		return queueRequestKeyRecovery(r.Context(), b, commentRecovery{CommentID: rowID})
+	}); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	waitingOn := threadTarget.waitingOnAfter(turn)
+	if input.AskID != nil {
+		askID := *input.AskID
+		if err := ledger.Queue(func(b *store.WriteBatch) error {
+			asks.QueueFollowAuthor(b, askID, actor)
+			return nil
+		}); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	comment.ID = rowID
+	comment.IssueKey = owner.IssueKey
+	comment.ArtifactID = owner.ArtifactID
+	comment.Author = actor
+	comment.Body = input.Body
+	comment.Anchor = anchor
+	comment.ReplyTo = input.ReplyTo
+	comment.AskID = input.AskID
+	comment.Turn = turn
+	comment.Suggestion = suggestion
+	comment.Mentions = mentions
+	comment.Deliveries = []model.CommentDelivery{}
+	comment.RepliesToBlock = threadTarget.ReplyBlock.nodeID()
+	if threadTarget.ReplyBlock != nil {
+		// The comment's insert is queued, so the read that gives a stored reply its block finds
+		// nothing yet: the block read in the read phase is carried here instead.
+		issueKey, project, slug, err := s.ownerAddress(r.Context(), tx, owner)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		comment.ReplyBlock = threadTarget.ReplyBlock.replyBlock(refs.ItemComment, issueKey, project, slug)
+	}
+	if comment.Anchor != nil {
+		s.registerCommentAnchor(ledger, comment, actor, false)
+		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, nil, projectionKind), actor); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	var reopenedRoot *model.Comment
+	var reopenedArtifactName string
+	if replyRoot != nil {
+		root := *replyRoot
+		// A reply reopens a resolved root, except a decided suggestion's: accepting or rejecting
+		// it is final, so the reply joins the thread and leaves who decided it, and when, as they
+		// were.
+		decided := root.Suggestion != nil && root.Suggestion.Accepted != nil
+		if root.Resolved && !decided {
+			if err := queueExec(ledger, `
+				update comments
+				set resolved = false, resolved_by = null, resolved_at = null
+				where id = $1
+			`, root.ID); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			root.Resolved = false
+			root.ResolvedBy = nil
+			root.ResolvedAt = nil
+			reopenedRoot = &root
+			s.registerCommentAnchor(ledger, root, actor, true)
+			reopenedArtifactName, err = s.commentArtifactName(r.Context(), tx, root)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+		}
+		if root.Anchor != nil {
+			replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", root.ID)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			// The chain the table holds lacks this reply, whose insert is queued.
+			replies = withReply(replies, comment)
+			// A decided or orphaned suggestion's mark is gone, so it has no projection kind to
+			// carry; the reply still lands and ProjectMark writes only the marks map, as a reopen
+			// or a resolve of that suggestion does.
+			rootProjectionKind := ""
+			kind, kindErr := s.commentProjectionKind(documentCtx, root)
+			if kindErr != nil && !errors.Is(kindErr, docs.ErrAnchorMissing) {
+				s.writeHandlerError(w, kindErr)
+				return
+			}
+			if kindErr == nil {
+				rootProjectionKind = kind
+			}
+			if err := s.deps.Docs.ProjectMark(documentCtx, root.Anchor.ArtifactID, root.Anchor.MarkID, commentMarkRecord(root, replies, rootProjectionKind), actor); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+		}
+	}
+	for _, mention := range resolvedMentions {
+		if err := queueExec(ledger, `
+			insert into comment_mentions (comment_id, target, delivery, resolved_session_id)
+			values ($1, $2, $3, $4)
+		`, comment.ID, mention.Target, mention.Delivery, mention.SessionID); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		resolveError := (*string)(nil)
+		if mention.ResolveError != "" {
+			resolveError = &mention.ResolveError
+		}
+		if err := queueExec(ledger, `
+			insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, resolve_error, state)
+			values ($1, $2, 1, $3, $4, $5, 'pending')
+		`, comment.ID, mention.Target, mention.Delivery, mention.SessionID, resolveError); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	referenceChanges, err := s.queueItemReferences(r.Context(), tx, ledger, refs.ItemComment, comment.ID, comment.Body, comment.CreatedAt, true)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// The comment's thread_logins are read by its event's insert, after the comment's own insert
+	// and the user_threads trigger it fires.
+	logins := events.ThreadLoginsOf(commentThread(comment))
+	events := []*model.Event{}
+	if snapshot != nil {
+		snapshotEvent, err := s.commitArtifactVersionEvent(ledger, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		events = append(events, snapshotEvent)
+	}
+	if reopenedRoot != nil {
+		payload, err := s.commentEventPayload(r.Context(), tx, reopenedRoot, reopenedArtifactName, commentEventThread{}, model.ReferenceChanges{})
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		event, err := s.queueEvent(ledger, owner.event(
+			"comment.reopened",
+			actor,
+			payload,
+		))
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		events = append(events, event)
+	}
+	payload, err := s.commentEventPayload(
+		r.Context(), tx, &comment, artifactName, threadTarget.eventThread(waitingOn), referenceChanges,
+	)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	payload.SuppressRoute = suppressRoute
+	payload.SuppressedRoute = suppressedRoute
+	payload.SuppressedRouteSessionID = suppressedRouteSessionID
+	event, err := s.queueLoggedEvent(ledger, owner.event(
+		"comment.created",
+		actor,
+		payload,
+	), logins, "comment", comment.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	events = append(events, event)
+	if err := ledger.Commit(r.Context()); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.publish(appendedEvents(events...)...)
+	// Each mention is delivered before the comment is answered, as a send to one session is, on a
+	// context the client cannot cancel: a page that gives up on the comment, or retries it under
+	// its key, never cuts off a frame in flight or strands its attempt pending. A keyed request's
+	// handler runs detached already (keyedWrites); an unkeyed one's mentions are detached here, and
+	// http.Server.Shutdown waits for the handler. A process that dies mid-delivery leaves the
+	// attempt pending, and the delivery sweep resumes it once its claim lapses
+	// (resumeOwedDeliveries).
+	sending := context.WithoutCancel(r.Context())
+	for _, mention := range resolvedMentions {
+		attempt, err := s.deliverResolvedCommentMention(sending, comment, *event, mention, actor, 1)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		comment.Deliveries = append(comment.Deliveries, attempt)
+	}
+	WriteJSON(w, http.StatusCreated, withAdvice(commentWriteResponse{Comment: comment, AskWaitingOn: waitingOn}, advice))
+}

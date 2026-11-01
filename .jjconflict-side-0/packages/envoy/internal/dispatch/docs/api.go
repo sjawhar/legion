@@ -1,0 +1,90 @@
+// Package docs defines Dispatch's live document service. A room has the
+// authoritative ProseMirror Y.XmlFragment and a server-owned marks Y.Map
+// projecting Postgres rows. Browsers edit the tree and originate browser marks;
+// API calls write rows and the marks projection, while agent quote anchors are
+// marked by Go. Markdown is canonically rendered from the tree for reads and
+// versions.
+package docs
+
+import (
+	"context"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+)
+
+// API is the live document operation surface used by Dispatch's HTTP handlers.
+type API interface {
+	SeedText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error)
+	ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error)
+	IndexDocumentReferences(ctx context.Context, artifactID string, version int, markdown string) (model.ReferenceChanges, error)
+	RebuildDocument(ctx context.Context, artifactID string, markdown *string, actor model.Actor) (RebuildReport, VersionResult, error)
+	InjectSchemaInvalidForTest(ctx context.Context, artifactID string) error
+	Text(ctx context.Context, artifactID string) (string, error)
+	TextWithToken(ctx context.Context, artifactID string) (string, string, error)
+	Blocks(ctx context.Context, artifactID string) ([]model.ArtifactBlock, error)
+	TextWithBlocks(ctx context.Context, artifactID string) (string, []model.ArtifactBlock, error)
+	BlockPath(ctx context.Context, artifactID, blockID string) (model.BlockPath, error)
+	SnapshotVersion(ctx context.Context, artifactID string, actor model.Actor) (VersionResult, error)
+	SetIssueClosed(ctx context.Context, issueKey string, closed bool)
+	SettleIssueDocuments(ctx context.Context, issueKey string) error
+	WriteIssueAskStates(ctx context.Context, issueKey string, asks []model.Ask, actor model.Actor, markUnindexed bool) ([]BlockRef, error)
+	AcquireConditionalEdit(ctx context.Context, artifactID string) (func(), error)
+	ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (EditOutcome, error)
+	SetBlockAttributes(ctx context.Context, artifactID, blockID string, attributes map[string]any, actor model.Actor) error
+	SetAskBlockText(ctx context.Context, artifactID, blockID string, edit AskBlockEdit, actor model.Actor) (AskBlockText, error)
+	ScheduleSettlement(artifactID string)
+	SettleCopiesOf(ctx context.Context, ask model.Ask) error
+	MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error)
+	VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error)
+	BlockForQuote(ctx context.Context, artifactID, quote string) (string, error)
+	SuggestionKind(ctx context.Context, artifactID, id string) (string, error)
+	AcceptSuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor) error
+	RejectSuggestion(ctx context.Context, artifactID, id string, actor model.Actor) error
+	ProjectMark(ctx context.Context, artifactID, markID string, record MarkRecord, actor model.Actor) error
+	Join(ctx context.Context, tx pgx.Tx) (context.Context, *Ledger)
+	NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (VersionResult, error)
+	CompactAll(ctx context.Context) error
+	Quiesce(ctx context.Context) error
+}
+
+// VersionResult is a written document version together with what its markdown moved in the
+// reference graph. Every caller that appends an `artifact.*` event for the version passes
+// Changes to the payload builder, so no producer can emit one that stays silent about the
+// batched backlink counts it changed. Wrote is false when the operation recorded nothing:
+// SnapshotVersion found the live document already matched the newest version, or RebuildDocument
+// restored the latest version or was given its markdown.
+type VersionResult struct {
+	Version model.Version
+	Wrote   bool
+	Changes model.ReferenceChanges
+}
+
+// EditOutcome is what one batch of document edit operations did. Changed compares the document's
+// semantic identity — the nodeToken over the whole tree, inline marks included, which is what a
+// precondition compares — before and after the whole batch, not against the newest version, whose
+// markdown differs while unsettled browser text is pending. A batch that leaves the document as
+// it was mints no version, named or not. Unchanged indexes, in order, each operation that left
+// the tree exactly as it found it. Token is that same whole-document identity after the batch,
+// taken from the tree this edit's own transaction wrote while it still held the room's writer
+// slot — never re-read after the commit, where a concurrent writer's change would fold into it —
+// so a caller passes it straight back as the next edit's document precondition. AddedAskBlocks
+// names each readable ask block the batch left in the document that it did not hold before, in
+// document order (addedAskBlocks). Settlement opens an ask for each, except a block written back
+// under the id of an ask the document already holds and settlement leaves closed: answered, or
+// resolved by a person.
+type EditOutcome struct {
+	Applied        int
+	Changed        bool
+	Unchanged      []int
+	Token          string
+	AddedAskBlocks []AddedAskBlock
+}
+
+// AddedAskBlock is one ask block an edit added: its block id and its question as settlement reads
+// it. No ask row exists for it yet; settlement opens one after the edit commits.
+type AddedAskBlock struct {
+	ID       string
+	Question string
+}

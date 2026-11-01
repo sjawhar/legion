@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-636",
+  "previousHandoff": "acd571e2b85f560394421a817d17597a98adeda1",
+  "completed": "2026-11-01T08:05:00Z",
+  "round": 4,
+  "verdict": "pass",
+  "failed": 0,
+  "failures": [],
+  "codeHead": "6a9939499a53777d72f7e9b07c65e3255baf4f0c",
+  "note": "Every measurement below was taken at code 6a9939499a53777d72f7e9b07c65e3255baf4f0c. The code has not moved since: the three commits above it on this branch (40411618, 7882f4fe, 84f0db49) change .legion/INFRA-636/implement.json alone, which git diff --stat 6a993949 84f0db49 shows as one file. I ran this round under a testing task the daemon cut on attempt 1's stale red ci-ok, held on the architect's instruction, and re-ran nothing when the task returned: only the three reads the architect asked for (ci-ok and every lane on attempt 2, and #2496's state) were taken again.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's own commands and drove the same surfaces independently at this head. (1) Its close/reopen smoke: I copied the implementer's own $TMPDIR/smoke/smoke.sh onto my Postgres (port 16230) and ran it against binaries I built myself, at the head and at the pre-fix head 3675b8e6. Head answered 10/10/10 and [] on the close and 15/15/15 with both asks on the reopen; the pre-fix binary answered 9 against a stored 10 with both withdrawn asks still advised. That is the implementer's 10/10/10/10 and [] against 9/10/10/9, reproduced. (2) Its owner-lock tests: TestOwedItemBlocksWaitForTheCommentsOwnerLock and TestTheGrammarReindexWaitsForTheCommentsOwnerLock pass twice here and fail on the pre-fix code with the message the implementer quoted. (3) Its load claim: I re-ran the series myself on a seed of my own at 1x and 10x, five runs per build, and the hold bar reproduces at both steps. (4) Its build, vet and suite claims: go build ./... and go vet ./internal/dispatch/... ./cmd/dispatch/ clean, go test ./cmd/dispatch/ -count=1 ok 356.123s, the 27 TestXidWindow* green twice. Every proof entry's claim holds."
+  },
+  "proof": [
+    {
+      "criterion": "Review round 1, findings 1 and 2: a close or reopen answers and stores the sequence its write phase committed, and its advice describes the asks as the patch leaves them.",
+      "surface": "the real Dispatch binary over HTTP, a database of its own on the harness's Postgres 16.2, driven by the implementer's smoke.sh (a session closes then reopens an issue holding a decision block, two open asks and a comment whose stored quote is stale)",
+      "command": "go build -o $TMPDIR/tester/smoke/dispatch-head ./cmd/dispatch; git archive 3675b8e686e7 | GOWORK=off go build -o $TMPDIR/tester/smoke/dispatch-old ./cmd/dispatch; bash $TMPDIR/tester/smoke/smoke.sh <binary> <label>",
+      "observed": "head status=done: answered last_seq 10, read last_seq 10, issue.closed seq 10 payload 10, 1 anchor refresh, your_open_asks []. head status=todo: answered 15, read 15, issue.updated seq 15 payload 15, your_open_asks [\"Which region?\",\"Which owner?\"].",
+      "headSha": "6a9939499a53777d72f7e9b07c65e3255baf4f0c",
+      "negativeControl": "The same script, the same Postgres, the pre-fix binary built from 3675b8e686e7: close answered last_seq 9 while the issue reads 10 and the issue.closed payload says 9, and your_open_asks named BOTH asks the close had just withdrawn; reopen answered 14 against a stored 15 and your_open_asks []. So the script separates the two builds on both findings."
+    },
+    {
+      "criterion": "Review round 1, finding 3 and the same gap in the grammar re-index: the owed item-block reconciliation and the grammar re-index take the item's owner lock, so neither writes between an edit's unlocked plan and its write phase.",
+      "surface": "the refs package against a real Postgres 16.2, each test running the reconciliation while a transaction of its own holds the comment's owner lock through an edit's read phase",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:16230/postgres?sslmode=disable GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 ./internal/dispatch/api/ ./internal/dispatch/docs/ ./internal/dispatch/refs/ -run 'TestXidWindow|TestClosingAndReopeningAnswerTheSequenceTheWritePhaseCommitted|TestCloseAndReopenAdviceDescribeTheAsksThePatchLeaves|TestOwedItemBlocksWaitForTheCommentsOwnerLock|TestTheGrammarReindexWaitsForTheCommentsOwnerLock|TestTwoPatchesOfOneIssueSerializeOnItsOwnerLockAndLoseNoUpdate|TestTwoWritersOfOneOwnerSerializeWithoutATransactionID|TestACloseCommittedWhileAWriterWaitsOnTheOwnerLockIsRefused|TestAThreadReadWaitsForAWritersReadPhase|TestAFailedWritePhaseLeavesNothing|TestWritePhaseSendsItsStatementsAsOneBatch|TestADrainedItemKeepsAConcurrentEdit' -count=2 -v",
+      "observed": "38 distinct tests pass twice each: ok api 181.620s, ok docs 20.103s, ok refs 5.233s. Among them the two owner-lock tests, the two close/reopen tests, the whole write-phase set and all 27 TestXidWindow* (21 in api, 6 in docs).",
+      "headSha": "6a9939499a53777d72f7e9b07c65e3255baf4f0c",
+      "negativeControl": "The two new test files copied into a git-archive export of the pre-fix head 3675b8e686e7 and run there against the same Postgres: both FAIL - item_blocks_owner_lock_test.go:151 and grammar_reindex_owner_lock_test.go:109, each 'the reconciliation answered (indexed true, error <nil>) without waiting for the comment's owner lock, which the edit holds through its read phase'. FAIL github.com/sjawhar/envoy/internal/dispatch/refs 5.822s."
+    },
+    {
+      "criterion": "Acceptance 2, hold bar (decision D7's decisive metric): transaction-id hold per write at p50 and p99 on INFRA-589's harness, five runs per side, base main and head on one seed, at full load and at ten times it.",
+      "surface": "packages/envoy/loadtest on this 2-CPU pod (uid 9e2b750d-04cb-4cad-9eb7-1bafeadb0f8b): a real Dispatch, Envoy listener, NATS and Postgres 16.2 behind the harness's 1 ms proxy, a fresh seed of my own (migration 149, made by the base build: 1,000 issues, 2,310 documents, 20,781 versions, 29,785 events), the two builds alternating on it",
+      "command": "bash packages/envoy/loadtest/run-step.sh y-<build>-<step>-r<n> --events 4|40 --sessions 400|1000 --requests 60|600 --live 2|20 --xact-interval 10ms, five alternating runs per build per step; base=dbdf9318c059eb3c83e8f9c64eb1a7ebdb18d7c1 (the main this head merged, so both builds sit at migration 149) and head built from the checkout",
+      "observed": "Medians of five runs, xid hold p50/p99/max ms. 1x: head 137.2/1636.3/2291.3 against base 1502.7/12965.2/21906.4 - 7.9 times lower p99 and 11.0 times lower p50, per-run p99 head 1393.9-1750.6 against base 12286.8-13327.3, no run of either side overlapping the other. 10x: head 97.4/1074.4/3430.3 against base 3281.3/14041.3/15399.9 - 13.1 times lower p99 and 33.7 times lower p50, per-run p99 head 811.6-1743.5 against base 6862.4-23661.5, again no overlap. Refusals: write_errors.non_2xx 0 in every one of the 20 runs of both builds at both steps. live_order_violations 0 in all 20. Write latency at 1x, where the box is not collapsed: comment write_ms p50/p99 head 10277.0/12951.4 against base 11914.8/14656.8, anchored 15578.8/28725.7 against 17067.2/28547.1 - head level or better. Dispatch RSS max at 1x, median: head 2,719.7 MiB against base 2,828.5.",
+      "headSha": "6a9939499a53777d72f7e9b07c65e3255baf4f0c",
+      "negativeControl": "The base build on the same seed, the same harness and alternating runs measures the hold the head does not have: p99 12,965.2 ms at 1x and 14,041.3 ms at 10x, against 1,636.3 and 1,074.4. So the sampler is reading real holds, not reporting one build's number for the other's."
+    },
+    {
+      "criterion": "The structural items of review round 1 are each pinned by a test that is red without its fix.",
+      "surface": "the repository's own suites against Postgres 16.2, and the real binary for the two close/reopen findings",
+      "command": "the two commands above, plus cd packages/envoy && go build ./... && go vet ./internal/dispatch/... ./cmd/dispatch/ && go test ./internal/dispatch/api/ -run Approval -count=1, and go test ./cmd/dispatch/ -count=1 -timeout 40m",
+      "observed": "Findings 1 and 2 (close/reopen sequence and advice): red on the pre-fix binary as quoted above, green at the head. Finding 3 and the grammar re-index: red on the pre-fix code with the new tests copied in, green twice at the head. Finding 4, the approval-ask result that depended on the caller's mode: it has NO red test and can have none - the fix removes the mode by changing MoveApprovalAsk to return only an error, so the shape the finding describes no longer compiles; it is pinned by the type and by api's Approval tests, ok 48.509s. The minor items check out by inspection: go.work.sum is byte-identical to main (git diff against main@origin is empty), IssueThreadLogins and store.WriteBatch.Len are gone from internal/dispatch (0 hits each), go build ./... and go vet ./internal/dispatch/... ./cmd/dispatch/ are clean, and go test ./cmd/dispatch/ -count=1 is ok 356.123s.",
+      "headSha": "6a9939499a53777d72f7e9b07c65e3255baf4f0c",
+      "negativeControl": "Named with each item above; the one item with no red test is named as such rather than claimed."
+    }
+  ],
+  "tenXCollapse": {
+    "statement": "At 10x BOTH builds collapse, so the transaction-id hold is the only 10x figure that separates them. Of 7,165 events offered in the window base committed 185 and head 192, that is 2.6 and 2.7 percent, with 7,036 and 7,062 transport errors (client timeouts) and zero non-2xx on either side; base's live frames from the write's response read 0.0/0.0 because almost nothing was delivered in time to measure.",
+    "whatNotToRead": "On that collapsed step head's write latency reads worse than base's (comment write_ms p50/p99 10957.5/15232.5 against 6749.3/8808.6, anchored 17217.0/23478.5 against 16186.0/17219.8) and its Dispatch RSS max reads 2,121.4 MiB against 1,790.4. Neither is a comparison: both are taken over the few requests and the few seconds that survived two saturated runs on a 2-CPU pod, and 10x offers ten times what this stack can serve. I would not read the 18 percent RSS difference as a regression without a step that does not saturate; at 1x, which does not, head's RSS is lower than base's (2,719.7 against 2,828.5 MiB). The hold is sampled from pg_stat_activity rather than bound by the offered rate, which is why it still separates the builds at 10x.",
+    "boxBusyBefore": "At 1x at most 3.4 percent. At 10x up to 81 percent, because the previous 10x step's own drain overlaps the reading that run-step.sh takes before its reset; that is the harness measuring its own predecessor, not other work of mine, and no step of mine ran beside another."
+  },
+  "ciAtHead": {
+    "codeHead": "6a9939499a53777d72f7e9b07c65e3255baf4f0c",
+    "read": "2026-11-01T07:59Z, the check-runs of that commit and the jobs of run 41267081301 with filter=all",
+    "ciOk": "success on attempt 2, completed 2026-11-01T07:43:42Z (attempt 1 failure 05:43:22Z)",
+    "dispatchMemory": "success on attempt 2, completed 2026-11-01T07:11:37Z (attempt 1 failure 04:30:47Z). Read from the run's jobs endpoint with filter=all, because the default hides every attempt but the last and the commit's check-runs list does not carry it.",
+    "success": ["ci-ok", "changes", "ci-filters", "lint", "test", "docs / build", "dispatch", "dispatch-memory", "dispatch-multiprocess", "dispatch-browser-multiprocess", "envoy-go", "envoy-go-race", "envoy-go-race-api", "envoy-go-race-docs", "envoy-go-race-pmdoc", "envoy-infra-go", "envoy-session-stall", "envoy-smoke", "listener-server-change", "worker-image / build"],
+    "skipped": ["broker-multiprocess", "ci-images", "claude-envoy", "contracts", "envoy-client", "envoy-e2e-local", "envoy-plugin", "pi-envoy", "pi-shared", "typecheck", "worker-image / attest"],
+    "failure": [],
+    "unread": [],
+    "note": "The handoff commits above the code (40411618, 7882f4fe, 84f0db49) carry no check runs: each is a handoff-only push with the skip-checks trailer, and the daemon carries the code head's verdict to them."
+  },
+  "otherTrees": {
+    "claim": "INFRA-707's sjawhar/legion#2496, which touches the same path, is still OPEN and unmerged at 2026-11-01T07:59Z, so there is nothing for this head to merge against and the architect's conditional item does not apply this round."
+  },
+  "unproven": [
+    {
+      "claim": "Acceptance 2's frame bar misses at one of its four numbers: at half load the live frame measured from the write's own response is about three times slower at p99 than before INFRA-591.",
+      "evidence": "Carried from round 3, where I measured it over five runs per build (head 674.1 ms against before-591 208.3 ms at p99, while head beat before-591 at p50 on that metric and at both percentiles measured from the event's creation). This round measured 1x and 10x against main rather than half load against before-591, as the architect's brief named, so it adds no new reading. The cause stands: the horizon's wait on open transaction ids, which before-591 predates and therefore never waits on; no implementing round can remove it. The architect accepted a departure of this shape at p50 on 2026-10-29 and has this at p99."
+    },
+    {
+      "claim": "The plan's widened scope names two background passes that no TestXidWindow* covers: the block-index backfill and the decided-wording restoration.",
+      "evidence": "Unchanged from round 3: the 27 xid-window tests cover every write route, settlement's version write, the edit-notice sweep and task-progress reconciliation, and name neither of those two. Acceptance 1 speaks of write routes, so this is not a miss of the acceptance, but nothing pins those two paths' windows."
+    }
+  ],
+  "podCouldNotRun": [
+    "Run in this pod at this head: ./cmd/dispatch (whole package), ./internal/dispatch/api, ./internal/dispatch/docs and ./internal/dispatch/refs under the selection above (twice each), ./internal/dispatch/api -run Approval, go build ./... and go vet ./internal/dispatch/... ./cmd/dispatch/, and CGO_ENABLED=1 go test -race -p 1 ./internal/dispatch/refs/ -count=1 -timeout 40m (ok 13.005s). The whole api and docs suites, the rest of packages/envoy and the api, docs and pmdoc race runs were left to CI, which is green at this head (envoy-go, envoy-go-race, envoy-go-race-api, envoy-go-race-docs, envoy-go-race-pmdoc). The pod's known limits were not reached: nothing I ran needs Docker, SO_PEERPIDFD or a non-C collation."
+  ],
+  "backgroundJobs": "I started no sampler or watcher job of my own: the memory and CPU figures are the load harness's own 5 s sampler (summary.json resources). The leftover check after the last step, `ps -eo pid,args | grep -v grep | grep -E 'run-step.sh|series.sh|loadgen|go test|stack.sh'`, printed one line, pid 1370, the harness's 1 ms latency proxy - a stack process left running on purpose, not a run of mine. The stack stays up for the next round (Postgres, the proxy, NATS and the listener at /legion/scratch/tmp/dispatch-loadtest, ports 16230-16236, with the seed template dispatch_seed), which the architect allowed on condition it costs no memory pressure: measured, the pod reads 19,456 MiB total with 2,760 used and 16,695 available and no swap, Dispatch itself stopped between steps, so it does not. Keeping it saves the next round a 25-minute reseed."
+}

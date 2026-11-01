@@ -1,0 +1,1001 @@
+import { type Browser, expect, type Locator, type Page, test } from "@playwright/test";
+
+import {
+  answerAsk,
+  createComment,
+  createIssue,
+  createIssueArtifact,
+  createProject,
+  editArtifact,
+  getArtifactText,
+  getAsk,
+  getIssue,
+  patchIssue,
+  resolveAsk,
+} from "./api";
+import {
+  type Clipboard,
+  copy,
+  documentEditor,
+  indexedBlockAsk,
+  openWithCaret,
+  paste,
+  selectEditorText,
+} from "./editor";
+import { resetDatabase } from "./seed";
+import { asUser } from "./users";
+
+test.beforeEach(async () => {
+  await resetDatabase();
+});
+
+/** The shared ask card a decision block hosts once the server has indexed the block: the same
+ * `AskCard` the Inbox renders, in its compact variant. Its `data-testid` names the ask id in
+ * every state (open card, answered or resolved record). */
+function hostedCard(block: Locator): Locator {
+  return block.locator("article[data-testid^=ask-]");
+}
+
+/** Picks one of the hosted card's options (a single-choice decision's radio row). */
+async function pickOption(card: Locator, name: string): Promise<void> {
+  await card.getByRole("radio", { name }).check();
+}
+
+/** Waits for the block to host its card: the server has indexed the block into an ask. */
+async function expectHosted(block: Locator): Promise<Locator> {
+  const card = hostedCard(block);
+  await expect(card).toBeVisible();
+  return card;
+}
+
+/** Copies the whole document through the editor's own copy handler. */
+async function copyWholeDocument(page: Page): Promise<Clipboard> {
+  await documentEditor(page).click();
+  await page.keyboard.press("ControlOrMeta+A");
+  return copy(page);
+}
+
+/** Pastes clipboard contents at the start of the text `quote`. */
+async function pasteBefore(page: Page, quote: string, clipboard: Clipboard): Promise<void> {
+  await selectEditorText(page, quote);
+  await page.keyboard.press("ArrowLeft");
+  await paste(page, clipboard);
+}
+
+const answeredDecisionSpec =
+  'Intro.\n\n:::ask{#decision urgency="med" multiple="false"}\nWhich one?\n\n- A\n- B\n:::\n\nAfter.\n';
+
+/** Seeds a spec holding the decision `decision`, answers it with A, and opens it as alice. */
+async function openAnsweredDecision(browser: Browser) {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: answeredDecisionSpec,
+    title: "Copied ask",
+  });
+  const blockAsk = await indexedBlockAsk(issue.key, "decision");
+  await answerAsk(blockAsk.id, { expected_edited_at: null, selected: ["A"], text: "Go A." });
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  await page.goto(`/issues/${issue.key}`);
+  const decision = documentEditor(page).locator('[data-dispatch-ask-block="decision"]');
+  await expect((await expectHosted(decision)).getByText("Go A.")).toBeVisible();
+  return { alice, blockAsk, issue, page };
+}
+
+/** Opens a spec holding only "End.", with the caret at its start or its end. */
+function openEnd(browser: Browser, title: string, caret: "start" | "end") {
+  return openWithCaret(browser, title, "End.\n", "End.", caret);
+}
+
+async function alertsIn(page: Page): Promise<Locator> {
+  return page.getByRole("article", { name: "Document" }).getByRole("alert");
+}
+
+test("agentWrittenAskBlockAppearsAndAnswersInPlace", async ({ browser }, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "## Specification\n\nContext\n",
+    title: "Ask block",
+  });
+  await patchIssue(issue.key, { labels: ["dispatch", "decision", "priority"] });
+  await editArtifact(
+    issue.primary_artifact_id,
+    {
+      ops: [
+        {
+          after: "end",
+          markdown:
+            ':::ask{#ship-decision urgency="high" multiple="false" state="open"}\nShould we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n',
+          op: "insert",
+        },
+      ],
+    },
+    { as: "agent" }
+  );
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ width: 1770, height: 900 });
+    await page.goto(`/issues/${issue.key}`);
+    const ask = documentEditor(page).locator('[data-dispatch-ask-block="ship-decision"]');
+    await expect(ask).toContainText("Should we ship?");
+    const decisions = page.getByRole("navigation", { name: "Open decisions" });
+    await expect(decisions.getByText("1 open decision", { exact: true })).toBeVisible();
+    const decisionLink = decisions.getByRole("link", { name: "Should we ship?" });
+    await expect(decisionLink).toHaveAttribute("title", "Should we ship?");
+    await expect(decisions).toHaveCSS("height", "28px");
+    const header = page.getByTestId("issue-header");
+    const specification = documentEditor(page).getByRole("heading", { name: "Specification" });
+    const desktopMetrics = await Promise.all([
+      header.evaluate((element) => element.getBoundingClientRect().height),
+      specification.evaluate((element) => element.getBoundingClientRect().y),
+    ]);
+    await testInfo.attach("specchrome-1770-metrics", {
+      body: JSON.stringify({ headerHeight: desktopMetrics[0], specificationY: desktopMetrics[1] }),
+      contentType: "application/json",
+    });
+    await page.screenshot({ path: testInfo.outputPath("specchrome-1770.png") });
+    expect(desktopMetrics[0]).toBeLessThanOrEqual(96);
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const tabletMetrics = await Promise.all([
+      header.evaluate((element) => element.getBoundingClientRect().height),
+      specification.evaluate((element) => element.getBoundingClientRect().y),
+    ]);
+    expect(tabletMetrics[0]).toBeLessThanOrEqual(140);
+    await testInfo.attach("specchrome-1280-metrics", {
+      body: JSON.stringify({ headerHeight: tabletMetrics[0], specificationY: tabletMetrics[1] }),
+      contentType: "application/json",
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: testInfo.outputPath("specchrome-390.png") });
+
+    const hosted = await expectHosted(ask);
+    await expect(ask.locator("[data-dispatch-ask-pill]")).toHaveText("High");
+    await expect(ask).toHaveAttribute("data-dispatch-ask-urgency", "high");
+    // The block hosts the Inbox's ask card for its indexed ask; the card, not the block header,
+    // says when it was asked (and by whom, once the server records the editing actor).
+    await expect(hosted.locator("time")).toBeVisible();
+    await expect(ask.locator("[data-dispatch-ask-asked]")).toHaveCount(0);
+    // The question is the editor's text; the card does not repeat it.
+    await expect(ask.getByText("Should we ship?")).toHaveCount(1);
+    await expect(hosted.getByRole("radio")).toHaveCount(3);
+    // Nothing chosen yet: nothing to submit.
+    await expect(hosted.getByRole("button", { exact: true, name: "Answer" })).toHaveCount(0);
+    await hosted.getByRole("button", { name: "Add a note or answer in your own words" }).click();
+    const answer = hosted.getByLabel("Your answer");
+    const submit = hosted.getByRole("button", { exact: true, name: "Answer" });
+    await expect(submit).toBeDisabled();
+    await answer.fill("Yes.");
+    await answer.press("Enter");
+    await expect(answer).toHaveValue("Yes.\n");
+    // A note alone is not an answer while the decision has options.
+    await expect(submit).toBeDisabled();
+    await answer.press("Control+Enter");
+    await expect(ask).not.toContainText("Answered by");
+    await pickOption(hosted, "Ship Release it");
+    // The note field stays open over its text (the compact card's rule) and the note goes with
+    // the answer.
+    await expect(answer).toHaveValue("Yes.\n");
+    await expect(submit).toBeEnabled();
+    await answer.press("Control+Enter");
+    await expect(ask).toContainText("Answered by alice");
+    await expect(ask.locator('ul[aria-label="Options"] li[data-selected="true"]')).toContainText(
+      "Ship"
+    );
+    await expect(hostedCard(ask)).toContainText("Yes.");
+    await expect(ask.locator("form")).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a reader asks back from a decision block: the question threads under the block, the decision stays open, and the Inbox row shows the reply @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "## Specification\n\nContext before the decision.\n",
+    title: "Ask back in a spec",
+  });
+  await editArtifact(
+    issue.primary_artifact_id,
+    {
+      ops: [
+        {
+          after: "end",
+          markdown:
+            ':::ask{#ship-decision urgency="high" multiple="false" state="open"}\nShould we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n',
+          op: "insert",
+        },
+      ],
+    },
+    { as: "agent" }
+  );
+  const blockAsk = await indexedBlockAsk(issue.key, "ship-decision");
+  // Written as a reader writes: a question, a list, and a fenced command.
+  const question =
+    "Ship to staging first, or straight to production?\n\n- staging has the new schema\n- prod does not\n\n```sh\nlegion status CORE\n```";
+  const questionLead = "Ship to staging first, or straight to production?";
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    if (testInfo.project.name === "chromium") {
+      await page.setViewportSize({ width: 1280, height: 900 });
+    }
+    await page.goto(`/issues/${issue.key}`);
+    const block = documentEditor(page).locator('[data-dispatch-ask-block="ship-decision"]');
+    const hosted = await expectHosted(block);
+    // No exchange yet: nothing to disclose.
+    await expect(block.getByRole("button", { name: /repl/ })).toHaveCount(0);
+    // The same two-row composer as the Inbox card: the words can answer or ask back.
+    await hosted.getByRole("button", { name: "Add a note or answer in your own words" }).click();
+    const askBack = hosted.getByRole("button", { name: "Ask back" });
+    await expect(askBack).toBeDisabled();
+    await hosted.getByLabel("Your answer").fill(question);
+    await expect(askBack).toBeEnabled();
+    await block.scrollIntoViewIfNeeded();
+    await block.screenshot({
+      path: testInfo.outputPath(`askback-composer-${testInfo.project.name}.png`),
+    });
+    await askBack.click();
+
+    // The clarification remains directly visible under the block while the decision stays open.
+    await expect(hosted.getByLabel("Your answer")).toHaveValue("");
+    const thread = block.getByTestId(`thread-${blockAsk.id}`);
+    await expect(thread).toContainText(questionLead);
+    // The reply is typeset as the Inbox typesets it: a real list and a code box, not bare text.
+    await expect(thread.locator(".dispatch-markdown ul")).toHaveCSS("list-style-type", "disc");
+    await expect(thread.locator(".dispatch-markdown pre")).toHaveCSS("overflow-x", "auto");
+    await expect(hosted.getByRole("button", { exact: true, name: "Answer" })).toBeVisible();
+    await expect(block).not.toContainText("Answered by");
+    // The turn passed to the asker, and the block says so from the refetched issue asks.
+    await expect(block.getByTestId(`turn-${blockAsk.id}`)).toHaveText(
+      "Waiting on session:e2e-seed…"
+    );
+    await expect
+      .poll(() => getAsk(blockAsk.id))
+      .toMatchObject({
+        ask: { answer: null, state: "open", waiting_on: "agent" },
+        replies: [{ body: question }],
+      });
+    await block.scrollIntoViewIfNeeded();
+    await block.screenshot({
+      path: testInfo.outputPath(`askback-reply-${testInfo.project.name}.png`),
+    });
+
+    // The Inbox row for the same ask carries the reply.
+    await page.goto("/");
+    const row = page.getByTestId(`ask-${blockAsk.id}`);
+    await expect(row).toBeVisible();
+    await expect(row.getByTestId(`thread-${blockAsk.id}`)).toContainText(questionLead);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a resolved decision block is read-only", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: "Context\n", title: "Resolved ask" });
+  await editArtifact(
+    issue.primary_artifact_id,
+    {
+      ops: [
+        {
+          after: "end",
+          markdown:
+            ':::ask{#resolved-decision urgency="med" multiple="false" state="open"}\nShould we ship?\n\n- Ship\n- Hold\n:::\n',
+          op: "insert",
+        },
+      ],
+    },
+    { as: "agent" }
+  );
+  const blockAsk = await indexedBlockAsk(issue.key, "resolved-decision");
+  await resolveAsk(
+    blockAsk.id,
+    { kind: "resolved", reason: "The decision is no longer needed." },
+    { as: "agent" }
+  );
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    const ask = documentEditor(page).locator('[data-dispatch-ask-block="resolved-decision"]');
+    // The hosted card's resolution record, with its reason; no composer.
+    const hosted = await expectHosted(ask);
+    await expect(hosted.getByTestId("ask-resolution-badge")).toHaveText("Resolved");
+    await expect(hosted).toContainText("The decision is no longer needed.");
+    await expect(ask.locator("form")).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a failed in-document decision answer reports inside the failed block and can be retried", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: "Context\n", title: "Failing ask" });
+  await editArtifact(
+    issue.primary_artifact_id,
+    {
+      ops: [
+        {
+          after: "end",
+          markdown:
+            ':::ask{#failing-decision urgency="med" multiple="false" state="open"}\nShould we ship?\n\n- Ship\n- Hold\n:::\n',
+          op: "insert",
+        },
+      ],
+    },
+    { as: "agent" }
+  );
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    // Dispatch's verdict: a 5xx would be tried again under the answer's key, not refused.
+    await page.route("**/api/v1/asks/*/answer", async (route) => {
+      await route.fulfill({
+        body: JSON.stringify({ code: "ASK_INPUT", error: "Dispatch refused the answer" }),
+        contentType: "application/json",
+        status: 400,
+      });
+    });
+    await page.goto(`/issues/${issue.key}`);
+    await expect(page.getByRole("navigation", { name: "Open decisions" })).toBeVisible();
+    const ask = documentEditor(page).locator('[data-dispatch-ask-block="failing-decision"]');
+    const hosted = await expectHosted(ask);
+    const errors = await alertsIn(page);
+    await expect(errors).toHaveCount(0);
+    await pickOption(hosted, "Other");
+    await hosted.getByLabel("Your answer").fill("Ship after review.");
+    await hosted.getByRole("button", { exact: true, name: "Answer" }).click();
+    const error = hosted.getByRole("alert");
+    await expect(error).toContainText("Could not save your answer.");
+    await expect(errors).toHaveCount(1);
+    await expect(error.getByRole("button", { name: "Retry" })).toBeEnabled();
+  } finally {
+    await alice.close();
+  }
+});
+
+test("malformed decision with a blank option label disables the answer form", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: "Context\n", title: "Malformed ask" });
+  const malformed = await createIssueArtifact(
+    issue.key,
+    {
+      content:
+        ':::ask{#malformed-decision urgency="high" multiple="false" state="open"}\nWhich path?\n\n- Ship: Release it\n- : No label\n:::\n',
+      name: "malformed.md",
+    },
+    { as: "agent" }
+  );
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`/issues/${issue.key}/artifacts/${malformed.artifact.slug}`);
+    const ask = documentEditor(page).locator('[data-dispatch-ask-block="malformed-decision"]');
+    await expect(ask.getByText("Malformed", { exact: true })).toBeVisible();
+    await expect(
+      ask.getByText(/ask block "malformed-decision" has an option without a label/)
+    ).toBeVisible();
+    await expect(
+      ask.getByText("Fix the block text; the decision re-activates once it parses.")
+    ).toBeVisible();
+    await expect(ask.locator("form")).toHaveCount(0);
+    await expect(ask.locator("li:empty")).toHaveCount(0);
+    await expect(ask.getByRole("listitem")).toHaveCount(2);
+    await page.screenshot({ path: testInfo.outputPath("specchrome-malformed-1280.png") });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("open decision navigation cycles through the available decisions", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: "Context\n", title: "Two decisions" });
+  await editArtifact(
+    issue.primary_artifact_id,
+    {
+      ops: [
+        {
+          after: "end",
+          markdown:
+            ':::ask{#first-decision urgency="med" multiple="false" state="open"}\nUse Postgres?\n\n- Yes\n:::\n\n:::ask{#second-decision urgency="med" multiple="false" state="open"}\nUse Redis?\n\n- Yes\n:::\n',
+          op: "insert",
+        },
+      ],
+    },
+    { as: "agent" }
+  );
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    const decisions = page.getByRole("navigation", { name: "Open decisions" });
+    await expect(decisions.getByText("2 open decisions", { exact: true })).toBeVisible();
+    const firstDecision = await decisions.getByRole("link").textContent();
+    expect(firstDecision).not.toBeNull();
+    await decisions.getByRole("button", { name: "Next open decision" }).click();
+    await expect(decisions.getByRole("link")).not.toHaveText(firstDecision ?? "");
+    await decisions.getByRole("button", { name: "Next open decision" }).click();
+    await expect(decisions.getByRole("link")).toHaveText(firstDecision ?? "");
+  } finally {
+    await alice.close();
+  }
+});
+
+const DECISION_SPEC = [
+  ':::ask{#storage urgency="blocking" multiple="false" state="open"}\nWhich storage engine backs the event log?\n\n- Postgres: Reuse the existing cluster\n- SQLite: One file per team, no ops\n:::\n',
+  "Some prose between the decisions so the margins around each block are visible.\n",
+  ':::ask{#retention urgency="high" multiple="true" state="open"}\nWhich retention windows do we support at launch?\n\n- 7 days\n- 30 days\n- Forever\n:::\n',
+  ':::ask{#naming urgency="low" multiple="false" state="open"}\nShould the CLI be called `legion` or `lg`?\n\n- legion\n- lg\n:::\n',
+  "Closing paragraph after the last decision.\n",
+].join("\n");
+
+test("decision blocks read as urgency-accented cards in the document and its version view", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "## Specification\n\nContext paragraph before the first decision.\n",
+    title: "Decision rendering",
+  });
+  await editArtifact(
+    issue.primary_artifact_id,
+    { ops: [{ after: "end", markdown: DECISION_SPEC, op: "insert" }] },
+    { as: "agent" }
+  );
+  await expect.poll(async () => (await getIssue(issue.key)).open_asks.length).toBe(3);
+  const naming = (await getIssue(issue.key)).open_asks.find((ask) => ask.block_id === "naming");
+  if (naming === undefined) {
+    throw new Error("the naming decision was not indexed");
+  }
+  await answerAsk(
+    naming.id,
+    { expected_edited_at: null, selected: ["legion"], text: "Short names are for shells." },
+    { login: "bob" }
+  );
+  // An exchange under the answered decision, written in Markdown as agents write.
+  await createComment(
+    issue.key,
+    { ask_id: naming.id, body: "Noted. Two follow-ups:\n\n- alias `lg`\n- update the docs" },
+    { as: "agent" }
+  );
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const editor = documentEditor(page);
+    for (const [width, height] of [
+      [1280, 900],
+      [390, 844],
+    ] as const) {
+      for (const scheme of ["light", "dark"] as const) {
+        await page.emulateMedia({ colorScheme: scheme });
+        await page.setViewportSize({ width, height });
+        await page.goto(`/issues/${issue.key}`);
+        await expect(editor.locator('[data-dispatch-ask-block="naming"]')).toContainText(
+          "Answered by bob"
+        );
+        await expectHosted(editor.locator('[data-dispatch-ask-block="storage"]'));
+        await page.screenshot({
+          fullPage: width > 400,
+          path: testInfo.outputPath(`decisions-${width}-${scheme}.png`),
+        });
+      }
+    }
+
+    for (const [blockId, urgency, label] of [
+      ["storage", "blocking", "Blocking"],
+      ["retention", "high", "High"],
+      ["naming", "low", "Low"],
+    ] as const) {
+      const block = editor.locator(`[data-dispatch-ask-block="${blockId}"]`);
+      await expect(block.locator("[data-dispatch-ask-pill]")).toHaveText(label);
+      await expect(block).toHaveAttribute("data-dispatch-ask-urgency", urgency);
+      await expect(block.getByText("Decision", { exact: true })).toBeVisible();
+    }
+    const storage = editor.locator('[data-dispatch-ask-block="storage"]');
+    const context = editor.getByText("Context paragraph before the first decision.");
+    // The rows are the options; the source "- Option: description" list stays folded until the
+    // caret is in the block, and folds again when the caret leaves.
+    const source = storage.locator("[data-proof-block-content] ul");
+    await expect(source).toBeHidden();
+    await storage.getByText("Which storage engine backs the event log?").click();
+    await expect(storage).toHaveAttribute("data-dispatch-ask-editing", "true");
+    await expect(source).toBeVisible();
+    await expect(source.getByText("Postgres: Reuse the existing cluster")).toBeVisible();
+    await context.click();
+    await expect(storage).not.toHaveAttribute("data-dispatch-ask-editing", "true");
+    await expect(source).toBeHidden();
+    // The hosted card offers the options as the shared choice rows plus Other; nothing to
+    // submit until one is chosen.
+    const storageCard = hostedCard(storage);
+    await expect(storageCard.getByRole("radio")).toHaveCount(3);
+    await expect(storageCard.getByText("Reuse the existing cluster")).toBeVisible();
+    await expect(storageCard.getByRole("button", { exact: true, name: "Answer" })).toHaveCount(0);
+    await pickOption(storageCard, "Postgres Reuse the existing cluster");
+    await expect(storageCard.getByRole("button", { exact: true, name: "Answer" })).toBeEnabled();
+
+    // The card sits in the prose with the same gap above and below it.
+    const gaps = await storage.evaluate((section) => {
+      const previous = section.previousElementSibling?.getBoundingClientRect();
+      const next = section.nextElementSibling?.getBoundingClientRect();
+      const own = section.getBoundingClientRect();
+      return previous === undefined || next === undefined
+        ? undefined
+        : { above: own.top - previous.bottom, below: next.top - own.bottom };
+    });
+    expect(gaps).toBeDefined();
+    expect(Math.abs((gaps?.above ?? 0) - (gaps?.below ?? 1))).toBeLessThan(1);
+    expect(gaps?.above).toBeGreaterThan(12);
+
+    const answered = editor.locator('[data-dispatch-ask-block="naming"]');
+    await expect(answered.locator('li[data-selected="true"]')).toContainText("legion");
+    await expect(answered.locator('li[data-selected="false"]')).toContainText("lg");
+    await expect(hostedCard(answered)).toContainText("Short names are for shells.");
+    await expect(answered.locator("form")).toHaveCount(0);
+    // The exchange under the record is the card's own list, not document prose: no marker, no
+    // indent, the card's spacing — and the reply's Markdown list keeps its markers.
+    const thread = answered.getByTestId(`thread-${naming.id}`);
+    const replies = thread.locator("> ul");
+    await expect(replies).toHaveCSS("list-style-type", "none");
+    await expect(replies).toHaveCSS("padding-left", "0px");
+    await expect(replies).toHaveCSS("margin-top", "0px");
+    const replyList = thread.locator(".dispatch-markdown ul");
+    await expect(replyList).toHaveCSS("list-style-type", "disc");
+    await expect(replyList.locator("li")).toHaveCount(2);
+    // Once answered, the rows are the record and the source list never shows, caret or not.
+    const answeredSource = answered.locator("[data-proof-block-content] ul");
+    await expect(answeredSource).toBeHidden();
+    await answered.getByText("Should the CLI be called").click();
+    await expect(answered).toHaveAttribute("data-dispatch-ask-editing", "true");
+    await expect(answeredSource).toBeHidden();
+    await context.click();
+
+    // The historical version keeps the block's own record, read-only: options shown, nothing to
+    // answer, no card.
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.getByRole("combobox", { name: "Version" }).selectOption("2");
+    const versionView = page.getByTestId("version-view");
+    const historical = versionView.locator('[data-dispatch-ask-block="storage"]');
+    await expect(historical.locator("[data-dispatch-ask-pill]")).toHaveText("Blocking");
+    await expect(historical.locator("form")).toHaveCount(0);
+    const historicalSource = historical.locator("[data-proof-block-content] ul");
+    await expect(historicalSource).toBeHidden();
+    await historical.getByText("Which storage engine backs the event log?").click();
+    await expect(historicalSource).toBeHidden();
+    await expect(hostedCard(historical)).toHaveCount(0);
+    await expect(historical.locator('ul[aria-label="Options"] li')).toHaveCount(2);
+    await expect(
+      historical.locator('ul[aria-label="Options"]').getByText("Reuse the existing cluster")
+    ).toBeVisible();
+    await expect(historical.getByRole("radio")).toHaveCount(0);
+    await expect(historical.getByRole("button", { exact: true, name: "Answer" })).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("decisions-version-1280-light.png") });
+  } finally {
+    await alice.close();
+  }
+});
+
+// A typed block's rendered DOM includes a header above its content hole. When a browser copies
+// that rendered block, the parse rule must read the content hole rather than treat the header as
+// its first paragraphs.
+test("a copied decision block carries its content, not its attribute header", async ({
+  browser,
+}) => {
+  const { alice, issue, page } = await openAnsweredDecision(browser);
+  try {
+    const clipboard = await copyWholeDocument(page);
+    expect(clipboard.html).toContain("Which one?");
+    expect(clipboard.html).not.toContain("data-proof-block-summary");
+    expect(clipboard.html).not.toContain("answered_by");
+
+    const header =
+      '<header data-proof-block-summary=""><span data-proof-block-name="">ask</span>' +
+      '<dl data-proof-block-attributes=""><dt>urgency</dt><dd data-proof-block-attribute="urgency">med</dd>' +
+      '<dt>answer</dt><dd data-proof-block-attribute="answer">Go A.</dd></dl></header>';
+    const rendered = clipboard.html.replace(
+      /(<section[^>]*data-proof-block-type="ask"[^>]*>)([\s\S]*?)(<\/section>)/,
+      `$1${header}<div data-proof-block-content="">$2</div>$3`
+    );
+    expect(rendered).toContain("data-proof-block-summary");
+    expect(rendered).toContain("data-proof-block-content");
+    await pasteBefore(page, "Intro.", { html: rendered, text: clipboard.text });
+
+    await expect
+      .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.question))
+      .toEqual(["Which one?"]);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A real clipboard copy holds the typed blocks' client-owned DOM attributes. A rendered page also
+// adds a header above each content hole. Pasting that rendered form must retain a callout's
+// attributes and each block's exact content, while the existing answered decision keeps its id
+// and server-owned answer.
+test("a pasted rendered callout and decision keep attributes, content, and the original answer", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec:
+      'Intro.\n\n:::callout{#callout kind="warning" title="Risk"}\nCareful.\n:::\n\n' +
+      ':::ask{#decision urgency="med" multiple="false"}\nWhich one?\n\n- A\n- B\n:::\n\nAfter.\n',
+    title: "Copied typed blocks",
+  });
+  const originalAsk = await indexedBlockAsk(issue.key, "decision");
+  await answerAsk(originalAsk.id, {
+    expected_edited_at: null,
+    selected: ["A"],
+    text: "Go A.",
+  });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    const clipboard = await copyWholeDocument(page);
+    expect(clipboard.html).toContain('data-proof-block-attr-kind="warning"');
+    expect(clipboard.html).toContain('data-proof-block-attr-title="Risk"');
+
+    const rendered = await page.evaluate((html) => {
+      const template = document.createElement("template");
+      template.innerHTML = html;
+      for (const section of template.content.querySelectorAll<HTMLElement>(
+        "section[data-proof-block-type]"
+      )) {
+        const header = document.createElement("header");
+        header.dataset.proofBlockSummary = "";
+        header.textContent = "This rendered header must not become document content.";
+        const content = document.createElement("div");
+        content.dataset.proofBlockContent = "";
+        while (section.firstChild !== null) {
+          content.append(section.firstChild);
+        }
+        section.append(header, content);
+      }
+      return template.innerHTML;
+    }, clipboard.html);
+    expect(rendered).toContain("data-proof-block-content");
+    await pasteBefore(page, "Intro.", { html: rendered, text: clipboard.text });
+
+    await expect
+      .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.question))
+      .toEqual(["Which one?"]);
+    const stored = (await getArtifactText(issue.primary_artifact_id)).markdown;
+    const callouts = [...stored.matchAll(/:::callout\{#([^ }]+)([^}]*)\}\n([\s\S]*?)\n:::/g)];
+    const decisions = [...stored.matchAll(/:::ask\{#([^ }]+)([^}]*)\}\n([\s\S]*?)\n:::/g)];
+    expect(callouts).toHaveLength(2);
+    expect(callouts.map((match) => match[1])).toEqual([
+      expect.not.stringMatching(/^callout$/),
+      "callout",
+    ]);
+    expect(callouts.map((match) => match[2])).toEqual([
+      expect.stringContaining('kind="warning"'),
+      expect.stringContaining('kind="warning"'),
+    ]);
+    expect(callouts.map((match) => match[2])).toEqual([
+      expect.stringContaining('title="Risk"'),
+      expect.stringContaining('title="Risk"'),
+    ]);
+    expect(callouts.map((match) => match[3])).toEqual(["Careful.", "Careful."]);
+    expect(decisions).toHaveLength(2);
+    expect(decisions.map((match) => match[1])).toEqual([
+      expect.not.stringMatching(/^decision$/),
+      "decision",
+    ]);
+    expect(decisions.map((match) => match[3])).toEqual([
+      "Which one?\n\n- A\n- B",
+      "Which one?\n\n- A\n- B",
+    ]);
+    expect(stored).not.toContain("This rendered header must not become document content.");
+    await expect
+      .poll(async () => getAsk(originalAsk.id))
+      .toMatchObject({
+        ask: {
+          answer: { selected: ["A"], text: "Go A." },
+          block_id: "decision",
+          state: "answered",
+        },
+      });
+    await page.close();
+  } finally {
+    await alice.close();
+  }
+});
+
+// A copy of an answered decision pasted above it is a new block. The editor keeps a block's id on
+// the block that held it before the paste and mints one for the copy, so the answered ask stays
+// on the original and the copy is indexed as a fresh open ask with the same question. Keeping the
+// id on whichever of the two comes first would hand the copy the original's ask, its answer with
+// it, and bring the original back as a fresh ask.
+test("a copy of an answered decision pasted above it leaves the answer on the original", async ({
+  browser,
+}) => {
+  const { alice, blockAsk, issue, page } = await openAnsweredDecision(browser);
+  try {
+    await pasteBefore(page, "Intro.", await copyWholeDocument(page));
+
+    await expect
+      .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.question))
+      .toEqual(["Which one?"]);
+    const copy = (await getIssue(issue.key)).open_asks[0];
+    expect(copy?.block_id).not.toBe("decision");
+    // Both asks read "Which one?", so only the stored order tells the copy from the original.
+    const stored = (await getArtifactText(issue.primary_artifact_id)).markdown;
+    expect([...stored.matchAll(/:::ask\{#([^ }]+)/g)].map((match) => match[1])).toEqual([
+      copy?.block_id,
+      "decision",
+    ]);
+    const held = (await getAsk(blockAsk.id)).ask;
+    expect({ block: held.block_id, question: held.question, state: held.state }).toEqual({
+      block: "decision",
+      question: "Which one?",
+      state: "answered",
+    });
+  } finally {
+    await alice.close();
+  }
+});
+
+// The editor's own HTML cleanup still runs on a paste: a paste from Google Docs arrives wrapped in
+// <b id="docs-internal-guid-…">, which the editor unwraps, so the text pastes as written rather
+// than bold.
+test("a paste from Google Docs keeps the editor's own cleanup of its wrapper", async ({
+  browser,
+}) => {
+  const { alice, issue, page } = await openEnd(browser, "Pasted wrapper", "end");
+  try {
+    await paste(page, {
+      html: '<b id="docs-internal-guid-4a1b2c3d-7fff"><p>Wrapped words</p></b>',
+      text: "Wrapped words",
+    });
+
+    await expect
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+      .toBe("End.Wrapped words\n");
+  } finally {
+    await alice.close();
+  }
+});
+
+// Typed blocks pasted as plain text are read as markdown, and the editor renders what it parsed
+// to HTML before parsing that back: the rendering carries a typed block's section and content
+// only, so a pasted decision's question and a callout's text arrive as written, never with the
+// block's attribute list in front of them.
+test("an ask and a callout pasted together as plain text arrive as written", async ({
+  browser,
+}) => {
+  const { alice, issue, page } = await openEnd(browser, "Plain text paste", "end");
+  try {
+    await paste(page, {
+      html: "",
+      text:
+        ':::ask{#d2 urgency="med" multiple="false"}\nWhich one?\n\n- A\n- B\n:::\n\n' +
+        ':::callout{#c2 kind="warning" title="Risk"}\nCareful.\n:::\n',
+    });
+
+    await expect
+      .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.question))
+      .toEqual(["Which one?"]);
+    const stored = (await getArtifactText(issue.primary_artifact_id)).markdown;
+    expect(stored).toMatch(/:::callout\{#c2[^}]*\}\nCareful\.\n:::/);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A lone typed block pasted as plain text beside a paragraph's text stays a block of its own, on
+// either side of that text: the pasted slice stops at the block, so its content never joins the
+// paragraph the caret is in. Were it to join, an ask pasted at the end of "End." would store
+// "End.Which one?" and a bare list, one pasted at its start "- BEnd." as the ask's last option, and
+// a callout "End.Careful." or "Careful.End." inside the callout.
+const loneAsk = ':::ask{#d2 urgency="med" multiple="false"}\nWhich one?\n\n- A\n- B\n:::\n';
+const loneAskStored = /:::ask\{#d2 [^}]*\}\nWhich one\?\n\n- A\n- B\n:::\n/.source;
+const loneCallout = ':::callout{#c2 kind="warning" title="Risk"}\nCareful.\n:::\n';
+const loneCalloutStored = /:::callout\{#c2 [^}]*\}\nCareful\.\n:::\n/.source;
+
+for (const [caret, where] of [
+  ["end", "after"],
+  ["start", "before"],
+] as const) {
+  const around = (block: string) =>
+    new RegExp(caret === "end" ? `^End\\.\\n\\n${block}$` : `^${block}\\nEnd\\.\\n$`);
+
+  test(`a lone ask pasted as plain text ${where} text stays an ask`, async ({ browser }) => {
+    const { alice, issue, page } = await openEnd(browser, "Lone ask paste", caret);
+    try {
+      await paste(page, { html: "", text: loneAsk });
+
+      await expect
+        .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.question))
+        .toEqual(["Which one?"]);
+      await expect
+        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+        .toMatch(around(loneAskStored));
+    } finally {
+      await alice.close();
+    }
+  });
+
+  test(`a lone callout pasted as plain text ${where} text stays a callout`, async ({ browser }) => {
+    const { alice, issue, page } = await openEnd(browser, "Lone callout paste", caret);
+    try {
+      await paste(page, { html: "", text: loneCallout });
+
+      await expect
+        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+        .toMatch(around(loneCalloutStored));
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
+/** A document's markdown with each directive's attributes dropped, so a row compares the blocks and
+ * the text around them. */
+function withoutAttributes(markdown: string): string {
+  return markdown.replace(/\{#([^ }]+)[^}]*\}/g, "{#$1}");
+}
+
+// The pasted block keeps its own block wherever the caret's container, or one around it inside the
+// same typed block or table cell, can hold it.
+for (const [target, spec, quote, pasted, stored] of [
+  [
+    "a blockquote",
+    "Intro.\n\n> Quoted.\n",
+    "Quoted.",
+    loneAsk,
+    "Intro.\n\n> Quoted.\n>\n> :::ask{#d2}\n> Which one?\n>\n> - A\n> - B\n> :::\n",
+  ],
+  [
+    "a blockquote",
+    "Intro.\n\n> Quoted.\n",
+    "Quoted.",
+    loneCallout,
+    "Intro.\n\n> Quoted.\n>\n> :::callout{#c2}\n> Careful.\n> :::\n",
+  ],
+  [
+    "a callout",
+    ':::callout{#k1 kind="note" title=""}\nInside.\n:::\n',
+    "Inside.",
+    loneAsk,
+    ":::callout{#k1}\nInside.\n:::\n\n:::ask{#d2}\nWhich one?\n\n- A\n- B\n:::\n",
+  ],
+  [
+    "a callout",
+    ':::callout{#k1 kind="note" title=""}\nInside.\n:::\n',
+    "Inside.",
+    loneCallout,
+    ":::callout{#k1}\nInside.\n:::\n\n:::callout{#c2}\nCareful.\n:::\n",
+  ],
+  [
+    "a list item",
+    "- Listed.\n- Second.\n",
+    "Listed.",
+    loneAsk,
+    "- Listed.\n  :::ask{#d2}\n  Which one?\n\n  - A\n  - B\n  :::\n- Second.\n",
+  ],
+  [
+    "a list item",
+    "- Listed.\n- Second.\n",
+    "Listed.",
+    loneCallout,
+    "- Listed.\n  :::callout{#c2}\n  Careful.\n  :::\n- Second.\n",
+  ],
+] as const) {
+  const block = pasted === loneAsk ? "ask" : "callout";
+  test(`a lone ${block} pasted as plain text into ${target} keeps its block`, async ({
+    browser,
+  }) => {
+    const { alice, issue, page } = await openWithCaret(browser, "Paste", spec, quote, "end");
+    try {
+      await paste(page, { html: "", text: pasted });
+
+      await expect
+        .poll(async () =>
+          withoutAttributes((await getArtifactText(issue.primary_artifact_id)).markdown)
+        )
+        .toBe(stored);
+      await expect
+        .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.question))
+        .toEqual(block === "ask" ? ["Which one?"] : []);
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
+// Where nothing inside the caret's typed block can hold the pasted block, the pasted text joins the
+// text at the caret. A lone callout, a lone ask, a list or a table pasted into an ask's question, as
+// plain text or as HTML, joins the question as text, since an ask holds only its question and one
+// options list. Splitting the ask instead would move its own options to a new ask under an empty
+// question. Text joining a bold question takes the bold only when it is one line, as a one-line
+// paste does anywhere else, so a lone callout or a list pasted there does not come out bold.
+const question = "Which here?";
+// It ends on a letter: after "?" the closing ** would sit between punctuation and a letter, where
+// pmdoc writes it but doesn't read it back as closing the bold.
+const boldQuestion = "**Which here**";
+const calloutText = { html: "", text: loneCallout };
+const listText = { html: "", text: "- x\n- y\n" };
+const tableHtml = {
+  html: "<table><tr><th>one</th><th>two</th></tr><tr><td>1</td><td>2</td></tr></table>",
+  text: "one\ttwo\n1\t2",
+};
+for (const [shape, before, clipboard, stored] of [
+  ["a lone callout as plain text", question, calloutText, "Which here?Careful."],
+  ["a lone ask as plain text", question, { html: "", text: loneAsk }, "Which here?Which one? A B"],
+  ["a list as plain text", question, listText, "Which here?x y"],
+  [
+    "a list as HTML",
+    question,
+    { html: "<ul><li>x</li><li>y</li></ul>", text: "x\ny" },
+    "Which here?x y",
+  ],
+  ["a table as HTML", question, tableHtml, "Which here?one two 1 2"],
+  ["one line as plain text", boldQuestion, { html: "", text: "x" }, "**Which herex**"],
+  ["a lone callout as plain text", boldQuestion, calloutText, "**Which here**Careful."],
+  ["a list as plain text", boldQuestion, listText, "**Which here**x y"],
+] as const) {
+  test(`${shape} pasted after the question ${JSON.stringify(before)} stores ${JSON.stringify(stored)}`, async ({
+    browser,
+  }) => {
+    const { alice, issue, page } = await openWithCaret(
+      browser,
+      "Paste into a question",
+      `:::ask{#q1 urgency="med" multiple="false"}\n${before}\n\n- X\n- Y\n:::\n`,
+      before.replaceAll("*", ""),
+      "end"
+    );
+    try {
+      await paste(page, clipboard);
+
+      await expect
+        .poll(async () =>
+          withoutAttributes((await getArtifactText(issue.primary_artifact_id)).markdown)
+        )
+        .toBe(`:::ask{#q1}\n${stored}\n\n- X\n- Y\n:::\n`);
+      await expect
+        .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.block_id))
+        .toEqual(["q1"]);
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
+// Plain text that holds no typed block pastes as it always has: its first paragraph or list item
+// joins the text before the caret and its last one the text after it.
+for (const [caret, text, stored] of [
+  ["end", "More words.", "End.More words.\n"],
+  ["end", "- x\n- y\n", "End.x\n\n- y\n"],
+  ["start", "Alpha\n\nBravo\n", "Alpha\n\nBravoEnd.\n"],
+] as const) {
+  test(`${JSON.stringify(text)} pasted as plain text at the ${caret} of text stores ${JSON.stringify(stored)}`, async ({
+    browser,
+  }) => {
+    const { alice, issue, page } = await openEnd(browser, "Plain paste", caret);
+    try {
+      await paste(page, { html: "", text });
+
+      await expect
+        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+        .toBe(stored);
+    } finally {
+      await alice.close();
+    }
+  });
+}

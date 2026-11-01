@@ -136,7 +136,9 @@ test("an issue's spec and Conversation tabs render the dark palette in dark mode
 
   try {
     const page = await alice.newPage();
-    const title = page.getByRole("heading", { level: 1, name: issue.title });
+    const title = page
+      .getByTestId("issue-header")
+      .getByRole("heading", { level: 1, name: issue.title });
     const header = page.locator("header").first();
 
     await page.emulateMedia({ colorScheme: "light" });

@@ -10,7 +10,7 @@ import {
   renderProofDocument,
 } from "../../__tests__/proof-document";
 import { ApiError, api } from "../../api/client";
-import type { IssueDetails } from "../../api/types";
+import type { Ask, IssueDetails } from "../../api/types";
 import { heldSends } from "../conversation/held-sends";
 import { marginComposeSendKey } from "../margin/margin-context";
 import { appKeymap } from "../shell/keymap";
@@ -288,7 +288,12 @@ test("ProofDocument reports connection status and pending edits through the tool
     act(() => status("connected"));
     await waitFor(() => expect(toolbar.current?.connection).toBe("connected"));
     act(() => {
-      pending({ count: 2, readOnly: false, rebuiltAt: undefined, stored: true });
+      pending({
+        count: 2,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      });
       status("offline");
     });
     await waitFor(() =>
@@ -306,6 +311,74 @@ test("ProofDocument reports connection status and pending edits through the tool
     expect(
       within(view.container).getByText("This issue is closed. Its document is read-only.")
     ).toBeDefined();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("the margin's wait for this browser's edits is answered by a report taken after it, and by its bound", async () => {
+  const { margin, pending, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(margin.current?.documentBridge).toBeDefined());
+    const bridge = margin.current?.documentBridge;
+    if (bridge === undefined) throw new Error("expected a registered document");
+
+    // The mark the margin has just written is an update of its own, and the store counts a local
+    // update only once its IndexedDB write is through. So the report that says this browser holds
+    // nothing has to be one taken after the wait began: the last report before it was taken
+    // without that mark in it, and on a quiet document it says nothing pending, which would send
+    // the retry straight back into the refusal it is recovering from.
+    act(() =>
+      pending({
+        count: 0,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
+    let answered = false;
+    const waiting = bridge.whenSent(5000).then(() => {
+      answered = true;
+    });
+    await Promise.resolve();
+    expect(answered).toBe(false);
+
+    act(() =>
+      pending({
+        count: 1,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
+    await Promise.resolve();
+    expect(answered).toBe(false);
+
+    act(() =>
+      pending({
+        count: 0,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
+    await waiting;
+    expect(answered).toBe(true);
+
+    // A read-only admission cannot send the row it holds, and a row another tab holds is not
+    // this page's to send either: the bound is what ends the wait, and the margin sends again
+    // whatever it answers.
+    act(() =>
+      pending({
+        count: 1,
+        readOnly: true,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
+    await bridge.whenSent(0);
   } finally {
     view.unmount();
   }
@@ -389,9 +462,9 @@ test("ProofDocument compares a selected version with the current settled text wh
   try {
     await sync();
     await waitFor(() => {
-      const diff = within(view.container).getByTestId("version-diff");
-      expect(diff.querySelector("del")?.textContent).toContain("SQLite");
-      expect(diff.querySelector("ins")?.textContent).toContain("Postgres");
+      const diff = within(view.container).getByTestId("change-view");
+      expect(diff.querySelector("del")?.textContent).toBe("SQLite");
+      expect(diff.querySelector("ins")?.textContent).toBe("Postgres");
     });
   } finally {
     view.unmount();
@@ -525,7 +598,14 @@ test("a selection-bar action opens the margin composer for the mark and settles 
     let comment: Promise<void> | undefined;
     act(() => {
       comment = Promise.resolve(
-        onMarkAction({ from: 11, kind: "comment", markId: "m-9", quote: "brown", to: 16 })
+        onMarkAction({
+          from: 11,
+          kind: "comment",
+          markId: "m-9",
+          placement: { blockId: "b-1", prefix: "The quick ", readings: 1, suffix: " fox" },
+          quote: "brown",
+          to: 16,
+        })
       );
       void comment.catch(() => {});
     });
@@ -533,7 +613,12 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       throw new Error("The comment action did not return a promise.");
     }
     expect(margin.current?.pendingCompose).toMatchObject({
-      anchor: { artifact: artifact.id, mark_id: "m-9", quote: "brown" },
+      anchor: {
+        artifact: artifact.id,
+        mark_id: "m-9",
+        placement: { blockId: "b-1", prefix: "The quick ", readings: 1, suffix: " fox" },
+        quote: "brown",
+      },
       kind: "comment",
     });
     act(() => sendOpenCompose());
@@ -544,7 +629,14 @@ test("a selection-bar action opens the margin composer for the mark and settles 
     let suggest: Promise<void> | undefined;
     act(() => {
       suggest = Promise.resolve(
-        onMarkAction({ from: 11, kind: "suggest", markId: "m-10", quote: "brown", to: 16 })
+        onMarkAction({
+          from: 11,
+          kind: "suggest",
+          markId: "m-10",
+          placement: null,
+          quote: "brown",
+          to: 16,
+        })
       );
       void suggest.catch(() => {});
     });
@@ -559,7 +651,14 @@ test("a selection-bar action opens the margin composer for the mark and settles 
     let ask: Promise<void> | undefined;
     act(() => {
       ask = Promise.resolve(
-        onMarkAction({ from: 11, kind: "ask", markId: "m-11", quote: "brown", to: 16 })
+        onMarkAction({
+          from: 11,
+          kind: "ask",
+          markId: "m-11",
+          placement: null,
+          quote: "brown",
+          to: 16,
+        })
       );
       void ask.catch(() => {});
     });
@@ -765,4 +864,184 @@ test("Ctrl+Alt+M comments on the selection while the editor has focus, and nowhe
     view.unmount();
   }
   expect(appKeymap.describe().some((entry) => entry.id === "comment-on-selection")).toBe(false);
+});
+
+// ---------------------------------------------------------------------------------------------
+// `surface="pane"`: the same live document drawn in a reading column beside a list (the Inbox's).
+// It takes no edits, publishes no presence, and claims none of the page-level singletons.
+// ---------------------------------------------------------------------------------------------
+
+const openDecision: Ask = {
+  anchor: null,
+  answer: null,
+  author: { id: "01a086ad", kind: "session", origin: { session_title: "Architect for CORE-1" } },
+  block_artifact: { id: "artifact-1", primary: true, slug: "spec" },
+  block_id: "ship_it",
+  created_at: "2026-09-09T00:00:00Z",
+  edited_at: null,
+  id: "ask-1",
+  issue_key: "CORE-1",
+  kind: "question",
+  multiple: false,
+  opened_event_id: 1,
+  options: [{ label: "Ship" }, { label: "Hold" }],
+  question: "Should we ship?",
+  state: "open",
+  urgency: "high",
+};
+
+test("a pane's editor is read-only and publishes no presence, where the page's takes edits and does", async () => {
+  const pane = renderProofDocument({ surface: "pane" });
+  try {
+    await pane.sync();
+    await waitFor(() => expect(pane.editors).toHaveLength(1));
+    expect(pane.editors[0]?.options).toMatchObject({ awareness: null, readOnly: true });
+    expect(pane.editors[0]?.readOnly).toBe(true);
+  } finally {
+    pane.view.unmount();
+  }
+
+  const page = renderProofDocument();
+  try {
+    await page.sync();
+    await waitFor(() => expect(page.editors).toHaveLength(1));
+    expect(page.editors[0]?.options).toMatchObject({
+      awareness: page.connections[0]?.awareness,
+      readOnly: false,
+    });
+    expect(page.editors[0]?.readOnly).toBe(false);
+  } finally {
+    page.view.unmount();
+  }
+});
+
+test("a read-only admission and a close each leave a pane read-only", async () => {
+  const { admit, editors, rerender, sync, view } = renderProofDocument({ surface: "pane" });
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    act(() => admit(false));
+    expect(editors[0]?.readOnly).toBe(true);
+    act(() => rerender({ isClosed: true }));
+    expect(editors[0]?.readOnly).toBe(true);
+    act(() => rerender({ isClosed: false }));
+    expect(editors[0]?.readOnly).toBe(true);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a pane registers no document with the margin, reports no toolbar and shows no Open-decisions navigator", async () => {
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([
+    { ...openDecision, last_reply: null },
+  ]);
+  const paneClient = createQueryClient();
+  paneClient.setQueryData(["asks", "CORE-1"], [openDecision]);
+  const pane = renderProofDocument({ queryClient: paneClient, surface: "pane" });
+  try {
+    await pane.sync();
+    await waitFor(() => expect(pane.editors).toHaveLength(1));
+    expect(pane.margin.current?.documentBridge).toBeUndefined();
+    expect(pane.toolbarChanges).toEqual([]);
+    expect(
+      within(pane.view.container).queryByRole("navigation", { name: "Open decisions" })
+    ).toBeNull();
+  } finally {
+    pane.view.unmount();
+  }
+  // Not even the unmount's "there is no toolbar now", which would clear a host's own controls.
+  expect(pane.toolbarChanges).toEqual([]);
+
+  // The same document on its own page claims all three.
+  const pageClient = createQueryClient();
+  pageClient.setQueryData(["asks", "CORE-1"], [openDecision]);
+  const page = renderProofDocument({ queryClient: pageClient });
+  try {
+    await page.sync();
+    await waitFor(() => expect(page.margin.current?.documentBridge).toBeDefined());
+    expect(page.toolbar.current).not.toBeUndefined();
+    expect(
+      await within(page.view.container).findByRole("navigation", { name: "Open decisions" })
+    ).toBeDefined();
+  } finally {
+    page.view.unmount();
+    listIssueAsks.mockRestore();
+  }
+});
+
+test("a pane writes no dispatch-search highlight, where the page writes one for the same term", async () => {
+  class TestHighlight {
+    readonly ranges: Range[];
+
+    constructor(...ranges: Range[]) {
+      this.ranges = ranges;
+    }
+  }
+  const styleApi = window as unknown as {
+    CSS?: { highlights?: Map<string, TestHighlight> };
+    Highlight?: typeof TestHighlight;
+  };
+  const originalCss = Object.getOwnPropertyDescriptor(styleApi, "CSS");
+  const originalHighlight = Object.getOwnPropertyDescriptor(styleApi, "Highlight");
+  const highlights = new Map<string, TestHighlight>();
+  Object.defineProperties(styleApi, {
+    CSS: { configurable: true, value: { highlights } },
+    Highlight: { configurable: true, value: TestHighlight },
+  });
+
+  try {
+    const pane = renderProofDocument({
+      fake: fakeDocumentRuntime({ text: "The astrolabe reads altitude." }),
+      highlightTerm: "astrolabe",
+      surface: "pane",
+    });
+    try {
+      await pane.sync();
+      await waitFor(() => expect(pane.editors).toHaveLength(1));
+      // Each of the three ways a page writes the registry: the bind, a routed term, a document
+      // change.
+      pane.rerender({ highlightTerm: "altitude" });
+      act(() => pane.connections[0]?.doc.getXmlFragment("prosemirror").delete(0, 1));
+      expect(highlights.has("dispatch-search")).toBe(false);
+    } finally {
+      pane.view.unmount();
+    }
+
+    const page = renderProofDocument({
+      fake: fakeDocumentRuntime({ text: "The astrolabe reads altitude." }),
+      highlightTerm: "astrolabe",
+    });
+    try {
+      await page.sync();
+      await waitFor(() =>
+        expect(highlights.get("dispatch-search")?.ranges.map(String)).toEqual(["astrolabe"])
+      );
+    } finally {
+      page.view.unmount();
+    }
+  } finally {
+    if (originalHighlight === undefined) {
+      delete styleApi.Highlight;
+    } else {
+      Object.defineProperty(styleApi, "Highlight", originalHighlight);
+    }
+    if (originalCss === undefined) {
+      delete styleApi.CSS;
+    } else {
+      Object.defineProperty(styleApi, "CSS", originalCss);
+    }
+  }
+});
+
+test("a pane pushes no document keymap scope and registers no binding of its own", async () => {
+  const { editors, sync, view } = renderProofDocument({ surface: "pane" });
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    expect(appKeymap.describe().some((entry) => entry.id === "comment-on-selection")).toBe(false);
+  } finally {
+    view.unmount();
+  }
 });

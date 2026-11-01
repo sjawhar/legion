@@ -25,6 +25,10 @@ func TestEditNoticeRestart(t *testing.T) {
 	key, artifactID := first.createIssue(t)
 	editor := first.openEditor(t, artifactID, "before\n")
 	replaceText(t, editor, "before", "after")
+	// A close drops whatever the socket has not delivered - the read loop that would have taken
+	// the update breaks on the closed connection instead - so the room has to hold the edit before
+	// the browser leaves, and the process's own read of the document is where it shows.
+	waitForDocumentText(t, first, artifactID, "after\n", 10*time.Second)
 	// The last browser leaving settles the room at once (settleLastPeer), so the edit's version and
 	// its notice are written without waiting out the settle delay.
 	editor.Close()
@@ -53,6 +57,31 @@ func TestEditNoticeRestart(t *testing.T) {
 	}
 	if count := humanEditedEvents(t, second, key); count != 1 {
 		t.Fatalf("artifact.human_edited events = %d, want 1", count)
+	}
+}
+
+// waitForDocumentText waits up to within for the process to render artifactID's document as want:
+// the room has taken the editor's update, which is what the settlement the editor's close runs
+// settles.
+func waitForDocumentText(t *testing.T, process *dispatchProcess, artifactID, want string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		answer := process.call(t, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", "", http.StatusOK)
+		var document struct {
+			Markdown string `json:"markdown"`
+		}
+		if err := json.Unmarshal(answer, &document); err != nil {
+			t.Fatalf("decode the document's text: %v: %s", err, answer)
+		}
+		if document.Markdown == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the room holds %q within %v of the editor's edit, want %q:\n%s",
+				document.Markdown, within, want, process.Output.String())
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

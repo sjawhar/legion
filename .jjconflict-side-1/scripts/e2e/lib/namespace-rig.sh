@@ -1,0 +1,143 @@
+# shellcheck shell=bash disable=SC2154,SC2034 # the variables below are the caller's (listed above op)
+# The namespace rig of a stage proof that runs pods in a shared cluster namespace: everything the
+# run creates carries its own project label (legion.dev/project), the teardown deletes by exact name
+# every Sandbox the run recorded and then everything labelled with that exact project — never by
+# label existence — and namespace-clean compares the run's own objects with the snapshot taken
+# before the run, so another system's objects, labelled or not, cannot fail it. Nothing outside the
+# namespace is touched.
+#
+# Sourced, never run. The caller sets
+#   operator         the admin kubectl context the operator steps use
+#   namespace        the namespace the run works in
+#   run_label        the run's legion.dev/project label, which starts with label_prefix (named apart
+#                    from lib/workflow.sh's project, the Dispatch project key)
+#   label_prefix     the prefix every run label of this proof carries (e.g. s4a-): the teardown
+#                    refuses any other, so a mistyped label can never select another run's objects
+#   label_exact      instead of label_prefix: the one fixed label a proof puts on its objects
+#                    (a Dispatch project's token, lowercased), which it owns while it holds that
+#                    identity's own run lock; the teardown refuses any other
+#   record           a file holding one Sandbox name per line, each deleted by name
+#   providers_secret (optional) the providers Secret the operator created for the run, deleted by
+#                    name; unset or empty when the run creates none
+#   work, evidence   the run's scratch and evidence directories
+#   torn_down, compared   empty
+# and defines begin, note, pass and fail (which exits).
+
+# op bounds every call, so a wait's poll cannot hang past the wait (--foreground keeps kubectl in the
+# run's process group, where a Ctrl-C reaches it).
+op() { timeout --foreground 300 kubectl --context "$operator" -n "$namespace" "$@"; }
+
+# kinds are what a run creates: the runtime's Sandboxes, their Secrets, PVCs and pods, the
+# ConfigMaps an operator's pod mounts, the operator's providers Secret when the run has one, and
+# (Stage 4a's own bridge mode, lib/bridge-tunnel.sh) a scratch Service and an auth Secret, both
+# already deleted by exact name in bridge_stop — services is here as the same safety net the other
+# kinds already are, so a bridge_stop that somehow left its Service behind still shows up in
+# namespace-clean's own before/after diff rather than silently passing.
+kinds=sandboxes,secrets,pvc,pods,configmaps,services
+
+# snapshot FILE: the run's own objects of those kinds, as the operator sees them: those labelled
+# with its project, and those with no project label whose name run_named counts as the run's. It
+# fails when either listing does.
+snapshot() {
+  local unlabelled labelled
+  unlabelled=$(op get "$kinds" -l '!legion.dev/project' -o name) || return 1
+  labelled=$(op get "$kinds" -l "legion.dev/project=$run_label" -o name) || return 1
+  {
+    run_named "$unlabelled"
+    [ -z "$labelled" ] || printf '%s\n' "$labelled"
+  } | sort >"$1"
+}
+
+# run_named LIST prints the lines of LIST, kubectl's `-o name` output, whose object name carries the
+# run's identity: its project label as written, or as a claim token carries it (claim.ProjectToken,
+# every character outside a-z0-9 dropped). Every object the run's daemon and harness create is named
+# from one or the other (SandboxName, the -boot Secrets, the issue-<sandbox> volume, the providers
+# Secret and the operator route), so one that lost its label is still the run's here, and is still
+# held to the snapshot, since the teardown deletes by label and would leave it behind. An unlabelled
+# object named otherwise is another system's: the namespace is shared, and the deployment's own
+# infrastructure creates and removes objects in it while a run goes on.
+run_named() {
+  local token=${run_label//[^a-z0-9]/} line name
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    name=${line#*/}
+    case $name in *"$run_label"* | *"$token"*) printf '%s\n' "$line" ;; esac
+  done <<<"$1"
+}
+
+# issue_pvcs ISSUE prints each PersistentVolumeClaim of the run labelled legion.dev/issue=ISSUE as
+# `<name> <phase>`, one a line, in name order, and nothing when the issue has no volume. An issue's
+# volume is its own Sandbox's, labelled with the issue's key by the Sandbox's claim template at its
+# creation (LEGION-632), so it is selected by that label and never by the tree's: a tree's issues
+# share no volume.
+issue_pvcs() {
+  op get pvc -l "legion.dev/project=$run_label,legion.dev/issue=$1" -o json |
+    jq -r '.items | sort_by(.metadata.name)[] | "\(.metadata.name) \(.status.phase)"'
+}
+
+# teardown: this run's objects, and nothing else, gone. Never fails; runs once.
+teardown() {
+  [ -z "$torn_down" ] || return 0
+  torn_down=1
+  echo "== teardown"
+  if [ -n "${label_exact:-}" ]; then
+    if [ "$run_label" != "$label_exact" ]; then
+      echo "   refused: the run label '$run_label' is not the run's own $label_exact"
+      return 0
+    fi
+  else
+    case "$run_label" in
+      "$label_prefix"?*) ;;
+      *)
+        echo "   refused: the run label '$run_label' lacks the reserved prefix $label_prefix"
+        return 0
+        ;;
+    esac
+  fi
+  local name left i failures=0 swept=
+  if [ -s "$record" ]; then
+    while read -r name; do
+      op delete sandbox "$name" --ignore-not-found --wait=false || true
+    done < <(sort -u "$record")
+  fi
+  op delete sandboxes -l "legion.dev/project=$run_label" --ignore-not-found --wait=false || true
+  # No Sandbox owns an operator's ConfigMap or providers Secret; a pod still mounting one keeps its
+  # files until it goes. The Secret goes by name, so the runtime's own Secrets still go with their
+  # Sandboxes first.
+  op delete configmaps -l "legion.dev/project=$run_label" --ignore-not-found --wait=false || true
+  [ -z "${providers_secret:-}" ] || op delete secret "$providers_secret" --ignore-not-found --wait=false || true
+  for i in $(seq 1 150); do
+    if ! left=$(op get "$kinds" -l "legion.dev/project=$run_label" -o name 2>"$work/teardown.err"); then
+      # A transient API error is waited out; three in a row mean the context cannot answer.
+      failures=$((failures + 1))
+      if [ "$failures" -ge 3 ]; then
+        echo "   [operator] context $operator cannot list project $run_label's objects; they may remain: $(cat "$work/teardown.err")"
+        return 0
+      fi
+      sleep 2
+      continue
+    fi
+    failures=0
+    [ -n "$left" ] || break
+    # Secrets and PVCs the Sandboxes' own deletion has not taken by the 90th listing are deleted by
+    # label, once, after the first listing from then on that answers.
+    if [ "$i" -ge 90 ] && [ -z "$swept" ]; then
+      op delete secrets,pvc -l "legion.dev/project=$run_label" --ignore-not-found --wait=false || true
+      swept=1
+    fi
+    sleep 2
+  done
+  echo "   [operator] left of project $run_label: ${left:-nothing}"
+  return 0
+}
+
+namespace_clean() {
+  compared=1
+  begin namespace-clean
+  snapshot "$evidence/namespace-after.txt" || fail "the operator could not list namespace $namespace"
+  if ! diff -u "$evidence/namespace-before.txt" "$evidence/namespace-after.txt"; then
+    fail "namespace $namespace differs from its snapshot (the run's objects: labelled with project $run_label, or unlabelled and named for it)"
+  fi
+  note "[operator] $(wc -l <"$evidence/namespace-after.txt") of the run's objects before and after, identical (labelled with project $run_label, or unlabelled and named for it; $kinds)"
+  pass
+}

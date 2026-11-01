@@ -1,0 +1,175 @@
+package api
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+)
+
+type inboxIssue struct {
+	Key      string  `json:"key"`
+	Title    string  `json:"title"`
+	Assignee *string `json:"assignee"`
+}
+
+type inboxDocument struct {
+	Project string `json:"project"`
+	Slug    string `json:"slug"`
+	Name    string `json:"name"`
+}
+
+// askThread is the initial data a card renders beside an ask: its reply chain, the rewordings
+// the question went through, its answers, and the sessions it reaches. The Inbox and an issue's
+// ask list asked for a thread both carry one per ask, so a client renders a thread without a
+// fetch per ask. `answers` is empty on an Inbox row, which is an open ask; the issue ask list
+// fills it for the answered asks on the page.
+type askThread struct {
+	Replies   []model.Comment     `json:"replies"`
+	Edits     []model.AskEdit     `json:"edits"`
+	Answers   []model.AskAnswer   `json:"answers"`
+	Followers []model.AskFollower `json:"followers"`
+	askReach
+}
+
+// askReach is who besides the followers a person's answer and replies on an ask reach: the
+// session holding the claim on the ask's issue (the outbox's claimant route) and the issue's
+// route, a session or a role holder. The embedded model.IssueRouteReach is that route's reach
+// right now (routeRoster.reach, the same the issue reads carry): RouteStatus says whether the
+// route reaches anyone (live, no_holder, or unknown when the listener did not answer), and
+// RouteHolder is the session it reaches while live, so a reader can count a session that is both
+// claimant and route holder once and tell an unreachable route from one it cannot see.
+// Claimant is null while nobody or a person holds the claim; Route, RouteStatus and RouteHolder
+// while the issue has no route; RouteHolder whenever RouteStatus is not live; and all four on a
+// project document's ask, which has no issue. The single-ask read and every askThread carry it
+// at the same keys.
+type askReach struct {
+	Claimant *string `json:"claimant"`
+	Route    *string `json:"route"`
+	model.IssueRouteReach
+}
+
+type inboxAsk struct {
+	model.Ask
+	Issue     *inboxIssue         `json:"issue,omitempty"`
+	Document  *inboxDocument      `json:"document,omitempty"`
+	Priority  *int                `json:"priority"`
+	LastReply *model.AskLastReply `json:"last_reply"`
+	// SnoozedUntil is the caller's own snooze on this row, null when they have not snoozed it.
+	// It is surfaced, never filtered: the row stays in everyone's inbox including its snoozer's,
+	// who folds it away while this moment is still ahead and sees it again once it passes.
+	SnoozedUntil *string   `json:"snoozed_until"`
+	Thread       askThread `json:"thread"`
+}
+
+// inboxAssigneeFilter turns ?assignee= into the SQL mode and email the inbox query binds:
+// "" (no filter), "unassigned", or "login" with the canonical email of a person who has signed
+// in. `me` is the caller; a named person is canonicalised first so a shared `?assignee=Alice@…`
+// link never 400s.
+func (s *server) inboxAssigneeFilter(ctx context.Context, raw string, caller model.Actor) (mode, login string, err error) {
+	switch value := strings.TrimSpace(raw); value {
+	case "":
+		return "", "", nil
+	case "unassigned":
+		return "unassigned", "", nil
+	case "me":
+		return "login", model.CanonicalLogin(caller.ID), nil
+	default:
+		login, err := s.allowedLogin(ctx, value)
+		if err != nil {
+			return "", "", err
+		}
+		return "login", login, nil
+	}
+}
+
+func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	project := strings.TrimSpace(r.URL.Query().Get("project"))
+	assigneeMode, assigneeLogin, err := s.inboxAssigneeFilter(r.Context(), r.URL.Query().Get("assignee"), caller)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// waiting_on is askReadColumns' alias for the turn rule, 'human' or 'agent' on an open ask, so
+	// sorting it descending puts the human's turn first. ORDER BY can name an output column only
+	// bare, never inside an expression such as `waiting_on = 'agent'`, so the rule runs once a row.
+	rows, err := s.deps.Store.Pool.Query(r.Context(), `
+		select `+askReadColumns+`,
+		       i.key, i.title, i.assignee, i.priority, ar.project_key, ar.slug, ar.name,
+		       sn.snoozed_until
+		`+askReadFrom+`
+		left join issues i on i.key = a.issue_key
+		left join artifacts ar on ar.id = a.artifact_id
+		left join user_ask_snooze sn on sn.ask_id = a.id and sn.login = $4
+		where a.state = 'open'
+		  and (i.key is null or i.closed_at is null)
+		  and ($1 = '' or coalesce(i.project_key, ar.project_key) = $1)
+		  and ($2 = ''
+		       or ($2 = 'unassigned' and (i.key is null or i.assignee is null))
+		       or ($2 = 'login' and i.assignee = $3))
+		order by i.priority asc nulls last, waiting_on desc,
+		         coalesce(lr.created_at, a.created_at) desc, a.id desc
+	`, project, assigneeMode, assigneeLogin, model.CanonicalLogin(caller.ID))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer rows.Close()
+	asks := []inboxAsk{}
+	for rows.Next() {
+		var ask inboxAsk
+		var issueKey, issueTitle, issueAssignee, documentProject, documentSlug, documentName *string
+		var snoozedUntil *time.Time
+		row, reply, err := scanAskRead(rows, &issueKey, &issueTitle, &issueAssignee, &ask.Priority, &documentProject, &documentSlug, &documentName, &snoozedUntil)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		ask.Ask = row
+		ask.LastReply = reply
+		if snoozedUntil != nil {
+			stamp := timestampValue(*snoozedUntil)
+			ask.SnoozedUntil = &stamp
+		}
+		if issueKey != nil {
+			ask.Issue = &inboxIssue{Key: *issueKey, Title: *issueTitle, Assignee: issueAssignee}
+		}
+		if documentProject != nil {
+			ask.Document = &inboxDocument{Project: *documentProject, Slug: *documentSlug, Name: *documentName}
+		}
+		asks = append(asks, ask)
+	}
+	if err := rows.Err(); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	askPointers := make([]*model.Ask, len(asks))
+	askIDs := make([]string, len(asks))
+	for index := range asks {
+		askPointers[index] = &asks[index].Ask
+		askIDs[index] = asks[index].ID
+	}
+	if err := s.attachOpenedEventIDs(r.Context(), s.deps.Store.Pool, askPointers); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := attachAskBacklinkCounts(r.Context(), s.deps.Store.Pool, askPointers); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	threads, err := s.loadAskThreads(r.Context(), askIDs)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	for index := range asks {
+		asks[index].Thread = threads[asks[index].ID]
+	}
+	WriteJSON(w, http.StatusOK, asks)
+}

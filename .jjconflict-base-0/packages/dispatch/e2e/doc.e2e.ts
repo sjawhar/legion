@@ -1,0 +1,806 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { type BrowserContext, expect, test } from "@playwright/test";
+
+import {
+  createComment,
+  createIssue,
+  createMessage,
+  createNamedVersion,
+  createProject,
+  editArtifact,
+  getArtifact,
+  getArtifactText,
+  getArtifactVersion,
+  patchIssue,
+} from "./api";
+import { runDispatch } from "./dispatch-cli";
+import {
+  connectedDot,
+  countDocumentSockets,
+  cursorLabel,
+  documentEditor,
+  documentTransport,
+  openDocumentSockets,
+  openSpecAndAwaitHeadingIds,
+  placeCaret,
+  selectEditorText,
+  typeAtEnd,
+} from "./editor";
+import { engineParagraphs } from "./read-back";
+import { resetDatabase } from "./seed";
+import { asUser } from "./users";
+
+const session = {
+  actor: { kind: "session" as const, id: "e2e-doc-editor", origin: { tmux: "dispatch:1.3" } },
+  as: "agent" as const,
+};
+const longToken = `sjawhar/legion#838-${"unbreakable".repeat(12)}`;
+const initialMarkdown = `## Database\n\nUse SQLite\n\n| col | value |\n|---|---|\n| a | 1 |\n| b | ${longToken} |\n\n- [ ] task\n\n\`\`\`ts\nconst x = 1;\n\`\`\`\n\nEnd of spec.\n`;
+
+test.beforeEach(async () => {
+  await resetDatabase();
+});
+
+test("the spec opens as a formatted, editable document with no source pane @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "READ", name: "Readable" });
+  const issue = await createIssue({
+    project: "READ",
+    spec: initialMarkdown,
+    title: "Rendering check",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+
+    const documentArticle = page.locator('article[aria-label="Document"]');
+    const editor = documentEditor(page);
+    await expect(editor).toBeVisible();
+    await expect(editor).toHaveAttribute("contenteditable", "true");
+
+    const heading = documentArticle.getByRole("heading", { level: 2, name: "Database" });
+    const paragraph = documentArticle.locator("p").first();
+    await expect(heading).toBeVisible();
+    await expect(paragraph).toBeVisible();
+    const [headingSize, paragraphSize] = await Promise.all([
+      heading.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize)),
+      paragraph.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize)),
+    ]);
+    expect(headingSize).toBeGreaterThan(paragraphSize);
+
+    const table = editor.locator("table");
+    await expect(table).toBeVisible();
+    const headerCell = table.locator("th").first();
+    const [headerWeight, borderWidth, paddingLeft] = await Promise.all([
+      headerCell.evaluate((element) => Number.parseInt(getComputedStyle(element).fontWeight, 10)),
+      table
+        .locator("td")
+        .first()
+        .evaluate((element) => Number.parseFloat(getComputedStyle(element).borderTopWidth)),
+      table
+        .locator("td")
+        .first()
+        .evaluate((element) => Number.parseFloat(getComputedStyle(element).paddingLeft)),
+    ]);
+    expect(headerWeight).toBeGreaterThanOrEqual(600);
+    expect(borderWidth).toBeGreaterThan(0);
+    expect(paddingLeft).toBeGreaterThan(0);
+    // A cell holding an unbreakable token wraps instead of pushing the table into a horizontal
+    // scroll, and on a wide desktop the editor is the column's width (the library's `prose` class
+    // would cap it at 65ch, about 600px).
+    expect(
+      await table.evaluate((element) => element.scrollWidth - element.clientWidth)
+    ).toBeLessThanOrEqual(1);
+    if (testInfo.project.name !== "iphone") {
+      await page.setViewportSize({ width: 1800, height: 1000 });
+      const [editorWidth, articleWidth] = await Promise.all([
+        editor.evaluate((element) => element.getBoundingClientRect().width),
+        documentArticle.evaluate((element) => element.getBoundingClientRect().width),
+      ]);
+      expect(articleWidth).toBeGreaterThan(700);
+      expect(editorWidth).toBeGreaterThanOrEqual(articleWidth - 1);
+    }
+    await expect(editor.locator('input[type="checkbox"]')).toBeVisible();
+    await expect(editor.locator("pre code")).toBeVisible();
+    await expect(page.getByRole("button", { name: /^(Edit|Preview)$/ })).toHaveCount(0);
+    await expect(page.getByRole("tabpanel", { name: "Spec" }).locator("textarea")).toHaveCount(0);
+
+    if (testInfo.project.name === "iphone") {
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+      ).toBe(true);
+    }
+    await page.screenshot({ path: testInfo.outputPath("rendered-document.png"), fullPage: true });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("reading a document gives its headings ids without versioning it or crediting the reader, however the headings got there", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  // An agent writes the spec, as an architect does, so every heading in it reaches the reader
+  // without the id the editor derives.
+  const issue = await createIssue(
+    {
+      project: "CORE",
+      spec: "## Plan\n\nShip it.\n\n## Plan\n\nShip it again.\n",
+      title: "Headed spec",
+    },
+    session
+  );
+  const artifactId = issue.primary_artifact_id;
+  const readAs = async (context: BrowserContext, text: string) => {
+    const page = await context.newPage();
+    await openSpecAndAwaitHeadingIds(page, issue.key, artifactId, text);
+    await page.close();
+  };
+  // A named version is written at once and names every pending author, so it is the next
+  // version only if the read minted none, and it names only its namer only if the read credited
+  // nobody.
+  const nameVersion = async (summary: string) => {
+    const named = await createNamedVersion(artifactId, summary, { login: "bob" });
+    expect(named.authors.map(({ id }) => id)).toEqual(["bob"]);
+    return named.number;
+  };
+
+  const alice = await asUser(browser, "alice");
+  try {
+    await readAs(alice, "Ship it again.");
+    expect(await nameVersion("after the first read")).toBe(2);
+
+    // An agent adds a heading, and the next reader's editor ids it.
+    await editArtifact(
+      artifactId,
+      { ops: [{ after: "end", markdown: "## Rollout\n\nOne region first.", op: "insert" }] },
+      session
+    );
+    await expect
+      .poll(async () => (await getArtifact(artifactId)).versions.map(({ number }) => number))
+      .toEqual([1, 2, 3]);
+    await readAs(alice, "One region first.");
+    expect(await nameVersion("after the agent's heading")).toBe(4);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("two users edit the same spec, see each other's text and cursor, and settle one version attributed to both @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: initialMarkdown,
+    title: "Database decision",
+  });
+  const artifactId = issue.primary_artifact_id;
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+
+  try {
+    const alicePage = await alice.newPage();
+    await alicePage.goto(`/issues/${issue.key}/spec`);
+    const aliceEditor = documentEditor(alicePage);
+    await expect(aliceEditor).toContainText("Use SQLite");
+
+    const bobPage = await bob.newPage();
+    await bobPage.goto(`/issues/${issue.key}/spec`);
+    const bobEditor = documentEditor(bobPage);
+    await expect(bobEditor).toContainText("Use SQLite");
+    await expect(connectedDot(alicePage)).toHaveText("connected");
+    await expect(connectedDot(bobPage)).toHaveText("connected");
+
+    await typeAtEnd(alicePage, "hello from alice");
+    await expect(bobEditor).toContainText("hello from alice");
+
+    await typeAtEnd(bobPage, "hello from bob");
+    await expect(aliceEditor).toContainText("hello from bob");
+
+    if (testInfo.project.name === "chromium") {
+      // Somewhere other than Alice's caret: a peer's caret on the focused local caret is not
+      // drawn, and a bare click can land at the end of her line.
+      await placeCaret(bobPage, "after", "Use SQLite");
+      await expect(cursorLabel(alicePage, "bob")).toBeVisible();
+      await expect(cursorLabel(bobPage, "alice")).toBeVisible();
+    }
+
+    await expect
+      .poll(() =>
+        getArtifact(artifactId).then((artifact) =>
+          artifact.versions
+            .find(({ number }) => number === 2)
+            ?.authors.map(({ id }) => id)
+            .sort()
+        )
+      )
+      .toEqual(["alice", "bob"]);
+    await expect
+      .poll(() =>
+        getArtifact(artifactId).then((artifact) =>
+          artifact.versions.find(({ number }) => number === 2)
+        )
+      )
+      .toMatchObject({ named: false, number: 2, summary: null });
+    await expect
+      .poll(() => getArtifactVersion(artifactId, 2).then(({ markdown }) => markdown))
+      .toContain("hello from alice");
+  } finally {
+    await bob.close();
+    await alice.close();
+  }
+});
+
+test("named versions, the version picker, and the diff stay current across users", async ({
+  browser,
+}) => {
+  await createProject({ key: "VERS", name: "Versions" });
+  const issue = await createIssue({
+    project: "VERS",
+    spec: initialMarkdown,
+    title: "Version naming",
+  });
+  const artifactId = issue.primary_artifact_id;
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    const sockets = countDocumentSockets(page);
+    await page.goto(`/issues/${issue.key}/spec`);
+    const editor = documentEditor(page);
+    await expect(editor).toContainText("Use SQLite");
+    await expect.poll(sockets).toBe(1);
+
+    await editArtifact(
+      artifactId,
+      { ops: [{ find: "SQLite", op: "replace", with: "Postgres" }] },
+      session
+    );
+    await expect(editor).toContainText("Use Postgres");
+    await expect
+      .poll(() =>
+        getArtifact(artifactId).then((artifact) =>
+          artifact.versions.find(({ number }) => number === 2)
+        )
+      )
+      .toMatchObject({ named: false, number: 2, summary: null });
+
+    await page.getByRole("button", { name: "Name version" }).click();
+    const nameDialog = page.getByRole("dialog", { name: "Name this version" });
+    await nameDialog.getByLabel("What changed?").fill("Decided Postgres");
+    await nameDialog.getByRole("button", { name: "Save" }).click();
+    await expect(nameDialog).toHaveCount(0);
+    await expect
+      .poll(() =>
+        getArtifact(artifactId).then((artifact) =>
+          artifact.versions.find(({ number }) => number === 3)
+        )
+      )
+      .toMatchObject({ named: true, number: 3, summary: "Decided Postgres" });
+
+    const versionPicker = page.getByRole("combobox", { name: "Version" });
+    await expect(versionPicker).toContainText("Version 3 — Decided Postgres");
+    await versionPicker.selectOption("1");
+    const versionView = page.getByTestId("version-view");
+    await expect(versionView).toContainText("Use SQLite");
+    await expect(versionView.getByRole("textbox", { name: "Document editor" })).toHaveAttribute(
+      "contenteditable",
+      "false"
+    );
+    await expect.poll(sockets).toBe(1);
+
+    await page.getByRole("button", { name: "Diff vs current" }).click();
+    await expect(page.getByTestId("change-view").locator("del")).toHaveText("SQLite");
+    await expect(page.getByTestId("change-view").locator("ins")).toHaveText("Postgres");
+
+    await versionPicker.selectOption("");
+    await expect(documentEditor(page)).toBeVisible();
+    await expect.poll(sockets).toBe(1);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an agent edit lands live in every open editor", async ({ browser }) => {
+  await createProject({ key: "LIVE", name: "Live updates" });
+  const issue = await createIssue({
+    project: "LIVE",
+    spec: initialMarkdown,
+    title: "Agent edit",
+  });
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+
+  try {
+    const alicePage = await alice.newPage();
+    const bobPage = await bob.newPage();
+    await Promise.all([
+      alicePage.goto(`/issues/${issue.key}/spec`),
+      bobPage.goto(`/issues/${issue.key}/spec`),
+    ]);
+    const aliceEditor = documentEditor(alicePage);
+    const bobEditor = documentEditor(bobPage);
+    await expect(aliceEditor).toContainText("Use SQLite");
+    await expect(bobEditor).toContainText("Use SQLite");
+
+    await editArtifact(
+      issue.primary_artifact_id,
+      { ops: [{ find: "SQLite", op: "replace", with: "Postgres" }] },
+      session
+    );
+    await expect(aliceEditor).toContainText("Use Postgres");
+    await expect(bobEditor).toContainText("Use Postgres");
+  } finally {
+    await bob.close();
+    await alice.close();
+  }
+});
+
+test("reloading mid-edit reopens the same content", async ({ browser }) => {
+  await createProject({ key: "LOAD", name: "Reloads" });
+  const issue = await createIssue({
+    project: "LOAD",
+    spec: initialMarkdown,
+    title: "Reload the document",
+  });
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+
+  try {
+    const alicePage = await alice.newPage();
+    const bobPage = await bob.newPage();
+    await Promise.all([
+      alicePage.goto(`/issues/${issue.key}/spec`),
+      bobPage.goto(`/issues/${issue.key}/spec`),
+    ]);
+    const bobEditor = documentEditor(bobPage);
+    await expect(documentEditor(alicePage)).toContainText("Use SQLite");
+    await expect(bobEditor).toContainText("Use SQLite");
+
+    await typeAtEnd(alicePage, "before reload");
+    await expect(bobEditor).toContainText("before reload");
+    await alicePage.reload();
+    await expect(documentEditor(alicePage)).toContainText("Use SQLite");
+    await expect(documentEditor(alicePage)).toContainText("before reload");
+    await expect(alicePage.getByRole("combobox", { name: "Version" })).toContainText("Version 1");
+  } finally {
+    await bob.close();
+    await alice.close();
+  }
+});
+
+test("tab round-trips keep one document connection, the typed text, and the Conversation scroll position", async ({
+  browser,
+}) => {
+  await createProject({ key: "TABS", name: "Tabs" });
+  const issue = await createIssue({
+    project: "TABS",
+    spec: "# Keep this document",
+    title: "Mounted panels",
+  });
+  for (let index = 0; index < 30; index += 1) {
+    await createMessage(issue.key, { body: `Existing message ${index}` }, session);
+  }
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const sockets = countDocumentSockets(page);
+    await page.goto(`/issues/${issue.key}/spec`);
+    const editor = documentEditor(page);
+    await typeAtEnd(page, "stay mounted");
+    await expect(editor).toContainText("stay mounted");
+    await expect.poll(sockets).toBe(1);
+
+    await page.getByRole("tab", { name: "Conversation" }).click();
+    await expect(page.getByRole("tab", { name: "Conversation" })).toBeFocused();
+    await expect(page.getByText("Existing message 29")).toBeVisible();
+    await page.evaluate(() => window.scrollTo(0, 500));
+    const scrollPosition = await page.evaluate(() => window.scrollY);
+    expect(scrollPosition).toBeGreaterThan(0);
+
+    await page.getByRole("tab", { name: "Conversation" }).press("ArrowLeft");
+    await expect(editor).toContainText("stay mounted");
+    await page.getByRole("tab", { name: "Spec" }).press("ArrowRight");
+    await expect(page.getByText("Existing message 29")).toBeVisible();
+    await expect.poll(sockets).toBe(1);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollPosition);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("moving between issue documents leaves one open document connection, not one per visit", async ({
+  browser,
+}) => {
+  await createProject({ key: "NAVDOC", name: "Navigation" });
+  const first = await createIssue({
+    project: "NAVDOC",
+    spec: "# First document\n\nFirst body.\n",
+    title: "First document",
+  });
+  const second = await createIssue({
+    project: "NAVDOC",
+    spec: "# Second document\n\nSecond body.\n",
+    title: "Second document",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const open = openDocumentSockets(page);
+    await page.goto(`/projects/NAVDOC/issues`);
+    await page.getByRole("link", { name: new RegExp(first.key) }).click();
+    await expect(documentEditor(page)).toContainText("First body.");
+    await expect.poll(open).toBe(1);
+
+    // Reading around the tree the way a long-lived tab does — in-app navigation, no reload:
+    // each document the reader leaves must take its connection with it, or the tab accumulates
+    // live rooms until it stalls.
+    // Each return to the list moves the pointer off it first. A pointer left on the link it just
+    // followed rests on that link again once the list renders, and on a loaded machine rests long
+    // enough to open its preview card, which covers the next row and takes the click meant for it.
+    for (let visit = 0; visit < 4; visit += 1) {
+      await page.mouse.move(0, 0);
+      await page.goBack();
+      await page.getByRole("link", { name: new RegExp(second.key) }).click();
+      await expect(documentEditor(page)).toContainText("Second body.");
+      await page.mouse.move(0, 0);
+      await page.goBack();
+      await page.getByRole("link", { name: new RegExp(first.key) }).click();
+      await expect(documentEditor(page)).toContainText("First body.");
+    }
+    await expect.poll(open).toBe(1);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The invariant `preserveConnection: false` must preserve: now that destroying a document really
+// closes its socket, a dropped transport must still bring the mounted editor back rather than
+// end its session.
+test("a dropped document transport reconnects the mounted editor and leaves one connection", async ({
+  browser,
+}) => {
+  await createProject({ key: "BLIP", name: "Blip" });
+  const issue = await createIssue({
+    project: "BLIP",
+    spec: "# Transport blip\n\nOriginal body.\n",
+    title: "Transport blip",
+  });
+
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+  try {
+    const page = await alice.newPage();
+    const sockets = countDocumentSockets(page);
+    const open = openDocumentSockets(page);
+    const transport = await documentTransport(page);
+    await page.goto(`/issues/${issue.key}/spec`);
+    const editor = documentEditor(page);
+    await expect(editor).toContainText("Original body.");
+    await expect(connectedDot(page)).toHaveText("connected");
+    await expect.poll(sockets).toBe(1);
+
+    const bobPage = await bob.newPage();
+    await bobPage.goto(`/issues/${issue.key}/spec`);
+    await expect(documentEditor(bobPage)).toContainText("Original body.");
+
+    await transport.sever();
+    await expect.poll(sockets).toBe(2);
+    await expect(connectedDot(page)).toHaveText("connected");
+    await expect.poll(open).toBe(1);
+
+    // The reconnected document is live in both directions, not merely re-opened.
+    await typeAtEnd(page, "written after the drop");
+    await expect(documentEditor(bobPage)).toContainText("written after the drop");
+    await typeAtEnd(bobPage, "answered after the drop");
+    await expect(editor).toContainText("answered after the drop");
+    await expect.poll(open).toBe(1);
+  } finally {
+    await bob.close();
+    await alice.close();
+  }
+});
+
+for (const row of [
+  { key: "IDLE", reader: "an editor", readOnly: false },
+  { key: "VIEW", reader: "a read-only viewer", readOnly: true },
+]) {
+  test(`an idle document provider stays on one connection past its receive timeout, as ${row.reader}`, async ({
+    browser,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name !== "chromium",
+      "one Hocuspocus provider proves the document socket stays connected"
+    );
+    test.setTimeout(90_000);
+    await createProject({ key: row.key, name: "Idle document" });
+    const issue = await createIssue({
+      project: row.key,
+      spec: "# Quiet document\n\nIt stays connected.\n",
+      title: "Idle document connection",
+    });
+    if (row.readOnly) {
+      // A closed issue's document admits its socket read-only.
+      await patchIssue(issue.key, { status: "done" });
+    }
+
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      const sockets = countDocumentSockets(page, issue.primary_artifact_id);
+      await page.goto(`/issues/${issue.key}/spec`);
+      await expect(documentEditor(page)).toContainText("It stays connected.");
+      if (row.readOnly) {
+        await expect(
+          page.getByText("This issue is closed. Its document is read-only.")
+        ).toBeVisible();
+      }
+      await expect(connectedDot(page)).toHaveText("connected");
+      await expect.poll(sockets).toBe(1);
+
+      // The provider closes a socket that has delivered nothing for 30 s.
+      await page.waitForTimeout(42_000);
+
+      await expect(connectedDot(page)).toHaveText("connected");
+      expect(sockets()).toBe(1);
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
+test("document marks and table alignment use classes rather than inline styles", async ({
+  browser,
+}) => {
+  await createProject({ key: "MARKS", name: "Marks" });
+  const issue = await createIssue({
+    project: "MARKS",
+    spec: "A marked phrase.\n\n| One | Two |\n| :--- | ---: |\n| Left | Right |\n",
+    title: "Document decoration style",
+  });
+  await createComment(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "marked phrase" }, body: "Review this." },
+    session
+  );
+
+  // Dispatch omits collaborative awareness below 1280 px, so exercise the peer selection in an
+  // explicit desktop context.
+  const [alice, selectionAlice, selectionBob] = await Promise.all([
+    asUser(browser, "alice"),
+    asUser(browser, "alice", { viewport: { height: 900, width: 1440 } }),
+    asUser(browser, "bob", { viewport: { height: 900, width: 1440 } }),
+  ]);
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    const editor = documentEditor(page);
+    const decoration = editor.locator(".mark-comment");
+    const rightCell = editor.locator("tbody td").nth(1);
+    await expect(decoration).toHaveCount(1);
+    await expect(editor.locator("[style]")).toHaveCount(0);
+    await expect(rightCell).toHaveAttribute("data-proof-text-align", "right");
+    await expect(rightCell.evaluate((cell) => getComputedStyle(cell).textAlign)).resolves.toBe(
+      "right"
+    );
+
+    const selectionPage = await selectionAlice.newPage();
+    await selectionPage.goto(`/issues/${issue.key}/spec`);
+    const selectionEditor = documentEditor(selectionPage);
+    const bobPage = await selectionBob.newPage();
+    await bobPage.goto(`/issues/${issue.key}/spec`);
+    await selectEditorText(bobPage, "marked phrase");
+    const selection = selectionEditor.locator(".proof-collab-selection");
+    await expect(selection).toHaveCount(1);
+    await expect(selectionEditor.locator("[style]")).toHaveCount(0);
+    await expect(
+      selection.evaluate((span) => getComputedStyle(span).backgroundImage !== "none")
+    ).resolves.toBe(true);
+  } finally {
+    await selectionBob.close();
+    await selectionAlice.close();
+    await alice.close();
+  }
+});
+
+// Method names survive minification where class and import names do not: `getXmlFragment(`
+// as a definition (not a `.getXmlFragment(` call) is Yjs's `Doc`, and `permissionDeniedHandler`
+// is the Hocuspocus provider. Dispatch's own host code calls these; only the libraries define them.
+const editorTransportMarkers = [/[^.\w$]getXmlFragment\(/u, /permissionDeniedHandler/u];
+
+test("the Conversation tab downloads no editor transport; the Spec tab loads it on demand", async ({
+  browser,
+}) => {
+  await createProject({ key: "LAZY", name: "Lazy" });
+  const issue = await createIssue({
+    project: "LAZY",
+    spec: "# Lazy\n\nUse SQLite\n",
+    title: "Transport on demand",
+  });
+  await createMessage(issue.key, { body: "A message, no document" }, session);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const scripts = new Set<string>();
+    page.on("request", (request) => {
+      if (/\/assets\/.*\.js(\?|$)/u.test(request.url())) {
+        scripts.add(request.url());
+      }
+    });
+    const transportChunks = async () => {
+      const chunks: string[] = [];
+      for (const url of scripts) {
+        const body = await (await page.request.get(url)).text();
+        if (editorTransportMarkers.some((marker) => marker.test(body))) {
+          chunks.push(url);
+        }
+      }
+      return chunks;
+    };
+
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    await expect(page.getByText("A message, no document")).toBeVisible();
+    expect(scripts.size).toBeGreaterThan(1);
+    expect(await transportChunks()).toEqual([]);
+
+    await page.getByRole("tab", { name: "Spec" }).click();
+    await expect(documentEditor(page)).toContainText("Use SQLite");
+    expect((await transportChunks()).length).toBeGreaterThan(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a version deep link renders the comment's original quote highlighted in a read-only editor", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "LINK", name: "Linked documents" });
+  const issue = await createIssue({
+    project: "LINK",
+    spec: "SQLite is local",
+    title: "Deep link highlight",
+  });
+  const comment = await createComment(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "SQLit" }, body: "Use the embedded store." },
+    session
+  );
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(
+      `/issues/${issue.key}/artifact/spec?v=1&comment=${encodeURIComponent(comment.id)}`
+    );
+
+    const versionView = page.getByRole("region", { name: "Document version 1" });
+    const highlight = versionView.locator(`[data-id="${comment.id}"]`);
+    await expect(highlight).toHaveText("SQLit");
+    await expect(versionView.locator(".dispatch-mark-pulse")).toHaveCount(1);
+    await expect(versionView.getByRole("textbox", { name: "Document editor" })).toHaveAttribute(
+      "contenteditable",
+      "false"
+    );
+    await page.screenshot({
+      path: testInfo.outputPath("spec-deep-link-highlight.png"),
+      fullPage: true,
+    });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("clicking a Markdown dispatch:// link in the live editor navigates in-app without a reload @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "NAV", name: "Navigation" });
+  const target = await createIssue({
+    project: "NAV",
+    title: "Navigation target",
+  });
+  const source = await createIssue({
+    project: "NAV",
+    spec: `See [the other issue](dispatch://${target.key}) for context.`,
+    title: "Navigation source",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${source.key}/spec`);
+
+    const editor = documentEditor(page);
+    // The live editor keeps the author's own link text (`@legion/proof-editor` exposes no
+    // decoration hook to safely replace a live editable mark's rendered text) and surfaces the
+    // resolved target in the hover card instead.
+    const link = editor.getByRole("link", { name: "the other issue" });
+    await expect(link).toBeVisible();
+    if (testInfo.project.name !== "iphone") {
+      await link.hover();
+      await expect(page.getByRole("tooltip")).toContainText("Navigation target");
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("tooltip")).toHaveCount(0);
+    }
+
+    // A full page reload would reset this marker; an in-app route change preserves it.
+    await page.evaluate(() => {
+      (window as unknown as { __e2eNavMarker?: boolean }).__e2eNavMarker = true;
+    });
+    await link.click();
+
+    await expect(page).toHaveURL(new RegExp(`/issues/${target.key}(/|$)`));
+    expect(
+      await page.evaluate(() => (window as unknown as { __e2eNavMarker?: boolean }).__e2eNavMarker)
+    ).toBe(true);
+  } finally {
+    await alice.close();
+  }
+});
+
+// INFRA-536: `\&` is an escaped ampersand, so `\&amp;` is the text `&amp;`, not `&` - in the
+// browser editor's engine (remark/micromark), in the server's Go reading of the document, and in
+// what an agent reads back from the command line.
+test("a backslash before a character reference reads as its text in a document, a comment and the command line", async ({
+  browser,
+}, testInfo) => {
+  const written = "Plain \\&amp; end.";
+  const text = "Plain &amp; end.";
+  await createProject({ key: "REF", name: "References" });
+  const issue = await createIssue(
+    { project: "REF", spec: `${written}\n`, title: "Escaped reference" },
+    session
+  );
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    const editor = documentEditor(page);
+    await expect.poll(() => editor.locator("p").allTextContents()).toEqual([text]);
+
+    // Stored as the canonical markdown for that text, which the engine reads back unchanged.
+    const stored = (await getArtifactText(issue.primary_artifact_id)).markdown;
+    expect(stored).toBe("Plain &amp;amp; end.\n");
+    expect(engineParagraphs(stored)).toEqual([text]);
+
+    // A comment's body is rendered by the engine alone: the control for the document's reading.
+    const comment = await createComment(issue.key, { body: written }, session);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(
+      page.locator(`[data-turn="comment:${comment.id}"]`).getByText(text, { exact: true })
+    ).toBeVisible();
+
+    // The command runs outside the browser, so one project runs it.
+    if (testInfo.project.name === "chromium") {
+      const home = mkdtempSync(join(tmpdir(), "dispatch-cli-doc-read-"));
+      try {
+        const read = await runDispatch(
+          ["doc-read", "--issue", issue.key, "--artifact", "spec"],
+          home
+        );
+        expect(read.code, `${read.stdout}${read.stderr}`).toBe(0);
+        const trailer = read.stdout.indexOf("Document token:");
+        expect(trailer, read.stdout).toBeGreaterThan(-1);
+        // The stored markdown, its own line ending, then the blank line before the trailer.
+        expect(read.stdout.slice(0, trailer)).toBe("Plain &amp;amp; end.\n\n\n");
+      } finally {
+        rmSync(home, { force: true, recursive: true });
+      }
+    }
+  } finally {
+    await alice.close();
+  }
+});

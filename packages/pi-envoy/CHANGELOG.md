@@ -1,5 +1,78 @@
 # Changelog
 
+## [14.1.0] - 2026-11-01
+
+### Added
+
+- Consumer delivery. While a session's agent subject is open, the plugin subscribes its relay
+  subject, `notifications.envoy.deliver.<session id>`, before it registers, and every registration
+  asks the listener for the session's durable consumer, with an epoch per NATS connection and the
+  resume point it persisted. Answered `consumer`, the session takes its agent subject and every
+  followed topic the stream stores from the listener's relay, in stream order: each frame is
+  answered `received` as it decodes, `progress` every 20 s while Oh My Pi holds its card or turn
+  unwritten, and `done` once Oh My Pi wrote it (the message's `message_end`), or at once for a
+  frame skipped, suppressed, already shown, or rejected (after the rejection reply is posted). A
+  frame the host dropped unwritten (a switch away, an interrupt that withdrew a person's turn) is
+  answered `nak` and comes again. The core copies of those subjects then show nothing and only
+  answer a role lane's receipt, and the replay engine makes no `/v1/replay` call. So a message
+  published while the session was killed, restarting or disconnected, a role message to a role it
+  holds included, is shown once when it is back, for up to 72 hours. A nats.js reconnect begins a
+  new epoch and registers at once, so the listener restarts the relay at the consumer's ack floor;
+  the resume point is kept in the session file (`envoy-consumer-state`), with each topic's follow
+  time whenever it changes, so a resumed session's missing consumer starts where it stopped. A
+  session coming from the previous plugin has no resume point of its own: its first consumer
+  starts at the replay cursors its session file holds, so the messages stored while it was away
+  are shown instead of acked away. A BTW
+  that arrives late (delivered before, or stored before the connection's epoch began) is one inert
+  card and starts no side turn. Answered `core`, or by a listener of an earlier release, delivery
+  works as before (INFRA-594).
+
+### Changed
+
+- A BTW's side turn and every Dispatch reply run off the frame that started them, so the frames
+  after it wait for neither the model call nor the reply, on the core path and the consumer path
+  alike (INFRA-594).
+
+### Fixed
+
+- `envoy_sessions`' `machine` filter finds a session by the listener it registered through as
+  well as by the machine its process runs on: it matched only the latter, so a filter by a hub's
+  machine id (`envoy-hub`, `gke`) listed nothing for the sessions registered through it
+  (INFRA-594).
+
+## [14.0.0] - 2026-11-01
+
+### Changed
+
+- The shipped `dispatch` command accepts only `omp` and `claude` as `DISPATCH_HOST`, and reads
+  `OPENCODE_CONFIG_DIR` no longer; `envoy_publish`'s description no longer names an OpenCode
+  agent as the kind of session a serve port reaches. Legion no longer supports OpenCode.
+
+## [13.13.1] - 2026-11-01
+
+### Added
+
+- Every model request shows each Envoy card with `delivered:`, the time the session got it, after its send time (`at:` on a card, `published_at:` on the notice that names a message the session could not be shown), and with `waited:` in words once the two are 15 minutes or more apart, so a session reading its inbox late does not take a card's send time for the present time. The two lines name their clocks: the send time is the Envoy server's, `delivered:` is the session's machine's. When the machine's clock runs 15 minutes or more ahead of or behind the Envoy listener's, read from the listener's replies, the card says so in `clocks:` and `waited:` leaves that difference out, so a skewed clock neither makes a wait nor hides one, and a card still dated after its delivery once that difference is taken off says the sending server's own clock runs ahead of the listener's. A difference under 15 minutes is not shown and stays in the stated wait. Each time is kept per session, so a session the host moves to that is shown the same message reads when it got it there. The card stored in the transcript is unchanged.
+
+### Fixed
+
+- Every Envoy card but an inert one goes to Oh My Pi as an aside with `triggerTurn`, busy session or idle, so no such card waits in the steering queue a person's typed message waits in. A card handed to an idle session as a steer joined that queue whenever the session turned busy first, and the queue releases one message per model turn. The startup phase keeps its follow-up, and an inert card (a replayed BTW, or a failure notice naming one) stays a steer with no turn, handed only to a settled session. This needs Oh My Pi 18.13.2-sami.20261027-235348 or later; `.omp-pin` moves to 18.13.3-sami.20261029-115123.
+
+## [13.13.0] - 2026-11-01
+
+### Changed
+
+- `dispatch`, "References": a local path is not a reference, and outside Dispatch (a chat reply, Slack, a pull request, an email) neither is a `dispatch://` reference, which opens nothing there; give the `https://` link `dispatch` printed. To stay under the 2,000-word guard, "A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`" is cut: `dispatch-first` says it ("an ask block for a design question its document records, else `dispatch ask`").
+- The `dispatch-writing-specs` skill now says to `wait` for the read-only fact check it runs
+  before each approval request: that `task(agent="scout")` runs as a background job under Oh My
+  Pi's own defaults, so its findings arrive from the `wait` rather than from the dispatch.
+
+## [13.11.1] - 2026-10-31
+
+### Changed
+
+- Each extension instance mints a client instance id when it starts and sends it on every registration and on the deregistration at shutdown. A soft role claim that names a forked, branched or resumed predecessor now takes the role only when that predecessor has no live registration, when its live registration carries the same instance id, or when either side carries no instance id, so a claim no longer takes a role from another process that is running the named session. A refused session keeps running and stays registered, without the role. The two serial task queues, each task deadline and fence, and the registration and role state the queued tasks write now live in one module, `src/registration-state.ts`, where a queued task acts through a handle that refuses every step past its deadline or once its session is no longer the open session.
+
 ## [13.10.1] - 2026-10-31
 
 ### Fixed

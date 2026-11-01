@@ -3649,8 +3649,14 @@ describe("executeDispatchTool", () => {
     });
 
     expect(requests).toEqual(["/api/v1/whoami"]);
-    expect(result.details).toEqual({ session: "session-1", owner: "alice", service: null });
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: "alice",
+      service: null,
+      project: null,
+    });
     expect(result.text).toContain("alice");
+    expect(result.text).not.toContain("which is not this host session");
   });
 
   test("dispatch_whoami reports a null owner under the shared token", async () => {
@@ -3669,7 +3675,12 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
-    expect(result.details).toEqual({ session: "session-1", owner: null, service: null });
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: null,
+      service: null,
+      project: null,
+    });
     expect(result.text).toContain("shared token");
   });
 
@@ -3699,9 +3710,107 @@ describe("executeDispatchTool", () => {
       session: "session-1",
       owner: null,
       service: "system:serviceaccount:legion:legion-worker",
+      project: null,
     });
     expect(result.text).toContain("runs as service legion/legion-worker");
     expect(result.text).not.toContain("shared token");
+  });
+
+  // The three cases the tool's text distinguishes, now that a credential can prove a session of
+  // its own: the server names the host's session, it names another, or it names none at all,
+  // which is a Dispatch older than broker-issued tokens and not an answer of "no session".
+  test("dispatch_whoami reports the session the credential proved when it is this host's", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({
+        kind: "agent",
+        owner: "alice",
+        service: null,
+        session: "session-1",
+        project: "INFRA",
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: "alice",
+      service: null,
+      project: "INFRA",
+    });
+    expect(result.text).toContain("Session session-1 acts for alice");
+    expect(result.text).toContain("It may write project INFRA and no other.");
+    expect(result.text).not.toContain("which is not this host session");
+  });
+
+  test("dispatch_whoami says plainly when the credential names another session", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({
+        kind: "agent",
+        owner: "alice",
+        service: null,
+        session: "ses_from_the_broker",
+        project: null,
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.details).toEqual({
+      session: "ses_from_the_broker",
+      owner: "alice",
+      service: null,
+      project: null,
+    });
+    expect(result.text).toContain("Session ses_from_the_broker acts for alice");
+    expect(result.text).toContain(
+      "Your credential names session ses_from_the_broker, which is not this host session (session-1): Dispatch records every write you make as ses_from_the_broker."
+    );
+    expect(result.text).not.toContain("may write project");
+  });
+
+  test("dispatch_whoami reads an omitted session as an older Dispatch, not as none", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({ kind: "agent", owner: "alice", service: null });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: "alice",
+      service: null,
+      project: null,
+    });
+    expect(result.text).toContain("Session session-1 acts for alice");
+    expect(result.text).not.toContain("which is not this host session");
   });
 
   test("dispatch_issue_update moves status and merges external links by URL as the session", async () => {
@@ -6876,6 +6985,40 @@ describe("executeDispatchTool", () => {
         ["b-1", "b-2"],
         [opening("b-1", "answered"), opening("b-2", "resolved")],
         [blockAsk("b-1", "answered"), blockAsk("b-2", "resolved")]
+      );
+
+      expect((await outcome).text).toStartWith("Approval requested for spec.md");
+      expect(posts).toEqual(["/api/v1/artifacts/artifact-42/approval-requests"]);
+    });
+
+    // The renderer writes an id the `#` shortcut cannot hold as `id="…"`, its `&` as `&amp;`
+    // (pmdoc.TypedBlockIDAttribute): the opener is found by that spelling.
+    const quotedOpening = (written: string, block: string, state: string) =>
+      `:::ask{id="${written}" urgency="med" multiple="false" state="${state}"}\nQuestion of ${block}?\n:::`;
+
+    test('refuses over open blocks whose ids are written id="…"', async () => {
+      const { outcome, posts } = await requestOver(
+        ["a b", "R&D"],
+        [quotedOpening("a b", "a b", "open"), quotedOpening("R&amp;D", "R&D", "open")],
+        [blockAsk("a b", "open"), blockAsk("R&D", "open")]
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n").slice(1, 3)).toEqual([
+        '- "Question of a b?" (block a b, ask ask-a b)',
+        '- "Question of R&D?" (block R&D, ask ask-R&D)',
+      ]);
+      expect(posts).toEqual([]);
+    });
+
+    test('requests approval once blocks whose ids are written id="…" are answered or resolved', async () => {
+      const { outcome, posts } = await requestOver(
+        ["a b", "R&D"],
+        [quotedOpening("a b", "a b", "answered"), quotedOpening("R&amp;D", "R&D", "resolved")],
+        [blockAsk("a b", "answered"), blockAsk("R&D", "resolved")]
       );
 
       expect((await outcome).text).toStartWith("Approval requested for spec.md");

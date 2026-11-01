@@ -1,0 +1,49 @@
+import { expect, test } from "bun:test";
+import { canSubmitComposer, hasUnsavedInput } from "../conversation/MentionComposer";
+import { buildIssuePath, composerReferences } from "../refs/routes";
+
+test("composer turns typed dispatch and pasted same-origin links into reference chips", () => {
+  expect(
+    composerReferences(
+      "See dispatch://CORE-1/spec and https://dispatch.test/issues/CORE-1/artifact/design",
+      "https://dispatch.test"
+    )
+  ).toEqual([
+    {
+      href: buildIssuePath({ key: "CORE-1", kind: "spec" }),
+      reference: "dispatch://CORE-1/spec",
+    },
+    {
+      href: buildIssuePath({ key: "CORE-1", kind: "artifact", slug: "design" }),
+      reference: "dispatch://CORE-1/artifact/design",
+    },
+  ]);
+});
+
+test("composer emits canonical browser routes for versioned dispatch references", () => {
+  expect(composerReferences("dispatch://CORE-1/artifact/design@v3")).toEqual([
+    {
+      href: buildIssuePath({ key: "CORE-1", kind: "artifact", slug: "design", version: 3 }),
+      reference: "dispatch://CORE-1/artifact/design@v3",
+    },
+  ]);
+});
+
+test("composer holds Save until every image upload settles", () => {
+  // A draft nothing refuses (`draftRefusal` returned no reason) still waits on its upload.
+  expect(canSubmitComposer(undefined, false, 1)).toBe(false);
+  expect(canSubmitComposer(undefined, false, 0)).toBe(true);
+});
+
+test("hasUnsavedInput counts a suggestion's optional reason even with no replacement typed", () => {
+  expect(hasUnsavedInput("because", "")).toBe(true);
+});
+
+test("hasUnsavedInput is false with every field blank", () => {
+  expect(hasUnsavedInput("", "")).toBe(false);
+  expect(hasUnsavedInput("   ", "  ")).toBe(false);
+});
+test("hasUnsavedInput counts typed option labels and descriptions", () => {
+  expect(hasUnsavedInput("", "", [{ description: "", label: "Ship" }])).toBe(true);
+  expect(hasUnsavedInput("", "", [{ description: "Explain why", label: "" }])).toBe(true);
+});

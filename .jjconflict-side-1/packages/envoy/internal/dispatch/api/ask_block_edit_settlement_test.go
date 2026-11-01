@@ -1,0 +1,1117 @@
+package api
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"slices"
+	"sort"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+)
+
+// blockAskHandler is a handler whose documents settle fast enough for a test to observe one.
+func blockAskHandler(t *testing.T) (http.Handler, *store.Store) {
+	t.Helper()
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	return handler, database
+}
+
+// seedBlockAsk writes an ask block into the issue's spec as sessionActor and returns the issue
+// and the id of the ask settlement indexes from it.
+func seedBlockAsk(t *testing.T, handler http.Handler, title, blockID, markdown, question string) (struct {
+	Key               string `json:"key"`
+	PrimaryArtifactID string `json:"primary_artifact_id"`
+}, string) {
+	t.Helper()
+	issue := createInteractionIssue(t, handler, "TEST", title, "Context\n")
+	written := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"actor": sessionActor(),
+		"ops":   []map[string]string{{"op": "insert", "after": "end", "markdown": markdown}},
+	})
+	if written.Code != http.StatusOK {
+		t.Fatalf("write ask block: status=%d body=%s", written.Code, written.Body.String())
+	}
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, blockID, question)
+	return issue, blockAskID(t, handler, issue.Key, blockID)
+}
+
+// blockAskID is the id of the ask indexed from blockID on the issue.
+func blockAskID(t *testing.T, handler http.Handler, issueKey, blockID string) string {
+	t.Helper()
+	asks := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issueKey+"/asks?state=all", nil, "alice")
+	if asks.Code != http.StatusOK {
+		t.Fatalf("list asks: status=%d body=%s", asks.Code, asks.Body.String())
+	}
+	found := ""
+	for _, ask := range decodeBody[[]model.Ask](t, asks) {
+		if ask.BlockID == nil || *ask.BlockID != blockID {
+			continue
+		}
+		if found != "" {
+			t.Fatalf("block %q has more than one ask: %s and %s", blockID, found, ask.ID)
+		}
+		found = ask.ID
+	}
+	if found == "" {
+		t.Fatalf("no ask indexed from block %q on %s", blockID, issueKey)
+	}
+	return found
+}
+
+// readBlockAsk is one ask as the dashboard and the tools read it.
+func readBlockAsk(t *testing.T, handler http.Handler, askID string) model.Ask {
+	t.Helper()
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+askID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read ask: status=%d body=%s", read.Code, read.Body.String())
+	}
+	return decodeBody[struct {
+		Ask model.Ask `json:"ask"`
+	}](t, read).Ask
+}
+
+func documentMarkdown(t *testing.T, handler http.Handler, artifactID string) string {
+	t.Helper()
+	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", nil, "alice")
+	if text.Code != http.StatusOK {
+		t.Fatalf("read document text: status=%d body=%s", text.Code, text.Body.String())
+	}
+	return decodeBody[struct {
+		Markdown string `json:"markdown"`
+	}](t, text).Markdown
+}
+
+// documentVersions is the document's settled versions, newest last.
+func documentVersions(t *testing.T, handler http.Handler, artifactID string) []model.Version {
+	t.Helper()
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifactID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read artifact: status=%d body=%s", read.Code, read.Body.String())
+	}
+	return decodeBody[model.Artifact](t, read).Versions
+}
+
+// awaitSettledVersion blocks until settlement has published the document's version number, on a
+// subscription taken before the write it settles. Settlement commits a version before it
+// releases the authors that version credits from the document's pending authors, so the version
+// can be read while they are still pending, and a write made then is credited to them as well.
+// It publishes the version's event only after releasing them, which makes the event, not the
+// stored version, the signal that settlement has finished.
+func awaitSettledVersion(t *testing.T, published <-chan model.Event, artifactID string, number int) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case event, ok := <-published:
+			if !ok {
+				t.Fatalf("the broker's subscription closed before version %d of %s was published", number, artifactID)
+			}
+			if event.Type != "artifact.version" {
+				continue
+			}
+			payload, isMap := event.Payload.(map[string]any)
+			version, isVersion := payload["version"].(model.Version)
+			if !isMap || !isVersion {
+				t.Fatalf("artifact.version payload = %#v, want the map ArtifactVersionEventPayload builds", event.Payload)
+			}
+			if payload["artifact_id"] == artifactID && version.Number == number {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("settlement published no version %d of %s", number, artifactID)
+		}
+	}
+}
+
+// settleDocument triggers one settlement of the document by a human and blocks until it has
+// run. The trigger inserts a marker ask block, whose indexing is settlement's own signal, so no
+// test sleeps for a settlement it cannot see. Each call needs a marker id of its own.
+func settleDocument(t *testing.T, handler http.Handler, artifactID, issueKey, marker string) {
+	t.Helper()
+	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{
+			"op":       "insert",
+			"after":    "end",
+			"markdown": ":::ask{#" + marker + " urgency=\"low\" multiple=\"false\"}\nMarker " + marker + "?\n:::\n",
+		}},
+	}, "alice")
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit the document to trigger settlement: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	awaitIndexedAskBlock(t, handler, artifactID, marker, "Marker "+marker+"?")
+}
+
+// askEvents are the issue's ask.* and block.* events, oldest first.
+type askEvent struct {
+	Type    string      `json:"type"`
+	Actor   model.Actor `json:"actor"`
+	Payload struct {
+		ID         string               `json:"id"`
+		BlockID    *string              `json:"block_id"`
+		Question   string               `json:"question"`
+		State      string               `json:"state"`
+		Resolution *model.AskResolution `json:"resolution"`
+		Restored   bool                 `json:"restored"`
+	} `json:"payload"`
+}
+
+func issueAskEvents(t *testing.T, handler http.Handler, issueKey string) []askEvent {
+	t.Helper()
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issueKey+"/events?limit=100", nil, "alice")
+	if events.Code != http.StatusOK {
+		t.Fatalf("read events: status=%d body=%s", events.Code, events.Body.String())
+	}
+	return decodeBody[[]askEvent](t, events)
+}
+
+const transportAsk = ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nWhich transport?\n\n" +
+	"- REST: Matches the platform\n- gRPC: Adds streaming\n:::\n"
+
+// A block ask keeps its text in two places: the ask row and the `:::ask` block. An edit writes
+// both, so the next settlement agrees with the row and leaves it alone (LEGION-265).
+func TestEditedBlockAskSurvivesTheNextDocumentSettlement(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Block ask edit", "decision", transportAsk, "Which transport?")
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": "Which transport ships first?",
+		"options":  []map[string]string{{"label": "REST", "description": "Ship now"}, {"label": "gRPC", "description": "Later"}},
+		"multiple": true,
+		"urgency":  "blocking",
+		"actor":    sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit block ask: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-edit")
+
+	ask := readBlockAsk(t, handler, askID)
+	if ask.Question != "Which transport ships first?" || !ask.Multiple || ask.Urgency != "blocking" {
+		t.Fatalf("settlement reverted the edited ask: question=%q multiple=%v urgency=%q", ask.Question, ask.Multiple, ask.Urgency)
+	}
+	if len(ask.Options) != 2 || ask.Options[0].Description != "Ship now" || ask.Options[1].Description != "Later" {
+		t.Fatalf("settlement reverted the edited options: %#v", ask.Options)
+	}
+	if ask.BlockID == nil || *ask.BlockID != "decision" {
+		t.Fatalf("edit moved the ask off its block: block_id=%v", ask.BlockID)
+	}
+	// The same id, so settlement neither opened a duplicate nor retracted the original.
+	if again := blockAskID(t, handler, issue.Key, "decision"); again != askID {
+		t.Fatalf("block decision now indexes ask %s, was %s", again, askID)
+	}
+
+	markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	for _, want := range []string{
+		"Which transport ships first?", "- REST: Ship now", "- gRPC: Later",
+		"#decision", `urgency="blocking"`, `multiple="true"`,
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("document does not carry %q after the edit:\n%s", want, markdown)
+		}
+	}
+	for _, event := range issueAskEvents(t, handler, issue.Key) {
+		if event.Type != "ask.edited" || event.Payload.ID != askID {
+			continue
+		}
+		if event.Actor.Kind != "session" || event.Payload.Question != "Which transport ships first?" {
+			t.Fatalf("ask.edited by %s %q carrying %q; only the editing session's own edit may be published",
+				event.Actor.Kind, event.Actor.ID, event.Payload.Question)
+		}
+	}
+}
+
+// Acceptance 8: the ask's wording is part of the document, so an edit versions it once, crediting
+// the session that edited - never the room's last actor.
+func TestEditedBlockAskWritesOneVersionCreditingTheEditor(t *testing.T) {
+	handler, _, deps := newTestServer(t, testServerOptions{settle: 20 * time.Millisecond})
+	issue, askID := seedBlockAsk(t, handler, "Block ask version", "decision", transportAsk, "Which transport?")
+	before := len(documentVersions(t, handler, issue.PrimaryArtifactID))
+
+	published, unsubscribe := deps.Events.Subscribe()
+	defer unsubscribe()
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": "Which transport ships first?", "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit block ask: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	// The edit's own settlement writes its version. Waiting until that settlement has finished
+	// is what makes the authors the edit's, rather than whoever else happens to touch the
+	// document within the settle window, and what keeps the next edit below from being credited
+	// to this edit's session too.
+	awaitSettledVersion(t, published, issue.PrimaryArtifactID, before+1)
+	edit := documentVersions(t, handler, issue.PrimaryArtifactID)[before]
+	if len(edit.Authors) != 1 || edit.Authors[0].Kind != "session" || edit.Authors[0].ID != sessionActor()["id"] {
+		t.Fatalf("the edit's version authors = %#v, want the editing session alone", edit.Authors)
+	}
+
+	// One version, and only one: a later settlement of the same document writes the versions
+	// its own edit earns and none on the edited ask's account.
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-version")
+	credited := 0
+	for _, version := range documentVersions(t, handler, issue.PrimaryArtifactID)[before:] {
+		for _, author := range version.Authors {
+			if author.Kind == "session" && author.ID == sessionActor()["id"] {
+				credited++
+				break
+			}
+		}
+	}
+	if credited != 1 {
+		t.Fatalf("%d versions credit the editing session, want exactly the edit's one", credited)
+	}
+}
+
+// A block ask's edit writes its document inside the handler's transaction, so the events that
+// write produced - an anchor moved under a comment, here - belong to the ledger, and the
+// handler's own ask.edited follows them. A reader watching the live stream applies them in that
+// order: the refreshed anchor, then the question it moved under. Both reach the stream from one
+// commit, and nothing may publish before it.
+func TestAnEditedBlockAskPublishesItsDocumentEventsBeforeItsOwn(t *testing.T) {
+	handler, _, deps := newTestServer(t, testServerOptions{settle: 20 * time.Millisecond})
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createReferenceAPIIssue(t, handler, "CORE")
+	written := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"actor": sessionActor(),
+		"ops":   []map[string]string{{"op": "insert", "after": "end", "markdown": ":::ask{#decision}\nWhich transport carries it?\n:::"}},
+	})
+	if written.Code != http.StatusOK {
+		t.Fatalf("write ask block: status=%d body=%s", written.Code, written.Body.String())
+	}
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "decision", "Which transport carries it?")
+	askID := blockAskID(t, handler, issue.Key, "decision")
+	anchored := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body":   "Say which one.",
+		"anchor": map[string]any{"artifact": "spec", "quote": "transport carries"},
+	}, "alice")
+	if anchored.Code != http.StatusCreated {
+		t.Fatalf("anchor a comment in the block: status=%d body=%s", anchored.Code, anchored.Body.String())
+	}
+
+	published, unsubscribe := deps.Events.Subscribe()
+	defer unsubscribe()
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": "Which transport ships this first, and when?", "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit the block ask: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+
+	var order []model.Event
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case event := <-published:
+			order = append(order, event)
+			if event.Type != "ask.edited" {
+				continue
+			}
+			if len(order) < 2 || order[len(order)-2].Type != "comment.anchor_refreshed" {
+				types := make([]string, 0, len(order))
+				for _, seen := range order {
+					types = append(types, seen.Type)
+				}
+				t.Fatalf("published %v, want comment.anchor_refreshed immediately before ask.edited", types)
+			}
+			if refreshed := order[len(order)-2]; refreshed.ID >= event.ID {
+				t.Fatalf("published the anchor refresh as event %d and ask.edited as %d, want the refresh appended first", refreshed.ID, event.ID)
+			}
+			return
+		case <-deadline:
+			t.Fatalf("the edit published %d events and no ask.edited", len(order))
+		}
+	}
+}
+
+// Acceptance 7, refused half: an option label carrying ": " cannot round-trip through the
+// block's `Label: Description` line, so the edit is refused whole - no row, block or version.
+func TestEditBlockAskRefusesAnOptionLabelTheBlockCannotCarry(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Block ask refusal", "decision", transportAsk, "Which transport?")
+	beforeVersions := len(documentVersions(t, handler, issue.PrimaryArtifactID))
+	beforeMarkdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+
+	refused := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"options": []map[string]string{{"label": "REST: the one", "description": "Ship now"}},
+		"actor":   sessionActor(),
+	})
+	if refused.Code != http.StatusBadRequest {
+		t.Fatalf("edit with an unrepresentable option label: status=%d body=%s", refused.Code, refused.Body.String())
+	}
+	if body := refused.Body.String(); !strings.Contains(body, "options") {
+		t.Fatalf("the refusal must name the field: %s", body)
+	}
+
+	if ask := readBlockAsk(t, handler, askID); ask.Question != "Which transport?" ||
+		len(ask.Options) != 2 || ask.Options[0].Label != "REST" || ask.EditedAt != nil {
+		t.Fatalf("the refused edit wrote the row: %#v", ask)
+	}
+	if got := documentMarkdown(t, handler, issue.PrimaryArtifactID); got != beforeMarkdown {
+		t.Fatalf("the refused edit wrote the document:\n%s", got)
+	}
+	if got := len(documentVersions(t, handler, issue.PrimaryArtifactID)); got != beforeVersions {
+		t.Fatalf("the refused edit wrote %d versions", got-beforeVersions)
+	}
+}
+
+// A spec whose text a renderer might rewrite keeps the caller's bytes, and anchoring a comment in
+// it, the route that snapshots a version, records none. Each paragraph is one the escape rules
+// could misjudge: a block-final backslash, citation-style links with paired brackets - alone,
+// split by formatting or a code span, and beside another link - a label beginning `::`, a heading
+// and table cells holding what would open a block at a line's start. Rewriting any of them would
+// change the document's canonical markdown, minting a version on the next anchor or edit and
+// staling the approval of a spec whose words nobody touched.
+func TestAnchoringInASpecWhoseTextARendererMightRewriteWritesNoVersion(t *testing.T) {
+	handler, database := blockAskHandler(t)
+	const spec = "Intro.\n\nThe path is C:\\\n\nSee [Issue [#42]](https://x.test) for details.\n\n" +
+		"See [`pmdoc.Parse` [source]](https://x.test) for details.\n\n" +
+		"See [**RFC** [7231]](https://x.test) for details.\n\n" +
+		"As shown [[1]](https://a.test)[[2]](https://b.test).\n\n" +
+		"[::1](https://x.test) is the loopback.\n\n" +
+		"## ~~~ tildes\n\n" +
+		"---\\\nafter a line of dashes.\n\n" +
+		"- Step one\n\n  ---\n- --dry-run skips the push\n\n" +
+		":::callout{#c1 kind=\"note\" title=\"T\"}\n- :::\n:::\n\n" +
+		"- [x] ---\n\n" +
+		"| Host | Address |\n| :--- | :--- |\n| localhost | ::1 |\n| spare | --- |\n"
+	issue := createInteractionIssue(t, handler, "TEST", "Backslash spec", spec)
+
+	if markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID); markdown != spec {
+		t.Fatalf("the spec reads back as %q, where it was written as %q", markdown, spec)
+	}
+	// The version a server stored before this rule existed holds the caller's own bytes. A
+	// renderer that wrote them differently would settle a new version over it on the next
+	// anchor, staling an approval for text nobody touched, so the stored markdown is set to
+	// those bytes before the anchor rather than left to this renderer.
+	storeLatestVersionMarkdown(t, database, issue.PrimaryArtifactID, spec)
+	before := len(documentVersions(t, handler, issue.PrimaryArtifactID))
+
+	comment := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"anchor": map[string]string{"artifact": "spec", "quote": "The path"},
+		"body":   "Which drive?",
+	}, "alice")
+	if comment.Code != http.StatusCreated {
+		t.Fatalf("anchor a comment: status=%d body=%s", comment.Code, comment.Body.String())
+	}
+	if after := len(documentVersions(t, handler, issue.PrimaryArtifactID)); after != before {
+		t.Fatalf("the anchored comment wrote %d versions", after-before)
+	}
+}
+
+// storeLatestVersionMarkdown rewrites the markdown of the document's newest version, standing in
+// for a version an earlier server recorded with its own rendering.
+func storeLatestVersionMarkdown(t *testing.T, database *store.Store, artifactID, markdown string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `
+		update artifact_versions set markdown = $2
+		where id = (
+			select id from artifact_versions where artifact_id = $1 order by number desc limit 1
+		)
+	`, artifactID, markdown); err != nil {
+		t.Fatalf("store version markdown: %v", err)
+	}
+}
+
+// A question line beginning `:::` was refused while the renderer wrote it unescaped, which left
+// the canonical markdown unparseable. The renderer escapes a directive opener now, so the block
+// carries the line and the document still reads back.
+func TestEditBlockAskCarriesAQuestionWithADirectiveLine(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Block ask directive", "decision", transportAsk, "Which transport?")
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": "Which transport?\n\n::: not a block",
+		"actor":    sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit with a directive line: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-directive-line")
+
+	if ask := readBlockAsk(t, handler, askID); ask.Question != "Which transport?\n\n::: not a block" {
+		t.Fatalf("question = %q", ask.Question)
+	}
+	markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	if !strings.Contains(markdown, "\\::: not a block") {
+		t.Fatalf("the document must escape the directive opener:\n%s", markdown)
+	}
+	if _, err := pmdoc.Parse(markdown); err != nil {
+		t.Fatalf("the document no longer parses: %v\n%s", err, markdown)
+	}
+}
+
+// A question's single newline is carried as a hard break, and the line after one read as a block
+// marker - a setext underline, a tilde fence, an HTML block opener, a table delimiter row - so
+// the block refused it. The renderer escapes each now and the route carries the question written.
+func TestEditBlockAskCarriesAQuestionWhoseLineLooksLikeABlock(t *testing.T) {
+	for _, question := range []string{
+		"Which transport?\n==",
+		"Which transport?\n--",
+		"Which transport?\n~~~",
+		"Which transport?\n<div",
+		"a | b\n--- | ---",
+		"Which transport?\n:--",
+		"Which transport?\n-:",
+		"Which transport?\\\nnext",
+	} {
+		t.Run(question, func(t *testing.T) {
+			handler, _ := blockAskHandler(t)
+			issue, askID := seedBlockAsk(t, handler, "Block ask block-marker line", "decision", transportAsk, "Which transport?")
+
+			edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+				"question": question,
+				"actor":    sessionActor(),
+			})
+			if edited.Code != http.StatusOK {
+				t.Fatalf("edit with %q: status=%d body=%s", question, edited.Code, edited.Body.String())
+			}
+			settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-block-marker-line")
+
+			if ask := readBlockAsk(t, handler, askID); ask.Question != question {
+				t.Fatalf("question = %q, want %q", ask.Question, question)
+			}
+			markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+			if _, err := pmdoc.Parse(markdown); err != nil {
+				t.Fatalf("the document no longer parses: %v\n%s", err, markdown)
+			}
+		})
+	}
+}
+
+// Acceptance 7, accepted half: everything the block can carry is accepted, normalised exactly as
+// the block parses it back - a description-less option renders as a bare label, a single newline
+// survives as a line break, and surrounding whitespace is trimmed rather than refused.
+func TestEditBlockAskAcceptsWhatTheBlockCanCarry(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Block ask normalisation", "decision", transportAsk, "Which transport?")
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": "  Which *transport* ships `first`?\nSay which.\n\nSay why.  ",
+		"options": []map[string]any{
+			{"label": "REST"},
+			{"label": "gRPC", "description": "  streaming: yes  "},
+		},
+		"actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit block ask: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-normalise")
+
+	ask := readBlockAsk(t, handler, askID)
+	if ask.Question != "Which *transport* ships `first`?\nSay which.\n\nSay why." {
+		t.Fatalf("question = %q", ask.Question)
+	}
+	if len(ask.Options) != 2 || ask.Options[0].Label != "REST" || ask.Options[0].Description != "" ||
+		ask.Options[1].Label != "gRPC" || ask.Options[1].Description != "streaming: yes" {
+		t.Fatalf("options = %#v", ask.Options)
+	}
+	markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	if !strings.Contains(markdown, "- REST\\n") && !strings.Contains(markdown, "- REST\n") {
+		t.Fatalf("a description-less option must render as a bare label:\n%s", markdown)
+	}
+	// The line break is a hard break in the document, not a literal newline: a literal one
+	// renders to markdown that re-parses as a space, which would put the row and block out of
+	// step at the next upload.
+	if !strings.Contains(markdown, "\\\nSay which.") {
+		t.Fatalf("a single newline must survive as a hard break:\n%s", markdown)
+	}
+}
+
+// Acceptance 5: a retract by a session is a decision, not a settlement artefact, so no later
+// settlement reopens it.
+func TestRetractedBlockAskSurvivesTheNextDocumentSettlement(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Block ask retract", "decision", transportAsk, "Which transport?")
+
+	resolved := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/resolve", map[string]any{
+		"kind": "retracted", "reason": "answered in the thread", "actor": sessionActor(),
+	})
+	if resolved.Code != http.StatusOK {
+		t.Fatalf("retract block ask: status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+	if markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID); !strings.Contains(markdown, `state="resolved"`) {
+		t.Fatalf("the retract did not write the block's state:\n%s", markdown)
+	}
+
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-retract")
+
+	ask := readBlockAsk(t, handler, askID)
+	if ask.State != "resolved" || ask.Resolution == nil || ask.Resolution.Kind != "retracted" {
+		t.Fatalf("settlement reopened the retracted ask: state=%q resolution=%#v", ask.State, ask.Resolution)
+	}
+	for _, event := range issueAskEvents(t, handler, issue.Key) {
+		if event.Type == "block.repaired" && event.Payload.BlockID != nil && *event.Payload.BlockID == "decision" {
+			t.Fatalf("settlement repaired the retracted ask's block, crediting %s %q", event.Actor.Kind, event.Actor.ID)
+		}
+	}
+}
+
+// The legacy marker for a settlement-written retraction is its reason, so a caller may not write
+// one that reads like it and be restored the next time the document settles.
+func TestResolveBlockAskRefusesTheSettlementReason(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	_, askID := seedBlockAsk(t, handler, "Block ask spoof", "decision", transportAsk, "Which transport?")
+
+	refused := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/resolve", map[string]any{
+		"kind": "retracted", "reason": "removed from the document in version 9", "actor": sessionActor(),
+	})
+	if refused.Code != http.StatusBadRequest {
+		t.Fatalf("resolve with the settlement's own reason: status=%d body=%s", refused.Code, refused.Body.String())
+	}
+	if body := refused.Body.String(); !strings.Contains(body, "reason") {
+		t.Fatalf("the refusal must name the field: %s", body)
+	}
+	if ask := readBlockAsk(t, handler, askID); ask.State != "open" {
+		t.Fatalf("the refused resolve closed the ask: state=%q", ask.State)
+	}
+}
+
+// Acceptance 5, second half: when the block leaves the document, settlement retracts its ask in
+// its own name, and undoing the deletion brings the ask back.
+func TestBlockRemovedFromTheDocumentRetractsAsTheSystemActorAndUndoRestores(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Block ask deletion", "decision", transportAsk, "Which transport?")
+
+	deleted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "delete", "block": "decision"}},
+	}, "alice")
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete the ask block: status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-delete")
+
+	ask := readBlockAsk(t, handler, askID)
+	if ask.State != "resolved" || ask.Resolution == nil || ask.Resolution.Kind != "retracted" {
+		t.Fatalf("the removed block's ask was not retracted: state=%q resolution=%#v", ask.State, ask.Resolution)
+	}
+	if ask.Resolution.Actor.Kind != "system" || ask.Resolution.Actor.ID != "document-settlement" {
+		t.Fatalf("settlement credited its own retraction to %s %q", ask.Resolution.Actor.Kind, ask.Resolution.Actor.ID)
+	}
+
+	restored := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "insert", "after": "end", "markdown": transportAsk}},
+	}, "alice")
+	if restored.Code != http.StatusOK {
+		t.Fatalf("restore the ask block: status=%d body=%s", restored.Code, restored.Body.String())
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-restore")
+
+	if back := readBlockAsk(t, handler, askID); back.State != "open" {
+		t.Fatalf("undoing the deletion did not bring the ask back: state=%q", back.State)
+	}
+	var opened []bool
+	for _, event := range issueAskEvents(t, handler, issue.Key) {
+		if event.Type == "ask.opened" && event.Payload.ID == askID {
+			opened = append(opened, event.Payload.Restored)
+		}
+	}
+	if len(opened) != 2 || opened[0] || !opened[1] {
+		t.Fatalf("ask.opened restored flags = %v, want the opening unmarked and the restoration marked", opened)
+	}
+}
+
+// Acceptance 6: the revision a human reads is the revision they answer, whatever the document
+// does in between.
+func TestAnsweringAfterAnEditAndSettlementSucceeds(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Block ask answer", "decision", transportAsk, "Which transport?")
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": "Which transport ships first?", "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit block ask: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	read := readBlockAsk(t, handler, askID)
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-answer-edit")
+
+	answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
+		"selected": []string{"REST"}, "text": "REST first.", "expected_edited_at": read.EditedAt,
+	}, "alice")
+	if answered.Code != http.StatusOK {
+		t.Fatalf("answer with the revision the human read: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+}
+
+// Acceptance 3: the document is still the way a human or `dispatch doc-edit` rewords a block ask,
+// and the row follows it, credited to that editor.
+func TestDocumentEditOfAnAskBlockStillUpdatesTheRow(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Block ask document edit", "decision", transportAsk, "Which transport?")
+
+	reworded := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{
+			{"op": "replace", "find": "Which transport?", "with": "Which transport, really?"},
+			{"op": "replace", "find": "REST: Matches the platform", "with": "REST: Matches everything"},
+		},
+	}, "alice")
+	if reworded.Code != http.StatusOK {
+		t.Fatalf("reword the ask block through the document: status=%d body=%s", reworded.Code, reworded.Body.String())
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-document-reword")
+
+	ask := readBlockAsk(t, handler, askID)
+	if ask.Question != "Which transport, really?" {
+		t.Fatalf("the row did not follow the document: question=%q", ask.Question)
+	}
+	if len(ask.Options) != 2 || ask.Options[0].Description != "Matches everything" {
+		t.Fatalf("the row did not follow the document's options: %#v", ask.Options)
+	}
+	edits := 0
+	for _, event := range issueAskEvents(t, handler, issue.Key) {
+		if event.Type != "ask.edited" || event.Payload.ID != askID {
+			continue
+		}
+		edits++
+		if event.Actor.Kind != "user" || event.Actor.ID != "alice" {
+			t.Fatalf("the document's reword was credited to %s %q", event.Actor.Kind, event.Actor.ID)
+		}
+	}
+	if edits != 1 {
+		t.Fatalf("the document's reword produced %d ask.edited events, want 1", edits)
+	}
+}
+
+// Editing takes the document's locks after the ask row while settlement takes them the other way
+// round. They are ordered by the owner row both hold first; if that ever stops being true this
+// deadlocks rather than fails, so it runs under its own deadline.
+func TestConcurrentBlockAskEditsAndSettlementsDoNotDeadlock(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Block ask concurrency", "decision", transportAsk, "Which transport?")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var wg sync.WaitGroup
+		for round := range 6 {
+			wg.Add(2)
+			go func(round int) {
+				defer wg.Done()
+				edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+					"question": fmt.Sprintf("Which transport, round %d?", round), "actor": sessionActor(),
+				})
+				if edited.Code != http.StatusOK {
+					t.Errorf("round %d edit: status=%d body=%s", round, edited.Code, edited.Body.String())
+				}
+			}(round)
+			go func(round int) {
+				defer wg.Done()
+				settling := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+					"ops": []map[string]string{{
+						"op": "insert", "after": "end",
+						"markdown": fmt.Sprintf("Paragraph %d.\n", round),
+					}},
+				}, "alice")
+				if settling.Code != http.StatusOK {
+					t.Errorf("round %d document edit: status=%d body=%s", round, settling.Code, settling.Body.String())
+				}
+			}(round)
+			wg.Wait()
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("concurrent block-ask edits and document settlements did not finish in 60s")
+	}
+
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-concurrency")
+	ask := readBlockAsk(t, handler, askID)
+	if !strings.HasPrefix(ask.Question, "Which transport, round ") {
+		t.Fatalf("the surviving question is neither edit: %q", ask.Question)
+	}
+	markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	if !strings.Contains(markdown, ask.Question) {
+		t.Fatalf("the row and the block disagree after concurrent writes: row=%q\n%s", ask.Question, markdown)
+	}
+}
+
+// An ask block written through the document carries formatting the ask row cannot hold: the row
+// is `nodeText`, plain. An edit that names only the urgency must leave every one of those
+// characters, and the links among them, exactly where they were - rebuilding the body from the
+// row would flatten them (LEGION-265 review, PROBE B).
+func TestUrgencyOnlyEditLeavesTheQuestionsFormattingAlone(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	const formatted = ":::ask{#decision urgency=\"med\" multiple=\"false\"}\nWhich **transport** ships [first](https://example.test/rfc)?\n\n" +
+		"- REST: Matches the platform\n:::\n"
+	issue, askID := seedBlockAsk(t, handler, "Block ask formatting", "decision", formatted,
+		"Which transport ships first?")
+	before := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"urgency": "high", "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("urgency-only edit: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-urgency")
+
+	markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	for _, want := range []string{"**transport**", "[first](https://example.test/rfc)", `urgency="high"`} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("urgency-only edit lost %q:\nbefore:\n%s\nafter:\n%s", want, before, markdown)
+		}
+	}
+	if ask := readBlockAsk(t, handler, askID); ask.Urgency != "high" || ask.Question != "Which transport ships first?" {
+		t.Fatalf("urgency-only edit changed the question: urgency=%q question=%q", ask.Urgency, ask.Question)
+	}
+}
+
+// The inner paragraph a human's comment is anchored to keeps its block id through an edit that
+// does not rewrite it, so the anchor stays attached (LEGION-265 review, PROBE D).
+func TestUrgencyOnlyEditLeavesAnAnchoredCommentAttached(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Block ask anchor", "decision", transportAsk, "Which transport?")
+
+	commented := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body":   "Why not both?",
+		"anchor": map[string]any{"artifact": "spec", "quote": "Which transport?"},
+	}, "alice")
+	if commented.Code != http.StatusCreated {
+		t.Fatalf("anchor a comment inside the ask block: status=%d body=%s", commented.Code, commented.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, commented)
+	if comment.Anchor == nil || comment.Anchor.Orphaned {
+		t.Fatalf("the seeded comment is not anchored: %#v", comment.Anchor)
+	}
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"urgency": "blocking", "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("urgency-only edit: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-anchor")
+
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read the anchored comment: status=%d body=%s", read.Code, read.Body.String())
+	}
+	after := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, read).Comment
+	if after.Anchor == nil || after.Anchor.Orphaned {
+		t.Fatalf("the urgency-only edit orphaned the comment's anchor: %#v", after.Anchor)
+	}
+}
+
+// Re-sending the values the block already holds writes nothing, which the live path reports as
+// ErrNoChanges. That is the ask the caller asked for, not a server fault (LEGION-265 review,
+// PROBE A2).
+func TestRepeatingABlockAskEditSucceeds(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	_, askID := seedBlockAsk(t, handler, "Block ask repeat", "decision", transportAsk, "Which transport?")
+
+	for round := range 2 {
+		edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+			"question": "Which transport ships first?", "actor": sessionActor(),
+		})
+		if edited.Code != http.StatusOK {
+			t.Fatalf("round %d edit: status=%d body=%s", round, edited.Code, edited.Body.String())
+		}
+	}
+	if ask := readBlockAsk(t, handler, askID); ask.Question != "Which transport ships first?" {
+		t.Fatalf("question after two identical edits = %q", ask.Question)
+	}
+}
+
+// A rewritten body is the children the markdown pipeline produces, so the bullet list carries the
+// list attributes every other document write gives it rather than a hand-built node's defaults.
+func TestBlockAskOptionsEditWritesAParsedList(t *testing.T) {
+	handler, database := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Block ask list attrs", "decision", transportAsk, "Which transport?")
+	seeded := askBlockListAttrs(t, database, issue.PrimaryArtifactID)
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"options": []map[string]string{{"label": "REST", "description": "Now"}, {"label": "Queue"}},
+		"actor":   sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("options edit: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-options")
+
+	ask := readBlockAsk(t, handler, askID)
+	if len(ask.Options) != 2 || ask.Options[0].Description != "Now" || ask.Options[1].Label != "Queue" ||
+		ask.Options[1].Description != "" {
+		t.Fatalf("options = %#v", ask.Options)
+	}
+	if written := askBlockListAttrs(t, database, issue.PrimaryArtifactID); written != seeded {
+		t.Fatalf("the rewritten list attributes = %s, want the parser's own %s", written, seeded)
+	}
+}
+
+// askBlockListAttrs is the ask block's bullet-list attributes as the stored document holds them.
+func askBlockListAttrs(t *testing.T, database *store.Store, artifactID string) string {
+	t.Helper()
+	var markdown string
+	if err := database.Pool.QueryRow(context.Background(),
+		`select markdown from artifact_versions where artifact_id = $1 order by number desc limit 1`,
+		artifactID).Scan(&markdown); err != nil {
+		t.Fatalf("read the settled document: %v", err)
+	}
+	tree, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse the settled document: %v", err)
+	}
+	attrs := "(no list)"
+	var walk func(*pmdoc.Node)
+	walk = func(node *pmdoc.Node) {
+		if node.Type == "bullet_list" {
+			keys := make([]string, 0, len(node.Attrs))
+			for name := range node.Attrs {
+				if name == pmdoc.BlockIDAttr {
+					continue
+				}
+				keys = append(keys, fmt.Sprintf("%s=%v", name, node.Attrs[name]))
+			}
+			sort.Strings(keys)
+			attrs = strings.Join(keys, " ")
+			return
+		}
+		for _, child := range node.Children {
+			walk(child)
+		}
+	}
+	walk(tree)
+	return attrs
+}
+
+// An idempotent retry re-sends the whole ask. A field it names but does not change is not
+// rewritten: rebuilding nodes that already say the same thing would mint fresh inner block ids
+// and orphan the anchors inside them for no change at all (LEGION-265 review round 3, P3-1).
+func TestIdempotentBlockAskEditRewritesNothing(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	const formatted = ":::ask{#decision urgency=\"med\" multiple=\"false\"}\nWhich **transport** ships [first](https://example.test/rfc)?\n\n" +
+		"- REST: Matches the platform\n- gRPC: Adds streaming\n:::\n"
+	issue, askID := seedBlockAsk(t, handler, "Block ask idempotent", "decision", formatted,
+		"Which transport ships first?")
+
+	commented := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body":   "Still open?",
+		"anchor": map[string]any{"artifact": "spec", "quote": "Which transport ships first?"},
+	}, "alice")
+	if commented.Code != http.StatusCreated {
+		t.Fatalf("anchor a comment inside the ask block: status=%d body=%s", commented.Code, commented.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, commented)
+
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "before-idempotent")
+	beforeMarkdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	beforeVersions := len(documentVersions(t, handler, issue.PrimaryArtifactID))
+	current := readBlockAsk(t, handler, askID)
+
+	// The whole ask, exactly as it reads now - what a retry sends.
+	options := make([]map[string]string, 0, len(current.Options))
+	for _, option := range current.Options {
+		options = append(options, map[string]string{"label": option.Label, "description": option.Description})
+	}
+	retried := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": current.Question,
+		"options":  options,
+		"multiple": current.Multiple,
+		"urgency":  current.Urgency,
+		"actor":    sessionActor(),
+	})
+	if retried.Code != http.StatusOK {
+		t.Fatalf("idempotent retry: status=%d body=%s", retried.Code, retried.Body.String())
+	}
+
+	if got := documentMarkdown(t, handler, issue.PrimaryArtifactID); got != beforeMarkdown {
+		t.Fatalf("the idempotent retry rewrote the document:\nbefore:\n%s\nafter:\n%s", beforeMarkdown, got)
+	}
+	if got := len(documentVersions(t, handler, issue.PrimaryArtifactID)); got != beforeVersions {
+		t.Fatalf("the idempotent retry wrote %d versions", got-beforeVersions)
+	}
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read the anchored comment: status=%d body=%s", read.Code, read.Body.String())
+	}
+	after := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, read).Comment
+	if after.Anchor == nil || after.Anchor.Orphaned {
+		t.Fatalf("the idempotent retry orphaned the comment's anchor: %#v", after.Anchor)
+	}
+}
+
+// An options edit that keeps what a person wrote under an option splices that item, which the
+// list's own markdown spaces, into a list the parser built. Get the spread wrong and the block's
+// markdown stops reading back as the block, which leaves the ask reading as changed to the next
+// write and marks it `invalid` at the next settlement. Neither happens: the settlement after the
+// edit rewrites nothing and the ask keeps the options the edit sent.
+func TestAskBlockOptionsEditKeepingContentSettlesUnchanged(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	const nestedAsk = ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nWhich transport?\n\n" +
+		"- REST: Matches the platform\n" +
+		"- gRPC: Adds streaming\n\n" +
+		"  - only behind the [proxy](https://proxy.test)\n" +
+		":::\n"
+	issue, askID := seedBlockAsk(t, handler, "Block ask preserving options", "decision", nestedAsk, "Which transport?")
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"options": []map[string]string{
+			{"label": "REST", "description": "Ship now"},
+			{"label": "gRPC", "description": "Adds streaming"},
+		},
+		"actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("options edit: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	written := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	for _, want := range []string{"- REST: Ship now", "- gRPC: Adds streaming", "  - only behind the [proxy](https://proxy.test)"} {
+		if !strings.Contains(written, want) {
+			t.Fatalf("the document does not carry %q after the edit:\n%s", want, written)
+		}
+	}
+
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-preserving")
+
+	// settleDocument appends its marker block, so the document settlement left is the markdown
+	// the edit wrote with that block after it: settlement rewrote none of the ask.
+	if settled := documentMarkdown(t, handler, issue.PrimaryArtifactID); !strings.HasPrefix(settled, written) {
+		t.Fatalf("settlement rewrote the edited ask:\nafter the edit:\n%s\nafter settling:\n%s", written, settled)
+	}
+	for _, event := range issueAskEvents(t, handler, issue.Key) {
+		if event.Type == "block.invalid" && event.Payload.BlockID != nil && *event.Payload.BlockID == "decision" {
+			t.Fatalf("settlement marked the edited ask invalid: %#v", event)
+		}
+	}
+	ask := readBlockAsk(t, handler, askID)
+	if len(ask.Options) != 2 || ask.Options[0] != (model.AskOption{Label: "REST", Description: "Ship now"}) ||
+		ask.Options[1] != (model.AskOption{Label: "gRPC", Description: "Adds streaming"}) {
+		t.Fatalf("the ask reads %#v after settling, want the options the edit sent", ask.Options)
+	}
+}
+
+// A browser can leave a decision whose question is empty and which holds a second bullet list.
+// An ask edit carrying a question repairs the question, and keeps both lists: the block it leaves
+// still reads as no decision, and what it parses back to joins the options of both lists. The row
+// keeps the options it was indexed with - settlement leaves the row of a block it cannot read as
+// it was, so a row given that reading would offer a person options read out of a stray list until
+// somebody repairs the block - while the question and the urgency the edit named are written. It
+// keeps them whichever fields the request named: a repair that sends the options beside the
+// question sends that joined reading, the only options such a block accepts.
+func TestEditOfAnAskWhoseBlockHoldsASecondListKeepsTheRowsOptions(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{
+			Store: database, Settle: 20 * time.Millisecond, Identity: headerIdentity(database),
+		})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue, askID := seedBlockAsk(t, handler, "Block ask second list", "decision", transportAsk, "Which transport?")
+	indexed := readBlockAsk(t, handler, askID).Options
+
+	// What no route writes: a browser empties the question and leaves a second list behind.
+	second, err := pmdoc.Parse("- Ship: Release it\n")
+	if err != nil {
+		t.Fatalf("parse the second list: %v", err)
+	}
+	peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
+	t.Cleanup(peer.close)
+	peer.edit(t, func(tree *pmdoc.Node) error {
+		for _, child := range tree.Children {
+			if id, _ := child.Attrs[pmdoc.BlockIDAttr].(string); id != "decision" {
+				continue
+			}
+			child.Children[0].Children = nil
+			child.Children = append(child.Children, second.Children...)
+			return nil
+		}
+		return fmt.Errorf("the document holds no block under %q", "decision")
+	})
+	peer.barrier(t)
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": "Which transport ships this week?", "urgency": "low", "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("repair the emptied question: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	repaired := decodeBody[model.Ask](t, edited)
+	if repaired.Question != "Which transport ships this week?" || repaired.Urgency != "low" {
+		t.Fatalf("the repaired ask reads question=%q urgency=%q, want the edit's own",
+			repaired.Question, repaired.Urgency)
+	}
+	if !slices.Equal(repaired.Options, indexed) {
+		t.Fatalf("the repaired ask holds options %#v, want the %#v its row held: the block's two lists "+
+			"joined are no decision's options", repaired.Options, indexed)
+	}
+	// The document holds both lists - the second written with a bullet marker of its own, which
+	// is how the markdown keeps two lists apart - so the block is still no decision, and the row
+	// the next settlement leaves alone is the one the edit wrote.
+	written := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	for _, want := range []string{
+		"Which transport ships this week?", "- REST: Matches the platform", "- gRPC: Adds streaming", "Ship: Release it",
+	} {
+		if !strings.Contains(written, want) {
+			t.Fatalf("the document does not carry %q after the repair:\n%s", want, written)
+		}
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-repair")
+	if stored := readBlockAsk(t, handler, askID); !slices.Equal(stored.Options, indexed) ||
+		stored.Question != "Which transport ships this week?" {
+		t.Fatalf("the ask reads question=%q options=%#v after settling, want the repaired question and the "+
+			"options its row held", stored.Question, stored.Options)
+	}
+
+	// The same repair, sent again by a caller that names the options beside the question. The
+	// only options such a block accepts are the joined reading of its two lists - any others
+	// are refused, since no options edit can say which list an option is in - so a row taking
+	// the request's own would hold that reading too.
+	peer.edit(t, func(tree *pmdoc.Node) error {
+		for _, child := range tree.Children {
+			if id, _ := child.Attrs[pmdoc.BlockIDAttr].(string); id != "decision" {
+				continue
+			}
+			child.Children[0].Children = nil
+			return nil
+		}
+		return fmt.Errorf("the document holds no block under %q", "decision")
+	})
+	peer.barrier(t)
+
+	withOptions := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": "Which transport ships next week?",
+		"options": []map[string]string{
+			{"label": "REST", "description": "Matches the platform"},
+			{"label": "gRPC", "description": "Adds streaming"},
+			{"label": "Ship", "description": "Release it"},
+		},
+		"actor": sessionActor(),
+	})
+	if withOptions.Code != http.StatusOK {
+		t.Fatalf("repair the emptied question with options beside it: status=%d body=%s",
+			withOptions.Code, withOptions.Body.String())
+	}
+	repairedAgain := decodeBody[model.Ask](t, withOptions)
+	if repairedAgain.Question != "Which transport ships next week?" {
+		t.Fatalf("the repaired ask asks %q, want the question the edit sent", repairedAgain.Question)
+	}
+	if !slices.Equal(repairedAgain.Options, indexed) {
+		t.Fatalf("the ask edited with options holds %#v, want the %#v its row held: the block's two lists "+
+			"joined are no decision's options, whichever fields the request named", repairedAgain.Options, indexed)
+	}
+	if stored := readBlockAsk(t, handler, askID); !slices.Equal(stored.Options, indexed) {
+		t.Fatalf("the ask row reads options %#v after the edit naming them, want the %#v it held",
+			stored.Options, indexed)
+	}
+}

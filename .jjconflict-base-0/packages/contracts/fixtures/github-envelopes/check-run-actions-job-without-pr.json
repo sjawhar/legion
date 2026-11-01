@@ -1,0 +1,17 @@
+{
+  "topic": "notifications.github.example-org.example-repo.job.3002.completed",
+  "payload_summary": "job deploy / production run 3002 completed/success",
+  "payload": {
+    "completed_at": "2026-09-07T03:24:00Z",
+    "conclusion": "success",
+    "head_sha": "4444444444444444444444444444444444444444",
+    "job_id": "3101",
+    "kind": "job",
+    "name": "deploy / production",
+    "repo": "example-org/example-repo",
+    "run_id": "3002",
+    "started_at": "2026-09-07T03:20:00Z",
+    "status": "completed",
+    "url": "https://github.com/example-org/example-repo/actions/runs/3002/job/3101"
+  }
+}

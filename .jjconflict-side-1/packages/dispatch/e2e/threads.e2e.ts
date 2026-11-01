@@ -1,0 +1,920 @@
+import { expect, type Locator, type Page, test } from "@playwright/test";
+
+import {
+  acceptSuggestion,
+  createAsk,
+  createComment,
+  createIssue,
+  createProject,
+  getIssueEvents,
+  listComments,
+  resolveAsk,
+} from "./api";
+import { conversationFilter, threadCard } from "./editor";
+import { inboxRow } from "./inbox-pane";
+import { resetDatabase } from "./seed";
+import { holdPosts, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
+import { asUser } from "./users";
+
+// "bob" names the session that opened the ask - authenticated over the API with
+// the agent bearer token, not a human's signed-in session - so its own reply
+// (clause 2 below) exercises the same "agent replies live" path a real Legion
+// session would use via `dispatch comment --reply-to-ask`.
+const bobSession = {
+  actor: { kind: "session" as const, id: "e2e-session-bob", origin: { tmux: "dispatch:1.3" } },
+  as: "agent" as const,
+};
+
+// Asks and comment threads both render in the margin; Conversation lists one card per thread.
+
+async function setSheet(page: Page, project: string, open: boolean): Promise<void> {
+  if (project !== "iphone") {
+    return;
+  }
+  const sheet = page.getByTestId("margin-sheet");
+  const expanded = open ? "true" : "false";
+  if ((await sheet.getAttribute("data-expanded")) !== expanded) {
+    await page
+      .getByRole("button", { name: open ? /Open review panel/ : /Close review panel/ })
+      .click();
+  }
+  await expect(sheet).toHaveAttribute("data-expanded", expanded);
+}
+
+async function expandedThread(page: Page, rootId: string): Promise<Locator> {
+  const card = threadCard(page, rootId);
+  const timelineThread = page.locator(`[data-turn="comment:${rootId}"]`);
+  if ((await card.getAttribute("aria-expanded")) !== "true") {
+    await timelineThread.getByRole("button", { name: "Expand thread" }).click();
+  }
+  const phoneThread = page.getByRole("dialog", { name: "Thread" });
+  if ((await phoneThread.count()) > 0) {
+    return phoneThread;
+  }
+  await expect(card).toHaveAttribute("aria-expanded", "true");
+  return card;
+}
+
+async function closeThreadView(page: Page, project: string): Promise<void> {
+  if (project !== "iphone") {
+    return;
+  }
+  const phoneThread = page.getByRole("dialog", { name: "Thread" });
+  if ((await phoneThread.count()) > 0) {
+    await phoneThread.getByRole("button", { name: "Back" }).click();
+    await expect(phoneThread).toHaveCount(0);
+  }
+}
+
+test.beforeEach(async () => {
+  await resetDatabase();
+});
+
+test("an ask is a thread: replies before and after answering, then a live agent reply @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "Ship the change to production",
+    title: "Threaded decision",
+  });
+  // Anchored, so the ask (and its thread) render in the margin, which - unlike
+  // the open-only Inbox and issue-board feeds - keeps an answered ask visible
+  // via AskCard's onAnswered callback.
+  const ask = await createAsk(
+    issue.key,
+    {
+      anchor: { artifact: "spec", quote: "production" },
+      options: [{ label: "Ship" }, { label: "Hold" }],
+      question: "Ship the **change**?",
+    },
+    bobSession
+  );
+  await expect
+    .poll(async () =>
+      (await getIssueEvents(issue.key)).some((event) => event.type === "ask.opened")
+    )
+    .toBe(true);
+
+  const alice = await asUser(browser, "alice");
+  const alicePage = await alice.newPage();
+  await alicePage.goto(`/issues/${issue.key}`);
+  await alicePage.getByRole("tab", { name: "Spec" }).click();
+  await setSheet(alicePage, testInfo.project.name, true);
+
+  const margin = alicePage.getByTestId("margin-sheet");
+  const card = margin.getByTestId(`ask-${ask.id}`);
+  await expect(card).toContainText("Ship the change?");
+  await expect(card.locator("strong")).toHaveText("change");
+  const thread = margin.getByTestId(`thread-${ask.id}`);
+
+  // Alice asks back from the same compact composer that can submit her answer.
+  await card.getByRole("button", { name: "Add a note or answer in your own words" }).click();
+  await card.getByLabel("Your answer").fill("Any blockers first?");
+  await card.getByRole("button", { name: "Ask back" }).click();
+  await expect(thread.getByText("Any blockers first?")).toBeVisible();
+
+  // Alice answers - a distinct, first-class event.
+  await card.getByRole("radio", { name: "Ship" }).check();
+  await card.getByRole("button", { exact: true, name: "Answer" }).click();
+  await expect(margin.getByText(/Answered by/)).toBeVisible();
+
+  // Answering does not end the conversation: the thread and its composer stay
+  // open here (the margin, unlike the Inbox, keeps an anchored answered ask),
+  // and Alice replies again.
+  const threadAfterAnswer = margin.getByTestId(`thread-${ask.id}`);
+  await expect(threadAfterAnswer.getByLabel("Reply")).toBeVisible();
+  await threadAfterAnswer.getByLabel("Reply").fill("Shipping now.");
+  await expect(threadAfterAnswer.getByRole("button", { name: "Reply" })).toBeEnabled();
+  await threadAfterAnswer.getByRole("button", { name: "Reply" }).click();
+  await expect(threadAfterAnswer.getByText("Shipping now.")).toBeVisible();
+
+  // The newest reply is first.
+  const replies = threadAfterAnswer.locator("li");
+  await expect(replies).toHaveCount(2);
+  await expect(replies.nth(0)).toContainText("Shipping now.");
+  await expect(replies.nth(1)).toContainText("Any blockers first?");
+  await expect(margin.getByText(/Answered by/)).toBeVisible();
+
+  // The asking session replies over the API (bearer auth, its own comment on
+  // the ask). Alice's already-open page shows it live from the event feed, no reload.
+  await createComment(issue.key, { ask_id: ask.id, body: "Thanks, merging." }, bobSession);
+  await expect(threadAfterAnswer.getByText("Thanks, merging.")).toBeVisible();
+  await expect(replies).toHaveCount(2);
+  await expect(replies.nth(0)).toContainText("Thanks, merging.");
+  await expect(replies.nth(1)).toContainText("Shipping now.");
+  await threadAfterAnswer.getByRole("button", { name: "Show 1 more reply" }).click();
+  await expect(replies).toHaveCount(3);
+  await expect(replies.nth(2)).toContainText("Any blockers first?");
+
+  await alice.close();
+});
+
+// The row above, with the race it can lose made certain: the margin's answered-ask read is held
+// until a reply has been typed into the answered card's thread, so the card moves out of Needs you
+// with the reply in it. The card moves in place, and the reply is still there to send.
+test("an answered ask's thread keeps a reply typed before the card leaves Needs you @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "Ship the change to production",
+    title: "Reply across the move",
+  });
+  const ask = await createAsk(
+    issue.key,
+    {
+      anchor: { artifact: "spec", quote: "production" },
+      options: [{ label: "Ship" }, { label: "Hold" }],
+      question: "Ship the change?",
+    },
+    bobSession
+  );
+  await expect
+    .poll(async () =>
+      (await getIssueEvents(issue.key)).some((event) => event.type === "ask.opened")
+    )
+    .toBe(true);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("tab", { name: "Spec" }).click();
+    await setSheet(page, testInfo.project.name, true);
+    const margin = page.getByTestId("margin-sheet");
+    const card = margin.getByTestId(`ask-${ask.id}`);
+    await expect(card).toContainText("Ship the change?");
+    await expect(margin.getByRole("heading", { name: "Needs you" })).toBeVisible();
+
+    // From here on the issue's asks read waits until the reply is typed.
+    const { promise: typed, resolve: releaseAsks } = Promise.withResolvers<void>();
+    await page.route(
+      (url) => url.pathname === `/api/v1/issues/${issue.key}/asks`,
+      async (route) => {
+        await typed;
+        await route.fallback();
+      }
+    );
+    await card.getByRole("radio", { name: "Ship" }).check();
+    await card.getByRole("button", { exact: true, name: "Answer" }).click();
+    await expect(margin.getByText(/Answered by/)).toBeVisible();
+    await expect(margin.getByRole("heading", { name: "Needs you" })).toBeVisible();
+
+    const thread = margin.getByTestId(`thread-${ask.id}`);
+    await thread.getByLabel("Reply").fill("Shipping now.");
+    releaseAsks();
+    await expect(margin.getByRole("heading", { name: "Needs you" })).toHaveCount(0);
+    await expect(thread.getByLabel("Reply")).toHaveValue("Shipping now.");
+    await thread.getByRole("button", { name: "Reply" }).click();
+    await expect(thread.getByText("Shipping now.")).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a Conversation reply after an agent-authored reply targets the root without copying its anchor @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "Keep this root visible.",
+    title: "Root-only comment replies",
+  });
+  const root = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "Keep" },
+    body: "Root comment.",
+  });
+  await createComment(issue.key, { body: "Agent reply.", reply_to: root.id }, bobSession);
+  const alice = await asUser(browser, "alice");
+  const submittedReplies: Record<string, unknown>[] = [];
+
+  try {
+    const page = await alice.newPage();
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        request.url().endsWith(`/api/v1/issues/${issue.key}/comments`)
+      ) {
+        submittedReplies.push(request.postDataJSON() as Record<string, unknown>);
+      }
+    });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const thread = await expandedThread(page, root.id);
+    const composer = thread.getByRole("form", { name: "Comment composer" });
+    await composer.getByRole("textbox", { name: "Reply" }).fill("Human thread reply.");
+    await composer.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => submittedReplies).toHaveLength(1);
+    expect(submittedReplies[0]).toMatchObject({
+      body: "Human thread reply.",
+      reply_to: root.id,
+    });
+    expect(submittedReplies[0]).not.toHaveProperty("anchor");
+    await expect
+      .poll(() => listComments(issue.key))
+      .toContainEqual(expect.objectContaining({ body: "Human thread reply.", reply_to: root.id }));
+  } finally {
+    await alice.close();
+  }
+});
+test("resolve, reopen, then edit leaves one comment turn in its final state @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "THREAD", name: "Thread controls" });
+  const issue = await createIssue({
+    project: "THREAD",
+    spec: "The quick brown fox",
+    title: "Resolve and reopen",
+  });
+  const root = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "brown" },
+    body: "Should this change?",
+  });
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+
+  try {
+    const alicePage = await alice.newPage();
+    const bobPage = await bob.newPage();
+    await Promise.all([
+      alicePage.goto(`/issues/${issue.key}/conversation`),
+      bobPage.goto(`/issues/${issue.key}/conversation`),
+    ]);
+    const aliceThread = await expandedThread(alicePage, root.id);
+    await aliceThread.getByRole("button", { name: "Resolve" }).click();
+    await expect(alicePage.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
+    // A resolved thread is not hidden from the Conversation: it moves to the Closed bucket and
+    // is still listed under All, which every visit opens on.
+    await expect(threadCard(alicePage, root.id)).toBeVisible();
+    await expect(threadCard(bobPage, root.id)).toBeVisible();
+    await conversationFilter(bobPage, "Open").click();
+    await expect(threadCard(bobPage, root.id)).toHaveCount(0);
+    await conversationFilter(bobPage, "Closed").click();
+
+    const resolvedThread = await expandedThread(bobPage, root.id);
+    await expect(resolvedThread).toContainText(/Resolved by alice/);
+    await resolvedThread.getByRole("button", { name: "Reopen" }).click();
+    await closeThreadView(bobPage, testInfo.project.name);
+    await conversationFilter(bobPage, "All").click();
+    await expect(alicePage.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
+    await expect(threadCard(alicePage, root.id)).toBeVisible();
+
+    const reopenedThread = await expandedThread(alicePage, root.id);
+    await reopenedThread.getByRole("button", { exact: true, name: "Edit" }).click();
+    await reopenedThread.getByLabel("Edit comment").fill("Final comment state");
+    await reopenedThread.getByRole("button", { name: "Save" }).click();
+    await expect(reopenedThread).toContainText("Final comment state");
+    await closeThreadView(alicePage, testInfo.project.name);
+    await expect(
+      alicePage
+        .getByRole("list", { name: "Conversation turns" })
+        .locator(':scope > li[data-turn^="comment:"]')
+    ).toHaveCount(1);
+    await expect(alicePage.getByText("resolved a comment on spec")).toHaveCount(0);
+    await expect(alicePage.getByText("reopened a comment on spec")).toHaveCount(0);
+    await expect(alicePage.getByText("edited a comment on spec")).toHaveCount(0);
+  } finally {
+    await bob.close();
+    await alice.close();
+  }
+});
+
+test("only comment authors edit root and reply text in Conversation @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "EDIT", name: "Comment edits" });
+  const issue = await createIssue({
+    project: "EDIT",
+    spec: "The quick brown fox",
+    title: "Edit a comment",
+  });
+  const root = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "brown" },
+    body: "Original comment",
+  });
+  const reply = await createComment(issue.key, { body: "Original reply", reply_to: root.id });
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+
+  try {
+    const alicePage = await alice.newPage();
+    const bobPage = await bob.newPage();
+    await Promise.all([
+      alicePage.goto(`/issues/${issue.key}/conversation`),
+      bobPage.goto(`/issues/${issue.key}/conversation`),
+    ]);
+    const bobThread = await expandedThread(bobPage, root.id);
+    await expect(bobThread.getByRole("button", { exact: true, name: "Edit" })).toHaveCount(0);
+
+    const aliceThread = await expandedThread(alicePage, root.id);
+    const editButtons = aliceThread.getByRole("button", { exact: true, name: "Edit" });
+    await expect(editButtons).toHaveCount(2);
+    await editButtons.first().click();
+    await aliceThread.getByLabel("Edit comment").fill("Edited root");
+    await aliceThread.getByRole("button", { name: "Save" }).click();
+    await expect(aliceThread.getByLabel("Edit comment")).toHaveCount(0);
+    await expect(editButtons).toHaveCount(2);
+    await expect(aliceThread).toContainText("Edited root");
+    await editButtons.last().click();
+    await aliceThread.getByLabel("Edit comment").fill("Edited reply");
+    await aliceThread.getByRole("button", { name: "Save" }).click();
+    await expect(aliceThread.getByLabel("Edit comment")).toHaveCount(0);
+    await expect(aliceThread).toContainText("Edited reply");
+
+    await closeThreadView(alicePage, testInfo.project.name);
+    await expect(bobThread).toContainText("Edited root");
+    await expect(bobThread).toContainText("Edited reply");
+    await expect(bobThread).toContainText("edited");
+    await expect
+      .poll(() => listComments(issue.key))
+      .toContainEqual(expect.objectContaining({ id: reply.id, body: "Edited reply" }));
+  } finally {
+    await bob.close();
+    await alice.close();
+  }
+});
+
+test("an agent comment reply appears in the root Conversation thread @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "AGENT", name: "Agent reply" });
+  const issue = await createIssue({
+    project: "AGENT",
+    spec: "The quick brown fox",
+    title: "Agent reply thread",
+  });
+  const root = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "brown" },
+    body: "Human root comment",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await createComment(issue.key, { body: "Agent response", reply_to: root.id }, bobSession);
+
+    const thread = await expandedThread(page, root.id);
+    await expect(thread).toContainText("Agent response");
+    await expect(thread.getByText("Agent response").locator("..")).toHaveCSS("margin-left", "0px");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("the phone Conversation opens a full-height thread view with its composer pinned at the bottom @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "This scenario exercises the phone-specific view.");
+  await createProject({ key: "PHONE", name: "Phone threads" });
+  const issue = await createIssue({
+    project: "PHONE",
+    spec: "The quick brown fox",
+    title: "Phone thread view",
+  });
+  const root = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "brown" },
+    body: "Thread summary",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await page
+      .locator(`[data-turn="comment:${root.id}"]`)
+      .getByRole("button", { name: "Expand thread" })
+      .click();
+    const thread = page.getByRole("dialog", { name: "Thread" });
+    await expect(thread).toBeVisible();
+    const viewport = page.viewportSize();
+    const threadBox = await thread.boundingBox();
+    const composerBox = await thread.getByRole("form", { name: "Comment composer" }).boundingBox();
+    if (viewport === null || threadBox === null || composerBox === null) {
+      throw new Error("The phone thread view did not expose a measurable layout.");
+    }
+    expect(threadBox.height).toBeGreaterThanOrEqual(viewport.height * 0.8);
+    expect(Math.abs(viewport.height - (composerBox.y + composerBox.height))).toBeLessThanOrEqual(8);
+    await page.keyboard.press("Escape");
+    await expect(thread).toHaveCount(0);
+    await expect(page.locator(`[data-turn="comment:${root.id}"]`)).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      viewport.width
+    );
+  } finally {
+    await alice.close();
+  }
+});
+test("a session retraction leaves its reason on the card and removes the human's live inbox item @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "Ship the change to production",
+    title: "Retracted decision",
+  });
+  const ask = await createAsk(
+    issue.key,
+    {
+      anchor: { artifact: "spec", quote: "production" },
+      options: [{ label: "Ship" }, { label: "Hold" }],
+      question: "Ship the change?",
+    },
+    bobSession
+  );
+
+  const alice = await asUser(browser, "alice");
+  const inboxPage = await alice.newPage();
+  await inboxPage.goto("/");
+  await expect(inboxRow(inboxPage, ask.id)).toBeVisible();
+  await expect(inboxPage.getByText(/^Blocked on you: 1 item/)).toBeVisible();
+  await inboxPage.screenshot({
+    fullPage: true,
+    path: testInfo.outputPath("inbox-before-ask-retraction.png"),
+  });
+
+  const issuePage = await alice.newPage();
+  await issuePage.goto(`/issues/${issue.key}`);
+  await issuePage.getByRole("tab", { name: "Spec" }).click();
+  if (testInfo.project.name === "iphone") {
+    await issuePage.getByRole("button", { name: "Open navigation" }).click();
+  }
+  const navigation = issuePage.getByRole("navigation", { name: "Navigation" });
+  await expect(navigation.getByRole("link", { name: "Inbox" })).toContainText("1");
+  await expect(navigation.locator('a[href="/projects/CORE"]')).toContainText("1");
+  if (testInfo.project.name === "iphone") {
+    await issuePage.getByRole("button", { name: "Close navigation" }).click();
+  }
+  await setSheet(issuePage, testInfo.project.name, true);
+  const margin = issuePage.getByTestId("margin-sheet");
+  await expect(margin.getByTestId(`ask-${ask.id}`)).toBeVisible();
+
+  await resolveAsk(
+    ask.id,
+    { kind: "retracted", reason: "A newer question supersedes this one." },
+    bobSession
+  );
+
+  // The retraction takes the question out of the human's Inbox, live: the "Blocked on you"
+  // strip counts what the server lists, and it drops with no reload.
+  await expect(inboxPage.getByText(/^Blocked on you:/)).toHaveCount(0);
+  // The row itself: a question the server withdraws leaves the list at once, at every width and
+  // with no reload - a withdrawn question with a live answer form invites an answer the server
+  // refuses, and nothing holds a row the reader has not touched (INFRA-575).
+  await expect(inboxRow(inboxPage, ask.id)).toHaveCount(0);
+  await expect(inboxPage.getByText("Nothing needs you")).toBeVisible();
+  await inboxPage.screenshot({
+    fullPage: true,
+    path: testInfo.outputPath("inbox-after-ask-retraction.png"),
+  });
+  // A retracted ask is withdrawn history: hidden by default, behind the same toggle as
+  // resolved comment threads.
+  await expect(margin.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
+  await margin.getByRole("button", { name: /^Resolved \(\d+\)$/ }).click();
+  await expect(margin.getByTestId(`ask-${ask.id}`)).toContainText(
+    "Retracted by session:e2e-sess… - A newer question supersedes this one."
+  );
+  await expect(margin.getByRole("button", { name: "Reply" })).toHaveCount(0);
+  await issuePage.screenshot({
+    fullPage: true,
+    path: testInfo.outputPath("ask-retraction-thread.png"),
+  });
+  if (testInfo.project.name === "iphone") {
+    await issuePage.getByRole("button", { name: /Close review panel/ }).click();
+    await issuePage.getByRole("button", { name: "Open navigation" }).click();
+  }
+  await expect(issuePage.getByRole("heading", { exact: true, name: "Needs you" })).toHaveCount(0);
+  if (testInfo.project.name === "iphone") {
+    await issuePage.getByRole("button", { name: "Close navigation" }).click();
+  }
+
+  // The margin folds a retracted ask away; the Conversation lists it like every other
+  // conversation, under All and under Closed, with no control of its own to reveal it.
+  await issuePage.getByRole("tab", { name: "Conversation" }).click();
+  const conversation = issuePage.getByRole("region", { name: "Conversation" });
+  const resolvedCard = conversation.getByTestId(`ask-${ask.id}`);
+  await expect(resolvedCard).toHaveCount(1);
+  await conversationFilter(issuePage, "Open").click();
+  await expect(conversation.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
+  await conversationFilter(issuePage, "Closed").click();
+  await expect(resolvedCard.getByTestId("ask-resolution-badge")).toHaveText("Retracted");
+  await expect(resolvedCard).toContainText(
+    "Retracted by session:e2e-sess… - A newer question supersedes this one."
+  );
+
+  await alice.close();
+});
+
+test("two suggestions on one block are each accepted from their collapsed card @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "SUGG", name: "Suggestion cards" });
+  const issue = await createIssue({
+    project: "SUGG",
+    spec: "The quick brown fox",
+    title: "Accept from the card",
+  });
+  const first = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "quick" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "swift" },
+  });
+  const second = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "brown" },
+    body: "Closer to the photo.",
+    suggestion: { replace_with: "red" },
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const firstCard = threadCard(page, first.id);
+    const secondCard = threadCard(page, second.id);
+    await expect(firstCard).toHaveAttribute("aria-expanded", "false");
+    await expect(secondCard).toHaveAttribute("aria-expanded", "false");
+    await expect(firstCard.locator("del")).toHaveText("quick");
+    await expect(firstCard.locator("ins")).toHaveText("swift");
+    await expect(secondCard.locator("ins")).toHaveText("red");
+    await expect(secondCard).toContainText("Closer to the photo.");
+    for (const card of [firstCard, secondCard]) {
+      for (const name of ["Accept suggestion", "Reject suggestion"]) {
+        const bounds = await card.getByRole("button", { name }).boundingBox();
+        if (bounds === null) {
+          throw new Error(`${name} has no bounds on a collapsed card.`);
+        }
+        expect(bounds.height).toBeGreaterThanOrEqual(testInfo.project.name === "iphone" ? 44 : 32);
+      }
+    }
+    // The compact stylesheet lays every button out inline-flex; the collapsed toggle's preview
+    // must still stack - struck text, then the proposal, then the note - not sit in one row.
+    const [del, ins, note] = await Promise.all([
+      secondCard.locator("del").boundingBox(),
+      secondCard.locator("ins").boundingBox(),
+      secondCard.getByText("Closer to the photo.").boundingBox(),
+    ]);
+    if (del === null || ins === null || note === null) {
+      throw new Error("The collapsed suggestion preview has no measurable rows.");
+    }
+    expect(ins.y).toBeGreaterThanOrEqual(del.y + del.height);
+    expect(note.y).toBeGreaterThanOrEqual(ins.y + ins.height);
+
+    // An accept decides the thread; it does not take the card off the Conversation. The card
+    // stays listed under All - the filter every visit opens on - with its Accept and Reject
+    // gone, and it is the Open bucket it leaves and the Closed one it joins.
+    await firstCard.getByRole("button", { name: "Accept suggestion" }).click();
+    await expect(firstCard.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expect(firstCard).toHaveCount(1);
+    await expect(page.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
+    await expect(secondCard).toHaveAttribute("aria-expanded", "false");
+    await secondCard.getByRole("button", { name: "Accept suggestion" }).click();
+    await expect(secondCard.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expect(secondCard).toHaveCount(1);
+    await conversationFilter(page, "Open").click();
+    await expect(firstCard).toHaveCount(0);
+    await expect(secondCard).toHaveCount(0);
+    await conversationFilter(page, "Closed").click();
+    await expect(firstCard).toHaveCount(1);
+    await expect(secondCard).toHaveCount(1);
+    await expect
+      .poll(() =>
+        listComments(issue.key, issue.primary_artifact_id).then((items) =>
+          items.map((item) => item.suggestion?.accepted)
+        )
+      )
+      .toEqual([true, true]);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The later suggestion rewrites "brown fox", which holds all of the earlier one's "fox", so its
+// accept leaves the earlier suggestion no text to anchor to. (A suggestion over exactly the same
+// text as the accepted one is a mark that covers all the replaced text, and moves onto the new text
+// with the accept, as a comment there does.)
+test("accepting a later suggestion over an earlier one's text leaves the earlier Conversation turn orphaned", async ({
+  browser,
+}) => {
+  await createProject({ key: "SUGG", name: "Suggestion cards" });
+  const issue = await createIssue({
+    project: "SUGG",
+    spec: "The quick brown fox",
+    title: "Competing suggestions",
+  });
+  const earlier = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "fox" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "cat" },
+  });
+  const later = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "brown fox" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "brown dog" },
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const laterCard = page
+      .locator(`[data-turn="comment:${later.id}"]`)
+      .getByTestId(`margin-comment-${later.id}`);
+    await laterCard.getByRole("button", { name: "Accept suggestion" }).click();
+    // The accept decides the later thread without taking its card off the Conversation: it
+    // stays listed under All with its Accept and Reject gone, leaves Open and joins Closed.
+    await expect(laterCard.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expect(laterCard).toHaveCount(1);
+    await conversationFilter(page, "Open").click();
+    await expect(laterCard).toHaveCount(0);
+    await conversationFilter(page, "Closed").click();
+    await expect(laterCard).toHaveCount(1);
+    await conversationFilter(page, "All").click();
+    await expect
+      .poll(() =>
+        listComments(issue.key, issue.primary_artifact_id).then(
+          (items) => items.find((item) => item.id === earlier.id)?.anchor?.orphaned
+        )
+      )
+      .toBe(true);
+    const earlierTurn = page.locator(`[data-turn="comment:${earlier.id}"]`);
+    await expect(earlierTurn).toContainText("Text changed.");
+    await expect(earlierTurn.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expect(earlierTurn.getByRole("button", { name: "Reject suggestion" })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an orphaned suggestion stays non-actionable through resolve and reopen @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "SUGG", name: "Suggestion cards" });
+  const issue = await createIssue({
+    project: "SUGG",
+    spec: "The quick brown fox",
+    title: "Competing suggestions",
+  });
+  const earlier = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "fox" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "cat" },
+  });
+  const later = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "brown fox" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "brown dog" },
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await page
+      .locator(`[data-turn="comment:${later.id}"]`)
+      .getByTestId(`margin-comment-${later.id}`)
+      .getByRole("button", { name: "Accept suggestion" })
+      .click();
+    await expect
+      .poll(() =>
+        listComments(issue.key, issue.primary_artifact_id).then(
+          (items) => items.find((item) => item.id === earlier.id)?.anchor?.orphaned
+        )
+      )
+      .toBe(true);
+
+    const expanded = await expandedThread(page, earlier.id);
+    await expect(expanded.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expanded.getByRole("button", { name: "Resolve" }).click();
+    await expect(page.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
+    // Resolved, the thread moves to the Closed bucket; it is still listed under All.
+    await expect(threadCard(page, earlier.id)).toBeVisible();
+    await conversationFilter(page, "Open").click();
+    await expect(threadCard(page, earlier.id)).toHaveCount(0);
+    await conversationFilter(page, "Closed").click();
+    const resolved = await expandedThread(page, earlier.id);
+    await expect(resolved).toContainText(/Resolved by alice/);
+    await expect(resolved.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await resolved.getByRole("button", { name: "Reopen" }).click();
+    await closeThreadView(page, testInfo.project.name);
+    await conversationFilter(page, "All").click();
+    await expect(
+      page
+        .locator(`[data-turn="comment:${earlier.id}"]`)
+        .getByTestId(`margin-comment-${earlier.id}`)
+    ).toContainText("Text changed.");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A Resolve closes its thread only once the server takes it: a refused one leaves the thread open,
+// with the reply the reader was writing in it.
+test("a failed queued Conversation comment action keeps its thread and reply, clears later clicks and retries explicitly", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "chromium",
+    "One visible phone thread cannot queue a second action."
+  );
+  await createProject({ key: "QUEUE", name: "Queued comment actions" });
+  const issue = await createIssue({
+    project: "QUEUE",
+    spec: "The quick brown fox",
+    title: "Queued actions",
+  });
+  const first = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "quick" },
+    body: "First action.",
+  });
+  const second = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "brown" },
+    body: "Second action.",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    let resolveFirst: (() => void) | undefined;
+    const firstResponse = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    let requests = 0;
+    await page.route("**/api/v1/comments/*/resolve", async (route) => {
+      requests += 1;
+      if (requests === 1) {
+        await firstResponse;
+        await route.fulfill({ status: 400 });
+        return;
+      }
+      await route.continue();
+    });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const firstThread = await expandedThread(page, first.id);
+    const secondThread = await expandedThread(page, second.id);
+    const firstReply = firstThread.getByRole("textbox", { name: "Reply" });
+    await firstReply.fill("Half a reply");
+    await firstThread.getByRole("button", { name: "Resolve" }).click();
+    await secondThread.getByRole("button", { name: "Resolve" }).click();
+    resolveFirst?.();
+    // A 400 with no body is still a verdict from the API, so the card shows what the client made
+    // of it, as the header, settings and composer do (a 5xx would be tried again under the
+    // write's key instead).
+    await expect(firstThread.getByText("Dispatch request failed (400)")).toBeVisible();
+    await expect.poll(() => requests).toBe(1);
+    await expect(firstReply).toHaveValue("Half a reply");
+    await firstThread.getByRole("button", { name: "Retry" }).click();
+    await expect.poll(() => requests).toBe(2);
+    // The retried Resolve is taken, so the first thread closes: its card collapses and leaves
+    // the Open bucket for Closed. It is still listed under All - a decided thread stays on the
+    // Conversation - and the second, whose queued click was cleared, is still open.
+    await expect(threadCard(page, first.id)).toHaveAttribute("aria-expanded", "false");
+    await expect(threadCard(page, first.id)).toHaveCount(1);
+    await expect(threadCard(page, second.id)).toBeVisible();
+    await conversationFilter(page, "Open").click();
+    await expect(threadCard(page, first.id)).toHaveCount(0);
+    await expect(threadCard(page, second.id)).toBeVisible();
+    await conversationFilter(page, "Closed").click();
+    await expect(threadCard(page, first.id)).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
+/** An issue whose spec's last word carries a suggestion, and the route its comment sends post to. */
+async function seedSuggestion(
+  title: string
+): Promise<{ comments: string; issueKey: string; suggestionId: string }> {
+  await createProject({ key: "SUGG", name: "Suggestion cards" });
+  const issue = await createIssue({ project: "SUGG", spec: "The quick brown fox", title });
+  const suggestion = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "fox" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "cat" },
+  });
+  return {
+    comments: `**/api/v1/issues/${issue.key}/comments`,
+    issueKey: issue.key,
+    suggestionId: suggestion.id,
+  };
+}
+
+// A decided suggestion's thread offers no reply, but a reply already out when someone else accepts
+// the suggestion is still the reader's: its composer stays with the draft until the server answers,
+// a refusal hands that draft back beside Retry, and Retry still sends it as a reply.
+test("a suggestion accepted while its thread's own reply is out keeps the reply's draft and refusal @phone", async ({
+  browser,
+}) => {
+  const { comments, issueKey, suggestionId } = await seedSuggestion("Accepted under a reply");
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issueKey}/conversation`);
+    const thread = await expandedThread(page, suggestionId);
+    const form = thread.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const refuse = await refusePosts(page, comments);
+    await field.fill("Reply under an accept");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await acceptSuggestion(suggestionId, { login: "bob" });
+    await expect(thread.getByText(/^Accepted by bob/)).toBeVisible();
+    await expect(thread.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expect(field).toHaveValue("Reply under an accept");
+
+    refuse();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
+    await expect(field).toHaveValue("Reply under an accept");
+    await expect(field).toBeEnabled();
+
+    await page.unroute(comments);
+    await form.getByRole("button", { name: "Retry" }).click();
+    await expect(thread.getByRole("list", { name: "Replies" })).toContainText(
+      "Reply under an accept"
+    );
+    await expect(form).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The composer a decided suggestion's thread keeps for a reply out is only that reply's: once the
+// reply lands it leaves, as the thread offers no new one.
+test("a reply out when its suggestion is accepted lands and leaves no composer behind @phone", async ({
+  browser,
+}) => {
+  const { comments, issueKey, suggestionId } = await seedSuggestion(
+    "Accepted before a reply lands"
+  );
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issueKey}/conversation`);
+    const thread = await expandedThread(page, suggestionId);
+    const form = thread.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const send = await holdPosts(page, comments);
+    await field.fill("Reply that lands after");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await acceptSuggestion(suggestionId, { login: "bob" });
+    await expect(thread.getByText(/^Accepted by bob/)).toBeVisible();
+    await expect(field).toHaveValue("Reply that lands after");
+
+    send.release();
+    await expect(thread.getByRole("list", { name: "Replies" })).toContainText(
+      "Reply that lands after"
+    );
+    await expect(form).toHaveCount(0);
+    expect(send.posts()).toBe(1);
+  } finally {
+    await alice.close();
+  }
+});

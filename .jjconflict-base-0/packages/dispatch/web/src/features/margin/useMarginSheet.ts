@@ -1,0 +1,634 @@
+import { itemFromSearch } from "@legion/contracts";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
+
+import type { WriteBounds } from "../../api/client";
+import { primarySpec } from "../../api/issue-cache";
+import { issueQuery, whoAmIQuery } from "../../api/queries";
+import type { Ask } from "../../api/types";
+import { useSending } from "../../hooks/useSending";
+import { useHeldSend, useHeldSends, useHeldSendsUnder } from "../conversation/held-sends";
+import type { CarriedBlockIds } from "../conversation/send-request";
+import { useProjectArtifact } from "../document/useProjectArtifact";
+import { writePin } from "../issue/pin-write";
+import { eventItemId } from "../issue/pins";
+import { parseIssuePath, parseProjectPath } from "../refs/routes";
+import { COMPACT_VIEWPORT_QUERY, PHONE_VIEWPORT_QUERY } from "../shell/useDialog";
+import type { MarginComposer } from "./CommentsTab";
+import type { MarginSheetModel } from "./MarginSheet";
+import {
+  MARGIN_REPLY_SEND_KEY,
+  marginComposeSendKey,
+  marginReplySendKey,
+  useMargin,
+} from "./margin-context";
+import {
+  composerOwner,
+  type MarginItem,
+  type MarginItemAction,
+  type MarginTab,
+  marginItemId,
+  marginItemMarkId,
+  marginItemRecord,
+  threadMarkId,
+  useMarginItems,
+  useMarginOwner,
+} from "./useMarginItems";
+import { useMarginListeners } from "./useMarginListeners";
+
+/** A retracted ask was taken back by its asker, and a withdrawn one by its issue's close: neither
+ *  is a live question or a decision to read, so the margin folds both away with the resolved
+ *  threads until a reader asks for them. Reopening the issue opens a withdrawn ask again, and an
+ *  open ask never folds. */
+export function isFoldedAsk(ask: Pick<Ask, "state" | "resolution">): boolean {
+  return (
+    ask.state === "resolved" &&
+    (ask.resolution?.kind === "retracted" || ask.resolution?.kind === "withdrawn")
+  );
+}
+
+/** The margin item a focus request names, once the request's mark has an item. */
+function focusedItemFor(
+  items: readonly MarginItem[],
+  request: { markId: string; seq: number } | undefined
+): { itemId: string; seq: number } | undefined {
+  if (request === undefined) {
+    return undefined;
+  }
+  const item = items.find((candidate) => marginItemMarkId(candidate) === request.markId);
+  return item === undefined ? undefined : { itemId: marginItemId(item), seq: request.seq };
+}
+
+/**
+ * Everything the margin's one rendered sheet needs: the owner and its route, the items, the
+ * selection and composer state, and the listeners that hold a linked card in view. Lifted out of
+ * `Margin.tsx` unchanged - `MarginProvider` owns the shared state above the router, this owns
+ * what the sheet on screen does with it.
+ */
+export function useMarginSheet(): MarginSheetModel {
+  const {
+    blockFilterId,
+    blockPlacements,
+    cancelCompose,
+    clearBlockFilter,
+    documentBridge,
+    focusBlock,
+    focusRequest,
+    hoveredItemId,
+    hoveredMarkId,
+    markPlacements,
+    pendingCompose,
+    placementsReported,
+    retypeCompose,
+    revealCompose,
+    selectItem,
+    selectedItemId,
+    setHoveredItemId,
+    setMarkItemIds,
+    shownCompose,
+  } = useMargin();
+  const store = useHeldSends();
+  const queryClient = useQueryClient();
+  const { key: locationKey, pathname, search } = useLocation();
+  const issueRoute = parseIssuePath(pathname, search);
+  const projectRoute = parseProjectPath(pathname, search);
+  const documentRoute = projectRoute?.kind === "document" ? projectRoute : undefined;
+  const owner = useMarginOwner();
+  const issueKey = owner?.kind === "issue" ? owner.key : undefined;
+  const documentArtifact = useProjectArtifact(documentRoute);
+  const routeArtifactSlug = issueRoute?.kind === "artifact" ? issueRoute.slug : documentRoute?.slug;
+  const queryItem = itemFromSearch(search);
+  const routeItemId =
+    issueRoute?.kind === "ask" || issueRoute?.kind === "comment"
+      ? issueRoute.id
+      : (documentRoute?.item?.id ?? queryItem?.id);
+  // Each navigation is its own request for the item it names, even when it names the one the
+  // reader is already on: following a link back to the card you moved off has to bring you back.
+  // `useLocation().key` changes on a same-URL push, which an item id alone cannot see.
+  const routeItemKey = routeItemId === undefined ? undefined : `${locationKey}:${routeItemId}`;
+
+  // The URL names the selection until the reader makes one: the link's item is rendered selected
+  // from the first commit, before the asynchronous selection effect has caught the shared margin
+  // state up. It never outranks the reader, though - nothing strips `?comment=` from the URL, so
+  // reading it first would pin the linked card as selected for the rest of the visit.
+  const displayedSelectedItemId = selectedItemId ?? routeItemId;
+  const [tab, setTab] = useState<MarginTab>("comments");
+  const [expandedOwnerId, setExpandedOwnerId] = useState<string>();
+  const [expandedThreadKey, setExpandedThreadKey] = useState<string>();
+  const [editingCommentId, setEditingCommentId] = useState<string>();
+  const [savingCommentEditId, setSavingCommentEditId] = useState<string>();
+  const [sheetThreadKey, setSheetThreadKey] = useState<string>();
+  const [showResolved, setShowResolved] = useState(false);
+  // Threads whose reply holds a send of its own, out or refused, in the held-send store: each
+  // stays in the list it was in (`useMarginItems`'s `held`), whoever resolves it meanwhile.
+  const heldReplies = useHeldSendsUnder(MARGIN_REPLY_SEND_KEY);
+  const heldReplyKeys = useMemo(
+    () =>
+      new Set(
+        heldReplies.flatMap((held) =>
+          held.request.replyTo === null ? [] : [held.request.replyTo.id]
+        )
+      ),
+    [heldReplies]
+  );
+  // The phone margin thread's reply names its send, so the thread's Back and Escape hold while it
+  // is out, until its deadline. No thread has the empty key, so with none open nothing matches.
+  const sheetReplyKey = useMemo(() => marginReplySendKey(sheetThreadKey ?? ""), [sheetThreadKey]);
+  const { sending: sheetReplySending, sendingNow: sheetReplySendingNow } = useSending(
+    sheetReplyKey,
+    { untilDeadline: true }
+  );
+  const closeThread = useCallback(() => {
+    if (sheetReplySendingNow()) return;
+    setSheetThreadKey(undefined);
+    // Back drops a refusal the thread's reply holds, its draft with it, as a Conversation phone
+    // thread's does; a send still out past the deadline stays held for the thread's return.
+    if (sheetThreadKey !== undefined) store.discard(marginReplySendKey(sheetThreadKey));
+  }, [sheetReplySendingNow, sheetThreadKey, store]);
+  const marginRef = useRef<HTMLElement>(null);
+  const issue = useQuery({ ...issueQuery(issueKey), enabled: issueKey !== undefined });
+  const viewer = useQuery(whoAmIQuery());
+  const visibleArtifact =
+    documentRoute === undefined
+      ? routeArtifactSlug === undefined
+        ? primarySpec(issue.data)
+        : issue.data?.artifacts.find((artifact) => artifact.slug === routeArtifactSlug)
+      : documentArtifact.data;
+  const visibleArtifactId = visibleArtifact?.id;
+  const removePin = useCallback(
+    (id: string) => {
+      if (owner?.kind === "issue") writePin(queryClient, owner.key, { id, op: "unpin" });
+    },
+    [owner, queryClient]
+  );
+  const unpin = useCallback(
+    (eventId: number) => removePin(eventItemId({ id: eventId })),
+    [removePin]
+  );
+  const {
+    actionFailure,
+    answeredAsksPending,
+    asksPending,
+    commentsError,
+    commentsPending,
+    editComment,
+    items,
+    marginItems,
+    mutateItem,
+    needsYou,
+    pendingActionIds,
+    openAskCount,
+    pinned,
+    pinnedConversations,
+    pinnedIds,
+    resolvedThreads,
+    retryAnsweredAsk,
+    retryComments,
+    retryItem,
+    threads,
+  } = useMarginItems(owner, tab, visibleArtifact, markPlacements, blockPlacements, blockFilterId, {
+    held: heldReplyKeys,
+  });
+  const onEdit = useCallback(
+    async (id: string, body: string, carried: CarriedBlockIds | undefined, bounds: WriteBounds) => {
+      setSavingCommentEditId(id);
+      try {
+        return await editComment(id, body, carried, bounds);
+      } finally {
+        setSavingCommentEditId(undefined);
+      }
+    },
+    [editComment]
+  );
+
+  // A retracted or withdrawn ask is history; it rides the same "show resolved" toggle as
+  // resolved comment threads instead of sitting among the answered decisions.
+  const askItems = useMemo(
+    () =>
+      items
+        .filter((item): item is Extract<MarginItem, { kind: "ask" }> => item.kind === "ask")
+        .map((item) => item.ask),
+    [items]
+  );
+  const foldedAskCount = useMemo(
+    () => askItems.filter((ask) => isFoldedAsk(ask)).length,
+    [askItems]
+  );
+  const historicalAsks = useMemo(
+    () => askItems.filter((ask) => showResolved || !isFoldedAsk(ask)),
+    [askItems, showResolved]
+  );
+  const markItemIds = useMemo(() => {
+    const ids = new Map<string, string>();
+    for (const item of marginItems) {
+      const markId = marginItemMarkId(item);
+      if (markId !== undefined) {
+        ids.set(markId, marginItemId(item));
+      }
+    }
+    return ids;
+  }, [marginItems]);
+  useEffect(() => {
+    setMarkItemIds(markItemIds);
+    return () => setMarkItemIds(new Map());
+  }, [markItemIds, setMarkItemIds]);
+  const isClosed =
+    owner?.kind === "document" ? false : issue.data !== undefined && issue.data.closed_at !== null;
+  const ownerId =
+    owner?.kind === "issue" ? owner.key : owner?.kind === "document" ? owner.artifactId : undefined;
+  // Every owner opens on Comments; a Pinned selection does not follow the reader to the next issue.
+  useEffect(() => {
+    if (ownerId !== undefined) {
+      setTab("comments");
+    }
+  }, [ownerId]);
+  // Every anchored and resolved thread by key: two callbacks and the sheet all resolve a key,
+  // and rebuilding a combined array per call allocated on every mark click and card tap.
+  const threadsByKey = useMemo(
+    () => new Map([...threads, ...resolvedThreads].map((thread) => [thread.key, thread])),
+    [resolvedThreads, threads]
+  );
+  // A compact viewport has no room beside the document, so anything that puts something new in
+  // the margin - a composer, a document item link, a block filter, a focused mark - opens the
+  // sheet over it. On a desktop the margin is already on screen and nothing opens.
+  const openCompactSheet = useCallback(() => {
+    if (ownerId !== undefined && window.matchMedia(COMPACT_VIEWPORT_QUERY).matches) {
+      setExpandedOwnerId(ownerId);
+    }
+  }, [ownerId]);
+  const selectedBlockFocus = useRef<string | undefined>(undefined);
+  // `openPhoneThread`: a mark click or card tap opens the thread in the phone's dialog; a
+  // route-driven selection (a comment or ask deep link) only highlights the card — on a phone
+  // the link's destination is the Conversation turn, which a modal dialog would cover.
+  const selectMarginItem = useCallback(
+    (id: string, openPhoneThread = true) => {
+      selectItem(id);
+      const thread = threadsByKey.get(id);
+      if (thread === undefined) {
+        setExpandedThreadKey(undefined);
+        return;
+      }
+      if (thread.resolved) {
+        setShowResolved(true);
+      }
+      if (ownerId !== undefined && window.matchMedia(PHONE_VIEWPORT_QUERY).matches) {
+        // A phone thread lives in the Thread dialog, never expanded inline (`onToggleThread`
+        // keeps the same rule). A document item URL opens the review panel so the highlighted
+        // card is reachable, but leaves the thread collapsed.
+        if (openPhoneThread) {
+          setExpandedThreadKey(thread.key);
+          setExpandedOwnerId(ownerId);
+          setSheetThreadKey(thread.key);
+        } else if (owner?.kind === "document") {
+          setExpandedOwnerId(ownerId);
+        }
+        return;
+      }
+      setExpandedThreadKey(thread.key);
+    },
+    [owner, ownerId, selectItem, threadsByKey]
+  );
+  const onToggleThread = useCallback(
+    (key: string) => {
+      const thread = threadsByKey.get(key);
+      if (thread === undefined) {
+        return;
+      }
+      selectItem(key);
+      if (thread.resolved) {
+        setShowResolved(true);
+      }
+      const blockID = thread.anchor?.block_id;
+      if (typeof blockID === "string") {
+        selectedBlockFocus.current = undefined;
+        focusBlock(blockID);
+      }
+      if (!thread.anchor?.orphaned) {
+        const markId = threadMarkId(thread);
+        if (markId !== undefined) {
+          documentBridge?.focusMark(markId);
+        }
+      }
+      if (ownerId !== undefined && window.matchMedia(PHONE_VIEWPORT_QUERY).matches) {
+        setExpandedOwnerId(ownerId);
+        setSheetThreadKey(key);
+        return;
+      }
+      setExpandedThreadKey((current) => (current === key ? undefined : key));
+    },
+    [documentBridge, focusBlock, ownerId, selectItem, threadsByKey]
+  );
+  const sheetExpanded = ownerId !== undefined && expandedOwnerId === ownerId;
+  const toggleSheet = useCallback(
+    (expanded?: boolean) => {
+      const nextExpanded = expanded ?? !sheetExpanded;
+      setExpandedOwnerId(nextExpanded ? ownerId : undefined);
+      if (!nextExpanded) {
+        closeThread();
+      }
+    },
+    [closeThread, ownerId, sheetExpanded]
+  );
+  // The composer's Close, Escape and Discard. The open compose ends unsaved; a refusal the store
+  // holds for the document goes, its draft and its mark with it (`MarginProvider` takes the mark).
+  // A send still out is not the reader's to drop, and one that landed has left the store already.
+  const closeComposer = useCallback(
+    (composer: MarginComposer) => {
+      if (composer.seq !== undefined) cancelCompose(composer.seq);
+      store.discard(marginComposeSendKey(composer.anchor.artifact));
+    },
+    [cancelCompose, store]
+  );
+  // Each compose the margin shows - a new one, one a newer selection-bar action had to wait on, or
+  // one held for the document the reader came back to - is shown on the Comments tab, and on a
+  // compact viewport in the sheet. Once each: the margin keeps the last one shown.
+  const handledShownCompose = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (shownCompose === undefined || handledShownCompose.current === shownCompose.seq) return;
+    handledShownCompose.current = shownCompose.seq;
+    setTab("comments");
+    openCompactSheet();
+  }, [openCompactSheet, shownCompose]);
+  // An unsent compose ends when the reader leaves its document, and when its issue closes. One
+  // that was sent is the held-send store's (`MarginProvider` hands it over at Send) and stays.
+  useEffect(() => {
+    if (pendingCompose === undefined) return;
+    if (pendingCompose.anchor.artifact !== visibleArtifactId || isClosed) {
+      cancelCompose(pendingCompose.seq);
+    }
+  }, [cancelCompose, isClosed, pendingCompose, visibleArtifactId]);
+  // Coming back to a document that holds a send of the margin's shows it: the compose held for
+  // the document, and a thread whose reply is held, opened as the reader left it. Once per arrival,
+  // once the document's threads are in.
+  const arrivedAt = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (visibleArtifactId === undefined) {
+      arrivedAt.current = undefined;
+      return;
+    }
+    if (arrivedAt.current === visibleArtifactId || commentsPending) return;
+    arrivedAt.current = visibleArtifactId;
+    if (store.get(marginComposeSendKey(visibleArtifactId)) !== undefined) {
+      revealCompose(visibleArtifactId);
+    }
+    const heldThread = [...heldReplyKeys].find((key) => threadsByKey.has(key));
+    if (heldThread !== undefined) selectMarginItem(heldThread);
+  }, [
+    commentsPending,
+    heldReplyKeys,
+    revealCompose,
+    selectMarginItem,
+    store,
+    threadsByKey,
+    visibleArtifactId,
+  ]);
+  // The composer on the open document: the one its held send is - out, or refused - from Send
+  // on, or the compose the reader has open there.
+  const heldCompose = useHeldSend(
+    visibleArtifactId === undefined ? undefined : marginComposeSendKey(visibleArtifactId)
+  );
+  const heldRequest = heldCompose?.request;
+  const turnedAway =
+    shownCompose?.turnedAway === true && shownCompose.artifact === visibleArtifactId;
+  const shownComposer = useMemo<MarginComposer | undefined>(() => {
+    if (heldRequest?.anchor !== undefined) {
+      return {
+        anchor: heldRequest.anchor,
+        kind: heldRequest.kind,
+        owner: heldRequest.owner,
+        seq: undefined,
+        turnedAway,
+      };
+    }
+    if (
+      pendingCompose === undefined ||
+      owner === undefined ||
+      pendingCompose.anchor.artifact !== visibleArtifactId
+    ) {
+      return undefined;
+    }
+    const { anchor, kind, seq } = pendingCompose;
+    return { anchor, kind, owner: composerOwner(owner), seq, turnedAway: false };
+  }, [heldRequest, owner, pendingCompose, turnedAway, visibleArtifactId]);
+  // A project-document item link has nowhere else to land, so the compact sheet opens on it.
+  // An issue's comment or ask deep link lands on its Conversation turn; the margin selects the
+  // card without covering that turn with the sheet.
+  const documentItemId = documentRoute?.item?.id;
+  useEffect(() => {
+    if (documentItemId !== undefined) {
+      openCompactSheet();
+    }
+  }, [documentItemId, openCompactSheet]);
+  useEffect(() => {
+    if (blockFilterId === undefined) {
+      return;
+    }
+    setTab("comments");
+    openCompactSheet();
+  }, [blockFilterId, openCompactSheet]);
+
+  const handledFocusSequence = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (focusRequest === undefined) {
+      handledFocusSequence.current = undefined;
+      return;
+    }
+    if (handledFocusSequence.current === focusRequest.seq) {
+      return;
+    }
+    const item = marginItems.find(
+      (candidate) => marginItemMarkId(candidate) === focusRequest.markId
+    );
+    if (item === undefined) {
+      return;
+    }
+    handledFocusSequence.current = focusRequest.seq;
+    selectMarginItem(marginItemId(item));
+    setTab("comments");
+    openCompactSheet();
+  }, [focusRequest, marginItems, openCompactSheet, selectMarginItem]);
+  useEffect(() => {
+    const selectedItems = [selectedItemId, hoveredItemId]
+      .map((itemId) => marginItems.find((candidate) => marginItemId(candidate) === itemId))
+      .filter((item): item is MarginItem => item !== undefined);
+    const markIds = selectedItems
+      .map((item) => marginItemMarkId(item))
+      .filter((markId): markId is string => markId !== undefined);
+    const blockIds = selectedItems
+      .map((item) => marginItemRecord(item).anchor)
+      .flatMap((anchor) =>
+        anchor?.orphaned && typeof anchor.block_id === "string" ? [anchor.block_id] : []
+      );
+    documentBridge?.setActiveMarks([...new Set(markIds)]);
+    documentBridge?.setActiveBlocks(blockIds);
+  }, [documentBridge, hoveredItemId, marginItems, selectedItemId]);
+
+  const onAction = useCallback(
+    (id: string, action: MarginItemAction) => {
+      mutateItem({ id, kind: action });
+    },
+    [mutateItem]
+  );
+  useEffect(() => {
+    const item = marginItems.find((candidate) => marginItemId(candidate) === selectedItemId);
+    const anchor = item === undefined ? undefined : marginItemRecord(item).anchor;
+    if (!anchor?.orphaned || typeof anchor.block_id !== "string") {
+      selectedBlockFocus.current = undefined;
+      return;
+    }
+    if (selectedBlockFocus.current === anchor.block_id) {
+      return;
+    }
+    selectedBlockFocus.current = anchor.block_id;
+    focusBlock(anchor.block_id);
+  }, [focusBlock, marginItems, selectedItemId]);
+  const onSelectCard = useCallback(
+    (id: string) => {
+      selectMarginItem(id);
+      const item = marginItems.find((candidate) => marginItemId(candidate) === id);
+      const markId = item === undefined ? undefined : marginItemMarkId(item);
+      if (markId !== undefined) {
+        documentBridge?.focusMark(markId);
+      }
+    },
+    [documentBridge, marginItems, selectMarginItem]
+  );
+  const focus = focusedItemFor(marginItems, focusRequest);
+
+  // A document item URL is often the first page the reader loads. Its thread arrives after the
+  // route effect's first pass, so apply that selection once the margin has the item, and bring
+  // the quote the link names into the document's viewport the way a fragment link would - on a
+  // phone, where the margin is a sheet over the document, and on a desktop, where the quote can
+  // be thousands of pixels below the fold. Once, per link: the URL keeps naming its item for as
+  // long as the reader stays on the page, and re-applying it would take the selection back off
+  // whatever card they went on to click.
+  const appliedRouteItem = useRef<string | undefined>(undefined);
+  const focusedRouteMark = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (routeItemId === undefined || routeItemKey === undefined) {
+      appliedRouteItem.current = undefined;
+      focusedRouteMark.current = undefined;
+      return;
+    }
+    const item = marginItems.find((candidate) => marginItemId(candidate) === routeItemId);
+    if (item === undefined) {
+      return;
+    }
+    // The selection is applied once per link; the quote is still brought into view the first
+    // time the open document can be asked, which is often a later pass than this one.
+    if (appliedRouteItem.current !== routeItemKey) {
+      appliedRouteItem.current = routeItemKey;
+      selectMarginItem(routeItemId, false);
+    }
+    const markId = marginItemMarkId(item);
+    // Only once the open document has reported that mark. `focusMark` is a one-shot scroll into
+    // a span that has to exist: asked while the document is still projecting its marks - which
+    // is where a client-side navigation lands - it silently does nothing and the reader never
+    // sees the quote. A published placement is the document saying the span is rendered.
+    if (
+      markId === undefined ||
+      !markPlacements.has(markId) ||
+      focusedRouteMark.current === `${routeItemKey}:${markId}` ||
+      documentBridge === undefined
+    ) {
+      return;
+    }
+    focusedRouteMark.current = `${routeItemKey}:${markId}`;
+    documentBridge.focusMark(markId);
+  }, [documentBridge, marginItems, markPlacements, routeItemId, routeItemKey, selectMarginItem]);
+
+  useMarginListeners({
+    composer: shownComposer,
+    focus,
+    margin: marginRef,
+    onSelectCard,
+    // Only the report of the document whose cards this margin shows. A document the route has
+    // left can stay registered behind the next route's loading view - Suspense keeps the old
+    // page mounted, hidden, until the new page's code has arrived and its throttled reveal
+    // commits - and its report would read a press there as the reader working a placed document.
+    placementsPublished:
+      placementsReported &&
+      visibleArtifact !== undefined &&
+      documentBridge?.artifactId === visibleArtifact.id,
+    routeItemId,
+    routeItemKey,
+    setHoveredItemId,
+    setTab,
+    sheetExpanded,
+    tab,
+    visibleArtifact,
+  });
+
+  return {
+    actions: {
+      onEditingChange: setEditingCommentId,
+      closeComposer,
+      onAction,
+      onComposerKindChange: retypeCompose,
+      onEdit,
+      onUnpin: unpin,
+      onUnpinConversation: removePin,
+      onRetryAction: retryItem,
+      onRetryAnsweredAsk: retryAnsweredAsk,
+      onRetryComments: retryComments,
+      onRetryIssue: () => void issue.refetch(),
+      onToggleResolved: () => setShowResolved((current) => !current),
+      onToggleThread,
+    },
+    composer: shownComposer,
+    items: {
+      actionFailure,
+      answeredAsksPending,
+      asksPending,
+      commentsError,
+      commentsPending,
+      historicalAsks,
+      marginRef,
+      isClosed,
+      issueError: issue.isError,
+      owner,
+      issuePending: issue.isPending,
+      needsYou,
+      onSelectCard,
+      openAskCount,
+      pendingActionIds,
+      pinned,
+      pinnedConversations,
+      pinnedIds,
+      resolvedThreads,
+      foldedAskCount,
+      threads,
+      viewerLogin: viewer.data?.login ?? "",
+      visibleArtifact,
+    },
+    filter: {
+      blockId: blockFilterId,
+      clear: clearBlockFilter,
+    },
+    placement: {
+      blockPlacements,
+      markPlacements,
+    },
+    selection: {
+      expandedThreadKey,
+      editingCommentId,
+      savingCommentEditId,
+      hoveredItemId,
+      hoveredMarkId,
+      selectedItemId: displayedSelectedItemId,
+      showResolved,
+    },
+    sheet: {
+      closeThread,
+      expanded: sheetExpanded,
+      replySending: sheetReplySending,
+      thread: sheetThreadKey === undefined ? undefined : threadsByKey.get(sheetThreadKey),
+      toggle: toggleSheet,
+    },
+    tab: {
+      set: setTab,
+      value: tab,
+    },
+  };
+}

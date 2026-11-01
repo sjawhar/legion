@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "envoy": {
+      "command": "bun",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/envoy-channel.js"],
+      "env": {
+        "CLAUDE_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}"
+      }
+    }
+  }
+}

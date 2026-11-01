@@ -1,0 +1,962 @@
+package cistore
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/kvwatch"
+	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/testnats"
+)
+
+// connectNATS connects to the package's shared NATS server, in the JetStream account
+// testnats.URL hands t, where no earlier test made a CI bucket.
+func connectNATS(t testing.TB) (*natsgo.Conn, func()) {
+	t.Helper()
+	conn := testnats.Connect(t, testnats.URL(t))
+	return conn, conn.Close
+}
+
+func openStore(t testing.TB, conn *natsgo.Conn) *Store {
+	t.Helper()
+	st, err := Open(conn, logging.New("test"), WithReplicas(1), WithTTL(time.Hour))
+	if err != nil {
+		t.Fatalf("open cistore: %v", err)
+	}
+	t.Cleanup(func() { forgetTestSummarizer(st) })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := st.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("cache not ready: %v", err)
+	}
+	return st
+}
+
+// within returns f's error, or an error when f has not returned within 10 s: a record that a
+// broken hand-over leaves waiting on its record's writer fails its test instead of hanging the
+// package until go test's timeout.
+func within(f func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- f() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		return errors.New("did not return within 10 s")
+	}
+}
+
+func recordCheck(s *Store, owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt string) error {
+	id, err := strconv.ParseUint(checkRunID, 10, 64)
+	if err != nil {
+		return err
+	}
+	return within(func() error {
+		return s.Record(context.Background(), contracts.CIObservation{
+			Owner:      owner,
+			Repo:       repo,
+			Number:     number,
+			SHA:        sha,
+			CheckName:  checkName,
+			CheckRunID: id,
+			URL:        url,
+			Status:     status,
+			Conclusion: conclusion,
+			ObservedAt: observedAt,
+		})
+	})
+}
+
+// assertCheckRuns fails unless the settlement's attempt set is exactly want.
+func assertCheckRuns(t *testing.T, runs []CheckRunRef, want map[string]uint64) {
+	t.Helper()
+	got := map[string]uint64{}
+	for _, run := range runs {
+		if _, dup := got[run.Name]; dup {
+			t.Fatalf("check_runs repeats %q: %+v", run.Name, runs)
+		}
+		got[run.Name] = run.ID
+	}
+	if len(got) != len(want) {
+		t.Fatalf("check_runs = %+v, want %v", runs, want)
+	}
+	for name, id := range want {
+		if got[name] != id {
+			t.Fatalf("check_runs[%s] = %d, want %d (set %+v)", name, got[name], id, runs)
+		}
+	}
+}
+
+// maxCheckRunID is the highest id in a settlement's attempt set, for tests
+// whose subject is a genuinely higher global maximum.
+func maxCheckRunID(runs []CheckRunRef) uint64 {
+	var max uint64
+	for _, run := range runs {
+		if run.ID > max {
+			max = run.ID
+		}
+	}
+	return max
+}
+
+func recordSuite(s *Store, owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt string) error {
+	return within(func() error {
+		return s.RecordSuite(context.Background(), contracts.CIObservation{
+			Owner:      owner,
+			Repo:       repo,
+			Number:     number,
+			SHA:        sha,
+			SuiteID:    suiteID,
+			AppID:      appID,
+			Status:     status,
+			Conclusion: conclusion,
+			ObservedAt: observedAt,
+		})
+	})
+}
+
+// getState reads the durable state directly (bypassing the eventually-consistent
+// cache) so assertions are deterministic right after a write.
+func getState(t *testing.T, s *Store, owner, repo, number, sha string) State {
+	t.Helper()
+	entry, err := s.watcher.KV().Get(Key(owner, repo, number, sha))
+	if err != nil {
+		t.Fatalf("kv get: %v", err)
+	}
+	var st State
+	if err := json.Unmarshal(entry.Value(), &st); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	return st
+}
+
+// useKV rebuilds the store's watcher over kv, a wrapper of its bucket handle, so the store writes
+// through kv from here on. The replaced watcher is stopped first.
+func useKV(t testing.TB, s *Store, kv natsgo.KeyValue) {
+	t.Helper()
+	s.watcher.Stop()
+	s.watcher = kvwatch.New("cistore", bus.KeyValue{KeyValue: kv}, s.applyWatched, s.resetCache)
+	s.watcher.Start()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("wait for the rebuilt watcher: %v", err)
+	}
+}
+
+type interleavingKV struct {
+	natsgo.KeyValue
+	beforeGet   func(string)
+	afterGet    func(string)
+	afterUpdate func(string, []byte, uint64)
+}
+
+func (kv *interleavingKV) Get(key string) (natsgo.KeyValueEntry, error) {
+	if kv.beforeGet != nil {
+		kv.beforeGet(key)
+	}
+	entry, err := kv.KeyValue.Get(key)
+	if err == nil && kv.afterGet != nil {
+		kv.afterGet(key)
+	}
+	return entry, err
+}
+
+func (kv *interleavingKV) Update(key string, value []byte, revision uint64) (uint64, error) {
+	updated, err := kv.KeyValue.Update(key, value, revision)
+	if err == nil && kv.afterUpdate != nil {
+		kv.afterUpdate(key, value, updated)
+	}
+	return updated, err
+}
+func TestStateUnmarshalJSONAcceptsLegacyAndNumericCheckRunIDs(t *testing.T) {
+	for name, checkRunID := range map[string]string{
+		"legacy string": `"987654321"`,
+		"number":        "987654321",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var state State
+			if err := json.Unmarshal([]byte(fmt.Sprintf(`{"checks":{"build":{"check_run_id":%s}}}`, checkRunID)), &state); err != nil {
+				t.Fatalf("unmarshal state: %v", err)
+			}
+			if got := state.Checks["build"].CheckRunID; got != 987654321 {
+				t.Fatalf("check_run_id = %d, want 987654321", got)
+			}
+		})
+	}
+}
+
+func TestStateUnmarshalJSONKeepsChecksWithoutRunIDs(t *testing.T) {
+	legacy := `{"owner":"example-org","repo":"example-repo","number":"42","sha":"abcdef1234567890abcdef1234567890abcdef12",` +
+		`"checks":{"build":{"status":"completed","conclusion":"failure","updated_at":"2026-09-01T00:00:00Z"},` +
+		`"lint":{"status":"completed","conclusion":"success"}},"generation":3,"settled_emitted":true}`
+	var state State
+	if err := json.Unmarshal([]byte(legacy), &state); err != nil {
+		t.Fatalf("unmarshal legacy state: %v", err)
+	}
+	if len(state.Checks) != 2 {
+		t.Fatalf("legacy checks = %+v, want both checks", state.Checks)
+	}
+	if state.Checks["build"].CheckRunID != 0 ||
+		state.Checks["build"].Conclusion != "failure" ||
+		state.Checks["build"].ObservedAt != "2026-09-01T00:00:00Z" {
+		t.Fatalf("legacy build = %+v, want retained failed check without an id and its legacy timestamp", state.Checks["build"])
+	}
+	if state.Generation != 3 || state.EmittedCount != 1 || !state.SettledEmitted || state.SHA == "" {
+		t.Fatalf("other fields lost on decode: %+v", state)
+	}
+	if settlementReady(state) {
+		t.Fatalf("all-legacy terminal state is ready: %+v", state)
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal legacy state: %v", err)
+	}
+	if strings.Contains(string(encoded), `"check_run_id":0`) {
+		t.Fatalf("reencoded legacy state wrote a zero check run id: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), `"observed_at":"2026-09-01T00:00:00Z"`) ||
+		strings.Contains(string(encoded), `"updated_at"`) {
+		t.Fatalf("legacy timestamp did not reencode as observed_at: %s", encoded)
+	}
+}
+
+func TestStateUnmarshalJSONMapsLegacyCheckUpdatedAtToObservedAt(t *testing.T) {
+	legacy := `{"owner":"example-org","repo":"example-repo","number":"42","sha":"abcdef1234567890abcdef1234567890abcdef12",` +
+		`"checks":{"build":{"check_run_id":"900","status":"completed","conclusion":"success","updated_at":"2026-09-07T03:00:00Z"},` +
+		`"lint":{"check_run_id":"901","status":"completed","conclusion":"failure","updated_at":"2026-09-07T03:01:00Z"}}}`
+	var state State
+	if err := json.Unmarshal([]byte(legacy), &state); err != nil {
+		t.Fatalf("unmarshal legacy state: %v", err)
+	}
+	if state.Checks["build"].ObservedAt != "2026-09-07T03:00:00Z" ||
+		state.Checks["lint"].ObservedAt != "2026-09-07T03:01:00Z" {
+		t.Fatalf("legacy timestamps were not mapped to observed_at: %+v", state.Checks)
+	}
+	if !settlementReady(state) {
+		t.Fatalf("legacy terminal state is not ready: %+v", state)
+	}
+}
+
+func TestRecordAccumulatesChecks(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	if err := recordCheck(s, "sjawhar", "legion", "42", "abc123", "build", "1", "", "completed", "success", ""); err != nil {
+		t.Fatalf("record build: %v", err)
+	}
+	before := getState(t, s, "sjawhar", "legion", "42", "abc123")
+	if err := recordCheck(s, "sjawhar", "legion", "42", "abc123", "test", "1", "", "in_progress", "", ""); err != nil {
+		t.Fatalf("record test: %v", err)
+	}
+	st := getState(t, s, "sjawhar", "legion", "42", "abc123")
+
+	if len(st.Checks) != 2 {
+		t.Fatalf("expected 2 checks, got %d: %+v", len(st.Checks), st.Checks)
+	}
+	if st.Checks["build"].Conclusion != "success" {
+		t.Errorf("build conclusion = %q, want success", st.Checks["build"].Conclusion)
+	}
+	if st.Checks["test"].Status != "in_progress" {
+		t.Errorf("test status = %q, want in_progress", st.Checks["test"].Status)
+	}
+	if st.LastEventAt < before.LastEventAt {
+		t.Errorf("LastEventAt regressed: %d < %d", st.LastEventAt, before.LastEventAt)
+	}
+	if st.Owner != "sjawhar" || st.Repo != "legion" || st.Number != "42" || st.SHA != "abc123" {
+		t.Errorf("identity mismatch: %+v", st)
+	}
+}
+
+func TestRecordStartsGenerationAtZero(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	if err := recordCheck(s, "example-org", "example-repo", "42", "abcdef1234567", "build", "1", "https://example.test/1", "completed", "success", ""); err != nil {
+		t.Fatalf("record check: %v", err)
+	}
+	if generation := getState(t, s, "example-org", "example-repo", "42", "abcdef1234567").Generation; generation != 0 {
+		t.Fatalf("new state generation = %d, want 0", generation)
+	}
+}
+
+func TestRecordConcurrentNoLostUpdate(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	const n = 12
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		name := "check-" + string(rune('a'+i))
+		go func() {
+			defer wg.Done()
+			errs <- recordCheck(s, "o", "r", "1", "sha", name, "1", "", "completed", "success", "")
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent record failed: %v", err)
+		}
+	}
+
+	st := getState(t, s, "o", "r", "1", "sha")
+	if len(st.Checks) != n {
+		t.Fatalf("expected %d checks after concurrent records (CAS retry), got %d", n, len(st.Checks))
+	}
+}
+
+func TestHashStableAndOrderIndependent(t *testing.T) {
+	a := State{Checks: map[string]Check{
+		"x": {Status: "completed", Conclusion: "success"},
+		"y": {Status: "in_progress"},
+	}}
+	b := State{Checks: map[string]Check{
+		"y": {Status: "in_progress"},
+		"x": {Status: "completed", Conclusion: "success"},
+	}}
+	if a.Hash() != b.Hash() {
+		t.Fatalf("hash should be order-independent: %s != %s", a.Hash(), b.Hash())
+	}
+	c := State{Checks: map[string]Check{
+		"x": {Status: "completed", Conclusion: "failure"},
+		"y": {Status: "in_progress"},
+	}}
+	if a.Hash() == c.Hash() {
+		t.Fatalf("hash should change when a conclusion changes")
+	}
+}
+
+func TestListReflectsRecords(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	if err := recordCheck(s, "o", "r", "7", "sha7", "build", "1", "", "completed", "success", ""); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	deadline := time.After(5 * time.Second)
+	for {
+		list := s.List()
+		if len(list) == 1 && list[0].Number == "7" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("List did not reflect record in time: %+v", s.List())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+func TestRecordIgnoresStaleCheckRunID(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	if err := recordCheck(s,
+		"example-org", "example-repo", "42", "abcdef1234567",
+		"unit-tests", "200", "https://example-host/checks/200", "completed", "failure", "",
+	); err != nil {
+		t.Fatalf("record latest attempt: %v", err)
+	}
+	if err := recordCheck(s,
+		"example-org", "example-repo", "42", "abcdef1234567",
+		"unit-tests", "199", "https://example-host/checks/199", "in_progress", "", "",
+	); err != nil {
+		t.Fatalf("record stale attempt: %v", err)
+	}
+
+	check := getState(t, s, "example-org", "example-repo", "42", "abcdef1234567").Checks["unit-tests"]
+	if check.CheckRunID != 200 || check.URL != "https://example-host/checks/200" ||
+		check.Status != "completed" || check.Conclusion != "failure" {
+		t.Fatalf("stale attempt overwrote latest check: %+v", check)
+	}
+}
+
+func TestRecordIgnoresOlderObservationForSameRunAndSuite(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	const (
+		owner      = "example-org"
+		repo       = "example-repo"
+		number     = "42"
+		sha        = "abcdef1234567"
+		completed  = "2026-09-07T03:00:00Z"
+		inProgress = "2026-09-07T02:00:00Z"
+	)
+	if err := recordCheck(s,
+		owner, repo, number, sha, "unit-tests", "200", "https://example-host/checks/200",
+		"completed", "failure", completed,
+	); err != nil {
+		t.Fatalf("record completed check: %v", err)
+	}
+	if err := recordCheck(s,
+		owner, repo, number, sha, "unit-tests", "200", "https://example-host/checks/200",
+		"in_progress", "", inProgress,
+	); err != nil {
+		t.Fatalf("record delayed check: %v", err)
+	}
+	check := getState(t, s, owner, repo, number, sha).Checks["unit-tests"]
+	if check.Status != "completed" || check.Conclusion != "failure" {
+		t.Fatalf("delayed check re-armed state: %+v", check)
+	}
+
+	if err := recordSuite(s, owner, repo, number, sha, "900", "completed", "success", "77", completed); err != nil {
+		t.Fatalf("record completed suite: %v", err)
+	}
+	if err := recordSuite(s, owner, repo, number, sha, "900", "in_progress", "", "77", inProgress); err != nil {
+		t.Fatalf("record delayed suite: %v", err)
+	}
+	suite := getState(t, s, owner, repo, number, sha).Suites["900"]
+	if suite.Status != "completed" || suite.Conclusion != "success" {
+		t.Fatalf("delayed suite re-armed state: %+v", suite)
+	}
+	state := getState(t, s, owner, repo, number, sha)
+	claimedState, claimed, err := s.ClaimSettlement(Key(owner, repo, number, sha), state.Hash(), state.Generation, time.Now().UnixMilli(), 0)
+	if err != nil {
+		t.Fatalf("claim settlement: %v", err)
+	}
+	if !claimed {
+		t.Fatal("claim settlement did not claim completed state")
+	}
+	marked, err := s.MarkSettled(Key(owner, repo, number, sha), claimedState.Generation)
+	if err != nil {
+		t.Fatalf("mark settled: %v", err)
+	}
+	if !marked {
+		t.Fatal("mark settled did not mark claimed state")
+	}
+	if err := recordCheck(s, owner, repo, number, sha, "unit-tests", "200", "https://example-host/checks/200", "in_progress", "", inProgress); err != nil {
+		t.Fatalf("record delayed check after settlement: %v", err)
+	}
+	if err := recordSuite(s, owner, repo, number, sha, "900", "in_progress", "", "77", inProgress); err != nil {
+		t.Fatalf("record delayed suite after settlement: %v", err)
+	}
+	if !getState(t, s, owner, repo, number, sha).SettledEmitted {
+		t.Fatal("delayed observations re-armed settled state")
+	}
+}
+
+func TestRewatchRestartsStoppedWatcher(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	url := conn.ConnectedUrl()
+	conn.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for s.WatchErr() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("stopped watcher did not become unhealthy")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := s.Ping(); err == nil {
+		t.Fatal("stopped watcher should make the CI store unhealthy")
+	}
+
+	replacement, err := natsgo.Connect(url)
+	if err != nil {
+		t.Fatalf("connect replacement: %v", err)
+	}
+	defer replacement.Close()
+	if err := s.Rewatch(replacement); err != nil {
+		t.Fatalf("rewatch store: %v", err)
+	}
+	if err := s.Ping(); err != nil {
+		t.Fatalf("ping after rewatch: %v", err)
+	}
+
+	js, err := replacement.JetStream()
+	if err != nil {
+		t.Fatalf("open replacement JetStream: %v", err)
+	}
+	kv, err := js.KeyValue(bus.CIStateBucket)
+	if err != nil {
+		t.Fatalf("open replacement CI bucket: %v", err)
+	}
+	state := State{Owner: "replacement", Repo: "repo", Number: "42", SHA: "abc", Checks: map[string]Check{}, Suites: map[string]Suite{}}
+	value, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal replacement state: %v", err)
+	}
+	if _, err := kv.Put(Key(state.Owner, state.Repo, state.Number, state.SHA), value); err != nil {
+		t.Fatalf("put replacement state: %v", err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		for _, got := range s.List() {
+			if got.Owner == state.Owner && got.Repo == state.Repo && got.Number == state.Number && got.SHA == state.SHA {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rewatched store did not receive replacement state: %+v", s.List())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestWatchEvictsMalformedState(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567"
+	)
+
+	if err := recordCheck(s, owner, repo, number, sha, "build", "300", "https://example-host/checks/300", "completed", "success", ""); err != nil {
+		t.Fatalf("record valid state: %v", err)
+	}
+	waitCacheChecks(t, s, owner, repo, number, sha, 1)
+	if _, err := s.watcher.KV().Put(Key(owner, repo, number, sha), []byte("{")); err != nil {
+		t.Fatalf("put malformed state: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if len(s.List()) == 0 {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("malformed state remained in cache: %+v", s.List())
+		case <-time.After(15 * time.Millisecond):
+		}
+	}
+}
+
+// An earlier listener kept each pull request's head as a record of its own kind in the same bucket.
+// Nothing reads one now; one left in the bucket until its TTL is never cached as a commit's state.
+func TestWatchSkipsARetiredHeadRecord(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	if _, err := s.watcher.KV().Put("head."+owner+"."+repo+"."+number,
+		[]byte(`{"kind":"head","sha":"`+sha+`","updated_at":"2026-09-07T03:00:00Z","generation":0}`)); err != nil {
+		t.Fatalf("put a retired head record: %v", err)
+	}
+	if err := recordCheck(s, owner, repo, number, sha, "build", "600", "https://example-host/checks/600", "completed", "success", ""); err != nil {
+		t.Fatalf("record state: %v", err)
+	}
+	waitCacheChecks(t, s, owner, repo, number, sha, 1)
+	states := s.List()
+	if len(states) != 1 || states[0].Owner != owner || states[0].SHA != sha {
+		t.Fatalf("the retired head record reached the cache as state: %+v", states)
+	}
+}
+
+// A repository's name may begin with a dot, end with one, or hold two in a row (`sjawhar/.github`),
+// and a KV key's dots separate tokens that must not be empty, so the key writes a dot in the owner
+// or the name as `=`, which no GitHub name holds: the checks of such a repository are recorded, `a.b` and `a_b` keep distinct keys, and a name without a dot keys as it always has.
+func TestDottedRepositoriesRecordUnderTheirOwnKeys(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner  = "example-org"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	for i, repo := range []string{".example", "a..b", "trailing.", "example.repo", "example_repo"} {
+		if err := recordCheck(s, owner, repo, number, sha, "build", strconv.Itoa(700+i), "https://example-host/checks", "completed", "success", ""); err != nil {
+			t.Fatalf("record %s/%s's check: %v", owner, repo, err)
+		}
+		waitCacheChecks(t, s, owner, repo, number, sha, 1)
+	}
+	if Key(owner, "example.repo", number, sha) == Key(owner, "example_repo", number, sha) {
+		t.Fatalf("example.repo and example_repo share the key %s", Key(owner, "example.repo", number, sha))
+	}
+	if got, want := Key(owner, "example-repo", number, sha), "example-org.example-repo.pr42."+sha; got != want {
+		t.Fatalf("Key = %s, want %s", got, want)
+	}
+}
+
+// A record written before a dot in a key segment became `=` sits under its old key until the TTL,
+// and the summary loop addresses every cached record by the key its identity builds now: the cache
+// holds a record only under that key, so an old-key record is never cached, claimed or published,
+// where it would otherwise fail a claim on every tick until it expired.
+func TestARecordUnderAnOldKeySpellingIsNotCached(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	if err := recordCheck(s, owner, "example.repo", number, sha, "build", "900", "https://example-host/checks/900", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record check: %v", err)
+	}
+	waitCacheChecks(t, s, owner, "example.repo", number, sha, 1)
+	kv := s.watcher.KV()
+	entry, err := kv.Get(Key(owner, "example.repo", number, sha))
+	if err != nil {
+		t.Fatalf("get the record: %v", err)
+	}
+	if _, err := kv.Put(owner+".example.repo.pr"+number+"."+sha, entry.Value()); err != nil {
+		t.Fatalf("write the record under its old key: %v", err)
+	}
+	if err := kv.Delete(Key(owner, "example.repo", number, sha)); err != nil {
+		t.Fatalf("delete the record's current key: %v", err)
+	}
+	// The watch delivers in order, so a later record reaching the cache means the two writes did.
+	if err := recordCheck(s, owner, "example-repo", number, sha, "build", "901", "https://example-host/checks/901", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record the later check: %v", err)
+	}
+	waitCacheChecks(t, s, owner, "example-repo", number, sha, 1)
+
+	var logs bytes.Buffer
+	for range 3 {
+		runSummaryTick(s, pub, 0, logging.NewWithWriter("test", &logs))
+	}
+	if strings.Contains(logs.String(), "checks claim failed") {
+		t.Fatalf("a summary tick tried to claim the old-key record:\n%s", logs.String())
+	}
+	if pub.count() != 1 || pub.last().Topic != "notifications.github.example-org.example-repo.pr.42.checks" {
+		t.Fatalf("published %d envelopes, want example-repo's settlement alone", pub.count())
+	}
+	for _, cached := range s.List() {
+		if cached.Repo == "example.repo" {
+			t.Fatalf("cached a record under its old key: %+v", cached)
+		}
+	}
+}
+func TestRecordSameIDDoesNotRegressCompletedAtEqualOrMissingTimestamps(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	const (
+		owner     = "example-org"
+		repo      = "example-repo"
+		number    = "42"
+		sha       = "abcdef1234567"
+		timestamp = "2026-09-07T03:00:00Z"
+	)
+	if err := recordCheck(s, owner, repo, number, sha, "build", "800", "https://example.test/800", "completed", "success", timestamp); err != nil {
+		t.Fatalf("record completed check: %v", err)
+	}
+	if err := recordCheck(s, owner, repo, number, sha, "build", "800", "https://example.test/800", "in_progress", "", timestamp); err != nil {
+		t.Fatalf("record equal-timestamp in-progress check: %v", err)
+	}
+	if err := recordCheck(s, owner, repo, number, sha, "build", "800", "https://example.test/800", "in_progress", "", ""); err != nil {
+		t.Fatalf("record timestamp-less in-progress check: %v", err)
+	}
+	if check := getState(t, s, owner, repo, number, sha).Checks["build"]; check.Status != "completed" || check.Conclusion != "success" {
+		t.Fatalf("completed check regressed: %+v", check)
+	}
+
+	if err := recordSuite(s, owner, repo, number, sha, "900", "completed", "success", "77", timestamp); err != nil {
+		t.Fatalf("record completed suite: %v", err)
+	}
+	if err := recordSuite(s, owner, repo, number, sha, "900", "in_progress", "", "77", timestamp); err != nil {
+		t.Fatalf("record equal-timestamp in-progress suite: %v", err)
+	}
+	if err := recordSuite(s, owner, repo, number, sha, "900", "in_progress", "", "77", ""); err != nil {
+		t.Fatalf("record timestamp-less in-progress suite: %v", err)
+	}
+	if suite := getState(t, s, owner, repo, number, sha).Suites["900"]; suite.Status != "completed" || suite.Conclusion != "success" {
+		t.Fatalf("completed suite regressed: %+v", suite)
+	}
+}
+
+func TestRecordTimestamplessObservationUpdatesTimestamplessState(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	if err := recordCheck(s, "example-org", "example-repo", "42", "abcdef1234567", "build", "800", "https://example.test/800", "queued", "", ""); err != nil {
+		t.Fatalf("record queued check: %v", err)
+	}
+	if err := recordCheck(s, "example-org", "example-repo", "42", "abcdef1234567", "build", "800", "https://example.test/800", "in_progress", "", ""); err != nil {
+		t.Fatalf("record in-progress check: %v", err)
+	}
+	if check := getState(t, s, "example-org", "example-repo", "42", "abcdef1234567").Checks["build"]; check.Status != "in_progress" {
+		t.Fatalf("timestamp-less observation did not apply: %+v", check)
+	}
+}
+
+func TestClaimSettlementRefusesWhenHashMoved(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner = "example-org"
+		repo  = "example-repo"
+		pr    = "42"
+		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record initial check: %v", err)
+	}
+	initial := getState(t, s, owner, repo, pr, sha)
+	// Claimable on its own merits, so the refusal below can only come from the
+	// hash having moved.
+	if !settlementReady(initial) {
+		t.Fatalf("fixture is not settlement-ready: %+v", initial)
+	}
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "802", "https://example.test/802", "completed", "failure", "2026-09-07T03:01:00Z"); err != nil {
+		t.Fatalf("record rerun: %v", err)
+	}
+
+	_, claimed, err := s.ClaimSettlement(Key(owner, repo, pr, sha), initial.Hash(), initial.Generation, time.Now().UnixMilli(), 0)
+	if err != nil {
+		t.Fatalf("claim settlement: %v", err)
+	}
+	if claimed {
+		t.Fatal("ClaimSettlement claimed a state whose hash changed")
+	}
+	if getState(t, s, owner, repo, pr, sha).Claim != nil {
+		t.Fatal("hash-moved state gained a settlement claim")
+	}
+}
+
+func TestClaimSettlementRechecksDurableDebounce(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner = "example-org"
+		repo  = "example-repo"
+		pr    = "42"
+		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	debounce := time.Second
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record initial terminal check: %v", err)
+	}
+	stale := getState(t, s, owner, repo, pr, sha)
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801-rerendered", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record changed terminal check: %v", err)
+	}
+	durable := getState(t, s, owner, repo, pr, sha)
+	if stale.Hash() != durable.Hash() || stale.Generation != durable.Generation {
+		t.Fatalf("changed terminal metadata altered settlement identity: stale=%+v durable=%+v", stale, durable)
+	}
+
+	key := Key(owner, repo, pr, sha)
+	_, claimed, err := s.ClaimSettlement(key, stale.Hash(), stale.Generation, durable.LastEventAt+debounce.Milliseconds()-1, debounce)
+	if err != nil {
+		t.Fatalf("claim inside durable debounce: %v", err)
+	}
+	if claimed {
+		t.Fatal("ClaimSettlement claimed inside the durable debounce window")
+	}
+	if getState(t, s, owner, repo, pr, sha).Claim != nil {
+		t.Fatal("durable-debounce rejection created a claim")
+	}
+
+	_, claimed, err = s.ClaimSettlement(key, stale.Hash(), stale.Generation, durable.LastEventAt+debounce.Milliseconds(), debounce)
+	if err != nil {
+		t.Fatalf("claim after durable debounce: %v", err)
+	}
+	if !claimed {
+		t.Fatal("ClaimSettlement did not claim after the durable debounce window")
+	}
+}
+
+func TestClaimSettlementStampsClaimAtCASTime(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner = "example-org"
+		repo  = "example-repo"
+		pr    = "42"
+		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	debounce := time.Second
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record terminal check: %v", err)
+	}
+	key := Key(owner, repo, pr, sha)
+	entry, err := s.watcher.KV().Get(key)
+	if err != nil {
+		t.Fatalf("get state: %v", err)
+	}
+	var state State
+	if err := json.Unmarshal(entry.Value(), &state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	state.LastEventAt = 0
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("encode old state: %v", err)
+	}
+	if _, err := s.watcher.KV().Update(key, raw, entry.Revision()); err != nil {
+		t.Fatalf("write old state: %v", err)
+	}
+
+	tickNow := time.Now().Add(-3 * debounce).UnixMilli()
+	claimedState, claimed, err := s.ClaimSettlement(key, state.Hash(), state.Generation, tickNow, debounce)
+	if err != nil {
+		t.Fatalf("claim settlement: %v", err)
+	}
+	if !claimed {
+		t.Fatal("ClaimSettlement did not claim an already quiet state")
+	}
+	staleBefore := time.Now().Add(-2 * debounce).UnixMilli()
+	if claimedState.Claim == nil || claimedState.Claim.ClaimedAt < staleBefore {
+		t.Fatalf("claim timestamp = %+v, want a fresh non-reclaimable claim", claimedState.Claim)
+	}
+	reclaimed, err := s.ReclaimSettlement(key, claimedState.Generation, staleBefore)
+	if err != nil {
+		t.Fatalf("reclaim fresh claim: %v", err)
+	}
+	if reclaimed {
+		t.Fatal("ReclaimSettlement reclaimed a claim stamped at CAS time")
+	}
+}
+
+func TestStateVersionAdvancesWhenClaimsAreReleasedReclaimedAndReplaced(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner = "example-org"
+		repo  = "example-repo"
+		pr    = "42"
+		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "900", "https://example.test/900", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record green check: %v", err)
+	}
+	key := Key(owner, repo, pr, sha)
+	initial := getState(t, s, owner, repo, pr, sha)
+	claimed, ok, err := s.ClaimSettlement(key, initial.Hash(), initial.Generation, time.Now().UnixMilli(), 0)
+	if err != nil || !ok {
+		t.Fatalf("claim initial settlement = (%+v, %t, %v), want claimed state", claimed, ok, err)
+	}
+	released, err := s.ReleaseClaim(key, claimed.Generation)
+	if err != nil || !released {
+		t.Fatalf("release settlement claim = (%t, %v), want released", released, err)
+	}
+	afterRelease := getState(t, s, owner, repo, pr, sha)
+	if afterRelease.Generation <= claimed.Generation || afterRelease.Claim != nil {
+		t.Fatalf("released state = %+v, want a newer unclaimed version", afterRelease)
+	}
+
+	reclaimedClaim, ok, err := s.ClaimSettlement(key, afterRelease.Hash(), afterRelease.Generation, time.Now().UnixMilli(), 0)
+	if err != nil || !ok {
+		t.Fatalf("claim released settlement = (%+v, %t, %v), want claimed state", reclaimedClaim, ok, err)
+	}
+	reclaimed, err := s.ReclaimSettlement(key, reclaimedClaim.Generation, time.Now().Add(time.Second).UnixMilli())
+	if err != nil || !reclaimed {
+		t.Fatalf("reclaim settlement claim = (%t, %v), want reclaimed", reclaimed, err)
+	}
+	afterReclaim := getState(t, s, owner, repo, pr, sha)
+	if afterReclaim.Generation <= reclaimedClaim.Generation || afterReclaim.Claim != nil {
+		t.Fatalf("reclaimed state = %+v, want a newer unclaimed version", afterReclaim)
+	}
+
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "900", "https://example.test/900", "completed", "failure", "2026-09-07T03:01:00Z"); err != nil {
+		t.Fatalf("record red replacement: %v", err)
+	}
+	afterReplacement := getState(t, s, owner, repo, pr, sha)
+	if afterReplacement.Generation <= afterReclaim.Generation || afterReplacement.Hash() == afterReclaim.Hash() {
+		t.Fatalf("replaced state = %+v, want a newer version for the changed snapshot", afterReplacement)
+	}
+}
+
+func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner = "example-org"
+		repo  = "example-repo"
+		pr    = "42"
+		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record check: %v", err)
+	}
+	state := getState(t, s, owner, repo, pr, sha)
+	claimedState, claimed, err := s.ClaimSettlement(Key(owner, repo, pr, sha), state.Hash(), state.Generation, time.Now().UnixMilli(), 0)
+	if err != nil || !claimed {
+		t.Fatalf("claim settlement = (%+v, %t, %v), want claimed state", claimedState, claimed, err)
+	}
+
+	originalKV := s.watcher.KV()
+	var watcherRevision uint64
+	useKV(t, s, &interleavingKV{
+		KeyValue: originalKV,
+		afterUpdate: func(key string, _ []byte, _ uint64) {
+			entry, err := originalKV.Get(key)
+			if err != nil {
+				t.Fatalf("get marked state: %v", err)
+			}
+			var newer State
+			if err := json.Unmarshal(entry.Value(), &newer); err != nil {
+				t.Fatalf("decode marked state: %v", err)
+			}
+			newer.Generation++
+			newer.SettledEmitted = false
+			raw, err := json.Marshal(newer)
+			if err != nil {
+				t.Fatalf("encode newer watcher state: %v", err)
+			}
+			watcherRevision, err = originalKV.Update(key, raw, entry.Revision())
+			if err != nil {
+				t.Fatalf("write newer watcher state: %v", err)
+			}
+			s.mu.Lock()
+			s.cacheStateLocked(key, newer, watcherRevision)
+			s.mu.Unlock()
+		},
+	})
+
+	marked, err := s.MarkSettled(Key(owner, repo, pr, sha), claimedState.Generation)
+	if err != nil {
+		t.Fatalf("mark settled: %v", err)
+	}
+	if !marked {
+		t.Fatal("MarkSettled did not mark the claimed generation")
+	}
+	key := Key(owner, repo, pr, sha)
+	s.mu.RLock()
+	cached := s.cache[key]
+	cachedRevision := s.cacheRevisions[key]
+	s.mu.RUnlock()
+	if cached.Generation <= claimedState.Generation || cached.SettledEmitted {
+		t.Fatalf("cached state = %+v, want the newer watcher state", cached)
+	}
+	if cachedRevision != watcherRevision {
+		t.Fatalf("cached revision = %d, want watcher revision %d", cachedRevision, watcherRevision)
+	}
+}
+
+// TestMain removes the NATS server the package's tests share (testnats.Main).
+func TestMain(m *testing.M) { os.Exit(testnats.Main(m)) }

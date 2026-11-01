@@ -1,0 +1,6 @@
+
+        systemctl stop envoy-watchdog.timer 2>/dev/null || true
+        systemctl disable envoy-watchdog.timer 2>/dev/null || true
+        rm -f /usr/local/bin/envoy-watchdog /etc/systemd/system/envoy-watchdog.{service,timer} /etc/envoy/watchdog.json /etc/envoy/listener.env
+        systemctl daemon-reload
+      

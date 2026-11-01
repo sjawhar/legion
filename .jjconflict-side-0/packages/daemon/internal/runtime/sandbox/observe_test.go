@@ -1,0 +1,611 @@
+package sandbox
+
+import (
+	"errors"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
+	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
+)
+
+const (
+	sandboxUID = "uid-sandbox-7"
+	recorded   = "uid-pod-recorded"
+)
+
+var rigNow = time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+
+func condition(kind, status, reason string, generation int64) metav1.Condition {
+	return metav1.Condition{Type: kind, Status: metav1.ConditionStatus(status), Reason: reason, ObservedGeneration: generation}
+}
+
+func terminated(name string, exit int32, reason string) corev1.ContainerStatus {
+	return corev1.ContainerStatus{Name: name, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: exit, Reason: reason}}}
+}
+
+func unscheduledFor(age time.Duration) corev1.PodStatus {
+	return corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+		Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "Unschedulable",
+		Message: "0/3 nodes are available", LastTransitionTime: metav1.NewTime(rigNow.Add(-age)),
+	}}}
+}
+
+// The mapping, row by row and in the order the rows apply, against the synced stores. Every
+// observation carries the recorded locator whatever it saw; the uid it saw goes in the detail.
+func TestTheMappingRowByRowInPrecedence(t *testing.T) {
+	labels := claimLabels(claim.RoleTester)
+	name := SandboxName(workerToken)
+	withPod := func(mode string, conditions []metav1.Condition, uid, owner string, status corev1.PodStatus, edit ...func(*corev1.Pod)) []k8sruntime.Object {
+		pod := podObject(name, uid, owner, labels, status)
+		for _, e := range edit {
+			e(pod)
+		}
+		return []k8sruntime.Object{sandboxObject(t, name, sandboxUID, mode, labels, conditions...), pod}
+	}
+	running := corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+		Name: workerContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}}}
+	withStatus := func(name string, state corev1.ContainerState) corev1.PodStatus {
+		status := running
+		status.ContainerStatuses = slices.Clone(running.ContainerStatuses)
+		for i := range status.ContainerStatuses {
+			if status.ContainerStatuses[i].Name == name {
+				status.ContainerStatuses[i].State = state
+			}
+		}
+		return status
+	}
+	alive := &shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 1, PID: 42}}
+	failed := func(statuses ...corev1.ContainerStatus) corev1.PodStatus {
+		status := corev1.PodStatus{Phase: corev1.PodFailed}
+		for _, s := range statuses {
+			if s.Name == initContainer || s.Name == fetchContainer {
+				status.InitContainerStatuses = append(status.InitContainerStatuses, s)
+			} else {
+				status.ContainerStatuses = append(status.ContainerStatuses, s)
+			}
+		}
+		return status
+	}
+	// launchedUnder is a pod whose containers are the ones a runtime with testOptions edited by edit
+	// creates, as a daemon under that configuration left it running.
+	launchedUnder := func(edit func(*Options)) func(*corev1.Pod) {
+		opts := testOptions()
+		edit(&opts)
+		r, err := configure(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		containers := podOf(t, r, workerSpec(t)).Containers
+		return func(p *corev1.Pod) { p.Spec.Containers = containers }
+	}
+	unmoved := func(*Options) {}
+	// withoutConnect drops the tester launcher's --connect and its address, as no pod this runtime
+	// builds is.
+	withoutConnect := func(p *corev1.Pod) {
+		for i := range p.Spec.Containers {
+			if c := &p.Spec.Containers[i]; c.Name == workerContainer {
+				flag := slices.Index(c.Command, connectFlag)
+				c.Command = slices.Delete(slices.Clone(c.Command), flag, flag+2)
+			}
+		}
+	}
+	// withRecord annotates the Sandbox of objects with value as the tester's address record.
+	withRecord := func(objects []k8sruntime.Object, value string) []k8sruntime.Object {
+		s := objects[0].(*unstructured.Unstructured)
+		s.SetAnnotations(map[string]string{addressesAnnotation(claim.RoleTester): value})
+		return objects
+	}
+	// recordUnder is the tester's record of generation, as a runtime with testOptions edited by edit
+	// writes it when it starts that generation.
+	recordUnder := func(edit func(*Options), generation uint64) string {
+		opts := testOptions()
+		edit(&opts)
+		r, err := configure(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, err := r.recordFor(claim.RoleTester, generation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	movedDaemon := func(o *Options) { o.DaemonURL = movedDaemonURL }
+	// displacing names uid, on the Sandbox of objects, as the live pod a relaunch replaced
+	// (displacedAnnotation), beside whatever else the Sandbox is annotated with.
+	displacing := func(objects []k8sruntime.Object, uid string) []k8sruntime.Object {
+		s := objects[0].(*unstructured.Unstructured)
+		annotations := s.GetAnnotations()
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[displacedAnnotation] = uid
+		s.SetAnnotations(annotations)
+		return objects
+	}
+	deleting := func(p *corev1.Pod) {
+		now := metav1.NewTime(rigNow)
+		p.DeletionTimestamp, p.Finalizers = &now, []string{"test/hold"}
+	}
+	// killedInit is a pod still inside its init containers whose running workspace-init the kubelet
+	// terminated non-zero: what the daemon's own delete of a pod it is replacing leaves behind, and
+	// what an init container failing on its own leaves too. The pod's DeletionTimestamp is the only
+	// thing that tells them apart (verdict).
+	killedInit := corev1.PodStatus{Phase: corev1.PodPending, InitContainerStatuses: []corev1.ContainerStatus{{
+		Name: initContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "Error"}},
+	}}}
+	exited := &shimwire.LauncherState{LastExit: &shimwire.LauncherExit{Generation: 1, Code: 143, Signal: "terminated"}}
+	pending := corev1.PodStatus{Phase: corev1.PodPending}
+	for _, tc := range []struct {
+		row        string
+		objects    []k8sruntime.Object
+		launcher   *shimwire.LauncherState
+		want       runtime.ObservationKind
+		detail     []string
+		absent     []string
+		initFailed bool
+		displaced  bool
+	}{
+		{row: "2 sandbox absent", want: runtime.Gone, detail: []string{"sandbox legion/" + name + " is absent"}},
+		{
+			row:     "3 no pod while Running",
+			objects: []k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeRunning, labels)},
+			want:    runtime.Gone, detail: []string{"no pod of sandbox " + name + " (operatingMode Running)"},
+		},
+		{
+			row: "3 no pod while Suspended, with the current Suspended condition",
+			objects: []k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeSuspended, labels,
+				condition(conditionSuspended, "True", "PodTerminated", 2))},
+			want: runtime.Gone, detail: []string{"operatingMode Suspended; Suspended=True PodTerminated"},
+		},
+		{
+			row:       "3 no pod while Suspended, after the daemon replaced the recorded pod, is displaced",
+			objects:   displacing([]k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeSuspended, labels)}, recorded),
+			want:      runtime.Gone,
+			displaced: true,
+			detail:    []string{"operatingMode Suspended", "; the daemon replaced pod " + recorded + " to launch another role there"},
+		},
+		{
+			row:     "3 no pod while Suspended, the Sandbox naming an earlier replaced pod, is the pod's own end",
+			objects: displacing([]k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeSuspended, labels)}, "uid-pod-earlier"),
+			want:    runtime.Gone,
+			absent:  []string{"the daemon replaced"},
+		},
+		{
+			row:     "3 a same-named pod the sandbox does not own is no pod of the claim's",
+			objects: withPod(modeRunning, nil, recorded, "uid-sandbox-earlier", running),
+			want:    runtime.Gone, detail: []string{"pod " + name + " (uid " + recorded + ") holds the name but is not controller-owned by the sandbox (uid " + sandboxUID + ")"},
+		},
+		{
+			row:     "4 another uid, before its phase is read",
+			objects: withPod(modeRunning, nil, "uid-pod-newer", sandboxUID, failed(terminated(workerContainer, 137, "Error"))),
+			want:    runtime.NotRecordedProcess, detail: []string{"is uid uid-pod-newer, not the recorded pod UID " + recorded},
+		},
+		{
+			row:       "4 another uid, after the daemon replaced the recorded pod, is displaced",
+			objects:   displacing(withPod(modeRunning, nil, "uid-pod-newer", sandboxUID, running), recorded),
+			want:      runtime.NotRecordedProcess,
+			displaced: true,
+			detail:    []string{"is uid uid-pod-newer, not the recorded pod UID " + recorded, "the daemon replaced pod " + recorded},
+		},
+		{
+			row:     "5 the pod's one container ended with the pod",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(initContainer, 0, "Completed"), terminated(workerContainer, 137, "Error"))),
+			want:    runtime.Gone,
+			detail:  []string{"pod " + name + " (uid " + recorded + ") Failed: container roles terminated (Error, exit code 137)", "last lines of tester:\n"},
+			absent:  []string{"fake logs"},
+		},
+		{
+			row:        "5 workspace-init failed",
+			objects:    withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(initContainer, 1, "Error"))),
+			want:       runtime.Gone,
+			initFailed: true,
+			detail:     []string{"pod " + name, "init container workspace-init terminated (Error, exit code 1)", "last lines of workspace-init:"},
+		},
+		{
+			row: "5 workspace-fetch failed, its repository's cache failing",
+			objects: append(withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(fetchContainer, 1, "Error")), func(p *corev1.Pod) {
+				p.Spec.InitContainers = []corev1.Container{{Name: fetchContainer, Command: []string{"/opt/legion/bin/legion", "workspace-init", "fetch", "--repo", "acme/widgets", "--feed", FeedDir}}}
+			}), cacheObject(t, cacheRepo, "uid-cache", modeRunning, ""), crashLooping(cachePod(cacheRepo, "uid-cache-pod", "uid-cache", testImage, corev1.PodRunning))),
+			want:       runtime.Gone,
+			initFailed: true,
+			detail: []string{
+				"init container workspace-fetch terminated (Error, exit code 1)",
+				"; the repository cache of acme/widgets, which a fresh feed comes from alone, is failing: container cache CrashLoopBackOff: back-off 5m0s restarting failed container (restarted 4 times)",
+			},
+		},
+		{
+			row:       "5 an init container the daemon's own delete killed is no failed init, so its roles are displaced",
+			objects:   displacing(withPod(modeSuspended, nil, recorded, sandboxUID, killedInit, deleting), recorded),
+			want:      runtime.Gone,
+			displaced: true,
+			detail:    []string{"init container workspace-init terminated (Error, exit code 137)", "the daemon replaced pod " + recorded},
+		},
+		{
+			row:        "5 the same init container terminating non-zero in a pod nothing is deleting is a failed init",
+			objects:    displacing(withPod(modeSuspended, nil, recorded, sandboxUID, killedInit), recorded),
+			want:       runtime.Gone,
+			initFailed: true,
+			absent:     []string{"the daemon replaced"},
+		},
+		{
+			row:     "5 the agent exited cleanly",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{terminated(workerContainer, 0, "Completed")}}),
+			want:    runtime.Gone, detail: []string{"Succeeded: container roles terminated (Completed, exit code 0)"},
+		},
+		{
+			row: "5 before 7, quoting Finished only when current",
+			objects: withPod(modeRunning, []metav1.Condition{
+				condition(conditionReady, "False", reasonReconcilerError, 2), condition(conditionFinished, "True", "PodFailed", 2),
+			}, recorded, sandboxUID, failed(terminated(workerContainer, 1, "Error"))),
+			want: runtime.Gone, detail: []string{"; sandbox Finished=True PodFailed;"},
+		},
+		{
+			row: "5 a Finished left by the previous generation is not quoted",
+			objects: withPod(modeRunning, []metav1.Condition{condition(conditionFinished, "True", "PodSucceeded", 1)},
+				recorded, sandboxUID, failed(terminated(workerContainer, 1, "Error"))),
+			want: runtime.Gone, absent: []string{"Finished"},
+		},
+		{
+			row: "6 unscheduled past the boot timeout",
+			objects: append(withPod(modeRunning, nil, recorded, sandboxUID, unscheduledFor(3*time.Second)), &corev1.Event{
+				ObjectMeta:     metav1.ObjectMeta{Name: name + ".1", Namespace: testNamespace},
+				InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: name, UID: recorded},
+				Type:           "Warning", Reason: "FailedScheduling", Message: "0/3 nodes are available: 3 node(s) had untolerated taint",
+			}),
+			want:   runtime.Gone,
+			detail: []string{"unscheduled for 3s, past the boot timeout 2s (PodScheduled=False Unschedulable", "events: Warning FailedScheduling: 0/3 nodes are available: 3 node(s) had untolerated taint"},
+		},
+		{
+			row:     "6 unscheduled within the boot timeout is alive",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, unscheduledFor(time.Second)),
+			want:    runtime.Alive,
+		},
+		{
+			row:     "7 the controller sees several pods",
+			objects: withPod(modeRunning, []metav1.Condition{condition(conditionReady, "False", reasonMultiplePods, 2)}, recorded, sandboxUID, running),
+			want:    runtime.Uncertain, detail: []string{"Ready=False MultiplePods"},
+		},
+		{
+			row:      "7 a reconciler error left by the previous generation",
+			objects:  withPod(modeRunning, []metav1.Condition{condition(conditionReady, "False", reasonReconcilerError, 1)}, recorded, sandboxUID, running),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row: "8 pending before its init container starts (B4)",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, corev1.PodStatus{Phase: corev1.PodPending, InitContainerStatuses: []corev1.ContainerStatus{{
+				Name: initContainer, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}},
+			}}}),
+			want: runtime.Alive, detail: []string{"(uid " + recorded + ") Pending"},
+		},
+		{
+			row:     "8 a pod with no status yet",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, corev1.PodStatus{}),
+			want:    runtime.Alive,
+		},
+		{
+			row:      "8 running",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running),
+			launcher: alive,
+			want:     runtime.Alive, detail: []string{"(uid " + recorded + ") role tester runs generation 1"},
+		},
+		{
+			row:      "8 the pod's Ready=False leaves a role its launcher runs alive",
+			objects:  withPod(modeRunning, []metav1.Condition{condition(conditionReady, "False", "ContainersNotReady", 2)}, recorded, sandboxUID, running),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:     "8 the role's launcher is not connected",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running),
+			want:    runtime.Uncertain, detail: []string{"role tester's launcher is disconnected"},
+			absent: []string{"restarted", "waiting"},
+		},
+		{
+			// The one container runs every role's launcher, so its crash loop reads as each role's
+			// launcher disconnected; the detail says why, from the kubelet's own status.
+			row: "8 the pod's one container crash-loops with no launcher connected",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+				Name: workerContainer, RestartCount: 5,
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff", Message: "back-off 2m40s restarting failed container"}},
+				LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					ExitCode: 2, Reason: "Error", FinishedAt: metav1.NewTime(time.Date(2026, 10, 26, 9, 30, 0, 0, time.UTC)),
+				}},
+			}}}),
+			want: runtime.Uncertain,
+			detail: []string{
+				"role tester's launcher is disconnected; container roles waiting (CrashLoopBackOff: back-off 2m40s restarting failed container); " +
+					"container roles restarted 5 times, its last instance terminated (Error, exit code 2 at 2026-10-26T09:30:00Z)",
+			},
+		},
+		{
+			row:      "8 the launcher runs a later generation",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running),
+			launcher: &shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 2, PID: 43}},
+			want:     runtime.NotRecordedProcess, detail: []string{"runs generation 2, not the recorded 1"},
+		},
+		{
+			row:      "8 the launcher reports the recorded generation exited",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running),
+			launcher: &shimwire.LauncherState{LastExit: &shimwire.LauncherExit{Generation: 1, Code: 143, Signal: "terminated"}},
+			want:     runtime.Gone, detail: []string{"reports generation 1 exited (code 143, signal terminated)"},
+		},
+		{
+			row:      "8 the launcher reports the recorded generation failed before its shim started",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running),
+			launcher: &shimwire.LauncherState{LastExit: &shimwire.LauncherExit{Generation: 1, Code: shimwire.LauncherExitSetupFailed}},
+			want:     runtime.Gone, detail: []string{"reports generation 1 failed setting up its namespaces before its shim started; last lines of tester:"},
+		},
+		{
+			row:     "8 the pod's one container terminated with no launcher connected",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, withStatus(workerContainer, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}})),
+			want:    runtime.Gone, detail: []string{"container roles terminated (OOMKilled, exit code 137)"},
+		},
+		{
+			row:      "8 a terminated container outranks a launcher reporting another generation",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, withStatus(workerContainer, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}})),
+			launcher: &shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 2, PID: 43}},
+			want:     runtime.Gone, detail: []string{"container roles terminated (OOMKilled, exit code 137)"},
+		},
+		{
+			row:      "8 a restarted launcher's recorded child outranks its previous container instance's terminated status",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, withStatus(workerContainer, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}})),
+			launcher: alive,
+			want:     runtime.Alive, detail: []string{"role tester runs generation 1"},
+		},
+		{
+			row:      "8 a pod being deleted is alive until it is gone",
+			objects:  withPod(modeSuspended, nil, recorded, sandboxUID, running, deleting),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:       "8 the recorded generation exited in a pod the daemon is replacing, being deleted, is displaced",
+			objects:   displacing(withPod(modeSuspended, nil, recorded, sandboxUID, running, deleting), recorded),
+			launcher:  exited,
+			want:      runtime.Gone,
+			displaced: true,
+			detail:    []string{"reports generation 1 exited", "the daemon replaced pod " + recorded},
+		},
+		{
+			row:      "8 the recorded generation exited in a named pod still running undeleted is the role's own end",
+			objects:  displacing(withPod(modeSuspended, nil, recorded, sandboxUID, running), recorded),
+			launcher: exited,
+			want:     runtime.Gone,
+			absent:   []string{"the daemon replaced"},
+		},
+		{
+			row: "8 a new pod's ADD while the sandbox still holds the old Finished (B5)",
+			objects: withPod(modeRunning, []metav1.Condition{
+				condition(conditionFinished, "True", "PodFailed", 1), condition(conditionReady, "False", "PodFailed", 1),
+			}, recorded, sandboxUID, corev1.PodStatus{Phase: corev1.PodPending}),
+			want: runtime.Alive,
+		},
+		{
+			row:      "8 a launcher dialing the stream a pod created now is handed, with no record, is alive",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:      "8 a launcher with no --connect is never read as stale for want of it",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(moveStream), withoutConnect),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:     "9 a moved worker stream, before the launcher's state is read",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(moveStream)),
+			want:    runtime.StaleAddress,
+			detail:  []string{movedAddress{connectFlag, movedStreamURL, testOptions().StreamURL}.String()},
+			absent:  []string{"disconnected", "LEGION_DAEMON_URL"},
+		},
+		{
+			row:     "9 a pending pod dialing a moved worker stream",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, pending, launchedUnder(moveStream)),
+			want:    runtime.StaleAddress,
+			detail:  []string{movedAddress{connectFlag, movedStreamURL, testOptions().StreamURL}.String()},
+		},
+		{
+			row:      "8 a generation recorded with every address a generation started now is handed",
+			objects:  withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), recordUnder(unmoved, 1)),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:      "9 a generation started with a moved daemon URL",
+			objects:  withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), recordUnder(movedDaemon, 1)),
+			launcher: alive,
+			want:     runtime.StaleAddress,
+			detail:   []string{"role tester runs generation 1", movedAddress{"LEGION_DAEMON_URL", movedDaemonURL, testOptions().DaemonURL}.String()},
+			absent:   []string{connectFlag, "ENVOY_URL"},
+		},
+		{
+			row: "9 every moved address of a generation is named",
+			objects: withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), recordUnder(func(o *Options) {
+				o.DaemonURL, o.EnvoyURL = movedDaemonURL, "http://192.0.2.9:9020"
+			}, 1)),
+			launcher: alive,
+			want:     runtime.StaleAddress,
+			detail: []string{
+				movedAddress{"LEGION_DAEMON_URL", movedDaemonURL, testOptions().DaemonURL}.String(),
+				movedAddress{"ENVOY_URL", "http://192.0.2.9:9020", testOptions().EnvoyURL}.String(),
+			},
+			absent: []string{"ENVOY_NATS_URL"},
+		},
+		{
+			row:      "8 the record of another generation is not compared",
+			objects:  withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), recordUnder(movedDaemon, 2)),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:      "9 an unreadable record proves nothing about the generation's addresses",
+			objects:  withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), "{not json"),
+			launcher: alive,
+			want:     runtime.StaleAddress,
+			detail:   []string{"the address record " + addressesAnnotation(claim.RoleTester) + " is unreadable"},
+		},
+		{
+			row:     "a phase the mapping has no row for is uncertain",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, corev1.PodStatus{Phase: corev1.PodUnknown}),
+			want:    runtime.Uncertain, detail: []string{"phase Unknown"},
+		},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			g := newRig(t, tc.objects, withoutController())
+			if tc.launcher != nil {
+				g.reportLauncher(workerToken, *tc.launcher)
+			}
+			loc := sandboxLocator(workerToken, recorded)
+			obs, err := g.r.Probe(g.ctx, loc)
+			if err != nil {
+				t.Fatalf("Probe: %v", err)
+			}
+			if obs.Kind != tc.want {
+				t.Fatalf("kind %s, want %s (detail: %s)", obs.Kind, tc.want, obs.Detail)
+			}
+			if obs.Locator != loc {
+				t.Fatalf("observation carries %+v, want the recorded locator", obs.Locator)
+			}
+			if got := g.initFailed(loc); got != tc.initFailed {
+				t.Errorf("initFailed = %t, want %t (detail: %s)", got, tc.initFailed, obs.Detail)
+			}
+			if obs.Displaced != tc.displaced {
+				t.Errorf("Displaced = %t, want %t (detail: %s)", obs.Displaced, tc.displaced, obs.Detail)
+			}
+			for _, want := range tc.detail {
+				if !strings.Contains(obs.Detail, want) {
+					t.Errorf("detail %q lacks %q", obs.Detail, want)
+				}
+			}
+			for _, absent := range tc.absent {
+				if strings.Contains(obs.Detail, absent) {
+					t.Errorf("detail %q has %q", obs.Detail, absent)
+				}
+			}
+		})
+	}
+}
+
+// breakablePods serves the pod informer's list and watch from the tracker until a test breaks
+// them: then every list and watch request fails, as they do while the API server is unreachable,
+// and the watch in flight ends.
+type breakablePods struct {
+	g      *rig
+	broken atomic.Bool
+	mu     sync.Mutex
+	end    func()
+}
+
+func withBreakablePods(b *breakablePods) rigOption {
+	return func(g *rig, _ *Options) {
+		b.g = g
+		refused := errors.New("dial tcp 192.0.2.1:443: connect: connection refused")
+		g.kube.PrependReactor("list", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+			if b.broken.Load() {
+				return true, nil, refused
+			}
+			return false, nil, nil
+		})
+		g.kube.PrependWatchReactor("pods", func(a k8stesting.Action) (bool, watch.Interface, error) {
+			if b.broken.Load() {
+				return true, nil, refused
+			}
+			upstream, err := g.kube.Tracker().Watch(podsGVR, a.GetNamespace())
+			if err != nil {
+				return true, nil, err
+			}
+			events, done := make(chan watch.Event), make(chan struct{})
+			go func() {
+				defer close(events)
+				defer upstream.Stop()
+				for {
+					select {
+					case <-done:
+						return
+					case ev, ok := <-upstream.ResultChan():
+						if !ok {
+							return
+						}
+						select {
+						case events <- ev:
+						case <-done:
+							return
+						}
+					}
+				}
+			}()
+			b.mu.Lock()
+			b.end = sync.OnceFunc(func() { close(done) })
+			b.mu.Unlock()
+			return true, watch.NewProxyWatcher(events), nil
+		})
+	}
+}
+
+// fail makes every pod list and watch request fail and ends the watch in flight.
+func (b *breakablePods) fail() {
+	b.broken.Store(true)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.end != nil {
+		b.end()
+	}
+}
+
+// A store whose watch keeps failing after it synced holds what it last heard: while the latest
+// list or watch request failed, the runtime answers Uncertain from it (row 1), never the Alive it
+// last saw, and answers from the store again once a request succeeds.
+func TestAFailingWatchMakesTheStoreUncertainUntilItRecovers(t *testing.T) {
+	pods := &breakablePods{}
+	g := newRig(t, nil, withBreakablePods(pods))
+	loc := g.spawn(workerSpec(t))
+	probe := func() runtime.Observation {
+		t.Helper()
+		obs, err := g.r.Probe(g.ctx, loc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return obs
+	}
+	if obs := probe(); obs.Kind != runtime.Alive {
+		t.Fatalf("before the watch fails: %s %q, want Alive", obs.Kind, obs.Detail)
+	}
+	pods.fail()
+	waitFor := func(what string, kind runtime.ObservationKind) runtime.Observation {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			obs := probe()
+			if obs.Kind == kind {
+				return obs
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: still %s %q", what, obs.Kind, obs.Detail)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	obs := waitFor("the pod watch failing", runtime.Uncertain)
+	if !strings.Contains(obs.Detail, "connection refused") || !strings.Contains(obs.Detail, "pod store") {
+		t.Errorf("the Uncertain detail %q names neither the failing pods watch nor its error", obs.Detail)
+	}
+	pods.broken.Store(false)
+	waitFor("the pod watch recovering", runtime.Alive)
+}

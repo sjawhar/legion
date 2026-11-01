@@ -1,0 +1,66 @@
+services:
+  dispatch:
+    image: ghcr.io/sjawhar/legion/envoy:${ENVOY_IMAGE_TAG:?set ENVOY_IMAGE_TAG (see deploy/README.md)}
+    build:
+      context: ../../../..
+      dockerfile: packages/envoy/docker/Dockerfile
+    network_mode: host
+    entrypoint: ["/usr/local/bin/envoy-dispatch"]
+    restart: unless-stopped
+    # A SIGTERM runs Dispatch's ordered shutdown: the requests in flight drain first, the document
+    # service settles what is owed within 14 s of its own (starting 11 s after the signal at the
+    # latest), and the database pool then closes once every request has answered. While the
+    # database still answers, nothing but this stop_grace_period bounds the pool's close, so a
+    # write still waiting on a lock commits and is answered whenever it finishes, up to that
+    # bound; only once stop_grace_period itself runs out is the process killed with it still open.
+    # Three 2 s health probes in a row finding the database silent close the pool early instead of
+    # waiting for stop_grace_period, and Dispatch exits without the connections still using it.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://${DISPATCH_LISTEN_HOST:-127.0.0.1}:${DISPATCH_PORT:-8766}/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    environment:
+      HOME: /home/envoy
+      # The Dispatch database is external, and the production deployment backs it up with its own
+      # scheduled task; this compose runs no Postgres and no backup worker of its own.
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL (the external Dispatch Postgres URL)}
+      DISPATCH_LISTEN_HOST: ${DISPATCH_LISTEN_HOST:-127.0.0.1}
+      DISPATCH_PORT: ${DISPATCH_PORT:-8766}
+      DISPATCH_APP_CLIENT_ID: ${DISPATCH_APP_CLIENT_ID:-}
+      DISPATCH_AGENT_TOKEN: ${DISPATCH_AGENT_TOKEN:?set DISPATCH_AGENT_TOKEN}
+      DISPATCH_SERVER_URL: ${DISPATCH_SERVER_URL:?set DISPATCH_SERVER_URL (the browser origin)}
+      NATS_URLS: ${NATS_URLS:?set NATS_URLS}
+      # This server owns ENVOY_NOTIFICATIONS on the NATS above, which is the shared server rather
+      # than this host's. Every connect refuses a NATS that is not the machine's own without this
+      # (packages/envoy/internal/bus/reach.go).
+      ENVOY_ALLOW_REMOTE_NATS: "1"
+      DISPATCH_SIGNIN_ISSUER: ${DISPATCH_SIGNIN_ISSUER:-}
+      DISPATCH_SIGNIN_CLIENT_ID: ${DISPATCH_SIGNIN_CLIENT_ID:-}
+      DISPATCH_SIGNIN_CLIENT_SECRET: ${DISPATCH_SIGNIN_CLIENT_SECRET:-}
+      DISPATCH_SIGNIN_GROUP: ${DISPATCH_SIGNIN_GROUP:-}
+      DISPATCH_SIGNIN_DOMAIN: ${DISPATCH_SIGNIN_DOMAIN:-}
+      # Production uses cookie identity. header:<name> is only for test/local harnesses and
+      # requires DISPATCH_IDENTITY_HEADER_TRUSTED=1; it never shares a deployment with sign-in.
+      DISPATCH_IDENTITY: ${DISPATCH_IDENTITY:-cookie}
+      DISPATCH_IDENTITY_HEADER_TRUSTED: ${DISPATCH_IDENTITY_HEADER_TRUSTED:-}
+      DISPATCH_NATS_DISABLED: ${DISPATCH_NATS_DISABLED:-}
+      ENVOY_URL: ${ENVOY_URL:-http://127.0.0.1:9020}
+      ENVOY_TOKEN: ${ENVOY_TOKEN:-}
+      # Optional boot seed for mappings absent from the dashboard. Stored
+      # repository mappings are authoritative; DISPATCH_DEFAULT_PROJECT catches
+      # external repositories with no stored mapping.
+      DISPATCH_REPO_PROJECTS: ${DISPATCH_REPO_PROJECTS:-}
+      DISPATCH_DEFAULT_PROJECT: ${DISPATCH_DEFAULT_PROJECT:-}
+      # Session cookies are Secure by default; set this when serving the
+      # OAuth dashboard over plain HTTP (local/tailnet use).
+      DISPATCH_INSECURE_COOKIE: ${DISPATCH_INSECURE_COOKIE:-}
+    volumes:
+      # Signing key and optional app.json credentials.
+      - dispatch-data:/home/envoy/.local/share/dispatch
+
+
+volumes:
+  dispatch-data:
