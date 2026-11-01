@@ -418,7 +418,7 @@
           "runAsNonRoot": true,
           "runAsUser": 1000
         },
-        "serviceAccountName": "legion-worker",
+        "serviceAccountName": "operator-account",
         "terminationGracePeriodSeconds": 30,
         "tolerations": [
           {
