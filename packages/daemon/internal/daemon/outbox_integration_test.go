@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,8 +20,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -27,6 +31,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -514,6 +519,115 @@ func (d *boardDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProjec
 	return nil, nil
 }
 func (d *boardDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
+
+// A person's handover row (dispatch://LEGION-755) is the one status row that brings its issue
+// into the workflow rather than moving one along inside it: a todo observed at the `triage` a
+// person's legion label found, or at the `backlog` or `icebox` their approval of a parked root's
+// spec found, marked PersonHandover. When Dispatch refuses its fenced write because an event
+// landed between the row's read and that write (ISSUE_CHANGED) — an interleaved comment, an edit
+// — the retry is judged by the handover's own rule, that the label is still there
+// (personHandoverStands), and nothing of the re-read is applied.
+//
+// Judged by statusStillWanted instead, whose record.OutOfWorkflow is true for exactly those three
+// statuses, every such row was dropped without writing and logged as having left a workflow its
+// issue had never entered; and the read applied on the triage path told admission the label was
+// nobody's — intake.ReadIssue carries no LabelSetter — which queued a `triage` wake for a root
+// the controller is told to leave alone (skills/legion-controller/references/triage.md).
+//
+// The runner holds a real pool and the two handlers that would queue that wake (workflow.New and
+// admit.New, the pair the hand-over tests wire): with a nil pool applyRead returns before applying
+// anything, so the wake assertion would hold whether the retry applies its read or not. The cases
+// share the pool and take a key each, so one case's wake is never read for another's.
+func TestAPersonsHandoverIsWrittenAfterDispatchRefusesItsFirstWrite(t *testing.T) {
+	const dropped = "outbox: a person's handover is not written; the label is gone"
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
+	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
+	for _, tc := range []struct {
+		name     string
+		key      string
+		observed string
+		// labelled is the label as the re-read after the refusal shows it: a person who took it
+		// off between the queue and this delivery withdrew the handover.
+		labelled bool
+		statuses []string
+		logged   int
+	}{
+		{name: "a person's label on a triage root", key: "LEGION-751", observed: "triage", labelled: true, statuses: []string{"todo"}},
+		{name: "a person's approval of a backlog root", key: "LEGION-752", observed: "backlog", labelled: true, statuses: []string{"todo"}},
+		{name: "a person's approval of an icebox root", key: "LEGION-753", observed: "icebox", labelled: true, statuses: []string{"todo"}},
+		{name: "the label taken off between the queue and the retry", key: "LEGION-754", observed: "triage", logged: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shown := dispatch.Issue{Key: tc.key, Status: tc.observed, Title: tc.key, Rank: "A", Labels: []string{dispatch.LegionLabel},
+				HandedOver: true, ResolvedRepo: "acme/widgets", LastSeq: 4}
+			// What the read after the refusal shows: the issue at the status the row was queued
+			// from, at the sequence the interleaved event moved it to.
+			reread := shown
+			reread.LastSeq, reread.HandedOver = shown.LastSeq+1, tc.labelled
+			if !tc.labelled {
+				reread.Labels = nil
+			}
+			client := &refusedOnceDispatch{outboxDispatch: outboxDispatch{issue: shown}, reread: reread}
+			var logs bytes.Buffer
+			runner := &outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{engine, admission},
+				log: slog.New(slog.NewJSONHandler(&logs, nil))}
+			row := mustOutboxRow(t, tc.key, record.StatusWrite{Status: "todo", ObservedStatus: tc.observed, PersonHandover: true}, time.Now())
+
+			if err := runner.execute(context.Background(), row); err != nil {
+				t.Fatalf("execute the person's handover: %v", err)
+			}
+
+			if client.refusals != 1 {
+				t.Fatalf("Dispatch refused %d writes, want the one interleaved change this test is about", client.refusals)
+			}
+			if !slices.Equal(client.statuses, tc.statuses) {
+				t.Fatalf("status writes = %v, want %v", client.statuses, tc.statuses)
+			}
+			if len(tc.statuses) > 0 && client.at != reread.LastSeq {
+				t.Fatalf("the retry wrote at sequence %d, want the re-read's %d", client.at, reread.LastSeq)
+			}
+			if wakes := triageWakes(t, pool, tc.key); wakes != 0 {
+				t.Fatalf("triage wakes queued for the controller = %d, want none: the retry applies nothing of its read", wakes)
+			}
+			if lines := loggedLines(t, logs.String(), dropped); len(lines) != tc.logged {
+				t.Fatalf("logged %q %d times, want %d: %s", dropped, len(lines), tc.logged, logs.String())
+			}
+		})
+	}
+}
+
+// refusedOnceDispatch refuses the first fenced status write with ISSUE_CHANGED, as Dispatch
+// refuses a write whose read an event overtook, and shows reread — the issue as it stands at the
+// sequence that event moved it to — to every read after that. refusals counts the refusals it
+// made, and at is the sequence of the last write it took.
+type refusedOnceDispatch struct {
+	outboxDispatch
+	reread   dispatch.Issue
+	refusals int
+	at       int64
+}
+
+func (d *refusedOnceDispatch) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	if d.refusals == 0 {
+		d.refusals, d.issue = 1, d.reread
+		return dispatch.Issue{}, &dispatch.Error{Status: http.StatusConflict, Code: "ISSUE_CHANGED", Message: "issue changed"}
+	}
+	d.at = issue.LastSeq
+	return d.outboxDispatch.SetStatusAt(ctx, issue, status)
+}
+
+// triageWakes counts the controller notices of kind triage the outbox holds for issue.
+func triageWakes(t *testing.T, pool *pgxpool.Pool, issue string) int {
+	t.Helper()
+	var wakes int
+	if err := pool.QueryRow(context.Background(), `select count(*) from outbox where kind = $1 and issue = $2 and payload->>'kind' = $3`,
+		string(record.OutboxKindControllerNotice), issue, string(record.TriageNotice)).Scan(&wakes); err != nil {
+		t.Fatalf("count the triage wakes queued for %s: %v", issue, err)
+	}
+	return wakes
+}
 
 // A failed transaction is one row's failure, never the runner's end: a Postgres restart drops the
 // pool's connections, and the outbox has to keep draining once they are back. A claim that fails

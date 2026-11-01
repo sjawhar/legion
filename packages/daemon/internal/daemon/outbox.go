@@ -472,14 +472,7 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 		}
 		return nil
 	}
-	// A person's handover row was queued for a person's legion label on an unrecorded triage root,
-	// or for a person's approval of a parked labelled root's spec. A person who took the label off
-	// between the queue and this delivery withdrew that handover, and a todo on an unlabelled issue
-	// would be nobody's: admission records nothing of a todo without the label (its "not handed to
-	// Legion" exit), so the write would only wake the controller for an issue it must not take. The
-	// row is dropped and logged once instead; the status guard above has already let a park stand.
-	if payload.PersonHandover && !issue.HandedOver {
-		r.log.Info("outbox: a person's handover is not written; the label is gone", "row", row.ID, "issue", row.Issue)
+	if payload.PersonHandover && !r.personHandoverStands(row, issue) {
 		return nil
 	}
 	if payload.HandOver {
@@ -539,6 +532,16 @@ const statusWriteReads = 3
 // (statusStillWanted). A read already at the status the row carries is this write's work, done by
 // someone else; a read at any other status is a change made after the row's read, which the row
 // never writes over, whether it took the issue out of the workflow or moved it along within one.
+//
+// A person's handover is the one row those two steps are wrong for, and wrong in opposite
+// directions, because it is the row that brings an issue *into* the workflow rather than moving
+// one along inside it: it is queued at `triage`, `backlog` or `icebox` (admit's person's label,
+// gate's approval of a parked root), and every one of those reads as out of the workflow, so
+// statusStillWanted would finish it without writing and log that its issue had left a workflow it
+// never entered. And the read this loop makes is unprepared — intake.ReadIssue carries no
+// LabelSetter — so applying it would tell admission the label is absent and queue a `triage` wake
+// for a root the controller is told to leave alone. Such a row is judged by personHandoverStands
+// instead, the same rule the first attempt applied, and nothing of its read is applied.
 func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) error {
 	for range statusWriteReads {
 		_, err := r.dispatch.SetStatusAt(ctx, read, payload.Status)
@@ -552,8 +555,10 @@ func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload 
 		if read, err = r.dispatch.GetIssue(ctx, row.Issue); err != nil {
 			return fmt.Errorf("read Dispatch issue %s again after it changed under the status write: %w", row.Issue, err)
 		}
-		if err := r.applyRead(ctx, read); err != nil {
-			return err
+		if !payload.PersonHandover {
+			if err := r.applyRead(ctx, read); err != nil {
+				return err
+			}
 		}
 		if read.Status == payload.Status {
 			r.log.Info("outbox status write found Dispatch already at its status after the issue changed under it",
@@ -565,6 +570,12 @@ func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload 
 				"row", row.ID, "issue", row.Issue, "status", payload.Status, "observed", payload.ObservedStatus, "dispatch", read.Status)
 			return nil
 		}
+		if payload.PersonHandover {
+			if !r.personHandoverStands(row, read) {
+				return nil
+			}
+			continue
+		}
 		wanted, err := r.statusStillWanted(ctx, row, payload, read)
 		if err != nil || !wanted {
 			return err
@@ -572,6 +583,29 @@ func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload 
 	}
 	return fmt.Errorf("set Dispatch issue %s to %s: it changed under each of the %d reads this attempt made",
 		row.Issue, payload.Status, statusWriteReads)
+}
+
+// personHandoverStands says whether a person's handover row may still be written, and is the one
+// rule both the first attempt and every ISSUE_CHANGED retry ask, so neither can drift from the
+// other: the row was queued for a person's legion label on an unrecorded triage root, or for a
+// person's approval of a parked labelled root's spec, and what it needs is that the label is
+// still there. A person who took it off between the queue and this delivery withdrew the
+// handover, and a todo on an unlabelled issue would be nobody's: admission records nothing of a
+// todo without the label (its "not handed to Legion" exit), so the write would only wake the
+// controller for an issue it must not take. The row is dropped and logged once instead.
+//
+// The status is not asked here, because both callers have already asked it of the same read: the
+// first attempt requires the observed status or the row's own, and the retry requires the
+// observed status after taking the two other answers (already written, moved elsewhere) itself.
+// What the retry must not ask is statusStillWanted, whose record.OutOfWorkflow is true for every
+// status a handover is queued from — this row brings an issue into the workflow rather than
+// moving one along inside it, so that question reads backwards here.
+func (r *outbox) personHandoverStands(row record.OutboxRow, issue dispatch.Issue) bool {
+	if issue.HandedOver {
+		return true
+	}
+	r.log.Info("outbox: a person's handover is not written; the label is gone", "row", row.ID, "issue", row.Issue)
+	return false
 }
 
 // applyRead applies what Dispatch shows of an issue to the record, through the fact path every
