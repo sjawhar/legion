@@ -2,32 +2,33 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "previousHandoff": "1e8492bf9b137226060af604aabdf394f909bf77",
+  "previousHandoff": "aa3a96f51df0a3b4fa273b785363fec618601346",
   "proof": [
     {
-      "criterion": "Forward merge of main f699b131 (#2607 stopped releasing the OpenCode plugin) resolves the conflict: .github/changelog-packages and AGENTS.md name six packages, and no CHANGELOG_PACKAGES block comes back",
-      "surface": "the merged tree; ci.yaml's lint step and changelog-fold.yaml's Plan the fold step, each run from its own run: text extracted from the workflow file at the merge",
-      "command": "bash -e -c <lint step run>; GITHUB_OUTPUT=/dev/null bash -e -c <Plan the fold run>",
-      "observed": "lint step exit 0; Plan the fold exit 0 with no warning, planning claude-envoy and envoy-client under main@fea4f37cc0ab, envoy 24.7.0 to 25.0.0, pi-envoy 13.11.1 and pi-legion 15.6.0 and 15.7.0 (contracts holds no fragment); .github/changelog-packages holds six specs",
-      "headSha": "fea4f37cc0ab4a6004ae73c9defb386d442af054",
-      "negativeControl": "a commit adding packages/envoy-plugin/.changes/unreleased/x.yaml on top of the merge: fold-orphans exits 1 naming the file"
+      "criterion": "The red ci-ok at 7c44d668 (code aa3a96f5) was envoy-session-stall alone, a timing flake in envoy-client's NATS stall test, which this pull request does not touch",
+      "surface": "GitHub Actions CI run 41247962078 on the code head aa3a96f51df0",
+      "command": "gh run rerun 41247962078 --failed --repo sjawhar/legion",
+      "observed": "attempt 2: envoy-session-stall success (job 124722836453), ci-ok success",
+      "headSha": "aa3a96f51df0a3b4fa273b785363fec618601346",
+      "negativeControl": "attempt 1: envoy-session-stall failed at nats-stall.test.ts:110 row B ('stalled redials never subscribed'), job 124682690264"
     },
     {
-      "criterion": "The checks the architect named pass at the merge",
-      "surface": "repository scripts at the merged tree",
-      "command": "bun scripts/semantic-line-breaks.ts AGENTS.md; bash .github/scripts/release-push.test.sh; check-release-credentials.sh and its test; check-ci-filters.sh; check-image-trigger-paths.sh; check-private-names.sh",
-      "observed": "semantic-line-breaks exit 0; release-push.test.sh 635 passed, 0 failed; check-release-credentials.sh PASS and its test PASS; filter, trigger and private-name checks pass",
-      "headSha": "fea4f37cc0ab4a6004ae73c9defb386d442af054",
-      "negativeControl": "unchanged-diff fingerprint b3329d36 -> bec65c9c, changed only by the envoy-plugin line of .github/changelog-packages and main's own AGENTS.md lines"
+      "criterion": "Forward merge of main d09b46d7 raises migrationid's closings to main's highest numbered migrations (daemon 0067_phase_assignment, Dispatch 0150_dpop_proofs), so the merge result keeps the identifier rule",
+      "surface": "the merged tree's Go tests on the pod's test PostgreSQL 18.6 with pgvector",
+      "command": "go test ./migrationid/ ./internal/pgmigrate/... ./internal/broker/store/ ./internal/dispatch/store/ (on a database the test role owns) ./cmd/dispatch -run 'Healthz|Census|Migrat'; go test ./internal/store/... in packages/daemon",
+      "observed": "migrationid, pgmigrate, pgmigratetest, broker store, cmd/dispatch, daemon store and store/migrations all ok, including the tester's red tests (next_number_test.go in both series) and the timestamped-migration tests. Dispatch store: two full runs each failed one different test (TestGraphEdgesUnionsMentionsWithEveryStructuralRelation, then TestRetirePlainRefreshTokensRetiresATokenStoredAfterTheLastBoot), neither touching migrations; each passed three times run alone",
+      "headSha": "91185860980407959a9fc34bd6afa63097a28956",
+      "negativeControl": "with the closings left at 0064/0149, main's 0065-0067 and 0150 are numbers above the closing file, which migrationid.Check refuses (the round-10 next-number proof)"
     }
   ],
   "filesChanged": [
-    "merge of main f699b131: .github/workflows/changelog-fold.yaml keeps reading .github/changelog-packages; AGENTS.md says six packages, listed by .github/changelog-packages",
-    ".github/changelog-packages: packages/envoy-plugin=opencode-legion-envoy-v removed, as #2607 removed it from CHANGELOG_PACKAGES"
+    "merge of main d09b46d7 (clean)",
+    "packages/envoy/migrationid/migrationid.go: closings 0067_phase_assignment.up.sql and 0150_dpop_proofs.up.sql",
+    "packages/daemon/internal/store/migrations/embed.go, docs/kubernetes.md, packages/envoy/cmd/dispatch/README.md: the closing file names"
   ],
   "trickyParts": [
-    "main added no numbered migration since the last merge, so migrationid's closings stay at 0064 and 0149",
-    "main still carries the three daemon fragments; this branch removes them, so the merged tree has none"
+    "The pod's test role is no superuser and cannot create in the postgres database's public schema: three census tests (pg_read_all_stats, a replication connection, an event trigger) fail there at main too, and the base-database Dispatch store tests need a database the role owns",
+    "The merge lane rescued an earlier copy of this merge (ad8bdd2b, on main 072a7d34) with the same closing edits; this merge is on the newer main d09b46d7 instead"
   ],
   "deviations": [],
   "openQuestions": []
