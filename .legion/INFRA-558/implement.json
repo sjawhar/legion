@@ -2,8 +2,24 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-558",
-  "completed": "2026-11-01T05:40:00Z",
+  "completed": "2026-11-01T21:40:00Z",
   "proof": [
+    {
+      "criterion": "ci-ok red at 920859be: the slow-page revoke test measures the revoke's end, not the page's drain.",
+      "surface": "Real sockets through docs.Service on real Postgres; the server-side end observed through schemaAdmissions",
+      "command": "cd packages/envoy && go test -count=100 -cpu=1,2 -timeout 60m -run TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole ./internal/dispatch/docs/ && CGO_ENABLED=1 go test -race -count=25 -cpu=1,2 -timeout 60m -run TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole ./internal/dispatch/docs/",
+      "observed": "Instrumented: the server closed 1.002-1.095 s after the revoke in all 32 runs, while a page with a 4 KB buffer could still be draining at 4 s, CI's failure. Fixed test: 200 runs, 50 race runs and 50 runs under CPU load pass",
+      "headSha": "0e545db075f9",
+      "negativeControl": "admission.cancel(errSchemaRevoked) removed from revokeUnless: FAIL 'the revoked page's socket was still open on the server 2.5s after the revoke, past 2.5s'."
+    },
+    {
+      "criterion": "The merges of main (d8c67afc, 05d65789) keep both sides, and the PR merges with main.",
+      "surface": "GitHub's mergeability; Go, bun and browser suites on real Postgres at the merged head",
+      "command": "gh pr view 2461 --json mergeable; cd packages/envoy && go test ./migrationid/ ./internal/dispatch/store/... ./internal/dispatch/pmdoc/ ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/bus/... ./internal/dispatch/delivery/ ./cmd/dispatch/ && go test -tags multiprocess ./cmd/dispatch && DISPATCH_PREVIOUS_BUILD=<legion-envoy-v27.2.1> go test -tags twobuild ./cmd/dispatch; bun tests in contracts, proof-editor, dispatch, envoy-client; browser specs",
+      "observed": "MERGEABLE, CI run 41361396521 started; all Go suites ok (race too for bus and delivery); contracts 414, proof-editor 250, dispatch 3126, envoy-client 1354 pass; browser 40 passed, e2e:multiprocess 8 passed",
+      "headSha": "0e545db075f9",
+      "negativeControl": "TestAnUploadHoldsNoIssueLockWhileTheStoreWrites without settle: time.Hour fails 1 in 40 to 1 in 3 at main and here (the seeded spec's settlement locks the issue row); 0 of 400 with it."
+    },
     {
       "criterion": "Review round 8: one forward merge of main that keeps both sides, so ci-ok can run at a head that merges.",
       "surface": "GitHub's mergeability of #2461; Go and browser suites on real Postgres at the merged head",
@@ -86,6 +102,8 @@
     }
   ],
   "filesChanged": [
+    "d839fb94: schema_admission_test.go (the slow-page test bounds the server's end, the page drains with a raised receive buffer)",
+    "02eb6569, 0e545db0: merges of main d8c67afc and 05d65789 (migrations to UTC timestamp names; hold and pass rows on #2391's intake and loops; ConnectionsPerProcess 94; #2394's link kinds on the compiled manifest; files_test.go settle hour; proof-editor AGENTS.md count twenty-five)",
     "4b63e8d5, b3a11acc, 920859be: merges of main f93dd689 (#2541: routes table write class for the newer-content hook; migrations 0151-0153 above 0150_dpop_proofs), d09b46d7 (#2522: refuseUncreatable in pmdoc's one writer tail, UpdateDocument included; applyMargin order kept), c656fc4f (#2549: the reading pane uses the compiled manifest)",
     "b7709821: merge of main daf71f53 (INFRA-767-ygo-awareness-echo.yaml and INFRA-767-ygo-v1-54-1-sami-1.yaml deleted as main's fold left them; pr2461-Added-20261028-123937.yaml names OnTokenAuthContext)",
     "338cfeaf: schema_admission_test.go (bounded slow-page test), schema_admission.go (no nil guard), websocket_test.go (fixtures with a real cancel), contracts dispatch-api.ts (points to the README's 1 s rule)",
