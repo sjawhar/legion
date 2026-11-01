@@ -635,7 +635,9 @@ func ReadPodFile(path string) (PodConfig, error) {
 	return pod, nil
 }
 
-// readPod reads `runtime.kubernetes.pod`, refusing a shape no pod could carry.
+// readPod reads `runtime.kubernetes.pod`, refusing a shape no pod could carry, and a
+// ServiceAccount still holding a ${…} placeholder: nothing in Legion expands one, as the token
+// projection says, so the API server would refuse every pod for an account that does not exist.
 func readPod(value *yaml.Node) (PodConfig, error) {
 	if value == nil {
 		return PodConfig{}, nil
@@ -660,6 +662,9 @@ func readPod(value *yaml.Node) (PodConfig, error) {
 	readOnlyShares(pod.Volumes, pod.VolumeMounts)
 	if pod.ServiceAccount, err = optionalString(fields["service_account"], podKey+".service_account"); err != nil {
 		return PodConfig{}, err
+	}
+	if strings.Contains(pod.ServiceAccount, "${") {
+		return PodConfig{}, fmt.Errorf("%s.service_account %q is an unfilled placeholder: put the ServiceAccount the pods run as in its place", podKey, pod.ServiceAccount)
 	}
 	return pod, nil
 }
