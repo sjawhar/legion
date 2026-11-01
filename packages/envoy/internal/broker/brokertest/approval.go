@@ -12,7 +12,6 @@ import (
 	"golang.org/x/net/html"
 
 	"github.com/sjawhar/envoy/internal/broker/approval"
-	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
@@ -31,15 +30,15 @@ const (
 // answers the sign-in configuration naming it, with sessions of an hour: what BROKER_SIGNIN_* and
 // the provider give a deployed broker. The issuer answers a code exchange with no refresh token,
 // as Google answers the broker's online sign-in.
-func SignIn(issuer *oidctest.Issuer, key *oidctest.Key) config.SignIn {
+func SignIn(issuer *oidctest.Issuer, key *oidctest.Key) approval.SignIn {
 	issuer.EnableCodeFlow(key, SignInClientID, SignInClientSecret)
 	issuer.OmitRefreshTokens()
-	return config.SignIn{Issuer: issuer.URL(), ClientID: SignInClientID, ClientSecret: SignInClientSecret, Domain: SignInDomain, SessionLifetime: time.Hour}
+	return approval.SignIn{Issuer: issuer.URL(), ClientID: SignInClientID, ClientSecret: SignInClientSecret, Domain: SignInDomain, SessionLifetime: time.Hour}
 }
 
 // NewApprovalPage builds the broker's approval page as cmd/broker/main.go does, for a broker at
 // publicURL whose records m reads and decides and whose sessions st keeps.
-func NewApprovalPage(t *testing.T, signIn config.SignIn, publicURL string, st *store.Store, m *requests.Machine) *approval.Page {
+func NewApprovalPage(t *testing.T, signIn approval.SignIn, publicURL string, st *store.Store, m *requests.Machine) *approval.Page {
 	t.Helper()
 	page, err := approval.New(approval.Config{
 		SignIn: signIn, PublicURL: publicURL, MachineLoginURL: MachineLoginURL, Store: st, Machine: m,

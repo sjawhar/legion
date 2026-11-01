@@ -1,5 +1,0 @@
-{
-  "name": "claude-envoy",
-  "description": "Deliver Envoy events as Claude Code channel notifications and expose Envoy MCP tools.",
-  "mcpServers": "./.mcp.json"
-}

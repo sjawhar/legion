@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
-	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -89,7 +89,7 @@ func TestClientCheckWritesWhatTheProviderAnsweredAboutTheClient(t *testing.T) {
 
 	for _, c := range []struct {
 		name   string
-		signIn config.SignIn
+		signIn approval.SignIn
 		want   oidc.ClientCheck
 	}{
 		{"the provider serving the broker's client", signIn, oidc.ClientCheckReady},

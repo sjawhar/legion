@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/redact"
@@ -1280,7 +1281,7 @@ func TestLoadReadsTheSignInClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := SignIn{Issuer: "https://accounts.example.com", ClientID: "broker-client", ClientSecret: signInSecret, Domain: "example.com", SessionLifetime: 86400 * time.Second}
+	want := approval.SignIn{Issuer: "https://accounts.example.com", ClientID: "broker-client", ClientSecret: signInSecret, Domain: "example.com", SessionLifetime: 86400 * time.Second}
 	if cfg.SignIn != want {
 		t.Fatalf("SignIn = %+v, want %+v", cfg.SignIn, want)
 	}

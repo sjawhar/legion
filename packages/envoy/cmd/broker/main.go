@@ -795,7 +795,7 @@ func kindMinters(githubApp secrets.GitHubApp, googleLogin secrets.GoogleLogin) m
 
 // runClientChecks checks the sign-in client at once and every clientCheckInterval after, until
 // ctx ends.
-func runClientChecks(ctx context.Context, signIn config.SignIn, st *store.Store) {
+func runClientChecks(ctx context.Context, signIn approval.SignIn, st *store.Store) {
 	for {
 		checkSignInClient(ctx, signIn, st)
 		select {
@@ -815,7 +815,7 @@ func runClientChecks(ctx context.Context, signIn config.SignIn, st *store.Store)
 // path that reads the discovery document again on its own, so a check that fails says nothing
 // about whether the next sign-in works. A write that fails loses this pass's answer and the
 // next pass writes again.
-func checkSignInClient(ctx context.Context, signIn config.SignIn, st *store.Store) {
+func checkSignInClient(ctx context.Context, signIn approval.SignIn, st *store.Store) {
 	check, err := oidc.CheckClient(ctx, signIn.Issuer, signIn.ClientID, signIn.ClientSecret)
 	if err != nil {
 		slog.Warn("broker: the sign-in client check", "state", check, "issuer", signIn.Issuer, "error", err)

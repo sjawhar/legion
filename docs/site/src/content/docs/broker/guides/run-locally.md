@@ -22,33 +22,38 @@ With Docker the command is the script alone; this run used a Postgres of its own
 
 ```console
 $ DEV_BROKER_POSTGRES_URL='postgres://broker:<password>@127.0.0.1:5433/postgres?sslmode=disable' packages/envoy/scripts/dev-broker.sh
-dev-broker: workdir /tmp/agent-secrets-dev.zCDU4L
-dev-broker: created isolated database dev_broker_zcdu4l
+dev-broker: workdir /tmp/agent-secrets-dev.lRLs0J
+dev-broker: created isolated database dev_broker_lrls0j
 dev-broker: building broker, dev-oidc-issuer, agent-secrets, agent-secrets-helper and agent-secrets-devrelay...
 dev-broker: starting dev-oidc-issuer...
-dev-oidc-issuer: /tmp/agent-secrets-dev.zCDU4L/account-token holds system:serviceaccount:example-ns:example-dispatch's token for audience legion-broker-pod (pod ddc9060f-aed0-419d-8204-52933355eaa6)
-dev-oidc-issuer: /tmp/agent-secrets-dev.zCDU4L/exchange-token holds system:serviceaccount:example-ns:example-worker's token for audience legion-broker-exchange (pod 69589abd-2150-4c9b-a5a6-de0935cf06e0)
+dev-oidc-issuer: /tmp/agent-secrets-dev.lRLs0J/account-token holds system:serviceaccount:example-ns:example-dispatch's token for audience legion-broker-pod (pod 715d7b04-23fe-433b-9710-f4a981a37072)
+dev-oidc-issuer: /tmp/agent-secrets-dev.lRLs0J/listener-token holds system:serviceaccount:example-ns:example-listener's token for audience legion-broker-pod (pod a11d7c0a-0fbc-4b6f-ab0f-92718e8847e4)
+dev-oidc-issuer: /tmp/agent-secrets-dev.lRLs0J/exchange-token holds system:serviceaccount:example-ns:example-worker's token for audience legion-broker-exchange (pod 814aaff2-717d-45a1-922f-beef231136c4)
+dev-oidc-issuer: /tmp/agent-secrets-dev.lRLs0J/pod-token holds system:serviceaccount:example-ns:example-worker's token for audience legion-broker-pod (pod 814aaff2-717d-45a1-922f-beef231136c4)
+dev-oidc-issuer: /tmp/agent-secrets-dev.lRLs0J/registrar-token holds system:serviceaccount:example-ns:example-daemon's token for audience legion-broker-pod (pod 71705342-8c20-4165-a715-f8874519f345)
 dev-oidc-issuer: code flow serves client dev-broker; an authorization with none queued at /_dev/sign-in-as signs in ada@example.com
-dev-oidc-issuer: issuer listening url=http://127.0.0.1:23524
+dev-oidc-issuer: issuer listening url=http://127.0.0.1:65207
 dev-broker: starting broker...
-2026/10/31 08:44:37 INFO broker stop budget drain=0s shutdown=60s total=60s
-2026/10/31 08:44:37 INFO database sign-in method=password
-2026/10/31 08:44:37 INFO approval sign-in on issuer=http://127.0.0.1:23524 client_id=dev-broker domain=example.com
-2026/10/31 08:44:37 INFO secret store store=aws-secrets-manager credentials="fake secrets file"
-2026/10/31 08:44:37 INFO broker: listening for the other pods' secret rereads channel=broker_secret_reread
-2026/10/31 08:44:37 INFO broker listening addr=127.0.0.1:40915
-2026/10/31 08:44:37 INFO token exchange state=on kubernetes=true github=false accounts=1 workflows=0
+2026/11/01 04:09:31 INFO broker stop budget drain=0s shutdown=60s total=60s
+2026/11/01 04:09:31 INFO database sign-in method=password
+2026/11/01 04:09:31 INFO approval sign-in on issuer=http://127.0.0.1:65207 client_id=dev-broker domain=example.com
+2026/11/01 04:09:32 INFO secret store store=aws-secrets-manager credentials="fake secrets file"
+2026/11/01 04:09:32 INFO broker: listening for the other pods' secret rereads channel=broker_secret_reread
+2026/11/01 04:09:32 INFO broker listening addr=127.0.0.1:29106
+2026/11/01 04:09:32 INFO token exchange state=on kubernetes=true github=false accounts=1 workflows=0
+2026/11/01 04:09:32 INFO broker: registered a pod to write under a session name service=legion-daemon account=system:serviceaccount:example-ns:example-worker pod=814aaff2-717d-45a1-922f-beef231136c4 session=example-worker-session
+dev-broker: registered the exchange pod to write under example-worker-session
 
 dev-broker: ready.
 
-  export AGENT_SECRETS_URL=http://127.0.0.1:40915
-  export AGENT_SECRETS_ACCOUNT_TOKEN_FILE=/tmp/agent-secrets-dev.zCDU4L/account-token
+  export AGENT_SECRETS_URL=http://127.0.0.1:29106
+  export AGENT_SECRETS_ACCOUNT_TOKEN_FILE=/tmp/agent-secrets-dev.lRLs0J/account-token
   export AGENT_SECRETS_APPROVER=ada@example.com
-  export AGENT_SECRETS_HELPER_SOCK=/tmp/agent-secrets-dev.zCDU4L/helper.sock
-  export AGENT_SECRETS_OPERATOR_FILE=/tmp/agent-secrets-dev.zCDU4L/operator
-  export AGENT_SECRETS_MACHINE_FILE=/tmp/agent-secrets-dev.zCDU4L/machine.json
-  export DEV_BROKER_DIR=/tmp/agent-secrets-dev.zCDU4L
-  export PATH=/tmp/agent-secrets-dev.zCDU4L/bin:$PATH
+  export AGENT_SECRETS_HELPER_SOCK=/tmp/agent-secrets-dev.lRLs0J/helper.sock
+  export AGENT_SECRETS_OPERATOR_FILE=/tmp/agent-secrets-dev.lRLs0J/operator
+  export AGENT_SECRETS_MACHINE_FILE=/tmp/agent-secrets-dev.lRLs0J/machine.json
+  export DEV_BROKER_DIR=/tmp/agent-secrets-dev.lRLs0J
+  export PATH=/tmp/agent-secrets-dev.lRLs0J/bin:$PATH
 ...
 ```
 
@@ -70,6 +75,22 @@ never touches one already running for your user, or your own machine's login, an
 your current directory. Check that `type agent-secrets` names the workdir's `bin/`: a tool manager
 that puts its own directories first on `PATH` at every prompt runs an installed `agent-secrets`
 instead.
+
+The broker lists a second caller too, and a caller's name decides which of its named-caller routes
+that account reaches. `dispatch` reaches all of them: the approval, denial and listing routes
+Dispatch's server calls, the machine-login and grant revocations beside them, and the two OAuth
+routes below. `listener`, whose token is `$DEV_BROKER_DIR/listener-token`, reaches
+`POST /v1/oauth/introspect` alone, since the Envoy listener reads a token back and relays nobody's
+decision. On any other of those routes it is refused by name:
+
+```console
+$ curl -s -H "Authorization: Bearer $(cat "$DEV_BROKER_DIR/listener-token")" "$AGENT_SECRETS_URL/v1/pending?approver=$AGENT_SECRETS_APPROVER"
+{"code":"ACCOUNT_LACKS_POWER","error":"the caller \"listener\" may not call GET /v1/pending"}
+```
+
+An account `BROKER_API_ACCOUNTS` does not list at all is `403 ACCOUNT_NOT_LISTED` instead, and an
+entry naming a caller the broker does not know refuses the boot, naming that name and the names it
+knows, so a typo never becomes a caller that reaches nothing.
 
 The fake secrets file holds two secrets of `ada@example.com`'s, under the namespace
 `example/agent-secrets/` and on its example key: `DEMO_READ_TOKEN`, tagged `tier=agent`, which her
@@ -238,19 +259,67 @@ each of those calls fails, naming the file.
 
 The broker's RFC 8693 token exchange is on, for one account,
 `system:serviceaccount:example-ns:example-worker`, writing the project `EXAMPLE` for
-`ada@example.com` under a session name the pod chooses. `$DEV_BROKER_DIR/exchange-token` holds that
-account's pod token for the exchange's own audience, `legion-broker-exchange`. A `POST
-/v1/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`,
-`client_id=dispatch-token-exchange`, that token as `subject_token`,
-`subject_token_type=urn:envoy:params:oauth:token-type:kubernetes-service-account` and a `session`,
-signed with a DPoP proof of a key of the caller's own, mints a DPoP-bound access token, and the
-caller token reads it back
-(`POST /v1/oauth/introspect` with the token in the form):
+`ada@example.com`. `$DEV_BROKER_DIR/exchange-token` holds that account's pod token for the
+exchange's own audience, `legion-broker-exchange`.
+
+That account's entry fixes no session name, so its pods name their own — and a pod writes under a
+name its deployment registered for it and no other. The registration is a route of its own,
+`POST /v1/oauth/exchange/pod-sessions`, which the deployment's daemon calls as the service
+`BROKER_SERVICE_LOGINS` lets it log in as, here `legion-daemon`
+(`$DEV_BROKER_DIR/registrar-token`); its body carries that pod's own token for the broker's
+audience (`$DEV_BROKER_DIR/pod-token`, the token a daemon enrolls the pod with) and the name the
+pod may write under. The script makes that call before it prints `ready.`, which is the
+`registered the exchange pod to write under example-worker-session` line above. Making it again
+extends the registration, which lasts 24 hours from each write, and the same call with another
+name is how you add one:
 
 ```console
-$ curl -s -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" -d "token=<access token>" "$AGENT_SECRETS_URL/v1/oauth/introspect"
-{"active":true,"session":"example-worker-session","person":"ada@example.com","project_scope":"named","project":"EXAMPLE","exp":1792929646,"client_id":"dispatch-token-exchange","jkt":"o__snCYl91_F2gKf-cLiLfkVmEfGOrpysCbt-j_FOJA"}
+$ curl -s -X POST -H "Authorization: Bearer $(cat "$DEV_BROKER_DIR/registrar-token")" -H 'Content-Type: application/json' -d "{\"pod_token\": \"$(cat "$DEV_BROKER_DIR/pod-token")\", \"session\": \"example-worker-session\"}" "$AGENT_SECRETS_URL/v1/oauth/exchange/pod-sessions"
+{"pod_uid":"87f7f873-65a4-47a7-b54d-abe68ac9db83","session":"example-worker-session","expires_at":"2026-10-31T00:20:03.764291Z"}
 ```
+
+A `POST /v1/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`,
+`client_id=dispatch-token-exchange`, that pod's exchange token as `subject_token`,
+`subject_token_type=urn:envoy:params:oauth:token-type:kubernetes-service-account` and
+`session=example-worker-session`, signed with a DPoP proof of a key of the caller's own, mints a
+DPoP-bound access token. A `session` no registration names is refused, and the refusal names it:
+
+```console
+{"error":"invalid_grant","error_description":"The provided authorization grant (e.g., authorization code, resource owner credentials) or refresh token is invalid, expired, revoked, does not match the redirection URI used in the authorization request, or was issued to another client. No registration says this pod may write under the session name 'other-session'. A pod writes under a session name its deployment registered for it."}
+```
+
+Either listed caller reads a minted token back (`POST /v1/oauth/introspect` with the token in the
+form). Here the `listener` token, which may do that and nothing else:
+
+```console
+$ curl -s -H "Authorization: Bearer $(cat "$DEV_BROKER_DIR/listener-token")" -d "token=<access token>" "$AGENT_SECRETS_URL/v1/oauth/introspect"
+{"active":true,"session":"example-worker-session","person":"ada@example.com","project_scope":"named","project":"EXAMPLE","exp":1793320811,"client_id":"dispatch-token-exchange","jkt":"oufCNV-MCX2NLGXXB5yj7Pdnwumhbp1dGcxoxpSTyWk"}
+```
+
+`POST /v1/oauth/revoke` (RFC 7009) ends one before its expiry, and is the only thing that can: an
+exchanged token names no machine login for a credential revocation to reach. Its form names the
+token, the client it was issued to and, optionally, which kind to look for first. Ending one of the
+broker's tokens relays a decision, so it takes the caller token, and the `listener` token is
+`403 ACCOUNT_LACKS_POWER` here as on every other such route. The answer is empty, and
+introspection says `active: false` from the moment it commits:
+
+```console
+$ curl -s -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" -d "token=<access token>&token_type_hint=access_token&client_id=dispatch-token-exchange" "$AGENT_SECRETS_URL/v1/oauth/revoke"
+$ curl -s -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" -d "token=<access token>" "$AGENT_SECRETS_URL/v1/oauth/introspect"
+{"active":false}
+```
+
+A token the broker never issued is answered the same empty `200`, since the request's purpose —
+that the token not work — holds either way. A token issued to another client than `client_id`
+names is `400`:
+
+```console
+$ curl -s -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" -d "token=<access token>&client_id=agent-secrets-helper" "$AGENT_SECRETS_URL/v1/oauth/revoke"
+{"error":"unauthorized_client","error_description":"The client is not authorized to request a token using this method. Make sure that client id and secret are correctly specified and that the client exists."}
+```
+
+Ending an access token ends that token alone: only a caller presenting a machine login's own
+refresh token ends that login and every token of its family.
 
 ## Stop
 
@@ -263,14 +332,16 @@ $ curl -s -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" 
 
 ## What is real and what is not
 
-The broker, its database, its policy, its approval page and every client are the real ones. Three
+The broker, its database, its policy, its approval page and every client are the real ones. Four
 things stand in for production: `agent-secrets-devrelay` plays Dispatch's machine-login relay
 alone (it presents the caller token and names the decider itself; it cannot decide a secret
 request, and neither can Dispatch); `dev-oidc-issuer` plays both the cluster's ServiceAccount
 token issuer and the Workspace a person signs in to the broker at (the Go tests' own local issuer,
 `internal/oidc/oidctest`, served on a loopback port: it publishes a key it holds in memory, mints
-the two token files, each bound to a pod of its own, and signs every authorization in as
-`ada@example.com` with no page to fill in); and the
-fake secrets file (`BROKER_FAKE_SECRETS_FILE`: each secret's name, key, tags and value, as JSON)
-plays Secrets Manager and KMS. The broker reads that file again on every call it makes to it, so
-editing it is how you write a secret here.
+the stack's five token files, one pod uid per service account, so the exchange pod's two — one for
+each audience — are one pod, and signs every authorization in as `ada@example.com` with no page to
+fill in); the pod-session registration the script makes before it is ready stands in for the
+deployment's own daemon, which makes that call as it starts a pod; and the fake secrets file
+(`BROKER_FAKE_SECRETS_FILE`: each secret's name, key, tags and value, as JSON) plays Secrets
+Manager and KMS. The broker reads that file again on every call it makes to it, so editing it is
+how you write a secret here.

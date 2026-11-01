@@ -1,8 +1,0 @@
-{{define "message.html"}}{{template "head" .}}
-{{- range .Lines}}
-<p>{{.}}</p>
-{{- end}}
-{{- with .Link}}
-<p><a href="{{.Href}}">{{.Text}}</a></p>
-{{- end}}
-{{template "foot" .}}{{end}}

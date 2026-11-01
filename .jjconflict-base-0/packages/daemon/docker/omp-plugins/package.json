@@ -1,8 +1,0 @@
-{
-  "name": "legion-worker-omp-plugins",
-  "private": true,
-  "description": "The Oh My Pi plugins the worker image links into its `legion` profile, installed from this directory's bun.lock with `bun install --frozen-lockfile` (worker.Dockerfile's plugin stage). @bopstack/pi-codegraph is pinned to the version the devbox runs (omp/plugins/package.json); its peer dependencies, which Bun installs beside it, are pinned by the lockfile alone.",
-  "dependencies": {
-    "@bopstack/pi-codegraph": "0.1.1"
-  }
-}

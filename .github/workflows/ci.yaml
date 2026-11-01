@@ -750,7 +750,6 @@ jobs:
               - 'packages/envoy/internal/broker/oauthwire/*'
               - 'packages/envoy/internal/broker/policy/**'
               - 'packages/envoy/internal/broker/proof/*'
-              - 'packages/envoy/internal/broker/ratelimit/*'
               - 'packages/envoy/internal/broker/record/*'
               - 'packages/envoy/internal/broker/requests/*'
               - 'packages/envoy/internal/broker/reread/*'
@@ -758,6 +757,7 @@ jobs:
               - 'packages/envoy/internal/broker/store/**'
               - 'packages/envoy/internal/broker/wake/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
+              - 'packages/envoy/internal/ratelimit/*'
             # The browser suite's two-process mode (dispatch-browser-multiprocess): what the
             # dispatch filter names. The dev OIDC issuer its sign-in step signs the browser in at
             # (e2e/run-signin-issuer.sh:34 builds it) compiles no package beyond the closure of the

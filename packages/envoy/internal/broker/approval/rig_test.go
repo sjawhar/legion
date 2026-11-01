@@ -108,7 +108,7 @@ func newRig(t *testing.T) *rig {
 	}
 	api.Register(mux, api.Deps{
 		PublicURL:     srv.URL,
-		APIAccounts:   map[string]string{dispatchAccount: "dispatch"},
+		APIAccounts:   map[string]api.Account{dispatchAccount: brokertest.Caller(t, "dispatch")},
 		AccountTokens: enroll.K8sPodVerifier{Verifier: accounts},
 		Enroll:        enr, Machine: reqMachine, MachineLogin: mach,
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
