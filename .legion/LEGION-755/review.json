@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "LEGION-755",
+  "previousHandoff": "",
+  "headReviewed": "06743f8f41a597095b1ec522c652e160f29cbdbf",
+  "codeHead": "c26f58b78781c2eca7a7b0854ed52dca156d1a43",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 4,
+  "keyFindings": [
+    {"severity": "minor", "file": "skills/legion-controller/references/triage.md:32", "description": "The controller's command read one unpaged page of 200 events, oldest first, while the rule it now applies (the newest add transition) and the daemon (intake.LabelSetter over EventsAfter from 0) read the whole log; on a root with more than 200 events whose label was removed and set again late, the two could name different setters. Fixed by the reviewer in 3f22ff3869b12001d80e02c4ff62fc8523ac30f8: the command's sentence says to page with &after=<last seq> until a page holds fewer than 200. Prose only; A5's greps and packages/pi-legion/src/skills-guard.test.ts (13 pass) re-run on the edited file."},
+    {"severity": "minor", "file": "packages/daemon/internal/daemon/outbox.go:504-550", "description": "The delivery guard is read-then-write: GetIssue, then SetStatus with no expected_sequence (dispatch/client.go:125-133), where HandOver fences on LastSeq (client.go:142-147). A park between the two round trips is overwritten. Pre-existing for every status row; the spec's R4 asks for the re-read and nothing more. Not a defect; named as a risk in the PR body."},
+    {"severity": "minor", "file": "packages/daemon/internal/record/outbox.go:122,558", "description": "A pending personHandover row is undecodable to a daemon before this release (DecodeOutboxPayload uses DisallowUnknownFields): a rollback while one is pending retries that row until it is removed, holding that issue's later status rows behind it. Window: the seconds a row is pending. A deploy note, not code."},
+    {"severity": "minor", "file": "packages/daemon/internal/workflow/gate.go:571-582", "description": "The code-quality pass asked to share the queue-and-log sequence between admit.queuePersonHandover and workflow.dispatchArtifact and to have personHandoverQueues return the write rather than a bool. Judged not a defect: six lines in two packages with different enqueue wrapping and commit-log hooks (intake.OnCommit, Engine.logOnCommit); the nil-view guard sits in personHandoverQueues and the dereference runs only when it returned true; the shared message literal is asserted by the scratch proof. The implementer's simplify pass declined the same helper for the same reason."}
+  ],
+  "notDefects": [
+    "A label added by the same PATCH that closes an issue is skipped by intake.LabelSetter (issue.closed is not walked): matches R2's rule as the spec states it, pinned by intake/label_setter_test.go; a session gains nothing it cannot do today by writing todo beside the label.",
+    "The carry prefix literal (intake.CarriedApprovalReasonPrefix) is pinned on the producer side by packages/envoy/internal/dispatch/api/approval_carry_test.go:233 (carrySentence), so a reword of carryReason fails an envoy test.",
+    "One full event-log read per issue.* event of an unrecorded labelled triage root and per boot-listing row of one is the spec's own Limits section; the read is outside the fact's transaction and bounded by AckWait."
+  ],
+  "threads": "none on the pull request (gh api graphql reviewThreads: []); no bot review or comment.",
+  "ci": "Read on GitHub at the CI head 1ece96f2eb38469d41fa24f22fbb70ddcfd0ccd4 (the branch's newest pull_request run; compare 1ece96f2...06743f8f handoffsOnly true, 1 file). Required set from the rulesets of main: ci-ok, pr-title; branch protection lists none. The verdicts the approval was given over are recorded in the review body.",
+  "e2e": "Both E2E lines present in the PR body and matching the handoffs: the implementer's three scratch-rig tests green at c26f58b7 with its negative controls, the tester's re-run on an independently built rig at 1ece96f2 with its own negative controls (the live R4 guard: a park and a label removal between queue and delivery).",
+  "thermo": "thermonuclear pair at 06743f8f: deep-review APPROVE (no Medium or High; six Minor hardening notes); code-quality CHANGES (three structure findings and one Minor, each judged Minor by the reviewer: a shared helper for the queue-and-log sequence, the scratch rig's duplicated HTTP helper and the shared identity constants placed in the proof file, a table-driven prepare chain, the lazy-walk guard in reconcileListing). None changes behaviour, hides an error or breaks a gate.",
+  "proseFix": {"commit": "3f22ff3869b12001d80e02c4ff62fc8523ac30f8", "files": ["skills/legion-controller/references/triage.md"], "what": "step 2's command pages the event log"},
+  "specAgainstPlan": "Reviewed against the plan's two recorded departures (D2: delivery of a marked row also requires the label, outbox.go:522; D3: the gate skip is tied to the queue decision per gate, gate.go:561 and personHandoverQueues) and the spec's acceptance A2-A6; A1 and A7 are LEGION-776's and the integration child's. No contract change census is needed: the diff adds optional fields and one record.Store method whose single implementer is record.Postgres; it removes or renames nothing and adds no refusal at a process boundary."
+}
