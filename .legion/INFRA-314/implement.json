@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-314",
-  "completed": "2026-10-31T23:05:00Z",
+  "completed": "2026-11-01T04:55:00Z",
   "proof": [
     {
       "criterion": "A1, A2, A3, A4, A9, A10, A11: the broker serves its own approval page with a sign-in on its own origin; only the signed-in approver decides, and the decision is bound to what the page showed; nothing Dispatch holds decides; the four sign-in settings are required; a sign-in crosses processes and restarts",
@@ -107,6 +107,14 @@
       "observed": "The gate passes: 'every ci.yaml filter matches every file its job reads (28 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)', with docs-pages.yaml's on.push.paths equal to the docs filter's 167 patterns. Its own test suite is 139 passed, 0 failed. BROKER_REFGEN_DIRS now holds internal/broker/approval, so cmd/broker-refgen/auth_test.go's readAPI rule covers it, and the docs job's static reads carry the matching entry citing routes.go:34,664, the two lines that name and resolve the cross-package answerer. ci.yaml's docs-filter comment names the sixth directory.",
       "headSha": "130911b16c93",
       "negativeControl": "With '- packages/envoy/internal/broker/approval/**' cut from the docs filter, the same gate exits 1 with 'docs: 3414 files, 12 uncovered (filter docs)' and 13 problems, each naming a file of that directory, among them docs-pages.yaml's own on.push.paths mismatch; the line restored, the gate passes again and jj diff shows ci.yaml differing from the base only in the comment."
+    },
+    {
+      "criterion": "The conflict return: GitHub reported the approved head a648cb09 CONFLICTING/DIRTY and ran no CI on it, so main is brought into the branch by a forward merge, the conflicts resolved, the migrations renumbered above main's 0021, and the branch's own behaviour unchanged",
+      "surface": "the merged tree itself: the compiled broker and its suites on this pod's Postgres, the whole dev-broker.sh stack run to readiness, Dispatch's browser suite in real Chromium against the real Dispatch server and the real broker binary, the docs site's build, and the repository's CI filter gate",
+      "command": "cd packages/envoy && go build ./... && go vet ./... && gofmt -l cmd internal ; go test -count=1 ./internal/broker/api/ ./internal/broker/approval/ ./internal/broker/config/ ./cmd/broker-refgen/ ./cmd/broker/ ./internal/broker/requests/ ; go test -count=1 -run 'WaitingOn|Pending|ApproveURL|NoSessionLine|ExecFormPending|MachineLogin' ./cmd/agent-secrets/ ; DEV_BROKER_POSTGRES_URL=<pod Postgres> bash packages/envoy/scripts/dev-broker.sh ; cd packages/dispatch && bun run e2e -- broker-approval.e2e.ts machine-login.e2e.ts inbox.e2e.ts --project chromium ; cd docs/site && bun run build ; bash .github/scripts/check-ci-filters.sh",
+      "observed": "The head is 6b100c1abd24 and GitHub reports it MERGEABLE where a648cb09 was CONFLICTING. Build, vet and gofmt clean; every named Go package ok; the dev stack reached 'dev-broker: ready.' with main's five token files, the pod-session registration and the branch's sign-in client in one run, whose real output replaces both sides' stale transcript in run-locally.md; the browser suite is 53 passed with 1 pre-existing skip; the docs site builds 43 pages with every internal link valid; the filter gate passes 28 gates with 0 uncovered once the dispatch filter follows main's move of internal/broker/ratelimit to internal/ratelimit. Migrations are renumbered to 0022_browser_sessions and 0023_signin_status above main's 0021_oauth_pod_sessions, and TestMigrationSetIsNumberedOneToN passes.",
+      "headSha": "6b100c1abd2430700888bc70f490269879596c65",
+      "negativeControl": "The fingerprint is the control, and it changed: 5846cf7e... at a648cb09 to ba3dad8b... at this head. Every changed file is named with its reason in https://github.com/sjawhar/legion/pull/2198#issuecomment-6553503533 - main's caller-powers model, its move of the ratelimit package, its migration 0021, and a dev-stack transcript neither side's run could describe. internal/broker/store's two IAM tests fail here as they do on main, needing a Postgres role with a password where this pod authenticates by trust."
     }
   ],
   "filesChanged": [
@@ -134,12 +142,13 @@
     "Spec v24, written during this round, dropped the broker's machine-login page: machine logins stay exactly as they are on main. Plan items W2 and W3 and the Settings move of W9 are not in this head, W4 refuses a secret request only, and agent-secrets-devrelay keeps machine-approve.",
     "packages/dispatch gets no changelog fragment: it has no .changie.yaml, so nothing folds one.",
     "The narrated walkthrough is not re-recorded and no screenshot was retaken. The rig refuses to run in a Legion pod (sudo is absent, unshare is refused, and agent-secrets machine login answers PEER_UNIDENTIFIED on SO_PEERPIDFD), and the three broker-page screenshots already show the new page. rig.sh could not have worked before this change either, since it gave the broker no BROKER_SIGNIN_*; it is fixed here for a machine that can record.",
-    "Round 7 is a retro finding, not a review one: the retro's second reading found the stale read model, the architect sent the issue back to implementing for it (Envoy 84786d6e), and the round is narrowed to those three edits, the gate and its negative control. The retro's learning documents are not written yet; retro runs again after this round."
+    "Round 7 is a retro finding, not a review one: the retro's second reading found the stale read model, the architect sent the issue back to implementing for it (Envoy 84786d6e), and the round is narrowed to those three edits, the gate and its negative control. The retro's learning documents are not written yet; retro runs again after this round.",
+    "The 03:02Z release roll killed the pod mid-merge. The INFRA merge lane pushed the in-flight work to two rescue branches; this round took d7574b25 as its base, merged current main d09b46d7 on top, restored the five finished files from c46a967f and never its run-locally.md, which still held conflict markers as literal text, and deleted both rescue branches. The branch therefore carries two merge commits."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "Two packages cannot run in a Legion pod and are CI's at this head: internal/broker/helper (needs SO_PEERPIDFD, which gVisor refuses) and internal/broker/store's TestOpenSignsEveryNewConnectionInWithAFreshlyMintedToken (needs a Postgres with IAM authentication).",
     "Two forward merges were needed, not one: the first for the conflict GitHub reported, the second for the migration number main took. The second's only conflict was docs/kubernetes.md, where main's one-sentence-per-line reflow met this branch's paragraph; main's text was taken and the sentence re-authored on it."
   ],
-  "previousHandoff": "9b711caca07a14ef6d4f0e40d6a8458578ab8c4d"
+  "previousHandoff": "e9aad7922ae17a2caae3e3c2c8222fc9f395b524"
 }
