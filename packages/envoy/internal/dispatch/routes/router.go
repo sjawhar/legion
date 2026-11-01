@@ -641,11 +641,8 @@ func isRetainedAssetPath(normalized string) bool {
 // asks the store nothing. A request whose context ends because its client went away, while still
 // queued for that room or while waiting for the store's answer (a navigation cancels the chunks
 // still loading), writes no response and logs a debug line, since neither the cap nor the store
-// was the reason and nobody is left to answer, and is marked a client that went away
-// (accesslog.ClientGone), so it reads 499 rather than the 200 of a handler that wrote nothing
-// wherever it is access-logged - the dashboard's own files, these among them, are served outside
-// the access log (New), so today the mark reaches no line. Once the object is
-// read the request keeps only its size until its response is written or its client goes away. A request
+// was the reason and nobody is left to answer. Once the object is read the request keeps only
+// its size until its response is written or its client goes away. A request
 // that stops waiting for the store's answer (its client went away, or its bound ran out) leaves
 // the read running for the requests after it (readRetainedAsset), and its reservation outlives
 // the request until that read ends: a client that abandons each request the moment it reaches
@@ -660,7 +657,6 @@ func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, ke
 	if err := r.retainedHeld.Acquire(ctx, MaxRetainedAssetSize); err != nil {
 		if errors.Is(err, context.Canceled) {
 			slog.Debug("dispatch: retained asset request canceled while queued for the memory cap", "key", key)
-			accesslog.ClientGone(req.Context())
 			return
 		}
 		refuseRetainedAssetAtCap(w, key)
@@ -683,7 +679,6 @@ func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, ke
 	// is this request's own client going away.
 	if errors.Is(err, context.Canceled) {
 		slog.Debug("dispatch: retained asset request canceled while the store read it", "key", key)
-		accesslog.ClientGone(req.Context())
 		return
 	}
 	if errors.Is(err, ErrAssetNotFound) {

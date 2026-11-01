@@ -149,7 +149,7 @@ type deliveryViewRead struct {
 func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 	started := time.Now()
 	h.mu.Lock()
-	view.dirty, view.immediate, view.computing = false, false, true
+	view.dirty, view.immediate, view.computing, view.readStarting = false, false, true, true
 	spec, epoch := view.spec, h.epoch
 	h.mu.Unlock()
 	h.note(deliveryHubNote{what: "recompute begin", view: spec.key, cause: cause})
@@ -158,7 +158,7 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 
 	now := h.clock.Now()
 	h.mu.Lock()
-	view.computing, view.readingSeq, view.readingKnown = false, 0, false
+	view.computing, view.readingSeq, view.readStarting = false, 0, false
 	if view.startingSeq > 0 {
 		// The read ended before it recorded its position, so it holds none of the change.
 		h.markDirtyLocked(view, now, deliveryCauseChange)
@@ -225,7 +225,7 @@ func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec) (deliveryV
 		return read, err
 	}
 	h.mu.Lock()
-	view.readingSeq, view.readingKnown = read.seq, true
+	view.readingSeq, view.readStarting = read.seq, false
 	if view.startingSeq > read.seq {
 		// A change caught up before this read recorded its position, and after it.
 		h.markDirtyLocked(view, h.clock.Now(), deliveryCauseChange)
@@ -299,7 +299,9 @@ func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec) (deliveryV
 // expire answers a view whose preset window, or whose pipeline day, moved past something it holds,
 // reading nothing: the compute over the population as last read, narrowed to the window now, with
 // the settings that read held. The population and its read's start stay as read, and the next
-// expiry comes from the narrowed population.
+// expiry comes from the narrowed population. Reading nothing, it records no read position, so a
+// change caught up while it computes marks the view dirty as any other does (catchUpChanges) and
+// that mark stands through the expiry, which clears none.
 func (h *deliveryHub) expire(view *deliveryView) {
 	started := time.Now()
 	h.mu.Lock()

@@ -435,7 +435,7 @@ func (s *server) runRelatedCheck(
 	}
 
 	// Stage 1 runs on a cancel of its own so that a check which answered without it does not
-	// leave it holding a request-pool connection past the answer (its end below).
+	// leave it holding a request-pool connection past the answer (the wait below).
 	keywordStage, endKeyword := context.WithCancel(bounded)
 	defer endKeyword()
 	keywordCtx, err := store.ForConcurrentRead(keywordStage)
@@ -462,6 +462,19 @@ func (s *server) runRelatedCheck(
 		}
 		stage.took = time.Since(stagesStarted)
 		keyword <- stage
+	}()
+	// Stage 1's goroutine holds a request-pool connection for its reads, so the check ends its
+	// context and waits for the stage before it returns, whichever return that is, as it does for
+	// stage 2 below: its allowance running out, the request going away, the terms failing. Left
+	// running, it would still hold that connection while the edit's next decision-block check ran,
+	// which is admitted for its own two connections and not for these as well
+	// (decisionBlockChecks). A stage already taken off the channel leaves nothing to wait for.
+	defer func() {
+		if keyword == nil {
+			return
+		}
+		endKeyword()
+		<-keyword
 	}()
 
 	// Stage 2 runs on a context of its own ending at relatedMeaningAllowance from the check's
@@ -540,27 +553,28 @@ func (s *server) runRelatedCheck(
 			reason = relatedReasonMeaningTimeout
 		}
 	}
-	// A meaning stage cut short by the request going away did not time out, and nobody waits on
-	// the keyword stage's answer.
+	// A meaning stage cut short by the request going away did not time out, and the keyword
+	// stage's answer is waited for by nobody but the wait above.
 	if callerGone() {
 		return notMade(relatedReasonCancelled, relatedCancelledMissing)
 	}
 	if answered {
 		suggestions.Search = relatedMeaningAndKeywords
 		// Stage 1's time is recorded when it has answered by now; its answer is not waited for.
-		// One still running is ended instead of left to the allowance, so a check that has
-		// answered holds no request-pool connection: the next check of the same edit is admitted
-		// for its own two, not for these as well (decisionBlockChecks).
+		// One still running is ended, and waited out, by the wait above rather than left to the
+		// allowance, so a check that has answered holds no request-pool connection: the next check
+		// of the same edit is admitted for its own two, not for these as well
+		// (decisionBlockChecks).
 		select {
 		case stage := <-keyword:
+			keyword = nil
 			record.keywordMS = milliseconds(stage.took)
 		default:
-			endKeyword()
-			<-keyword
 		}
 	} else {
 		select {
 		case stage := <-keyword:
+			keyword = nil
 			record.keywordMS = milliseconds(stage.took)
 			if stage.err != nil {
 				return searchFailed(stage.err)
@@ -661,6 +675,9 @@ func (s *server) relatedSearch(
 		return model.SearchResponse{}, err
 	}
 	defer rows.Close()
+	if s.relatedSearchEntered != nil {
+		s.relatedSearchEntered()
+	}
 	// A document hit's link opens the document with these words highlighted.
 	return scanSearchRows(rows, relatedSearchQuery(picked.Terms), suggestionSearchDepth, 0)
 }

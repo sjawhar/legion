@@ -1603,6 +1603,81 @@ func TestAPresetViewSendsItsOldestPullRequestLeavingWithoutAReadingTheDatabase(t
 	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, delta, "")
 }
 
+// A change caught up while a view's expiry is computing marks the view: an expiry reads nothing,
+// so it records no read position, and a change held back for one (deliveryView.readStarting) would
+// be held for good - the catch-up's cursor moves past it and the expiry ends without looking at
+// it, leaving every subscriber a stale answer. The clock stands still, so the pull request leaving
+// two seconds on is the view's first expiry; the hook holds that expiry open, between its mark of
+// the view as computing and its end, while the test writes a second pull request and has the hub
+// catch it up.
+func TestAChangeCaughtUpWhileAViewExpiresIsRecomputed(t *testing.T) {
+	clock := newStillHubClock()
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	expiring, release := make(chan struct{}), make(chan struct{})
+	var held, released sync.Once
+	releaseExpiry := func() { released.Do(func() { close(release) }) }
+	defer releaseExpiry()
+	rig := hubOn(t, handler, database, deps, clock, func(hub *deliveryHub) {
+		observe := hub.observe
+		hub.observe = func(note deliveryHubNote) {
+			observe(note)
+			if note.what == "recompute begin" && note.cause == deliveryCauseExpiry {
+				held.Do(func() {
+					close(expiring)
+					<-release
+				})
+			}
+		}
+	})
+	seedHubSettings(t, rig.database)
+	now := clock.Now()
+	upsertPR(t, rig.database, hubPR(1, now.Add(-28*24*time.Hour+2*time.Second)))
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("p", presetView(deliveryLiveTimeline, 28, "")))
+	conn.snapshot(t, 5*time.Second, "p")
+	rig.waitConnected(t)
+	rig.settle(t)
+	// A delivery change the snapshot did not hold may have marked the view dirty, and on this
+	// clock, standing still, its recompute is due only once the clock moves. Moving it by less
+	// than the two seconds the pull request has left runs that recompute, and sends whatever delta
+	// it has, before the expiry below.
+	clock.Advance(2 * viewQuiet)
+	rig.waitNoRecompute(t, 2*viewQuiet)
+	for drained := false; !drained; {
+		select {
+		case <-conn.frames:
+		default:
+			drained = true
+		}
+	}
+
+	start := rig.mark()
+	clock.Advance(3 * time.Second)
+	select {
+	case <-expiring:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the view's expiry did not begin within 5s of the clock passing it")
+	}
+	// The second pull request is written and caught up while the expiry computes.
+	upsertPR(t, rig.database, hubPR(2, now.Add(-time.Hour)))
+	rig.hub.catchUpNow()
+	releaseExpiry()
+
+	expired := conn.delta(t, 5*time.Second, "p")
+	if got := expired.Items["prs"].Remove; !slices.Equal(got, []string{"acme/widgets#1"}) {
+		t.Fatalf("the expiry's delta removes %v, want acme/widgets#1", got)
+	}
+	rig.waitFor(t, start, 5*time.Second, "the expiry's end", func(note deliveryHubNote) bool {
+		return note.what == "recompute end" && note.cause == deliveryCauseExpiry
+	})
+	// The change marked the view, so its recompute is due a quiet after the mark.
+	clock.Advance(viewQuiet)
+	delta := conn.delta(t, 5*time.Second, "p")
+	if got := liveUpsertIDs(t, delta, "prs"); !slices.Equal(got, []string{"acme/widgets#2"}) {
+		t.Fatalf("the delta after the change caught up while the view expired upserts %v, want acme/widgets#2", got)
+	}
+}
+
 func TestAPipelineViewMovesItsDaysAtMidnightWithoutReadingTheDatabase(t *testing.T) {
 	clock := &fakeHubClock{}
 	rig := newClockedHubRig(t, clock)

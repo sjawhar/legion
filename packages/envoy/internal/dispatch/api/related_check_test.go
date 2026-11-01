@@ -1110,3 +1110,55 @@ func TestARelatedCheckWaitsForItsHeldMeaningStagesConnection(t *testing.T) {
 		t.Fatalf("%d request-pool connections taken once the check answered, want 0", held)
 	}
 }
+
+// Stage 1's twin of the test above: a check that ends while its keyword stage is still running
+// does not return before that stage has given its request-pool connection back either. This
+// server has no embedder, so the check runs stage 1 alone and waits for its answer until the
+// allowance runs out, and the stage is held inside its search, with that connection taken, until
+// past that allowance.
+func TestARelatedCheckWaitsForItsHeldKeywordStagesConnection(t *testing.T) {
+	const allowance = 500 * time.Millisecond
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	srv := directServer(deps)
+	createSuggestionProject(t, handler, "KHOLD")
+	createSearchIssue(t, handler, "KHOLD", "Nightly backups overrun their window", "")
+	awaitTermStatsRefresh(t, srv, "KHOLD")
+	refreshTermStats(t, database, "KHOLD")
+	awaitQuietRequestPool(t, database.Pool)
+	srv.suggestionTimeout = allowance
+
+	holding, release := make(chan struct{}), make(chan struct{})
+	var held, released sync.Once
+	releaseKeyword := func() { released.Do(func() { close(release) }) }
+	defer releaseKeyword()
+	srv.relatedSearchEntered = func() {
+		held.Do(func() { close(holding) })
+		<-release
+	}
+	answered := make(chan *model.Suggestions, 1)
+	go func() {
+		answered <- srv.relatedCheck(context.Background(), relatedInput{project: "KHOLD", text: "Nightly snapshots finish late"})
+	}()
+	<-holding
+	select {
+	case suggestions := <-answered:
+		t.Fatalf("the check answered %+v while its keyword stage still held a request-pool connection", suggestions)
+	case <-time.After(4 * allowance):
+	}
+
+	releaseKeyword()
+	select {
+	case <-answered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the check did not answer within 10s of its keyword stage being let go")
+	}
+	// The read the stage was held inside ends on a cancelled context, and the connection it broke
+	// is destroyed on a goroutine of the pool's, so the count is waited on rather than read once.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if held := database.Pool.Stat().AcquiredConns(); held == 0 {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("%d request-pool connections taken 10s after the check answered, want 0", held)
+		}
+	}
+}

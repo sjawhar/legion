@@ -256,7 +256,7 @@ func (h *deliveryHub) catchUpChanges() error {
 		for _, change := range changes {
 			for _, view := range h.views {
 				if change.Seq > max(view.seq, view.readingSeq) && view.touchedBy(change, now) {
-					if view.computing && !view.readingKnown {
+					if view.readStarting {
 						view.startingSeq = max(view.startingSeq, change.Seq)
 						continue
 					}

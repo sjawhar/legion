@@ -310,6 +310,11 @@ type server struct {
 	// server the deployment builds leaves it, calls nothing. Only a test sets it, to hold the
 	// stage where production has only a slow one.
 	meaningSearchEntered func()
+	// relatedSearchEntered runs inside each of the related-item check's searches, with the
+	// connection its rows hold and before they are read; nil, which every server the deployment
+	// builds leaves it, calls nothing. Only a test sets it, to hold a stage where production has
+	// only a slow query.
+	relatedSearchEntered func()
 	// broadcastResolveBudget overrides the budget a broadcast's recipient resolution runs under;
 	// zero, which every server the deployment builds leaves it, means broadcastResolveTimeout.
 	// Only a test sets it, so a budget that ends before every selected session is read is the
