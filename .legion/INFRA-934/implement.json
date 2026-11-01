@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-934",
-  "previousHandoff": "",
+  "previousHandoff": "dae282b9dd4281bbfdea7b27000d729d6c44522b",
   "proof": [
+    {
+      "criterion": "Round 2, the tester's failure: R5 / A2, the LEGION_E2E_POD_FILE lane — the account a deployment's pod block names is read by one rule, an absent service_account and an empty one both meaning the namespace's `default`.",
+      "surface": "scripts/e2e/stage4b-sandbox-tree.sh's own `block_account`, run out of the script by the tester's test with the file's own scriptFunctions harness, as its shape_problems, record_stream and pod_shape_verdict tests are run.",
+      "command": "bun test scripts/e2e/lib/stage4b-pods.test.ts; then block_account extracted with sed and run on three blocks ({\"service_account\":\"legion-infra-worker\"}, one naming none, {\"service_account\":\"\"}) beside the expression it replaces",
+      "observed": "59 pass, 0 fail, where the tester's commit 7ca6678fcf18 was 56 pass / 3 fail with each failure reading 'stage4b-sandbox-tree.sh defines no block_account()'. Run directly on the three blocks, block_account prints legion-infra-worker, default and default. The three readings of that field now all come from it: the note at :3134, pod_account at :3158 and, through pod_account, the identity the deployment-pod-block checkpoint expects kubectl auth whoami to answer at :3554. Stage 4b still refuses at its own CLI with LEGION_E2E_POD_SERVICE_ACCOUNT unset, exit 1, 0 kubectl calls.",
+      "headSha": "4adc61e9a7cbe1c69b8f200c2d88e7a2d0d020c8",
+      "negativeControl": "The expression this replaces, `jq -r '.service_account // \"default\"'`, run on the same three blocks prints legion-infra-worker, default and the empty string — jq's `//` is false only for null and false — which is the defect the tester measured: both consumers of pod_account then hold every pod of such a deployment to a nameless account and reject a pod that is right. The first two cases are identical under both expressions, so the test discriminates the empty case alone rather than only demanding the name."
+    },
     {
       "criterion": "A1 (loader): an unfilled service_account placeholder is refused; a filled operator route loads.",
       "surface": "legion start --check-config, the operator's own command, run as the real built binary against deploy/kubernetes/operator-route/pod.yml copied under runtime.kubernetes.pod.",
