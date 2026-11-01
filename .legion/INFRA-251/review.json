@@ -2,25 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-251",
-  "previousHandoff": "8c77911b11be0c23d385b6c4972b9e749dca14f2",
-  "headReviewed": "the handoff push above 0103f7a7bf10 (code head 695ee39dea13)",
-  "completed": "2026-11-01T09:32:14Z",
-  "decision": "approved",
-  "round": "narrowed round: the merges of main kept both sides, review 5726218763's five Minors are fixed, nothing merged reopens a way to lose a kept decision, and the last merge moved nothing of this change",
+  "previousHandoff": "8d19216c497669dbc378ae17056a867a972b835f",
+  "headReviewed": "the handoff push above 618de2cc463e (code head 22a0671ee5be)",
+  "completed": "2026-11-01T14:44:37Z",
+  "decision": "changes_requested",
+  "round": "narrowed round: the merge kept main's #2619 beside this change's relay, the devbox proof's checkpoints read results back and match spec version 4, and nothing merged reopens a way to lose a decision",
   "critical": 0,
-  "important": 0,
-  "minor": 0,
+  "important": 1,
+  "minor": 2,
   "accepted": [
-    "The merges kept both sides: main's delivery assignment and this change's Row, Kept, kept_decisions and delivered_rows survive in store/claims.go (claimSelect, putClaim with 28 values, putDelivery, scanClaim), supervise/delivery.go queue and daemon/outbox.go's start; migrations are 0068/0069 after main's 0067. The diff of the branch's own diffs at 8c77911b and 079532ed shows only these unions, the renumber and the Minors.",
-    "The last merge (695ee39d) moved nothing of this change: the unchanged-diff fingerprint is de5b6dc8c0a2e9d4 at both 079532ed and 0103f7a7.",
-    "Nothing merged reopens a loss: RetireDelivery is the only delete of a pending delivery and releases its holds in the same transaction; #2571 only delays retiring a confirmed delivery, which holds nothing; its AgentInvoked=false take-back writes the delivery unconfirmed, so holdKeptDecisions puts the told rows back.",
-    "Review 5726218763's five Minors are fixed, and the new tests can fail (pg_locks read by the second session's pid; TestAHoldReleaseLeavesAClaimThatCounts puts a hold back beside the claim; TestALateReportOfASpentCatchUpNamesWhatItsRowReleased covers spentKept's claims==0 branch).",
-    "c7d8ae93 adds the prompt result main's supervisor now waits for and leaves every kept-decision assertion as it was."
+    "#2619 is kept beside the relay: when a person's approval queues a parked labelled root as their handover, dispatchArtifact skips the root's own gate, so no design-approved notice is written and parkDecision relays nothing; the ask relay is unchanged; an unlabelled, live, child or non-primary case falls back to the gate as before. Nothing is both queued and relayed, and nothing is lost: the approval stays on Dispatch for register_gate.",
+    "The branch's DispatchArtifact.Actor dissolved into main's own field of the same name; gate.go's Actor and Ref on spec notices are intact.",
+    "The proof's checkpoints match spec v4's A3 and A4 and read each result back from the daemon log, Dispatch events, legion state or session files; every grepped log string matches the daemon's source."
   ],
-  "keyFindings": [],
-  "notFindings": [
-    "record/outbox.go:406-410's comment on SuperviseRequest.Kept still says a queued start task forgets its decisions; the delivery holds them until confirmation. A stale comment, not a fault, so left out under the architect's narrowed scope."
+  "keyFindings": [
+    {"severity": "important", "file": "packages/daemon/internal/admit/admit.go:1016", "description": "After #2619, a queued approval skips the root's own gate, so a gate that held approved=N below latest=N+1 still reads that way when the person approves N+1. The queued todo re-admits the root, keepStaleApproval keeps (N, N+1), and the new architect's start task says 'approved at version N and now at version N+1: request approval of version N+1' about a version the person just approved. The architect then repeats the armed-gate steps and may ask the person again. Record the approval on the root's own gate without a notice when the handover queues (or have keepStaleApproval read Dispatch's approval), and test the readmit."},
+    {"severity": "minor", "file": "scripts/e2e/parked-decision-devbox.sh:839", "description": "`! relayed_logged \"$tree4\" design-approved` cannot fail: the workflow relay is only called for ask decisions. Delete it; undelivered_logged (:418) has no caller either."},
+    {"severity": "minor", "file": "skills/legion-controller/references/parked-decisions.md:169", "description": "Walk step 3 still counts a person's artifact.approved newer than the park, which the paragraph at :40-44 says is the daemon's handover and no notice. A walk while the handover's todo row waits can judge it and post 'stays parked' on a root the daemon is about to set todo. Have step 3 skip a person's approval of the root's primary document."}
   ],
-  "providers": "Verified from each run's own turns in the session store: DeepReview20, 47 assistant turns, and CodeQuality20, 29 assistant turns, all anthropic / claude-opus-5-5.",
-  "ci": "CI head 2bfe17df (only .legion/INFRA-251/test.json above it): ci-ok success and pr-title success, main's whole required set, read 2026-11-01T09:32Z; test, lint and pi-legion success."
+  "providers": "Verified from each run's own turns in the session store: DeepReview22, 61 assistant turns, and CodeQuality22, 50, all anthropic / claude-opus-5-5.",
+  "ci": "CI head dde47991 (only .legion/INFRA-251/test.json above it), read 2026-11-01T14:3xZ: test in progress, pr-title success. A request for changes does not wait on CI."
 }
