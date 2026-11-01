@@ -1083,7 +1083,7 @@ func TestAResetEventLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 	if _, err := rig.database.Pool.Exec(t.Context(), `update projects set last_seq = 5 where key = 'HUB'`); err != nil {
 		t.Fatalf("move the project's sequence: %v", err)
 	}
-	notifyChannel(t, rig.database, dispatchEventsChannel, "")
+	notifyChannel(t, rig.database, EventsChannel, "")
 	delta = conn.delta(t, eventFeedWait, "t")
 	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship every widget" {
 		t.Fatalf("after the second reset the delta's issue_titles = %v, want %s retitled", got, key)
@@ -1116,7 +1116,7 @@ func TestACatchUpPastIgnoredEventsAdvancesTheCursor(t *testing.T) {
 	if err := rig.database.Pool.QueryRow(t.Context(), `select max(id) from events`).Scan(&newest); err != nil {
 		t.Fatalf("read the newest event: %v", err)
 	}
-	notifyChannel(t, rig.database, dispatchEventsChannel, "")
+	notifyChannel(t, rig.database, EventsChannel, "")
 	rig.waitFor(t, start, eventFeedWait, "the catch-up", func(note deliveryHubNote) bool {
 		return note.what == "events caught up" && note.through == newest
 	})
@@ -1126,7 +1126,7 @@ func TestACatchUpPastIgnoredEventsAdvancesTheCursor(t *testing.T) {
 		t.Fatalf("catch-ups from the cursor before the 500 events = %d, want 1", n)
 	}
 	second := rig.mark()
-	notifyChannel(t, rig.database, dispatchEventsChannel, "")
+	notifyChannel(t, rig.database, EventsChannel, "")
 	rig.waitFor(t, second, 3*time.Second, "the second catch-up", func(note deliveryHubNote) bool { return note.what == "events caught up" })
 	if n := rig.count(second, func(note deliveryHubNote) bool { return note.what == "events caught up" && note.from != newest }); n != 0 {
 		t.Fatalf("the second notification scanned from below %d again", newest)

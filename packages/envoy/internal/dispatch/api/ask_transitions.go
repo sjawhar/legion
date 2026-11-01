@@ -107,7 +107,15 @@ func answerTransition(actor model.Actor, selected []string, text *string, option
 			if selected == nil {
 				selected = []string{}
 			}
-			answer := model.AskAnswer{User: actor.ID, Selected: selected, Text: text, At: time.Now().UTC()}
+			// The transaction's now(), read under the ask's row lock (transitionAskTx), so it is
+			// the created_at of this answer's ask.answered event too. Each process's host keeps
+			// its own clock, and this `at` is compared with times the database stamped: the carry
+			// rule holds it against an approval's created_at (docs.carryVerdict).
+			var answeredAt time.Time
+			if err := tx.QueryRow(ctx, `select now()`).Scan(&answeredAt); err != nil {
+				return model.Ask{}, err
+			}
+			answer := model.AskAnswer{User: actor.ID, Selected: selected, Text: text, At: answeredAt.UTC()}
 			if options.WriteBlock != nil {
 				if err := options.WriteBlock(ctx, tx, ask, answer); err != nil {
 					return model.Ask{}, err

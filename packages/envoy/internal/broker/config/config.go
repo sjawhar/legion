@@ -19,10 +19,13 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
@@ -74,12 +77,30 @@ type Config struct {
 	// projected token, for BROKER_K8S_OIDC_AUDIENCE, on those routes, verified against
 	// BROKER_K8S_OIDC_ISSUER as every other ServiceAccount token the broker takes is, so this
 	// needs that pair. A token that lives longer than an hour from its issue is refused, as a
-	// service's login token is. The caller's name
-	// (lowercase letters, digits and hyphens, at most 64) is what the broker's log names it when
-	// it acts; nothing else reads it. A namespace's default account is refused, as is an account
-	// given twice, since each account names one caller. Keyed by account, each answering its
-	// caller. Unset, no caller reaches those routes.
-	APIAccounts map[string]string
+	// service's login token is. The caller's name decides what the account may do, and the broker
+	// knows two: dispatch reaches every one of those routes, the ten Dispatch's server relays a
+	// person's decisions and reads through as well as introspection, and listener reaches
+	// introspection alone, since the Envoy listener reads a token back and relays no decision. A
+	// name the broker does not know refuses the boot naming it and the names it knows, so a typo
+	// never quietly produces a caller that reaches nothing, and a new caller is a deliberate
+	// edit to the broker's own table (api.AccountFor). A listed caller reaching a route its name
+	// does not carry is 403 ACCOUNT_LACKS_POWER, which is a different fact from an account that
+	// is not listed at all (403 ACCOUNT_NOT_LISTED). A namespace's default account is refused, as
+	// is an account given twice, since each account names one caller. Keyed by account, each
+	// answering its caller and that caller's powers. Unset, no caller reaches those routes.
+	APIAccounts map[string]api.Account
+	// BROKER_SIGNIN_ISSUER, BROKER_SIGNIN_CLIENT_ID, BROKER_SIGNIN_CLIENT_SECRET_FILE,
+	// BROKER_SIGNIN_DOMAIN, BROKER_SIGNIN_SESSION_SECONDS: the broker's own OpenID Connect client,
+	// through which a person signs in to the broker's approval page to approve a secret request:
+	// the provider's issuer (an absolute https URL, or http only to a loopback host, for a run on
+	// one machine), the client's id, a file holding the client's secret (read at startup and
+	// trimmed; no variable carries the secret itself, so BROKER_SIGNIN_CLIENT_SECRET is refused),
+	// the Google Workspace domain a person's ID token must name in its hd claim, and how many
+	// seconds a sign-in lasts (an absolute expiry nothing extends, at most 86400, 24 hours, the
+	// default). The first four are required: a broker missing any of them refuses to start,
+	// naming the ones missing, since nobody could approve a secret request on a page nobody can
+	// sign in to.
+	SignIn approval.SignIn
 	// BROKER_SECRETS_STORE: which secret store the agent secrets live in: aws-secrets-manager (the
 	// default when unset, AWS Secrets Manager with the agent-secrets key in AWS KMS) or
 	// gcp-secret-manager (Google Cloud Secret Manager with the agent-secrets key in Cloud KMS, read
@@ -122,7 +143,10 @@ type Config struct {
 	// as owner-tag-malformed.
 	ServicesByAccount map[string]string
 	// BROKER_SERVICE_LOGINS: the ServiceAccounts that log in as a service with their own projected
-	// token (POST /v1/launcher-credentials/token), whitespace-separated <service>=<service account>
+	// token (POST /v1/launcher-credentials/token), and that authenticate the routes a service
+	// calls as itself (serviceAuth, today POST /v1/oauth/exchange/pod-sessions, where a
+	// deployment's daemon registers a pod it starts under a session name),
+	// whitespace-separated <service>=<service account>
 	// entries, such as legion-daemon=system:serviceaccount:legion-system:legion-daemon-legion. Each
 	// account (system:serviceaccount:<namespace>:<name>, named exactly: there is no wildcard) logs in
 	// as the one service its entry names and is given once; one service may have several accounts,
@@ -255,6 +279,19 @@ type Config struct {
 	TrustedProxyHeader string
 }
 
+// The four settings the broker's sign-in needs, each read by its own name: the provider's issuer,
+// the client's id, the file holding the client's secret, and the Workspace domain.
+const (
+	signInIssuerSetting       = "BROKER_SIGNIN_ISSUER"
+	signInClientIDSetting     = "BROKER_SIGNIN_CLIENT_ID"
+	signInClientSecretSetting = "BROKER_SIGNIN_CLIENT_SECRET_FILE"
+	signInDomainSetting       = "BROKER_SIGNIN_DOMAIN"
+)
+
+// SignInSettings are those four settings, every one of them required. Every message that names
+// them names them in this order.
+var SignInSettings = []string{signInIssuerSetting, signInClientIDSetting, signInClientSecretSetting, signInDomainSetting}
+
 // NotServingSweeps is how many sweeps a gap between two serving records may last and still count
 // as a broker serving; a longer gap is time no broker was serving.
 const NotServingSweeps = 3
@@ -291,7 +328,7 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_DISPATCH_TOKEN_FILE", noDispatchCredential},
 	{"BROKER_DISPATCH_PROJECT", noDispatchCredential},
 	{"BROKER_ASK_POLL_SECONDS", noDispatchCredential},
-	{"BROKER_UI_ORIGIN", "approval is by Dispatch login, so the broker checks no WebAuthn origin"},
+	{"BROKER_UI_ORIGIN", "a person approves on the broker's own page, signed in to the broker (BROKER_SIGNIN_*), so the broker checks no WebAuthn origin"},
 	{"BROKER_UI_TOKEN", noUIToken},
 	{"BROKER_UI_TOKEN_FILE", noUIToken},
 	{"BROKER_DATABASE_PASSWORD", noDatabasePassword},
@@ -300,6 +337,7 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_RULES_RELOAD_SECONDS", noRulesFile},
 	{"BROKER_MAX_GRANT_SECONDS", noGrantCap},
 	{"BROKER_MINT_TARGETS", noMintTargets},
+	{"BROKER_SIGNIN_CLIENT_SECRET", "the broker reads its sign-in client's secret only from the file BROKER_SIGNIN_CLIENT_SECRET_FILE names, so the secret is never in its environment"},
 }
 
 // serviceAccountPattern is a Kubernetes service account's subject, the one a pod's projected token
@@ -806,10 +844,17 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	for _, entry := range callers {
-		if cfg.APIAccounts == nil {
-			cfg.APIAccounts = map[string]string{}
+		// A caller's name is an authority and not a label — it decides which of the broker's
+		// named-caller routes that account reaches — so a name the broker's own table does not
+		// know is refused here, rather than listed as a caller that reaches nothing.
+		account, known := api.AccountFor(entry.service)
+		if !known {
+			return Config{}, fmt.Errorf("BROKER_API_ACCOUNTS names the caller %q, which this broker does not know, got %q: its callers are %s", entry.service, entry.text, strings.Join(api.KnownCallers(), ", "))
 		}
-		cfg.APIAccounts[entry.subject] = entry.service
+		if cfg.APIAccounts == nil {
+			cfg.APIAccounts = map[string]api.Account{}
+		}
+		cfg.APIAccounts[entry.subject] = account
 	}
 	if len(cfg.APIAccounts) > 0 && cfg.K8sOIDCIssuer == "" {
 		return Config{}, fmt.Errorf("BROKER_API_ACCOUNTS needs BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE, whose tokens its callers present")
@@ -840,6 +885,7 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, err
 		}
 	}
+	var sessionSeconds int
 	ints := []struct {
 		name     string
 		dst      *int
@@ -852,6 +898,7 @@ func Load(getenv func(string) string) (Config, error) {
 		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 2592000, 1, 2592000},
 		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 1, 60},
 		{"BROKER_DRAIN_SECONDS", &cfg.DrainSeconds, 5, 0, 120},
+		{"BROKER_SIGNIN_SESSION_SECONDS", &sessionSeconds, 86400, 1, 86400},
 	}
 	for _, i := range ints {
 		raw := getenv(i.name)
@@ -865,6 +912,9 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		*i.dst = n
 	}
+	if cfg.SignIn, err = parseSignIn(getenv, time.Duration(sessionSeconds)*time.Second); err != nil {
+		return Config{}, err
+	}
 	// A live session renews with at least two thirds of its lease left, and a gap of up to
 	// NotServingSweeps sweeps reads as a broker still serving, so a lease that ran out inside such a
 	// gap would be ended rather than given back. That gap must fall short of two thirds of a lease.
@@ -875,21 +925,78 @@ func Load(getenv func(string) string) (Config, error) {
 	return cfg, nil
 }
 
+// parseSignIn reads the broker's sign-in client, its session lasting sessionLifetime, the
+// BROKER_SIGNIN_SESSION_SECONDS Load read. All four of the client's settings are required, since
+// a broker nobody can sign in to is a broker on which no secret request is ever approved. It
+// refuses: any of them missing, naming each one; an issuer that is not an absolute https URL, or
+// http to a loopback host; and an unreadable or blank secret file. No refusal carries the secret.
+func parseSignIn(getenv func(string) string, sessionLifetime time.Duration) (approval.SignIn, error) {
+	signIn := approval.SignIn{SessionLifetime: sessionLifetime}
+	// One destination per SignInSettings entry, read in that order, so the missing ones are named
+	// in the order every message naming them uses. The secret's path is held aside rather than
+	// kept in the SignIn, whose field carries the secret itself.
+	var secretPath string
+	into := []*string{&signIn.Issuer, &signIn.ClientID, &secretPath, &signIn.Domain}
+	var missing []string
+	for i, setting := range SignInSettings {
+		*into[i] = strings.TrimSpace(getenv(setting))
+		if *into[i] == "" {
+			missing = append(missing, setting)
+		}
+	}
+	if len(missing) > 0 {
+		return approval.SignIn{}, fmt.Errorf("the broker's approval page needs %s; missing %s", strings.Join(SignInSettings, ", "), strings.Join(missing, ", "))
+	}
+	if !signInIssuerOK(signIn.Issuer) {
+		return approval.SignIn{}, fmt.Errorf("%s must be an absolute https URL, or http to a loopback host, got %q", signInIssuerSetting, signIn.Issuer)
+	}
+	var err error
+	if signIn.ClientSecret, err = secretFile(signInClientSecretSetting, secretPath); err != nil {
+		return approval.SignIn{}, err
+	}
+	return signIn, nil
+}
+
+// signInIssuerOK reports whether issuer is an absolute https URL, or an http one whose host is
+// localhost or a loopback address: a sign-in's code exchange sends the client secret to it, which
+// only a local run may send in plain text, to its own machine.
+func signInIssuerOK(issuer string) bool {
+	parsed, err := url.Parse(issuer)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	switch parsed.Scheme {
+	case "https":
+		return true
+	case "http":
+		host := parsed.Hostname()
+		ip := net.ParseIP(host)
+		return host == "localhost" || ip != nil && ip.IsLoopback()
+	}
+	return false
+}
+
 // secretValue reads NAME_FILE (trimmed contents) ahead of NAME; a set-but-unreadable or blank
 // file is an error naming both, never a fallback.
 func secretValue(getenv func(string) string, name string) (string, error) {
 	if path := getenv(name + "_FILE"); path != "" {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("%s_FILE names %s, which could not be read: %w", name, path, err)
-		}
-		value := strings.TrimSpace(string(data))
-		if value == "" {
-			return "", fmt.Errorf("%s_FILE names %s, which is empty", name, path)
-		}
-		return value, nil
+		return secretFile(name+"_FILE", path)
 	}
 	return getenv(name), nil
+}
+
+// secretFile reads the trimmed contents of path, the file the variable setting names; an
+// unreadable or blank file is an error naming setting and path, never what the file holds.
+func secretFile(setting, path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("%s names %s, which could not be read: %w", setting, path, err)
+	}
+	value := strings.TrimSpace(string(data))
+	if value == "" {
+		return "", fmt.Errorf("%s names %s, which is empty", setting, path)
+	}
+	return value, nil
 }
 
 func orDefault(v, d string) string {

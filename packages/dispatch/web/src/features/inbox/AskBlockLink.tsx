@@ -4,9 +4,10 @@ import { Link } from "react-router-dom";
 import type { Ask } from "../../api/types";
 import { blockFragment } from "../refs/block-reference";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
+import { isDecisionAsk } from "./ask-decision";
 
 export function AskBlockLink({ ask }: { ask: Ask }): ReactNode {
-  if (ask.block_id === undefined || ask.block_id === null || ask.block_artifact === undefined) {
+  if (!isDecisionAsk(ask)) {
     return null;
   }
   const fragment = blockFragment(ask.block_id);

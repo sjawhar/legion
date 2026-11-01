@@ -433,13 +433,19 @@ func (s *Service) storedVersionTree(ctx context.Context, tx pgx.Tx, artifactID s
 // name, giving reason as the answer's text, as a human's answer through the answer route is
 // written, and hands sink the ask.answered event it appends on the ask's owner. The write names the
 // open state it answers from: a request that is no longer open is an error, not a second answer,
-// which the update's callback returns, so the write phase stops there. The update and the append
-// are one step (write); the event carries the row as the step leaves it, after the move this
-// version write queued before it, which set the request's edited_at (rewriteApprovalAsk). Where
-// the step is queued, the ledger records the request closed, so nothing later in the transaction
-// answers it again.
+// which the update's callback returns, so the write phase stops there. The answer's time is the
+// transaction's now() (transactionNow), as the answer route's is: each process's host keeps its
+// own clock, and this one is the created_at of the ask.answered event appended here and of the
+// review the carry writes beside it. The update and the append are one step (write); the event
+// carries the row as the step leaves it, after the move this version write queued before it, which
+// set the request's edited_at (rewriteApprovalAsk). Where the step is queued, the ledger records
+// the request closed, so nothing later in the transaction answers it again.
 func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, ask *model.Ask, actor model.Actor, reason string, sink func(model.Event)) error {
-	answer := model.AskAnswer{User: actor.ID, Selected: []string{ApprovalOptionApprove}, Text: &reason, At: time.Now().UTC()}
+	answeredAt, err := transactionNow(ctx, tx)
+	if err != nil {
+		return err
+	}
+	answer := model.AskAnswer{User: actor.ID, Selected: []string{ApprovalOptionApprove}, Text: &reason, At: answeredAt.UTC()}
 	encoded, err := json.Marshal(answer)
 	if err != nil {
 		return fmt.Errorf("encode approval answer: %w", err)

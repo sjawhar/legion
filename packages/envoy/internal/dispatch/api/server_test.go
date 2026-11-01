@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -21,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/persistence"
 
+	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -63,6 +65,12 @@ type testServerOptions struct {
 	// oidc is the service-account token verifier; nil is the unconfigured
 	// deployment, whose bearer handling is untouched by that feature.
 	oidc ServiceTokenVerifier
+	// brokerTokens decides a caller presenting an access token the secrets broker issued, under
+	// the DPoP scheme. It is built from the test's own database, as the persistence seam below
+	// is, because the verifier's DPoP replay store is a table of it (store.NewDPoPProofs); nil
+	// is the deployment with no broker, which is every test but broker_token_test.go's and
+	// project_scope_test.go's, and answers such a presentation 401 UNAUTHORIZED.
+	brokerTokens func(*store.Store) *brokertoken.Verifier
 	// identity resolves a cookie caller; nil is headerIdentity, which names the person the
 	// X-Dispatch-User header names.
 	identity identity.Identity
@@ -95,6 +103,13 @@ type testServerOptions struct {
 	lifetime context.Context
 	// streamHeartbeat replaces the sockets' fifteen-second heartbeat.
 	streamHeartbeat time.Duration
+	// takeoverWindow replaces the listener take-over window (Deps.ListenerTakeoverWindow); zero is
+	// testTakeoverWindow. A test proving the window itself passes its own, listenerTakeoverWindow
+	// for the production twelve seconds.
+	takeoverWindow time.Duration
+	// testHookTimeout replaces the test hooks' acknowledgement timeout (Deps.TestHookTimeout);
+	// zero keeps the production ten seconds.
+	testHookTimeout time.Duration
 	// tracer is installed on every connection of the server's pool (storetest.Traced), so a test
 	// sees each statement the server runs; nil leaves the pool untraced. The xid window tests
 	// (xid_window_test.go) pass a storetest.XidTracer.
@@ -109,6 +124,18 @@ type testServerOptions struct {
 	// server with no dashboard, as the Go test rigs are.
 	dashboardEntry string
 }
+
+// testTakeoverWindow is the listener take-over window of a test server that sets none. A send to
+// a session that is gone, or a listener that refuses, waits the window out before it settles, and
+// the production twelve seconds made every such test sleep that long. 750 ms leaves exactly one
+// retry: the first, after takeoverFirstBackoff (250 ms), still starts inside it whenever the first
+// try took under half a second, which a test whose take-over answers on the second try relies on,
+// and the second, 500 ms later, never does, so a window run out costs about a quarter second.
+const testTakeoverWindow = 750 * time.Millisecond
+
+// testServerURL is the public origin every test server serves under: what a link a handler
+// writes names, and what a DPoP proof's 'htu' is checked against (broker_token_test.go).
+const testServerURL = "https://dispatch.example"
 
 // testSigningKey is the one-key set the package's session cookies are signed with.
 var testSigningKey = auth.SingleSigningKey("signing-key")
@@ -137,6 +164,12 @@ func newTestHandler(t *testing.T) http.Handler {
 func newTestHandlerWithStore(t *testing.T) (http.Handler, *store.Store) {
 	t.Helper()
 	handler, database, _ := newTestServer(t, testServerOptions{})
+	return handler, database
+}
+
+func newTestHandlerWithTestHooks(t *testing.T) (http.Handler, *store.Store) {
+	t.Helper()
+	handler, database, _ := newTestServer(t, testServerOptions{testHooks: true})
 	return handler, database
 }
 
@@ -170,14 +203,18 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 	}
 	database := storetest.Open(t)
 	if options.tracer != nil {
-		database = storetest.Traced(t, database, options.tracer)
+		database = &store.Store{Pool: storetest.Traced(t, database.Pool, options.tracer, nil)}
 	}
 	broker := events.NewBroker()
 	var documentPersistence docs.VersionedStore
 	if options.persistence != nil {
 		documentPersistence = options.persistence(database)
 	}
-	documentService := docs.New(docs.Deps{Store: database, Persistence: documentPersistence, Events: broker, ServerURL: "https://dispatch.example", Settle: settle})
+	var brokerTokens *brokertoken.Verifier
+	if options.brokerTokens != nil {
+		brokerTokens = options.brokerTokens(database)
+	}
+	documentService := docs.New(docs.Deps{Store: database, Persistence: documentPersistence, Events: broker, ServerURL: testServerURL, Settle: settle})
 	t.Cleanup(func() {
 		if err := documentService.Shutdown(context.Background()); err != nil {
 			t.Errorf("shutdown document service: %v", err)
@@ -189,24 +226,27 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		people = options.identity
 	}
 	deps, err := NewDeps(DepsInput{
-		Store:            database,
-		Identity:         people,
-		AgentTokens:      sharedAgentTokens(t, "agent-token"),
-		DefaultProject:   options.defaultProject,
-		ServerURL:        "https://dispatch.example",
-		Docs:             documentService,
-		Events:           broker,
-		App:              options.app,
-		GitHubAPIBase:    options.githubAPIBase,
-		TestHooksEnabled: options.testHooks,
-		StreamHeartbeat:  options.streamHeartbeat,
-		EnvoyURL:         options.envoyURL,
-		EnvoyTimeout:     options.envoyTimeout,
-		OIDC:             options.oidc,
-		AgentStream:      options.agentStream,
-		Embedder:         options.embedder,
-		Files:            options.files,
-		DashboardEntry:   options.dashboardEntry,
+		Store:                  database,
+		Identity:               people,
+		AgentTokens:            sharedAgentTokens(t, "agent-token"),
+		DefaultProject:         options.defaultProject,
+		ServerURL:              testServerURL,
+		Docs:                   documentService,
+		Events:                 broker,
+		App:                    options.app,
+		GitHubAPIBase:          options.githubAPIBase,
+		TestHooksEnabled:       options.testHooks,
+		StreamHeartbeat:        options.streamHeartbeat,
+		EnvoyURL:               options.envoyURL,
+		EnvoyTimeout:           options.envoyTimeout,
+		ListenerTakeoverWindow: cmp.Or(options.takeoverWindow, testTakeoverWindow),
+		TestHookTimeout:        options.testHookTimeout,
+		OIDC:                   options.oidc,
+		BrokerTokens:           brokerTokens,
+		AgentStream:            options.agentStream,
+		Embedder:               options.embedder,
+		Files:                  options.files,
+		DashboardEntry:         options.dashboardEntry,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -219,9 +259,9 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		served.agentWatchInterval = options.agentWatchInterval
 	}
 	// waitBackground, as production's shutdown calls it: every keyed handler and every delivery a
-	// handler detached from its request, then the sockets, the hub and the relay. A broadcast's
-	// deliveries and a keyed handler outlive the client that started them, so a test that did not
-	// wait for them would close its database under a worker still writing.
+	// handler detached from its request, then the sockets, the hub, the relay and the test hooks'
+	// listener. A broadcast's deliveries and a keyed handler outlive the client that started them,
+	// so a test that did not wait for them would close its database under a worker still writing.
 	t.Cleanup(func() { waitBackgroundOf(t, served) })
 	return mux, database, deps, served
 }
@@ -1910,6 +1950,56 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 		if err == nil || response == nil || (response.StatusCode != http.StatusUnauthorized && response.StatusCode != http.StatusForbidden) {
 			t.Fatalf("revoked cookie websocket %s: response=%#v err=%v, want rejected handshake", path, response, err)
 		}
+	}
+}
+
+// The document socket takes a signed-in person's cookie and nothing else (INFRA-264). The shared
+// agent token the HTTP API accepts is no credential for it: the handshake is refused, where the
+// same room admits the cookie. A bearer once named its own session in a header the socket read,
+// which made it a second, weaker door into Dispatch.
+func TestTheDocumentSocketTakesACookieAndNotTheSharedAgentToken(t *testing.T) {
+	handler, _, cookie, request := newCookieServer(t)
+	if response := request(http.MethodPost, "/api/v1/projects", map[string]string{"key": "TEST", "name": "Test"}); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := request(http.MethodPost, "/api/v1/issues", map[string]string{"project": "TEST", "title": "Document door"})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	issue := decodeBody[struct {
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}](t, created)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + issue.PrimaryArtifactID
+
+	// The same token answers GET /api/v1/whoami as the shared agent, so the socket's refusal is
+	// the socket's own and not an unknown value.
+	whoami := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+	whoami.Header.Set("Authorization", "Bearer agent-token")
+	whoamiResponse := httptest.NewRecorder()
+	handler.ServeHTTP(whoamiResponse, whoami)
+	if whoamiResponse.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/whoami with the shared agent token: status=%d body=%s, want 200", whoamiResponse.Code, whoamiResponse.Body.String())
+	}
+	connection, response, err := gws.DefaultDialer.Dial(wsURL, http.Header{"Authorization": []string{"Bearer agent-token"}})
+	if connection != nil {
+		_ = connection.Close()
+	}
+	if err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("the document socket with the shared agent token: response=%#v err=%v, want a refused handshake (401)", response, err)
+	}
+	// The same room admits the person the browser signs in as, and a bearer beside that cookie is
+	// no second credential: the person is who the connection is.
+	for name, header := range map[string]http.Header{
+		"the signed-in person's cookie":             {"Cookie": []string{cookie.Name + "=" + cookie.Value}},
+		"that cookie beside the shared agent token": {"Cookie": []string{cookie.Name + "=" + cookie.Value}, "Authorization": []string{"Bearer agent-token"}},
+	} {
+		connection, response, err := gws.DefaultDialer.Dial(wsURL, header)
+		if err != nil {
+			t.Fatalf("the document socket with %s: response=%#v err=%v", name, response, err)
+		}
+		_ = connection.Close()
 	}
 }
 

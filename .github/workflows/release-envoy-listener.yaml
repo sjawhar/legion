@@ -25,7 +25,6 @@ on:
       - "packages/pi-envoy/package.json"
       - "packages/pi-legion/package.json"
       - "packages/pi-shared/package.json"
-      - "packages/envoy-plugin/package.json"
       - "packages/claude-envoy/package.json"
       - "docs/site/package.json"
       - ".dockerignore"

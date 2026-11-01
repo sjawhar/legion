@@ -29,7 +29,6 @@ import (
 	"testing"
 	"time"
 
-	gws "github.com/gorilla/websocket"
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
@@ -37,9 +36,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
-	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -590,7 +587,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					t.Errorf("DISPATCH_AGENT_TOKEN=' table-token ': GET /api/v1/whoami with other-token answered %d %s, want 401", response.Code, response.Body.String())
 				}
 			})
-			t.Run("several values", sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket)
+			t.Run("several values", sharedAgentTokenListReachesTheAPI)
 		},
 		"DISPATCH_IDENTITY": func(t *testing.T) {
 			header, err := resolveBootConfig(envGetter(headerIdentityEnvironment(map[string]string{"DISPATCH_IDENTITY": " header:X-Dispatch-User "})))
@@ -911,13 +908,16 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			// Its three readers, on a single server, which refuses a create at more than one copy
 			// and names the setting: the stream main's publisher reconciles
 			// (dispatchStreamOptions) on its first connection, in the background, so the refusal
-			// reaches the reconnect hook's logged error (startDispatchStream), the webhook
-			// sweeper's bucket (webhookSweeper's Open) and the bucket redeliver-webhooks opens.
-			// stream_replicas_test.go raises the same on a cluster.
+			// reaches the reconnect hook's logged error (dispatchStart.awaitHookFailure), the
+			// webhook sweeper's bucket (webhookSweeper's Open) and the bucket redeliver-webhooks
+			// opens. stream_replicas_test.go raises the same on a cluster.
 			_, url := testnats.Start(t)
 			three := map[string]string{"ENVOY_NATS_REPLICAS": "3"}
-			if _, err := startDispatchStream(t, []string{url}, three); err == nil || !strings.Contains(err.Error(), "ENVOY_NATS_REPLICAS=3: ") {
-				t.Errorf("the stream at ENVOY_NATS_REPLICAS=3 on one server: logged %v, want the server's refusal naming the setting", err)
+			refused := connectDispatchStream(t, []string{url}, three)
+			refusal := refused.awaitHookFailure(t)
+			refused.client.Close()
+			if !strings.Contains(refusal.Error, "ENVOY_NATS_REPLICAS=3: ") {
+				t.Errorf("the stream at ENVOY_NATS_REPLICAS=3 on one server: logged %q, want the server's refusal naming the setting", refusal.Error)
 			}
 			conn := testnats.Connect(t, url)
 			t.Cleanup(conn.Close)
@@ -928,13 +928,13 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if info, err := js.StreamInfo(bus.Stream); !errors.Is(err, natsgo.ErrStreamNotFound) {
 				t.Errorf("after the refused start at ENVOY_NATS_REPLICAS=3 the stream is %+v (%v), want none created", info, err)
 			}
-			client, err := startDispatchStream(t, []string{url}, nil)
-			if err != nil {
-				t.Fatalf("connect the publisher at the default: %v", err)
-			}
+			client := startDispatchStream(t, []string{url}, nil)
 			key, pemText := githubapptest.Key(t)
 			app := &auth.AppConfig{ClientID: replicasTestClientID, PEM: pemText}
-			sweeper, err := webhookSweeper(client, app, "", resolveWith(t, three).NATSReplicas)
+			// The sweep's App client and redeliver-webhooks both read the GitHub rate limits
+			// every process shares, so each needs the database that holds them.
+			database := storetest.Open(t)
+			sweeper, err := webhookSweeper(client, database, app, "", resolveWith(t, three).NATSReplicas)
 			if err != nil {
 				t.Fatalf("build the webhook sweeper: %v", err)
 			}
@@ -946,6 +946,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				var stdout, stderr bytes.Buffer
 				code := runSubcommand(context.Background(), []string{"redeliver-webhooks", "--since", "1h", "--dry-run"}, envGetter(map[string]string{
 					"NATS_URLS":                url,
+					"DATABASE_URL":             database.Pool.Config().ConnString(),
 					"XDG_CONFIG_HOME":          t.TempDir(),
 					"DISPATCH_APP_CLIENT_ID":   replicasTestClientID,
 					"DISPATCH_APP_PEM_B64":     pemText,
@@ -970,10 +971,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			// Its reader: the stream main's publisher creates (dispatchStreamOptions) holds the
 			// limit and refuses new messages once full.
 			_, url := testnats.Start(t)
-			client, err := startDispatchStream(t, []string{url}, map[string]string{"ENVOY_STREAM_MAX_BYTES": "1048576"})
-			if err != nil {
-				t.Fatalf("start the stream with ENVOY_STREAM_MAX_BYTES=1048576: %v", err)
-			}
+			client := startDispatchStream(t, []string{url}, map[string]string{"ENVOY_STREAM_MAX_BYTES": "1048576"})
 			info, err := client.JS().StreamInfo(bus.Stream)
 			if err != nil || info.Config.MaxBytes != 1<<20 || info.Config.Discard != natsgo.DiscardNew {
 				t.Errorf("stream = %+v, %v; want a byte limit of %d discarding new", info, err, 1<<20)
@@ -1022,7 +1020,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				overrides["ENVOY_URL"] = listener.URL
 				request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil), "alice")
 				response := httptest.NewRecorder()
-				routerFor(t, resolveWith(t, overrides), routes.AppContextOptions{}).ServeHTTP(response, request)
+				routerFor(t, resolveWith(t, overrides), routes.AppContextOptions{Store: storetest.Open(t)}).ServeHTTP(response, request)
 				if response.Code != http.StatusOK {
 					t.Fatalf("GET /api/v1/agents: %d %s", response.Code, response.Body.String())
 				}
@@ -1646,6 +1644,27 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_ROUTE_ROSTER_TTL": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.RouteRosterTTL != 0 {
+				t.Errorf("DISPATCH_TEST_ROUTE_ROSTER_TTL unset: RouteRosterTTL = %v, want 0 (the server's own five seconds)", boot.RouteRosterTTL)
+			}
+			const longTTL = time.Minute
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":            "1",
+				"DISPATCH_TEST_ROUTE_ROSTER_TTL": longTTL.String(),
+			})
+			if boot.RouteRosterTTL != longTTL {
+				t.Errorf("DISPATCH_TEST_ROUTE_ROSTER_TTL: RouteRosterTTL = %v, want %v", boot.RouteRosterTTL, longTTL)
+			}
+			if options := appContextOptions(boot, routes.AppContextOptions{}); options.RouteRosterTTL != longTTL {
+				t.Errorf("DISPATCH_TEST_ROUTE_ROSTER_TTL: the router is handed RouteRosterTTL = %v, want %v", options.RouteRosterTTL, longTTL)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_ROUTE_ROSTER_TTL": invalid},
+					fmt.Sprintf("DISPATCH_TEST_ROUTE_ROSTER_TTL=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_ROUTE_ROSTER_TTL": "1m"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 		"DISPATCH_TEST_EDIT_NOTICE_QUIET": func(t *testing.T) {
 			const shortQuiet = 3 * time.Second
 			boot := resolveWith(t, map[string]string{
@@ -1660,6 +1679,15 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					fmt.Sprintf("DISPATCH_TEST_EDIT_NOTICE_QUIET=%q (expected a positive Go duration)", invalid))
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_EDIT_NOTICE_QUIET": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
+		"DISPATCH_TEST_RECONCILE_AT_START": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_RECONCILE_AT_START": "1"}); !boot.ReconcileAtStart {
+				t.Error("DISPATCH_TEST_RECONCILE_AT_START=1: ReconcileAtStart false")
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_RECONCILE_AT_START": "true"}); boot.ReconcileAtStart {
+				t.Error("DISPATCH_TEST_RECONCILE_AT_START=true: ReconcileAtStart true, want only 1 to set it")
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_RECONCILE_AT_START": "1"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
 		"DISPATCH_TEST_ROSTER_UNCACHED": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_ROSTER_UNCACHED": "1"}); !boot.ListenerRosterUncached {
@@ -1683,7 +1711,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 						"DISPATCH_TEST_HOOKS":           "1",
 						"DISPATCH_TEST_ROSTER_UNCACHED": value,
 						"ENVOY_URL":                     listener.URL,
-					}), routes.AppContextOptions{})
+					}), routes.AppContextOptions{Store: storetest.Open(t), Lifetime: t.Context()})
 					for range 2 {
 						response := httptest.NewRecorder()
 						router.ServeHTTP(response, signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil), "alice"))
@@ -1737,10 +1765,10 @@ func answersSharedToken(response *httptest.ResponseRecorder) bool {
 }
 
 // With DISPATCH_AGENT_TOKEN holding several values, the server main builds from the setting
-// accepts every one on the HTTP API and on the document websocket, and refuses on both a value the
-// setting does not list. A request that authenticates with a value after the first is logged once
-// per address and User-Agent, with the load balancer's address and never a token.
-func sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket(t *testing.T) {
+// accepts every one on the HTTP API and refuses a value the setting does not list. A request that
+// authenticates with a value after the first is logged once per address and User-Agent, with the
+// load balancer's address and never a token.
+func sharedAgentTokenListReachesTheAPI(t *testing.T) {
 	// The server's request goroutines write the log while the test reads it.
 	var logged cmdtest.LockedBuffer
 	logtest.SetDefault(t, slog.NewJSONHandler(&logged, nil))
@@ -1757,80 +1785,26 @@ func sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket(t *testing.T) {
 	}
 
 	boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_TOKEN": "new-token\nold-token"})
-	database := storetest.Open(t)
-	broker := events.NewBroker()
-	documentService := newDocumentService(boot, docs.Deps{Store: database, Events: broker})
-	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-	handler := routerFor(t, boot, routes.AppContextOptions{Store: database, Docs: documentService, Events: broker})
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-
-	project := signedIn(t, httptest.NewRequest(http.MethodPost, "/api/v1/projects", strings.NewReader(`{"key":"TOKENS","name":"Tokens"}`)), "alice")
-	project.Header.Set("Content-Type", "application/json")
-	project.Header.Set("Sec-Fetch-Site", "same-origin")
-	created := httptest.NewRecorder()
-	handler.ServeHTTP(created, project)
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create project: %d %s", created.Code, created.Body.String())
-	}
-	issueRequest := httptest.NewRequest(http.MethodPost, "/api/v1/issues", strings.NewReader(
-		`{"project":"TOKENS","title":"Shared tokens","spec":"before\n","actor":{"kind":"session","id":"session-0123456789abcdef"}}`))
-	issueRequest.Header.Set("Content-Type", "application/json")
-	issueRequest.Header.Set("Authorization", "Bearer new-token")
-	created = httptest.NewRecorder()
-	handler.ServeHTTP(created, issueRequest)
-	var issue struct {
-		PrimaryArtifactID string `json:"primary_artifact_id"`
-	}
-	if created.Code != http.StatusCreated || json.Unmarshal(created.Body.Bytes(), &issue) != nil || issue.PrimaryArtifactID == "" {
-		t.Fatalf("create an issue with the first value: %d %s", created.Code, created.Body.String())
-	}
-	documentPath := "/ws/doc/" + issue.PrimaryArtifactID
-	dial := func(token, forwardedFor string) (*http.Response, error) {
-		t.Helper()
-		connection, response, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+documentPath, http.Header{
-			"Authorization":    {"Bearer " + token},
-			"X-Dispatch-Actor": {`{"kind":"session","id":"session-0123456789abcdef"}`},
-			"X-Forwarded-For":  {forwardedFor},
-		})
-		if connection != nil {
-			_ = connection.Close()
-		}
-		return response, err
-	}
+	handler := routerFor(t, boot, routes.AppContextOptions{Store: storetest.Open(t)})
 
 	for _, token := range []string{"new-token", "old-token"} {
 		if response := whoamiAs(handler, token, "198.51.100.9, 203.0.113.7"); !answersSharedToken(response) {
 			t.Errorf("GET /api/v1/whoami with %s answered %d %s, want 200 naming the shared token", token, response.Code, response.Body.String())
 		}
-		if response, err := dial(token, "203.0.113.8"); err != nil {
-			t.Errorf("the document websocket refused %s: response=%v err=%v", token, response, err)
-		}
 	}
 	if response := whoamiAs(handler, "third-token", "203.0.113.7"); response.Code != http.StatusUnauthorized {
 		t.Errorf("GET /api/v1/whoami with a value the setting does not list answered %d %s, want 401", response.Code, response.Body.String())
 	}
-	if response, err := dial("third-token", "203.0.113.8"); err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
-		t.Errorf("the document websocket with a value the setting does not list: response=%v err=%v, want a refused handshake (401)", response, err)
-	}
 
-	// Again within the window from the same callers: nothing more is logged.
+	// Again within the window from the same caller: nothing more is logged.
 	whoamiAs(handler, "old-token", "203.0.113.7")
-	if response, err := dial("old-token", "203.0.113.8"); err != nil {
-		t.Errorf("the document websocket refused old-token a second time: response=%v err=%v", response, err)
-	}
 	lines := previousTokenLines()
-	if len(lines) != 2 {
-		t.Fatalf("previous-token log lines = %v, want one for the API caller and one for the websocket caller", lines)
+	if len(lines) != 1 {
+		t.Fatalf("previous-token log lines = %v, want one for the API caller", lines)
 	}
-	for index, want := range []map[string]any{
-		{"entry": float64(2), "address": "203.0.113.7", "path": "/api/v1/whoami"},
-		{"entry": float64(2), "address": "203.0.113.8", "path": documentPath},
-	} {
-		for key, value := range want {
-			if lines[index][key] != value {
-				t.Errorf("previous-token log line %d %s = %v, want %v (line %v)", index+1, key, lines[index][key], value, lines[index])
-			}
+	for key, value := range map[string]any{"entry": float64(2), "address": "203.0.113.7", "path": "/api/v1/whoami"} {
+		if lines[0][key] != value {
+			t.Errorf("the previous-token log line's %s = %v, want %v (line %v)", key, lines[0][key], value, lines[0])
 		}
 	}
 	for _, token := range []string{"new-token", "old-token", "third-token"} {

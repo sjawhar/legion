@@ -357,10 +357,14 @@ package api
 // INFRA-229 at 36, so this branch took 37; main then landed INFRA-80 at 37 with store migration
 // 0051, so this branch took 38 and store migration 0052; main then landed INFRA-225 at 38 with
 // store migrations 0052 and 0053, so this branch takes 39 and store migration 0054, as the
-// collision note says. Other open branches may declare 39 or a migration 0054 too: whichever
-// merges after another takes the next free contract number and renumbers its store migration past
-// main's, every site that names either included, among them the rollback's
-// `delete from schema_version where version = 54` in docs/kubernetes.md.)
+// collision note says. Other open branches may declare 39 too: whichever merges after another
+// takes the next free contract number, every site that names it included. A store migration is
+// not renumbered with it: one added after the numbered series takes the UTC moment it was
+// created as its version, 14 digits YYYYMMDDHHMMSS, which sort above the numbered series, so two
+// branches open at once cannot claim one version and the file keeps the name it was written
+// with. A rollback that deletes the row a migration recorded, as the one in docs/kubernetes.md
+// does with `delete from schema_version where version = 54`, names that version, which for a
+// migration written since is its 14-digit timestamp.)
 //
 // 40: a root whose architect asked a person a question and handed the turn back gives its
 // admission slot up in the new phase `awaiting_person`, and its strict state issue view gains
@@ -426,4 +430,17 @@ package api
 // App is not installed, the check failed, or Dispatch does not answer the check; never null, and
 // the repository is served all the same. (This branch took 41, then 42; 42 is declared by main's
 // stalled-worker reminder, so this change takes the number above it, as the collision note says.)
-const DaemonAPIVersion = 43
+//
+// 44: a Claude Code role's start command and pane no longer carry
+// CLAUDE_CODE_DISABLE_BACKGROUND_TASKS; CLAUDE_CONFIG_DIR and CLAUDE_CODE_DISABLE_CRON stay, and
+// the name is no longer the runtime's, so an operator's `runtime.kubernetes.pod.env` and
+// `runtime.tmux.pane_env` may set it as they may set Claude Code's other variables. A role may
+// leave a background task running past the end of a turn: when it finishes, Claude Code starts a
+// turn of its own, which the bridge reports to the daemon as a turn (`internal/claudebridge`), so
+// the result is read in a turn the daemon sees rather than after one the daemon thinks has ended.
+// The worker container's and the pane's environment is one of this contract's surfaces, so
+// dropping a variable from it bumps the number, as adding the three at 42 did, and the image probe
+// holds this daemon and the image that runs its roles together. This change adds no store
+// migration. (This branch took 43; main then landed the consumer lag at 43, so this branch takes
+// the number above it, as the collision note says.)
+const DaemonAPIVersion = 44

@@ -57,6 +57,7 @@ import {
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
   serviceSubjectLabel,
+  typedBlockIdAttribute,
   zodSchemaApi,
 } from "@legion/contracts";
 import { canonicalRepo } from "@legion/contracts/repo";
@@ -1912,9 +1913,9 @@ function routeHeldBySession(issue: RoutedIssue): boolean {
 /**
  * An issue's route as every agent surface reads it: where its messages go and whether that
  * reaches anyone, from the `route_status` the server resolved on this read. A route to a role
- * nobody holds, or to a session that is not running, reaches nobody as of the server's copy of
- * the listener's session list, at most 5 s old,
- * so it says so - and says "right now", because a restarting session is absent for minutes.
+ * nobody holds, or to a session that is not running, reaches nobody as of the listener's session
+ * list Dispatch last stored, at most 5 s old and the same on every server process, so it says
+ * so - and says "right now", because a restarting session is absent for minutes.
  */
 function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): string {
   if (issue.route === null) return "none";
@@ -2865,11 +2866,13 @@ async function refuseOpenDecisionBlocks(
       : `${named}, ${state} but still open in version ${latest}: write the decision into the text with dispatch doc-edit, which writes a version that carries it`;
   const open = blocks.flatMap((block): string[] => {
     const ask = asks.get(block.id);
-    // The block's opening lines, `:::ask{#<id> … state="…"}`. Every match counts, so a line that
-    // quotes the opener (in code, say) can add an open block but never hide one; a block none of
-    // whose lines carries a state is open.
+    // The block's opening lines, `:::ask{<id> … state="…"}`, the id as the renderer writes it
+    // (`typedBlockIdAttribute`: `#<id>`, or `id="…"` for an id the shortcut cannot hold). Every
+    // match counts, so a line that quotes the opener (in code, say) can add an open block but
+    // never hide one; a block none of whose lines carries a state is open.
+    const id = typedBlockIdAttribute(block.id);
     const openers = lines.filter(
-      (line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`)
+      (line) => line.includes(`ask{${id} `) || line.includes(`ask{${id}}`)
     );
     const states = openers.map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
     const named =
@@ -3223,18 +3226,30 @@ export async function executeDispatchTool(
     const owner = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
     // A Dispatch that predates verified service tokens omits the field entirely.
     const service = identity.kind === "agent" ? (identity.service ?? null) : null;
+    // So does one that predates broker-issued tokens, which are the only credential that proves
+    // a session of its own: read either omission as that older build, not as "no session".
+    const proved = identity.kind === "agent" ? (identity.session ?? null) : null;
+    const project = identity.kind === "agent" ? (identity.project ?? null) : null;
+    // The session Dispatch records the writes as: the one the credential proved, else this host's.
+    const session = proved ?? sessionId;
     const unowned =
       "no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.";
+    const acting =
+      owner !== null
+        ? `Session ${session} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.`
+        : service !== null
+          ? // The text names the identity the way every other surface does; details
+            // keeps the subject whole, because that is the persisted value.
+            `Session ${session} runs as service ${serviceSubjectLabel(service)}: ${unowned}`
+          : `Session ${session} runs under the shared token: ${unowned}`;
+    const elsewhere =
+      proved !== null && proved !== sessionId
+        ? ` Your credential names session ${proved}, which is not this host session (${sessionId}): Dispatch records every write you make as ${proved}.`
+        : "";
+    const writable = project !== null ? ` It may write project ${project} and no other.` : "";
     return {
-      text:
-        owner !== null
-          ? `Session ${sessionId} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.`
-          : service !== null
-            ? // The text names the identity the way every other surface does; details
-              // keeps the subject whole, because that is the persisted value.
-              `Session ${sessionId} runs as service ${serviceSubjectLabel(service)}: ${unowned}`
-            : `Session ${sessionId} runs under the shared token: ${unowned}`,
-      details: { session: sessionId, owner, service },
+      text: acting + elsewhere + writable,
+      details: { session, owner, service, project },
     };
   }
   const args = checked.args;

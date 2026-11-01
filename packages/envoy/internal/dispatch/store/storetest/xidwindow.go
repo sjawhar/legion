@@ -13,7 +13,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -193,21 +192,6 @@ func (x *XidTracer) TraceCopyFromStart(ctx context.Context, conn *pgx.Conn, data
 // TraceCopyFromEnd implements pgx.CopyFromTracer.
 func (x *XidTracer) TraceCopyFromEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceCopyFromEndData) {
 	x.end(ctx, data.CommandTag)
-}
-
-// Traced returns a store on database's database whose every connection, the separate pools it
-// opens included, reports its statements to tracer; the pool closes after t ends.
-func Traced(t testing.TB, database *store.Store, tracer pgx.QueryTracer) *store.Store {
-	t.Helper()
-	config := database.Pool.Config()
-	config.ConnConfig.Tracer = tracer
-	opened, err := pgxpool.NewWithConfig(context.Background(), config)
-	if err != nil {
-		t.Fatalf("open a traced pool: %v", err)
-	}
-	traced := store.NewPool(opened)
-	t.Cleanup(traced.Close)
-	return &store.Store{Pool: traced}
 }
 
 // xidPoll is one read of pg_stat_activity: sent when the query left, received when its answer

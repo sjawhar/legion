@@ -35,7 +35,7 @@ func TestDerivedStampSourceSeqIsTheStampingEventsID(t *testing.T) {
 	}
 	located := text.ExtractAt(markdown, server)
 	blocks := []model.ArtifactBlock{{ID: "b-stamp", Type: "paragraph", From: 0, To: len(markdown)}}
-	if _, err := IndexBlocks(ctx, tx, document, 1, time.Now(), markdown, blocks, located); err != nil {
+	if _, err := IndexBlocks(ctx, tx, document, 1, time.Now(), markdown, blocks, located, nil); err != nil {
 		t.Fatalf("index the document's blocks: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `insert into refs (from_kind, from_id, to_kind, to_id, source_seq) values ('artifact', $1, 'issue', 'STAMP-9', 7)`, document); err != nil {

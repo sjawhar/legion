@@ -30,7 +30,7 @@ import (
 func xidService(t *testing.T) (*Service, *store.Store, *storetest.XidTracer) {
 	t.Helper()
 	tracer := storetest.NewXidTracer()
-	database := storetest.Traced(t, storetest.Open(t), tracer)
+	database := &store.Store{Pool: storetest.Traced(t, storetest.Open(t).Pool, tracer, nil)}
 	service := New(Deps{
 		Store:     database,
 		Events:    events.NewBroker(),

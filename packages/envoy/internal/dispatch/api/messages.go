@@ -181,7 +181,7 @@ func (s *server) sendHeldMessageOn(ctx context.Context, message model.Message, d
 		return err
 	}
 	sending := context.WithoutCancel(ctx)
-	if _, err := s.deliverMessageResuming(sending, message, delivery, nil, message.Author, nil, attempt); err != nil &&
+	if _, err := s.deliverMessageResuming(sending, message, delivery, message.Author, nil, attempt); err != nil &&
 		!errors.Is(err, errAttemptNotPending) {
 		return err
 	}
@@ -189,8 +189,9 @@ func (s *server) sendHeldMessageOn(ctx context.Context, message model.Message, d
 }
 
 // owedMessageAttempts is the attempt each of the targeted messages owes, keyed by message id, with
-// a message that owes nothing absent: the first attempt of a message with no attempt at all - its
-// process died between the commit and the send, or its own sender is between them right now - or
+// a message that owes nothing absent: the first attempt of a message with no attempt at all,
+// which only a message an earlier release stored can be, since createStoredMessage writes attempt
+// 1 in the transaction that stores the message - or
 // the message's latest attempt when it is pending and its claim has lapsed, which Postgres judges
 // against the claimed_at it wrote (claimLapsed). A pending attempt whose claim is live is in
 // flight and left to its sender, and a latest attempt that settled owes nothing: an earlier
@@ -339,8 +340,9 @@ func (s *server) createStoredMessage(
 		return model.Message{}, nil, err
 	}
 	// The parent's lock, the index its blocks owe, the insert, the recovery point, this message's
-	// own index, the event and its stamp go in one batch (store.WriteBatch): the message is known
-	// before the insert runs, and the stamp names the event's id as the id sequence left it.
+	// own index, the event, its stamp and a targeted message's first delivery attempt go in one
+	// batch (store.WriteBatch): the message is known before the insert runs, and the stamp names
+	// the event's id as the id sequence left it.
 	var event model.Event
 	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
 		if block != nil {
@@ -367,6 +369,22 @@ func (s *server) createStoredMessage(
 		if issueKey != nil {
 			refs.QueueStamp(b, "message", message.ID)
 		}
+		// A targeted message's attempt 1 is queued here, with the writes of the transaction that
+		// stores the message, unclaimed and naming no session yet, as writeBroadcast opens each
+		// recipient's: a process that dies, or a request whose connection is cut, between this
+		// commit and the send then leaves a pending attempt the delivery sweep
+		// (delivery_sweep.go) sends. An earlier release opened it after the listener lookup, so a
+		// message it stored could have no attempt at all, and the recovery that opens a first
+		// attempt for one (owedKeyedSend, openFirstMessageDeliveryAttempt) serves only the
+		// messages such a release stored. It records who asked for it and the urgency they chose,
+		// which every send of it carries (pendingMessageDelivery), this request's own and a
+		// resumed one alike.
+		if message.Target != nil {
+			b.Queue("", `
+				insert into message_deliveries (message_id, attempt, delivery, session_id, state, requested_by, urgency)
+				values ($1, 1, $2, '', 'pending', $3, $4)
+			`, messageID, delivery, author, input.Urgency)
+		}
 		return nil
 	}); err != nil {
 		return model.Message{}, nil, err
@@ -376,15 +394,18 @@ func (s *server) createStoredMessage(
 	}
 	s.publish(event)
 	if message.Target != nil {
-		// The delivery runs on past the request: a page that gives up on a send, or retries it
-		// under its key, never cuts off a frame in flight or strands its attempt pending. Nor does
-		// a deploy: http.Server.Shutdown waits for this handler, so the send finishes inside the
-		// drain, and the listener client's receipt timeout bounds it there.
+		// The send keeps the request's values (its transaction tracking) and drops its
+		// cancellation: a connection cut after the commit - a closed tab, a front door's pod
+		// roll - must not take the send with it, and nor must a deploy: http.Server.Shutdown
+		// waits for this handler, so the send finishes inside the drain, and the listener
+		// client's receipt timeout bounds it there.
 		sending := context.WithoutCancel(ctx)
-		// Bound to the message's first attempt: a repeat of a keyed send that found this message
-		// committed with no attempt yet may open it first (sendHeldMessageOn), and then this send
-		// sends nothing and answers with the attempt that repeat opened.
-		attempt, err := s.deliverMessageResuming(sending, message, delivery, input.Urgency, actor, &thread, 1)
+		// Bound to attempt 1, never the unbound send, so this request cannot open a second
+		// attempt beside one the delivery sweep or a person's Retry already took. Another sender
+		// owning attempt 1 - a repeat of a keyed send that found this message committed
+		// (sendHeldMessageOn) among them - means the message's delivery is under way there: the
+		// message is stored, so it is answered with the attempts as that sender has left them.
+		attempt, err := s.deliverMessageResuming(sending, message, delivery, actor, &thread, 1)
 		switch {
 		case errors.Is(err, errAttemptNotPending):
 			deliveries, err := s.loadMessageDeliveries(sending, s.deps.Store.Pool, []string{message.ID})

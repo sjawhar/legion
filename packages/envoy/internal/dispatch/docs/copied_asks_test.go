@@ -248,6 +248,37 @@ func TestCopiedAskSourcesAreTheDocumentOwnersOwn(t *testing.T) {
 	}
 }
 
+// The copies of an ask are found by its block's opener as the rendering writes it
+// (pmdoc.TypedBlockIDAttribute), an id written `id="…"` included: a document of the same owner
+// whose latest version holds the block is a copy, and one holding another block is not.
+func TestTheCopiesOfAnAskAreFoundByItsBlockIDAsWritten(t *testing.T) {
+	service, _ := newTestService(t)
+	ask := func(id string) string {
+		return ":::ask{" + pmdoc.TypedBlockIDAttribute(id) + " urgency=\"med\" multiple=\"false\"}\nWhich region?\n:::\n"
+	}
+	for _, id := range []string{"plain", "a b", `a"b`, "100%_done"} {
+		t.Run(id, func(t *testing.T) {
+			source := createIssueDocument(t, service.store, 1, "Context\n\n"+ask(id))
+			copied := createIssueDocument(t, service.store, 1, "Copy\n\n"+ask(id))
+			createIssueDocument(t, service.store, 1, "Other\n\n"+ask(id+"-other"))
+			ctx := context.Background()
+			tx, err := service.store.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			defer tx.Rollback(ctx)
+			issue := "DOC-1"
+			found, err := copiesOf(ctx, tx, documentAsks{artifactID: source, owner: artifactOwner{IssueKey: &issue}, asks: []model.Ask{{BlockID: &id}}})
+			if err != nil {
+				t.Fatalf("copiesOf: %v", err)
+			}
+			if !slices.Equal(found, []string{copied}) {
+				t.Fatalf("copies of the ask under %q = %v, want only %s", id, found, copied)
+			}
+		})
+	}
+}
+
 // openAsksUnder is the documents holding an open ask under blockID, in the test's own database.
 func openAsksUnder(t *testing.T, service *Service, blockID string) []string {
 	t.Helper()

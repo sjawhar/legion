@@ -95,12 +95,13 @@ func IndexBlocks(
 	markdown string,
 	blocks []model.ArtifactBlock,
 	located []text.Located,
+	pointers []Pointer,
 ) ([]Target, error) {
 	index, err := ReadBlockIndex(ctx, tx, artifactID)
 	if err != nil {
 		return nil, err
 	}
-	indexing := PlanBlocks(index, artifactID, version, versionAt, markdown, blocks, located)
+	indexing := PlanBlocks(index, artifactID, version, versionAt, markdown, blocks, located, pointers)
 	cited, err := indexing.Cited(ctx, tx)
 	if err != nil {
 		return nil, err

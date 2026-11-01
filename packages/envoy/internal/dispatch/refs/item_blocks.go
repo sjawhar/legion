@@ -316,20 +316,22 @@ func PlanItemIndex(
 	// The links the body drops, in the order the index listed them, then those it adds, in the
 	// order the insert writes them: the targets the delete and the insert move.
 	indexing.pairs = itemBlockPairs(next, ids, located)
-	written := make(map[blockPair]struct{}, len(indexing.pairs))
+	// An item's links carry no block types, so a pair is its key (blockPairKey) and no link is
+	// kept while its types change, as a document's typed block attribute can be.
+	written := make(map[blockPairKey]struct{}, len(indexing.pairs))
 	for _, pair := range indexing.pairs {
-		written[pair] = struct{}{}
+		written[pair.key()] = struct{}{}
 	}
-	stillHeld := make(map[blockPair]struct{}, len(index.held))
+	stillHeld := make(map[blockPairKey]struct{}, len(index.held))
 	for _, link := range index.held {
-		pair := blockPair{blockID: link.blockID, kind: link.kind, target: link.target}
+		pair := blockPairKey{blockID: link.blockID, kind: link.kind, target: link.target}
 		stillHeld[pair] = struct{}{}
 		if _, still := written[pair]; !still {
 			indexing.moved = append(indexing.moved, pair.target)
 		}
 	}
 	for _, pair := range indexing.pairs {
-		if _, already := stillHeld[pair]; !already {
+		if _, already := stillHeld[pair.key()]; !already {
 			indexing.moved = append(indexing.moved, pair.target)
 		}
 	}
@@ -606,7 +608,7 @@ func itemBlockPairs(next []itemblocks.Block, ids []string, located []text.Locate
 	for index, block := range next {
 		nodes[index] = model.ArtifactBlock{ID: ids[index], From: block.From, To: block.To}
 	}
-	return blockPairs(nodes, located)
+	return blockPairs(nodes, located, nil)
 }
 
 // queueBlockRefs queues the reconciliation of the item's block mentions with the links its blocks

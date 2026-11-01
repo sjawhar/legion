@@ -77,13 +77,20 @@ func (r *Runtime) treeSandboxes(ctx context.Context, tree string) ([]*unstructur
 // runtime's shape is not among them: it is its pod's own, and goes when the delete takes the pod.
 // A conflict is returned as it is.
 func (r *Runtime) deleteSandbox(ctx context.Context, object *unstructured.Unstructured) error {
+	s, err := decodeSandbox(object)
+	if err != nil {
+		return err
+	}
+	if err := r.guardSessionVolumeReap(ctx, s); err != nil {
+		return err
+	}
 	name, uid, version := object.GetName(), object.GetUID(), object.GetResourceVersion()
 	policy := metav1.DeletePropagationForeground
 	options := metav1.DeleteOptions{
 		PropagationPolicy: &policy,
 		Preconditions:     &metav1.Preconditions{UID: &uid, ResourceVersion: &version},
 	}
-	err := r.sandboxClient().Delete(ctx, name, options)
+	err = r.sandboxClient().Delete(ctx, name, options)
 	if err != nil && !apierrors.IsNotFound(err) {
 		if apierrors.IsConflict(err) {
 			return err

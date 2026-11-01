@@ -32,6 +32,7 @@ import (
 	"golang.org/x/sync/semaphore"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
@@ -117,7 +118,11 @@ type AppContextOptions struct {
 	App           *auth.AppConfig
 	GitHubAPIBase string
 	OIDC          api.ServiceTokenVerifier
-	AgentStream   agentstream.Source
+	// BrokerTokens decides a caller presenting an access token the secrets broker issued, under
+	// the DPoP scheme; nil where no broker is configured. cmd/dispatch builds it
+	// (brokerTokenVerifier). See api.DepsInput.
+	BrokerTokens *brokertoken.Verifier
+	AgentStream  agentstream.Source
 	// Lifetime is the process context the API's background work runs on, which New passes to
 	// api.Register as its lifetime; required, since api.Register refuses a nil one.
 	Lifetime context.Context
@@ -129,6 +134,9 @@ type AppContextOptions struct {
 	// files in Postgres. See api.DepsInput.
 	Files            files.Store
 	TestHooksEnabled bool
+	// RouteRosterTTL replaces how long a stored listener answer serves issue reads; zero keeps the
+	// server's five seconds. See api.Deps.RouteRosterTTL.
+	RouteRosterTTL time.Duration
 	// ListenerRosterUncached is for end-to-end test processes only (cmd/dispatch:
 	// DISPATCH_TEST_ROSTER_UNCACHED); see api.DepsInput.
 	ListenerRosterUncached bool
@@ -178,11 +186,13 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		App:                    opts.App,
 		GitHubAPIBase:          opts.GitHubAPIBase,
 		OIDC:                   opts.OIDC,
+		BrokerTokens:           opts.BrokerTokens,
 		AgentStream:            opts.AgentStream,
 		AgentSecretsURL:        opts.AgentSecretsURL,
 		AgentSecretsTokenFile:  opts.AgentSecretsTokenFile,
 		Files:                  opts.Files,
 		TestHooksEnabled:       opts.TestHooksEnabled,
+		RouteRosterTTL:         opts.RouteRosterTTL,
 		ListenerRosterUncached: opts.ListenerRosterUncached,
 		DashboardEntry:         opts.DashboardEntry,
 	})
@@ -252,7 +262,8 @@ type router struct {
 // work (api.Background): its Wait returns once every keyed write's handler and every delivery a
 // request left running past its answer has settled, and the delivery hub, every live socket and
 // their subscriptions, and the event stream relay have ended after the process lifetime is
-// cancelled; its ResumeDeliveries is the delivery sweep's pass the maintenance loop runs.
+// cancelled; its ResumeDeliveries is the delivery sweep's pass the maintenance loop runs
+// (api.RunMaintenanceSweep).
 func New(ctx *AppContext) (http.Handler, api.Background) {
 	r := &router{
 		ctx:          ctx,
