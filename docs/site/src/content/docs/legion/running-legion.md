@@ -422,7 +422,7 @@ What each part is for:
   the worker has nothing to do again: its turn ended, or the task it was given went to a phase its
   issue has since left and was dropped. A daemon restart begins the wait again for every idle
   worker it adopts, so a restart near the deadline keeps that worker's process a whole wait
-  longer. The loader refuses a value below the worker's own end-of-turn reminder
+  longer. The loader refuses a value that is not more than the worker's own end-of-turn reminder
   (`LEGION_STALL_WAITING_MS`, 900 s by default), since a worker that replied `WAITING` on an open
   phase holds its only wake in the process the suspension would take. `0` keeps every idle worker
   running.

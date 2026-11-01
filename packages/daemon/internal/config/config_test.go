@@ -160,12 +160,16 @@ func TestLoadTakesZeroAsTheIdleSuspendTurnedOff(t *testing.T) {
 	}
 }
 
-// The idle suspend is refused below the worker's own end-of-turn reminder: a phase worker that
-// replied WAITING on an open phase is woken by that reminder inside its own process, which the
-// suspension would take, leaving the phase with nothing to wake it. The reminder's length is the
-// daemon's own LEGION_STALL_WAITING_MS, which it passes to every worker it starts, so the floor
-// moves with it, and a deployment that turns the idle suspend off (0) is not judged against it.
-func TestLoadRefusesAnIdleSuspendBelowTheWaitingReminder(t *testing.T) {
+// The idle suspend is refused at or below the worker's own end-of-turn reminder: a phase worker
+// that replied WAITING on an open phase is woken by that reminder inside its own process, which
+// the suspension would take, leaving the phase with nothing to wake it; equal deadlines are a
+// race, so the suspend must be the longer of the two. The reminder's length is the daemon's own
+// LEGION_STALL_WAITING_MS, which it passes to every worker it starts, so the floor moves with it,
+// and a deployment that turns the idle suspend off (0) is not judged against it.
+func TestLoadRefusesAnIdleSuspendUnderTheWaitingReminder(t *testing.T) {
+	waiting := func(ms string) func(string) string {
+		return func(k string) string { return map[string]string{"LEGION_STALL_WAITING_MS": ms}[k] }
+	}
 	for _, c := range []struct {
 		name    string
 		seconds string
@@ -173,10 +177,14 @@ func TestLoadRefusesAnIdleSuspendBelowTheWaitingReminder(t *testing.T) {
 		want    string
 	}{
 		{name: "below the default reminder", seconds: "899", env: noEnv,
-			want: "worker_idle_suspend_seconds must be at least 900"},
-		{name: "below the daemon's own reminder", seconds: "1200",
-			env:  func(k string) string { return map[string]string{"LEGION_STALL_WAITING_MS": "1800000"}[k] },
-			want: "worker_idle_suspend_seconds must be at least 1800"},
+			want: "worker_idle_suspend_seconds must be more than 900"},
+		{name: "equal to the default reminder", seconds: "900", env: noEnv,
+			want: "worker_idle_suspend_seconds must be more than 900"},
+		{name: "below the daemon's own reminder", seconds: "1200", env: waiting("1800000"),
+			want: "worker_idle_suspend_seconds must be more than 1800"},
+		{name: "a reminder the worker would fall back from leaves the default floor",
+			seconds: "899", env: waiting("-1"),
+			want: "worker_idle_suspend_seconds must be more than 900"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := Load(writeConfigFile(t, minimalFile+"worker_idle_suspend_seconds: "+c.seconds+"\n"), c.env)
@@ -187,15 +195,33 @@ func TestLoadRefusesAnIdleSuspendBelowTheWaitingReminder(t *testing.T) {
 	}
 }
 
-// A reminder the deployment shortened lowers the floor with it, so an idle suspend above it loads.
-func TestLoadTakesAnIdleSuspendAboveAShortenedWaitingReminder(t *testing.T) {
-	env := func(k string) string { return map[string]string{"LEGION_STALL_WAITING_MS": "60000"}[k] }
-	cfg, err := Load(writeConfigFile(t, minimalFile+"worker_idle_suspend_seconds: 120\n"), env)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+// The floor is judged against the value the worker will really run on, read as the worker reads
+// it (stall-limits.ts's integerSetting): a reminder the deployment shortened lowers the floor
+// with it, an exponent form is the number the worker's Number() makes of it, and a value the
+// worker falls back from leaves the plugin's own default, which 1800 clears.
+func TestLoadTakesAnIdleSuspendOverTheWorkersOwnWaitingReminder(t *testing.T) {
+	waiting := func(ms string) func(string) string {
+		return func(k string) string { return map[string]string{"LEGION_STALL_WAITING_MS": ms}[k] }
 	}
-	if cfg.WorkerIdleSuspend != 120*time.Second {
-		t.Errorf("WorkerIdleSuspend = %s, want 2m0s", cfg.WorkerIdleSuspend)
+	for _, c := range []struct {
+		name    string
+		seconds string
+		env     func(string) string
+		want    time.Duration
+	}{
+		{name: "a shortened reminder", seconds: "120", env: waiting("60000"), want: 120 * time.Second},
+		{name: "an exponent form the worker reads", seconds: "120", env: waiting("6e4"), want: 120 * time.Second},
+		{name: "a value the worker falls back from", seconds: "1800", env: waiting("-1"), want: 1800 * time.Second},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg, err := Load(writeConfigFile(t, minimalFile+"worker_idle_suspend_seconds: "+c.seconds+"\n"), c.env)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.WorkerIdleSuspend != c.want {
+				t.Errorf("WorkerIdleSuspend = %s, want %s", cfg.WorkerIdleSuspend, c.want)
+			}
+		})
 	}
 }
 
@@ -225,7 +251,7 @@ worker_boot_timeout_seconds: 90
 worker_boot_registration_deadline_intervals: 4
 worker_rpc_timeout_seconds: 7
 worker_stop_timeout_seconds: 11
-worker_idle_suspend_seconds: 900
+worker_idle_suspend_seconds: 1200
 tree_stop_timeout_seconds: 61
 slow_command_timeout_seconds: 301
 probe_interval_seconds: 15
@@ -261,7 +287,7 @@ nats_nkey_seed_file: secrets/legion-pane.nk
 	want.WorkerBootRegistrationDeadlineIntervals = 4
 	want.WorkerRPCTimeout = 7 * time.Second
 	want.WorkerStopTimeout = 11 * time.Second
-	want.WorkerIdleSuspend = 900 * time.Second
+	want.WorkerIdleSuspend = 1200 * time.Second
 	want.TreeStopTimeout = 61 * time.Second
 	want.SlowCommandTimeout = 301 * time.Second
 	want.ProbeInterval = 15 * time.Second

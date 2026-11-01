@@ -998,12 +998,8 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	// stallLimitVariables), so it is read from the same place here; a worker told nothing runs on
 	// the plugin's own default.
 	if cfg.WorkerIdleSuspend > 0 {
-		waiting, err := stallWaiting(env)
-		if err != nil {
-			return Config{}, err
-		}
-		if cfg.WorkerIdleSuspend < waiting {
-			return Config{}, fmt.Errorf("worker_idle_suspend_seconds must be at least %d: a worker that replied WAITING on an open phase is reminded by its own process after %s (LEGION_STALL_WAITING_MS), and a shorter idle suspend would take that process first",
+		if waiting := stallWaiting(env); cfg.WorkerIdleSuspend <= waiting {
+			return Config{}, fmt.Errorf("worker_idle_suspend_seconds must be more than %d: a worker that replied WAITING on an open phase is reminded by its own process after %s (LEGION_STALL_WAITING_MS), and an idle suspend that is not longer than that could take the process holding the reminder first",
 				int(waiting/time.Second), waiting)
 		}
 	}
@@ -1016,18 +1012,20 @@ const defaultStallWaitingMs = 900_000
 
 // stallWaiting is how long a WAITING reply buys a worker before its own process reminds it again:
 // the daemon's LEGION_STALL_WAITING_MS, which it passes to every worker it starts, else the
-// plugin's default. A value the plugin would refuse (not an integer of 0 or more) is refused here
-// rather than silently floored, since the whole deployment's idle suspend is judged against it.
-func stallWaiting(env func(string) string) (time.Duration, error) {
+// plugin's default. It reads the variable exactly as the worker does (stall-limits.ts's
+// integerSetting, whose Number() takes a decimal and an exponent form alike, and which falls back
+// to the default on anything that is not an integer of 0 or more), so the floor is judged against
+// the value the worker will really run on and no configuration the worker accepts is refused here.
+func stallWaiting(env func(string) string) time.Duration {
 	raw := strings.TrimSpace(env("LEGION_STALL_WAITING_MS"))
-	if raw == "" {
-		return defaultStallWaitingMs * time.Millisecond, nil
+	ms := float64(defaultStallWaitingMs)
+	if raw != "" {
+		read, err := strconv.ParseFloat(raw, 64)
+		if err == nil && read >= 0 && read == math.Trunc(read) {
+			ms = read
+		}
 	}
-	ms, err := strconv.Atoi(raw)
-	if err != nil || ms < 0 {
-		return 0, errors.New("LEGION_STALL_WAITING_MS must be an integer of 0 or more")
-	}
-	return time.Duration(ms) * time.Millisecond, nil
+	return time.Duration(ms) * time.Millisecond
 }
 
 // resolveControllerLaunch settles `controller`: the operator's launch unless the file names the
