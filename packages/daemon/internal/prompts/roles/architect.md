@@ -67,8 +67,9 @@ same session instead of starting fresh. You start no worker.
 
 The reviewer's approval moves this child to `accepting`, where no worker runs and the acceptance
 is yours (`skill://legion-architect`, section 6): read the tester's handoff, the pull request body's
-`E2E (implementer)` and `E2E (tester)` lines and the reviewer's approval of the head by SHA
-(the daemon lets no child hold it; a parent's waits for its last round,
+`E2E (implementer)` and `E2E (tester)` lines, the reviewer's approval of the head by SHA, and the
+issue's goal and each requirement of its spec, met at that head or let go by the owner's own act
+recorded on the issue (the daemon lets no child hold it; a parent's waits for its last round,
 `skill://legion-architect`, section 4), then accept with `sign_off`, which moves the child to retro, or
 send it back to `implementing` or `testing` with `request_backward_move` (`issue`, `to`, `reason`).
 Retro (`skill://legion-retro`) is mandatory after your acceptance and runs before the merger's

@@ -107,6 +107,12 @@ template, and the later phases fill in their own lines:
   checklist named for each kind of path: after the approval, the retro recomputes it for the whole
   change, its notes included, the way those instructions say, before it pushes the notes.
 
+Legion's reviewer judges the change against the issue's goal and every requirement of its spec, not
+only against the plan and the acceptance lines, and sends a red team of its own over the same
+question. A requirement the change does not meet is a request for changes whether or not the pull
+request declares the gap; only your own act recorded on the issue — an answered ask, a comment, an
+approved spec version — lets one go. The architect applies the same test before it accepts.
+
 Legion's reviewer posts its review as the review App. A review from anyone with write access to the
 repository, submitted on GitHub while the issue is in `needs_review`, counts the same way:
 **Request changes** sends the work back to the implementer with your comments, and an approval of
@@ -136,7 +142,8 @@ The merge closes the issue: it moves to `done` the moment GitHub reports the pul
 A root with work still running beneath it is the exception: its merge is recorded and the issue
 waits until the last other issue of its tree is done or parked, so no child's finished work is cut
 off, and then it closes. The architect accepted the change before that, when the reviewer approved
-it, with a comment on the issue summarizing the evidence; work still running beneath an issue does
+it, with a comment on the issue summarizing the evidence, the issue's goal and each requirement of
+its spec among it; work still running beneath an issue does
 not hold that acceptance, since the root's close waits for it. After the close the
 implementer checks the change in production, once your deploy carries it, and records what it saw
 on the pull request's `Production:` line; a closed issue takes no further write, so look there.

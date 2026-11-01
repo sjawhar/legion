@@ -18,8 +18,10 @@ missing instruction.
 
 ## Accepting
 
-Sign off an issue with no children once its evidence holds; a parent only after its last round
-(below), because before it the approved head does not carry its children's merges.
+Sign off an issue with no children once its evidence holds for the issue's goal and every
+requirement of its spec, none of them unmet without the owner's own record on the issue; a parent
+only after its last round (below), because before it the approved head does not carry its
+children's merges.
 
 ```text
 dispatch comment --issue LEGION-40 --body-file - <<'EOF'
@@ -59,9 +61,9 @@ merge comes last: a child that waits for it waits forever, so work another child
 first-wave child of its own. While the approved head does not carry those merges, or the tester's
 evidence of a criterion in another repository is older than the close of a child it needs, leave
 the issue in `accepting` until each of those children has closed (`child-closed`) or been parked
-for good (`child-status`). Move a parked child's criterion to other work first; never downgrade
-it. Then,
-in one turn:
+for good (`child-status`). Move a parked child's criterion to the root's own pull request or to a
+released, open child first; never downgrade it. A root's requirement stays the root's and is
+pending until this round, where the root's head must meet it. Then, in one turn:
 
 1. `envoy_publish` to the tester's role topic: "The next round of <KEY> is its last round: a full
    test round of every acceptance criterion, not the forward-merge re-check." The backward move's

@@ -57,14 +57,14 @@ Your `sign_off` starts retro; never `envoy_publish` to the implementer to start 
 
 ## 6. Acceptance and the merge
 
-The reviewer's `phase-finished` with an `APPROVED` review puts the issue in `accepting`, where no worker runs. Against every acceptance line of the spec and the plan, read:
+The reviewer's `phase-finished` with an `APPROVED` review puts the issue in `accepting`, where no worker runs. Against the issue's goal, every requirement of its spec and every acceptance line of the spec and the plan, read:
 
 - the tester's handoff, `.legion/<issue>/test.json` at the approved head;
 - the pull request body's `E2E (implementer)` and `E2E (tester)` lines;
 - the reviewer's approval of that head by SHA (`gh api --paginate repos/<o>/<r>/pulls/<n>/reviews`);
 - each claim the reviewer's prose commits to, checked against the code at that head and command output, never against the finding it ruled on or its own verdict: no other agent has read that prose.
 
-Accept only when each acceptance line of the issue's own pull request has passing evidence at the approved head and no criterion left the tree; on a parent, that head is section 4's last round. A finding ask on the issue holds the acceptance until it is resolved or carries the controller's reply (`skill://legion-architect/references/acceptance.md`). Post that evidence as a `dispatch comment`, then `legion({ op: "sign_off", issue: "<KEY>" })`.
+Accept only when the change meets the issue's goal and every requirement of its spec, each with passing evidence at the approved head, and no criterion left the tree; on a parent, that head is section 4's last round. A requirement the change does not meet stops the sign-off whether or not the pull request declares it, unless the owner recorded on the issue, before now, that this issue will not do it; the reviewer's `Goal check:` block is your input, not your proof. A finding ask on the issue holds the acceptance until it is resolved or carries the controller's reply (`skill://legion-architect/references/acceptance.md`). Post that evidence as a `dispatch comment`, then `legion({ op: "sign_off", issue: "<KEY>" })`.
 
 - `sign_off` works only in `accepting` (`SIGNOFF_OUTSIDE_ACCEPTING`). The daemon lets no child hold it, so you hold a parent's yourself until its last round (section 4).
 - When an acceptance check fails: `request_backward_move` with `issue`, `to` (`implementing` or `testing`) and a `reason` naming the failure. It counts a review round.

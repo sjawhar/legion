@@ -115,7 +115,10 @@ it, and any other change to the head voids it.
 A reviewer's phase ends with its completion, not with its review. Every round writes a handoff
 and takes this order: read CI as above; write, commit and push the handoff; submit the review of
 the head that push made, by its SHA; then complete. A red at the code is a `REQUEST_CHANGES`
-naming the check, never an approval. A request for changes does not wait, since it stands
+naming the check, never an approval. An unmet goal, or one unmet requirement with no act of the
+owner letting it go, is a `REQUEST_CHANGES` that names it, in the same way. A requirement an open
+child of the tree carries is pending until the parent's last round, which is a full round for you,
+named by the forward-merge comment's `parent's last round: full test round`. A request for changes does not wait, since it stands
 whatever CI says and the issue leaves reviewing with it. The approval waits on nothing at a
 handoff-only commit either: it ends the round whatever CI says there, since the round reads no CI
 verdict, and a red the daemon reads later — at that commit or any above it — is the code's red
@@ -279,12 +282,18 @@ reviewing until you finish.
     wrote the record: the PR body's `Production:` line,
     `<what was checked in production, how, what was observed> — merge commit <sha>; woken by <event>`,
     and one pull-request comment carrying the Legion footer. A staging pass is not this, since a
-    staging gate does not run every resource production does.
+    staging gate does not run every resource production does. `pass` covers each requirement of
+    the issue that only the deploy can show too — read them from the spec version that bound the
+    review and the plan's named observations — each driven as the requirement names it and named
+    in the record with what was observed; observing something else is never that requirement
+    observed.
   - `pending`, when production does not carry the merge yet (a shared profile still holding the
-    previous release, a daemon still running the previous commit, a deploy nobody has run): the
-    summary names what is missing, and the `Production:` line stays at
+    previous release, a daemon still running the previous commit, a deploy nobody has run), or
+    when the observation a requirement names has not happened yet (no person has opened the page,
+    for example): the summary names what is missing, and the `Production:` line stays at
     `pending deploy of <merge sha>`.
-  - `fail`, for a defect: file no issue, and take the path
+  - `fail`, for a requirement observed as not met, for one still unobserved at the last look, and
+    for a defect: file no issue, and take the path
     `skill://legion-worker/references/findings.md` gives it. A defect with a clear fix goes to the
     controller topic, with its evidence comment on the controller's report issue. A defect that
     needs a decision is a `dispatch ask` on the report issue, and you publish its reference to the

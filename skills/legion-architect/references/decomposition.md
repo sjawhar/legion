@@ -42,10 +42,11 @@ EOF
   child list, each child's title and whole spec. Its mandate: *"You did not write this list. Argue
   that each child should not exist. Name every child that is a to-do, a fix found in review, a
   proof of the root's acceptance, or a part of the architect's own work, and say where it folds:
-  the root's pull request or an open child's."* A child survives only when it cannot ride in the
-  root's pull request or an open child's: its code is in a repository no open pull request of this
-  tree is in, or it is its own deploy: it must be applied on its own before other work of the tree
-  can build on it.
+  the root's pull request or an open child's. Then name every requirement of the root that neither
+  the root's own pull request nor a child of this list carries."* A child survives only when it
+  cannot ride in the root's pull request or an open child's: its code is in a repository no open
+  pull request of this tree is in, or it is its own deploy: it must be applied on its own before
+  other work of the tree can build on it.
   A repeated change — the same edit per program, directory or wave of this tree's own work —
   survives as one child, never one per instance, and a deletion of what this tree replaced rides
   in the pull request of the last change it waits on, never a child of its own: a wave is an order

@@ -152,15 +152,18 @@ decision kept, unless the planner brings evidence the human did not weigh that w
 (such as a measurement showing the settled choice cannot meet the Acceptance); then a decision
 block names the decision and that evidence. A plan never overturns a settled decision on its own.
 
+An act of the owner after the approval binds from that act, with no new version and no new
+approval: an answer or comment of theirs asking for work in this issue adds a requirement, one
+saying this issue will not do a requirement removes it, and the later act governs. Each role
+reads these acts from the issue's events itself; nobody copies them into the spec or the plan.
+
 A design change that leaves the Summary, Acceptance, scope and settled decisions intact (a
 planner's measurement that finds a better way to build the same outcome) goes in the plan (the
 issue's `plan.md` document and `.legion/<issue>/plan.json`), never into the approved spec, even
-where the spec's text describes the older design; the reviewer reads the plan beside the spec.
-
-When a planner's `phase-finished` names a departure from the spec's design, compare it with the
-approved spec. If the Summary, the Acceptance, the scope and every settled decision are unchanged,
-the plan is the record and the tree carries on; otherwise change the root spec and request
-approval again.
+where the spec's text describes the older design; the reviewer reads the plan beside the spec. So
+when a planner's `phase-finished` names a departure, compare it with the approved spec: if those
+four are unchanged, the plan is the record and the tree carries on; otherwise change the root spec
+and request approval again.
 
 Later waves and re-scoping open children toward the same Acceptance need no spec edit and no new
 approval. A child issue's spec is never gated.
