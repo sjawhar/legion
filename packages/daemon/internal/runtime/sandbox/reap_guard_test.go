@@ -68,13 +68,42 @@ func TestReplacementRefusesToReapAVolumeWithALegacySession(t *testing.T) {
 	if err == nil {
 		t.Fatal("replacement succeeded, want it to refuse reaping the legacy session volume")
 	}
-	for _, want := range []string{string(rootToken), "ses_unimported", IssueClaimName(workerToken), "legion sessions import", "legion claims forget-session"} {
+	for _, want := range []string{string(rootToken), "ses_unimported", IssueClaimName(workerToken),
+		"run legion sessions import first", "then run legion claims forget-session"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("replacement refusal %q does not name %q", err, want)
 		}
 	}
 	if s := g.sandbox(SandboxName(workerToken)); s == nil || s.UID != "uid-sandbox-superseded" {
 		t.Fatalf("Sandbox after refused replacement = %+v, want the legacy Sandbox kept", s)
+	}
+}
+
+// Forgetting a legacy session is the explicit acknowledgement that lets its
+// volume reap. Importing it first preserves its contents in the session table;
+// the runtime needs only the cleared durable claim to proceed.
+func TestReplacementReapsAfterALegacySessionIsForgotten(t *testing.T) {
+	store := &claimsForReap{
+		fakeStore: newFakeStore(),
+		claims: []supervise.Claim{{
+			Token: rootToken, Project: testProject, Tree: testTree, Issue: testTree,
+			Session: "ses_imported", SessionFile: "/sessions/ses_imported.jsonl",
+		}},
+	}
+	g := supersededIssue(t, withOptions(func(o *Options) { o.Store = store }))
+	g.launcher(workerToken)
+	if _, err := g.r.Spawn(g.ctx, workerSpec(t)); err == nil {
+		t.Fatal("replacement succeeded before the session was forgotten")
+	}
+
+	// This is the persisted claim transition RequestForgetSession makes after
+	// the operator has imported the session and stopped the claim.
+	store.claims[0].Session, store.claims[0].SessionFile = "", ""
+	if _, err := g.r.Spawn(g.ctx, workerSpec(t)); err != nil {
+		t.Fatalf("replacement after the session was forgotten: %v", err)
+	}
+	if s := g.sandbox(SandboxName(workerToken)); s == nil || s.UID == "uid-sandbox-superseded" {
+		t.Fatalf("Sandbox after the session was forgotten = %+v, want its replacement", s)
 	}
 }
 

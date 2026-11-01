@@ -1042,7 +1042,7 @@ Those rights are the ones `postgres` needs too: Oh My Pi creates and migrates `o
 
 ### Starting fresh when a session is lost or wedged
 
-Use this recovery when a stopped claim's session was lost with its volume, or when its agent is wedged after a provider refusal.
+Use this recovery when a stopped claim's session was lost with its volume, after importing its file session before its volume can be reaped, or when its agent is wedged after a provider refusal.
 Read the claim's recorded session from `legion claims list`, then run:
 
 ```sh
@@ -1067,8 +1067,10 @@ Before it reaps a Sandbox-owned volume, including a disk-shape replacement, an i
 Under `postgres`, the providers volume's `OMP_SESSION_SQL_DSN` item proves the Sandbox stored sessions in a database; under `cloudsql-iam`, the launcher command's `--session-instance`, `--session-database`, and `--session-user` flags do.
 Either marker permits the reap.
 Without a database marker, the daemon refuses when a matching claim records a session; it has no providers-Secret read permission or session-store connection, so it cannot inspect the session database.
-Its refusal names the claim, session, and volume; import the session with the procedure below and retry the reap, or, when the session is lost, stop the claim and [start it fresh](#starting-fresh-when-a-session-is-lost-or-wedged).
-An issue close keeps the recorded session id as this evidence but clears its resume path, so a later admission starts fresh after the volume is gone.
+Its refusal names the claim, session, and volume.
+To keep the session's contents, run the import procedure below first, then [clear the stopped claim's recorded session](#starting-fresh-when-a-session-is-lost-or-wedged).
+Only clearing that record permits the reap.
+The next generation starts fresh, while the imported session row remains in the database.
 
 On `legion-v10.0.0`, a deployment whose sessions are files on its tree volumes copies each one into the table once, while those volumes still exist, after the last write to any of them and before any agent writes the same session under SQL storage.
 The order below is what keeps a copy current: nothing checks, at a resume, that a row still matches the file it was copied from, so a session written after its copy would resume from the older row without a word.

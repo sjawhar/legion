@@ -683,8 +683,9 @@ Closing the terminal leaves the project without one, and the daemon logs
    The providers volume's `OMP_SESSION_SQL_DSN` item under `postgres`, or the launcher's three
    Cloud SQL session flags under `cloudsql-iam`, proves that the Sandbox used the session database
    and permits the reap. Without either marker, it refuses when the matching claim records a
-   session; import it, or stop the claim and use `legion claims forget-session` when the session is
-   lost. An issue whose
+   session. To keep that session's contents, import it first, then run `legion claims
+   forget-session` on the stopped claim with its recorded session id; only that clears the reap
+   guard. Its next generation starts fresh, while the imported row remains in the database. An issue whose
    Sandbox still owns the volume of the earlier shape keeps it until its next launch, which deletes
    that Sandbox and the volume with it and starts the issue on a pod-owned disk, so stop each issue
    with its work pushed and start it again rather than letting a relaunch choose the moment. The

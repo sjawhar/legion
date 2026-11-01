@@ -26,7 +26,7 @@ func (r *Runtime) guardSessionVolumeReap(ctx context.Context, s *sandbox) error 
 		if !matches(c) || c.Session == "" {
 			continue
 		}
-		return fmt.Errorf("refuse to reap volume %s: claim %s records file-store session %s; run legion sessions import before retrying, or run legion claims forget-session --claim %s --session %s after the claim has no live process",
+		return fmt.Errorf("refuse to reap volume %s: claim %s records file-store session %s; to keep its contents, run legion sessions import first, then run legion claims forget-session --claim %s --session %s after the claim has no live process",
 			issueVolume+"-"+s.Name, c.Token, c.Session, c.Token, c.Session)
 	}
 	return nil
