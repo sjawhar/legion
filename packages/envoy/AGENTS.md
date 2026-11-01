@@ -381,7 +381,7 @@ A compacted `doc_updates`, and any backup of it taken later, therefore holds no 
 text deleted before a version captured it is gone (the operator's decision, LEGION-496).
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and after;
-the one measure the room's update observer, `updateChangesMarkdown`, a transactional live write in `applyLive` and settlement's own closure, `closureChangedMarkdown`, all apply) - and settlement writes a version only when a content-class row lies past the latest version's `doc_update_version` cursor and the settled document renders differently from that version.
+the one measure the room's update observer, `updateChangesMarkdown`, a transactional live write in `applyLive`, and a settlement's or the block-id backfill's repair, `repairClass`, all apply) - and settlement writes a version only when a content-class row lies past the latest version's `doc_update_version` cursor and the settled document renders differently from that version.
 It stays one measure where a rendering is reused rather than made again:
 a write takes the rendering of its fork before the operation from the room's replica or from its own previous operation, and the observer takes a published write's own rendering, only where each is the rendering of the very state being measured (`warmFork`, `applyLive`, `renderedReplica.changedBy`), since rendering is deterministic over one state;
 a margin write (`applyMargin`) renders nothing before it writes.
@@ -508,16 +508,16 @@ each text's items walked directly rather than through ygo's `ToDelta`, the tree 
 A document outside the schema stores no rendering and keeps the tree/error behavior each read had before.
 Websocket admission still uses `loadTree`, because it needs the raw stored update to preload the room.
 
-A read of a write transaction's fork goes through one reader (`readFork`, `treeOfUnshared`):
+A read of a write transaction's fork goes through one reader (`readForkTree`, `treeOfUnshared`):
 the fork has one reader at a time, the request goroutine that holds it, so `applyLive`'s reads before and after its write, `applyMargin`'s, `docTree`'s, `heldTree`'s and the version capture's each read it through `pmdoc.ReadUnshared`, which hands back a `pmdoc.ValidDocument`.
-`startTree` reads it through the same reader when `current` holds no tree, which is what `applyLive` leaves when the reader refuses the document (`treeOfUnshared`, `docs/mutation.go:1486-1494`).
+`startTree` reads it through the same reader when `current` holds no tree, which is what `applyLive` leaves when the reader refuses the document (`treeOfUnshared`, `docs/mutation.go:1518-1526`).
 `applyLive` and `applyMargin` render that value (`documentMarkdownValid`), which does not validate the tree again;
 `docTree`, `heldTree` and the version capture take its `Node()` and go on as they did, so the version capture's own render still validates.
-Three reads inside a write are not this reader: the unconditional edit's repair read, made when the fork's tree needs its block ids stamped (`editTree`, `treeOf`, `docs/mutation.go:1444`), goes through `pmdoc.Read`, while the conditional edit's repair read (`docs/mutation.go:1356`) and `rewriteLive`'s read inside its own transaction both go through `treeOfTransaction`, that is `pmdoc.ReadInTransaction` (`docs/tree.go:200-208`).
+Three reads inside a write are not this reader: the unconditional edit's repair read, made when the fork's tree needs its block ids stamped (`editTree`, `treeOf`, `docs/mutation.go:1476`), goes through `pmdoc.Read`, while the conditional edit's repair read (`docs/mutation.go:1388`) and `rewriteLive`'s read inside its own transaction both go through `treeOfTransaction`, that is `pmdoc.ReadInTransaction` (`docs/tree.go:200-208`).
 A document edit carries one validation through its whole batch (`batchTree`):
 the first step that needs a validated tree pays for it and the batch's own reads of that tree take it (`pmdoc.ValidDocument`'s `QuoteFinder`, `Splice`, `BlockIndexes`, `BlockBoundary`, `BlockRange`, `BlockDescendantIDs`, `DeleteBlock`, `DeleteTextblock`, `InsertTableRows`, `TokenJSON`), the blocks a write changed are found in one walk and read by every refusal that needs them (`matchedBlocks`), and the batch's verdict validates the tree it wrote once and hands it to `pmdoc.UpdateDocument`.
 Other pmdoc calls over that same tree take a plain `*pmdoc.Node` and validate it for themselves: `pmdoc.MoveBlock` (`docs/edits.go:1150`), `pmdoc.FindHeading` (`docs/edits.go:1357`), `pmdoc.DeleteTableRow` and `pmdoc.DeleteTableColumn` (`docs/edits.go:1118`, `:1128`), and `pmdoc.TableRowMarks` and `pmdoc.TableColumnMarks` (`docs/edits.go:705`, `:714`, `:852`, `:861`).
-A caller holding a plain tree validates it first (`pmdoc.ValidateDocument`) and reads it through the value that gives, and plain functions are still called outside the batch, for example where the accept path's advice asks whether deleting a block would leave its holder readable (`pmdoc.DeleteBlock`, `docs/accept.go:139`), where `checkEditPrecondition`'s token encodes a tree it holds as a `*pmdoc.Node` (`pmdoc.EncodeTokenJSON`, `docs/edits.go:209`), where an anchored mark or a block lookup finds its quote (`pmdoc.FindQuote`, `docs/marks.go:137`, `:203`), and where an upload re-anchors its rows (`pmdoc.NewQuoteFinder`, `docs/mutation.go:646`).
+A caller holding a plain tree validates it first (`pmdoc.ValidateDocument`) and reads it through the value that gives, and plain functions are still called outside the batch, for example where the accept path's advice asks whether deleting a block would leave its holder readable (`pmdoc.DeleteBlock`, `docs/accept.go:139`), where `checkEditPrecondition`'s token encodes a tree it holds as a `*pmdoc.Node` (`pmdoc.EncodeTokenJSON`, `docs/edits.go:209`), where an anchored mark or a block lookup finds its quote (`pmdoc.FindQuote`, `docs/marks.go:137`, `:203`), and where an upload re-anchors its rows (`pmdoc.NewQuoteFinder`, `docs/mutation.go:659`).
 A conditional edit encodes its tree once: the token `checkEditPrecondition` computed is the batch's own `before`, which is exact because a document token carries no block identity, so the stamp between them cannot change it.
 
 A read of a resident room outside a write never walks the live tree.
@@ -537,14 +537,18 @@ Inside a write transaction, `docTree` and a version's capture take the write's o
 `heldTree` still reads the fork and returns a tree its reader owns.
 
 A read takes up to three locks, in one order:
-the room's state lock; then the replica's, which a read only tries; then the live document's, for the copy's encode.
-A version's capture takes its authors under the state lock and releases it before it takes the room through `holdLive`, which keeps the replica's lock, when it reads the replica, until the capture has walked it:
-an author the update observer credits after that take is numbered past it and stays pending for the next version, whether or not the copy holds the edit (`captureLiveTextAndAuthors`, LEGION-503).
-The update observer's own turn with the replica (`renderedReplica.observe`) is the one exception to that order:
-it holds the replica's lock for its whole call (`lockForUpdate`, a blocking acquisition, unlike every other caller's), and the classification it runs for each update it drains (`observeAskBlocksForUpdate`, `creditContentChange`, `recordUpdateClass`) takes the state lock from inside it, nested the other way around (LEGION-503).
-This stays deadlock-free because every other acquisition of the replica's lock only tries it (`hold`, under `holdLive`/`readLive`) rather than blocking on it, and always after releasing the state lock first, never while holding it - so nothing can be waiting on the state lock while the observer waits for anyone else to release the replica's;
-only a Yjs transaction's own function holds a document's lock, and it takes neither of the others.
-So the caller of `readLive` or `holdLive` may hold the room's state lock, and must not hold the live document's lock - run inside a Yjs transaction on it - since the copy encodes under that lock.
+the room's state lock; then the replica's; then the live document's, for a copy's encode.
+A read of a resident room outside a write (`readLive`, through `holdLive`) only tries the replica's lock (`hold`), and its caller may hold the room's state lock.
+A version's capture, a settlement's read and a live write's fork read instead read the room at an exact commit position (`Service.readPoint`, `docs/flush.go`):
+an author the update observer credits after the capture's bound is numbered past it and stays pending for the next version, and every update through that position is stored before the version (`Ledger.flushThrough`).
+
+Three acquisitions block on the replica's lock (`lockForUpdate`) and classify each update they drain under it, which takes the room's state lock from inside it (`observeAskBlocksForUpdate`, `creditContentChange`, `queueUpdateClass`), nested the other way around:
+the update observer's own turn (`renderedReplica.observe`), the exact read (`renderedReplica.readPoint`), and the check that the room has committed since a read point (`renderedReplica.drainedSeq`), all in `docs/tree.go`.
+This stays deadlock-free because of one rule for all three:
+their callers hold no room state lock and run inside no Yjs transaction, and only a Yjs transaction's own function holds a document's lock, taking neither of the others.
+So nothing waits on the state lock while one of them waits for the replica's, and the encode `readPoint` runs under the live document's lock never meets a held state lock.
+Every other acquisition of the replica's lock only tries it, and never while holding the live document's lock:
+the caller of `readLive` or `holdLive` must not run inside a Yjs transaction on the document, since the copy encodes under that lock.
 A read that may load its room (a version's capture, `docTree`, `VerifyMark`'s subscription) takes what it reads inside the `Server.Apply` that loads and holds the room:
 a room looked up again with `GetDoc` once that Apply returned can have been evicted in between.
 
@@ -630,7 +634,7 @@ A close the service forces - a failed room's eviction, `Evict`, `Quiesce`, and t
 The close therefore keeps that state while anything holds it and forgets it when nothing does, as every other end of a room does (`releaseIfUnusedLocked`), so the browser, what the new room's load read - its issue's closed flag, its ask blocks, its latest edit source and the settlement it armed - and the new room's own credits and unstored updates stay where they were recorded, and so does what the closed room left for its own late callbacks to come back for (INFRA-352).
 Only a failed room's state has to go, since it carries the failure that its holders still read and no later access may (`handOverFailedRoomLocked`);
 a load refuses a failed room, so only a browser's connect can have reached it, and that browser is handed to the state registered in its place.
-A durable append of the state that went finishes on the state that counted it (`finishDurableAppend` takes the state `consumeUpdateClass` found the class on), so no count of it reaches that successor, where one below zero would hold it for good.
+A durable append of the state that went finishes on the state that counted it (`finishUpdateClass` takes the state `consumeUpdateClass` found the class on), so no count of it reaches that successor, where one below zero would hold it for good.
 
 Two `envoy-dispatch` processes do not share a live document session, and durable convergence does not depend on one:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored history is their union, so no edit is lost whichever process took it.
