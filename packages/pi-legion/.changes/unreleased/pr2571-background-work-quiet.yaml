@@ -1,0 +1,9 @@
+kind: Fixed
+body: |-
+    A worker whose turn ends while an Oh My Pi background job of its own is still running gets no
+    phase reminder: the pinned runtime holds `session_stop` back until its agent-owned async jobs
+    are idle, and the job's own result wakes the session into the next turn. The real-binary test
+    is what holds the pin to that.
+time: 2026-10-30T19:40:00Z
+custom:
+    Issue: pr2571

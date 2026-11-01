@@ -426,6 +426,16 @@ function renderLoaded(
 }
 
 /**
+ * The shared engine when a load has already resolved, and `undefined` until then: what a caller
+ * that must answer in this task parses with. It starts no load of its own - a caller that wants
+ * one awaits `warmMarkdownRenderer` first, as the change marks' caller does - and so is the
+ * synchronous half of `renderWithEngine` without its callback or its background load.
+ */
+export function loadedEngine(): MarkdownEngine | undefined {
+  return readyEngine;
+}
+
+/**
  * Renders `markdown` under the soft-break policy `softBreaks`, through the shared engine.
  *
  * A body of at most `markdownWorkerThreshold` characters is parsed on the page's own thread and
