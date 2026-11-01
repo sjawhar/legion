@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+    `legion-worker`'s tools reference says that `legion_test` is the pod's test server's superuser,
+    so a suite that needs an event trigger, `pg_read_all_stats`, a WAL sender or anything else a
+    test login has on CI runs in a pod as it does in CI. What bounds that role is the server and
+    not its privileges: the pod's own cluster, on loopback, holding test data only, and run in
+    mount, PID, IPC and user namespaces where no role's credentials are.
+time: 2026-11-01T06:00:00.000000000Z
+custom:
+    Issue: pr2613

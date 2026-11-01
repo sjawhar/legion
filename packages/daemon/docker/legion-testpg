@@ -13,20 +13,30 @@
 # path inside the role's namespace, so no role can edit postgresql.auto.conf and have the next start
 # load it into the launcher's namespace.
 #
-# The issue pod's launcher runs `ensure` at container start, as PID 1 of the roles container and
-# outside every role's PID namespace, and again every 15 s; a role never starts the server, it
-# finds it serving. `ensure` is idempotent, holds a lock over the work all the same, and tests the
-# DSN rather than the port, so a start that died with the postmaster up and its post-start steps
-# unfinished is carried the rest of the way by the tick that follows rather than reported served.
+# The issue pod's launcher runs `ensure` at container start and again every 15 s, inside mount,
+# PID, IPC and user namespaces of its own (`legion launcher testpg-init`, which is this server's
+# PID 1); a role never starts the server, it finds it serving. `ensure` is idempotent, holds a lock
+# over the work all the same, and tests the DSN rather than the port, so a start that died with the
+# postmaster up and its post-start steps unfinished is carried the rest of the way by the tick that
+# follows rather than reported served.
 #
-# initdb's superuser is the OS user (`id -un`, legion). The DSN names another role, created after
-# the server is up with LOGIN CREATEDB CREATEROLE NOSUPERUSER, because a superuser can run
-# `copy … to program '…'`, which runs as the server process — in the roles container's own
-# namespace, where every role's tokens live. CREATEROLE is there because this repository's own
-# suites create a login role and connect as it (packages/envoy/internal/broker/store/iam_test.go,
-# packages/envoy/internal/dispatch/store/census_test.go), and a test that passes in CI and fails in
-# the pod is what sends an agent to the deployment's sessions database; measured on 18, a CREATEROLE
-# non-superuser can neither make a superuser, nor grant itself one, nor grant pg_execute_server_program.
+# initdb's superuser is the OS user (`id -un`, legion), reachable on the admin socket alone. The
+# DSN names another role, created after the server is up with LOGIN CREATEDB CREATEROLE SUPERUSER
+# and owning the database the DSN names. It is a superuser because the suites that run here need
+# what a test login has on CI's Postgres and that does not reduce to a set of grants: on 18,
+# packages/envoy/internal/dispatch/store needs pg_read_all_stats, a WAL sender, CREATE on a
+# database's public schema, and `create event trigger`, which needs SUPERUSER with no grantable
+# role for it.
+#
+# What bounds the DSN's role is the server, not the role's privileges: the role can do anything on
+# this one cluster. The cluster is the pod's own, on the LEGION_TESTPG_DIR emptyDir, listening on
+# 127.0.0.1 alone, holding test data only, and named by a DSN the runtime sets and refuses from a
+# deployment's pod.env. The namespaces the launcher starts it in are what keeps `copy … to
+# program`, `copy … from '<path>'` and pg_read_file inside the server: in them every role's gh,
+# private, state and agent-secrets directories are behind an empty filesystem over the roles
+# directory, the data directory is bound back, and /proc lists this server's processes alone. In
+# the roles container's own namespace, where the postmaster used to run, those directories are
+# readable by the uid the postmaster runs as.
 set -eu
 
 name=legion-testpg
@@ -114,16 +124,22 @@ parse_dsn() {
 	esac
 }
 
-# serving: the DSN works — a server answers on the port it names and the role and the database it
-# names are there. This is what `ensure` reports and what start-locked tests. A port test is not
-# enough: start() has the postmaster up before it makes the role, `vector` in template1 and the
-# DSN's database, so any failure after that leaves a server answering the port with no usable DSN,
-# and a port test would call that served for the pod's whole life. -w never prompts for a password
-# (the DSN carries none and pg_hba trusts loopback, so a prompt would mean something is wrong, not
-# something to wait on) and PGCONNECT_TIMEOUT bounds the connect, so a half-open port costs one
-# tick and never holds the launcher.
+# serving: the DSN works — a server answers on the port it names, the role and the database it
+# names are there, and the role is this cluster's superuser. This is what `ensure` reports and
+# what start-locked tests. A port test is not enough: start() has the postmaster up before it makes
+# the role, `vector` in template1 and the DSN's database, so any failure after that leaves a server
+# answering the port with no usable DSN, and a port test would call that served for the pod's whole
+# life. The query reads the role's own rolsuper rather than `select 1` for the same reason, one
+# step further on: a cluster a version of this script before the superuser left on the pod's data
+# directory answers `select 1` forever, and nothing would ever raise the role, since `ensure`
+# returns on a server it finds serving and never reaches start(). Asking for rolsuper makes the
+# next 15 s tick run start() against that server and alter the role. -w never prompts for a
+# password (the DSN carries none and pg_hba trusts loopback, so a prompt would mean something is
+# wrong, not something to wait on) and PGCONNECT_TIMEOUT bounds the connect, so a half-open port
+# costs one tick and never holds the launcher.
 serving() {
-	PGCONNECT_TIMEOUT=5 psql -X -w -tAq "$LEGION_TEST_PG_DSN" -c 'select 1' > /dev/null 2>&1
+	[ "$(PGCONNECT_TIMEOUT=5 psql -X -w -tAq "$LEGION_TEST_PG_DSN" \
+		-c "select rolsuper from pg_roles where rolname = current_user" 2> /dev/null)" = t ]
 }
 
 # listening: a server on the port accepts connections. start() tests this rather than the DSN to
@@ -175,8 +191,9 @@ start() {
 			rm -rf "${data:?}"/* "${data:?}"/.[!.]* 2> /dev/null || true
 			# --locale-provider=icu with en-US sorts text the way CI's en_US.utf8 databases
 			# do: a suite whose ORDER BY output is a fixture would otherwise pass here and
-			# fail there on C collation. --username keeps the OS user as the superuser; the
-			# DSN's role is made below, with no superuser rights.
+			# fail there on C collation. --username keeps the OS user as the cluster's own
+			# superuser, reachable on the admin socket alone; the DSN's role is made below,
+			# a second superuser that pg_hba.conf admits over loopback.
 			"$bin/initdb" --pgdata "$data" --username "$superuser" --auth-local=trust \
 				--auth-host=trust --encoding=UTF8 --locale-provider=icu --icu-locale=en-US \
 				--no-sync > "$log" 2>&1 ||
@@ -217,19 +234,27 @@ start() {
 		# under, which the kubelet evicts every role of the pod over: the daemon's own default
 		# is 80Gi on a 6Gi request (`defaultResources`), and a deployment that sets
 		# `runtime.kubernetes.resources.issue` names its own — one Autopilot deployment gives
-		# its issue pods 10Gi. Each setting is below its default: wal_level=minimal
-		# writes no WAL at all for a table built, copied into or rewritten in the transaction
-		# that made it, which is most of what a suite's fixture does (and it needs
-		# max_wal_senders=0, since no walsender can serve that level, and no replication slot
-		# can exist to pin segments); max_wal_size=512MB halves the checkpoint distance, and
+		# its issue pods 10Gi. max_wal_size=512MB halves the checkpoint distance, and
 		# with it the recycled segments a long run settles at; min_wal_size=64MB lets the floor
 		# fall to four segments between runs; and wal_keep_size=0 retains nothing for a replica
-		# this cluster will never have. Measured on 18: a database grown to 985 MB, updated
-		# across a third of its rows, VACUUM FULLed and dropped left the data directory at
-		# 1.1 GB with the defaults and at 425 MB with these.
+		# this cluster will never have.
+		# wal_level is replica, the default, and not minimal, which this script set until a
+		# suite needed a WAL sender: packages/envoy/internal/dispatch/store's
+		# TestCensusRefusesAWALSenderHoldingALockInATransaction opens a replication=database
+		# connection, which needs max_wal_senders above 0, and a server with max_wal_senders
+		# above 0 refuses to start on wal_level=minimal. max_wal_senders is 10, the default, so
+		# a package's parallel binaries do not queue on one. The cost is the WAL minimal
+		# skipped: measured on 18, a database grown to 985 MB, updated across a third of its
+		# rows, VACUUM FULLed and dropped left the data directory at 1.1 GB with these
+		# settings and at 425 MB with wal_level=minimal.
+		# These are postmaster options, so they reach a cluster only when this script launches
+		# its server. An `ensure` tick on a server that is already up does not restart it: a
+		# restart would end every connection a suite has open mid-test, which is worse than a
+		# pod whose WAL sender test fails until the pod is replaced. Every pod made after this
+		# change starts its own cluster on an empty emptyDir and gets them at once.
 		# shellcheck disable=SC2094 # pg_ctl writes $log through --log and this append; it reads none
 		"$bin/pg_ctl" --pgdata "$data" --log "$log" --wait --timeout 120 \
-			--options "-p $port -k $sockets -c listen_addresses=127.0.0.1 -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=100 -c shared_buffers=256MB -c huge_pages=off -c dynamic_shared_memory_type=mmap -c jit=off -c wal_level=minimal -c max_wal_senders=0 -c max_wal_size=512MB -c min_wal_size=64MB -c wal_keep_size=0" \
+			--options "-p $port -k $sockets -c listen_addresses=127.0.0.1 -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=100 -c shared_buffers=256MB -c huge_pages=off -c dynamic_shared_memory_type=mmap -c jit=off -c wal_level=replica -c max_wal_senders=10 -c max_wal_size=512MB -c min_wal_size=64MB -c wal_keep_size=0" \
 			start >> "$log" 2>&1 ||
 			die "pg_ctl start failed; $log holds its output"
 	fi
@@ -238,15 +263,28 @@ start() {
 	# `create extension if not exists vector` of its own is a no-op the DSN's role may run.
 	super -d template1 -c 'create extension if not exists vector' >> "$log" 2>&1 ||
 		die "create extension vector in template1 failed; $log holds its output"
-	# The DSN's role: it may log in, make databases and make roles, and it is no superuser, so
-	# nothing that holds the DSN can `copy … to program` as the server's own process. CREATEROLE
-	# is what lets a suite that creates its own login role run here as it does in CI; on 18 it
-	# cannot hand out SUPERUSER or a role it does not hold itself, such as
-	# pg_execute_server_program.
+	# The DSN's role is a SUPERUSER of this cluster, and owns the database the DSN names. A
+	# suite that runs here must be able to do what it does on CI's Postgres, where every login
+	# is a test login, and the privileges it needs do not reduce to a set of grants: measured on
+	# 18, packages/envoy/internal/dispatch/store needs pg_read_all_stats, a WAL sender,
+	# `create event trigger` — which needs SUPERUSER, with no grantable role for it — and CREATE
+	# on a database's public schema. Granting them one at a time found the next one each time.
+	# What bounds this is the server, not the role: it is the pod's own cluster, on an emptyDir
+	# the kubelet makes with the pod and deletes with it, listening on loopback alone, holding
+	# test data only, and the launcher runs this script — and so the postmaster and every psql
+	# below — inside mount, PID, IPC and user namespaces of its own (legion launcher testpg-init),
+	# where no role's credentials and no other process are reachable. Without those namespaces a
+	# superuser here could `copy … to program` as the postmaster's own process and read every
+	# role's tokens.
 	super -tA -d postgres -c "select 1 from pg_roles where rolname = '$user'" 2>> "$log" |
 		grep -q 1 ||
-		super -d postgres -c "create role $user login createdb createrole nosuperuser" >> "$log" 2>&1 ||
+		super -d postgres -c "create role $user login createdb createrole superuser" >> "$log" 2>&1 ||
 		die "create role $user failed; $log holds its output"
+	# The alter runs on every start, not only when the role is created, so a cluster a version of
+	# this script before the superuser left on the pod's data directory is carried the rest of the
+	# way by the next 15 s tick; altering a role that already has it is a no-op.
+	super -d postgres -c "alter role $user login createdb createrole superuser" >> "$log" 2>&1 ||
+		die "alter role $user failed; $log holds its output"
 	if [ "$database" != postgres ]; then
 		super -tA -d postgres -c "select 1 from pg_database where datname = '$database'" 2>> "$log" |
 			grep -q 1 ||

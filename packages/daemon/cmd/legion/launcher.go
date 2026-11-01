@@ -27,11 +27,14 @@ func (l *roleList) Set(value string) error {
 // runLauncher is PID 1 of an issue pod's one container, which serves every resident role, or of
 // the controller pod's one container, which serves its one role. It has no workflow policy: it
 // only authenticates to the daemon, once per role, and starts or stops that role's worker-shim
-// on daemon commands. Its own hidden subcommand, `role-init`, is what it runs as the init of a
-// role's namespaces; nothing else ever runs it.
+// on daemon commands. Its own hidden subcommands, `role-init` and `testpg-init`, are what it runs
+// as the init of a role's namespaces and of the pod's test database's; nothing else ever runs them.
 func runLauncher(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == launcher.RoleInitSubcommand {
 		return runRoleInit(ctx, args[1:], stdout, stderr)
+	}
+	if len(args) > 0 && args[0] == launcher.TestPGInitSubcommand {
+		return runTestPGInit(ctx, args[1:], stdout, stderr)
 	}
 	flags := newFlags("launcher", launcherUsage, stderr)
 	connect := flags.String("connect", "", "the daemon launcher stream: tcp://host:port")
@@ -127,6 +130,36 @@ func runRoleInit(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	}); err != nil {
 		fmt.Fprintln(stderr, err)
 		return launcher.RoleInitSetupFailedExit
+	}
+	return 0
+}
+
+const testPGInitUsage = "usage: legion launcher testpg-init --roles-dir <dir> [--home-mounts <dir>] --dsn <dsn> --ready-fd <n>"
+
+// runTestPGInit is `legion launcher testpg-init`, the launcher's second hidden subcommand: the
+// init of the pod's test PostgreSQL's own user, mount, PID and IPC namespaces, which the launcher
+// clones into them. It is never run by hand, and `legion launcher --help` does not offer it: run
+// outside those namespaces it refuses, since it would otherwise cover the launcher's own view of
+// every role's directories. It returns only when the launcher's stop ends it, and its exit ends
+// the namespaces and with them the postmaster. A failure before the first `ensure` exits
+// launcher.TestPGInitSetupFailedExit.
+func runTestPGInit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	flags := newFlags("launcher testpg-init", testPGInitUsage, stderr)
+	rolesDir := flags.String("roles-dir", "", "the container-level per-role root, whose testpg directory holds the cluster")
+	homeMounts := flags.String("home-mounts", launcher.RoleHomeMounts(), "where the container mounts every volume that belongs under the home")
+	dsn := flags.String("dsn", "", "the DSN the script must serve, which every role of the pod is told")
+	readyFD := flags.Int("ready-fd", 0, "the descriptor to report the first ensure on, by closing it")
+	if code, ok := parseFlags(flags, args); !ok {
+		if code == 0 {
+			return 0
+		}
+		return launcher.TestPGInitSetupFailedExit
+	}
+	if err := launcher.TestPGInit(ctx, launcher.TestPGInitConfig{
+		RolesDir: *rolesDir, HomeMounts: *homeMounts, DSN: *dsn, ReadyFD: *readyFD, Stdout: stdout, Stderr: stderr,
+	}); err != nil {
+		fmt.Fprintln(stderr, err)
+		return launcher.TestPGInitSetupFailedExit
 	}
 	return 0
 }

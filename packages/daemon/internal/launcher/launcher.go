@@ -112,7 +112,8 @@ func Run(ctx context.Context, cfg Config) error {
 		return managers[0].serveUntil(ctx, address)
 	}
 	// The pod's own test database, before any role starts: a role that starts at once finds the
-	// server serving its DSN (serveTestPG). Its ticker is waited on with the roles below, so Run
+	// server serving its DSN (serveTestPG waits for its first `ensure`). The init that keeps it
+	// running, and ticks from inside its own namespaces, is waited on with the roles below, so Run
 	// returns with nothing of the launcher's still running.
 	var testPG <-chan struct{}
 	if cfg.TestPostgres {

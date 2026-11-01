@@ -13,12 +13,17 @@ cites is in sjawhar/legion.
 - Give every Postgres variable a test reads `$LEGION_TEST_PG_DSN`, your pod's own server:
   `LEGION_TEST_PG_DSN`, `DISPATCH_TEST_DATABASE_URL` and `BROKER_TEST_DATABASE_URL`. Each makes
   and drops a database of its own per test, so your pod's roles can share the server.
-- Anything that migrates into the database its DSN names, rather than making one per test, needs
-  a database of your own, because a sibling role writing the same one collides with you: the
-  Dispatch browser suite's `DATABASE_URL`, which resets what it is given, and the stage scripts'
-  `LEGION_E2E_PG_DSN`, which a daemon's `postgres_dsn` becomes and migrates Legion's schema into.
-  Make one and point the variable at it:
-  `createdb -h 127.0.0.1 -p 5433 -U legion_test "e2e_$(date +%s)"`.
+- The database `$LEGION_TEST_PG_DSN` names is `legion_test`, which that role owns, so a test or a
+  migration that writes into the database the DSN names, rather than making one per test, works
+  there. Two roles of one pod that both migrate into it still write the same tables, so when a
+  sibling role may do the same, make a database of your own and point that variable at it:
+  `createdb -h 127.0.0.1 -p 5433 -U legion_test "e2e_$(date +%s)"`. The Dispatch browser suite's
+  `DATABASE_URL`, which resets what it is given, and the stage scripts' `LEGION_E2E_PG_DSN`, which
+  a daemon's `postgres_dsn` becomes, are the two that migrate rather than make one per test.
+- `legion_test` is that server's superuser, so a suite needing an event trigger, `pg_read_all_stats`,
+  a WAL sender or anything else a test login has on CI runs there as it does in CI. The server is
+  the pod's own, on loopback, holding test data only, and it runs in namespaces where no role's
+  credentials are: nothing you do in it reaches the pod. Never point that role at any other server.
 - The server is empty in every new pod and dies with it. Every database made from `template1`
   has pgvector.
 - `LEGION_TEST_PG_DSN` set and the connection refused: that is not yours to repair. Starting the
@@ -31,8 +36,9 @@ cites is in sjawhar/legion.
   is starting one and nothing will appear while you wait. With `legion-testpg` on `PATH`, start
   one yourself on the issue's volume: the directory it defaults to is a 1 MiB filesystem your
   role's own mounts cover, so `export LEGION_TESTPG_DIR=$XDG_DATA_HOME/testpg` first, then
-  `export LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable`
-  and `legion-testpg ensure`, which makes the cluster, the role and `vector` in `template1`. That
+  `export LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/legion_test?sslmode=disable`
+  and `legion-testpg ensure`, which makes the cluster, the role, the database it owns and `vector`
+  in `template1`. That
   server lives in your generation: it dies when your generation ends, which takes a sibling
   role's connections and databases with it mid-test, and the next `ensure` of either role finds
   the same cluster on disk and serves it again. With no
