@@ -2,18 +2,18 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-558",
-  "completed": "2026-10-31T23:53:00Z",
-  "round": 7,
-  "scope": "Narrowed by the INFRA-63 architect: round 6's three items, any merge of main, and ci-ok plus pr-title at the code head.",
-  "reviewedHead": "a3bc62e0efa471ef5ed676734b98c7f70915727c",
-  "codeHead": "7a037ba4f521",
+  "completed": "2026-11-01T01:44:00Z",
+  "round": 8,
+  "scope": "Narrowed by the INFRA-63 architect: only the forward merge b7709821 (main's deletion taken, this PR's wording in a pr2461 fragment, nothing else changed), then approval once ci-ok and pr-title are green at the code head.",
+  "reviewedHead": "6b6509ed7490bb8aa77d01c50f11db2fddd23905",
+  "codeHead": "b770982192e5",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
   "minor": 0,
-  "ci": "Required set (ruleset): ci-ok, pr-title. CI run 41251696819 at code head 7a037ba4 is queued, and pr-title is queued (three runs cancelled). The compare 7a037ba4...a3bc62e0 changes only .legion/INFRA-558/. GitHub reports the PR CONFLICTING with main daf71f53.",
-  "items": "All three closed at 338cfeaf. (1) The slow-page test checks that revokeUnless returned the slow page's admission and that the socket ends within revokedEndBound (4 s) of the revoke, the revoke itself within 2.5 s of the connect, well inside ygo's 10 s write and 30 s handshake deadlines. Negative control run in a scratch worktree with admission.cancel(errSchemaRevoked) removed: FAIL 'ended with read tcp ...: i/o timeout' (12.3 s); with the cancel, PASS (11.5 s). (2) The contracts comment points to README 'Two builds at once' as the one statement. (3) The nil guard is gone, and every fixture carries a real cancel (admittedRequest, admitSocket). Merge 7a037ba4: the resolution keeps both sides (ProofDocument deps drop blockSchema per the compiled manifest, pending-sync.test.ts keeps both imports, go.mod on sami.2).",
+  "merge": "b7709821 (main at daf71f53), read with --remerge-diff: takes main's deletion of INFRA-767-ygo-awareness-echo.yaml and INFRA-767-ygo-v1-54-1-sami-1.yaml, and carries the OnTokenAuthContext wording into pr2461-Added-20261028-123937.yaml. It names sjawhar/ygo v1.54.1-sami.3, which main and the branch both pin, so go.mod is the same as main's. Comparing this PR's diff against main before (efed4e4d..7a037ba4) and after (daf71f53..b7709821), .legion/ left out, the only differences are those two fragments and that pr2461 fragment. Nothing else changed.",
+  "ci": "Required set (ruleset): ci-ok, pr-title. At code head b7709821, pr-title passed (run 41257556683), but CI run 41257504555 has been queued since 00:36Z and ci-ok has no check-run. At 01:43Z GitHub reports the PR CONFLICTING again, with main f93dd689 (#2541) on packages/envoy/cmd/dispatch/README.md, packages/envoy/cmd/dispatch/AGENTS.md and packages/envoy/internal/dispatch/api/routes_table.go. The compare b7709821...6b6509ed changes only .legion/INFRA-558/.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/.changes/unreleased/INFRA-767-ygo-awareness-echo.yaml", "description": "The PR is CONFLICTING with main daf71f53: main's fold (6eceb88f) deleted INFRA-767-ygo-awareness-echo.yaml and INFRA-767-ygo-v1-54-1-sami-1.yaml into CHANGELOG.md, while this branch rewrote them for the sami.2 pin. GitHub runs no pull_request workflow on a conflicting PR, and the merge queue takes no conflicting PR. Required: a forward merge of main (no rebase) that takes main's deletion and carries this PR's wording about sami.2 and OnTokenAuthContext into a pr2461 fragment; never edit CHANGELOG.md. Push the code without the skip-checks trailer so ci-ok runs at the code head."}
+    {"severity": "important", "file": "PR #2461 (merge)", "description": "CONFLICTING with main f93dd689 (#2541, broker-issued tokens) on cmd/dispatch/README.md, cmd/dispatch/AGENTS.md and api/routes_table.go. ci-ok has not run at b7709821 and cannot be read as green for a head that does not merge. Required: one forward merge of main that keeps both sides (the routes table keeps #2541's routes and this PR's test-hook route), pushed without the skip-checks trailer, so ci-ok runs at the merged head."}
   ]
 }
