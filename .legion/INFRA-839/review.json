@@ -2,25 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-839",
-  "completed": "2026-10-31T17:45:00Z",
-  "round": 4,
-  "reviewedCodeHead": "5593037ddf8314876e8130cf794e5a4ca07d3dbb",
-  "diffBase": "3666db3184d3 (legion/INFRA-594, the base commit the branch merged)",
+  "completed": "2026-11-01T03:00:00Z",
+  "round": 5,
+  "reviewedCodeHead": "e19f161c6ca891b3b8f54d5334029ec8a3d6c4a8",
+  "diffBase": "15e39ed3b8ba (legion/INFRA-594, merged at e19f161c)",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 3,
-  "ci": "Run 41212135030 (CI, pull_request, 5593037ddf83) completed failure at 17:32Z. ci-ok failed because envoy-go-race failed. Its race step reports WARNING: DATA RACE and --- FAIL: TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim/role_delivery (race detected during execution of test): the claim's handover goroutine reads the session registry (role_keep.go:493 -> role_holder.go:229 -> session/registry.go:529) while the test swaps it (api_test.go:999). envoy-go, pr-title, lint, typecheck, test and every other job succeeded. The base legion/INFRA-594 requires no check. As the architect asked, I pushed nothing until this run finished.",
-  "round3": "All three round-3 blocking findings and all eight minors are fixed. I answered each round-3 thread.",
+  "important": 4,
+  "minor": 4,
+  "ci": "Run 41254878038 (CI, pull_request, e19f161c6ca8) has two failed jobs. envoy-go-race: --- FAIL TestRoleHolderStateIsNamedByEachRoutesAnswer/publish, where api_test.go:712 wants holder_lapsed and gets unclaimed. claude-envoy: its 'Typecheck Claude Envoy plugin' step fails with TS2345 at tests/envoy-role-reassertion.test.ts(191,45) and (240,45), because clientInstanceID is missing from ChannelSessionOptions. envoy-go and pr-title succeeded. As the architect asked, I pushed nothing until the run's failures were read.",
+  "round4": "Both round-4 blocking findings and the three minors are fixed in efa9c9be. The merge e19f161c resolves its six conflicts correctly, which I checked against both parents: claude-envoy/AGENTS.md takes the base's more precise sentence; envoy/AGENTS.md, api.go and roles.md keep both sides; envoy.ts takes the base's deletion of reassertRoleNow, where this branch had changed only a comment. Deleting publisher_role_keep_test.go is sound: its only assertion was on a field that no longer exists, and TestADispatchRoleRoutedEventToAnUnheldRoleReachesTheNextHolder and TestTheRoleLaneKeepsARawRolePublishForTheRolesNextHolder fail if the lane stops keeping raw role publishes.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 5593037d",
-    "codeQuality": "Verdict: CHANGES at 5593037d"
+    "deepReview": "Verdict: APPROVE at e19f161c",
+    "codeQuality": "Verdict: CHANGES at e19f161c"
   },
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:493", "description": "envoy-go-race is red at 5593037ddf83. Every handover pass resolves the role's holder before it reads the kept lane, so every POST /v1/roles/set starts a goroutine that does a claim read and a session read even for a role nothing was ever kept for. TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim swaps the session registry after its claim, and the race detector fails it. Fix: open each pass with the lane-head read that keptRoleCopiesLeft does (one helper shared with walkKeptRole's opening), and resolve the holder only when copies are left. A claim of a role with no kept lane then costs one stream read again."},
-    {"severity": "important", "file": "packages/envoy/cmd/listener/api.go:754", "description": "Envelope.Keep has no producer now that the outbox reversal is done. Only api.go:754 writes it, copying the request flag onto the envelope, and the envelope then carries keep:false onto every forward to a holder (confirmed.go:399) and every publish answer, which means every daemon notice and phase reminder. The contract (envelope.ts, envelope.schema.json, generated.go) and two fragments advertise a raw-lane opt-out that nothing uses. Delete the field and check the request's flag in the route's give-up (one flag, on the request)."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:624", "description": "keptRoleCopiesLeft repeats walkKeptRole's opening reads, error texts and comparison. Use one helper (also the fix for the red lane)."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:523", "description": "The decision after each walk is split between roleKeepDrainAgain and the loop's re-branch on result.end, with the progress test written twice. Write it as one switch."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:608", "description": "The sweep logs 'found a lane no handover was draining' at Info and starts a goroutine before it knows the role has a live holder. A role with no holder keeps its lane ahead of the cursor for 72 h, so every listener logs and works on it every 5 minutes. Check the holder first, or log only when a walk runs."}
+    {"severity": "important", "file": "packages/claude-envoy/tests/envoy-role-reassertion.test.ts:191", "description": "The claude-envoy typecheck is red. The base made ChannelSessionOptions.clientInstanceID required, and this branch's two new startChannelSession calls (:191, :240) do not pass it. The merge did not fix them, because they are outside any conflict marker."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/api_test.go:702", "description": "envoy-go-race is red: TestRoleHolderStateIsNamedByEachRoutesAnswer/publish. The first publish keeps a copy, and keepForNextHolder starts a background handover. The test then claims the role and deletes the holder's session, and the handover's resolveRoleHolder releases the lapsed claim before the second publish, which reads unclaimed rather than holder_lapsed. The test must wait for the keep's handover to end (or start the second case on a fresh role) before it claims. Grep the other rigs that keep and then claim on the same role for the same race."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:476", "description": "A failed first lane-head read ends a claim's handover at Debug level and returns nil. In round 4 that same read failure was retried with backoff and logged at Error. Now only the 5-minute sweep recovers it, and nothing is logged above Debug. Only a failed first holder resolution is the keep's no-holder case. Retry a failed lane read with backoff from the first pass, or at least log it at Warn."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/role_keep.go:613", "description": "The lane head is read up to three times per handover: once by the sweep, once at the top of each pass, and again in walkKeptRole. The sweep also does both stream reads before its claim check, for every unclaimed-role lane, every 5 minutes, on every listener, for 72 h. role_keep.go is now 1001 lines. Pass the pass's head into the walk, check the claim before the sweep reads anything, and fold the single-caller helpers writeRoleKeepCursor and readRoleKeepCursor into their methods."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:362", "description": "This comment still names the deleted roleKeepDrainAgain."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/role_keep.go:590", "description": "The sweep doc says the cached claim costs no round trip, but for an unclaimed role CachedRoleHolder misses and reads the bucket (kv.go:1145-1152)."},
+    {"severity": "minor", "file": "packages/claude-envoy/tests/legion-phase-hook.test.ts:379", "description": "The comment says the notice asks for no keep:false. The shared phase reminder does send keep:false (phase-reminder.ts:305)."},
+    {"severity": "minor", "file": "PR body", "description": "The Size line counted against the old base. I fixed it in the body myself: +5495/-348 against 15e39ed3b8ba."}
   ]
 }
