@@ -1227,8 +1227,12 @@ func mpTail(text string, n int) string {
 // durable's deliver subject in the moment after its only subscriber's connection went: the
 // server counts such a push undone, below zero, and the message leaves the pending list at its
 // ack wait with no redelivery (the same behaviour receive.go's hand-back keeps a subscriber for,
-// nats-server 2.10.29 consumer.go didNotDeliver, decDeliveryCount and hasMaxDeliveries). The
-// durable's own count of redeliveries rises by one for each message it loses that way.
+// consumer.go didNotDeliver, decDeliveryCount and hasMaxDeliveries). That loss is nats-server
+// v2.10.29 through v2.14.0, the versions this module built its test server from until v2.15.2;
+// v2.15.0 removed the underflowed count rather than leaving it behind, so the server these rows
+// run on redelivers such a message (internal/bus/backlog_cut_test.go holds it to that). The
+// durable's own count of redeliveries rises by one for each message a server that still has the
+// underflow loses that way.
 //
 // It is printed when the row fails, and only then: a row that passes is as quiet as before.
 

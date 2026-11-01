@@ -11,7 +11,7 @@ import (
 )
 
 // publishRefusal reads the subject of the server's refusal of a publish: `Permissions Violation
-// for Publish to "<subject>"` (nats-server v2.10.29 client.go:4947-4951), which it reports on the
+// for Publish to "<subject>"` (nats-server v2.15.2 client.go:5916-5922), which it reports on the
 // connection and never in the publish's own answer. The server writes the subject with %q, as it
 // writes the names of a refused subscription (subscriptionRefusal), so it is matched as a whole
 // Go-quoted string, escapes included, and unquoted before it is recorded: a subject holding a

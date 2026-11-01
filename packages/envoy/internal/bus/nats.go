@@ -886,13 +886,15 @@ func (c *Client) subscriptionOK(transport subscriptionTransport) bool {
 // subscriptionRefusal reads the server's refusal of a subscription: the subject, the queue group
 // when there is one, and the sid when the refusal is a configuration reload's revocation of a
 // subscription it had accepted. A refusal of a subscription the client sent reads `Permissions
-// Violation for Subscription to "<subject>" using queue "<queue>"` (nats-server v2.10.29
-// client.go:4959-4964); a revocation reads `Permissions Violation for Subscription to "<subject>"
-// (sid "<sid>")` (client.go:5300) and names no queue group whether the subscription had one or not.
+// Violation for Subscription to "<subject>" using queue "<queue>"` (nats-server v2.15.2
+// client.go:5925-5936); a revocation reads `Permissions Violation for Subscription to "<subject>"
+// (sid "<sid>")`, and names the queue group before the sid when the subscription had one
+// (client.go:6277-6283; v2.10.29, which this module built its test server from before v2.15.2,
+// named no queue group in a revocation, client.go:5300).
 // The server writes each name with %q, so each is matched as a whole Go-quoted string, escapes
 // included, and unquoted before it is compared: a name holding a double quote or a backslash
 // reaches the text escaped. nats.go's own reading (permissionsRe and permissionsQueueRe, nats.go
-// v1.50.0 nats.go:3795-3833) keeps the escapes, so it compares unequal to such a name.
+// v1.53.1 nats.go:4032-4056) keeps the escapes, so it compares unequal to such a name.
 var subscriptionRefusal = regexp.MustCompile(`Subscription to ("(?:[^"\\]|\\.)*")(?: using queue ("(?:[^"\\]|\\.)*"))?(?: \(sid ("(?:[^"\\]|\\.)*")\))?`)
 
 // onAsyncError is wired as the connection's async error callback, after the error is logged. A
@@ -908,10 +910,11 @@ var subscriptionRefusal = regexp.MustCompile(`Subscription to ("(?:[^"\\]|\\.)*"
 // answered its own denial (window.acknowledged).
 //
 // A refusal of a subscription the client sent names its subject and, when it has one, its queue
-// group, and both must be the core registration's. A reload's revocation names the subject and the
-// sid but never the queue group, so its subject alone identifies the core registration: the client
-// holds one core subscription, and nats.go itself leaves that refusal unrecorded on a queue
-// subscription and the subscription valid, though the server has removed it.
+// group, and both must be the core registration's. A reload's revocation names the sid too, and
+// is read the same way: on a server that names the queue group with it (v2.15.0 and later) by
+// subject and queue group, and on one that does not by its subject alone, which identifies the
+// core registration since the client holds one core subscription. nats.go leaves the subscription
+// valid either way, though the server has removed it.
 //
 // The mark cannot outlive the refusal: nats.go queues the reconnect callback, which clears it
 // (countConnectionEvent, on the callback goroutine, before the event's own work is queued),

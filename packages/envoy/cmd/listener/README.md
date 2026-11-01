@@ -454,6 +454,19 @@ listener"). These concern the pods of one machine id:
 | `ENVOY_POD_HOSTNAME` | The host name stamped as `accepted_host` and compared against it. Default: the host name. Two processes on one host set it to stand for two pods (the tests). |
 | `ENVOY_NATS_REPLICAS` | Replicas of every bucket the listener creates, `envoy_listener` included. |
 
+## The NATS server the listener needs
+
+The listener needs nats-server v2.15.0 or later. Before that release the server loses a message
+for good when it pushes one to a deliver subject whose only subscriber is going away: the failed
+delivery subtracts one from a delivery count the first delivery never raised, the count
+underflows, and at the ack wait the server reads it as past the durable's `MaxDeliver`, drops the
+message and redelivers it to nobody, with no advisory. A consumer with no `MaxDeliver` is
+unaffected, and the listener's durable sets one (`consumerMaxDeliver`, `durable.go`), so an active
+pod that is stopped or cut while the durable has a backlog loses what the server was pushing to
+it. The production hubs run v2.15.1, and the Go tests' in-process server is v2.15.2
+(`packages/envoy/go.mod`); `TestEveryMessageOfABacklogSurvivesTheCutOfItsOnlySubscriber`
+(`internal/bus/backlog_cut_test.go`) holds the server to it.
+
 ## Recreating the durable
 
 Recreating `listener-<machine id>` (to drop a setting NATS cannot change in place, as `subscribe

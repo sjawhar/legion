@@ -3019,6 +3019,11 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   nats-server can leave one of two replica changes proposed at once unanswered (seen with v2.10.29), and every nats-server before v2.12.5 (every v2.10 and v2.11 release included) can refuse the later of two updates of one stream as overlapping an existing stream, the stream itself (`nats: subjects overlap with an existing stream`), when the other update lands while the server checks this one (nats-server commit `cb1afd68d014` skips the stream by name from v2.12.5).
   Neither answer stops a start or fails a keeper pass while the stream, read again, holds what the program asked for, and the refused update is sent again while it does not, up to five sends (`updateStream`, `internal/bus/stream.go`), so a stream another stream really does overlap is still refused, after the fifth send, and a refusal of a setting, such as more copies than the cluster has servers, still fails the listener's start naming that setting, while Dispatch's server, which reconciles in the background, keeps serving with the refusal logged.
 
+- The listener needs nats-server v2.15.0 or later, and the production hubs run v2.15.1.
+  Before v2.15.0 a message the server pushes to a deliver subject whose only subscriber is going away is lost for good: the failed delivery subtracts one from a delivery count the first delivery never raised, the count underflows, and at the ack wait the server reads it as past the durable's `MaxDeliver`, drops the message and redelivers it to nobody, with no advisory (`didNotDeliver`, `decDeliveryCount` and `hasMaxDeliveries`, nats-server `server/consumer.go`).
+  A consumer with no `MaxDeliver` is unaffected, and the listener's durable sets one (`consumerMaxDeliver`), so an active pod stopped or cut while its durable has a backlog loses what the server was pushing to it.
+  The Go tests' in-process server is v2.15.2 (`packages/envoy/go.mod`), and `TestEveryMessageOfABacklogSurvivesTheCutOfItsOnlySubscriber` (`internal/bus/backlog_cut_test.go`) holds it to that: a backlog of 600 messages, the only subscriber cut mid-push, and every message delivered to the subscriber that binds next.
+
 - Cross-machine route correctness depends on valid session registry entries with non-null ports.
 
 ## Listener API
