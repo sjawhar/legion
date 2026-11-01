@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-961",
+  "previousHandoff": "",
+  "proof": [
+    {
+      "criterion": "Twenty runs of TestClusteredNatsHubCluster pass under the natslive tag, and in every run the killed server led both the LIVE_R3 stream and the JetStream meta group (spec, 'Acceptance, as corrected by the plan', first bullet).",
+      "surface": "The live test as the envoy-infra-go lane runs it: three real nats-server v2.15.1 processes started on the chart's rendered nats.conf and auth.conf, in the INFRA-961 issue pod with TMPDIR=/legion/scratch/tmp.",
+      "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -tags natslive -run '^TestClusteredNatsHubCluster$' -count=20 -timeout 180m -v ./gcp/ > /legion/scratch/tmp/infra961-after2.log 2>&1; grep -c -- '--- PASS: TestClusteredNatsHubCluster' /legion/scratch/tmp/infra961-after2.log; grep -c -- '--- FAIL' /legion/scratch/tmp/infra961-after2.log; grep -c 'led both LIVE_R3 and the JetStream meta group' /legion/scratch/tmp/infra961-after2.log",
+      "observed": "ok github.com/sjawhar/envoy/infra/gcp 675.290s; 20 '--- PASS: TestClusteredNatsHubCluster', 0 '--- FAIL', 20 lines naming 'led both LIVE_R3 and the JetStream meta group'. In 10 of the 20 runs the new JetStream meta leader was not the new stream leader, and the meta leader arrived 0.001-2.574 s after the stream leader (stream election 4.214-8.426 s after the kill, meta election 4.371-8.572 s), which is the window the old code read in.",
+      "headSha": "4d68055230dde87baa32e573d46d4b6ba47e3e8a",
+      "negativeControl": "In a throwaway jj change abandoned after the run, a second survivor is killed after the kill so the lone server has no quorum, and js.GetMsg is polled on it: 'NEGATIVE CONTROL: with envoy-nats-1 and envoy-nats-0 killed, envoy-nats-2 names the JetStream meta leader \"\" (<nil>) and js.GetMsg(LIVE_R3, 1) was refused 8.411s after the second kill: code 503, err_code 10008, description \"JetStream system temporarily unavailable\"'. That is the refusal the committed wait avoids. The log is /legion/scratch/tmp/infra961-control-a.log; jj --ignore-working-copy diff --stat reports 0 files changed afterwards."
+    },
+    {
+      "criterion": "The control: the leaderless JetStream meta window the fix covers is proven to happen on every run, not assumed (spec, 'Acceptance, as corrected by the plan', second bullet).",
+      "surface": "The same live test. The assertion is require.Greater over the file's own s.count idiom on each survivor's nats-server output, counting 'Self is new JetStream cluster metadata leader' before the kill and after the survivors agree on the new meta leader.",
+      "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -tags natslive -run '^TestClusteredNatsHubCluster$' -count=20 -timeout 180m -v ./gcp/ (the same run; the assertion fails the test when the line did not appear, so 20 passes are 20 proofs)",
+      "observed": "20 of 20 runs passed that assertion. Each run's (b) lines also record that both survivors still named the killed server as meta leader 3-5 ms after the kill, for example 'envoy-nats-1 names the JetStream meta leader \"envoy-nats-0\", read 3ms after the kill' with envoy-nats-0 the server just killed.",
+      "headSha": "4d68055230dde87baa32e573d46d4b6ba47e3e8a",
+      "negativeControl": "The wait-removed loop the spec asks for: the same 20 runs with the meta wait and its control assertion removed and the forced co-located kill kept passed 20 of 20 (ok github.com/sjawhar/envoy/infra/gcp 665.173s, /legion/scratch/tmp/infra961-control-b.log). The spec says to quote it whatever it shows: the refused read needs the meta election to outlast the stream election plus the publisher's remaining run, which did not happen in this pod, so the deterministic probe above is what proves the refusal exists."
+    },
+    {
+      "criterion": "The committed test keeps one run per job and the envoy-infra-go lane's static checks pass at the head (spec, 'Acceptance, as corrected by the plan', fourth bullet; CI decides the lane itself).",
+      "surface": "The lane's own commands from packages/envoy/infra, as .github/workflows/ci.yaml lines 2469-2488 run them.",
+      "command": "cd packages/envoy/infra && gofmt -l . && go vet -tags pulumilive,natslive ./... && TMPDIR=/legion/scratch/tmp go test -tags natslive -timeout 30m ./core/ ./seed/ ./gcp/",
+      "observed": "gofmt -l . printed nothing; go vet -tags pulumilive,natslive ./... passed; in the lane's live command TestClusteredNatsHubCluster passed again (a 21st green run) while four tests this change does not touch failed for pod-environment gaps alone: gcp's TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd and TestARefusedDataDiskIsNeverFormattedOnALaterBoot report 'these tests need mkfs.ext4 on this machine', and core's TestDispatchPermissionsOnRealServers and seed's TestAGeneratedSeedReachesNATS need a Docker daemon the pod does not run ('Cannot connect to the Docker daemon', 'rootless Docker not found').",
+      "headSha": "4d68055230dde87baa32e573d46d4b6ba47e3e8a",
+      "negativeControl": "The build refuses the change when the test file is wrong: a first draft of the negative control named a variable the test already holds and go test answered 'gcp/clusteredhub_live_test.go:1175:10: no new variables on left side of :=' with FAIL [build failed], so these commands do compile and run the file under test rather than skipping it. Without -tags natslive the file is not compiled at all and the run reports 'no tests to run'."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/infra/gcp/clusteredhub_live_test.go: hubServer.metaCluster() and agreedMetaLeader() read the JetStream meta group from /jsz; phase (a) uses the first in place of its inline struct; stepDownStreamLeader() sends $JS.API.STREAM.LEADER.STEPDOWN with placement.preferred; phase (b) gains the forceCoLocated loop (called before the publisher starts and again before the kill), the require.Equal that the killed server leads both groups, the per-survivor /jsz log right after the kill, the bounded wait for both survivors to name one live meta leader, the require.Greater control on the new meta leader's own log line, and an extended (b) SIGKILL line."
+  ],
+  "trickyParts": [
+    "The forcing loop re-issues the stepdown on every pass rather than polling: nothing guarantees the preferred peer wins the election its stepdown starts, and a 400 with err_code 10005 ('preferred server ... is already leader') is not a failure of its own, so the next pass's comparison decides.",
+    "The forcing runs before the publisher starts, not between the 200-acknowledgement wait and the kill: require.Less(t, atKill, int64(messages)) needs the publisher still running at the kill, and only about 5 s of publishing is left when that wait returns. The second call before the kill is bounded at 3 s for the same reason; its ordinary cost is one pass, about 10 ms.",
+    "The post-kill wait reads both survivors, not the one that leads the stream: jsMsgGetRequest (nats-server v2.15.1, server/jetstream_api.go:3922-3925) answers 503/10008 on every server that receives the request, before it decides which server leads the stream.",
+    "The control is the new meta leader's own log line, counted with the file's s.count idiom, not a /jsz sample of an empty leader: that state is too short to poll at within's 100 ms, and a raft group reaches a new leader only through a term that has none, so the line proves the state without sampling it.",
+    "The negative control's first draft called js.GetMsg once as soon as the lone survivor's /jsz named no leader and got 'context deadline exceeded': jsMsgGetRequest returns without answering while js.isLeaderless() is still false and this server does not lead the stream. Polling until the refusal arrives gives the 503/10008 after 8.411 s."
+  ],
+  "deviations": [
+    "The plan's T3 asked for require.Greater on byName[newMeta].count(selfElected). The simplify pass replaced the unguarded map lookup with the server itself (var newMeta *hubServer, resolved inside the wait), so a name that is no server of the cluster fails the bounded wait by name instead of panicking inside count. The assertion is the same log count.",
+    "The plan's T2 had forceCoLocated return (meta, took); took had no caller, so the closure returns meta alone and keeps the duration as a local for its own log line.",
+    "The 15 s stream-leader wait's duration is now taken as time.Since(killedAt) rather than the within call's own duration, so both elections in the (b) SIGKILL line are measured from the kill. The wait, its bound and its comment are unchanged.",
+    "The plan's four recorded departures from the spec stand and the architect accepted all four (Envoy message of 2026-11-01T19:26:15Z): the restated acceptance command with -tags natslive, the log-line control in place of a sampled empty meta leader, the two negative controls in place of 'the forced case fails', and phase (b) no longer exercising a kill of a stream leader that is not the meta leader."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "The wait-removed loop passed 20 of 20 in this pod, where the planner's scratch harness met the refusal in 1 of 6. The reads start after the publisher's remaining roughly 5 s, so the meta election has to be slower than the stream election by more than that to be caught; the measured spread here was 0.001-2.574 s. The failing CI run had a 7.212 s stream election, so its meta election was slower again. This is why the deterministic two-kill probe is the control that proves the refusal.",
+    "packages/envoy/infra has no .changie.yaml and is not in .github/changelog-packages, so no changelog fragment is written. .github/scripts/ci_job_reads.py:650 already declares packages/envoy/infra/** as the envoy-infra-go job's read set, and ci.yaml:2439 gates the job on it, so no CI wiring changes. The lane keeps one run per job (ci.yaml:2487)."
+  ]
+}
