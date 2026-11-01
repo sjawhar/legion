@@ -120,6 +120,7 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 		}
 	}()
 	var head int64
+	behind := -1
 	for {
 		next, err := s.eventRelay.subscribe(ctx, liveEventsBuffer)
 		if err != nil {
@@ -132,9 +133,11 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 		subscription, subscribed = next, true
 		// The log's newest id, and the row at the relay's cursor, as they stand now, after the
 		// relay subscription began. A cursor above the newest id, or one whose row is gone or
-		// carries another created_at, is a relay whose reset check has not yet run.
+		// carries another created_at, is a relay whose reset check has not yet run. The same
+		// statement counts what a resume is behind (eventSubscriptionCheck), so a resume reads
+		// the pool once before its replay rather than twice.
 		var cursorAt *time.Time
-		if head, cursorAt, err = eventCursorCheck(ctx, s.deps.Store.Pool, subscription.head); err != nil {
+		if head, cursorAt, behind, err = eventSubscriptionCheck(ctx, s.deps.Store.Pool, subscription.head, since); err != nil {
 			endEventsAfterFailure(ctx, stream, sub, "read the event log's head", err)
 			return
 		}
@@ -159,7 +162,7 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 		}
 	}
 
-	replay, err := s.resolveEventReplay(ctx, since, subscription.head, head, replacedFrom)
+	replay, err := s.resolveEventReplay(ctx, since, subscription.head, head, replacedFrom, behind)
 	if err != nil {
 		endEventsAfterFailure(ctx, stream, sub, "read the event log", err)
 		return
@@ -268,7 +271,8 @@ type eventReplay struct {
 // A resume at or below published is replayed (since, published] when that is at most maxLiveReplay
 // events of at most maxLiveReplayBytes of encodings, and is then complete; past either bound it is
 // replayed nothing and its page refreshes what it shows (replay_complete false is its signal).
-// Rows are counted, not ids subtracted: ids have gaps.
+// Rows are counted, not ids subtracted: ids have gaps. behind is that count when the caller's own
+// read already took it (eventSubscriptionCheck), and below zero when it did not.
 //
 // A resume above published is either ahead of this process's relay or from a replaced log. When
 // since is at or below head, the relay has not yet published what the page already holds (another
@@ -278,12 +282,12 @@ type eventReplay struct {
 // never lowers it, resumes from an id of the old log: it is replayed nothing, is not complete and
 // starts at published, so the new log's events reach it rather than sitting below a since that
 // will never be passed.
-func (s *server) resolveEventReplay(ctx context.Context, since *int64, published, head, replacedFrom int64) (eventReplay, error) {
+func (s *server) resolveEventReplay(ctx context.Context, since *int64, published, head, replacedFrom int64, behind int) (eventReplay, error) {
 	if since == nil {
 		if replacedFrom < 0 {
 			return eventReplay{start: published, after: published}, nil
 		}
-		return s.replayThrough(ctx, min(replacedFrom, published), published, false)
+		return s.replayThrough(ctx, min(replacedFrom, published), published, false, -1)
 	}
 	resume := *since
 	if resume > published {
@@ -292,19 +296,22 @@ func (s *server) resolveEventReplay(ctx context.Context, since *int64, published
 		}
 		return eventReplay{start: published, after: published}, nil
 	}
-	return s.replayThrough(ctx, resume, published, true)
+	return s.replayThrough(ctx, resume, published, true, behind)
 }
 
 // replayThrough is the bounded replay of (from, published]: every event there, each encoded once,
 // when they are at most maxLiveReplay of them and their encodings total at most maxLiveReplayBytes,
 // and complete says so in the events_start. Past either bound nothing is replayed and the
-// subscription starts at published, not complete, so its page refreshes what it shows.
-func (s *server) replayThrough(ctx context.Context, from, published int64, complete bool) (eventReplay, error) {
-	var behind int
-	if err := s.deps.Store.Pool.QueryRow(ctx, `
-		select count(*) from (select 1 from events where id > $1 and id <= $2 order by id limit $3) as behind
-	`, from, published, maxLiveReplay+1).Scan(&behind); err != nil {
-		return eventReplay{}, err
+// subscription starts at published, not complete, so its page refreshes what it shows. behind is
+// how many events stand there, counted up to maxLiveReplay+1, or below zero when the caller has not
+// counted them, and it counts them itself.
+func (s *server) replayThrough(ctx context.Context, from, published int64, complete bool, behind int) (eventReplay, error) {
+	if behind < 0 {
+		if err := s.deps.Store.Pool.QueryRow(ctx, `
+			select count(*) from (select 1 from events where id > $1 and id <= $2 order by id limit $3) as behind
+		`, from, published, maxLiveReplay+1).Scan(&behind); err != nil {
+			return eventReplay{}, err
+		}
 	}
 	if behind > maxLiveReplay {
 		return eventReplay{start: published, after: published}, nil
@@ -340,17 +347,35 @@ func (s *server) resumeAfterOverflow(ctx context.Context, after int64) (relaySub
 	if err != nil {
 		return relaySubscription{}, eventReplay{}, false
 	}
-	head, cursorAt, err := eventCursorCheck(ctx, s.deps.Store.Pool, next.head)
+	head, cursorAt, behind, err := eventSubscriptionCheck(ctx, s.deps.Store.Pool, next.head, &after)
 	if err != nil || eventLogWasReset(next.head, next.headAt, head, cursorAt) {
 		next.cancel()
 		return relaySubscription{}, eventReplay{}, false
 	}
-	caughtUp, err := s.resolveEventReplay(ctx, &after, next.head, head, -1)
+	caughtUp, err := s.resolveEventReplay(ctx, &after, next.head, head, -1, behind)
 	if err != nil || !caughtUp.complete {
 		next.cancel()
 		return relaySubscription{}, eventReplay{}, false
 	}
 	return next, caughtUp, true
+}
+
+// eventSubscriptionCheck is eventCursorCheck for an events subscription whose relay subscription
+// began at cursor, and in the same statement how many events a resume from since stands behind
+// it: the rows of (since, cursor], counted up to maxLiveReplay+1, which is all the bound needs
+// (replayThrough). behind is -1 when there is nothing to count: no since, or a since above the
+// cursor, which resolveEventReplay answers without a replay read. One statement, so a resume waits
+// for the shared pool once before its replay read rather than twice: on a restart every page
+// resumes at once, behind every request queued for a connection.
+func eventSubscriptionCheck(ctx context.Context, q queryer, cursor int64, since *int64) (maxID int64, cursorAt *time.Time, behind int, err error) {
+	if err := q.QueryRow(ctx, `
+		select coalesce((select max(id) from events), 0), (select created_at from events where id = $1),
+			case when $2::bigint is null or $2::bigint > $1 then -1
+			else (select count(*) from (select 1 from events where id > $2::bigint and id <= $1 order by id limit $3) as b)::int end
+	`, cursor, since, maxLiveReplay+1).Scan(&maxID, &cursorAt, &behind); err != nil {
+		return 0, nil, 0, err
+	}
+	return maxID, cursorAt, behind, nil
 }
 
 // endEventsAfterFailure ends a subscription whose read failed, with an ended frame (behind), so its
