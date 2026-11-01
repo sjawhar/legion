@@ -121,7 +121,7 @@ func newContractRig(t *testing.T) *contractRig {
 	dispatchToken := issuer.Mint(t, issuerKey, dispatchClaims)
 	brokerapi.Register(brokerMux, brokerapi.Deps{
 		PublicURL:     brokerServer.URL,
-		APIAccounts:   map[string]string{contractDispatchAccount: "dispatch"},
+		APIAccounts:   map[string]brokerapi.Account{contractDispatchAccount: brokertest.Caller(t, "dispatch")},
 		AccountTokens: enroll.K8sPodVerifier{Verifier: tokenVerifier},
 		Enroll:        enr, Machine: reqMachine, MachineLogin: mach,
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),

@@ -17,6 +17,15 @@ type Limit struct {
 	Burst int
 }
 
+// RetryAfterSeconds is the Retry-After a bucket refilled one request every every names: whole
+// seconds rounded up, and never 0, which would invite an immediate retry the bucket would refuse
+// again. Every refusal of a bucket of this package carries it — the broker's own 429s
+// (internal/broker/api) and Dispatch's refusal of an introspection it would not make
+// (internal/dispatch/api) — so the two cannot read one wait differently.
+func RetryAfterSeconds(every time.Duration) int {
+	return max(int((every+time.Second-1)/time.Second), 1)
+}
+
 // maxBuckets bounds a Keyed's memory: past it, full buckets (indistinguishable from fresh ones)
 // are dropped.
 const maxBuckets = 10000
