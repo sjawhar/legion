@@ -1322,7 +1322,7 @@ check_issue_claim_refuses_the_stalled_holder() {
 # its claim. The horizon here is a listener of the run's own at 90s — the same boundary, which ten
 # minutes of waiting would measure no better.
 check_gone_only_past_the_horizon() {
-  local role=ess-kill-$$ victim victim_pid victim_fd killed_at gone_at before_new topic
+  local role=ess-kill-$$ victim victim_pid victim_fd killed_at before_new topic boundary
   write_omp_profile
   omp_launch victim victim_pid victim_fd
   wait_until 240 "the victim session to print ready" grep -q '"type":"ready"' "$work/victim.out" || return 1
@@ -1344,27 +1344,14 @@ check_gone_only_past_the_horizon() {
   exec {victim_fd}>&-
   kill -KILL "$victim_pid" || refuse "could not kill the victim session" || return 1
   killed_at=$(date +%s)
-  wait_until 120 "the killed session to read unresponsive" \
-    state_is "$short_port" "$victim" unresponsive unresponsive || return 1
-  role_reason_is "$short_port" "$role" holder_lapsed ||
-    refuse "the role lookup for the killed-but-unresponsive holder answered $(head -c 200 "$answer")" || return 1
-  jq -e --arg v "$victim" '.holder == $v and .claim_released == false' "$answer" >/dev/null ||
-    refuse "the killed session lost its role claim while it was only unresponsive" || return 1
-  wait_until 300 "the killed session to reach gone past its 90s horizon" \
-    state_is "$short_port" "$victim" unresponsive gone || return 1
-  gone_at=$(date +%s)
-  measured_kill_latency=$((gone_at - killed_at))
-  note "SIGKILL-to-gone latency: ${measured_kill_latency}s (gone horizon 90s, a reaper pass every 10s)"
-  [ "$measured_kill_latency" -ge 90 ] ||
-    refuse "the killed session read gone ${measured_kill_latency}s after the kill, inside its own 90s horizon" || return 1
-  # The role claim reaper runs at this listener's own ENVOY_SESSION_REAP_INTERVAL, the ten
-  # seconds set above (StartRoleClaimReaper, cmd/listener/main.go), so the release is one pass
-  # behind the session reaper's that found the holder gone.
-  wait_until 120 "the role reaper to release the gone holder's claim" \
-    role_reason_is "$short_port" "$role" unclaimed || return 1
-  note "the role claim was released only once its holder was gone"
+  # Everything from here to the stop runs through one status, so a refusal still stops the
+  # short-horizon listener: left running, its 90s horizon reaps the later checks' sessions and
+  # decides their verdicts rather than its own.
+  boundary=0
+  gone_horizon_boundary "$victim" "$role" "$killed_at" || boundary=$?
   stop_pid "$shortlistener_pid"
   shortlistener_pid=
+  [ "$boundary" -eq 0 ] || return 1
   # /clear mints a new session id; the one it leaves must be gone at once, and a resume inside the
   # 15 minutes the registry remembers a last heartbeat for gets its topics back.
   topic=notifications.team.ess-$$.all
@@ -1391,6 +1378,37 @@ check_gone_only_past_the_horizon() {
   wait_until 120 "the session new_session left to be gone" state_is "$port_a" "$before_new" unresponsive gone || return 1
   omp_session=$(omp_session_id)
   note "new_session left $before_new gone at once and registered $omp_session"
+}
+
+# gone_horizon_boundary is check 6's measurement, from the kill to the release of the dead
+# holder's claim, on the short-horizon listener. The horizon runs from the session's last
+# registration, not from the kill, so that is what the measurement compares: a heartbeat lands up
+# to one interval before the kill, and measuring from the kill reads the boundary as that much
+# shorter than it is.
+gone_horizon_boundary() {
+  local victim=$1 role=$2 killed_at=$3 victim_last_seen horizon_elapsed gone_at
+  wait_until 120 "the killed session to read unresponsive" \
+    state_is "$short_port" "$victim" unresponsive unresponsive || return 1
+  victim_last_seen=$(last_seen "$short_port" "$victim") ||
+    refuse "the unresponsive killed session names no last registration to measure its horizon from" || return 1
+  role_reason_is "$short_port" "$role" holder_lapsed ||
+    refuse "the role lookup for the killed-but-unresponsive holder answered $(head -c 200 "$answer")" || return 1
+  jq -e --arg v "$victim" '.holder == $v and .claim_released == false' "$answer" >/dev/null ||
+    refuse "the killed session lost its role claim while it was only unresponsive" || return 1
+  wait_until 300 "the killed session to reach gone past its 90s horizon" \
+    state_is "$short_port" "$victim" unresponsive gone || return 1
+  gone_at=$(date +%s)
+  measured_kill_latency=$((gone_at - killed_at))
+  horizon_elapsed=$((gone_at - victim_last_seen / 1000))
+  note "SIGKILL-to-gone latency: ${measured_kill_latency}s, and ${horizon_elapsed}s after the session's last registration (gone horizon 90s, a reaper pass every 10s)"
+  [ "$horizon_elapsed" -ge 90 ] ||
+    refuse "the killed session read gone ${horizon_elapsed}s after its last registration, inside its own 90s horizon" || return 1
+  # The role claim reaper runs at this listener's own ENVOY_SESSION_REAP_INTERVAL, the ten
+  # seconds set above (StartRoleClaimReaper, cmd/listener/main.go), so the release is one pass
+  # behind the session reaper's that found the holder gone.
+  wait_until 120 "the role reaper to release the gone holder's claim" \
+    role_reason_is "$short_port" "$role" unclaimed || return 1
+  note "the role claim was released only once its holder was gone"
 }
 
 # ---- 7. every plugin shows the state ---------------------------------------------------------------------
