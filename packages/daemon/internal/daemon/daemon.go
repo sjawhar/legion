@@ -271,7 +271,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		return err
 	}
 	sessionStore := "pvc"
-	if cfg.Runtime.Kubernetes != nil {
+	if cfg.Runtime.Kubernetes != nil && cfg.Runtime.Kubernetes.SessionStore.Kind != "" {
 		sessionStore = string(cfg.Runtime.Kubernetes.SessionStore.Kind)
 	}
 	if err := st.ResolveUnknownSessionStores(boot, sessionStore); err != nil {
