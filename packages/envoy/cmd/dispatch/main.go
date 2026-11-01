@@ -264,12 +264,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// document_search (migration 0162) holds each document's latest search vector, 0163's
-	// trigger keeps it in step from the deploy on, and this fills it for the documents stored
-	// before that. It runs here, in committed batches, rather than as migration 0164: one
-	// transaction over artifact_versions measured 35.5 s on a production-shaped database, and
-	// 0163's trigger makes every concurrent version write to a document the pass has already
-	// written wait that whole transaction out (0164's comment holds the measurement).
+	// document_search (migration 20261101182447) holds each document's latest search vector,
+	// 20261101182454's trigger keeps it in step from the deploy on, and this fills it for the
+	// documents stored before that. It runs here, in committed batches, rather than as migration
+	// 20261101182501: one transaction over artifact_versions measured 35.5 s on a
+	// production-shaped database, and 20261101182454's trigger makes every concurrent version
+	// write to a document the pass has already written wait that whole transaction out
+	// (20261101182501's comment holds the measurement).
 	//
 	// A failure stops the boot, unlike the count below: this release's search reads
 	// document_search alone, so a process that served with the table unfilled would answer a

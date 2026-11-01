@@ -14,8 +14,8 @@ import (
 )
 
 // documentSearchTriggerFixture is one issue and one document with two versions, which migration
-// 0163's trigger has written into document_search: version 1 holds triggerOldWord and version 2
-// triggerWord. Each test below writes on from there.
+// 20261101182454's trigger has written into document_search: version 1 holds triggerOldWord and
+// version 2 triggerWord. Each test below writes on from there.
 type documentSearchTriggerFixture struct {
 	handler  http.Handler
 	database *store.Store

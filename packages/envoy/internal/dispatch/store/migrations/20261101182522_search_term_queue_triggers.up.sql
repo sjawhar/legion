@@ -1,5 +1,5 @@
--- 0167_search_term_queue_triggers.up.sql
--- The five triggers that fill 0165's search_term_queue: one for each kind of item the
+-- 20261101182522_search_term_queue_triggers.up.sql
+-- The five triggers that fill 20261101182508's search_term_queue: one for each kind of item the
 -- related-terms refresh counts.
 --
 -- Each fires only when an item's search text changes, on the columns that item's search vector is
@@ -9,19 +9,20 @@
 -- is in a list here, so an event append queues nothing. Inserts and deletes carry no column list,
 -- because every one of them changes what the project holds.
 --
--- search is in each list for the reason 0163 gives for artifact_versions: a write that sets the
--- vector directly is a change to what the project holds, and nothing else would see it. Before
--- this release a full rebuild every ten minutes repaired such a write; now a project that has a
--- snapshot is counted by step passes alone, so a write no trigger sees stays counted wrong with
--- no limit. Postgres fires a column-list trigger on the columns the UPDATE command names, so an
--- ordinary title or body edit, which does not name search, still fires the trigger exactly once.
+-- search is in each list for the reason 20261101182454 gives for artifact_versions: a write that
+-- sets the vector directly is a change to what the project holds, and nothing else would see it.
+-- Before this release a full rebuild every ten minutes repaired such a write; now a project that
+-- has a snapshot is counted by step passes alone, so a write no trigger sees stays counted wrong
+-- with no limit. Postgres fires a column-list trigger on the columns the UPDATE command names,
+-- so an ordinary title or body edit, which does not name search, still fires the trigger exactly
+-- once.
 --
--- A document's changes are taken from 0162's document_search, not from artifact_versions. That
--- table already holds exactly the vector of the version the refresh counts, and 0163's trigger
--- writes it inside the artifact_versions write, so this trigger fires nested inside that one and
--- the refresh needs no second trigger on the 5.2 GiB table. 0163's guard,
--- `where excluded.number >= document_search.number`, correctly queues nothing when a late write
--- of an older version updates no row.
+-- A document's changes are taken from 20261101182447's document_search, not from
+-- artifact_versions. That table already holds exactly the vector of the version the refresh
+-- counts, and 20261101182454's trigger writes it inside the artifact_versions write, so this
+-- trigger fires nested inside that one and the refresh needs no second trigger on the 5.2 GiB
+-- table. 20261101182454's guard, `where excluded.number >= document_search.number`, correctly
+-- queues nothing when a late write of an older version updates no row.
 --
 -- Each trigger is one insert and reads no row: the spec's bound on what the writes may cost
 -- (within 10%) is what keeps it to that, and every value it writes is already in the row the
@@ -36,9 +37,9 @@
 -- next, and a writer that writes two of these tables in the other order closes a cycle with it.
 -- 0066 names two such writers on comments and asks - accepting a suggestion, and a document edit
 -- under a comment's anchor - and a version write closes the same cycle on document_search and
--- issues: the insert into artifact_versions fires 0163's trigger, which takes ROW EXCLUSIVE on
--- document_search, and recordTaskProgress (docs/task_progress.go) then updates issues, which
--- takes ROW EXCLUSIVE there even when it matches no row.
+-- issues: the insert into artifact_versions fires 20261101182454's trigger, which takes ROW
+-- EXCLUSIVE on document_search, and recordTaskProgress (docs/task_progress.go) then updates
+-- issues, which takes ROW EXCLUSIVE there even when it matches no row.
 --
 -- Under the runner's five-second bound either side can lose that race, and the runner retries
 -- only 55P03 (store/store.go RetryLockTimeouts), so a deadlock either answers a request 500 or
@@ -118,9 +119,9 @@ begin
   return null;
 end $$;
 
--- document_search has no delete path (0162), so this one covers the two writes 0163's trigger
--- makes: the document's first row, which queues no old vector, and every later replacement of it,
--- which queues the vector the row held.
+-- document_search has no delete path (20261101182447), so this one covers the two writes
+-- 20261101182454's trigger makes: the document's first row, which queues no old vector, and
+-- every later replacement of it, which queues the vector the row held.
 create or replace function document_search_term_queue() returns trigger language plpgsql as $$
 declare
   previous tsvector;

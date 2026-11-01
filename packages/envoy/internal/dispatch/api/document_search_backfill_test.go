@@ -15,12 +15,12 @@ import (
 
 // The two migrations the fill runs behind, read from the store's own directory rather than
 // copied here, so this test applies the text that ships. The fill itself is no migration:
-// 0164 creates the one row that records how far it has got, and store.FillDocumentSearch runs it
-// in committed batches at boot, after every migration and before the server serves
-// (cmd/dispatch/main.go).
+// 20261101182501 creates the one row that records how far it has got, and
+// store.FillDocumentSearch runs it in committed batches at boot, after every migration and
+// before the server serves (cmd/dispatch/main.go).
 const (
-	documentSearchTableMigration   = "0162_document_search.up.sql"
-	documentSearchTriggerMigration = "0163_artifact_versions_document_search_trigger.up.sql"
+	documentSearchTableMigration   = "20261101182447_document_search.up.sql"
+	documentSearchTriggerMigration = "20261101182454_artifact_versions_document_search_trigger.up.sql"
 )
 
 // applyStoreMigration applies one migration of the store's set, as the runner applies it: the
@@ -36,10 +36,11 @@ func applyStoreMigration(t *testing.T, database *store.Store, name string) {
 	}
 }
 
-// undoDocumentSearch drops 0162's table and 0163's function and trigger, which leaves the schema
-// the one before 0162 and lets a test write documents as a build without this change writes
-// them, with no table to fill. 0164's progress row stands: a database that has never run a pass
-// holds it as the migration wrote it, which is the state the fill starts from.
+// undoDocumentSearch drops 20261101182447's table and 20261101182454's function and trigger,
+// which leaves the schema the one before 20261101182447 and lets a test write documents as a
+// build without this change writes them, with no table to fill. 20261101182501's progress row
+// stands: a database that has never run a pass holds it as the migration wrote it, which is the
+// state the fill starts from.
 func undoDocumentSearch(t *testing.T, database *store.Store) {
 	t.Helper()
 	for _, statement := range []string{
@@ -87,10 +88,11 @@ func countRows(t *testing.T, database *store.Store, statement string) int64 {
 
 // A4. The fill, run the way a boot runs it. The three migrations of the document-search table
 // are undone, and the documents are then written as a build without this change writes them,
-// with no table to fill. 0162 and 0163 are applied, one more version is written in the window
-// between 0163 and the fill, which the trigger catches, and the fill writes the rest. Search
-// then answers what main's own statement answers over the same rows, which is what says the
-// filled table holds each document's latest version and no older one.
+// with no table to fill. 20261101182447 and 20261101182454 are applied, one more version is
+// written in the window between 20261101182454 and the fill, which the trigger catches, and the
+// fill writes the rest. Search then answers what main's own statement answers over the same
+// rows, which is what says the filled table holds each document's latest version and no older
+// one.
 func TestTheBackfillLeavesSearchAnsweringWhatMainsStatementDoes(t *testing.T) {
 	ctx := context.Background()
 	handler, database := newTestHandlerWithStore(t)
@@ -235,10 +237,10 @@ func TestTheFillCoversEveryDocumentOverMoreThanOneBatch(t *testing.T) {
 }
 
 // The write guard under batching. A version that commits while the pass runs is in the table
-// through 0163's trigger, at a number above the one the running batch read, and the batch must
-// leave it there. The version write is held open until the batch's insert has queued behind its
-// uncommitted row, which is the order of that race: the batch read artifact_versions before the
-// write committed, so the row it carries is the older version.
+// through 20261101182454's trigger, at a number above the one the running batch read, and the
+// batch must leave it there. The version write is held open until the batch's insert has queued
+// behind its uncommitted row, which is the order of that race: the batch read artifact_versions
+// before the write committed, so the row it carries is the older version.
 func TestAVersionCommittedWhileTheFillRunsIsNotReplacedByTheOlderOneItRead(t *testing.T) {
 	ctx := context.Background()
 	handler, database := newTestHandlerWithStore(t)

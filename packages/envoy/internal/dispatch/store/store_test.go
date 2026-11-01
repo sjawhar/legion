@@ -284,8 +284,8 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		from pg_indexes
 		where schemaname = current_schema()
 	`, expectedIndexes)
-	// Migration 0161 drops asks_open_artifact, the partial index 0009 built for the one read
-	// that lists a document's open asks: that read uses asks_artifact_id, which
+	// Migration 20261101182440 drops asks_open_artifact, the partial index 0009 built for the one
+	// read that lists a document's open asks: that read uses asks_artifact_id, which
 	// api.TestTheAuditedReadsSearchTheirIndex holds it to.
 	assertDatabaseObjectsAbsent(t, ctx, store.Pool, `
 		select indexname

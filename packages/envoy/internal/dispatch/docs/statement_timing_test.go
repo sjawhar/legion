@@ -26,11 +26,12 @@ const anchoredMarkTimingLimit = 20
 // reads of edits.go (rejectUnindexedTableMarks, rejectLiveTableAnchors) and the two of
 // mutation.go (lockTableAnchorRows). Their gain is their own text and no index this change adds.
 // Both indexes the new texts reach were already there - comments_anchor_artifact is migration
-// 0032 and asks_anchor_artifact_id migration 0148, both below this change's block, which starts
-// at 0158 - and what each read gained is the uuid comparison beside its text comparison, which
-// is what makes the index eligible at all. One schema therefore holds both sides, and the pair
-// is the committed regression check: the before text cannot use the index, so the day a read
-// loses that comparison its median goes back to the before text's and the pair fails.
+// 0032 and asks_anchor_artifact_id migration 0148, both below this change's ten migrations,
+// 20261101182419 to 20261101182522 - and what each read gained is the uuid comparison beside
+// its text comparison, which is what makes the index eligible at all. One schema therefore
+// holds both sides, and the pair is the committed regression check: the before text cannot use
+// the index, so the day a read loses that comparison its median goes back to the before text's
+// and the pair fails.
 //
 // Each pair's before text is the oracle anchor_reads_test.go already holds - the text the
 // release before this change ran - read from there rather than copied a second time: two copies

@@ -15,10 +15,11 @@ import (
 	"github.com/sjawhar/envoy/internal/explaintest"
 )
 
-// documentSearchIndex is the GIN index migration 0162 builds over document_search.search. Every
-// statement that matches a tsquery on the document arm reads that table through it; before
-// migration 0162 each of them read every document's latest version through a lateral join over
-// artifact_versions, whose search column has no index and can have none.
+// documentSearchIndex is the GIN index migration 20261101182447 builds over
+// document_search.search. Every statement that matches a tsquery on the document arm reads that
+// table through it; before migration 20261101182447 each of them read every document's latest
+// version through a lateral join over artifact_versions, whose search column has no index and
+// can have none.
 const documentSearchIndex = "document_search_vector"
 
 const (
@@ -113,8 +114,8 @@ func newDocumentSearchFixture(t *testing.T) documentSearchFixture {
 	// The bulk the planner needs, which no read above returns: on a handful of documents every
 	// plan costs about the same and the planner's choice says nothing, and production's shape is
 	// a few matches in a table holding many. They are written as SQL, the only part of the
-	// fixture that is not a writer's own work, and 0163's trigger fills document_search for them
-	// as it does for the rest.
+	// fixture that is not a writer's own work, and 20261101182454's trigger fills document_search
+	// for them as it does for the rest.
 	ctx := context.Background()
 	for _, bulk := range []struct{ what, statement string }{
 		{"the other documents", `

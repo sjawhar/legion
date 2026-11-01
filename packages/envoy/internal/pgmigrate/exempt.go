@@ -24,8 +24,8 @@ import (
 //   - set and reset (VariableSetStmt): a run-time parameter of the transaction, which takes no
 //     lock, reads no row and names no table, so it cannot make a migration's lock window grow
 //     with any table. A migration that bounds its own lock wait sets lock_timeout
-//     (0066_asks_handed_back_reply_fkey, 0167_search_term_queue_triggers), and that line must not
-//     be what costs it an exemption the rest of its statements earn.
+//     (0066_asks_handed_back_reply_fkey, 20261101182522_search_term_queue_triggers), and that
+//     line must not be what costs it an exemption the rest of its statements earn.
 //
 // An event trigger on these commands runs code of its own when they run, so Census does not apply
 // the exemption where one is enabled (ddlEventTriggers). Adding a kind is a reviewed edit with the

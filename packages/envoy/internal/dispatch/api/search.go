@@ -63,13 +63,13 @@ const (
 // (askBlockNodeSQL). The ask arm's anchor cast is store.CastableUUID's, which answers the document
 // every spelling of an artifact_id Postgres casts names.
 //
-// The document arm reads document_search (migration 0162), one row per document holding its
-// latest version's vector under a GIN index, rather than the lateral over artifact_versions it
-// read before: that table's search column has no index and can have none (0010 left it out, and
-// its 5.2 GiB is above what the pre-deploy census lets a migration touch), so the arm tested
-// every document's latest version in turn. The rows are the same ones - 0163's trigger holds
-// document_search at each document's latest version with markdown - and the join to artifacts
-// still decides the arm's project, kind and issue.
+// The document arm reads document_search (migration 20261101182447), one row per document
+// holding its latest version's vector under a GIN index, rather than the lateral over
+// artifact_versions it read before: that table's search column has no index and can have none
+// (0010 left it out, and its 5.2 GiB is above what the pre-deploy census lets a migration
+// touch), so the arm tested every document's latest version in turn. The rows are the same
+// ones - 20261101182454's trigger holds document_search at each document's latest version
+// with markdown - and the join to artifacts still decides the arm's project, kind and issue.
 func searchKeywordLegs(rank func(searchColumn string) string) string {
 	return `
   select 'issue' as kind, 'keyword' as list, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,

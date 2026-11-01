@@ -77,9 +77,9 @@ func seedTestDatabase(t *testing.T) (*store.Store, *seedRun) {
 
 // TestSeedBuildsTermStatisticsOnMainsSchema seeds the shape the measurement protocol's "before"
 // side seeds: a database migrated from a checkout of main, filled by this tool with
-// --no-migrate. Its search_term_totals carries no snapshot column (migration 0166) and the build
-// of this release reads one, so without the step choosing its build by the schema every project
-// fails and the seed reports a data set whose term statistics were never built.
+// --no-migrate. Its search_term_totals carries no snapshot column (migration 20261101182515)
+// and the build of this release reads one, so without the step choosing its build by the schema
+// every project fails and the seed reports a data set whose term statistics were never built.
 //
 // The two columns are dropped from a database migrated to the head rather than the schema being
 // migrated from main, because a test process has no checkout of main to migrate from. Dropping
@@ -91,7 +91,7 @@ func TestSeedBuildsTermStatisticsOnMainsSchema(t *testing.T) {
 	database := storetest.Open(t)
 	if _, err := database.Pool.Exec(ctx,
 		`alter table search_term_totals drop column snapshot, drop column snapshot_at`); err != nil {
-		t.Fatalf("drop the snapshot columns 0166 added: %v", err)
+		t.Fatalf("drop the snapshot columns 20261101182515 added: %v", err)
 	}
 
 	started := time.Now()
@@ -128,8 +128,9 @@ func TestSeedBuildsTermStatisticsOnMainsSchema(t *testing.T) {
 // TestSeedRefusesAFilledDatabaseWithoutMigratingIt holds the seed to refusing a database that
 // already holds rows before it has written anything to it, its migrations included. A
 // --database-url that names a database in use by mistake is the case the order decides: the
-// migrations this release adds (0158 to 0167) have been run by no release, and applying them to
-// somebody else's database is not something the refusal that follows takes back.
+// ten migrations this release adds (20261101182419 to 20261101182522) have been run by no
+// release, and applying them to somebody else's database is not something the refusal that
+// follows takes back.
 //
 // Each case reads schema_migrations before and after, whole and in order. A database with no
 // Dispatch schema carries no such table, so "it did not change" is "it is still not there": a

@@ -45,15 +45,15 @@ const (
 //
 //   - Protocol 2, head text alone: listIssueAsksQueryAll, listIssueRootMessagesQuery and
 //     listArtifactAsksQueryOpen, whose texts this change does not edit at all - their gain is
-//     asks_issue_key (0159) and messages_issue_roots (0160), and for the artifact list the drop
-//     of asks_open_artifact (0161), whose before side needs that index present. And the five
-//     statements of search's document arm - searchQuery, searchQueryMeaning,
-//     relatedKeywordQuery, relatedMeaningQuery and relatedProbeSQL - whose head text reads
-//     document_search (0162), a table that must be absent for the before side and present for
-//     the after. One database cannot be both, so each of these is measured here as its head
-//     side, with its plan, and seam 7's two-commit run takes the before side by running this
-//     same measurement against a database migrated from the release before this change, whose
-//     migrations stop at 0157.
+//     asks_issue_key (20261101182426) and messages_issue_roots (20261101182433), and for the
+//     artifact list the drop of asks_open_artifact (20261101182440), whose before side needs
+//     that index present. And the five statements of search's document arm - searchQuery,
+//     searchQueryMeaning, relatedKeywordQuery, relatedMeaningQuery and relatedProbeSQL - whose
+//     head text reads document_search (20261101182447), a table that must be absent for the
+//     before side and present for the after. One database cannot be both, so each of these is
+//     measured here as its head side, with its plan, and seam 7's two-commit run takes the
+//     before side by running this same measurement against a database migrated from the release
+//     before this change, whose migrations stop at 0157.
 //
 // Every pair's before text is the text that release runs, which this package already holds as an
 // oracle - issue_list_equality_test.go, agent_activity_test.go and issue_children_test.go - read
@@ -150,10 +150,10 @@ type documentArmStatements struct {
 
 // documentArmSide answers the five statements this database can run, and the label that names
 // the side they are. A database migrated from the release before this change has no
-// document_search (migration 0162), so it can run only that release's text, which is protocol
-// 2's before side; a database at this release's schema runs the after text. The table is read
-// from the catalogue rather than from a caught error, so a statement that fails for its own
-// reason still fails the run.
+// document_search (migration 20261101182447), so it can run only that release's text, which is
+// protocol 2's before side; a database at this release's schema runs the after text. The table
+// is read from the catalogue rather than from a caught error, so a statement that fails for its
+// own reason still fails the run.
 func documentArmSide(t *testing.T, runner *benchtime.Runner) (documentArmStatements, string) {
 	t.Helper()
 	var present bool

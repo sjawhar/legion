@@ -12,8 +12,8 @@ import (
 )
 
 // auditedRead is one of the three reads the index audit of 2026-10-25 named: the statement, the
-// relation whose read was unindexed, the index that serves it after migrations 0159 to 0161,
-// and the parameter type and literal its prepared form is explained with.
+// relation whose read was unindexed, the index that serves it after migrations 20261101182426
+// to 20261101182440, and the parameter type and literal its prepared form is explained with.
 type auditedRead struct {
 	name      string
 	query     string

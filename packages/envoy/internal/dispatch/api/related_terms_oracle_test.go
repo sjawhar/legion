@@ -24,8 +24,8 @@ import (
 // searchTermItemsBeforeSnapshotsSQL is main's searchTermItemsSQL, which {project} stands in for
 // the project key of as it does there. It differs from this release's in its document arm alone,
 // which reads every artifact's latest version through a lateral join over artifact_versions where
-// this release's reads document_search (migration 0162): a database at main's schema has no
-// document_search, and one at this head answers the same rows through either.
+// this release's reads document_search (migration 20261101182447): a database at main's schema
+// has no document_search, and one at this head answers the same rows through either.
 const searchTermItemsBeforeSnapshotsSQL = `
 select i.search from issues i where i.project_key = {project}
 union all

@@ -9,13 +9,14 @@ import (
 // DocumentSearchFillBatch is how many documents one transaction of FillDocumentSearch takes.
 //
 // The single statement this fill replaces, `insert … select distinct on (artifact_id) … from
-// artifact_versions` (migration 0164 before this change), measured 35.5 s over 40,000 documents
-// on a production-shaped database (artifact_versions 3337 MB, 200,000 versions): about 0.9 ms a
-// document. A thousand documents is therefore a transaction of about a second and the whole pass
-// forty of them, so a writer that meets a key the fill holds - 0163's trigger's upsert on a
-// document the fill has reached - waits about a second at worst instead of 35.5 s, while the
-// cost a batch pays whatever its size, its commit, its cursor update and one descent of
-// artifact_versions_artifact_id_number_key, is paid forty times rather than four hundred.
+// artifact_versions` (migration 20261101182501 before this change), measured 35.5 s over 40,000
+// documents on a production-shaped database (artifact_versions 3337 MB, 200,000 versions):
+// about 0.9 ms a document. A thousand documents is therefore a transaction of about a second
+// and the whole pass forty of them, so a writer that meets a key the fill holds -
+// 20261101182454's trigger's upsert on a document the fill has reached - waits about a second
+// at worst instead of 35.5 s, while the cost a batch pays whatever its size, its commit, its
+// cursor update and one descent of artifact_versions_artifact_id_number_key, is paid forty
+// times rather than four hundred.
 const DocumentSearchFillBatch = 1000
 
 // fillDocumentSearchBatchQuery is one batch: it takes the next DocumentSearchFillBatch documents
@@ -30,14 +31,14 @@ const DocumentSearchFillBatch = 1000
 // `batch` is the keyset: the next distinct artifact_ids above the cursor, in id order, which is
 // the order artifact_versions_artifact_id_number_key holds, so the scan starts where the last
 // batch stopped instead of counting past it as an `offset` would. `markdown is not null` is
-// 0163's trigger's own guard: a version with no markdown has a null search vector and is no
-// document to search.
+// 20261101182454's trigger's own guard: a version with no markdown has a null search vector and
+// is no document to search.
 //
-// `latest` is 0164's old write guard, unchanged: the latest version of each document in the
-// batch, and `filled` writes them under `on conflict (artifact_id) do update … where
-// excluded.number >= document_search.number`, so a row 0163's trigger wrote while the pass runs
-// is never replaced by an older one. That guard is also what makes a batch idempotent, so the
-// pass is safe to run twice and from two processes at once.
+// `latest` is 20261101182501's old write guard, unchanged: the latest version of each document
+// in the batch, and `filled` writes them under `on conflict (artifact_id) do update … where
+// excluded.number >= document_search.number`, so a row 20261101182454's trigger wrote while the
+// pass runs is never replaced by an older one. That guard is also what makes a batch
+// idempotent, so the pass is safe to run twice and from two processes at once.
 //
 // The cursor comes from `batch` and never from `filled`'s `returning`: a row the guard skips
 // returns nothing, so a cursor taken from the write would stall on the first document whose row
@@ -77,16 +78,17 @@ const fillDocumentSearchBatchQuery = `
 	select (select count(*) from filled), (select done from moved)
 `
 
-// FillDocumentSearch fills 0162's document_search for the documents stored before 0163's trigger
-// went live, and answers how many rows it wrote. The boot runs it after the migrations and
-// before the server serves (cmd/dispatch/main.go): search's document arm reads document_search
-// alone, so a process serving with the table unfilled answers a search with documents missing.
+// FillDocumentSearch fills 20261101182447's document_search for the documents stored before
+// 20261101182454's trigger went live, and answers how many rows it wrote. The boot runs it
+// after the migrations and before the server serves (cmd/dispatch/main.go): search's document
+// arm reads document_search alone, so a process serving with the table unfilled answers a
+// search with documents missing.
 //
-// A pass already finished costs one row: the progress row 0164 creates says so, and this reads
-// nothing else. Otherwise it loops, each iteration one short transaction that takes the next
-// batch of documents by keyset, writes them and commits, so no row it writes stays uncommitted
-// for longer than its own batch and a version write that meets one of its keys waits for that
-// batch alone. 0164's comment holds the measurement that says why.
+// A pass already finished costs one row: the progress row 20261101182501 creates says so, and
+// this reads nothing else. Otherwise it loops, each iteration one short transaction that takes
+// the next batch of documents by keyset, writes them and commits, so no row it writes stays
+// uncommitted for longer than its own batch and a version write that meets one of its keys
+// waits for that batch alone. 20261101182501's comment holds the measurement that says why.
 func (s *Store) FillDocumentSearch(ctx context.Context) (int64, error) {
 	var done bool
 	if err := s.Pool.QueryRow(ctx, "select done from document_search_backfill").Scan(&done); err != nil {

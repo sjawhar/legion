@@ -1,12 +1,13 @@
--- 0166_search_term_totals_snapshot.up.sql
+-- 20261101182515_search_term_totals_snapshot.up.sql
 -- What a refresh pass of this release writes beside a project's item count, and what tells a
 -- later pass whether that count is its own work.
 --
--- Every pass of the new code, whether it rebuilds the project in full or applies 0165's queue,
--- writes items, refreshed_at, snapshot and snapshot_at in the one statement that counts:
--- refreshed_at and snapshot_at both from that statement's statement_timestamp(), and snapshot
--- from the pg_current_snapshot() it takes there. A pass then drops exactly the queue rows that
--- snapshot sees, so the counts and the drained rows describe one moment.
+-- Every pass of the new code, whether it rebuilds the project in full or applies
+-- 20261101182508's queue, writes items, refreshed_at, snapshot and snapshot_at in the one
+-- statement that counts: refreshed_at and snapshot_at both from that statement's
+-- statement_timestamp(), and snapshot from the pg_current_snapshot() it takes there. A pass then
+-- drops exactly the queue rows that snapshot sees, so the counts and the drained rows describe
+-- one moment.
 --
 -- The signal that somebody else wrote the row is refreshed_at is distinct from snapshot_at, not a
 -- null snapshot. The release before this one updates items and refreshed_at and nothing else

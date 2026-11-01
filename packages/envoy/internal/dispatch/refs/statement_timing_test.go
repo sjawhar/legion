@@ -21,18 +21,19 @@ import (
 //     `exists` probe that sat under an OR, which the planner could only run as a hashed subplan
 //     over all of document_blocks. Both texts read the same tables and the same indexes, so one
 //     schema holds both sides. The closure also gains from asks (issue_key) and
-//     messages (issue_key, created_at, id), the two indexes migrations 0159 and 0160 add, and
-//     that part of its gain is not in this pair: both sides here are read with those indexes
-//     present, which only helps the before side, so the pair is the conservative reading of the
-//     text's own gain. Seam 7's two-commit run takes the whole gain under protocol 2.
+//     messages (issue_key, created_at, id), the two indexes migrations 20261101182426 and
+//     20261101182433 add, and that part of its gain is not in this pair: both sides here are
+//     read with those indexes present, which only helps the before side, so the pair is the
+//     conservative reading of the text's own gain. Seam 7's two-commit run takes the whole gain
+//     under protocol 2.
 //
 //   - The two backlink counts are protocol 2, head text alone. The release before this change
 //     counted over the whole graph_edges view (this package holds that read as
 //     backlinkCountOracle), and the before side of record is that statement on a schema without
-//     ask_followers_session_id, which migration 0158 adds and this release's schema therefore
-//     has. One database cannot be both, so the pair is seam 7's two-commit run and what is
-//     measured here is the head side of it, with its plan, under the same protocol as every
-//     other reading.
+//     ask_followers_session_id, which migration 20261101182419 adds and this release's schema
+//     therefore has. One database cannot be both, so the pair is seam 7's two-commit run and
+//     what is measured here is the head side of it, with its plan, under the same protocol as
+//     every other reading.
 func TestStatementTimings(t *testing.T) {
 	runner := benchtime.Open(t, os.Getenv(benchtime.DatabaseURLEnv))
 	subjects := runner.Subjects()

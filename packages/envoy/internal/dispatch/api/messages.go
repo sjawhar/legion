@@ -772,9 +772,9 @@ func (s *server) hydrateMessageThreads(ctx context.Context, roots []model.Messag
 
 // listIssueRootMessagesQuery is every root message of one issue, oldest first. It is named
 // rather than written into its handler so that the plan test and the equality test read the
-// statement the route runs, not a copy of it: messages_issue_roots (0160) is keyed on exactly
-// this predicate and this order, and a test that held a copy would keep passing after an edit
-// that took the statement off the index.
+// statement the route runs, not a copy of it: messages_issue_roots (20261101182433) is keyed on
+// exactly this predicate and this order, and a test that held a copy would keep passing after
+// an edit that took the statement off the index.
 var listIssueRootMessagesQuery = `
 		select ` + messageColumns + `
 		from messages

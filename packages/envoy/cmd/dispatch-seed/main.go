@@ -88,8 +88,9 @@ type Options struct {
 //
 // The refusal comes before the migration, so a --database-url that names a database in use by
 // mistake is refused with that database as it was found. Migrating it first would apply this
-// release's own schema change - migrations 0158 to 0167, which no release has run yet - to
-// somebody else's database, and a refusal afterwards does not take that back.
+// release's own schema change - this change's ten migrations, 20261101182419 to 20261101182522,
+// which no release has run yet - to somebody else's database, and a refusal afterwards does not
+// take that back.
 func Seed(ctx context.Context, options Options) error {
 	out := options.Out
 	if out == nil {

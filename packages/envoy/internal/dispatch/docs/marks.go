@@ -792,8 +792,8 @@ var (
 
 // anchoredOn is the predicate that finds the rows of the target's table anchored on the document
 // bound to $1: `anchor is not null`, the text comparison the anchor reads of the release before
-// migration 0158 ran, and the uuid comparison this table's anchor index is built on, in that
-// order.
+// migration 20261101182419 ran, and the uuid comparison this table's anchor index is built on,
+// in that order.
 //
 // `anchor is not null` is the partial predicate of asks_anchor_artifact_id (0148), which Postgres
 // cannot prove from a clause on anchor->>'artifact_id' alone, so without it that index is not
