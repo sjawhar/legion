@@ -8,12 +8,14 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
+	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -159,7 +161,8 @@ func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer
 // --restore, the rollback, it writes every moved file's bytes back into its row from the bucket
 // (files.RestoreRows). Each pass names the rows it could not do and goes on past them, exits 1
 // when any failed, and can be run again at any time; the server serves a row from its bytes
-// whenever it holds them.
+// whenever it holds them. The move refuses, with exit 1 and before it touches a row, while a live
+// server process has no bucket (bucketlessProcesses): that process serves a file only from its row.
 func backfillFiles(ctx context.Context, args []string, databaseURL, bucket string, out io.Writer) int {
 	flags := flag.NewFlagSet("backfill-files", flag.ContinueOnError)
 	flags.SetOutput(out)
@@ -185,6 +188,19 @@ func backfillFiles(ctx context.Context, args []string, databaseURL, bucket strin
 		return 1
 	}
 	defer database.Pool.Close()
+	if !*verifyOnly && !*restore {
+		bucketless, err := bucketlessProcesses(ctx, database)
+		if err != nil {
+			fmt.Fprintf(out, "backfill-files: %v\n", err)
+			return 1
+		}
+		if len(bucketless) > 0 {
+			fmt.Fprintf(out, "backfill-files: refused: these live server processes have no bucket and serve a file only from its row, "+
+				"so no row may lose its bytes: %s. Give each one DISPATCH_FILE_STORE_BUCKET, or stop it, then run backfill-files again\n",
+				strings.Join(bucketless, "; "))
+			return 1
+		}
+	}
 	fileStore, err := files.NewS3(ctx, bucket)
 	if err != nil {
 		fmt.Fprintf(out, "backfill-files: %v\n", err)
@@ -211,6 +227,26 @@ func backfillFiles(ctx context.Context, args []string, databaseURL, bucket strin
 		return 1
 	}
 	return 0
+}
+
+// bucketlessProcesses names each live server process with no bucket (processes.Bucketless): one
+// started without DISPATCH_FILE_STORE_BUCKET, or one of a build that predates the fleet columns
+// (PredatesFleetColumns), which registers no file_store. Each is named by its instance id, its
+// build and when it started.
+func bucketlessProcesses(ctx context.Context, database *store.Store) ([]string, error) {
+	bucketless, err := processes.Bucketless(ctx, database.Pool)
+	if err != nil {
+		return nil, err
+	}
+	var named []string
+	for _, process := range bucketless {
+		build := process.Build()
+		if process.PredatesFleetColumns() {
+			build += ", a build that does not register file_store"
+		}
+		named = append(named, fmt.Sprintf("%s (%s, started %s)", process.ID, build, process.StartedAt.UTC().Format(time.RFC3339)))
+	}
+	return named, nil
 }
 
 // loadServerURL resolves the dashboard origin exactly as the server does, for a subcommand

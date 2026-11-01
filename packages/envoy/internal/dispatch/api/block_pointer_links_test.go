@@ -50,7 +50,13 @@ func TestASavedBlockPointerIsALinkNamedByItsAttribute(t *testing.T) {
 	requireEdgeSources(t, "links to r1", graphEdges(t, handler, url.Values{"to": {r1}}).Edges, "serves block "+c1)
 	requireEdgeSources(t, "serves links to r1", graphEdges(t, handler, url.Values{"to": {r1}, "kind": {"serves"}}).Edges, "serves block "+c1)
 	requireEdgeSources(t, "mentions of r1", graphEdges(t, handler, url.Values{"to": {r1}, "kind": {"mentions"}}).Edges)
-	expectRefusal(t, "an unknown kind", graphRequest(t, handler, url.Values{"to": {r1}, "kind": {"nope"}}), http.StatusBadRequest, "INVALID_KIND")
+	// A kind no build of this fleet emits is listed in unknown_kinds rather than refused, as a
+	// newer build's `block[]` attribute name would be during a release.
+	unknown := graphEdges(t, handler, url.Values{"to": {r1}, "kind": {"nope"}})
+	requireEdgeSources(t, "an unknown kind", unknown.Edges)
+	if !reflect.DeepEqual(unknown.UnknownKinds, []string{"nope"}) {
+		t.Fatalf("an unknown kind: unknown_kinds = %q, want [nope]", unknown.UnknownKinds)
+	}
 
 	atR1 := 0
 	for _, edge := range graphEdges(t, handler, url.Values{"to": {specRef}}).Edges {

@@ -30,26 +30,28 @@ const (
 // so no message and no timer reads the row. A nil settingsWake reads it once.
 //
 // The returned stop, called once ctx is cancelled, waits for both intakes' Runs and the cache's,
-// then closes both clients. Intake's Run returns only once it has stopped delivering
-// (Intake.StopDelivering, which it begins as ctx ends): a message in its handler then finishes and
-// is acknowledged before stop closes the client, and the messages behind it are handed back to
-// NATS for the next process. Each Run's stop has one deadline, intakeStopBudget after ctx ends
-// (stopContext), which a bind under way at that moment spends rather than extends: the handlers
-// still running then are given up and their messages handed back too, and the Runs return
-// promptly after it. So intakeStopBudget from ctx's end bounds how long a shutdown spends on the
-// intakes, and stop adds no deadline of its own. Every handler of Intake's has returned by the
-// time stop does, so a caller that closes the pool after stop returns, as cmd/dispatch's shutdown
-// does, never closes it under one's writes. A second call returns once the first has.
+// then closes both clients. Each Run returns only once it has stopped delivering and released its
+// hold (heldDurable.stop): a message in its handler then finishes and is acknowledged before stop
+// closes the client, the messages behind it are handed back to NATS, and the next process takes
+// the durable over at once rather than at the hold's lapse. Each Run's stop has one deadline,
+// intakeStopBudget after ctx ends (stopContext), which a take-over under way at that moment
+// spends rather than extends: the handlers still running then are given up and their messages
+// handed back too, and the Runs return promptly after it. So intakeStopBudget from ctx's end
+// bounds how long a shutdown spends on the intakes, and stop adds no deadline of its own. Every
+// handler of Intake's has returned by the time stop does, so a caller that closes the pool after
+// stop returns, as cmd/dispatch's shutdown does, never closes it under one's writes. A second
+// call returns once the first has.
 //
 // The intakes cannot share a client: a bus.Client holds one JetStream subscription, and refuses the
-// second intake's bind with bus.ErrSubscriptionHeld.
+// second intake's subscribe with bus.ErrSubscriptionHeld.
 //
-// Each intake reconciles its durable's configuration under a lease of that durable's own
-// (consumerLease), taken on the pool's lease connections, so that two envoy-dispatch processes
-// never reconcile one durable against each other -- and so that neither intake's reconciliation
-// can block the other's, which one lease over both durables did (the measurement is on
-// consumerLease). A pool that cannot open those connections is returned as the error, with
-// neither intake started: an intake that could not take its lease would reconcile nothing.
+// Each intake delivers from its durable only while it holds that durable's hold
+// (intakeHoldName), and changes the durable only under that durable's own consumer lease
+// (consumerLease), both taken and the hold renewed on the pool's lease connections, so that of
+// every envoy-dispatch process one delivers from each durable at a time -- and so that neither
+// intake's take-over can block the other's, which one lease over both durables did (the
+// measurement is on consumerLease). A pool that cannot open those connections is returned as the
+// error, with neither intake started: an intake that could take neither would deliver nothing.
 func StartIntakes(ctx context.Context, connect func(name string) (*bus.Client, error), pool *store.Pool, github *githubapp.Client, broker *events.Broker, settingsWake <-chan struct{}) (stop func(), err error) {
 	if github == nil {
 		slog.Info("dispatch delivery: no GitHub App key — the intakes are idle")

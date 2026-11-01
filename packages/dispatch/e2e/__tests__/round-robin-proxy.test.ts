@@ -1,4 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server, Subprocess } from "bun";
 
@@ -25,6 +28,8 @@ const { WebSocket: WsClient } = require("ws") as {
 const proxyScript = fileURLToPath(new URL("../round-robin-proxy.ts", import.meta.url));
 const harnessPortsModule = fileURLToPath(new URL("../harness-ports.ts", import.meta.url));
 const runServer = fileURLToPath(new URL("../run-server.sh", import.meta.url));
+// run-server.sh runs the server from packages/envoy, without the trailing slash `pwd` drops.
+const envoyDirectory = fileURLToPath(new URL("../../../envoy", import.meta.url));
 
 /** What an upstream saw of one request. */
 interface Seen {
@@ -223,6 +228,9 @@ describe("round-robin proxy", () => {
       { "X-Dispatch-E2E-Process": "c" },
       { Cookie: "dispatch-e2e-process=A" },
       { Cookie: "dispatch-e2e-process=b", "X-Dispatch-E2E-Process": "" },
+      { Cookie: "dispatch-e2e-page=c" },
+      // A pin of the other kind than the request's is refused too.
+      { Cookie: "dispatch-e2e-api=b; dispatch-e2e-page=" },
     ];
     for (const headers of refused) {
       const response = await get("/who", headers);
@@ -232,6 +240,38 @@ describe("round-robin proxy", () => {
       });
     }
     expect([...a.seen, ...b.seen]).toEqual([]);
+  });
+
+  test("a page pin and an API pin send a context's page to one process and the rest to the other", async () => {
+    const split = { Cookie: "dispatch-e2e-page=b; dispatch-e2e-api=a" };
+    // The page: a navigation, index.html and every asset.
+    expect(await answeredBy("/issues/CORE-1", { ...split, "Sec-Fetch-Mode": "navigate" })).toBe(
+      "b"
+    );
+    expect(await answeredBy("/index.html", split)).toBe("b");
+    expect(await answeredBy("/assets/index-abc.js", split)).toBe("b");
+    // Everything else: the API, sign-in (a navigation included), a websocket.
+    expect(await answeredBy("/api/v1/issues", split)).toBe("a");
+    expect(
+      await answeredBy("/auth/_dev/signin?login=alice", { ...split, "Sec-Fetch-Mode": "navigate" })
+    ).toBe("a");
+    expect(await answeredBy("/favicon.svg", split)).toBe("a");
+    const socket = openSocket(split);
+    expect(await socket.received(1)).toEqual(["opened on a"]);
+    socket.socket.close();
+    await socket.closed;
+    // A pin of the request's kind beats the context pin, which still pins the other kind; the
+    // header beats both.
+    const both = "dispatch-e2e-process=a; dispatch-e2e-page=b";
+    expect(await answeredBy("/assets/index-abc.js", { Cookie: both })).toBe("b");
+    expect(await answeredBy("/api/v1/issues", { Cookie: both })).toBe("a");
+    expect(await answeredBy("/api/v1/issues", { Cookie: "dispatch-e2e-api=b" })).toBe("b");
+    expect(
+      await answeredBy("/assets/index-abc.js", { ...split, "X-Dispatch-E2E-Process": "a" })
+    ).toBe("a");
+    // None of them took a turn.
+    expect(await answeredBy("/who")).toBe("a");
+    expect(await answeredBy("/who")).toBe("b");
   });
 
   test("a /_test/ request goes to both processes and answers A's, or a non-2xx of either", async () => {
@@ -350,11 +390,12 @@ describe("DISPATCH_E2E_PROCESSES", () => {
       stderr: "pipe",
       stdout: "pipe",
     });
-    const [code, stderr] = await Promise.all([
+    const [code, stdout, stderr] = await Promise.all([
       child.exited,
+      new NativeResponse(child.stdout).text(),
       new NativeResponse(child.stderr).text(),
     ]);
-    return { code, stderr };
+    return { code, stderr, stdout };
   };
   // A process of its own per import: the refusal is the module's evaluation, which runs once.
   const importPorts = (env: Record<string, string>) =>
@@ -381,6 +422,76 @@ describe("DISPATCH_E2E_PROCESSES", () => {
     const keyless = await run(["bash", runServer], { ...database, DISPATCH_E2E_PROCESSES: "2" });
     expect(keyless.code).not.toBe(0);
     expect(keyless.stderr).toContain("DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY must give both processes");
+  });
+
+  test("run-server.sh runs DISPATCH_E2E_SERVER_BINARY, when set, as it runs the one it builds", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "run-server-binary-"));
+    try {
+      const binary = join(directory, "envoy-dispatch");
+      // The binary reports the directory it runs in, the settings run-server.sh sweeps the
+      // environment down to, and how it was told to listen: the socket it inherited, or the port
+      // it was handed.
+      writeFileSync(
+        binary,
+        [
+          "#!/usr/bin/env bash",
+          'fd="$DISPATCH_LISTEN_FD"',
+          "socket=none",
+          'if [ -n "$fd" ] && [ -S "/dev/fd/$fd" ]; then',
+          "  socket=listening",
+          "fi",
+          '[ -n "$fd" ] || fd=none',
+          'echo "given binary in $PWD with DISPATCH_TEST_HOOKS=$DISPATCH_TEST_HOOKS' +
+            " DISPATCH_WEB_DIST=$DISPATCH_WEB_DIST DISPATCH_LISTEN_FD=$fd socket=$socket" +
+            ' DISPATCH_PORT=$DISPATCH_PORT DISPATCH_SERVER_URL=$DISPATCH_SERVER_URL"',
+          "",
+        ].join("\n"),
+        { mode: 0o755 }
+      );
+      // run-server.sh reads the fakes' ports, and binds the port it is given.
+      const environment = {
+        DATABASE_URL: "postgres://postgres@127.0.0.1:1/never-opened",
+        DISPATCH_E2E_PORT: "8777",
+        DISPATCH_E2E_SERVER_BINARY: binary,
+        DISPATCH_E2E_SERVER_WEB_DIST: "/given/web",
+        FAKE_BROKER_PORT: "9024",
+        FAKE_ENVOY_PORT: "9021",
+        FAKE_GITHUB_PORT: "9022",
+      };
+      const { code, stdout } = await run(["bash", runServer], environment);
+      expect(code).toBe(0);
+      expect(stdout).toBe(
+        `given binary in ${envoyDirectory} with DISPATCH_TEST_HOOKS=1 DISPATCH_WEB_DIST=/given/web ` +
+          "DISPATCH_LISTEN_FD=none socket=none DISPATCH_PORT=8777 " +
+          "DISPATCH_SERVER_URL=http://127.0.0.1:8777\n"
+      );
+
+      const missing = await run(["bash", runServer], {
+        ...environment,
+        DISPATCH_E2E_SERVER_BINARY: join(directory, "absent"),
+      });
+      expect(missing.code).not.toBe(0);
+      expect(missing.stderr).toContain(
+        `DISPATCH_E2E_SERVER_BINARY names ${join(directory, "absent")}, which is not an executable file`
+      );
+
+      // With no port of its own the given binary serves on the socket held for it, as a build
+      // from this tree does: held-port.py hands it the listening socket as DISPATCH_LISTEN_FD and
+      // names its port. A previous release adopts it (legion-envoy-v20.1.0 and later), so a
+      // two-build run holds B's port like A's and sets none.
+      const { DISPATCH_E2E_PORT: _, ...portless } = environment;
+      const held = await run(["bash", runServer], portless);
+      expect(held.code).toBe(0);
+      const port = /DISPATCH_PORT=([1-9][0-9]*) /.exec(held.stdout)?.[1];
+      expect(port).toBeDefined();
+      expect(held.stdout).toBe(
+        `given binary in ${envoyDirectory} with DISPATCH_TEST_HOOKS=1 DISPATCH_WEB_DIST=/given/web ` +
+          `DISPATCH_LISTEN_FD=3 socket=listening DISPATCH_PORT=${port} ` +
+          `DISPATCH_SERVER_URL=http://127.0.0.1:${port}\n`
+      );
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
   });
 
   test("A's and B's ports join the collision check in two-process mode only", async () => {

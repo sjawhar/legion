@@ -130,6 +130,12 @@ func (s *server) publishAgentStreamFrame(w http.ResponseWriter, r *http.Request)
 			writeError(w, "FRAME_INPUT", http.StatusBadRequest, "responder takes {\"responding\": bool}")
 			return
 		}
+		// This body is the test's alone, so a member it does not declare is a mistake in the
+		// test and is refused by name, as every test hook's body is (decodeJSONTestHook).
+		if err := refuseUndeclaredMembers(&body, frame); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		call.As, call.Responding = as, body.Responding
 	default:
 		call.Frame = string(frame)

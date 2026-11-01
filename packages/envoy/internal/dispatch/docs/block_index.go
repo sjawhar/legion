@@ -80,7 +80,7 @@ func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.L
 	// counts (an open issue's document whose live text stays ahead, skipped every tick) logs nothing.
 	var logged BlockIndexTick
 	liveAhead := liveAheadDocuments{}
-	duty.RunLeasedAfterEachPass(ctx, leases, blockIndexLease, BlockIndexReconcileInterval, func(ctx context.Context) time.Duration {
+	duty.RunLeasedAfterEachPass(ctx, leases, blockIndexLease, BlockIndexReconcileInterval, func(ctx context.Context, _ time.Duration) time.Duration {
 		var wait time.Duration
 		wait, cursor = s.blockIndexTick(ctx, cursor, liveAhead, &logged)
 		return wait
@@ -172,6 +172,11 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 		switch {
 		case ctx.Err() != nil:
 			return tick, ctx.Err()
+		case errors.Is(err, ErrDocNewerContent):
+			// Another build wrote an element this build does not know, during a release; a build
+			// that reads it indexes the document, which stays owed until then.
+			slog.Warn("dispatch: block index skipped a document holding an element this build cannot read",
+				"artifact", document.id, "error", err)
 		case err != nil:
 			slog.Error("dispatch: block index skipped a document it could not index",
 				"artifact", document.id, "error", err)

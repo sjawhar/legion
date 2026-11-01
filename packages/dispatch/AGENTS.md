@@ -1092,7 +1092,13 @@ checks every socket itself, so such a read admits at most a socket the server re
 admission's own read alone decides, and only an admission opens anything: a `409 DOC_SCHEMA` read
 shows the repair message and a markdown upload under the document's own name (whatever the picked
 file is called) that repairs it, `409 DOCUMENT_UNLOADABLE` offers the rebuild from the latest
-version, and any other failure says the document could not load. A blocked admission is admitted
+version, and any other failure says the document could not load. A `409 DOC_NEWER_CONTENT` read is
+a tree holding an element this build of Dispatch cannot read, which a newer build wrote during a
+release: nothing here repairs it, and a replacement would delete that element, so the page offers
+no upload or rebuild. It says "This document holds content this version of Dispatch cannot show
+yet. It reloads in a minute." and admits again on its own after 0, 1, 2, 4 and 8 seconds, then
+once a minute, until a read succeeds; `isDocumentNewerContent` errors are retried like any
+transient failure (`isRetryableQueryError`). A blocked admission is admitted
 again by the next successful read of the text - the refetch a repair upload's or a rebuild's
 invalidation makes - so a repair reconnects the editor. After admission the provider owns
 reconnects: the first connect opens at once, and once a socket has opened, the reconnect after it
@@ -1103,26 +1109,48 @@ a reconnect into an unreadable room: it closes the socket with
 code `4409` (`DOCUMENT_SCHEMA_CLOSE_CODE` in `packages/contracts`) before any sync, and
 `connection.ts` stops the provider and calls `onOutsideSchema`, where `ProofDocument` tears the
 editor down and admits again after 0, 1, 2, 4 and 8 seconds for successive refusals; the sixth in a
-row stops reconnecting and asks for a reload, and a socket that syncs ends the run. Later refetches
-of the text - every `artifact.version` event, and the whole-cache refresh the event feed runs after
-a gap its replay does not cover - leave a connected editor alone whether they succeed or fail, so an
-outage that answers
-them 500 or 503 keeps the editor and the edits it holds.
+row stops reconnecting and asks for a reload, and a socket that syncs ends the run. A room holding
+an element this build cannot read closes with code `4425` (`DOCUMENT_NEWER_CONTENT_CLOSE_CODE`)
+instead, which `connection.ts` leaves to the provider: `@hocuspocus/provider` 2.15 stops only on
+4401 and 1009, so it reconnects with its backoff and can reach a build that reads the document.
+Later refetches of the text - every `artifact.version` event, and the whole-cache refresh the
+event feed runs after a gap its replay does not cover - leave a connected editor alone whether
+they succeed or fail, so an outage that answers them 500 or 503 keeps the editor and the edits it
+holds.
 
-Before constructing Proof, Dispatch fetches `/api/v1/schema/blocks` once and keeps the schema by
-version for the session. It passes that schema to the live editor, historical-version editor, and
-the one headless Markdown engine cached per schema version; the connection carries it as
-`schema_version`. A server version mismatch admits the tab read-only and the surface shows
-`Reload to edit`. A closed issue's document is admitted read-only too, and names no reload, which
-cannot make it editable: `ProofDocument` shows the line only for a read-only admission that came
-while the issue was open (`closedAdmission` records whether it was closed then), while the issue
-is open and the socket is connected. The admission and the connection decide the line, not the
-close or the reopen: each drops the socket only on the server process that served it
-(`SetIssueClosed`), and where it does, the reconnect's admission decides again. Typed blocks use
-`:::name{#block-id key="value"}` container directives. The server owns their schema and version,
-while Dispatch owns host rendering for `render: "host"` types; the SPA must not invent node schemas
-or parse a second directive grammar.
-After the first paint, Dispatch warms that schema and headless Markdown engine so a long-lived tab
+The page uses the document schema manifest it was built with: `web/src/features/doc/schema.ts`
+imports `packages/envoy/internal/dispatch/pmdoc/schema/blocks.json` at build time
+(`compiledBlockSchema`) and reads no schema from the server, since during a release the process
+that answers can be of the other build. `GET /api/v1/schema/blocks` stays for pages of earlier
+builds. The page passes that manifest to the live editor, the historical-version editor and the one
+headless Markdown engine. The connection presents it in its query as `schema_version` (V, the
+manifest's `version`) and `schema_creatable` (R, the highest `since` among the elements the page
+may create, `compiledSchemaCreatable`, as Go's `pmdoc.SchemaCreatable()`); its Hocuspocus token
+stays V alone, because a server that predates `schema_creatable` compares the whole token with
+its own version and its answer replaces the query's. The server admits the tab read-only when a
+live server process cannot read what the tab creates, or the tab cannot represent what the fleet
+creates or what the document holds (`packages/envoy/cmd/dispatch/README.md`, "Two builds at
+once"), and the surface shows `Reload to edit`. A tab admitted writable whose numbers the fleet
+stops admitting - a build of another version joins or rolls away - has its socket closed by the
+server's 15 s re-check with code `4412` (`DOCUMENT_ADMISSION_REVOKED_CLOSE_CODE` in
+`packages/contracts`), or with `1006` when the tab is too slow to take that frame
+(`packages/envoy/cmd/dispatch/README.md`, "Two builds at once", for the rule). `connection.ts`
+reads neither code, so the provider reconnects on both, the reconnect presents the same numbers,
+and its admission - read-only now - decides the line again.
+A closed issue's document is admitted read-only
+too, and names no reload, which cannot make it editable: `ProofDocument` shows the line only for a
+read-only admission that came while the issue was open (`closedAdmission` records whether it was
+closed then), while the issue is open and the socket is connected. The admission and the
+connection decide the line, not the close or the reopen: each drops the socket only on the server
+process that served it (`SetIssueClosed`), and where it does, the reconnect's admission decides
+again. y-prosemirror deletes, from the page's copy of
+the document, an element or text the editor's schema cannot build (`createNodeFromYElement`), such
+as an element a newer build wrote; `pending-sync.ts` never keeps that repair as a pending edit, so
+no later writable admission replays it. Typed blocks use `:::name{#block-id key="value"}`
+container directives. The server owns their schema and version, while Dispatch owns host rendering
+for `render: "host"` types; the SPA must not invent node schemas or parse a second directive
+grammar.
+After the first paint, Dispatch warms the headless Markdown engine so a long-lived tab
 holds the lazy chunk through an SPA replacement. A stale Vite chunk reloads the page, at most
 three times in any five minutes (never while the browser is offline — that is an outage, not a
 deployment); if rendering still fails, `MarkdownBody` exposes its literal-text fallback with
@@ -1605,22 +1633,36 @@ harness stops (the row's `heldAhead`), and the port is in every row's environmen
 takes each server's own inputs: its port as `DISPATCH_E2E_SERVER_PORT` when A's or B's variable is
 set, or else `DISPATCH_E2E_LISTEN_FROM`, the keeper's socket, which it serves on; then
 `DISPATCH_E2E_SERVER_WEB_DIST` (default `../dispatch/web/dist`, a path from `packages/envoy`, as
-`DISPATCH_WEB_DIST` is), and `DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY`, which it passes on as the
-server's `DISPATCH_DEV_SIGNIN_SHARED_KEY`. It requires the key and `DISPATCH_E2E_PORT` in
-two-process mode, and sets both servers' `DISPATCH_SERVER_URL` to the proxy's origin. The harness
-generates that key once per run and hands it to both, so a person signed in through one process
-is signed in on the other, and points B at `DISPATCH_E2E_WEB_DIST_B` when it is set (default: A's
-dist). The proxy alternates each HTTP
+`DISPATCH_WEB_DIST` is), `DISPATCH_E2E_SERVER_BINARY` (an envoy-dispatch to run in place of the one
+it builds from this tree, also a path from `packages/envoy`; it refuses one that is not an
+executable file), and `DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY`, which it passes on as the server's
+`DISPATCH_DEV_SIGNIN_SHARED_KEY`. It requires the key and `DISPATCH_E2E_PORT` in two-process mode,
+and sets both servers' `DISPATCH_SERVER_URL` to the proxy's origin. The harness generates that key
+once per run and hands it to both, so a person signed in through one process is signed in on the
+other, and points B at `DISPATCH_E2E_WEB_DIST_B` when it is set (default: A's dist) and at
+`DISPATCH_E2E_BINARY_B` when it is set (`binaryB` in `e2e/harness-processes.ts`): a previous
+release's build, which gets the same environment, since a release ignores a setting it does not
+know. Such a B must be `legion-envoy-v20.1.0` or later
+(`packages/envoy/scripts/build-dispatch-build.sh` refuses an older commit): that release serves on
+the socket the harness holds for it and knows the shared key, so it starts exactly as A does, no
+run names a port for it, and `e2e/preflight.ts` checks it for the one cookie key as it checks any
+other B. The proxy alternates each HTTP
 request and each websocket upgrade between A and B (two turns, each starting at A), streams each
-response back as it arrives, and forwards `Host` and `Origin` unchanged. `X-Dispatch-E2E-Process: a|b` on any request
-pins it, over a `dispatch-e2e-process=a|b` cookie, which pins a whole browser context, websocket
-upgrades included; a pinned request takes no turn, and any other value is refused (400). A path
+response back as it arrives, and forwards `Host` and `Origin` unchanged.
+`X-Dispatch-E2E-Process: a|b` on any request
+pins it, over the cookie of its kind, `dispatch-e2e-page=a|b` for a page request (a navigation
+outside `/api/`, `/auth/` and `/ws/`, `/index.html`, `/assets/*`) and `dispatch-e2e-api=a|b` for
+every other, which split a browser context so one process's page runs against the other's
+server, over a `dispatch-e2e-process=a|b` cookie, which pins a whole browser context, websocket
+upgrades included; a pinned request takes no turn, and any other value of any of them is refused
+(400). A path
 containing `/_test/` goes to both processes, answering A's response or the first non-2xx of the
 two. A path containing `/_proxy/` is the proxy's own and never forwarded: `GET /_proxy/requests`
 (`[{path, method, upstream}]`), `GET /_proxy/sockets` (`[{id, path, upstream, open, openedAt}]` in
 open order, `openedAt` in epoch milliseconds) and `POST /_proxy/reset`, which empties both lists
-and starts both turns over at A. `e2e/api.ts`'s calls take `process: "a" | "b"` to pin, and
-`pinnedTo` in `e2e/harness-processes.ts` builds the header for a plain fetch. `e2e/preflight.ts`
+and starts both turns over at A. `e2e/api.ts`'s calls take `process: "a" | "b"` to pin, and sign
+in on that process for a cookie of its own; `pinnedTo` in `e2e/harness-processes.ts` builds the
+header for a plain fetch. `e2e/preflight.ts`
 asks each process, pinned, for this run's fake Envoy session, then signs a person in on A and
 requires B to know them. The proxy shares its relay with the plain-HTTP proxy
 (`e2e/http-relay.ts`, which passes a websocket close code on wherever the other side may send it),
@@ -1630,10 +1672,15 @@ mode runs them alone (the sign-in spec only under `DISPATCH_E2E_SIGNIN=oidc`, be
 `chromium` project. `bun run e2e:multiprocess` builds the dashboard
 twice (`web/dist`, then `web/dist-b` with `DISPATCH_BUILD=e2e-b`, so its entry chunk differs from
 A's even where CI sets `GITHUB_SHA`; `web/vite.config.ts` takes `DISPATCH_BUILD` first) and runs
-Playwright through `e2e/run.ts` in two-process mode with B on `dist-b`, passing on extra arguments
+Playwright through `e2e/run.ts` in two-process mode with B on `dist-b`, or on the
+`DISPATCH_E2E_WEB_DIST_B` the caller set, passing on extra arguments
 (`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). CI's
-`dispatch-browser-multiprocess` job runs it. Two-process mode starts its own servers, so the
-Playwright config refuses it with `PLAYWRIGHT_BASE_URL`, and `bun run dispatch:local` refuses it.
+`dispatch-browser-multiprocess` job runs it, and `dispatch-two-builds` runs
+`cross-build.multiprocess` with `DISPATCH_E2E_BINARY_B` and `DISPATCH_E2E_WEB_DIST_B` naming the
+previous release's build (`e2e/cross-build.multiprocess.e2e.ts`: each direction's page against the
+other build's server, and, with both processes on this tree, a document holding newer content).
+Two-process mode starts its own servers, so the Playwright config refuses it with
+`PLAYWRIGHT_BASE_URL`, and `bun run dispatch:local` refuses it.
 
 `DISPATCH_E2E_SIGNIN` picks how the harness's servers sign a person in (`e2e/harness-signin.ts`):
 unset or empty is dev sign-in, above, and `oidc` is the production sign-in, through

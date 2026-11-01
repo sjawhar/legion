@@ -25,10 +25,21 @@ var (
 	// every route answers it alike (OutsideSchemaError).
 	ErrDocOutsideSchema = errors.New("document is outside the Proof schema; replace the document from markdown to repair it")
 	// ErrDocumentUnloadable is a document whose stored history does not decode, so nothing can read
-	// or open it. A rebuild from its latest saved version restores it (RebuildDocument).
-	ErrDocumentUnloadable = errors.New("the document's stored history cannot load; rebuild it from its latest saved version")
-	ErrDocumentLive       = errors.New("document is live")
-	ErrDocumentLoads      = errors.New("this document loads; nothing to rebuild — if it is outside the schema, replace it from markdown to repair it")
+	// or open it. A rebuild from its latest saved version (RebuildDocument) restores it and discards
+	// every edit made after that version, so a person decides it.
+	ErrDocumentUnloadable = errors.New("the document's stored history cannot load. A rebuild from the latest saved version discards every edit made after that version. A person decides whether to rebuild the document")
+	// ErrDocumentLive is a rebuild refused because the document is resident in this server.
+	ErrDocumentLive = errors.New("document is live")
+	// ErrDocumentLoads is a rebuild refused because the document's stored history loads. A
+	// rebuild is only for a history that cannot load, so its message offers no repair and tells
+	// the caller to stop and ask a person.
+	ErrDocumentLoads = errors.New("this document's stored history loads, so Dispatch refused the rebuild. Dispatch rebuilds only a document whose stored history cannot load. Stop. Ask a person what to do with this document")
+	// ErrDocNewerContent is the tree a document holds refused because it holds an element this
+	// build does not know (pmdoc.ErrUnknownElement): two builds serve one database during a
+	// release, and a newer build wrote it. It is not ErrDocSchema: no repair applies, and a
+	// replacement from markdown or a rebuild would delete the element (NewerContentError), so the
+	// message tells the caller to use neither.
+	ErrDocNewerContent = errors.New("this Dispatch process's build cannot read an element of this document. During a release, another build may serve the document. Try again in one minute. Do not replace or rebuild the document")
 )
 
 // OutsideSchemaError is ErrDocOutsideSchema with the refusal that names what is wrong. treeOf and
@@ -49,13 +60,33 @@ func (e *OutsideSchemaError) Is(target error) bool {
 
 func (e *OutsideSchemaError) Unwrap() error { return e.Cause }
 
+// NewerContentError is ErrDocNewerContent with the refusal that names the element. treeOf and
+// documentMarkdown classify a document's tree by it where they read or render it, as they do an
+// OutsideSchemaError, so every route answers it alike. An operation that would repair a tree
+// outside the schema refuses it as it refuses any other error.
+type NewerContentError struct{ Cause error }
+
+func (e *NewerContentError) Error() string {
+	return ErrDocNewerContent.Error() + " (" + e.Cause.Error() + ")"
+}
+
+// Is makes it ErrDocNewerContent alone: not ErrDocSchema or ErrDocOutsideSchema, which a repair
+// answers.
+func (e *NewerContentError) Is(target error) bool { return target == ErrDocNewerContent }
+
+func (e *NewerContentError) Unwrap() error { return e.Cause }
+
 // documentSchemaError classifies err from reading, rendering or walking the tree a document holds -
 // a walk inside a write's transaction included, since a peer can have deepened that tree past the
-// schema's depth bound after the write read it: a schema refusal is an OutsideSchemaError, and any
-// other error is returned as it is.
+// schema's depth bound after the write read it: a refusal of an element this build does not know
+// is a NewerContentError, any other schema refusal is an OutsideSchemaError, and any other error is
+// returned as it is.
 func documentSchemaError(err error) error {
-	if err == nil || errors.Is(err, ErrDocOutsideSchema) {
+	if err == nil || errors.Is(err, ErrDocOutsideSchema) || errors.Is(err, ErrDocNewerContent) {
 		return err
+	}
+	if errors.Is(err, pmdoc.ErrUnknownElement) {
+		return &NewerContentError{Cause: err}
 	}
 	if errors.Is(err, ErrDocSchema) || errors.Is(err, pmdoc.ErrSchema) {
 		return &OutsideSchemaError{Cause: err}
@@ -154,11 +185,19 @@ func asUploaded(tree *pmdoc.Node) *pmdoc.Node {
 // encodeDocumentTree writes tree into a fresh document and returns the first durable update for
 // callers that create or rebuild a document outside a live room.
 func encodeDocumentTree(tree *pmdoc.Node) ([]byte, error) {
+	return encodeDocumentTreeHolding(tree, nil)
+}
+
+// encodeDocumentTreeHolding is encodeDocumentTree for a tree whose content the document holds
+// already as held (pmdoc.UpdateHolding): a rebuild from the latest saved version puts back what
+// that version holds, an element this build may not create yet among it. held nil is
+// encodeDocumentTree.
+func encodeDocumentTreeHolding(tree, held *pmdoc.Node) ([]byte, error) {
 	doc := crdt.New()
 	fragment := doc.GetXmlFragment(fragmentName)
 	doc.GetMap(marksMapName)
 	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
-		return pmdoc.Update(transaction, fragment, tree)
+		return pmdoc.UpdateHolding(transaction, fragment, tree, held)
 	}); err != nil {
 		return nil, err
 	}
@@ -338,7 +377,7 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 
 // renderedReplica is the copy of a room's document its update observer renders and the room's
 // reads walk (readLive). ygo fires the observer after the transaction has released the document's
-// lock (sjawhar/ygo v1.51.3-sami.4, crdt/doc.go, transactInternal), and a walk of the live tree
+// lock (sjawhar/ygo v1.54.1-sami.2, crdt/doc.go, transactInternal), and a walk of the live tree
 // takes no lock (crdt/yxml.go), so a render or read of the live tree can walk it while another
 // transaction writes it: a torn walk reads a healthy document as one outside the schema, logs a
 // false WARN and counts the update as a content change. Only a holder of mu writes or walks the
@@ -549,7 +588,7 @@ func (r *renderedReplica) takeLocked(room string, base []byte, updates []crdt.Lo
 			r.recover(room, updates[i:], note)
 			return settles, changed
 		}
-		if err := crdt.ApplyUpdateV1(r.doc, update.Update, nil); err != nil {
+		if err := r.apply(update); err != nil {
 			slog.Error("dispatch: apply a committed update to the document's rendered copy", "room", room, "error", err)
 			r.recover(room, updates[i:], note)
 			return settles, changed
@@ -559,6 +598,23 @@ func (r *renderedReplica) takeLocked(room string, base []byte, updates []crdt.Lo
 		note(update, contentChanged, asks)
 	}
 	return settles, changed
+}
+
+// apply moves the replica through one logged commit: what the commit integrated, and then what it
+// parked (crdt.LoggedUpdate.Parked), the structs and deletions the commit left waiting for
+// something the room lacks, which ygo leaves out of the update its observers are handed, as Yjs
+// does. The replica is the room's copy, which every read walks and which holds the room's state
+// until the room is evicted, so it parks exactly what the room parked and integrates it when the
+// room does: one that took the update alone has lost a peer's edit the room still holds, and
+// shows the document without it once the update that fills the gap arrives. The caller holds mu.
+func (r *renderedReplica) apply(update crdt.LoggedUpdate) error {
+	if err := crdt.ApplyUpdateV1(r.doc, update.Update, nil); err != nil {
+		return err
+	}
+	if len(update.Parked) == 0 {
+		return nil
+	}
+	return crdt.ApplyUpdateV1(r.doc, update.Parked, nil)
 }
 
 // changedBy classifies the update the replica has just applied and counted (consumed), published
@@ -856,9 +912,12 @@ func (r *renderedReplica) updateChangesMarkdown(room string) (bool, *pmdoc.Node)
 	markdown, tree, err := renderDocumentForUpdate(r.doc)
 	if err != nil {
 		r.markdown = nil
-		if errors.Is(err, ErrDocOutsideSchema) {
+		switch {
+		case errors.Is(err, ErrDocOutsideSchema):
 			slog.Warn("dispatch: updated document outside Proof schema", "room", room, "error", err)
-		} else {
+		case errors.Is(err, ErrDocNewerContent):
+			slog.Warn("dispatch: updated document holds an element this build cannot read", "room", room, "error", err)
+		default:
 			slog.Error("dispatch: read updated document", "room", room, "error", err)
 		}
 		return true, nil

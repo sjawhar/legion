@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 
+import manifest from "../../../../../envoy/internal/dispatch/pmdoc/schema/blocks.json";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import {
@@ -397,6 +398,45 @@ test("ProofDocument offers no rebuild for a document service that is unavailable
   }
 });
 
+// A document holding content this build of Dispatch cannot read was written by a newer build
+// during a release. Nothing on this page repairs it, and a replacement would delete that content,
+// so the page offers no upload or rebuild: it says the document reloads, reads the text again on
+// the refusal schedule, and connects once a read succeeds.
+test("ProofDocument shows content this build cannot show yet without a replace drop zone, and reloads", async () => {
+  const getArtifactText = spyOn(api, "getArtifactText").mockRejectedValue(
+    new ApiError(409, {
+      code: "DOC_NEWER_CONTENT",
+      error:
+        "this Dispatch process's build cannot read an element of this document. Try again in one minute.",
+    })
+  );
+  const { connections, view } = renderProofDocument();
+  try {
+    expect(
+      await within(view.container).findByText(
+        "This document holds content this version of Dispatch cannot show yet. It reloads in a minute."
+      )
+    ).not.toBeNull();
+    expect(connections).toHaveLength(0);
+    expect(screen.queryByLabelText("Upload artifact")).toBeNull();
+    expect(screen.queryByText("Upload markdown to replace and repair this document.")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Rebuild from the latest version" })).toBeNull();
+    expect(within(view.container).queryByText(/This document could not load/)).toBeNull();
+    await waitFor(() => expect(getArtifactText.mock.calls.length).toBeGreaterThan(1));
+
+    getArtifactText.mockResolvedValue({ markdown: "The live document", version: 1 });
+    await waitFor(() => expect(connections).toHaveLength(1), { timeout: 3_000 });
+    expect(
+      within(view.container).queryByText(
+        "This document holds content this version of Dispatch cannot show yet. It reloads in a minute."
+      )
+    ).toBeNull();
+  } finally {
+    view.unmount();
+    getArtifactText.mockRestore();
+  }
+});
+
 // A reading column (the Inbox's) is not the document's page: it offers no repair and no rebuild,
 // because a reader beside a list of questions has not come to mend a document. Each blocked
 // admission is reported to the host instead, which shows the question's own card in its place.
@@ -580,5 +620,33 @@ test("ProofDocument names a reload again for a schema's admission when a close a
     expect(reloadLine()).not.toBeNull();
   } finally {
     view.unmount();
+  }
+});
+
+// During a release the process that answers the page can be of the other build, and its schema
+// route names that build's manifest, not the one this page's editor builds. So the page presents
+// the manifest it was built with: its version, and the highest version that reads every element
+// it creates (each current element is read from version 1), and it asks no server for a schema.
+test("ProofDocument connects with the schema it was built with and reads none from the server", async () => {
+  const realFetch = globalThis.fetch;
+  const schemaReads: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = input.toString();
+    if (path.startsWith("/api/v1/schema/blocks")) {
+      schemaReads.push(path);
+      return Response.json({ ...manifest, version: manifest.version + 1 });
+    }
+    return realFetch(input, init);
+  }) as unknown as typeof fetch;
+  const { callbacks, connections, view } = renderProofDocument();
+
+  try {
+    await waitFor(() => expect(connections).toHaveLength(1));
+    expect(callbacks[0]?.schemaVersion).toBe(manifest.version);
+    expect(callbacks[0]?.schemaCreatable).toBe(1);
+    expect(schemaReads).toEqual([]);
+  } finally {
+    view.unmount();
+    globalThis.fetch = realFetch;
   }
 });

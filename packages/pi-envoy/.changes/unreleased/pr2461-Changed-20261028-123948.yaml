@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+    The `dispatch` command and the Dispatch tools send a request that a Dispatch process answered
+    `404 NOT_FOUND` "no route for …" again after 1, 2 and 4 seconds; after the last attempt they say
+    the action is not offered yet because a release is in progress, and to try again in one minute.
+    `dispatch read` names `DOC_NEWER_CONTENT` among the codes of `Position: unavailable (<code>)`: a
+    document holding an element this Dispatch build cannot read, which a newer build wrote.
+time: 2026-10-28T12:39:48.979178013Z
+custom:
+    Issue: pr2461

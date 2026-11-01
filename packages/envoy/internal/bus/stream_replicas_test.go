@@ -8,6 +8,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -109,8 +110,10 @@ func TestAReconcileOnTheClusterKeepsTheCopiesTheByteLimitTheIDAndTheLimitsItDoes
 						t.Errorf("stream subjects = %v, want %s among them", got.Subjects, subject)
 					}
 				}
-				if !maps.Equal(got.Metadata, before.Metadata) {
-					t.Errorf("stream metadata = %v, want the deployed %v", got.Metadata, before.Metadata)
+				want := maps.Clone(before.Metadata)
+				want[streamGenerationKey] = strconv.Itoa(streamConfigGeneration)
+				if !maps.Equal(got.Metadata, want) {
+					t.Errorf("stream metadata = %v, want the deployed %v with this build's generation", got.Metadata, before.Metadata)
 				}
 				if got.MaxMsgsPerSubject != before.MaxMsgsPerSubject || got.MaxMsgSize != before.MaxMsgSize {
 					t.Errorf("stream MaxMsgsPerSubject = %d and MaxMsgSize = %d, want the deployed %d and %d", got.MaxMsgsPerSubject, got.MaxMsgSize, before.MaxMsgsPerSubject, before.MaxMsgSize)
@@ -253,7 +256,7 @@ func TestTheStreamTakesTheDeploymentsByteLimitAndKeepsADeployedOne(t *testing.T)
 
 	counting := &countingJetStream{JetStreamContext: js}
 	cfg := parseConnectOptions([]ConnectOption{WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes)}).streamConfig()
-	if err := ensureStreamWithConfig(counting, &cfg); err != nil {
+	if _, err := ensureStreamWithConfig(counting, &cfg); err != nil {
 		t.Fatalf("start setting %d: %v", testStreamMaxBytes, err)
 	}
 	if writes := counting.written(); len(writes) != 0 {
@@ -491,7 +494,7 @@ func TestOneServerStoppedAStartOfAThreeCopyDeploymentWritesNothing(t *testing.T)
 	startOnCluster(t, cluster, WithReplicas(3))
 	counting := &countingJetStream{JetStreamContext: js}
 	cfg := parseConnectOptions([]ConnectOption{WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes)}).streamConfig()
-	if err := ensureStreamWithConfig(counting, &cfg); err != nil {
+	if _, err := ensureStreamWithConfig(counting, &cfg); err != nil {
 		t.Fatalf("ensure the stream with one server stopped: %v", err)
 	}
 	if _, err := EnsureKeyValue(counting, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 3}); err != nil {
@@ -577,7 +580,7 @@ func TestASecondStartOnASingleServerWritesNothing(t *testing.T) {
 	}
 	counting := &countingJetStream{JetStreamContext: client.JS()}
 	cfg := parseConnectOptions([]ConnectOption(nil)).streamConfig()
-	if err := ensureStreamWithConfig(counting, &cfg); err != nil {
+	if _, err := ensureStreamWithConfig(counting, &cfg); err != nil {
 		t.Fatalf("second start: %v", err)
 	}
 	if _, err := EnsureKeyValue(counting, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {

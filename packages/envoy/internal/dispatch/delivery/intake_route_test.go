@@ -198,15 +198,112 @@ func TestIntakeAcksAnEnvelopeWithNoPayloadSilently(t *testing.T) {
 	}
 }
 
-// TestIntakeLogsAMalformedEnvelopeOfAKindItRecords: a pull request's or a workflow run's payload
-// is the flat string map its handler reads. One carrying anything else is malformed: logged at
-// ERROR, as every malformed envelope is, acknowledged, and nothing is written or fetched.
-func TestIntakeLogsAMalformedEnvelopeOfAKindItRecords(t *testing.T) {
-	for _, envelope := range []struct{ name, topic, payload string }{
-		{"pr", contracts.GithubResourceSubject("acme", "widgets", "pr", "7"),
-			`{"kind":"pr","action":"closed","repo":"acme/widgets","number":"7","merged":"true","labels":["non-task"]}`},
-		{"workflow", contracts.GithubWorkflowSubject("acme", "widgets", "deploy_yml", "completed"),
-			`{"kind":"workflow","action":"completed","repo":"acme/widgets","path":".github/workflows/deploy.yml","run_id":["1"]}`},
+// TestIntakeHandlesAMergedPullRequestEnvelopeWithAMemberItDoesNotRead: payload members are
+// additive, so a newer publisher may add a member that is not a string. No handler reads such a
+// member: the intake skips it and handles the rest of the payload. The merged pull request is
+// fetched and stored, with no ERROR line, and the event's time is recorded.
+func TestIntakeHandlesAMergedPullRequestEnvelopeWithAMemberItDoesNotRead(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	logs := captureLogs(t)
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/pulls/7", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, map[string]any{
+			"number": 7, "title": "feat: a widget", "html_url": "https://github.com/acme/widgets/pull/7",
+			"user": map[string]any{"login": "octocat"}, "labels": []any{map[string]any{"name": "non-task"}},
+			"created_at": "2024-01-01T00:00:00Z", "merged_at": "2024-01-01T02:00:00Z",
+			"merge_commit_sha": "abc123", "additions": 10, "deletions": 2, "body": "",
+		})
+	})
+	fake.handle("GET /repos/acme/widgets/pulls/7/commits", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			mustEncode(t, w, []any{})
+			return
+		}
+		mustEncode(t, w, []any{
+			map[string]any{"commit": map[string]any{"message": "feat: a widget", "author": map[string]any{"date": "2024-01-01T00:00:00Z"}}},
+		})
+	})
+	natsClient := intakeTestClient(t)
+	startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker(), loadedSettingsCache(t, ctx, pool)))
+	awaitBoundDurable(t, natsClient)
+
+	topic := contracts.GithubResourceSubject("acme", "widgets", "pr", "7")
+	publishGitHubEnvelope(t, natsClient, topic,
+		`{"kind":"pr","action":"closed","repo":"acme/widgets","number":"7","author":"octocat",`+
+			`"merged":"true","merge_commit_sha":"abc123","labels":["non-task"],"draft":false,"review":{"state":"approved"}}`)
+	awaitAcknowledged(t, natsClient)
+
+	for _, record := range logs() {
+		if record["level"] == "ERROR" && strings.HasPrefix(fmt.Sprint(record["msg"]), "dispatch delivery:") {
+			t.Errorf("intake logged an ERROR for a pull request with a member it does not read: %v", record)
+		}
+	}
+	pr, err := ScanPullRequest(pool.QueryRow(ctx, `select `+PullRequestColumns+` from delivery_pull_requests where repo = $1 and number = $2`, "acme/widgets", 7))
+	if err != nil {
+		t.Fatalf("read the stored pull request acme/widgets#7: %v", err)
+	}
+	if pr.Partial || pr.Additions == nil || *pr.Additions != 10 {
+		t.Errorf("stored pull request = %+v, want the completed fetch (not partial, 10 additions)", pr)
+	}
+	settings, err := GetSettings(ctx, pool)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if settings.LastEventAt == nil {
+		t.Error("last_event_at = null, want the handled envelope's time recorded")
+	}
+}
+
+// TestIntakeWarnsOfAWorkflowRunWhoseRunIDIsNotAString: the intake skips a payload member that is
+// not a string, so a workflow run whose run_id is not a string carries no run_id. The run handler
+// logs the malformed run_id at WARN, as it does for every run it cannot process. The envelope is
+// acknowledged, and nothing is written or fetched.
+func TestIntakeWarnsOfAWorkflowRunWhoseRunIDIsNotAString(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	logs := captureLogs(t)
+	fake := newFakeGitHub(t)
+	natsClient := intakeTestClient(t)
+	startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker(), loadedSettingsCache(t, ctx, pool)))
+	awaitBoundDurable(t, natsClient)
+
+	topic := contracts.GithubWorkflowSubject("acme", "widgets", "deploy_yml", "completed")
+	publishGitHubEnvelope(t, natsClient, topic,
+		`{"kind":"workflow","action":"completed","repo":"acme/widgets","path":".github/workflows/deploy.yml","run_id":["1"]}`)
+	awaitAcknowledged(t, natsClient)
+
+	warned := false
+	for _, record := range logs() {
+		if record["level"] == "WARN" && record["msg"] == "dispatch delivery: process event" && record["subject"] == topic &&
+			strings.HasPrefix(fmt.Sprint(record["error"]), `workflow envelope: malformed run_id ""`) {
+			warned = true
+		}
+		if record["level"] == "ERROR" && strings.HasPrefix(fmt.Sprint(record["msg"]), "dispatch delivery:") {
+			t.Errorf("intake logged an ERROR for a workflow run whose run_id is not a string: %v", record)
+		}
+	}
+	if !warned {
+		t.Errorf("no WARN \"dispatch delivery: process event\" naming the malformed run_id for %s; logged %v", topic, logs())
+	}
+	settings, err := GetSettings(ctx, pool)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if settings.LastEventAt != nil || countRuns(t, ctx, pool) != 0 || fake.tokenMints.Load() != 0 {
+		t.Errorf("a run with no run_id wrote or fetched: last_event_at %v, %d runs, %d token mints",
+			settings.LastEventAt, countRuns(t, ctx, pool), fake.tokenMints.Load())
+	}
+}
+
+// TestIntakeLogsAMalformedEnvelopePayload: a payload that is not a JSON object, or a kind that is
+// not a string, cannot be routed. It is malformed: logged at ERROR, acknowledged, and nothing is
+// written or fetched.
+func TestIntakeLogsAMalformedEnvelopePayload(t *testing.T) {
+	topic := contracts.GithubResourceSubject("acme", "widgets", "pr", "7")
+	for _, envelope := range []struct{ name, payload string }{
+		{"not an object", `["pr","closed"]`},
+		{"kind not a string", `{"kind":["pr"],"action":"closed","repo":"acme/widgets","number":"7","merged":"true"}`},
 	} {
 		t.Run(envelope.name, func(t *testing.T) {
 			pool, ctx := deliveryTestPool(t)
@@ -217,17 +314,17 @@ func TestIntakeLogsAMalformedEnvelopeOfAKindItRecords(t *testing.T) {
 			startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker(), loadedSettingsCache(t, ctx, pool)))
 			awaitBoundDurable(t, natsClient)
 
-			publishGitHubEnvelope(t, natsClient, envelope.topic, envelope.payload)
+			publishGitHubEnvelope(t, natsClient, topic, envelope.payload)
 			awaitAcknowledged(t, natsClient)
 
 			logged := false
 			for _, record := range logs() {
-				if record["level"] == "ERROR" && record["msg"] == "dispatch delivery: decode envelope payload" && record["subject"] == envelope.topic {
+				if record["level"] == "ERROR" && record["msg"] == "dispatch delivery: decode envelope payload" && record["subject"] == topic {
 					logged = true
 				}
 			}
 			if !logged {
-				t.Errorf("no ERROR \"dispatch delivery: decode envelope payload\" for %s; logged %v", envelope.topic, logs())
+				t.Errorf("no ERROR \"dispatch delivery: decode envelope payload\" for %s; logged %v", topic, logs())
 			}
 			settings, err := GetSettings(ctx, pool)
 			if err != nil {

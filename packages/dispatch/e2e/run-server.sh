@@ -128,6 +128,17 @@ case "${DISPATCH_E2E_SIGNIN:-}" in
     ;;
 esac
 
+# DISPATCH_E2E_SERVER_BINARY, when set, is the envoy-dispatch this run starts in place of the one
+# it builds from this tree, also a path from packages/envoy: the harness sets it for B from
+# DISPATCH_E2E_BINARY_B, a previous release's build (packages/envoy/scripts/build-dispatch-build.sh),
+# so a browser drives two builds at once. That build gets the same environment: a release ignores
+# a setting it does not know and refuses only the ones it removed, none of which is set here. It
+# must be legion-envoy-v20.1.0 or later (packages/envoy/scripts/build-dispatch-build.sh refuses an
+# older one): that release adopts the held socket (DISPATCH_LISTEN_FD) and knows
+# DISPATCH_DEV_SIGNIN_SHARED_KEY, so it starts on the port the caller holds for it and signs
+# cookies with the run's shared key, exactly as a build from this tree does.
+server_binary="${DISPATCH_E2E_SERVER_BINARY:-}"
+
 # The secrets broker the server relays credential requests to, read before
 # the sweep below drops every DISPATCH_* variable. DISPATCH_E2E_AGENT_SECRETS_URL
 # is the harness's one switch, which e2e/harness-broker.ts reads the same way
@@ -212,8 +223,17 @@ cd "$(dirname "$0")/../../envoy"
 # checkout, built under a lock so two harnesses, or two-process mode's two servers, starting at
 # once serialise: Go rewrites it only when the source changed, and a running server keeps the
 # inode it started from. The port is chosen only after the build, and held-port.py execs `env`,
-# which execs the server, so the pid a caller started is still the server's.
-flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
+# which execs the server, so the pid a caller started is still the server's. A given binary
+# (DISPATCH_E2E_SERVER_BINARY) is run as it is.
+if [ -n "$server_binary" ]; then
+  if [ ! -f "$server_binary" ] || [ ! -x "$server_binary" ]; then
+    echo "run-server.sh: DISPATCH_E2E_SERVER_BINARY names $server_binary, which is not an executable file" >&2
+    exit 2
+  fi
+else
+  flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
+  server_binary=./dispatch-e2e
+fi
 exec "${listen[@]}" env \
   "${broker_env[@]}" \
   "${file_store_env[@]}" \
@@ -236,4 +256,4 @@ exec "${listen[@]}" env \
   XDG_CACHE_HOME=/nonexistent \
   XDG_CONFIG_HOME=/nonexistent \
   XDG_DATA_HOME=/nonexistent \
-  ./dispatch-e2e
+  "$server_binary"

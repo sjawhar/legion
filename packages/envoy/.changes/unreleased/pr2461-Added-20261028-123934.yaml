@@ -1,0 +1,15 @@
+kind: Added
+body: |-
+    Two Dispatch builds, the one that serves and the one a release rolls in beside it, now serve one
+    Postgres and one NATS together, in both directions, and no release stops every server process.
+    `cmd/dispatch/README.md` ("Two builds at once") gives the rule each release keeps while the build
+    before it serves, for request bodies, routes, query values and opaque tokens, socket frames,
+    response members, stored documents, NATS settings and subjects, settings and SQL; the exception
+    for stop-the-world migrations is gone. `0113` and `0117` stay deployed as they were, and a
+    deployment still on a release before `0117` crosses it once with Dispatch stopped, before it runs
+    more than one replica. The build before this one compares stream settings without generations,
+    binds its durable with no hold and refuses request members it does not declare, so this release
+    changes no request member, document element, stream or consumer setting, or loop interval.
+time: 2026-10-28T12:39:34.267544883Z
+custom:
+    Issue: pr2461

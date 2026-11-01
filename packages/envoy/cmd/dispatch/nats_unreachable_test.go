@@ -290,7 +290,7 @@ func (p *dispatchProcess) requireAgentViewRelays(t *testing.T, conn *natsgo.Conn
 	}
 }
 
-// ───── shared with multiprocess_test.go ─────────────────────────────────────
+// ───── shared with multiprocess_test.go and the two-build tests (processes_test.go) ──
 
 // logLines is every line of the process's output that holds all of parts, which is how a slog
 // text line is matched: the message and the attribute that narrows it.

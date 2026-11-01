@@ -139,9 +139,27 @@ the `*.multiprocess.e2e.ts` specs but the sign-in spec below, in Chromium, which
 leaves out; arguments after `--` reach Playwright
 (`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). A spec
 pins a request to one process with the `X-Dispatch-E2E-Process: a|b` header or a whole browser
-context with the `dispatch-e2e-process` cookie, and reads which process served what from the
-proxy's `/_proxy/requests` and `/_proxy/sockets`; `AGENTS.md`'s end-to-end section has the whole
-contract. Any `DISPATCH_E2E_PROCESSES` other than `1`, `2` or unset is refused.
+context with the `dispatch-e2e-process` cookie, or splits a context with the `dispatch-e2e-page`
+and `dispatch-e2e-api` cookies (its page from one process, its API, sockets and `/auth` from the
+other), and reads which process served what from the proxy's `/_proxy/requests` and
+`/_proxy/sockets`; `AGENTS.md`'s end-to-end section has the whole contract. Any
+`DISPATCH_E2E_PROCESSES` other than `1`, `2` or unset is refused.
+
+To run one build's page against another build's server, give B a previous release, as CI's
+`dispatch-two-builds` job does with the directory `packages/envoy/scripts/build-dispatch-build.sh`
+writes:
+
+```bash
+DISPATCH_E2E_BINARY_B=<dir>/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=<dir>/web \
+  bun run e2e:multiprocess -- cross-build.multiprocess
+```
+
+B then runs that envoy-dispatch and serves that web dist (both paths absolute or from
+`packages/envoy`). That build must be `legion-envoy-v20.1.0` or later, which
+`build-dispatch-build.sh` refuses to go below: it serves on the port the harness holds for it, as
+A does, and signs cookies with the run's shared key, so no run names a port for B and the
+preflight checks it like any other B. `e2e/cross-build.multiprocess.e2e.ts` splits each browser
+context, its page from one build and its API, sockets and `/auth` from the other.
 
 `DISPATCH_E2E_SIGNIN=oidc` signs people in as a deployment does instead of through dev sign-in:
 the harness also starts `packages/envoy/cmd/dev-oidc-issuer` (`e2e/run-signin-issuer.sh`), and

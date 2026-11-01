@@ -1510,6 +1510,55 @@ func TestListenAddressJoinsAnIPv6LoopbackHost(t *testing.T) {
 	}
 }
 
+// seedBackfillFile writes an issue holding one file artifact, notes-bin, with version 1 holding
+// its bytes in its row, and returns those bytes.
+func seedBackfillFile(t *testing.T, database *store.Store) []byte {
+	t.Helper()
+	for _, statement := range []string{
+		`insert into projects (key, name) values ('FILES', 'Files')`,
+		`insert into issues (key, project_key, number, title, status, created_by, rank) values ('FILES-1', 'FILES', 1, 'Issue', 'todo', '{"kind":"user","id":"alice"}', 'U')`,
+		`insert into artifacts (issue_key, project_key, slug, name, kind, created_by) values ('FILES-1', 'FILES', 'notes-bin', 'notes.bin', 'file', '{"kind":"user","id":"alice"}')`,
+	} {
+		if _, err := database.Pool.Exec(context.Background(), statement); err != nil {
+			t.Fatalf("seed %q: %v", statement, err)
+		}
+	}
+	body := []byte("an uploaded file")
+	addBackfillVersion(t, database, 1, body, files.SHA256(body))
+	return body
+}
+
+// addBackfillVersion adds version number of notes-bin, holding content in its row under sha.
+func addBackfillVersion(t *testing.T, database *store.Store, number int, content []byte, sha string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into artifact_versions (artifact_id, number, content, mime, size, sha256)
+		select id, $1, $2, 'application/octet-stream', $3, $4 from artifacts where slug = 'notes-bin'
+	`, number, content, len(content), sha); err != nil {
+		t.Fatalf("seed version %d: %v", number, err)
+	}
+}
+
+// rowHoldsBytes reports whether version number of the file holds its bytes in its row.
+func rowHoldsBytes(t *testing.T, database *store.Store, number int) bool {
+	t.Helper()
+	var held bool
+	if err := database.Pool.QueryRow(context.Background(), `select content is not null from artifact_versions where number = $1`, number).Scan(&held); err != nil {
+		t.Fatalf("read version %d: %v", number, err)
+	}
+	return held
+}
+
+// runBackfillFiles runs envoy-dispatch backfill-files with args against database and bucket, and
+// returns its exit code and what it wrote to stdout and stderr.
+func runBackfillFiles(t *testing.T, database *store.Store, bucket string, args ...string) (int, string) {
+	t.Helper()
+	env := envGetter(map[string]string{"DATABASE_URL": database.Pool.Config().ConnString(), "DISPATCH_FILE_STORE_BUCKET": bucket})
+	var stdout, stderr bytes.Buffer
+	code := runSubcommand(context.Background(), append([]string{"backfill-files"}, args...), env, &stdout, &stderr)
+	return code, stdout.String() + stderr.String()
+}
+
 // envoy-dispatch backfill-files moves every file row's bytes into the bucket and exits 0, and
 // exits 1 when it stops short; --verify-only exits 0 while every moved file reads back and 1 once
 // one does not. Those exit codes are what an operator's script reads before it trusts that the
@@ -1518,87 +1567,95 @@ func TestBackfillFilesExitsNonZeroUntilEveryFileReadsBackFromTheBucket(t *testin
 	database := storetest.Open(t)
 	const bucket = "example-files-bucket"
 	fake := filestest.ServeS3(t, bucket)
-	ctx := context.Background()
-	body := []byte("an uploaded file")
+	body := seedBackfillFile(t, database)
 	key := files.Key(files.SHA256(body))
-	for _, statement := range []string{
-		`insert into projects (key, name) values ('FILES', 'Files')`,
-		`insert into issues (key, project_key, number, title, status, created_by, rank) values ('FILES-1', 'FILES', 1, 'Issue', 'todo', '{"kind":"user","id":"alice"}', 'U')`,
-		`insert into artifacts (issue_key, project_key, slug, name, kind, created_by) values ('FILES-1', 'FILES', 'notes-bin', 'notes.bin', 'file', '{"kind":"user","id":"alice"}')`,
-	} {
-		if _, err := database.Pool.Exec(ctx, statement); err != nil {
-			t.Fatalf("seed %q: %v", statement, err)
-		}
-	}
-	addVersion := func(number int, content []byte, sha string) {
-		t.Helper()
-		if _, err := database.Pool.Exec(ctx, `
-			insert into artifact_versions (artifact_id, number, content, mime, size, sha256)
-			select id, $1, $2, 'application/octet-stream', $3, $4 from artifacts where slug = 'notes-bin'
-		`, number, content, len(content), sha); err != nil {
-			t.Fatalf("seed version %d: %v", number, err)
-		}
-	}
-	addVersion(1, body, files.SHA256(body))
-	rowHoldsBytes := func(number int) bool {
-		t.Helper()
-		var held bool
-		if err := database.Pool.QueryRow(ctx, `select content is not null from artifact_versions where number = $1`, number).Scan(&held); err != nil {
-			t.Fatalf("read version %d: %v", number, err)
-		}
-		return held
-	}
-	run := func(bucket string, args ...string) (int, string) {
-		t.Helper()
-		env := envGetter(map[string]string{"DATABASE_URL": database.Pool.Config().ConnString(), "DISPATCH_FILE_STORE_BUCKET": bucket})
-		var stdout, stderr bytes.Buffer
-		code := runSubcommand(ctx, append([]string{"backfill-files"}, args...), env, &stdout, &stderr)
-		return code, stdout.String() + stderr.String()
-	}
 
-	if code, out := run(bucket, "--verify-everything"); code != 2 {
+	if code, out := runBackfillFiles(t, database, bucket, "--verify-everything"); code != 2 {
 		t.Fatalf("backfill-files --verify-everything: exit %d, want 2:\n%s", code, out)
 	}
 	// A bucket that does not answer stops the run before any row is touched.
-	if code, out := run("example-missing-bucket"); code != 1 || !strings.Contains(out, "not reachable") || !rowHoldsBytes(1) {
-		t.Fatalf("backfill-files against a missing bucket: exit %d, row holds bytes %t, want exit 1 with the row untouched:\n%s", code, rowHoldsBytes(1), out)
+	if code, out := runBackfillFiles(t, database, "example-missing-bucket"); code != 1 || !strings.Contains(out, "not reachable") || !rowHoldsBytes(t, database, 1) {
+		t.Fatalf("backfill-files against a missing bucket: exit %d, row holds bytes %t, want exit 1 with the row untouched:\n%s", code, rowHoldsBytes(t, database, 1), out)
 	}
 
-	if code, out := run(bucket); code != 0 || rowHoldsBytes(1) {
-		t.Fatalf("backfill-files: exit %d, row holds bytes %t, want exit 0 with the row cleared:\n%s", code, rowHoldsBytes(1), out)
+	if code, out := runBackfillFiles(t, database, bucket); code != 0 || rowHoldsBytes(t, database, 1) {
+		t.Fatalf("backfill-files: exit %d, row holds bytes %t, want exit 0 with the row cleared:\n%s", code, rowHoldsBytes(t, database, 1), out)
 	}
 	if _, stored, held := fake.Object(key); !held || !bytes.Equal(stored, body) {
 		t.Fatalf("the bucket holds %d bytes under %s (held %t), want the file", len(stored), key, held)
 	}
-	if code, out := run(bucket, "--verify-only"); code != 0 || !strings.Contains(out, "verified=1 bytes=0 failed=0") {
+	if code, out := runBackfillFiles(t, database, bucket, "--verify-only"); code != 0 || !strings.Contains(out, "verified=1 bytes=0 failed=0") {
 		t.Fatalf("backfill-files --verify-only: exit %d, want 0 with the one file verified:\n%s", code, out)
 	}
-	if code, out := run(bucket, "--verify-only", "--restore"); code != 2 {
+	if code, out := runBackfillFiles(t, database, bucket, "--verify-only", "--restore"); code != 2 {
 		t.Fatalf("backfill-files --verify-only --restore: exit %d, want 2:\n%s", code, out)
 	}
 
 	// The rollback writes the bytes back from the bucket; a backfill moves them out again.
-	if code, out := run(bucket, "--restore"); code != 0 || !strings.Contains(out, "restored=1") || !rowHoldsBytes(1) {
-		t.Fatalf("backfill-files --restore: exit %d, row holds bytes %t, want exit 0 with the row filled:\n%s", code, rowHoldsBytes(1), out)
+	if code, out := runBackfillFiles(t, database, bucket, "--restore"); code != 0 || !strings.Contains(out, "restored=1") || !rowHoldsBytes(t, database, 1) {
+		t.Fatalf("backfill-files --restore: exit %d, row holds bytes %t, want exit 0 with the row filled:\n%s", code, rowHoldsBytes(t, database, 1), out)
 	}
-	if code, out := run(bucket); code != 0 || rowHoldsBytes(1) {
-		t.Fatalf("backfill-files after a restore: exit %d, row holds bytes %t, want exit 0 with the row cleared again:\n%s", code, rowHoldsBytes(1), out)
+	if code, out := runBackfillFiles(t, database, bucket); code != 0 || rowHoldsBytes(t, database, 1) {
+		t.Fatalf("backfill-files after a restore: exit %d, row holds bytes %t, want exit 0 with the row cleared again:\n%s", code, rowHoldsBytes(t, database, 1), out)
 	}
 
 	fake.DeleteObject(key)
-	if code, out := run(bucket, "--verify-only"); code != 1 || !strings.Contains(out, "failed=1") {
+	if code, out := runBackfillFiles(t, database, bucket, "--verify-only"); code != 1 || !strings.Contains(out, "failed=1") {
 		t.Fatalf("backfill-files --verify-only with the object gone: exit %d, want 1 naming the failure:\n%s", code, out)
 	}
-	if code, out := run(bucket, "--restore"); code != 1 || !strings.Contains(out, "FAILED version") || rowHoldsBytes(1) {
-		t.Fatalf("backfill-files --restore with the object gone: exit %d, row holds bytes %t, want exit 1 with the row left empty:\n%s", code, rowHoldsBytes(1), out)
+	if code, out := runBackfillFiles(t, database, bucket, "--restore"); code != 1 || !strings.Contains(out, "FAILED version") || rowHoldsBytes(t, database, 1) {
+		t.Fatalf("backfill-files --restore with the object gone: exit %d, row holds bytes %t, want exit 1 with the row left empty:\n%s", code, rowHoldsBytes(t, database, 1), out)
 	}
 
 	// A row whose bytes do not match its hash is named and passed over: exit 1, the row untouched,
 	// and every other row still moved.
-	addVersion(2, []byte("other bytes"), files.SHA256(body))
-	addVersion(3, []byte("sound bytes"), files.SHA256([]byte("sound bytes")))
-	if code, out := run(bucket); code != 1 || !strings.Contains(out, "FAILED version") || !rowHoldsBytes(2) || rowHoldsBytes(3) {
-		t.Fatalf("backfill-files over a row it cannot move: exit %d, corrupt row holds bytes %t, sound row holds bytes %t, want exit 1 with the corrupt row untouched and the sound row moved:\n%s", code, rowHoldsBytes(2), rowHoldsBytes(3), out)
+	addBackfillVersion(t, database, 2, []byte("other bytes"), files.SHA256(body))
+	addBackfillVersion(t, database, 3, []byte("sound bytes"), files.SHA256([]byte("sound bytes")))
+	if code, out := runBackfillFiles(t, database, bucket); code != 1 || !strings.Contains(out, "FAILED version") || !rowHoldsBytes(t, database, 2) || rowHoldsBytes(t, database, 3) {
+		t.Fatalf("backfill-files over a row it cannot move: exit %d, corrupt row holds bytes %t, sound row holds bytes %t, want exit 1 with the corrupt row untouched and the sound row moved:\n%s", code, rowHoldsBytes(t, database, 2), rowHoldsBytes(t, database, 3), out)
+	}
+}
+
+// envoy-dispatch backfill-files moves no row while a live server process stores no file in a
+// bucket, since that process serves a file only from its row: it exits 1 naming each such
+// process, one started without DISPATCH_FILE_STORE_BUCKET and one of a build that predates the
+// fleet columns, which registers no file_store. --verify-only and --restore, which take no bytes
+// out of a row, still run. Once those rows lapse, the backfill moves the row.
+func TestBackfillFilesRefusesWhileAProcessWithoutABucketIsLive(t *testing.T) {
+	database := storetest.Open(t)
+	const bucket = "example-files-bucket"
+	filestest.ServeS3(t, bucket)
+	ctx := context.Background()
+	seedBackfillFile(t, database)
+	var bucketless, older string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into server_processes (instance, commit, signing_keys, schema_version, schema_creatable, file_store)
+		values (gen_random_uuid(), 'bucketless0commit', '{fingerprint}', 1, 1, false) returning instance::text`).Scan(&bucketless); err != nil {
+		t.Fatalf("add a bucketless server process: %v", err)
+	}
+	if err := database.Pool.QueryRow(ctx, `
+		insert into server_processes (instance, commit, signing_keys) values (gen_random_uuid(), 'older0commit', '{fingerprint}')
+		returning instance::text`).Scan(&older); err != nil {
+		t.Fatalf("add a server process of a build that predates the fleet columns: %v", err)
+	}
+
+	code, out := runBackfillFiles(t, database, bucket)
+	if code != 1 || !rowHoldsBytes(t, database, 1) || !strings.Contains(out, bucketless) || !strings.Contains(out, older) {
+		t.Fatalf("backfill-files beside live processes without a bucket: exit %d, row holds bytes %t, want exit 1 naming %s and %s with the row untouched:\n%s",
+			code, rowHoldsBytes(t, database, 1), bucketless, older, out)
+	}
+	if code, out := runBackfillFiles(t, database, bucket, "--verify-only"); code != 0 {
+		t.Fatalf("backfill-files --verify-only beside them: exit %d, want 0:\n%s", code, out)
+	}
+	if code, out := runBackfillFiles(t, database, bucket, "--restore"); code != 0 {
+		t.Fatalf("backfill-files --restore beside them: exit %d, want 0:\n%s", code, out)
+	}
+
+	if _, err := database.Pool.Exec(ctx, `update server_processes set heartbeat_at = now() - interval '1 hour'`); err != nil {
+		t.Fatalf("let the processes lapse: %v", err)
+	}
+	if code, out := runBackfillFiles(t, database, bucket); code != 0 || rowHoldsBytes(t, database, 1) {
+		t.Fatalf("backfill-files once they lapsed: exit %d, row holds bytes %t, want exit 0 with the row cleared:\n%s", code, rowHoldsBytes(t, database, 1), out)
 	}
 }
 

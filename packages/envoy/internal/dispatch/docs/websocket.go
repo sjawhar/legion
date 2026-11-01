@@ -28,6 +28,11 @@ type connectionState struct {
 	id    uint64
 	actor model.Actor
 	added bool
+	// admission is this socket's schema admission: ServeHTTP makes it with the document's
+	// documentSince and the cancel of the socket's own request context, authorize decides and
+	// records it, the answer to the socket's token reads it (authorizeSchemaVersion), a re-check
+	// revokes it (RunSchemaAdmission), and ServeHTTP forgets it once the socket has ended.
+	admission *schemaAdmission
 }
 
 type connectionContextKey struct{}
@@ -214,12 +219,35 @@ func (s *Service) takePreload(room string) (persistence.LoadResult, bool) {
 // repair state rather than as a dropped connection to retry.
 const documentSchemaCloseCode = contracts.DocumentSchemaCloseCode
 
+// documentNewerContentCloseCode closes a document websocket whose room holds an element this
+// build does not know (DOCUMENT_NEWER_CONTENT_CLOSE_CODE in packages/contracts). A newer build
+// wrote it while two builds serve one database, and a browser editor would drop it and write the
+// result back. In the pinned @hocuspocus/provider 2.15, onClose
+// (packages/dispatch/node_modules/@hocuspocus/provider/src/HocuspocusProviderWebsocket.ts:483-545)
+// stops reconnecting only on 4401 and 1009, which set shouldConnect to false, and on 4403, where
+// it returns before it reconnects unless the provider is quiet. A socket closed before any message
+// rejects its connection attempt, which the provider retries with its backoff (:265-288). So it
+// reconnects on this code, and a later attempt can reach a build that reads the document.
+const documentNewerContentCloseCode = contracts.DocumentNewerContentCloseCode
+
 // refuseOutsideSchema completes the upgrade only to close it with documentSchemaCloseCode before
 // anything of the document is sent: a browser reads a close code, never the status of a refused
-// upgrade. The zero upgrader keeps the same-origin rule ygo's own upgrade applies with no
-// AllowedOrigins configured.
+// upgrade.
 func refuseOutsideSchema(w http.ResponseWriter, r *http.Request, room string, cause error) {
 	slog.Warn("dispatch: refuse a document socket outside Proof schema; a replacement from markdown repairs it", "room", room, "error", cause)
+	refuseSocket(w, r, documentSchemaCloseCode, contracts.DocumentSchemaCloseReason)
+}
+
+// refuseNewerContent completes the upgrade only to close it with documentNewerContentCloseCode
+// before anything of the document is sent.
+func refuseNewerContent(w http.ResponseWriter, r *http.Request, room string, cause error) {
+	slog.Warn("dispatch: refuse a document socket holding an element this build cannot read; the provider reconnects", "room", room, "error", cause)
+	refuseSocket(w, r, documentNewerContentCloseCode, contracts.DocumentNewerContentCloseReason)
+}
+
+// refuseSocket completes the upgrade only to close it with code and reason. The zero upgrader
+// keeps the same-origin rule ygo's own upgrade applies with no AllowedOrigins configured.
+func refuseSocket(w http.ResponseWriter, r *http.Request, code int, reason string) {
 	var upgrader gws.Upgrader
 	connection, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -227,7 +255,7 @@ func refuseOutsideSchema(w http.ResponseWriter, r *http.Request, room string, ca
 	}
 	defer connection.Close()
 	deadline := time.Now().Add(time.Second)
-	if err := connection.WriteControl(gws.CloseMessage, gws.FormatCloseMessage(documentSchemaCloseCode, contracts.DocumentSchemaCloseReason), deadline); err != nil {
+	if err := connection.WriteControl(gws.CloseMessage, gws.FormatCloseMessage(code, reason), deadline); err != nil {
 		return
 	}
 	// The client's close in reply completes the handshake; whatever it sent before that is
@@ -275,16 +303,21 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// A browser editor normalizes a tree it cannot represent and writes the result back, so no
 	// connection - a first one, or a provider's reconnect - joins a room outside the Proof schema
-	// until it is replaced from markdown. An ask holding blocks off its content rule is inside it:
+	// until it is replaced from markdown, or a room holding an element this build does not know,
+	// which a newer build wrote. An ask holding blocks off its content rule is inside the schema:
 	// the editor keeps such an ask rather than normalizing it away, and settlement marks it
 	// `invalid`. The server decides it here, for every client at once, by the same stored document
 	// and rendering `/text` answers with (readDocument), so a socket is refused exactly when that
-	// read is ErrDocOutsideSchema.
+	// read is ErrDocOutsideSchema or ErrDocNewerContent.
 	tree, loaded, err := s.loadTree(r.Context(), room)
 	if err == nil && tree != nil {
-		if _, renderErr := documentMarkdown(tree); errors.Is(renderErr, ErrDocOutsideSchema) {
+		if _, renderErr := documentMarkdown(tree); errors.Is(renderErr, ErrDocOutsideSchema) || errors.Is(renderErr, ErrDocNewerContent) {
 			err = renderErr
 		}
+	}
+	if errors.Is(err, ErrDocNewerContent) {
+		refuseNewerContent(w, r, room, err)
+		return
 	}
 	if errors.Is(err, ErrDocOutsideSchema) {
 		refuseOutsideSchema(w, r, room, err)
@@ -299,14 +332,25 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.preloads.Store(room, preload)
 		defer s.preloads.CompareAndDelete(room, preload)
 	}
-	connection := &connectionState{}
-	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
+	// The socket's admission lives on a request context of its own: the answer to the Hocuspocus
+	// token this socket sends is that admission and no other's (authorizeSchemaVersion), since two
+	// sockets of one room can present one token, and cancelling that context with errSchemaRevoked
+	// is how a re-check closes the socket (RunSchemaAdmission).
+	ctx, cancel := context.WithCancelCause(r.Context())
+	defer cancel(nil)
+	connection := &connectionState{admission: &schemaAdmission{documentSince: pmdoc.DocumentSince(tree), cancel: cancel}}
+	ctx = context.WithValue(ctx, connectionContextKey{}, connection)
 	s.srv.ServeHTTP(w, r.WithContext(ctx))
+	s.schemaAdmissions.remove(connection.admission)
 	if connection.added {
 		s.removeConnection(connection.room, connection.id)
 	}
 }
 
+// authorize accepts a document socket, read-only unless its page may write (schemaFleet.admits).
+// It decides the admission ServeHTTP put on the socket's context and records it with the service,
+// so a re-check can close the socket again (schemaAdmissions); the answer to the socket's token
+// is that same admission (authorizeSchemaVersion).
 func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) {
 	actor, err := s.requestActor(r)
 	if err != nil {
@@ -330,28 +374,42 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	if connection == nil {
 		return websocket.ConnectionConfig{}, false
 	}
+	fleet, err := readSchemaFleet(r.Context(), s.queryFrom(r.Context()))
+	if err != nil {
+		slog.Warn("dispatch: refuse a document socket: read the live server processes", "room", room, "error", err)
+		return websocket.ConnectionConfig{}, false
+	}
+	query := r.URL.Query()
+	page := schemaPageOf(query)
+	admission := connection.admission
+	admission.key = schemaAdmissionKey{room: room, token: query.Get("schema_version")}
+	admission.page = page
+	admission.writable = open && fleet.admits(page, admission.documentSince)
+	s.schemaAdmissions.admit(admission)
 	connection.room = room
 	connection.id = s.nextConnection.Add(1)
 	connection.actor = actor
 	connection.added = true
 	s.addConnection(room, connection.id, actor)
-	return websocket.ConnectionConfig{
-		ReadOnly: schemaReadOnly(open, r.URL.Query().Get("schema_version")),
-	}, true
+	return websocket.ConnectionConfig{ReadOnly: !admission.writable}, true
 }
 
-func schemaReadOnly(open bool, clientSchemaVersion string) bool {
-	return !open || clientSchemaVersion != fmt.Sprintf("%d", pmdoc.SchemaVersion())
-}
-
-// authorizeSchemaVersion confirms the existing HTTP-authorized connection's schema admission
-// through Hocuspocus's authenticated scope, which is the provider's client-visible signal.
-func (s *Service) authorizeSchemaVersion(room, clientSchemaVersion string) (websocket.ConnectionConfig, error) {
-	open, err := s.issueOpen(context.Background(), s.queryFrom(context.Background()), room)
-	if err != nil {
-		return websocket.ConnectionConfig{}, err
+// authorizeSchemaVersion is ygo's OnTokenAuthContext: the answer to the Hocuspocus token a
+// socket's provider sends once it opens, which the provider takes as the socket's scope and ygo as
+// its read-only state (sjawhar/ygo provider/websocket/peer.go, handleAuth). ctx is the request
+// context ServeHTTP served that socket on, so the answer is the admission that socket carries and
+// no other's: the page's token is its schema_version alone - a server that predates the fleet
+// columns compares the whole token with its own version - so two sockets of one room can send one
+// token, and neither the key nor the order they arrive in tells them apart. It is read-write only
+// when this socket was admitted writable, no re-check has revoked it, and the room and token are
+// the ones it was admitted with (schemaAdmissions.writable); read-only in every other case. It
+// never refuses: a refusal closes the socket with 4401, after which the provider never reconnects.
+func (s *Service) authorizeSchemaVersion(ctx context.Context, room, token string) (websocket.ConnectionConfig, error) {
+	var admission *schemaAdmission
+	if connection, ok := ctx.Value(connectionContextKey{}).(*connectionState); ok {
+		admission = connection.admission
 	}
-	return websocket.ConnectionConfig{ReadOnly: schemaReadOnly(open, clientSchemaVersion)}, nil
+	return websocket.ConnectionConfig{ReadOnly: !s.schemaAdmissions.writable(admission, room, token)}, nil
 }
 
 // requestActor is the person a document connection is: the identity service's answer, and nothing
@@ -507,6 +565,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	switch {
 	case errors.Is(err, ErrDocOutsideSchema):
 		slog.Warn("dispatch: loaded document outside Proof schema; a replacement from markdown repairs it", "room", room, "error", err)
+	case errors.Is(err, ErrDocNewerContent):
+		// The room loads, so a write meets the document's own refusal rather than a failed room.
+		slog.Warn("dispatch: loaded document holding an element this build cannot read; another build may serve it", "room", room, "error", err)
 	case err != nil:
 		return err
 	default:

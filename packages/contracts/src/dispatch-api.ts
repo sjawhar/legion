@@ -76,27 +76,45 @@ export type BlockAttributeKind =
 
 export type BlockContentRule = "paragraph+" | "block+" | "paragraph+ bullet_list?";
 
+/** From which schema version a build reads a manifest element (`since`) and from which it may
+ *  create one (`creatable_since`); each is 1 when the manifest names none. */
+export interface BlockElementVersions {
+  readonly since?: number;
+  readonly creatable_since?: number;
+}
+
 // A `block[]` attribute points at blocks: canonical block references (parseBlockPointerValue in
 // dispatch-block-ref.ts), each making an edge of the attribute's name (GraphEdgeKind). `targets`,
 // which only a `block[]` attribute carries, limits the types of the blocks it points at; absent
 // or empty, it points at any block.
-export interface BlockAttributeSchema {
+export interface BlockAttributeSchema extends BlockElementVersions {
   readonly kind: BlockAttributeKind;
   readonly choices?: readonly string[];
   readonly default?: string | boolean | readonly string[];
   readonly server?: boolean;
+  /** The numbers of each choice that has some, by choice: the choices stay plain strings. */
+  readonly choice_versions?: Readonly<Record<string, BlockElementVersions>>;
   readonly targets?: readonly string[];
 }
 
-export interface BlockTypeSchema {
+export interface BlockTypeSchema extends BlockElementVersions {
   readonly name: string;
   readonly content: BlockContentRule;
   readonly render: "host";
   readonly attributes: Readonly<Record<string, BlockAttributeSchema>>;
 }
 
+/** A node or a mark of the Proof schema, as the manifest names it. */
+export interface BlockSchemaElement extends BlockElementVersions {
+  readonly name: string;
+}
+
+/** GET /api/v1/schema/blocks: the document schema manifest, `pmdoc/schema/blocks.json`. A server
+ *  whose manifest predates element versions names no `nodes` or `marks`. */
 export interface BlockSchema {
   readonly version: number;
+  readonly nodes?: readonly BlockSchemaElement[];
+  readonly marks?: readonly BlockSchemaElement[];
   readonly types: readonly BlockTypeSchema[];
 }
 
@@ -779,6 +797,7 @@ export interface AnchorPosition {
   readonly anchor_block_error?:
     | "DOC_SERVICE_UNAVAILABLE"
     | "DOC_SCHEMA"
+    | "DOC_NEWER_CONTENT"
     | "DOCUMENT_UNLOADABLE"
     | "INTERNAL";
 }
@@ -2244,9 +2263,12 @@ export interface GraphEdge {
 }
 
 // GraphReferences is GET /api/v1/references: the queried node and its edges, newest first.
+// `unknown_kinds` lists the `?kind=` values the answering server does not emit (a newer build's,
+// during a release); it answers no edges of them, and leaves the field out when there are none.
 export interface GraphReferences {
   readonly node: GraphNode;
   readonly edges: GraphEdge[];
+  readonly unknown_kinds?: readonly string[];
 }
 
 // BlockLink is one link from a block of one document to a block of a document: its edge kind,
@@ -3131,6 +3153,43 @@ export const DOCUMENT_SCHEMA_CLOSE_CODE = 4409;
  *  `contracts.DocumentSchemaCloseReason`. */
 export const DOCUMENT_SCHEMA_CLOSE_REASON = "DOC_SCHEMA";
 
+/**
+ * The close code the document websocket (`/ws/doc/{room}`) refuses a room with when the tree it
+ * holds has an element that this Dispatch process's build cannot read: a newer build wrote it while
+ * two builds serve one database during a release. It completes the upgrade and closes with this
+ * code, and `DOCUMENT_NEWER_CONTENT_CLOSE_REASON`, before any sync, so a browser editor never
+ * receives a tree it would write back without that element. The pinned `@hocuspocus/provider`
+ * (2.15) stops reconnecting only on 4401 and 1009 (`HocuspocusProviderWebsocket.ts` `onClose`), so
+ * it reconnects on this code with its backoff, and a later attempt can reach a build that reads the
+ * document. 425 is HTTP's "Too Early". Generated into Go as
+ * `contracts.DocumentNewerContentCloseCode`.
+ */
+export const DOCUMENT_NEWER_CONTENT_CLOSE_CODE = 4425;
+
+/** The reason the document websocket closes with `DOCUMENT_NEWER_CONTENT_CLOSE_CODE`: the code reads
+ *  of that document answer (`409 DOC_NEWER_CONTENT`). Generated into Go as
+ *  `contracts.DocumentNewerContentCloseReason`. */
+export const DOCUMENT_NEWER_CONTENT_CLOSE_REASON = "DOC_NEWER_CONTENT";
+
+/**
+ * The close code the document websocket (`/ws/doc/{room}`) ends an open writable socket with once
+ * the live server processes no longer admit the page that opened it: a build whose numbers the
+ * admission held against has joined or rolled away, so that page may no longer write
+ * (`RunSchemaAdmission`). The close carries this code and
+ * `DOCUMENT_ADMISSION_REVOKED_CLOSE_REASON`; what that close waits for, and what a peer too slow
+ * to take it reads instead, are in `packages/envoy/cmd/dispatch/README.md`, "Two builds at once",
+ * which is the one statement of that rule. The pinned `@hocuspocus/provider` (2.15) stops
+ * reconnecting only on 4401, 4403 and 1009 (`HocuspocusProviderWebsocket.ts` `onClose`), so the
+ * page reconnects on this code, presents its numbers again and is admitted again: read-only,
+ * unless a live process admits it. 412 is HTTP's "Precondition Failed", which the admission the
+ * fleet withdrew is. Generated into Go as `contracts.DocumentAdmissionRevokedCloseCode`.
+ */
+export const DOCUMENT_ADMISSION_REVOKED_CLOSE_CODE = 4412;
+
+/** The reason the document websocket closes with `DOCUMENT_ADMISSION_REVOKED_CLOSE_CODE`.
+ *  Generated into Go as `contracts.DocumentAdmissionRevokedCloseReason`. */
+export const DOCUMENT_ADMISSION_REVOKED_CLOSE_REASON = "DOC_ADMISSION_REVOKED";
+
 export interface ArtifactRebuildReport {
   readonly head: number;
   readonly removed_checkpoints: number;
@@ -3196,6 +3255,86 @@ export interface DispatchServiceErrorShape {
   readonly candidates?: TargetCandidate[] | DuplicateCandidate[];
   readonly current?: EditPreconditionCurrent;
   readonly mismatches?: EditPreconditionMismatch[];
+}
+
+/** How the message of a Dispatch process's `404 NOT_FOUND` starts when the process has no route for
+ *  the request ("no route for GET /api/v1/…"). While a release rolls out, two builds of Dispatch
+ *  answer, and the older one answers this way for a route only the newer one serves. No handler
+ *  ran, so a client may send the request again whatever its method. A `404 NOT_FOUND` for a
+ *  resource the server does not know says "not found" instead. */
+export const NO_ROUTE_MESSAGE_PREFIX = "no route for ";
+
+/** The waits before each new attempt of a request a Dispatch process answered with no route. Each
+ *  wait is jittered by ±25 % (`jitteredDelay`), so the attempts of many clients spread out, and
+ *  each attempt may reach another process. */
+export const NO_ROUTE_RETRY_DELAYS_MS: readonly number[] = [1_000, 2_000, 4_000];
+
+/** What a client says when every attempt of a request met a Dispatch process with no route for it. */
+export const NO_ROUTE_ROLLING_RELEASE_MESSAGE =
+  "The Dispatch process that answered does not offer this action yet, because a new release of " +
+  "Dispatch is in progress. Try again in one minute.";
+
+/** Waits `ms` milliseconds, or until `signal` aborts. A client takes one so that a test does not
+ *  wait. */
+export type Sleep = (ms: number, signal?: AbortSignal | null) => Promise<void>;
+
+/** The `Sleep` a client waits with when its caller gives none: a timer. When `signal` aborts,
+ *  before or during the wait, the wait rejects at once with the signal's reason, so an aborted
+ *  request sends nothing more. */
+export const sleep: Sleep = (ms, signal) => {
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  if (signal?.aborted) {
+    reject(signal.reason);
+    return promise;
+  }
+  const abort = () => {
+    clearTimeout(timer);
+    reject(signal?.reason);
+  };
+  const timer = setTimeout(() => {
+    signal?.removeEventListener("abort", abort);
+    resolve();
+  }, ms);
+  signal?.addEventListener("abort", abort, { once: true });
+  return promise;
+};
+
+/** `ms` jittered by ±25 %: a wait of `NO_ROUTE_RETRY_DELAYS_MS`, as a client waits it. */
+function jitteredDelay(ms: number): number {
+  return ms * (0.75 + Math.random() * 0.5);
+}
+
+/**
+ * Runs `attempt` until a Dispatch process that serves the route answers. An attempt `isNoRoute`
+ * recognises is made again after each of `NO_ROUTE_RETRY_DELAYS_MS`, jittered (`jitteredDelay`)
+ * and waited with `options.sleep` (a timer, `sleep`, when the caller names none): while a release
+ * rolls out, two builds of Dispatch answer, and the next attempt may reach the build that serves
+ * the route. No handler ran, so this is safe for every method, and every attempt is the same
+ * request. After the last attempt it throws what `options.exhausted` builds, which is the
+ * caller's own error for `NO_ROUTE_ROLLING_RELEASE_MESSAGE`. Anything else `attempt` throws is
+ * thrown on at once, and an abort of `options.signal` during a wait rejects with the abort's
+ * reason, so nothing more is sent.
+ */
+export async function retryNoRoute<T>(
+  attempt: () => Promise<T>,
+  isNoRoute: (error: unknown) => boolean,
+  options: {
+    readonly exhausted: () => Error;
+    readonly sleep?: Sleep;
+    readonly signal?: AbortSignal | null;
+  }
+): Promise<T> {
+  const wait = options.sleep ?? sleep;
+  for (const delay of [...NO_ROUTE_RETRY_DELAYS_MS, undefined]) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!isNoRoute(error)) throw error;
+      if (delay === undefined) break;
+    }
+    await wait(jitteredDelay(delay), options.signal);
+  }
+  throw options.exhausted();
 }
 
 /**

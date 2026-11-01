@@ -9,6 +9,8 @@ import {
   type FetchImplementation,
   isCredentialFeatureOff,
   isDeliveryNotConfigured,
+  isDocumentNewerContent,
+  isDocumentSchemaError,
   isRetryableQueryError,
   isUnauthorized,
   NetworkError,
@@ -715,22 +717,6 @@ test("API client sends inline artifacts as JSON", async () => {
   });
 });
 
-test("API client reads the server-owned block schema", async () => {
-  const stub = stubFetch(() =>
-    Response.json({
-      types: [{ attributes: {}, content: "paragraph+", name: "callout", render: "host" }],
-      version: 1,
-    })
-  );
-  const api = createApiClient(stub.fetch);
-
-  const schema = await api.getBlockSchema();
-
-  expect(schema.version).toBe(1);
-  expect(schema.types[0]?.name).toBe("callout");
-  expect(stub.requests.map(({ path }) => path)).toEqual(["/api/v1/schema/blocks"]);
-});
-
 test("API client encodes list filters and artifact version query parameters", async () => {
   const stub = stubFetch();
   const api = createApiClient(stub.fetch);
@@ -968,6 +954,30 @@ test("a refusal keeps the server's Retry-After in delta-seconds, and no delay fo
   expect(none).toMatchObject({ retryAfterMs: undefined, status: 503 });
   expect(isRetryableQueryError(seconds)).toBe(true);
 });
+
+test(
+  "a document holding content this build cannot read is DOC_NEWER_CONTENT, not the repair state, " +
+    "and its read is retried, since another build may answer the next one",
+  async () => {
+    const newer = createApiClient(
+      stubFetch(() =>
+        Response.json(
+          {
+            error:
+              "this Dispatch process's build cannot read an element of this document. Try again in one minute.",
+            code: "DOC_NEWER_CONTENT",
+          },
+          { status: 409 }
+        )
+      ).fetch
+    );
+    const newerError = await newer.getArtifactText("artifact-1").catch((error: unknown) => error);
+
+    expect(isDocumentNewerContent(newerError)).toBe(true);
+    expect(isDocumentSchemaError(newerError)).toBe(false);
+    expect(isRetryableQueryError(newerError)).toBe(true);
+  }
+);
 
 test(
   "the production retry policy issues one credential request when the broker is unconfigured, " +

@@ -9,7 +9,6 @@ package bustest
 import (
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -51,9 +50,10 @@ func DeployedThreeCopyStream(change func(*natsgo.StreamConfig)) natsgo.StreamCon
 }
 
 // RequireKeptThreeCopyStream fails the test unless after, the DeployedThreeCopyStream after a
-// start, holds three copies, the byte limit and before's metadata, its id among it, with every
-// subject this binary compiles in and its age, its duplicate window and discard corrected to the
-// binary's: a full stream refuses new messages (DiscardNew).
+// start, holds three copies, the byte limit and every key of before's metadata, its id among them,
+// with every subject this binary compiles in and its age, its duplicate window and discard
+// corrected to the binary's: a full stream refuses new messages (DiscardNew). A start adds keys of
+// its own (the stream's generation), so a key before does not carry is no failure.
 func RequireKeptThreeCopyStream(t testing.TB, before natsgo.StreamConfig, after *natsgo.StreamInfo) {
 	t.Helper()
 	got := after.Config
@@ -63,8 +63,12 @@ func RequireKeptThreeCopyStream(t testing.TB, before natsgo.StreamConfig, after 
 	if got.MaxBytes != StreamMaxBytes || got.Discard != natsgo.DiscardNew {
 		t.Errorf("stream byte limit = %d discarding %v, want %d discarding new", got.MaxBytes, got.Discard, StreamMaxBytes)
 	}
-	if !maps.Equal(got.Metadata, before.Metadata) || got.Metadata[bus.StreamIDMetadataKey] != DeployedStreamID {
-		t.Errorf("stream metadata = %v, want the deployed %v", got.Metadata, before.Metadata)
+	kept := true
+	for key, value := range before.Metadata {
+		kept = kept && got.Metadata[key] == value
+	}
+	if !kept || got.Metadata[bus.StreamIDMetadataKey] != DeployedStreamID {
+		t.Errorf("stream metadata = %v, want the deployed %v kept in it", got.Metadata, before.Metadata)
 	}
 	if got.MaxAge != contracts.DeliveryDuplicateWindow || got.Duplicates != contracts.DeliveryDuplicateWindow {
 		t.Errorf("stream age = %s and duplicate window = %s, want %s", got.MaxAge, got.Duplicates, contracts.DeliveryDuplicateWindow)

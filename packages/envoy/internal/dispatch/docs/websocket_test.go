@@ -137,6 +137,18 @@ func TestIssueReopenClosesADocumentConnectionAdmittedWhileClosed(t *testing.T) {
 	}
 }
 
+// admittedRequest is request on a request context of its own carrying the admission ServeHTTP
+// puts on every document socket's context, that context's cancel included: authorize fills the
+// admission in, and cancelling the context with errSchemaRevoked is how a re-check closes the
+// socket (revokeUnless).
+func admittedRequest(t *testing.T, request *http.Request) *http.Request {
+	t.Helper()
+	ctx, cancel := context.WithCancelCause(request.Context())
+	t.Cleanup(func() { cancel(nil) })
+	connection := &connectionState{admission: &schemaAdmission{cancel: cancel}}
+	return request.WithContext(context.WithValue(ctx, connectionContextKey{}, connection))
+}
+
 func TestClosedColdRoomAuthorizesReadOnly(t *testing.T) {
 	service, artifactID := newTestService(t)
 	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
@@ -145,7 +157,7 @@ func TestClosedColdRoomAuthorizesReadOnly(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/ws/doc/"+artifactID, nil)
 	request.Header.Set("X-Dispatch-User", "alice")
 	request.SetPathValue("room", artifactID)
-	request = request.WithContext(context.WithValue(request.Context(), connectionContextKey{}, &connectionState{}))
+	request = admittedRequest(t, request)
 	config, ok := service.authorize(request)
 	if !ok || !config.ReadOnly {
 		t.Fatalf("cold closed room authorization = %#v, %t; want read-only acceptance", config, ok)
@@ -163,9 +175,7 @@ func TestSchemaVersionAdmissionAuthorizesMismatchAndVersionlessClientsReadOnly(t
 			)
 			request.Header.Set("X-Dispatch-User", "alice")
 			request.SetPathValue("room", artifactID)
-			request = request.WithContext(
-				context.WithValue(request.Context(), connectionContextKey{}, &connectionState{}),
-			)
+			request = admittedRequest(t, request)
 
 			config, ok := service.authorize(request)
 			if !ok || !config.ReadOnly {
@@ -180,23 +190,30 @@ func TestSchemaVersionAdmissionAuthorizesMismatchAndVersionlessClientsReadOnly(t
 	}
 }
 
-func TestSchemaVersionAdmissionCommunicatesReadOnlyScope(t *testing.T) {
+// The page presents its schema in the socket's query as schema_version and schema_creatable, and
+// in its Hocuspocus token as the version alone. A page of this build that does so is writable on
+// an open issue, both when the socket is accepted and when the provider authenticates.
+func TestSchemaAdmissionAuthorizesAPagePresentingItsCreatableVersionReadWrite(t *testing.T) {
 	service, artifactID := newTestService(t)
+	version := strconv.Itoa(pmdoc.SchemaVersion())
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/ws/doc/"+artifactID+"?schema_creatable="+strconv.Itoa(pmdoc.SchemaCreatable())+"&schema_version="+version,
+		nil,
+	)
+	request.Header.Set("X-Dispatch-User", "alice")
+	request.SetPathValue("room", artifactID)
+	request = admittedRequest(t, request)
 
-	mismatched, err := service.authorizeSchemaVersion(artifactID, "0")
-	if err != nil {
-		t.Fatalf("authorize mismatched schema version: %v", err)
+	accepted, ok := service.authorize(request)
+	if !ok || accepted.ReadOnly {
+		t.Fatalf("socket authorization = %#v, %t; want read-write acceptance", accepted, ok)
 	}
-	if !mismatched.ReadOnly {
-		t.Fatalf("mismatched schema admission = %#v, want read-only", mismatched)
-	}
-
-	current, err := service.authorizeSchemaVersion(artifactID, fmt.Sprintf("%d", pmdoc.SchemaVersion()))
-	if err != nil {
-		t.Fatalf("authorize current schema version: %v", err)
-	}
-	if current.ReadOnly {
-		t.Fatalf("current schema admission = %#v, want read-write", current)
+	// The token's answer is the admission the socket's own context carries, so it is asked on that
+	// context, as ygo asks it on the one it served the connection on.
+	authenticated, err := service.authorizeSchemaVersion(request.Context(), artifactID, version)
+	if err != nil || authenticated.ReadOnly {
+		t.Fatalf("token authorization = %#v, %v; want read-write", authenticated, err)
 	}
 }
 

@@ -21,7 +21,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/logtest"
@@ -56,8 +55,9 @@ func deliveryTestPool(t *testing.T) (*store.Pool, context.Context) {
 	// that crashes before its own cleanup runs. duty_passes is cleared with them: this database
 	// is the server's own and outlives the run, where storetest's clones do not, so a reconcile
 	// pass an earlier run recorded inside ReconcileInterval would make this run's pass skip for
-	// a period it did not serve (duty.Exclusive).
-	for _, table := range []string{"delivery_run_jobs", "delivery_runs", "delivery_pull_requests", "delivery_reconcile_progress", "delivery_settings", "duty_passes"} {
+	// a period it did not serve (duty.Exclusive). duty_holds too: an intake an earlier test
+	// abandoned leaves its durable's hold to lapse, and this test's intake would stand by for it.
+	for _, table := range []string{"delivery_run_jobs", "delivery_runs", "delivery_pull_requests", "delivery_reconcile_progress", "delivery_settings", "duty_passes", "duty_holds"} {
 		if _, err := pool.Exec(ctx, "delete from "+table); err != nil {
 			t.Fatalf("truncate %s: %v", table, err)
 		}
@@ -65,11 +65,11 @@ func deliveryTestPool(t *testing.T) (*store.Pool, context.Context) {
 	return pool, ctx
 }
 
-// deliveryTestLeases is the lease pool an intake reconciles its durable under (duty.Exclusive on
-// consumerLease(durable)), taken from the test's own pool. Each lease is held on a connection of
-// its own, so a test can hold the lease from one caller while an intake tries for it from
-// another.
-func deliveryTestLeases(t *testing.T, pool *store.Pool) duty.Leases {
+// deliveryTestLeases is the lease pool an intake takes its durable's hold and consumer lease on
+// (intakeHoldName, consumerLease), taken from the test's own pool. Each lease is held on a
+// connection of its own, so a test can hold the lease from one caller while an intake tries for it
+// from another.
+func deliveryTestLeases(t *testing.T, pool *store.Pool) *pgxpool.Pool {
 	t.Helper()
 	leases, err := pool.Leases()
 	if err != nil {

@@ -8,14 +8,16 @@ import (
 // Splice returns a copy of d's tree with r replaced by with, using Proof's
 // ProseMirror-compatible range-fitting rules. It reads the splice's shape (spliceShape), then
 // validates with, the replacement, in that order, and only then fits the replacement into the
-// range; the document itself was validated once, when the ValidDocument was made. The zero
-// ValidDocument is a splice whose shape cannot be read.
+// range; the document itself was validated once, when the ValidDocument was made. The
+// replacement's validation refuses one holding an element this build may not create yet that d's
+// tree does not hold already (validateTransformed). The zero ValidDocument is a splice whose
+// shape cannot be read.
 func (d ValidDocument) Splice(r Range, with *Node) (*Node, error) {
 	if err := spliceShape(d.doc, r, with); err != nil {
 		return nil, err
 	}
 	doc := d.doc
-	if err := with.Validate(); err != nil {
+	if err := validateTransformed(with, doc); err != nil {
 		return nil, err
 	}
 	if r.From == r.To {
@@ -170,6 +172,9 @@ func (d ValidDocument) InsertTableRows(target Range, markdown string, after bool
 	children = append(children, outTable.Children[index:]...)
 	outTable.Children = children
 	if err := out.Validate(); err != nil {
+		return nil, true, err
+	}
+	if err := refuseUncreatable(rows, func() *Node { return doc }); err != nil {
 		return nil, true, err
 	}
 	return out, true, nil

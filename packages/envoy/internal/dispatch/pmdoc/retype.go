@@ -55,7 +55,7 @@ func RetypeBlock(doc *Node, blockID, typeName string, attributes Attrs) (*Node, 
 	}
 	retyped := &Node{Type: typeName, Attrs: attrs, Children: children}
 	replaceNodeAtPath(out, targetPath, retyped)
-	if err := out.Validate(); err != nil {
+	if err := validateTransformed(out, doc); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -73,11 +73,12 @@ func StripServerOwnedAttrs(doc *Node) {
 			if !attribute.Server {
 				continue
 			}
-			if attribute.Default == nil {
+			value, ok := writtenDefault(typ, name, attribute)
+			if !ok {
 				delete(node.Attrs, name)
 				continue
 			}
-			node.Attrs[name] = cloneSchemaValue(attribute.Default)
+			node.Attrs[name] = value
 		}
 		return true
 	})
@@ -124,7 +125,7 @@ func SetBlockAttributes(doc *Node, blockID string, attributes Attrs) (*Node, err
 		}
 		target.Attrs[name] = value
 	}
-	if err := out.Validate(); err != nil {
+	if err := validateTransformed(out, doc); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -175,8 +176,17 @@ func SetBlockBody(doc *Node, blockID string, children []*Node, attributes Attrs)
 		}
 		target.Attrs[name] = value
 	}
-	if err := out.Validate(); err != nil {
+	if err := validateTransformed(out, doc); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// validateTransformed is the validation of out, the tree a transform made from doc: out is within
+// the schema, and it adds no element this build cannot create (refuseUncreatable).
+func validateTransformed(out, doc *Node) error {
+	if err := out.Validate(); err != nil {
+		return err
+	}
+	return refuseUncreatable(out.Children, func() *Node { return doc })
 }

@@ -1,0 +1,12 @@
+kind: Changed
+body: |-
+    `ENVOY_NOTIFICATIONS` carries the generation of its settings in its metadata
+    (`dispatch.stream-generation`), and an owning client (the listener, Dispatch's server) leaves a
+    stream stamped with a higher generation as it is, so an older build never reverts a newer one's
+    `MaxAge`, `Duplicates` or subjects. It ensures the stream on its connect and again after every
+    reconnect, so a stream lost while it runs is created again; Dispatch's server keeps the stream's
+    deployed replica count. Every client decides a topic's transport from the deployed stream's
+    subjects, read at each ensure, or at connect and every 60 s by a client that owns no stream.
+time: 2026-10-28T12:39:41.070133631Z
+custom:
+    Issue: pr2461

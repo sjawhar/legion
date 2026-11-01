@@ -1,10 +1,14 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { waitFor } from "@testing-library/react";
+import { createDecoder, readVarString, readVarUint, readVarUint8Array } from "lib0/decoding";
 import * as Y from "yjs";
 
+import { type DocumentConnection, loadDocumentTransport } from "./connection";
+import { createEditor } from "./editor";
 import type { PendingEdits, PendingKey } from "./pending-edits";
 import {
   artifactId,
+  authenticatedFrame,
   closeStores,
   frame,
   NAME,
@@ -17,13 +21,16 @@ import {
   stampHeadingId,
   storeFor,
   syncStatusFrame,
+  syncStep1Frame,
   syncStep2Frame,
   typeInto,
   typeParagraph,
   updateFrame,
+  varBytes,
 } from "./pending-fixture";
 import { type PendingState, type PendingSync, startPendingSync } from "./pending-sync";
 import { createPendingWaiter } from "./pending-waiter";
+import { compiledBlockSchema, compiledSchemaCreatable } from "./schema";
 
 /** Stands in for the provider: updates it applies from the server carry it as their origin. */
 const SERVER = { server: true };
@@ -721,6 +728,218 @@ test("an edit recorded while a SyncStep2 acknowledgement is clearing stays track
     expect(await rowsOf(artifact)).toEqual([]);
   } finally {
     logged.mockRestore();
+  }
+});
+
+/** A socket already open, as the browser's is once it connects; the test plays the server. */
+class OpenSocket extends EventTarget {
+  static opened: OpenSocket[] = [];
+  binaryType = "blob";
+  readonly readyState: number = 1;
+  readonly sent: Uint8Array[] = [];
+
+  constructor(readonly url: string) {
+    super();
+    OpenSocket.opened.push(this);
+    queueMicrotask(() => this.dispatchEvent(new Event("open")));
+  }
+
+  close(): void {}
+
+  send(data: Uint8Array): void {
+    this.sent.push(new Uint8Array(data));
+  }
+
+  receive(data: Uint8Array): void {
+    this.dispatchEvent(new MessageEvent("message", { data: data.slice().buffer }));
+  }
+}
+
+// The server reads the page's schema when it accepts the socket, from the query, and again when
+// the provider authenticates, from the token. A server that predates `schema_creatable` ignores
+// that query parameter and compares the whole token with its own version, so the token stays the
+// version alone: any other token would make every socket of that server read-only.
+test("a connection presents its schema version and creatable version, and its version as its token", async () => {
+  const artifact = artifactId();
+  const realSocket = globalThis.WebSocket;
+  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
+  OpenSocket.opened = [];
+  let connection: DocumentConnection | undefined;
+  try {
+    const connect = await loadDocumentTransport();
+    connection = connect(artifact, {
+      onAdmission() {},
+      onOutsideSchema() {},
+      onPending() {},
+      onStatus() {},
+      onSynced() {},
+      schemaCreatable: 1,
+      schemaVersion: 2,
+    });
+    await waitFor(() => expect(OpenSocket.opened).toHaveLength(1));
+    const socket = OpenSocket.opened[0] as OpenSocket;
+    const query = new URL(socket.url).searchParams;
+    expect(query.get("schema_version")).toBe("2");
+    expect(query.get("schema_creatable")).toBe("1");
+    // A Hocuspocus Auth message (2) carrying a Token (0).
+    const token = frame(artifact, [2, 0], varBytes(new TextEncoder().encode("2")));
+    await waitFor(() => expect(socket.sent).toContainEqual(token));
+  } finally {
+    connection?.destroy();
+    globalThis.WebSocket = realSocket;
+  }
+});
+
+/** The names of the elements at the top of a document's Proof fragment, in order. */
+function topElements(doc: Y.Doc): string[] {
+  return doc
+    .getXmlFragment("prosemirror")
+    .toArray()
+    .map((child) => (child instanceof Y.XmlElement ? child.nodeName : "#text"));
+}
+
+interface Admitted {
+  connection: DocumentConnection;
+  /** Answers every frame the page sent since the last call as the document server does: a
+   *  writable socket's Update or SyncStep2 is applied to `server` and acknowledged with 1, and a
+   *  read-only socket's is dropped and acknowledged with 0 (`ygo`'s `applySyncUpdate`). */
+  serve(): void;
+}
+
+/** A page admitted to `server`'s document over a real provider, once its first sync completes. */
+async function admitted(
+  artifact: string,
+  server: Y.Doc,
+  scope: "readonly" | "read-write"
+): Promise<Admitted> {
+  OpenSocket.opened = [];
+  let synced = false;
+  const connect = await loadDocumentTransport();
+  const connection = connect(artifact, {
+    onAdmission() {},
+    onOutsideSchema() {},
+    onPending() {},
+    onStatus() {},
+    onSynced: () => {
+      synced = true;
+    },
+    schemaCreatable: compiledSchemaCreatable,
+    schemaVersion: compiledBlockSchema.version,
+  });
+  await waitFor(() => expect(OpenSocket.opened[0]?.sent.length).toBeGreaterThan(0));
+  const socket = OpenSocket.opened[0] as OpenSocket;
+  socket.receive(authenticatedFrame(scope, artifact));
+  socket.receive(syncStep1Frame(Y.encodeStateVector(server), artifact));
+  socket.receive(syncStep2Frame(Y.encodeStateAsUpdate(server), artifact));
+  await waitFor(() => expect(synced).toBe(true));
+  let served = 0;
+  return {
+    connection,
+    serve() {
+      for (const sent of socket.sent.slice(served)) {
+        served += 1;
+        const decoder = createDecoder(sent);
+        readVarString(decoder); // the document name
+        if (readVarUint(decoder) !== 0 || readVarUint(decoder) === 0) {
+          continue; // not a Sync message, or a SyncStep1, which changes nothing on the server
+        }
+        const update = readVarUint8Array(decoder);
+        if (scope === "read-write") {
+          Y.applyUpdate(server, update, "page");
+        }
+        socket.receive(syncStatusFrame(scope === "read-write", artifact));
+      }
+    },
+  };
+}
+
+/** A server document holding a paragraph and then `future_block`, an element of a newer build
+ *  that this page's schema does not have, holding a paragraph of its own. */
+function serverWithFutureBlock(): Y.Doc {
+  const server = new Y.Doc();
+  server.clientID = 100;
+  const known = new Y.XmlElement("paragraph");
+  known.insert(0, [new Y.XmlText("Known text.")]);
+  const inner = new Y.XmlElement("paragraph");
+  inner.insert(0, [new Y.XmlText("Written by a newer build.")]);
+  const future = new Y.XmlElement("future_block");
+  future.insert(0, [inner]);
+  server.getXmlFragment("prosemirror").insert(0, [known, future]);
+  return server;
+}
+
+// A newer build wrote an element this page's schema does not have. y-prosemirror (1.3.7) cannot
+// build it, so the editor deletes it from the page's copy of the document (`createNodeFromYElement`
+// in its `sync-plugin.js`). The server holds the page read-only, which drops the deletion. That
+// deletion is the editor's repair, not an edit, so the browser must not keep it either: a later
+// writable admission, a page of the newer build among them, replays the edits the browser kept,
+// and would delete the element from the document for everyone.
+test("an element the editor cannot build survives a read-only session and a later writable admission", async () => {
+  const artifact = artifactId();
+  const server = serverWithFutureBlock();
+
+  const realSocket = globalThis.WebSocket;
+  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
+  const root = document.body.appendChild(document.createElement("div"));
+  const opened: DocumentConnection[] = [];
+  try {
+    const readOnly = await admitted(artifact, server, "readonly");
+    opened.push(readOnly.connection);
+    const editor = await createEditor(root, {
+      awareness: null,
+      blockSchema: compiledBlockSchema,
+      readOnly: true,
+      user: { color: "#f59e0b", name: "alice" },
+      ydoc: readOnly.connection.doc,
+    });
+    // The pinned y-prosemirror deletes the element from the page's copy of the document.
+    expect(topElements(readOnly.connection.doc)).toEqual(["paragraph"]);
+    readOnly.serve();
+    expect(topElements(server)).toEqual(["paragraph", "future_block"]);
+    editor.destroy();
+    readOnly.connection.destroy();
+
+    const writable = await admitted(artifact, server, "read-write");
+    opened.push(writable.connection);
+    writable.serve();
+    expect(topElements(writable.connection.doc)).toEqual(["paragraph", "future_block"]);
+    expect(topElements(server)).toEqual(["paragraph", "future_block"]);
+    expect(server.getXmlFragment("prosemirror").toString()).toContain("Written by a newer build.");
+  } finally {
+    for (const connection of opened) {
+      connection.destroy();
+    }
+    root.remove();
+    globalThis.WebSocket = realSocket;
+  }
+});
+
+// The editor's repair and an edit typed in the editor reach the document with the same origin,
+// y-prosemirror's sync plugin key. The browser keeps the edit, and only the edit: replaying what
+// it kept adds the typed text and keeps the element the editor could not build.
+test("an edit typed in the editor is kept, and the editor's repair beside it is not", async () => {
+  const server = serverWithFutureBlock();
+  const { artifact, doc } = await scripted(artifactId(), Y.encodeStateAsUpdate(server));
+  const root = document.body.appendChild(document.createElement("div"));
+  const editor = await createEditor(root, {
+    awareness: null,
+    blockSchema: compiledBlockSchema,
+    user: { color: "#f59e0b", name: "alice" },
+    ydoc: doc,
+  });
+  try {
+    expect(topElements(doc)).toEqual(["paragraph"]);
+    editor.view.dispatch(editor.view.state.tr.insertText("Typed. ", 1));
+
+    await waitFor(async () => expect((await rowsOf(artifact)).length).toBeGreaterThan(0));
+    for (const row of await (await storeFor(artifact, -1)).restoreRows()) {
+      Y.applyUpdate(server, row.update);
+    }
+    expect(topElements(server)).toEqual(["paragraph", "future_block"]);
+    expect(server.getXmlFragment("prosemirror").toString()).toContain("Typed. Known text.");
+  } finally {
+    editor.destroy();
+    root.remove();
   }
 });
 

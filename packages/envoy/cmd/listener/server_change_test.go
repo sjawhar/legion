@@ -261,7 +261,7 @@ func runServerChange(t *testing.T, run serverChangeRun) {
 		}
 	})
 	s.awaitReplicated(t)
-	if bus.UsesCoreTransport(serverChangeCaptured) || !bus.UsesCoreTransport(serverChangeAdHoc) {
+	if (&bus.Client{}).UsesCoreTransport(serverChangeCaptured) || !(&bus.Client{}).UsesCoreTransport(serverChangeAdHoc) {
 		t.Fatalf("the captured topic %s must be stored by the stream and the ad-hoc topic %s must not", serverChangeCaptured, serverChangeAdHoc)
 	}
 

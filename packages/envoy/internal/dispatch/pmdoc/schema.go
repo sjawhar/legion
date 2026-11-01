@@ -19,10 +19,24 @@ import (
 //go:embed schema/blocks.json
 var blockSchemaJSON []byte
 
-// BlockSchema describes the typed document nodes that every Dispatch client supports.
+// BlockSchema is the document schema manifest, schema/blocks.json, which this build embeds and GET
+// /api/v1/schema/blocks serves byte for byte: the nodes and marks of the Proof schema and the typed
+// blocks Dispatch adds to it. Every element of it - a node, a mark, a typed block, a typed block's
+// attribute, an enum attribute's choice - may say from which schema version a build reads it
+// (since) and from which a build may create it (creatable_since); both are 1 when it says neither
+// (ElementVersions). This build reads every element its manifest declares and creates those whose
+// creatable_since is at most Version (SchemaVersion).
 type BlockSchema struct {
 	Version int               `json:"version"`
+	Nodes   []ElementSchema   `json:"nodes"`
+	Marks   []ElementSchema   `json:"marks"`
 	Types   []BlockTypeSchema `json:"types"`
+}
+
+// ElementSchema is one node or mark of the Proof schema.
+type ElementSchema struct {
+	Name string `json:"name"`
+	ElementVersions
 }
 
 // BlockContentRule describes the block children a typed node may contain.
@@ -40,84 +54,41 @@ type BlockTypeSchema struct {
 	Content    BlockContentRule                `json:"content"`
 	Render     string                          `json:"render"`
 	Attributes map[string]BlockAttributeSchema `json:"attributes"`
+	ElementVersions
 }
 
-// BlockAttributeSchema describes a typed block attribute. Targets limits a `block[]` attribute to
-// blocks of the named types (a typed block the schema declares, or a built-in block the link graph
-// holds, builtInBlockNode); absent or empty, it points at any block. No other kind carries it.
+// BlockAttributeSchema describes a typed block attribute. An enum's choices stay plain strings,
+// since the editors of earlier builds compare a value against them; ChoiceVersions holds a choice's
+// since and creatable_since, by choice, for each choice that has numbers other than 1. Targets
+// limits a `block[]` attribute to blocks of the named types (a typed block the schema declares, or
+// a built-in block the link graph holds, builtInBlockNode); absent or empty, it points at any
+// block. No other kind carries it.
 type BlockAttributeSchema struct {
-	Kind    string   `json:"kind"`
-	Choices []string `json:"choices,omitempty"`
-	Default any      `json:"default,omitempty"`
-	Server  bool     `json:"server,omitempty"`
-	Targets []string `json:"targets,omitempty"`
+	Kind           string                     `json:"kind"`
+	Choices        []string                   `json:"choices,omitempty"`
+	Default        any                        `json:"default,omitempty"`
+	Server         bool                       `json:"server,omitempty"`
+	Targets        []string                   `json:"targets,omitempty"`
+	ChoiceVersions map[string]ElementVersions `json:"choice_versions,omitempty"`
+	ElementVersions
 }
 
-var schema BlockSchema
-var schemaTypes map[string]BlockTypeSchema
-var schemaLinkKinds []string
-
-// schemaPointerAttributes maps each typed block declaring a `block[]` attribute to those
-// attributes' names, sorted.
-var schemaPointerAttributes map[string][]string
-
-func init() {
-	if err := json.Unmarshal(blockSchemaJSON, &schema); err != nil {
-		panic(fmt.Sprintf("pmdoc: decode embedded block schema: %v", err))
-	}
-	if err := normalizeSchemaDefaults(&schema); err != nil {
-		panic(fmt.Sprintf("pmdoc: normalize embedded block schema: %v", err))
-	}
-	if err := validateBlockSchema(schema); err != nil {
-		panic(fmt.Sprintf("pmdoc: invalid embedded block schema: %v", err))
-	}
-	installSchema(schema)
-}
-
-// installSchema makes value, a valid schema, the one every reader of this package uses.
-func installSchema(value BlockSchema) {
-	schema = value
-	schemaTypes = make(map[string]BlockTypeSchema, len(value.Types))
-	schemaPointerAttributes = map[string][]string{}
-	kinds := map[string]struct{}{}
-	for _, typ := range value.Types {
-		schemaTypes[typ.Name] = typ
-		var names []string
-		for name, attr := range typ.Attributes {
-			if attr.Kind == "block[]" {
-				kinds[name] = struct{}{}
-				names = append(names, name)
-			}
-		}
-		if len(names) > 0 {
-			sort.Strings(names)
-			schemaPointerAttributes[typ.Name] = names
-		}
-	}
-	schemaLinkKinds = slices.Sorted(maps.Keys(kinds))
-}
-
-// LinkKinds is the edge kinds the schema's `block[]` attributes make, sorted: each such
+// LinkKinds is the edge kinds the manifest's `block[]` attributes make, sorted: each such
 // attribute's name, once however many types declare it. None is a structural edge kind
 // (model.GraphEdgeKinds).
 func LinkKinds() []string {
-	return slices.Clone(schemaLinkKinds)
+	return slices.Clone(active.linkKinds)
 }
 
-// HasLinkKinds reports whether the schema declares any `block[]` attribute (LinkKinds is not
+// HasLinkKinds reports whether the manifest declares any `block[]` attribute (LinkKinds is not
 // empty).
 func HasLinkKinds() bool {
-	return len(schemaLinkKinds) > 0
+	return len(active.linkKinds) > 0
 }
 
 // SchemaJSON returns a copy of the canonical server-owned block schema JSON.
 func SchemaJSON() []byte {
 	return append([]byte(nil), blockSchemaJSON...)
-}
-
-// SchemaVersion returns the current schema version clients present during document admission.
-func SchemaVersion() int {
-	return schema.Version
 }
 
 // IsTypedBlock reports whether name is a typed block the schema declares.
@@ -127,13 +98,13 @@ func IsTypedBlock(name string) bool {
 }
 
 func typedBlock(name string) (BlockTypeSchema, bool) {
-	typ, ok := schemaTypes[name]
+	typ, ok := active.types[name]
 	return typ, ok
 }
 
 func typedBlockNames() []string {
-	names := make([]string, 0, len(schema.Types))
-	for _, typ := range schema.Types {
+	names := make([]string, 0, len(active.schema.Types))
+	for _, typ := range active.schema.Types {
 		names = append(names, typ.Name)
 	}
 	sort.Strings(names)
@@ -180,7 +151,7 @@ func validateBlockSchema(value BlockSchema) error {
 	for _, typ := range value.Types {
 		for _, name := range slices.Sorted(maps.Keys(typ.Attributes)) {
 			for _, target := range typ.Attributes[name].Targets {
-				if _, typed := seenTypes[target]; !typed && !builtInBlockNode(target) {
+				if _, typed := seenTypes[target]; !typed && !builtInBlockNode(value, target) {
 					return fmt.Errorf("type %q attribute %q targets %q, which is neither a type the schema declares nor a built-in block the link graph holds", typ.Name, name, target)
 				}
 			}
@@ -189,17 +160,22 @@ func validateBlockSchema(value BlockSchema) error {
 	return nil
 }
 
-// builtInBlockNode reports whether name is a built-in block type whose blocks are nodes of the
-// link graph, which a `block[]` attribute's targets may name: a type the renderer records a block
-// offset for (renderer.block: any node but the document and inline nodes), so one
-// GET /api/v1/artifacts/{id}/blocks lists, less the types the renderer writes without recording
-// one - a list item and a table's rows and cells - which no block list holds.
-func builtInBlockNode(name string) bool {
+// builtInBlockNode reports whether name is a built-in block type of value, the manifest being
+// validated, whose blocks are nodes of the link graph, which a `block[]` attribute's targets may
+// name: a type the renderer records a block offset for (renderer.block: any node but the document
+// and inline nodes), so one GET /api/v1/artifacts/{id}/blocks lists, less the types the renderer
+// writes without recording one - a list item and a table's rows and cells - which no block list
+// holds. It reads value's own nodes rather than the installed manifest's, since the manifest
+// being validated is not installed yet (compileManifest).
+func builtInBlockNode(value BlockSchema, name string) bool {
 	switch name {
 	case "doc", "list_item", "table_header_row", "table_row", "table_header", "table_cell":
 		return false
 	}
-	return nodeTypes[name] && !isInlineNodeType(name)
+	if isInlineNodeType(name) {
+		return false
+	}
+	return slices.ContainsFunc(value.Nodes, func(node ElementSchema) bool { return node.Name == name })
 }
 
 func validBlockContentRule(rule BlockContentRule) bool {
@@ -310,7 +286,7 @@ func validateAttributeValue(attr BlockAttributeSchema, value any) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("must be one of %s, got %q", strings.Join(attr.Choices, ", "), text)
+		return unknownElement(fmt.Errorf("must be one of %s, got %q", strings.Join(attr.Choices, ", "), text))
 	case "string[]":
 		switch items := value.(type) {
 		case []string:
@@ -416,11 +392,42 @@ func parseTypedAttributeValue(attr BlockAttributeSchema, raw any) (any, error) {
 	}
 }
 
+// defaultAttributes is the attributes a block of typ holds before it names any of its own: each
+// attribute's written default (writtenDefault).
 func defaultAttributes(typ BlockTypeSchema) Attrs {
 	attrs := make(Attrs, len(typ.Attributes))
 	for name, attr := range typ.Attributes {
-		if attr.Default != nil {
-			attrs[name] = cloneSchemaValue(attr.Default)
+		if value, ok := writtenDefault(typ, name, attr); ok {
+			attrs[name] = value
+		}
+	}
+	return attrs
+}
+
+// writtenDefault is the value of typ's attribute name, attr, for a block that does not hold it: its
+// default, and false when it has none or when this build may not create the attribute yet. A
+// block an earlier build wrote, before the attribute existed, reads with that default (readElement,
+// renderTypedAttributes), as the browser editor reads it. An attribute this build cannot create is
+// left out, so that no write of this build adds it.
+func writtenDefault(typ BlockTypeSchema, name string, attr BlockAttributeSchema) (any, bool) {
+	if attr.Default == nil || !creatable(Element{Kind: AttributeElement, Block: typ.Name, Name: name}) {
+		return nil, false
+	}
+	return cloneSchemaValue(attr.Default), true
+}
+
+// withWrittenDefaults is attrs, a typed block's attributes as a stored tree holds them, with the
+// written default of each attribute of typ that it does not hold. It adds to attrs in place.
+func withWrittenDefaults(typ BlockTypeSchema, attrs Attrs) Attrs {
+	for name, attr := range typ.Attributes {
+		if _, present := attrs[name]; present {
+			continue
+		}
+		if value, ok := writtenDefault(typ, name, attr); ok {
+			if attrs == nil {
+				attrs = make(Attrs, len(typ.Attributes))
+			}
+			attrs[name] = value
 		}
 	}
 	return attrs
@@ -448,11 +455,11 @@ func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, error) {
 			continue
 		}
 		value, present := n.Attrs[name]
+		if !present {
+			value, present = writtenDefault(typ, name, definition)
+		}
 		if !present || (value == nil && definition.Default == nil) {
-			if definition.Default == nil {
-				continue
-			}
-			return "", fmt.Errorf("%w: typed block %q is missing attribute %q", ErrSchema, n.Type, name)
+			continue
 		}
 		var encoded string
 		switch definition.Kind {

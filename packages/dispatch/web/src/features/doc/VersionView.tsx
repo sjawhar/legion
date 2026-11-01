@@ -4,7 +4,7 @@ import type { Doc } from "yjs";
 
 import { api } from "../../api/client";
 import { whoAmIQuery } from "../../api/queries";
-import type { Ask, BlockSchema } from "../../api/types";
+import type { Ask } from "../../api/types";
 import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { Timestamp } from "../refs/Timestamp";
 import { AskBlockCard } from "./AskBlockCard";
@@ -16,13 +16,13 @@ import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
 import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { DocumentRuntime } from "./runtime";
+import { compiledBlockSchema } from "./schema";
 import type { AskBlockHost } from "./typed-block-drawing";
 
 export interface VersionViewProps {
   artifactId: string;
   /** The document's block-indexed asks, so a historical decision block still names its asker. */
   asks: readonly Ask[];
-  blockSchema: BlockSchema | undefined;
   /** The markdown of the version this one is marked against - the last approved one - with which
    *  the view draws what changed since it: the words each changed block gained, and each block
    *  removed since then where it stood. Without it nothing is marked. */
@@ -37,7 +37,6 @@ export interface VersionViewProps {
 export function VersionView({
   artifactId,
   asks,
-  blockSchema,
   changeBaseline,
   createdAt,
   highlight,
@@ -79,12 +78,7 @@ export function VersionView({
   useEffect(() => {
     const parent = root.current;
     const user = userQuery.data;
-    if (
-      parent === null ||
-      markdown === undefined ||
-      user === undefined ||
-      blockSchema === undefined
-    ) {
+    if (parent === null || markdown === undefined || user === undefined) {
       return;
     }
 
@@ -102,7 +96,7 @@ export function VersionView({
       ydoc = doc;
       const editor = await createEditor(parent, {
         awareness: null,
-        blockSchema,
+        blockSchema: compiledBlockSchema,
         heatMapMode: "hidden",
         readOnly: true,
         user: { color: colorForLogin(user.login), name: user.login },
@@ -113,7 +107,7 @@ export function VersionView({
         editor.destroy();
         return;
       }
-      installTypedBlocks(editor.view, blockSchema, setAskBlockHosts);
+      installTypedBlocks(editor.view, compiledBlockSchema, setAskBlockHosts);
       const embedded =
         highlighted === undefined ? undefined : embedHighlight(markdown, highlighted);
       editor.setMarkdown(embedded ?? markdown);
@@ -148,7 +142,7 @@ export function VersionView({
       handle?.destroy();
       ydoc?.destroy();
     };
-  }, [blockSchema, changeBaseline, createEditor, highlighted, markdown, userQuery.data]);
+  }, [changeBaseline, createEditor, highlighted, markdown, userQuery.data]);
 
   if (versionQuery.isPending) {
     return <p>Loading version…</p>;

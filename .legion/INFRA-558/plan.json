@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-558",
+  "completed": "2026-10-27T02:49:40Z",
+  "planDocument": "dispatch://INFRA-558/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, the PR body's proof entries (references/pr-body.md), the simplify pass and pushing; the plan's failing-before and passing-after runs are quoted there.",
+      "asd-ste100: the new error messages (DOC_NEWER_CONTENT, the rewritten DOCUMENT_UNLOADABLE/LOADS/LIVE texts, the rolling-release retry message) and the dispatch_read tool description are read by agents with no human to resolve ambiguity.",
+      "ce-simplify-code: the simplify pass over the settled change before the PR is called done."
+    ],
+    "test": [
+      "legion-worker: the tester re-runs the plan's commands on the real surfaces (two builds, one Postgres, one NATS; browser suite) and records proof entries with the G3 negative control."
+    ],
+    "review": [
+      "legion-worker: merge-gate and review-thread rules (references/merge-gate.md, review-threads.md).",
+      "asd-ste100: checks the agent-facing error and tool-description texts the change rewrites."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "A1: 'The previous release' is undefined; production pins an image, tags are cut for some paths, CI has no history, a previous build below 0117 fails by design.",
+        "answer": "Plan 0.4/G1/G5: the previous build is a commit built from source with git archive; CI default is the newest legion-envoy-v* tag that is an ancestor of the PR base, with fetch-depth 0; a workflow_dispatch input takes any commit; the script refuses a commit below migration 0117. The INFRA-63 architect answered (Envoy, 02:45Z) that INFRA-564's spec runs the harness with the commit production ran before the measured release."
+      },
+      {
+        "finding": "A2: Leniency protects only once a lenient build is the previous one; sibling children adding request members in the same window are refused by the strict build.",
+        "answer": "The INFRA-63 architect answered (Envoy, 02:45Z): INFRA-561 raises the server count only onto a build carrying INFRA-558 and INFRA-559 on every pod. Plan 0.3 and departure 3: this release adds no request member."
+      },
+      {
+        "finding": "A3: Meaning search on new-identity pods during an embedder roll returns no vector hits.",
+        "answer": "Plan E-a and departure 2: accepted as text-only matches on the inactive identity, the same gap a one-process embedder change has today; README says so; dual vectors need a new embeddings layout (one row per (kind,id), vector(1536))."
+      },
+      {
+        "finding": "B1: Admission by |client-server|<=1 can admit a stale tab writable and let y-prosemirror delete an element; nothing separates readable from creatable; corpus cross-read is Go-only.",
+        "answer": "Plan D2/D3/D5: per-element since/creatable_since in the manifest; write paths refuse elements not yet creatable; admission writable iff R_client <= min V of the live fleet and C_client >= max(fleet R, elements present in the document); sockets re-checked every 30 s. G4's browser half checks the page side across builds."
+      },
+      {
+        "finding": "B2: pending-sync may replay a y-prosemirror deletion recorded while read-only.",
+        "answer": "Plan D9: a web test on the pinned versions; if the editor deletes, exclude its repair transactions from the pending store and never send them from a read-only socket; acceptance is the element surviving a read-only session followed by a writable admission."
+      },
+      {
+        "finding": "B3: Writing no version when the approved version is unreadable can block settlement forever, including for versions an earlier release stored.",
+        "answer": "Plan D7: applies to the newer-content class (D6) only; skipUnreadableVersion stays for versions an earlier release stored."
+      },
+      {
+        "finding": "B4: Leaving unreadable documents owed starves the excerpt batch (from_id order, limit 20).",
+        "answer": "Plan D8: newer-content class only, plus a per-process skip set keyed by artifact and version so the batch moves past them; test reconciles a 26th normal document past 25 unreadable ones."
+      },
+      {
+        "finding": "B5: A composite duty_passes key doubles passes during this release's own roll at equal periods.",
+        "answer": "Plan E-c: the new build also reads the legacy lease=name row when its period_ns equals its own, and writes it only when absent or at its own period."
+      },
+      {
+        "finding": "B6: The two embedder takeover rules contradict each other.",
+        "answer": "Plan E-a: one rule, stored in a singleton embedder_active row: the active identity stays active while any live process carries it; then the earliest-started live process's identity takes over by compare-and-set."
+      },
+      {
+        "finding": "B7: Registry and holds protect only builds that carry them; takeover could steal from a pre-change holder that never rebinds.",
+        "answer": "Plan 0.3 and F1: protections bind from the release after the first carrying them; this release changes no setting. Plan A1: rows of builds before INFRA-558 (registry defaults) are left out of fleet numbers and treated as lacking the bucket. Plan C5: a new build never takes a binding from a deliver subject no lease recorded; it waits until that consumer is unbound."
+      },
+      {
+        "finding": "B8: Stream Metadata cannot protect against the previous build; preserving Replicas would change ENVOY_NATS_REPLICAS; usesCoreTransport is shared with the listener and outbox.",
+        "answer": "Plan C1: MaxAge/Duplicates/Subjects unchanged this release. Plan C2: only a client without WithReplicas (Dispatch) keeps deployed Replicas; the listener's meaning is unchanged. Plan C4 and 'Coordination': the shared transport change is told to INFRA-557 and INFRA-514; outbox code untouched."
+      },
+      {
+        "finding": "B9: /api/v1/schema/blocks must stay and stay readable by old tabs; new keys outside types.",
+        "answer": "Plan D2: endpoint unchanged byte for byte; nodes and marks are new top-level keys; per-element since fields are keys the previous validateBlockSchema ignores (read at legion-envoy-v18.1.0 block-schema.ts:51-70)."
+      },
+      {
+        "finding": "C1-C2: The claim route's trust comment and the daemon's strict-text ride-out and labels_add probe test depend on strictness.",
+        "answer": "Plan B3: comments rewritten; daemon ride-out left as is (right against strict builds; both fields known at legion-envoy-v18.1.0); api/issues_test.go:701-708 probes by effect; README rule says a future precondition ships as a route."
+      },
+      {
+        "finding": "C3-C4: New enum values (view.kind, ?kind=, cursor) and response members are not unknown fields.",
+        "answer": "Plan B2/B6 (view kind degrades and the page reconnects), D11 (?kind= answers unknown_kinds), F1 (cursors and response members reader-first / optional)."
+      },
+      {
+        "finding": "C5: A new document error class reaches contracts, generated Go, tool descriptions, plugin bundles, web, README and AGENTS docs.",
+        "answer": "Plan D6 lists each consumer, the new close code (verified against the pinned Hocuspocus provider), and the web state."
+      },
+      {
+        "finding": "C6-C7: 0117 note; migration numbers may collide.",
+        "answer": "Plan F1 keeps 0113/0117 as history and the one-time 0117 stop; 'Coordination' says the later PR renumbers."
+      },
+      {
+        "finding": "D: Ambiguities (page requests, stopping includes SIGKILL, which messages, file store off, route-missing handling).",
+        "answer": "Real browser via Playwright (G4) in its own CI job; SIGKILL covered with a 25 s bound (C5); all four document messages stop giving destructive advice (D6); turning the store off needs restore-files first (E-b, F1); retry then message (B4/B5)."
+      },
+      {
+        "finding": "E: Acceptance needs a negative control, numbers, equal-set checks, and the items with no failing-before test named.",
+        "answer": "Plan G3 negative control via ENVOY_TEST_GO_OVERLAY; numbers in C5 (5 s, 25 s) and E; equal sets of event and delivery ids in G2; items 5 and 6 named as having none; document fails-before comes from single-build tests with a synthetic element (D3, D6)."
+      },
+      {
+        "finding": "F: Unsourced claims (y-prosemirror pinned behaviour, Hocuspocus close handling, wrong-method 404, CLI fallback removal).",
+        "answer": "D9 and D6 verify the pinned libraries; B7 adds a router test for the wrong-method answer; the CLI fallback is kept (B5)."
+      },
+      {
+        "finding": "G: Overlaps with 555, 556, 557, 559, 514.",
+        "answer": "Plan 'Coordination', following the INFRA-63 architect's answer (02:45Z): A1 adds columns to INFRA-555's server_processes (no registry of our own); A2 shares one holder lease with INFRA-514 (asked its architect, message b7221345c44cbae099529670069b2625); G4 extends INFRA-559's two-process browser harness (no harness of our own); INFRA-557 told of the shared bus code; Document-rooms finding 8 stays here (D5)."
+      },
+      {
+        "finding": "H: Tests skip without Postgres in a pod; CI needs history; previous build must be >=0117.",
+        "answer": "Plan H: failing-before shown on CI with test-only commits, or locally with the documented rootless Postgres under $TMPDIR; G5 fetch-depth 0; G1 refuses below 0117 (tag 18.1.0 carries through 0120)."
+      },
+      {
+        "finding": "Architect (Envoy, 02:45Z) via INFRA-557's planner: nats-server refuses to change a push consumer's deliver subject while the old subject has interest, which a dead connection keeps for 2-4 minutes, so rotation fails when fencing is needed.",
+        "answer": "Plan C5 deletes and recreates the durable at AckFloor+1 with a fresh deliver subject; the interest check applies only to a config update (nats-server v2.10.29 server/consumer.go:1873-1883), not to a delete or a create on a new subject; the intake already deletes and recreates at the ack floor (intake.go:607-614). Each holder handles a message only while it holds the lease."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": [
+    {
+      "spec": "Item 2: a build reads and edits documents containing elements written by the other build without refusing them.",
+      "plan": "Elements become creatable one release after they are readable (manifest since/creatable_since, write-path refusal, fleet admission), so the other build only writes elements this build reads; an element a build does not know is refused with a non-destructive retry error (DOC_NEWER_CONTENT), never read opaquely.",
+      "evidence": "y-prosemirror deletes a Yjs element its schema cannot build (upstream sync-plugin.js createNodeFromYElement; pinned copy verified in task D9); Markdown has no form for an unknown node or mark; pmdoc validateNode is the one gate for read, parse, render and write (pmdoc/node.go:101).",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "Item 4: releases that change embedder settings work while both builds serve, by a change to the code.",
+      "plan": "The builds stop undoing each other (one active identity in the database; the inactive identity neither drops nor embeds), and meaning search on a process of the inactive identity returns text matches only until the active identity changes.",
+      "evidence": "A query is embedded with the serving process's identity and matched with e.model = that identity (api/search.go:228-481); embeddings holds one vector per (kind, id), vector(1536) (migration 0072), so two identities cannot be covered at once without a new layout.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "Outcome: two builds serve together 'for every release'.",
+      "plan": "Every protection (lenient decoding, generations, registry, holds) binds from the release after the first one carrying it; this release changes no request member, document element, stream or consumer setting, embedder or file store default, or loop interval, because the previous build would refuse or revert it.",
+      "evidence": "The previous build decodes strictly (api/server.go:833), compares stream and consumer settings without generations (bus/stream.go:271-300, delivery/intake.go:618-635), and neither registers nor holds.",
+      "outcome": {
+        "kind": "changed",
+        "summary": [
+          "'for every release' holds from the release after the one that deploys this change; that first overlap is protected only where the strict previous build already behaves."
+        ]
+      }
+    }
+  ]
+}

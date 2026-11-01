@@ -58,7 +58,7 @@ not reach them:
 | `src/nested-links.ts` | `remarkHoistNestedLinks` and the `$remark` plugin that registers it: a `link` holding a `link` is rewritten into siblings, the inner link beside the runs around it and each run wrapped in a copy of the outer link's `url` and `title`, so `[a <https://u.test> b](u)` reads as `a ` under the label's link, the autolink's text under its own, and ` b` under the label's again. The only markdown that nests the two is an autolink inside a link label, since CommonMark forbids an inline link there, and `@milkdown/transformer` cannot read that label as written: it holds one flat mark set, so the link mark runner's `closeMark` on the inner autolink removes the `link` type outright (`removeFromSet`) and every later run of the label was left with no link at all, where Go's reader gives it the label's link again (`packages/envoy/internal/dispatch/pmdoc/parse.go`). The hoisted spelling is the tree Go's renderer writes for itself (`[a ](u)<https://u.test>[ b](u)`), so both readers agree rather than meeting at a third reading. It is registered at every parse seam - the explicit chain in `src/lib-headless.ts` and, through `remarkCtx`, `src/lib.ts`'s shared `parserCtx` and its `setMarkdown` - and changes no output, since a unified transformer runs on `runSync` at parse and never on `stringify` |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Twenty-four kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Twenty-five kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -142,13 +142,25 @@ document unchanged; `blockPointerRefusal` treats that block's pointers as alread
 type is unchanged, so a pointer the old type held under the same name meets the new type's targets; in `src/lib.ts`,
 `CreateProofEditorOptions.documentRef` passed to `createTypedBlockCommands`; and in
 `src/tests/block-schema.test.ts`, the imports of `DISPATCH_BLOCK_POINTER_VALUES`, `EditorState`
-and `createTypedBlockCommands` and the suite's four cases for it;
-and annotations, casts and assertions
-that make a file type-check, each of which erases before runtime (below).
+and `createTypedBlockCommands` and the suite's four cases for it; `src/block-schema.ts`,
+`src/typed-block-commands.ts` and `src/lib.ts` reading the manifest's `since` and
+`creatable_since` (INFRA-558): the `BlockSchema` types name the manifest's nodes and marks and
+each element's numbers, a block the editor makes takes no default of an attribute that the editor
+may not create yet (`typedBlockSpec`'s `version`), the commands offer, insert, retype into and
+write only the typed blocks, attributes and enum values the editor may create (`creatable`,
+`creatableValue`), and the editor's other writes keep to the same rule: `src/lib.ts`'s
+`installCreationGate` makes a markdown parse through `parserCtx` (a text/plain paste, a
+suggestion's accept) and an editable editor's `setMarkdown` throw for content holding a node,
+mark, typed block, attribute or enum value the editor may not create yet (`assertCreatable`), and
+puts `creatableDomParser` in `schema.cached`, so an HTML paste or drop does not read such a node
+or mark, and `parsedDomAttrs` does not read a typed block's section holding such an attribute or
+value; a read-only editor's `setMarkdown` (a version view), the collab sync and the headless
+engine still read all of them; and annotations, casts and assertions that make a file type-check,
+each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table but `src/directive-factories.ts`
-has that counterpart, and the only lines that differ should be the twenty-four kinds.
+has that counterpart, and the only lines that differ should be the twenty-five kinds.
 `src/directive-factories.ts`'s counterparts are those three files of micromark-extension-directive
 4.0.0 (`node_modules/.bun/micromark-extension-directive@4.0.0` at the repository root, or the
 package's npm tarball); each function there differs from its source by the join and the type

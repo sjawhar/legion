@@ -13,16 +13,24 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 )
 
-// intakeDelivery is one subscription of the intake's: the client it subscribed on, the
-// subscription, the keyed runner its callback (receive) hands messages to, and the context every
-// handler of it runs under. Each subscribe makes one of its own, so stopping one ends that
-// subscription and nothing a later subscribe starts.
+// intakeDelivery is one subscription of an intake's: the client it subscribed on, the
+// subscription, the keyed runner its callback (receive) hands messages to, the hold it delivers
+// under, and the context every handler of it runs under. Each subscribe makes one of its own, so
+// stopping one ends that subscription and nothing a later subscribe starts.
 type intakeDelivery struct {
 	nats *bus.Client
 	sub  *natsgo.Subscription
 	keys *keyedRunner[intakeMessage]
+	// key reads whether this delivery wants a message at all and the key its handler runs under
+	// (heldDurable.key).
+	key func(*natsgo.Msg) (string, *contracts.Envelope, bool)
+	// hold is the hold the subscription delivers under: once its loss deadline has passed, every
+	// message is handed back rather than handled, since this intake may no longer act on the
+	// durable's messages.
+	hold *duty.Hold
 	// handling is the parent of every handler's context (deliver), and abandon cancels it: the stop
 	// gives up the handlers still running when its context ends.
 	handling context.Context
@@ -46,60 +54,77 @@ type intakeMessage struct {
 	envelope *contracts.Envelope
 }
 
-// subscribe subscribes the intake's handling to its durable's push deliveries
-// (subscribeDurable): at the deliver subject the durable carries when deliverSubject is empty, as
-// bind does, or at deliverSubject, for a caller that has just created the durable with it. The
+// subscribe subscribes the intake's handling to its durable's push deliveries at deliverSubject
+// (subscribeDurable), for a caller that creates the durable with it right after (takeOver). The
 // subscription's callback only routes each message (receive); its handler runs on the goroutine of
-// the message's key (keyedRunner) and acknowledges it there (deliver). StopDelivering stops the
-// subscription this made last, so a caller subscribing again stops the one before first. A
-// subscribe that fails gives up its handling and the registration the client kept of it
-// (bus.Client.ReleaseFailed): a reconnect would bind that registration otherwise, and its
-// callback, its handling given up, would hand back every message until the intake's next subscribe
-// replaced it.
-func (in *Intake) subscribe(deliverSubject string) (*natsgo.Subscription, error) {
+// the message's key (keyedRunner) and acknowledges it there. StopDelivering stops the subscription
+// this made last, so a caller subscribing again stops the one before first. A subscribe that fails
+// gives up its handling and the registration the client kept of it (bus.Client.ReleaseFailed): a
+// reconnect would bind that registration otherwise, and its callback, its handling given up, would
+// hand back every message until the intake's next subscribe replaced it.
+func (d *heldDurable) subscribe(deliverSubject string) (*natsgo.Subscription, error) {
 	handling, abandon := context.WithCancel(context.Background())
-	delivery := &intakeDelivery{nats: in.nats, handling: handling, abandon: abandon}
-	delivery.keys = newKeyedRunner(func(message intakeMessage) { in.deliver(handling, message) })
-	wanted := deliveryConsumerConfig()
-	sub, err := subscribeDurable(in.nats, wanted, deliverSubject, delivery.receive)
+	delivery := &intakeDelivery{nats: d.nats, key: d.key, hold: d.hold, handling: handling, abandon: abandon}
+	delivery.keys = newKeyedRunner(func(message intakeMessage) { d.handle(handling, message) })
+	wanted := d.config()
+	sub, err := subscribeDurable(d.nats, wanted, deliverSubject, delivery.receive)
 	if err != nil {
 		abandon()
-		in.nats.ReleaseFailed(wanted.FilterSubject)
+		d.nats.ReleaseFailed(wanted.FilterSubject)
 		return nil, err
 	}
 	delivery.sub = sub
-	in.mu.Lock()
-	in.delivering = delivery
-	in.mu.Unlock()
+	d.mu.Lock()
+	d.delivering = delivery
+	d.mu.Unlock()
 	return sub, nil
+}
+
+// subscribeDurable subscribes deliver to wanted's durable through client.Subscribe at
+// deliverSubject, acknowledging by hand. Bind with DeliverSubject and SkipConsumerLookup
+// subscribes without looking the durable up, so the durable need not exist yet: nats.go sends
+// the SUB and creates nothing (js.go, the SkipConsumerLookup branch of subscribe with Bind). It
+// is for a caller that creates the durable with that deliver subject right after, under its
+// consumer lease (takeOver).
+func subscribeDurable(client *bus.Client, wanted natsgo.ConsumerConfig, deliverSubject string, deliver natsgo.MsgHandler) (*natsgo.Subscription, error) {
+	options := []natsgo.SubOpt{
+		natsgo.Bind(bus.Stream, wanted.Durable),
+		natsgo.ManualAck(),
+		natsgo.DeliverSubject(deliverSubject),
+		natsgo.SkipConsumerLookup(),
+	}
+	// The subject must be the consumer's own filter subject: nats.go checks a bound
+	// subscription's subject against it, and refuses an empty one ("subject does not match
+	// consumer").
+	return client.Subscribe(wanted.FilterSubject, deliver, options...)
 }
 
 // intakeStopBudget is the one deadline of an intake's stop, counted from the moment Run's ctx ends
 // (stopContext): the messages in their handlers have until then to finish and be acknowledged
-// before the stop gives them up (StopDelivering), the drain's wait ends by then, and a bind under
-// way as ctx ended ends by then too (bindDurableConsumer), so one that binds after ctx ended is
-// stopped under the same deadline rather than one of its own. In cmd/dispatch that ctx is the
-// signal context, so the stop begins at SIGTERM and runs beside the HTTP drain and the document
-// shutdown, which take up to stopGrace (30 s) less a 5 s reserve: httpDrainBeforeDocuments then
-// documentShutdownTimeout (cmd/dispatch/shutdown.go); StartIntakes' stop, which the shutdown waits
-// for, adds no deadline of its own. The shutdown waits for the intakes after the document service
-// and before it deregisters this process and closes the database pool, so that a handler's writes
-// never meet a closed pool. 15 s leaves 10 s before the document budget's latest end for what
-// follows the deadline -- the handlers given up returning, which they do as soon as their context
-// is cancelled, the negative acknowledgements, the drain's end, which the given-up handlers'
-// cancelled context cuts short, and the clients closing -- so the intakes never hold the shutdown
-// past what that budget already can, and 15 s before the kubelet's kill. It is also well past what
-// a handler GitHub answers needs, a pull request and its commit pages with a page GitHub answered
-// 502 asked again (after 1 s, then 2 s: githubPageRetryWait), so an ordinary handler finishes and
-// is acknowledged rather than redone. A call GitHub does not answer holds one attempt for up to
-// githubapp.RequestTimeout (20 s), and is then asked again, which no budget inside stopGrace could
-// wait out. A var so a test can shrink it.
+// before the stop gives them up (StopDelivering), the drain's wait ends by then, and a take-over
+// under way as ctx ended ends by then too (takeOverFinishWithin, 10 s), so one that binds after
+// ctx ended is stopped under the same deadline rather than one of its own. In cmd/dispatch that
+// ctx is the signal context, so the stop begins at SIGTERM and runs beside the HTTP drain and the
+// document shutdown, which take up to stopGrace (30 s) less a 5 s reserve: httpDrainBeforeDocuments
+// then documentShutdownTimeout (cmd/dispatch/shutdown.go); StartIntakes' stop, which the shutdown
+// waits for, adds no deadline of its own. The shutdown waits for the intakes after the document
+// service and before it deregisters this process and closes the database pool, so that a handler's
+// writes never meet a closed pool. 15 s leaves 10 s before the document budget's latest end for
+// what follows the deadline -- the handlers given up returning, which they do as soon as their
+// context is cancelled, the negative acknowledgements, the drain's end, which the given-up
+// handlers' cancelled context cuts short, the hold's release and the clients closing -- so the
+// intakes never hold the shutdown past what that budget already can, and 15 s before the kubelet's
+// kill. It is also well past what a handler GitHub answers needs, a pull request and its commit
+// pages with a page GitHub answered 502 asked again (after 1 s, then 2 s: githubPageRetryWait), so
+// an ordinary handler finishes and is acknowledged rather than redone. A call GitHub does not
+// answer holds one attempt for up to githubapp.RequestTimeout (20 s), and is then asked again,
+// which no budget inside stopGrace could wait out. A var so a test can shrink it.
 var intakeStopBudget = 15 * time.Second
 
 // stopContext returns the stop deadline of an intake whose Run runs until ctx ends: a context that
-// ends intakeStopBudget after ctx does, armed by ctx's end, so everything of the stop -- a bind
-// under way at that moment, the handler wait, the drain's wait -- runs under one deadline counted
-// from it. release frees it, for Run to defer.
+// ends intakeStopBudget after ctx does, armed by ctx's end, so everything of the stop -- a
+// take-over under way at that moment, the handler wait, the drain's wait -- runs under one
+// deadline counted from it. release frees it, for run to defer.
 func stopContext(ctx context.Context) (stopping context.Context, release func()) {
 	// Read now rather than as ctx ends, so a test restoring intakeStopBudget after Run has
 	// returned never races the read.
@@ -128,15 +153,16 @@ func stopContext(ctx context.Context) (stopping context.Context, release func())
 // (bus.Client.DrainSubscription), so that no reconnect binds it again and a later subscribe on the
 // same client starts afresh.
 //
-// Run calls it as its ctx ends, under its stop deadline (stopContext). It is safe from any
-// goroutine and idempotent: a second call returns once the first has stopped, and a call with
-// nothing subscribed returns at once. Every call's ctx bounds the handler wait of the stop under
-// way, so a caller with a nearer deadline than the first has the handlers given up when its own
-// ctx ends.
-func (in *Intake) StopDelivering(ctx context.Context) {
-	in.mu.Lock()
-	delivery := in.delivering
-	in.mu.Unlock()
+// run calls it as its ctx ends, under its stop deadline (stopContext), and when the hold is lost
+// or the durable no longer delivers here, under a budget of its own (stopDeliveringWithin). It is
+// safe from any goroutine and idempotent: a second call returns once the first has stopped, and a
+// call with nothing subscribed returns at once. Every call's ctx bounds the handler wait of the
+// stop under way, so a caller with a nearer deadline than the first has the handlers given up when
+// its own ctx ends.
+func (d *heldDurable) StopDelivering(ctx context.Context) {
+	d.mu.Lock()
+	delivery := d.delivering
+	d.mu.Unlock()
 	if delivery != nil {
 		delivery.stop(ctx)
 	}
@@ -213,15 +239,17 @@ func (d *intakeDelivery) giveBack(msg *natsgo.Msg) {
 // context ending cuts it shorter: by then the drain has had the whole handler wait to end.
 const intakeDrainWait = natsgo.DefaultDrainTimeout
 
-// receive is the subscription's callback, and only routes: a message once stopping is set is
-// handed back (giveBack), a subject intakeKey does not want is acknowledged, and any other message
-// goes to its key's handler (deliver).
+// receive is the subscription's callback, and only routes: a message once stopping is set, or once
+// the hold's loss deadline has passed, is handed back (giveBack) -- this intake may no longer act
+// on the durable's messages, and the server redelivers them to the next holder; a subject the
+// intake's key does not want is acknowledged; and any other message goes to its key's handler
+// (deliver).
 func (d *intakeDelivery) receive(msg *natsgo.Msg) {
-	if d.stopping.Load() {
+	if d.stopping.Load() || (d.hold != nil && !time.Now().Before(d.hold.Deadline())) {
 		d.giveBack(msg)
 		return
 	}
-	key, envelope, wanted := intakeKey(msg)
+	key, envelope, wanted := d.key(msg)
 	if !wanted {
 		acknowledge(msg)
 		return

@@ -1,0 +1,10 @@
+kind: Added
+body: |-
+    `BlockElementVersions` (`since`, `creatable_since`) on every element of the document schema
+    manifest: `BlockTypeSchema` and `BlockAttributeSchema` extend it, `BlockAttributeSchema` gains
+    `choice_versions` by choice, and the manifest gains `nodes` and `marks`, each a
+    `BlockSchemaElement` (`name` and the two numbers). A server before this release names no nodes or
+    marks.
+time: 2026-10-28T12:39:45.586803004Z
+custom:
+    Issue: pr2461

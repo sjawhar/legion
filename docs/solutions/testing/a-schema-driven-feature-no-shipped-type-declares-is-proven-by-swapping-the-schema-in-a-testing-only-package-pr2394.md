@@ -31,7 +31,7 @@ module: packages/envoy/internal/dispatch/pmdoc
 
 ## Evidence
 
-- `pmdoc.SetBlockSchemaForTest` (`pmdoc/schema_testhooks.go`) and `pmdoctest.UseBlockSchema` and
+- `pmdoc.SetBlockSchemaForTest` (`pmdoc/testhooks.go`) and `pmdoctest.UseBlockSchema` and
   `BlockPointerSchema` (`pmdoc/pmdoctest/pmdoctest.go`) in sjawhar/legion#2394. The `api` and
   `docs` tests share them.
 - The `ce-simplify-code` pass at `a5b79547` moved the helper out of the server binary.

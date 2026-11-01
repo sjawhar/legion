@@ -18,7 +18,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hkdf"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -70,35 +69,6 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// multiprocessNATS is the NATS server this file's processes share: one of this test's own, with
-// JetStream for Dispatch's outbox stream, running in this test process and ending with the test.
-func multiprocessNATS(t *testing.T) string {
-	t.Helper()
-	_, url := testnats.Start(t)
-	return url
-}
-
-// multiprocessSigningKey is the one DISPATCH_SIGNING_KEY every process of a pair carries: a
-// session cookie minted by one process is presented to the other on the next request, and a
-// process whose key set a live peer does not share refuses to start (processes.Register).
-const multiprocessSigningKey = "multiprocess-signing-key"
-
-// dispatchPair is two envoy-dispatch processes on one database and one NATS server.
-type dispatchPair struct {
-	a, b     *dispatchProcess
-	database *store.Store
-	nats     string
-}
-
-// newPair opens the database and takes the NATS server the pair will share, and starts nothing:
-// a row that must seed durable state the processes read at boot (the delivery settings their
-// intakes wait for) or hold a lock their first pass will wait on does that between this and
-// start.
-func newPair(t *testing.T) *dispatchPair {
-	t.Helper()
-	return &dispatchPair{database: storetest.Open(t), nats: multiprocessNATS(t)}
-}
-
 // start starts both processes on the pair's database and NATS, each on a port held for it from the
 // moment the kernel chose it (startDispatchProcessWith) and in a home of its own, both carrying
 // multiprocessSigningKey, and returns once each answers /healthz. The two are started together
@@ -119,45 +89,6 @@ func startPair(t *testing.T, env map[string]string) *dispatchPair {
 	pair := newPair(t)
 	pair.start(t, env)
 	return pair
-}
-
-// databaseURL is the connection string a process is started with: the database storetest cloned
-// for this test (databaseURLOf).
-func (p *dispatchPair) databaseURL(t *testing.T) string {
-	t.Helper()
-	return databaseURLOf(t, p.database)
-}
-
-// databaseURLOf is the connection string of database as its pool's configuration names it. The
-// credential is written through url.UserPassword when the pool carries a password, since CI's
-// Postgres takes one (DISPATCH_TEST_DATABASE_URL) where a trust-authenticated development server
-// does not, and a URL built without it is refused with SQLSTATE 28P01 before the process can serve
-// anything.
-func databaseURLOf(t *testing.T, database *store.Store) string {
-	t.Helper()
-	config := database.Pool.Config().ConnConfig
-	credential := url.User(config.User).String()
-	if config.Password != "" {
-		credential = url.UserPassword(config.User, config.Password).String()
-	}
-	return fmt.Sprintf("postgres://%s@%s:%d/%s?sslmode=disable",
-		credential, config.Host, config.Port, config.Database)
-}
-
-// other is the process of the pair that is not one.
-func (p *dispatchPair) other(one *dispatchProcess) *dispatchProcess {
-	if one == p.a {
-		return p.b
-	}
-	return p.a
-}
-
-// name is what a failure calls a process of the pair.
-func (p *dispatchPair) name(one *dispatchProcess) string {
-	if one == p.a {
-		return "A"
-	}
-	return "B"
 }
 
 // ───── the live socket's event feed ─────────────────────────────────────────
@@ -200,65 +131,6 @@ func (p *dispatchProcess) openEventFeed(t *testing.T) <-chan feedEvent {
 		}
 	}()
 	return events
-}
-
-// ───── the API a row drives ─────────────────────────────────────────────────
-
-// uniqueProjectKey is prefix with six random characters after it, within the project key's own
-// grammar (contracts.ProjectKeyPattern). Every topic a row publishes on carries its project key,
-// and it has to be this run's alone: a NATS server the harness keeps running outlives the run,
-// and the notification stream recognises a repeat by its dedupe key and topic for
-// DeliveryDuplicateWindow, three days. A fresh database always numbers its events from one, so a
-// second run against a fixed project key would publish the very dedupe keys the stream still
-// holds, have every JetStream publish suppressed as a duplicate, and read back nothing.
-func uniqueProjectKey(t *testing.T, prefix string) string {
-	t.Helper()
-	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	suffix := make([]byte, 6)
-	if _, err := rand.Read(suffix); err != nil {
-		t.Fatalf("pick a project key: %v", err)
-	}
-	for i, b := range suffix {
-		suffix[i] = alphabet[int(b)%len(alphabet)]
-	}
-	return prefix + string(suffix)
-}
-
-// createProject creates the project key, which the rows that make issues need first.
-func (p *dispatchProcess) createProject(t *testing.T, key, name string) {
-	t.Helper()
-	p.call(t, http.MethodPost, "/api/v1/projects",
-		fmt.Sprintf(`{"key":%q,"name":%q}`, key, name), http.StatusCreated)
-}
-
-// createIssueIn creates an issue in project with title and spec, and returns its key and its spec
-// document's id.
-func (p *dispatchProcess) createIssueIn(t *testing.T, project, title, spec string) (key, artifactID string) {
-	t.Helper()
-	body := fmt.Sprintf(`{"project":%q,"title":%q,"spec":%q}`, project, title, spec)
-	created := p.call(t, http.MethodPost, "/api/v1/issues", body, http.StatusCreated)
-	var issue struct {
-		Key               string `json:"key"`
-		PrimaryArtifactID string `json:"primary_artifact_id"`
-	}
-	if err := json.Unmarshal(created, &issue); err != nil || issue.Key == "" {
-		t.Fatalf("create issue: %v: %s", err, created)
-	}
-	return issue.Key, issue.PrimaryArtifactID
-}
-
-// documentText is the markdown GET /api/v1/artifacts/{id}/text answers: the document as this
-// process renders it now.
-func (p *dispatchProcess) documentText(t *testing.T, artifactID string) string {
-	t.Helper()
-	answer := p.call(t, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", "", http.StatusOK)
-	var document struct {
-		Markdown string `json:"markdown"`
-	}
-	if err := json.Unmarshal(answer, &document); err != nil {
-		t.Fatalf("decode the document's text: %v: %s", err, answer)
-	}
-	return document.Markdown
 }
 
 // ───── the live feed carries the other process's events ─────────────────────
@@ -377,46 +249,6 @@ func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 			t.Errorf("the stream holds %d retained messages for %s; want one", count, message)
 		}
 	}
-}
-
-// waitForEveryEventPublished waits for every event row the outbox takes to carry published_at.
-// A row whose payload says `pending` is not one the outbox claims (claimPendingEvents' own
-// predicate), so it is not waited for.
-func waitForEveryEventPublished(t *testing.T, database *store.Store, within time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(within)
-	for {
-		var unpublished int
-		if err := database.Pool.QueryRow(context.Background(), `
-			select count(*) from events
-			where published_at is null and coalesce(payload ->> 'pending', 'false') <> 'true'
-		`).Scan(&unpublished); err != nil {
-			t.Fatalf("count unpublished events: %v", err)
-		}
-		if unpublished == 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%d events were still unpublished after %v", unpublished, within)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
-// streamHead is the last sequence the notification stream holds when a row begins, read before
-// that row publishes anything: readStreamFrom reads past it, so nothing already on the stream is
-// counted as the row's. A row starts a NATS server of its own, whose stream begins empty, so the
-// head it reads is zero; reading it is what keeps that an assumption the row does not make.
-func streamHead(t *testing.T, js natsgo.JetStreamContext) uint64 {
-	t.Helper()
-	info, err := js.StreamInfo(bus.Stream)
-	if err != nil {
-		if errors.Is(err, natsgo.ErrStreamNotFound) {
-			return 0
-		}
-		t.Fatalf("read the notification stream: %v", err)
-	}
-	return info.State.LastSeq
 }
 
 // drainEnvelopes reads what a subscription has collected and keeps reading until quiet is up with
@@ -550,10 +382,11 @@ func (f *githubFake) Release() { f.once.Do(func() { close(f.release) }) }
 // URL is the origin DISPATCH_GITHUB_API_BASE names.
 func (f *githubFake) URL() string { return f.server.URL }
 
-// Each delivery durable admits one subscriber. With two processes reading one NATS, exactly one
-// of them binds each durable and the other stands by - an ordinary state, logged at INFO and
-// never as a failure - polling every two seconds, so the work resumes within seconds of the
-// holder dying rather than waiting for a deploy.
+// Each delivery durable is delivered from by one process: the one holding its hold. With two
+// processes reading one NATS, exactly one of them binds each durable and the other stands by - an
+// ordinary state, logged at INFO and never as a failure - polling every two seconds, so the work
+// resumes within seconds of the holder's hold lapsing when it dies, rather than waiting for a
+// deploy.
 //
 // The delivery reconcile reads GitHub from whichever process takes its lease. Its first pass is
 // jittered over its first five minutes, so without a knob it lands inside this row's window
@@ -586,7 +419,7 @@ func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 				durable, strings.Join(errorLines, "\n"))
 		}
 		if bound := standby.logLines(`msg="dispatch delivery: NATS consumer bound"`, "name="+durable); len(bound) > 0 {
-			t.Errorf("both processes bound %s, which admits one subscriber:\n%s", durable, strings.Join(bound, "\n"))
+			t.Errorf("both processes bound %s, which one process at a time delivers from:\n%s", durable, strings.Join(bound, "\n"))
 		}
 		if info, err := js.ConsumerInfo(bus.Stream, durable); err != nil {
 			t.Fatalf("read %s: %v", durable, err)
@@ -607,7 +440,9 @@ func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 	}
 
 	// The holder dies the way a task replaced mid-deploy or killed for memory does, with no
-	// chance to unsubscribe, and the process that was standing by takes the durable over.
+	// chance to unsubscribe or release its hold, and the process that was standing by takes the
+	// durable over once the dead holder's hold lapses: within the hold's 15 s TTL, one 2 s poll and
+	// a margin.
 	dying := holders["delivery-events"]
 	survivor := pair.other(dying)
 	if err := dying.Cmd.Process.Kill(); err != nil {
@@ -619,29 +454,74 @@ func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 		if holders[durable] != dying {
 			continue
 		}
-		survivor.waitForLog(t, 10*time.Second, `msg="dispatch delivery: NATS consumer bound"`, "name="+durable)
+		survivor.waitForLog(t, 25*time.Second, `msg="dispatch delivery: NATS consumer bound"`, "name="+durable)
 	}
 	t.Logf("the standby bound the dead holder's durables %v after it died", time.Since(handedOver))
 }
 
-// waitForDurableHolder waits for exactly one of the pair to log that it bound durable, and
-// answers which.
-func waitForDurableHolder(t *testing.T, pair *dispatchPair, durable string, within time.Duration) *dispatchProcess {
-	t.Helper()
-	bound := `msg="dispatch delivery: NATS consumer bound"`
-	deadline := time.Now().Add(within)
-	for {
-		switch {
-		case pair.a.logged(bound, "name="+durable):
-			return pair.a
-		case pair.b.logged(bound, "name="+durable):
-			return pair.b
-		case time.Now().After(deadline):
-			t.Fatalf("neither process bound %s within %v:\nA:\n%s\nB:\n%s",
-				durable, within, pair.a.Output.String(), pair.b.Output.String())
-		}
-		time.Sleep(50 * time.Millisecond)
+// A process starts its delivery intakes before it joins the registry of live server processes, so
+// a process that waits for admission (processes.Register: a live peer refuses its signing keys)
+// can already deliver from both durables. A deploy that stops it in that wait stops its intakes
+// too: each hold is released, not left to lapse with the stopped process's deliver subject as its
+// token, and the process standing by takes each durable over within one bind interval. The peer
+// that refuses it has no GitHub App, so its intakes take nothing.
+func TestAProcessStoppedWhileWaitingForAdmissionReleasesItsDurables(t *testing.T) {
+	pair := newPair(t)
+	seedDeliverySettings(t, pair.database)
+	fake := startGitHubFake(t)
+	fake.Release()
+	app := githubAppEnv(t, fake.URL())
+	peer := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: multiprocessSigningKey})
+	peer.waitHealthy(t)
+
+	waiting := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: "a-key-the-peer-does-not-share", Env: app})
+	waiting.waitForLog(t, 30*time.Second, "a live server process refuses this one's signing keys; waiting for its heartbeat to lapse")
+	for _, durable := range deliveryDurables {
+		waiting.waitForLog(t, 10*time.Second, `msg="dispatch delivery: NATS consumer bound"`, "name="+durable)
 	}
+	standby := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: multiprocessSigningKey, Env: app})
+	for _, durable := range deliveryDurables {
+		standby.waitForLog(t, 10*time.Second, `msg="dispatch delivery: NATS consumer held by another process; standing by"`, "name="+durable)
+	}
+
+	conn := testnats.Connect(t, pair.nats)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream context: %v", err)
+	}
+	subjects := map[string]string{}
+	for _, durable := range deliveryDurables {
+		info, err := js.ConsumerInfo(bus.Stream, durable)
+		if err != nil {
+			t.Fatalf("read %s: %v", durable, err)
+		}
+		subjects[durable] = info.Config.DeliverSubject
+	}
+	if waiting.logged(`msg="dispatch: listening"`) {
+		t.Fatalf("the process refused admission serves; the row needs it still waiting:\n%s", waiting.Output.String())
+	}
+
+	waiting.Terminate(t)
+	waiting.WaitExit(t, "SIGTERM")
+	stopped := time.Now()
+	if code := waiting.Cmd.ProcessState.ExitCode(); code != 0 {
+		t.Fatalf("a process stopped while waiting for admission exited %d, want 0:\n%s", code, waiting.Output.String())
+	}
+	for _, durable := range deliveryDurables {
+		var left int
+		if err := pair.database.Pool.QueryRow(context.Background(),
+			`select count(*) from duty_holds where name = $1 and token = $2`, "delivery-intake-"+durable, subjects[durable]).Scan(&left); err != nil {
+			t.Fatalf("read the hold of %s: %v", durable, err)
+		}
+		if left != 0 {
+			t.Errorf("the stopped process left its hold of %s in place, naming its deliver subject %s", durable, subjects[durable])
+		}
+	}
+	// One bind interval (delivery.durableBindInterval, 2 s) and a margin, not the hold's 15 s TTL.
+	for _, durable := range deliveryDurables {
+		standby.waitForLog(t, 4*time.Second-time.Since(stopped), `msg="dispatch delivery: NATS consumer bound"`, "name="+durable)
+	}
+	t.Logf("the standby bound both durables %v after the stop", time.Since(stopped))
 }
 
 // ───── documents ───────────────────────────────────────────────────────────

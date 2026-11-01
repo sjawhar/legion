@@ -358,11 +358,11 @@ func TestEveryNodeOfTheSchemaWeighsWhatItMakes(t *testing.T) {
 	}
 	oneADocument := map[string]bool{"doc": true, "frontmatter": true}
 	types := typedBlockNames()
-	for typeName := range nodeTypes {
+	for typeName := range active.nodes {
 		types = append(types, typeName)
 	}
 	for typeName := range oneADocument {
-		if !nodeTypes[typeName] {
+		if !active.nodes[typeName] {
 			t.Errorf("%s is no node type of the schema", typeName)
 		}
 	}

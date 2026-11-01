@@ -174,11 +174,13 @@ const referenceExcerptLease = "reference-excerpts"
 //
 // A document the pass cannot read or record is deferred, one minute after its first failure and
 // doubling to six hours (refs.DeferExcerpts), so it neither holds the loop at two seconds nor
-// fills every batch ahead of the documents that sort after it. The first pass each process runs
-// also marks owed the excerpts a version written by a binary predating migration 0092 left behind
-// (refs.MarkStaleExcerpts); every build since records its excerpts in each version write, so one
-// marking per process is enough. A mention owed an excerpt is answered with the document's name
-// until this stores one.
+// fills every batch ahead of the documents that sort after it; a document holding an element
+// this build does not know (ErrDocNewerContent), which a newer build wrote while two builds serve
+// one database, is deferred the same way, its mentions left owed for a build that reads it. The
+// first pass each process runs also marks owed the excerpts a version written by a binary
+// predating migration 0092 left behind (refs.MarkStaleExcerpts); every build since records its
+// excerpts in each version write, so one marking per process is enough. A mention owed an excerpt
+// is answered with the document's name until this stores one.
 func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context, leases duty.Leases, wake <-chan struct{}) {
 	s.runReferenceExcerptReconciliation(ctx, leases, wake, referenceExcerptSchedule)
 }
@@ -257,12 +259,15 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 // (TextWithBlocks), with no transaction or connection held, and stores its mentions' excerpts at
 // the version the drift named. A document whose stored history does not load or whose tree is
 // outside the schema has no block to show, so its mentions are stored with none and keep the
-// document's name until its next version. A document it cannot read or record for any other
-// reason is logged and deferred (refs.DeferExcerpts, retryBase after its first failure), its
-// mentions left owed, so one document never holds back the rest of its batch nor the batches
-// after it; a recorded document's backoff row is deleted. documents counts the ones recorded, and
-// full reports a full batch at least one of whose documents left the drift a batch reads - recorded
-// or deferred - so the next batch reads documents this one did not.
+// document's name until its next version. A document holding an element this build does not know
+// (ErrDocNewerContent) is one a newer build wrote while two builds serve one database: its
+// mentions stay owed, for a build that reads it, and it is deferred so the batches after it are
+// read. A document it cannot read or record for any other reason is logged and deferred too
+// (refs.DeferExcerpts, retryBase after its first failure), its mentions left owed, so one document
+// never holds back the rest of its batch nor the batches after it; a recorded document's backoff
+// row is deleted. documents counts the ones recorded, and full reports a full batch at least one
+// of whose documents left the drift a batch reads - recorded or deferred - so the next batch reads
+// documents this one did not.
 func (s *Service) reconcileReferenceExcerpts(ctx context.Context, retryBase time.Duration) (documents int, full bool, err error) {
 	drifted, err := refs.DriftedExcerpts(ctx, s.store.Pool, referenceExcerptBatch)
 	if err != nil {
@@ -285,6 +290,11 @@ func (s *Service) reconcileReferenceExcerpts(ctx context.Context, retryBase time
 		switch {
 		case ctx.Err() != nil:
 			return documents, false, ctx.Err()
+		case errors.Is(err, ErrDocNewerContent):
+			slog.Warn("dispatch: reference excerpt reconciliation deferred a document holding an element this build cannot read; its mentions stay owed for a build that reads it",
+				"artifact", document.FromID, "version", document.Version, "error", err)
+			deferDocument(document)
+			continue
 		case errors.Is(err, ErrDocumentUnloadable), errors.Is(err, ErrDocOutsideSchema):
 			slog.Warn("dispatch: reference excerpt reconciliation cannot read the document; its mentions keep the document's name",
 				"artifact", document.FromID, "error", err)

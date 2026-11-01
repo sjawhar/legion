@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionAnswer, SessionAnswerRelation } from "@legion/contracts";
 import type { DispatchConfigResolution } from "./dispatch-config";
-import { DispatchClient, isNoRoute } from "./dispatch-http";
+import { DispatchClient, DispatchNoRouteError, isNoRoute } from "./dispatch-http";
 import { ownerTitle } from "./dispatch-owner";
 import { sessionDirectory, writeAtomically } from "./dispatch-session-directory";
 import { messageFor } from "./errors";
@@ -64,11 +64,15 @@ export function isSessionAnswersText(text: string): boolean {
 }
 
 /** Whether `error` is Dispatch's own answer that it has no answers route: the `404 NOT_FOUND`
- *  "no route for …" its router answers for a path it has no route for (`isNoRoute`), as a build
- *  older than the route answers it. A 404 that something in Dispatch's place wrote (a
- *  `DispatchGatewayError`: a proxy's page, an empty body) says nothing about Dispatch's routes. */
+ *  "no route for …" its router answers for a path it has no route for, as a build older than the
+ *  route answers it. Both shapes of that answer count: the raw one (`isNoRoute`), as the read on
+ *  the request path sees it from a client built with `retryNoRoute: false`, and
+ *  `DispatchNoRouteError`, which a client that asks again (the `dispatch answers` command and the
+ *  `dispatch_answers` tool) reports once every attempt met no route. A 404 that something in
+ *  Dispatch's place wrote (a `DispatchGatewayError`: a proxy's page, an empty body) says nothing
+ *  about Dispatch's routes. */
 export function isNoAnswersRoute(error: unknown): boolean {
-  return isNoRoute(error);
+  return isNoRoute(error) || error instanceof DispatchNoRouteError;
 }
 
 /**
@@ -461,7 +465,12 @@ export async function readSessionAnswers(
   }
   let read = current.inFlight;
   if (read === undefined) {
-    const client = new DispatchClient(url, dispatch.token, options.fetchImpl ?? fetch);
+    // The client runs the read once: an answer of no route is this read's own (`isNoAnswersRoute`,
+    // `NO_ROUTE_BACKOFF_MS`), and that 5-minute back-off, not the client's waits, is what carries
+    // the request past a release rolling out, within this call's deadline.
+    const client = new DispatchClient(url, dispatch.token, options.fetchImpl ?? fetch, {
+      retryNoRoute: false,
+    });
     const started = client
       .sessionAnswers(session, {
         maxChars: SESSION_ANSWERS_MAX_CHARS,

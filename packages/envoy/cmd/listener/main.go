@@ -812,9 +812,11 @@ func main() {
 	// kernel chose (PORT=0 or a socket a harness opened on port 0).
 	logger.Info("envoy-listener listening", slog.String("addr", ln.Addr().String()))
 
-	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here). The listener owns
-	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream) at the
-	// deployment's replica count and byte limit (listenerStreamOptions).
+	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here). The listener and
+	// Dispatch's server both own ENVOY_NOTIFICATIONS: this client ensures the stream on this
+	// connect and after every reconnect, at the deployment's replica count and byte limit
+	// (listenerStreamOptions), and leaves as it is a stream that a newer build stamped with a
+	// higher generation (bus.ConnectOwningStream).
 	client, err := bus.ConnectOwningStream(cfg.NATSURLs, listenerStreamOptions(cfg)...)
 	if err != nil {
 		log.Fatal(err)

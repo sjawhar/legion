@@ -691,6 +691,30 @@ GATES = [
                  "go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch", ENVOY, ["./cmd/dispatch"], tags="multiprocess"),
     ], reads=setup_go("dispatch-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
 
+    # Its "Build the Dispatch server" step names an output (-o), which the simple form does not
+    # reduce, so the step is pinned whole, as dispatch-browser-multiprocess's is.
+    gate("dispatch_two_builds", "dispatch-two-builds", runs=[
+        step_run("dispatch-two-builds", "Two-build tests of the Dispatch server",
+                 "go test -tags twobuild -count=1 -timeout 30m ./cmd/dispatch", ENVOY, ["./cmd/dispatch"], tags="twobuild"),
+        script_run(RUN_SERVER, DISPATCH_SERVER_BUILD, "started by packages/dispatch/e2e/harness-listeners.ts:50, which e2e/run.ts starts in "
+                   + at("dispatch-two-builds", "Browser-test each build's page against the other build's server"),
+                   ENVOY, ["./cmd/dispatch"], mode="build"),
+    ], exact=[
+        pinned_step("dispatch-two-builds", "Build the Dispatch server", ENVOY, "go build -o ./dispatch-e2e ./cmd/dispatch", [
+            (ENVOY, ["./cmd/dispatch"], "go build -o ./dispatch-e2e ./cmd/dispatch", {"mode": "build"}),
+        ]),
+    ], reads=reads(
+        (f"{ENVOY}/scripts/build-dispatch-build.sh", at("dispatch-two-builds", "Build the previous build")),
+        ("packages/dispatch/**", at("dispatch-two-builds", "Browser-test each build's page against the other build's server")),
+        ("packages/proof-editor/**", "packages/dispatch/web/vite.config.ts:73-87 (build:web)"),
+        (CONTRACTS_SRC, f"{at('dispatch-two-builds', 'Build contracts for dispatch e2e')}; packages/dispatch/web/vite.config.ts:63-72 aliases"),
+        ("packages/envoy-client/bin/dispatch.ts", "packages/envoy/cmd/dispatch/twobuild_cli_test.go runs this tree's dispatch command"),
+        (ENVOY_CLIENT_SRC, "imported by packages/envoy-client/bin/dispatch.ts, which the two-build CLI test runs"),
+        (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/dispatch/e2e/engine-tables.ts:9-10"),
+        ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:37 holds the server's port through it"),
+        ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
+    ) + setup_go("dispatch-two-builds", f"{ENVOY}/go.mod") + bun_job("dispatch-two-builds") + CI_SELF),
+
     gate("listener_server_change", "listener-server-change", exact=[
         pinned_step("listener-server-change", SOAK_STEP, ENVOY, SOAK_SCRIPT, [
             (ENVOY, ["./cmd/listener"], "go test -tags serverchange ./cmd/listener", {"tags": "serverchange"}),

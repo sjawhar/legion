@@ -3,7 +3,7 @@ import type { Node as ProseMirrorNode, NodeType } from '@milkdown/kit/prose/mode
 import type { EditorState, Transaction } from '@milkdown/kit/prose/state';
 
 import { blockPointerRefusal, findBlock } from './block-pointers.js';
-import type { BlockAttributeSchema, BlockSchema, BlockTypeSchema } from './block-schema.js';
+import { creatable, creatableValue, type BlockAttributeSchema, type BlockSchema, type BlockTypeSchema } from './block-schema.js';
 import { BLOCK_ID_ATTR, blockIdOf } from './editor/schema/block-ids.js';
 
 export type TypedBlockAttributeValue = string | boolean | readonly string[];
@@ -46,6 +46,13 @@ function findType(schema: BlockSchema, typeName: string): BlockTypeSchema {
   return type;
 }
 
+/** The typed block `typeName`, which this editor makes a new block of: one it may create. */
+function findCreatableType(schema: BlockSchema, typeName: string): BlockTypeSchema {
+  const type = findType(schema, typeName);
+  if (!creatable(schema.version, type)) throw new Error(`this editor cannot create typed block ${JSON.stringify(typeName)} yet`);
+  return type;
+}
+
 function nodeType(state: EditorState, type: BlockTypeSchema): NodeType {
   const result = state.schema.nodes[type.name];
   if (!result) throw new Error(`editor schema does not declare typed block ${JSON.stringify(type.name)}`);
@@ -82,13 +89,16 @@ function validateValue(typeName: string, name: string, attribute: BlockAttribute
   }
 }
 
-function clientAttributes(type: BlockTypeSchema, attrs: TypedBlockAttributes | undefined): Record<string, TypedBlockAttributeValue> {
+function clientAttributes(schema: BlockSchema, type: BlockTypeSchema, attrs: TypedBlockAttributes | undefined): Record<string, TypedBlockAttributeValue> {
   const result: Record<string, TypedBlockAttributeValue> = {};
   for (const [name, value] of Object.entries(attrs ?? {})) {
     const attribute = type.attributes[name];
     if (!attribute) throw new Error(`typed block ${JSON.stringify(type.name)} does not declare attribute ${JSON.stringify(name)}`);
     if (attribute.server) throw new Error(`typed block ${JSON.stringify(type.name)} attribute ${JSON.stringify(name)} is server-owned`);
     validateValue(type.name, name, attribute, value);
+    if (!creatableValue(schema.version, attribute, value)) {
+      throw new Error(`this editor cannot write ${JSON.stringify(value)} into typed block ${JSON.stringify(type.name)} attribute ${JSON.stringify(name)} yet`);
+    }
     result[name] = value;
   }
   return result;
@@ -120,11 +130,11 @@ function dispatchUnlessRefused(
 
 function insert(context: TypedBlockCommandContext, schema: BlockSchema, typeName: string, attrs?: TypedBlockAttributes): boolean {
   const state = context.getState();
-  const type = findType(schema, typeName);
+  const type = findCreatableType(schema, typeName);
   const typedNode = nodeType(state, type);
   const paragraph = state.schema.nodes.paragraph.createAndFill();
   if (paragraph === null) throw new Error('editor schema cannot create an empty paragraph');
-  const block = typedNode.createAndFill(clientAttributes(type, attrs), paragraph);
+  const block = typedNode.createAndFill(clientAttributes(schema, type, attrs), paragraph);
   if (block === null) throw new Error(`typed block ${JSON.stringify(typeName)} cannot contain a paragraph body`);
   dispatchUnlessRefused(context, state.tr.replaceSelectionWith(block), type, null, block.attrs);
   return true;
@@ -134,12 +144,12 @@ function retype(context: TypedBlockCommandContext, schema: BlockSchema, blockId:
   const state = context.getState();
   const source = findBlock(state.doc, blockId);
   if (source === null) return false;
-  const type = findType(schema, typeName);
+  const type = findCreatableType(schema, typeName);
   const typedNode = nodeType(state, type);
   const body = source.node.type.create({ ...source.node.attrs, [BLOCK_ID_ATTR]: null }, source.node.content, source.node.marks);
   if (!typedNode.contentMatch.matchType(body.type)?.validEnd) return false;
   const replacement = typedNode.createChecked({
-    ...clientAttributes(type, attrs),
+    ...clientAttributes(schema, type, attrs),
     [BLOCK_ID_ATTR]: blockId,
   }, body);
   dispatchUnlessRefused(context, state.tr.replaceWith(source.pos, source.pos + source.node.nodeSize, replacement), type, source.node, replacement.attrs);
@@ -151,7 +161,7 @@ function setAttributes(context: TypedBlockCommandContext, schema: BlockSchema, b
   const located = findBlock(state.doc, blockId);
   if (located === null) return false;
   const type = findType(schema, located.node.type.name);
-  const changes = clientAttributes(type, attrs);
+  const changes = clientAttributes(schema, type, attrs);
   if (Object.keys(changes).length === 0) return true;
   dispatchUnlessRefused(context, state.tr.setNodeMarkup(located.pos, undefined, { ...located.node.attrs, ...changes }, located.node.marks), type, located.node, changes);
   return true;
@@ -197,13 +207,14 @@ export function createTypedBlockCommands(context: TypedBlockCommandContext): Typ
     },
     blockMenuItems() {
       const state = context.getState();
-      const items: TypedBlockMenuItem[] = schema.types.map((type) => ({
+      const types = schema.types.filter((type) => creatable(schema.version, type));
+      const items: TypedBlockMenuItem[] = types.map((type) => ({
         label: `Insert ${type.name.slice(0, 1).toUpperCase()}${type.name.slice(1)}`,
         run: () => insert(context, schema, type.name),
       }));
       const paragraph = selectedParagraph(state);
       if (paragraph === null) return items;
-      for (const type of schema.types) {
+      for (const type of types) {
         if (!canRetype(state, schema, paragraph, type)) continue;
         const blockId = blockIdOf(paragraph.node);
         if (blockId === null) continue;

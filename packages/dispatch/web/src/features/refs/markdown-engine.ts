@@ -2,8 +2,7 @@ import type { HeadlessProofEditor, SoftBreaks } from "@legion/proof-editor/headl
 import { DOMSerializer, type Node as ProseMirrorNode, type Schema } from "prosemirror-model";
 import { useLayoutEffect, useState } from "react";
 
-import type { BlockSchema } from "../../api/types";
-import { loadBlockSchema } from "../doc/schema";
+import { compiledBlockSchema } from "../doc/schema";
 import { renderAskBlockShell, renderTypedBlock } from "../doc/typed-block-drawing";
 import { referenceSpans } from "./reference-spans";
 import {
@@ -58,13 +57,11 @@ export interface MarkdownEngine {
   parse(markdown: string, softBreaks?: SoftBreaks): ProseMirrorNode | undefined;
 }
 
-type HeadlessModule = typeof import("@legion/proof-editor/headless");
-
-let headlessModule: Promise<HeadlessModule> | undefined;
-const engines = new Map<number, Promise<MarkdownEngine>>();
-/** The engine the newest resolved load produced: what a body renders with synchronously. The
- *  engine serves every soft-break policy (the policy is a parse argument), and a parse that
- *  throws no longer evicts it - the headless editor drops only its own refused parser. */
+/** The engine, built once from the manifest this page was built with (`compiledBlockSchema`). */
+let loadingEngine: Promise<MarkdownEngine> | undefined;
+/** The engine once its load resolved: what a body renders with synchronously. The engine serves
+ *  every soft-break policy (the policy is a parse argument), and a parse that throws does not
+ *  evict it - the headless editor drops only its own refused parser. */
 let readyEngine: MarkdownEngine | undefined;
 
 /**
@@ -123,33 +120,26 @@ function buildEngine(proof: HeadlessProofEditor): MarkdownEngine {
   };
 }
 
-function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
-  const cached = engines.get(blockSchema.version);
-  if (cached !== undefined) {
-    return cached;
-  }
-  headlessModule ??= import("@legion/proof-editor/headless");
-  const created = headlessModule
+function loadEngine(): Promise<MarkdownEngine> {
+  loadingEngine ??= import("@legion/proof-editor/headless")
     .then(({ createHeadlessProof }) =>
       createHeadlessProof({
-        blockSchema,
+        blockSchema: compiledBlockSchema,
         readOnly: true,
         renderBlock: (node, type) =>
           type.name === "ask" ? renderAskBlockShell(node) : renderTypedBlock(node, type),
       })
     )
     .then((proof) => {
-      const engine = buildEngine(proof);
-      readyEngine = engine;
-      return engine;
+      readyEngine = buildEngine(proof);
+      return readyEngine;
     });
-  engines.set(blockSchema.version, created);
-  return created;
+  return loadingEngine;
 }
 
-/** Loads the schema and headless Proof chunk before Markdown-bearing UI needs to render. */
+/** Loads the headless Proof chunk before Markdown-bearing UI needs to render. */
 export async function warmMarkdownRenderer(): Promise<void> {
-  await loadEngine(await loadBlockSchema());
+  await loadEngine();
 }
 
 /**
@@ -166,12 +156,10 @@ export function loadedEngine(): MarkdownEngine | undefined {
  * Calls `render` with the shared engine: synchronously when a load has already resolved, so a
  * body renders in the layout phase of the commit that mounts it (a list that inserts a turn sees
  * the turn's full height in that same commit, and `ViewportAnchor` compensates in one
- * measurement); otherwise once the schema and the engine chunk arrive. Only the very first
- * render on a page, or a schema that failed to load, takes the asynchronous path. Without the
- * server schema (or Proof's headless engine) `render` gets `undefined` and shows the literal
- * text instead: readable, never lost. The cause is reported and the schema cache does not retain
- * the failure, so the next render tries the fetch again. Returns the cancel for the asynchronous
- * path; a cancelled `render` never runs.
+ * measurement); otherwise once the engine chunk arrives. Only a render before the engine has
+ * loaded takes the asynchronous path. Without Proof's headless engine `render` gets `undefined` and
+ * shows the literal text instead: readable, never lost, and the cause is reported. Returns the
+ * cancel for the asynchronous path; a cancelled `render` never runs.
  */
 export function renderWithEngine(render: (engine: MarkdownEngine | undefined) => void): () => void {
   if (readyEngine !== undefined) {
@@ -182,9 +170,9 @@ export function renderWithEngine(render: (engine: MarkdownEngine | undefined) =>
   void (async () => {
     let engine: MarkdownEngine | undefined;
     try {
-      engine = await loadEngine(await loadBlockSchema());
+      engine = await loadEngine();
     } catch (error) {
-      console.error("Rendering literal Markdown, the block schema is unavailable", error);
+      console.error("Rendering literal Markdown, the Markdown engine is unavailable", error);
       engine = undefined;
     }
     if (!cancelled) {

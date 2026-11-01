@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-558",
+  "completed": "2026-11-01T01:44:00Z",
+  "round": 8,
+  "scope": "Narrowed by the INFRA-63 architect: only the forward merge b7709821 (main's deletion taken, this PR's wording in a pr2461 fragment, nothing else changed), then approval once ci-ok and pr-title are green at the code head.",
+  "reviewedHead": "6b6509ed7490bb8aa77d01c50f11db2fddd23905",
+  "codeHead": "b770982192e5",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "merge": "b7709821 (main at daf71f53), read with --remerge-diff: takes main's deletion of INFRA-767-ygo-awareness-echo.yaml and INFRA-767-ygo-v1-54-1-sami-1.yaml, and carries the OnTokenAuthContext wording into pr2461-Added-20261028-123937.yaml. It names sjawhar/ygo v1.54.1-sami.3, which main and the branch both pin, so go.mod is the same as main's. Comparing this PR's diff against main before (efed4e4d..7a037ba4) and after (daf71f53..b7709821), .legion/ left out, the only differences are those two fragments and that pr2461 fragment. Nothing else changed.",
+  "ci": "Required set (ruleset): ci-ok, pr-title. At code head b7709821, pr-title passed (run 41257556683), but CI run 41257504555 has been queued since 00:36Z and ci-ok has no check-run. At 01:43Z GitHub reports the PR CONFLICTING again, with main f93dd689 (#2541) on packages/envoy/cmd/dispatch/README.md, packages/envoy/cmd/dispatch/AGENTS.md and packages/envoy/internal/dispatch/api/routes_table.go. The compare b7709821...6b6509ed changes only .legion/INFRA-558/.",
+  "keyFindings": [
+    {"severity": "important", "file": "PR #2461 (merge)", "description": "CONFLICTING with main f93dd689 (#2541, broker-issued tokens) on cmd/dispatch/README.md, cmd/dispatch/AGENTS.md and api/routes_table.go. ci-ok has not run at b7709821 and cannot be read as green for a head that does not merge. Required: one forward merge of main that keeps both sides (the routes table keeps #2541's routes and this PR's test-hook route), pushed without the skip-checks trailer, so ci-ok runs at the merged head."}
+  ]
+}

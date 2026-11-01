@@ -446,7 +446,7 @@ function dispatchServing(
     return body(documentBlocks(doc.markdown));
   }) as typeof fetch;
   const session = (_directory: string, signal: AbortSignal): DispatchSession => ({
-    client: new DispatchClient("https://dispatch.example", "token", fetchImpl, signal),
+    client: new DispatchClient("https://dispatch.example", "token", fetchImpl, { signal }),
     serverUrls: ["https://dispatch.example"],
   });
   return { requests, session };

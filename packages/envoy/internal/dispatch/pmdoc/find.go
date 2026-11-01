@@ -1176,7 +1176,7 @@ func (w *MarkWriter) Mark(txn *crdt.Transaction, r Range, mark Mark) error {
 	if txn == nil || w.frag == nil || r.From >= r.To {
 		return fmt.Errorf("%w: invalid mark range", ErrSchema)
 	}
-	if !markTypes[mark.Type] {
+	if !active.marks[mark.Type] {
 		return fmt.Errorf("%w: mark %q", ErrSchema, mark.Type)
 	}
 	if err := attrNestingError("mark", mark.Type, mark.Attrs, maxMarkAttrNesting); err != nil {
@@ -1372,7 +1372,7 @@ func Unmark(txn *crdt.Transaction, frag *crdt.YXmlFragment, markType, id string)
 	if txn == nil || frag == nil {
 		return fmt.Errorf("%w: Unmark requires transaction and fragment", ErrSchema)
 	}
-	if !markTypes[markType] {
+	if !active.marks[markType] {
 		return fmt.Errorf("%w: mark %q", ErrSchema, markType)
 	}
 

@@ -113,6 +113,7 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/artifacts/{id}/versions":                   scopeProject,
 	"POST /api/v1/artifacts/{id}/edits":                      scopeProject,
 	"POST /api/v1/artifacts/{id}/_test/outside-schema":       scopeProject,
+	"POST /api/v1/artifacts/{id}/_test/newer-content":        scopeProject,
 
 	"PUT /api/v1/asks/{id}/followers/{session_id}":    scopeProject,
 	"DELETE /api/v1/asks/{id}/followers/{session_id}": scopeProject,
@@ -362,6 +363,7 @@ func (s *server) routes() []apiRoute {
 			routeRow{http.MethodPost, "/api/v1/live/_test/rotate", authAny, "Test hook: close every open live socket on every process with 4001 (max age), as its age does.", s.rotateLiveSockets},
 			routeRow{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document on every process and finish the settlements in flight.", s.quiesceDocuments},
 			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
+			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/newer-content", authAny, "Test hook: append an element no build knows, so the document holds newer content.", s.injectArtifactNewerContent},
 			routeRow{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers on every process.", s.publishAgentStreamFrame},
 			routeRow{http.MethodPost, "/api/v1/writes/_test/slow", authAny, "Test hook: {method, path, delay_ms} delays every keyed run of that method and path by delay_ms after its key is claimed, on the handler's own context; 0 disarms.", s.armSlowWrite},
 		)

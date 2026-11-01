@@ -1,5 +1,5 @@
 import { $nodeSchema } from '@milkdown/kit/utils';
-import type { DOMOutputSpec, Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
+import { DOMParser, type DOMOutputSpec, type Fragment, type Node as ProseMirrorNode, type Schema } from '@milkdown/kit/prose/model';
 import type { MarkdownNode as ParsedMarkdownNode, NodeSchema } from '@milkdown/kit/transformer';
 
 import { parseBlockPointers } from './block-pointers.js';
@@ -10,25 +10,115 @@ import { markdownSource } from './typed-block-drawing.js';
 
 export type BlockAttributeKind = 'string' | 'bool' | 'enum' | 'string[]' | 'block[]' | 'actor' | 'timestamp';
 
-export interface BlockAttributeSchema {
+/**
+ * From which schema version an editor reads an element of the manifest (`since`) and from which
+ * it may create one (`creatable_since`); each is 1 when the manifest names none. An editor built
+ * from a schema reads every element the schema declares and creates the ones whose
+ * `creatable_since` is at most the schema's `version` (`creatable`).
+ */
+export interface BlockElementVersions {
+  since?: number;
+  creatable_since?: number;
+}
+
+export interface BlockAttributeSchema extends BlockElementVersions {
   kind: BlockAttributeKind;
   choices?: readonly string[];
   default?: string | boolean | readonly string[];
   server?: boolean;
+  /** The numbers of each choice that has some, by choice: the choices stay plain strings. */
+  choice_versions?: Readonly<Record<string, BlockElementVersions>>;
   /** The block types a `block[]` attribute points at (./block-pointers.ts); none, any block. */
   targets?: readonly string[];
 }
 
-export interface BlockTypeSchema {
+export interface BlockTypeSchema extends BlockElementVersions {
   name: string;
   content: string;
   render: 'host';
   attributes: Readonly<Record<string, BlockAttributeSchema>>;
 }
 
+/** A node or a mark of the Proof schema, as the manifest names it. */
+export interface BlockSchemaElement extends BlockElementVersions {
+  name: string;
+}
+
 export interface BlockSchema {
   version: number;
+  /** The Proof schema's nodes and marks; a document service older than the manifest names none. */
+  nodes?: readonly BlockSchemaElement[];
+  marks?: readonly BlockSchemaElement[];
   types: readonly BlockTypeSchema[];
+}
+
+/** Whether an editor of schema version `version` may create `element`. */
+export function creatable(version: number, element: BlockElementVersions | undefined): boolean {
+  return (element?.creatable_since ?? 1) <= version;
+}
+
+/** Whether an editor of schema version `version` may write `value` into `attribute`. */
+export function creatableValue(version: number, attribute: BlockAttributeSchema, value: unknown): boolean {
+  if (!creatable(version, attribute)) return false;
+  return attribute.kind !== 'enum' || typeof value !== 'string' || creatable(version, attribute.choice_versions?.[value]);
+}
+
+/**
+ * The manifest's numbers of the node or mark `name` of the Proof schema (a typed block is a
+ * node), or undefined when the manifest names none.
+ */
+function elementVersions(schema: BlockSchema, kind: 'node' | 'mark', name: string): BlockElementVersions | undefined {
+  if (kind === 'mark') return schema.marks?.find((mark) => mark.name === name);
+  return schema.nodes?.find((node) => node.name === name) ?? schema.types.find((type) => type.name === name);
+}
+
+/** Why an editor built from `schema` may not create `node` itself, its marks or its attributes. */
+function uncreatableNode(schema: BlockSchema, node: ProseMirrorNode): string | undefined {
+  const name = node.type.name;
+  const type = schema.types.find((candidate) => candidate.name === name);
+  if (!creatable(schema.version, elementVersions(schema, 'node', name))) {
+    return `this editor cannot create ${type ? 'typed block' : 'node'} ${JSON.stringify(name)} yet`;
+  }
+  for (const mark of node.marks) {
+    if (!creatable(schema.version, elementVersions(schema, 'mark', mark.type.name))) {
+      return `this editor cannot create mark ${JSON.stringify(mark.type.name)} yet`;
+    }
+  }
+  for (const [attributeName, attribute] of Object.entries(type?.attributes ?? {})) {
+    const value: unknown = node.attrs[attributeName];
+    if (value !== undefined && value !== null && !creatableValue(schema.version, attribute, value)) {
+      return `this editor cannot write ${JSON.stringify(value)} into typed block ${JSON.stringify(name)} attribute ${JSON.stringify(attributeName)} yet`;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Throws when `content`, which an editor built from `schema` is about to write, holds a node, a
+ * mark, a typed block, an attribute or an enum choice that the editor may not create yet. A typed
+ * block holds such an attribute only when its source names one (`schemaAttrs`).
+ */
+export function assertCreatable(schema: BlockSchema, content: Fragment): void {
+  let refusal: string | undefined;
+  content.descendants((node) => {
+    refusal ??= uncreatableNode(schema, node);
+    return refusal === undefined;
+  });
+  if (refusal !== undefined) throw new Error(refusal);
+}
+
+/**
+ * `schema`'s DOM parser, which reads pasted and dropped HTML, without the rules of each node and
+ * mark that an editor built from `blockSchema` may not create yet: such an element is not read,
+ * and its content is kept without it, as a typed block's section with an attribute the editor
+ * may not write is (`parsedDomAttrs`).
+ */
+export function creatableDomParser(schema: Schema, blockSchema: BlockSchema): DOMParser {
+  const rules = DOMParser.fromSchema(schema).rules.filter((rule) => {
+    if ('node' in rule && rule.node !== undefined) return creatable(blockSchema.version, elementVersions(blockSchema, 'node', rule.node));
+    return rule.mark === undefined || creatable(blockSchema.version, elementVersions(blockSchema, 'mark', rule.mark));
+  });
+  return new DOMParser(schema, rules);
 }
 
 export type HostBlockRenderer = (node: ProseMirrorNode, type: BlockTypeSchema) => DOMOutputSpec;
@@ -109,15 +199,20 @@ function parseAttribute(typeName: string, name: string, attribute: BlockAttribut
   }
 }
 
-function schemaAttrs(type: BlockTypeSchema): Record<string, { default?: string | boolean | readonly string[] }> {
-  return Object.fromEntries(Object.entries(type.attributes).map(([name, attribute]) => [name, { default: attribute.default }]));
+/**
+ * A block that names no value for an attribute holds its default, unless an editor of schema
+ * version `version` may not create the attribute yet: that one is left out, so the editor never
+ * writes it.
+ */
+function schemaAttrs(type: BlockTypeSchema, version: number): Record<string, { default?: string | boolean | readonly string[] }> {
+  return Object.fromEntries(Object.entries(type.attributes).map(([name, attribute]) => [name, { default: creatable(version, attribute) ? attribute.default : undefined }]));
 }
 
-function directiveAttrs(type: BlockTypeSchema, attrs: Record<string, string> | undefined): Record<string, string | boolean | readonly string[] | undefined> {
+function directiveAttrs(type: BlockTypeSchema, attrs: Record<string, string> | undefined, version: number): Record<string, string | boolean | readonly string[] | undefined> {
   const parsed: Record<string, string | boolean | readonly string[] | undefined> = {};
   for (const [name, attribute] of Object.entries(type.attributes)) {
     const value = attrs?.[name];
-    parsed[name] = value === undefined ? attribute.default : parseAttribute(type.name, name, attribute, value);
+    parsed[name] = value === undefined ? (creatable(version, attribute) ? attribute.default : undefined) : parseAttribute(type.name, name, attribute, value);
   }
   for (const name of Object.keys(attrs ?? {})) {
     if (name !== 'id' && name !== 'className' && !(name in type.attributes)) {
@@ -173,10 +268,11 @@ function domAttrs(type: BlockTypeSchema, node: ProseMirrorNode): Record<string, 
 
 /**
  * The client-owned attributes a typed block's section carries, parsed as its markdown would be;
- * the others keep their defaults. A section whose attribute the schema refuses is not read as the
- * typed block at all (the rule does not match), since this editor never writes one.
+ * the others keep their defaults. A section whose attribute the schema refuses, or holds a value an
+ * editor of schema version `version` may not write yet, is not read as the typed block at all (the
+ * rule does not match), since this editor never writes one.
  */
-function parsedDomAttrs(type: BlockTypeSchema, dom: HTMLElement): Record<string, unknown> | false {
+function parsedDomAttrs(type: BlockTypeSchema, dom: HTMLElement, version: number): Record<string, unknown> | false {
   const attributes: Record<string, unknown> = {};
   for (const [name, definition] of Object.entries(type.attributes)) {
     if (definition.server) continue;
@@ -187,21 +283,25 @@ function parsedDomAttrs(type: BlockTypeSchema, dom: HTMLElement): Record<string,
     } catch {
       return false;
     }
+    if (!creatableValue(version, definition, attributes[name])) return false;
   }
   return attributes;
 }
 
-/** The ProseMirror node spec of the typed block `type`, drawn by `renderBlock` when given. */
-export function typedBlockSpec(type: BlockTypeSchema, renderBlock?: HostBlockRenderer): NodeSchema {
+/**
+ * The ProseMirror node spec of the typed block `type`, drawn by `renderBlock` when given, for an
+ * editor of schema version `version`: a block it makes holds no attribute it may not create yet.
+ */
+export function typedBlockSpec(type: BlockTypeSchema, renderBlock?: HostBlockRenderer, version = Number.POSITIVE_INFINITY): NodeSchema {
   return withBlockIdSpec({
-    attrs: schemaAttrs(type),
+    attrs: schemaAttrs(type, version),
     content: type.content,
     group: 'block',
     defining: true,
     isolating: true,
     parseDOM: [{
       tag: `section[data-proof-block-type="${type.name}"]`,
-      getAttrs: (dom) => parsedDomAttrs(type, dom),
+      getAttrs: (dom) => parsedDomAttrs(type, dom, version),
       contentElement: (dom) => dom.querySelector('[data-proof-block-content]') ?? dom,
     }],
     toDOM: (node) => withDomAttributes(renderBlock?.(node, type) ?? [
@@ -216,7 +316,7 @@ export function typedBlockSpec(type: BlockTypeSchema, renderBlock?: HostBlockRen
       match: (node) => (node as MarkdownNode).type === 'containerDirective' && (node as MarkdownNode).name === type.name,
       runner: (state, node, nodeType) => {
         const directive = node as MarkdownNode;
-        state.openNode(nodeType, directiveAttrs(type, directive.attributes));
+        state.openNode(nodeType, directiveAttrs(type, directive.attributes, version));
         state.next(directive.children as unknown as ParsedMarkdownNode[]);
         state.closeNode();
       },
@@ -237,7 +337,7 @@ export function typedBlockSpec(type: BlockTypeSchema, renderBlock?: HostBlockRen
 
 export function blockSchemaPlugins(schema: BlockSchema, renderBlock?: HostBlockRenderer) {
   validateBlockSchema(schema);
-  return schema.types.map((type) => $nodeSchema(type.name, () => typedBlockSpec(type, renderBlock)));
+  return schema.types.map((type) => $nodeSchema(type.name, () => typedBlockSpec(type, renderBlock, schema.version)));
 }
 
 /** Why the schema refuses the container directive `node`, as `visit` throws it, or undefined when it is accepted. */
@@ -246,7 +346,7 @@ export function typedBlockRefusal(schema: BlockSchema, node: { name?: string; at
   const type = schema.types.find((candidate) => candidate.name === name);
   if (!type) return `unknown typed block ${JSON.stringify(name)} (known types: ${knownNames(schema)})`;
   try {
-    directiveAttrs(type, node.attributes);
+    directiveAttrs(type, node.attributes, schema.version);
   } catch (error) {
     return (error as Error).message;
   }

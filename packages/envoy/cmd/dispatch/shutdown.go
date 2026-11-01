@@ -99,22 +99,25 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 // signal, beside the HTTP drain and the document shutdown: a message in its handler finishes and is
 // acknowledged, or is given up and handed back to NATS, delivery's intakeStopBudget (15 s) after
 // the signal at the latest, the one deadline of that stop, which counts from the signal and which a
-// bind under way at the signal spends rather than extends. That wait ends 10 s inside the latest
-// the document service's budget ends (stopGrace less its 5 s reserve, 25 s after the signal), which
-// leaves the given-up handlers' prompt return, their negative acknowledgements and the intakes'
-// clients closing room inside it, so it never makes the shutdown longer than the document budget
-// already can, nor pushes deregister and the pool's close past stopGrace. It comes before the pool
-// closes because nothing else keeps the pool open for a handler: one waiting on GitHub holds no
-// connection, so waitUntilIdle finds the pool idle, and its writes would fail on the closed pool
-// once GitHub answered, with its message acknowledged all the same. The database pool closes once
-// every request has answered and no connection of the shared or document-rooms pool is in use.
-// While the database answers, nothing but the runtime's kill bounds that wait, so a write in flight
-// commits and is answered if it finishes before the kill. Then deregister takes this process out of
-// the registry of live server processes: it runs only once HTTP has drained, so a draining process
-// counts as live until its last request is answered, and before the pool closes. A database that
-// has stopped answering (silentProbes) holds its connections forever, so Dispatch exits without
-// them, and the database rolls back whatever they held open; it deregisters nothing then, since the
-// delete would wait on that database too, and its row's heartbeat stops with the process instead.
+// take-over under way at the signal spends rather than extends. Each intake then releases its hold
+// through the pool, so another process takes its durable over at once. That wait ends 10 s inside
+// the latest the document service's budget ends (stopGrace less its 5 s reserve, 25 s after the
+// signal), which leaves the given-up handlers' prompt return, their negative acknowledgements, the
+// holds' release and the intakes' clients closing room inside it, so it never makes the shutdown
+// longer than the document budget already can, nor pushes deregister and the pool's close past
+// stopGrace. It comes before the pool closes because nothing else keeps the pool open for a
+// handler: one waiting on GitHub holds no connection, so waitUntilIdle finds the pool idle, and
+// its writes would fail on the closed pool once GitHub answered, with its message acknowledged all
+// the same, and because a hold released through a closed pool is a hold left in place for its TTL.
+// The database pool closes once every request has answered and no connection of the shared or
+// document-rooms pool is in use. While the database answers, nothing but the runtime's kill bounds
+// that wait, so a write in flight commits and is answered if it finishes before the kill. Then
+// deregister takes this process out of the registry of live server processes: it runs only once
+// HTTP has drained, so a draining process counts as live until its last request is answered, and
+// before the pool closes. A database that has stopped answering (silentProbes) holds its
+// connections forever, so Dispatch exits without them, and the database rolls back whatever they
+// held open; it deregisters nothing then, since the delete would wait on that database too, and
+// its row's heartbeat stops with the process instead.
 func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitBackground, waitIntakes, deregister func()) {
 	drained := make(chan struct{})
 	go func() {
