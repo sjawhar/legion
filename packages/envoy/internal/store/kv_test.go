@@ -1236,6 +1236,92 @@ func TestPlanInterestKeepsTheControllerLaneAHeartbeatOmits(t *testing.T) {
 	}
 }
 
+// storedInterest reads sessionID's row from the interest bucket itself, which is what the next
+// registration, the reaper and every other listener read, rather than from this registry's cache.
+func storedInterest(t *testing.T, conn *natsgo.Conn, sessionID string) Interest {
+	t.Helper()
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+	kv, err := js.KeyValue(bus.InterestBucket)
+	if err != nil {
+		t.Fatalf("open %s: %v", bus.InterestBucket, err)
+	}
+	entry, err := kv.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read %s's stored row: %v", sessionID, err)
+	}
+	var item Interest
+	if err := json.Unmarshal(entry.Value(), &item); err != nil {
+		t.Fatalf("decode %s's stored row: %v", sessionID, err)
+	}
+	return item
+}
+
+// A registration's write stores its plan at the revision the plan was read at and plans again
+// when the bucket refuses it, so an unsubscribe that lands between the two is not undone. Seconds
+// pass in that window: the listener's registration route plans first, then creates or re-filters
+// the session's consumer, each bus call waiting up to 5 s, and writes the plan after
+// (cmd/listener's subscribeHandler). Until INFRA-771's review the write read the row again and
+// merged the plan into it unconditionally, so a topic the unsubscribe had removed was written
+// back by the plan that had read it, and the row only ever grew from there; the likeliest trigger
+// is the daemon's fire-and-forget unsubscribe at the end of a role racing the next heartbeat.
+func TestUpsertPlannedKeepsAnUnsubscribeThatOutranItsPlan(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	reg, err := Open(conn, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	const (
+		sessionID = "ses_unsubscribe_race"
+		followed  = "notifications.dispatch.issue.KEY-1.>"
+	)
+	own := contracts.AgentSubject(sessionID)
+	ctx := context.Background()
+	registration, err := reg.PlanInterest(ctx, sessionID, []string{followed, own})
+	if err != nil {
+		t.Fatalf("plan the registration that follows the issue: %v", err)
+	}
+	first, err := reg.UpsertPlanned(ctx, Interest{SessionID: sessionID, MachineID: "m1"}, registration)
+	if err != nil {
+		t.Fatalf("write the registration that follows the issue: %v", err)
+	}
+	if !slices.Contains(first.Topics, followed) {
+		t.Fatalf("stored topics %v, want the issue topic the registration named", first.Topics)
+	}
+
+	// The heartbeat plans the row as it stands, the issue topic its body leaves out included.
+	plan, err := reg.PlanInterest(ctx, sessionID, []string{own})
+	if err != nil {
+		t.Fatalf("plan the heartbeat: %v", err)
+	}
+	if !slices.Contains(plan.Topics, followed) {
+		t.Fatalf("planned topics %v, want the issue topic the row holds", plan.Topics)
+	}
+	// The unsubscribe lands while the route is still giving the session its consumer.
+	if err := reg.Remove(ctx, sessionID, []string{followed}); err != nil {
+		t.Fatalf("unsubscribe from the issue topic: %v", err)
+	}
+
+	answered, err := reg.UpsertPlanned(ctx, Interest{SessionID: sessionID, MachineID: "m1"}, plan)
+	if err != nil {
+		t.Fatalf("write the heartbeat whose plan the unsubscribe outran: %v", err)
+	}
+	if slices.Contains(answered.Topics, followed) {
+		t.Fatalf("the write answered topics %v; the unsubscribe removed %s, so the registration must not write it back", answered.Topics, followed)
+	}
+	stored := storedInterest(t, conn, sessionID)
+	if slices.Contains(stored.Topics, followed) {
+		t.Fatalf("the stored row holds topics %v; the unsubscribe removed %s, and nothing removes it a second time", stored.Topics, followed)
+	}
+	if !slices.Contains(stored.Topics, own) {
+		t.Fatalf("the stored row holds topics %v, want the session's own agent subject %s the heartbeat named", stored.Topics, own)
+	}
+}
+
 // An unsubscribe and a role claim rewrite the session's row too, and neither keeps a topic the row
 // stored before the listener refused topics reaching a private stream subject: another session's
 // agent subject and a failed-delivery lane are dropped, so Match stops fanning that lane out to the

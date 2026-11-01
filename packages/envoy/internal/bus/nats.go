@@ -952,18 +952,18 @@ func (c *Client) Close() {
 // first, so neither the drain's close nor a recovery already under way reconnects or re-subscribes
 // a process that is shutting down. It then drains the delivery subscriptions while the connection
 // still accepts new ones: a handler finishing its delivery may subscribe (a forward's reply
-// inbox, startForward), which a draining connection refuses. Next it runs the drain hooks (AddDrainHook), which
-// end the KV watchers with requests of their own while the connection still carries them, even
-// when the deliveries ran out their share of the timeout (drainHookReserve) or failed to drain. Only
-// then does it drain the connection, whose Drain only starts the drain, and wait for it to close
-// itself. A connection that is reconnecting is closed at once and runs no hook: nothing it sends
-// reaches the server, so no subscription would drain and a reconnect would re-send them.
-// A bind in flight at the stop is not waited for: one that ends while the subscriptions drain
-// installs its own, which the next pass drains, and one that ends after the last pass drains its
-// own, which the connection's drain takes (endBind). The close ends one still in flight. A
-// reconnect nats.go reports once the client has stopped closes the connection only when it came
-// after the stop (closeStopped). The stop ends the keeper too, which Drain waits for once the
-// connection is closed (awaitKeeper).
+// inbox, StartRequestStoredTo), which a draining connection refuses. Next it runs the drain hooks
+// (AddDrainHook), which end the KV watchers with requests of their own while the connection still
+// carries them, even when the deliveries ran out their share of the timeout (drainHookReserve) or
+// failed to drain. Only then does it drain the connection, whose Drain only starts the drain, and
+// wait for it to close itself. A connection that is reconnecting is closed at once and runs no
+// hook: nothing it sends reaches the server, so no subscription would drain and a reconnect
+// would re-send them. A bind in flight at the stop is not waited for: one that ends while the
+// subscriptions drain installs its own, which the next pass drains, and one that ends after the
+// last pass drains its own, which the connection's drain takes (endBind). The close ends one
+// still in flight. A reconnect nats.go reports once the client has stopped closes the connection
+// only when it came after the stop (closeStopped). The stop ends the keeper too, which Drain
+// waits for once the connection is closed (awaitKeeper).
 func (c *Client) Drain(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	deliveriesDeadline := deadline.Add(-min(drainHookReserve, timeout*3/10))
@@ -1174,8 +1174,8 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 // before. The capture is judged on the subjects this binary compiles in, not the deployed stream's:
 // a topic under a subject only a newer build adds (which reconciliation keeps) goes over core NATS
 // from an older one, so the stream still stores it but without a MsgId, and the older listener's
-// name: nothing would store it, and a session reads only what its own consumer holds
-// (ReachesNoSession, cmd/listener/api.go).
+// own publish and subscribe routes refuse it by name: on that build nothing would store it, and
+// a session reads only what its own consumer holds (ReachesNoSession, cmd/listener/api.go).
 func UsesCoreTransport(topic string) bool {
 	return strings.HasPrefix(topic, NotificationTopicPrefix) && !StreamCaptures(topic)
 }
@@ -1525,10 +1525,10 @@ func (c *Client) PublishCoreContext(ctx context.Context, subject string, item co
 // ForwardMsgID is the Nats-Msg-Id of an envelope whose dedupe key is dedupeKey published or
 // forwarded to subject: the dedupe key, a colon, the subject. publishJetStream stores an envelope
 // that earns a MsgId under it, so each topic one upstream event is published on keeps its own
-// copy, and every forward to a session's subject (startForward) sets its header through it, so
-// the stream, which captures every agent subject, keeps one copy of a message per recipient
-// however many times a sender forwards it, and a forward of the same message to another
-// recipient is a copy of its own.
+// copy, and every forward to a session's subject (StartRequestStoredTo) sets its header through
+// it, so the stream, which captures every agent subject, keeps one copy of a message per
+// recipient however many times a sender forwards it, and a forward of the same message to
+// another recipient is a copy of its own.
 func ForwardMsgID(dedupeKey, subject string) string {
 	return dedupeKey + ":" + subject
 }
@@ -1554,20 +1554,6 @@ var ErrForwardNotStored = errors.New("bus: the stream did not acknowledge storin
 // arrive (a denied or invalid forward, a connection that never came back within timeout); every
 // returned forward must be waited for, which releases its reply subscription.
 func (c *Client) StartRequestStoredTo(subject string, item contracts.Envelope, timeout time.Duration) (*PendingForward, error) {
-	return c.startForward(subject, item, timeout)
-}
-
-// PendingForward is a forward StartRequestStoredTo published, whose replies Wait reads.
-type PendingForward struct {
-	// replies is the forward's reply inbox, which the stream answers on.
-	replies  *nats.Subscription
-	deadline time.Time
-	// unconfirmed is publishConfirmed's error for a publish it could not confirm, which the
-	// stream's acknowledgement may still overrule; nil when it confirmed the publish.
-	unconfirmed error
-}
-
-func (c *Client) startForward(subject string, item contracts.Envelope, timeout time.Duration) (*PendingForward, error) {
 	if err := checkSubject(subject); err != nil {
 		return nil, err
 	}
@@ -1595,6 +1581,16 @@ func (c *Client) startForward(subject string, item contracts.Envelope, timeout t
 		return nil, err
 	}
 	return &PendingForward{replies: replies, deadline: deadline, unconfirmed: err}, nil
+}
+
+// PendingForward is a forward StartRequestStoredTo published, whose replies Wait reads.
+type PendingForward struct {
+	// replies is the forward's reply inbox, which the stream answers on.
+	replies  *nats.Subscription
+	deadline time.Time
+	// unconfirmed is publishConfirmed's error for a publish it could not confirm, which the
+	// stream's acknowledgement may still overrule; nil when it confirmed the publish.
+	unconfirmed error
 }
 
 // Wait reads the forward's replies until the stream has acknowledged storing it or its window

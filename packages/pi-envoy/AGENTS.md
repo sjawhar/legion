@@ -441,15 +441,20 @@ next relay of that frame shows it as a card that runs nothing. A `pi.sendUserMes
 recorded at the run's end, found or not, since its text was the only way to find it, so one an
 interrupt withdrew is not shown again.
 
-Which subjects the session follows is what `registerSession` registers (`followedSubjects`, by the
-shared rule `replayFollowedSubjects`): the agent subject and every open subscription not held for
-a role nor reaching a private stream subject (`reachesPrivateStreamSubject`: another session's
-agent subject, a failed-delivery lane, the Legion controller lane, or a wildcard reaching one, the
-listener's own rule, which would refuse it and warn on every heartbeat). The listener filters the
-session's consumer on exactly those subjects, and refuses a registration naming a
-`notifications.` topic the stream does not capture, so a followed topic is one the consumer can
-deliver. A topic followed now brings up no older history: the consumer keeps its position when
-its filter changes, so the topic starts there.
+What a registration carries is the shared rule `registrationTopics`: the session's own agent
+subject and every topic it follows, a role-bound one included, but one reaching a private stream
+subject that is not this session's (`reachesPrivateStreamSubject`: another session's agent
+subject, a failed-delivery lane, another project's Legion controller lane, or a wildcard reaching
+one, the listener's own rule, which it would leave out of the row and warn about on every
+heartbeat), and one nothing would ever be delivered on (`streamDeliversNothing`: a
+`notifications.` topic the stream does not capture, a role lane apart), which the listener
+refuses the whole registration for. The session still follows such a topic — the tool, the stored
+interest row and the transcript all bring one back — and it never reaches the listener, so it
+wedges no later registration. Which subjects a restore follows again is the sibling rule
+`replayFollowedSubjects`. The listener filters the session's consumer on exactly the registered
+subjects, so a followed topic that got there is one the consumer can deliver. A topic followed
+now brings up no older history: the consumer keeps its position when its filter changes, so the
+topic starts there.
 
 How soon a reconnect comes: `ensureConnection` dials with the shared options of
 `@legion/envoy-client/nats-connection` (`natsConnectionOptions`), which ping the server every 10 s
@@ -1028,7 +1033,7 @@ state never nudges.
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
 | Real end-to-end delivery smoke | `scripts/smoke-delivery.sh`, `scripts/smoke-btw.sh`, `scripts/README.md` | Manual installed-plugin smokes against live Envoy; `smoke-btw.sh` creates a targeted Dispatch BTW or Steer attempt and verifies its correlated reply |
 | Consumer delivery | `extensions/envoy.ts` (`createRelay`, `deliverRelayed`, `takeDeliveryAnswer`, `renewRelayEpoch`), `src/missed-messages.ts` (`CONSUMER_STATE_ENTRY`, `consumerSnapshot`), `../envoy-client/src/consumer-delivery.ts`, `../../scripts/e2e/envoy-session-delivery.sh` | The listener's relay of the session's durable consumer ("Consumer delivery" above): the relay subscription and epoch, the frame's `received`, `progress`, `done` and `nak`, and the persisted resume point; the live proof is the repository's `scripts/e2e/envoy-session-delivery.sh` (`scripts/e2e/README.md`) |
-| Each frame shown once | `extensions/envoy.ts`, `src/missed-messages.ts`, `src/unwritten-frames.ts` (`UnwrittenFrames`: the cards and turns handed and not yet written, each claim's settle and release), `../envoy-client/src/delivery-ledger.ts` | The ledger of what this session was shown and the notices it raises ("Each frame shown once" above); the ledger is `@legion/envoy-client/delivery-ledger`'s and the subject rules both plugins share (`replayFollowedSubjects`, `rememberedTopics`, `reachesPrivateStreamSubject`, `streamDeliversNothing`) are `@legion/envoy-client/stream-topics`'s; this package holds its cards and transcript entries |
+| Each frame shown once | `extensions/envoy.ts`, `src/missed-messages.ts`, `src/unwritten-frames.ts` (`UnwrittenFrames`: the cards and turns handed and not yet written, each claim's settle and release), `../envoy-client/src/delivery-ledger.ts` | The ledger of what this session was shown and the notices it raises ("Each frame shown once" above); the ledger is `@legion/envoy-client/delivery-ledger`'s and the subject rules both plugins share (`registrationTopics`, `replayFollowedSubjects`, `rememberedTopics`, `reachesPrivateStreamSubject`, `streamDeliversNothing`) are `@legion/envoy-client/stream-topics`'s; this package holds its cards and transcript entries |
 | NATS stall test | `extensions/envoy.test.ts` (the row `a session whose NATS path freezes subscribes its relay subject again …`, `-t "NATS path freezes"`), `../envoy-client/test/stall-proxy.ts`, `../envoy-client/test/envoy-stack.ts`, `../envoy-client/test/stall-scenario.ts` | Runs only with `LEGION_E2E_ENVOY_STACK=1` (CI's `envoy-session-stall` job), and needs `go` on `PATH` to build natsd and the listener from `packages/envoy`: with the gate set, a missing `go` or a failed build fails the row rather than skipping it. The real extension registers against that listener (its row shows `plugin` and `plugin_version`), which answers `consumer`, and the proxy freezes its NATS path. Within 60 s the connection nats.js dials in place of the frozen one subscribes the relay subject again (natsd's `/connz`), the session registers a new epoch (its `envoy_sessions` entry), and the message sent during the freeze and one sent after it are each shown once, neither as a replay: the freeze and what it checks are `runFreezeScenario`, which claude-envoy's stall test runs too. Without `renewRelayEpoch` on the `reconnect` status the message sent during the freeze is never shown |
 
 ## Critical conventions

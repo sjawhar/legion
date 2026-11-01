@@ -9,7 +9,7 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { deliverSubject } from "@legion/envoy-client/consumer-delivery";
+import { deliverSubject, RelayHeader } from "@legion/envoy-client/consumer-delivery";
 import { Terminal } from "@xterm/headless";
 import { linkOmpNatives } from "./omp-natives";
 
@@ -82,6 +82,116 @@ export function serveStandin(
     await server.stop(true);
   });
   return { requests, base: `http://127.0.0.1:${server.port}` };
+}
+
+/** The stream the stand-in listener's answers and relay frames name, one for every case here. */
+export const STANDIN_STREAM_ID = "standin-stream";
+
+/**
+ * The delivery answer a listener gives a registration it can give a consumer: the session's own
+ * relay subject, which is the one path a message reaches it by (INFRA-771). A registration
+ * answered without one is refused in the client (`parseSubscribeAnswer`), as the listener's own
+ * refusal is, and leaves the session deaf until a later registration is accepted.
+ */
+export interface ConsumerDeliveryAnswer {
+  readonly mode: "consumer";
+  readonly subject: string;
+  readonly stream_id: string;
+  readonly gap: boolean;
+}
+
+/**
+ * What a registration answer carries beyond the interest: the consumer, on
+ * `/v1/interests/subscribe`, and nothing on any other listener route, which answers an interest
+ * alone. The session is the one the request names, `fallbackSessionID` when it names none.
+ */
+export function deliveryFor(
+  pathname: string,
+  body: { readonly session_id?: unknown } | undefined,
+  fallbackSessionID: string
+): { readonly delivery?: ConsumerDeliveryAnswer } {
+  if (pathname !== "/v1/interests/subscribe") return {};
+  const named = typeof body?.session_id === "string" ? body.session_id : fallbackSessionID;
+  return {
+    delivery: {
+      mode: "consumer",
+      subject: deliverSubject(named === "" ? fallbackSessionID : named),
+      stream_id: STANDIN_STREAM_ID,
+      gap: false,
+    },
+  };
+}
+
+/** What a relay frame needs of a NATS connection; `nats`'s `NatsConnection` is one. */
+export interface RelayConnection {
+  request(
+    subject: string,
+    payload: Uint8Array,
+    options: { readonly timeout: number; readonly headers: RelayFrameHeaders }
+  ): Promise<unknown>;
+}
+
+/** What a relay frame needs of a NATS header set; `nats`'s `headers()` makes one. */
+export interface RelayFrameHeaders {
+  set(name: string, value: string): void;
+}
+
+/** One frame of the stand-in stream, as `sendRelayFrame` sends it. */
+export interface RelayFrame {
+  readonly connection: RelayConnection;
+  /** Makes an empty header set; `nats`'s `headers` is one. */
+  readonly newHeaders: () => RelayFrameHeaders;
+  /** The session the listener relays to, which the deliver subject names. */
+  readonly sessionID: string;
+  /** The subject the stream stored the message on, which the frame carries. */
+  readonly subject: string;
+  readonly payload: Uint8Array;
+  /** Where the stream stored it; one case is one stream, so its frames are ordered by this. */
+  readonly seq: number;
+  /** When the stream stored it, RFC 3339; now by default. */
+  readonly storedAt?: string;
+  /** Which delivery of the frame this is; the first by default. */
+  readonly delivered?: number;
+  /** How long the frame is offered before this fails; 30 s by default. */
+  readonly withinMs?: number;
+  /** A run that ended: its error fails the wait at once, rather than at the deadline. */
+  readonly stopped?: { readonly error?: unknown };
+}
+
+/**
+ * Sends one frame as the listener's relay of a session's consumer sends it: the stored subject,
+ * sequence, stream and time in its headers (`decodeRelayFrame`), on the session's deliver
+ * subject. Sent as a request, whose answer is the session's own `received`: until that session
+ * has subscribed the subject the server reports no responder, so the frame goes again, as the
+ * one frame it is, and a copy of a frame the session already holds is answered and never shown
+ * twice (`createConsumerDelivery`). Answers the session's reply.
+ */
+export async function sendRelayFrame(frame: RelayFrame): Promise<unknown> {
+  const deadline = Date.now() + (frame.withinMs ?? 30_000);
+  for (;;) {
+    const headers = frame.newHeaders();
+    headers.set(RelayHeader.subject, frame.subject);
+    headers.set(RelayHeader.streamSeq, String(frame.seq));
+    headers.set(RelayHeader.streamID, STANDIN_STREAM_ID);
+    headers.set(RelayHeader.delivered, String(frame.delivered ?? 1));
+    headers.set(RelayHeader.storedAt, frame.storedAt ?? new Date().toISOString());
+    try {
+      return await frame.connection.request(deliverSubject(frame.sessionID), frame.payload, {
+        timeout: 1_000,
+        headers,
+      });
+    } catch (error) {
+      if (frame.stopped?.error !== undefined) throw frame.stopped.error;
+      if (Date.now() > deadline) {
+        throw new Error(
+          `${frame.sessionID} took no relay frame on ${frame.subject}: ${String(error)}`
+        );
+      }
+      // A real clock, deliberately: a session that has not yet subscribed its deliver subject
+      // emits no signal here — the server only answers the next send with no responder.
+      await Bun.sleep(100);
+    }
+  }
 }
 
 /**
@@ -625,25 +735,16 @@ export async function runLegionPane(
       return Response.json({ error: `no stand-in route ${url.pathname}` }, { status: 404 });
     }
     // The Envoy listener: registration, the role claim, and any read answer with an interest.
+    // A session takes its messages from its own consumer, relayed on its own deliver subject: a
+    // registration answered without one leaves the session deaf, which the plugin refuses rather
+    // than accept, and with it every claim the pane makes (INFRA-771).
     const sessionID = typeof body.session_id === "string" ? body.session_id : "";
     return Response.json({
       session_id: sessionID,
       machine_id: `${name}-machine`,
       dir: workspace,
       topics: [],
-      // A session takes its messages from its own consumer, relayed on its own deliver subject:
-      // a registration answered without one leaves the session deaf, which the plugin refuses
-      // rather than accept, and with it every claim the pane makes (INFRA-771).
-      ...(url.pathname === "/v1/interests/subscribe"
-        ? {
-            delivery: {
-              mode: "consumer",
-              subject: deliverSubject(sessionID),
-              stream_id: `${name}-stream`,
-              gap: false,
-            },
-          }
-        : {}),
+      ...deliveryFor(url.pathname, body, sessionID),
     });
   });
   await writeStandinProfile(home, base);

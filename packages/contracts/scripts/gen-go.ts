@@ -42,7 +42,12 @@ import {
   SEARCH_QUERY_MAX,
 } from "../src/dispatch-tools";
 import { MINTED_DEDUPE_KEY_PATTERN } from "../src/envelope";
-import { SUBJECT_MAX_BYTES, SUBJECT_SEGMENT_REPLACED } from "../src/subject";
+import { controllerToken } from "../src/legion-roles";
+import {
+  legionControllerNoticeSubject,
+  SUBJECT_MAX_BYTES,
+  SUBJECT_SEGMENT_REPLACED,
+} from "../src/subject";
 
 type ScalarKind = "string" | "integer" | "boolean";
 
@@ -69,6 +74,30 @@ const map = {
   integer: "int64",
   boolean: "bool",
 } satisfies Record<ScalarKind, string>;
+
+// splitAtSentinel is the text a builder puts before and after the one value it interpolates,
+// read by building it with a sentinel: a builder that stopped interpolating that value, or
+// interpolated it twice, throws here rather than generating Go that reads nothing like it.
+function splitAtSentinel(built: string, sentinel: string): [string, string] {
+  const parts = built.split(sentinel);
+  const [before, after] = parts;
+  if (parts.length !== 2 || before === undefined || after === undefined) {
+    throw new Error(`cannot split ${JSON.stringify(built)} at the sentinel ${sentinel}`);
+  }
+  return [before, after];
+}
+
+// A Legion project token is lowercase alphanumeric (PROJECT_TOKEN in src/legion-roles.ts), which
+// this sentinel is, so both builders below accept it.
+const projectSentinel = "zzprojectzz";
+const [legionNoticeTopicPrefix, controllerNoticeSuffix] = splitAtSentinel(
+  legionControllerNoticeSubject(projectSentinel),
+  projectSentinel
+);
+const [controllerRolePrefix, controllerRoleSuffix] = splitAtSentinel(
+  controllerToken(projectSentinel),
+  projectSentinel
+);
 
 const keep = `func ValidateWire(raw []byte) error {
 	var fields map[string]json.RawMessage
@@ -108,6 +137,21 @@ func validateWireNonEmpty(fields map[string]json.RawMessage, field, path string)
 
 const AgentTopicPrefix = "notifications.agent."
 const RoleTopicPrefix = "notifications.role."
+
+// LegionNoticeTopicPrefix opens every Legion daemon notice subject, ControllerNoticeSuffix ends
+// the one subject of that family naming a project's controller rather than an issue, so project
+// <p>'s notice lane is LegionNoticeTopicPrefix + <p> + ControllerNoticeSuffix, and
+// ControllerRoleToken is the Legion role token whose holder that lane is for. Generated from
+// legionControllerNoticeSubject and controllerToken in packages/contracts: a rename there that Go
+// did not follow would leave the listener refusing the holder's registration of its own lane
+// (bus.ReachesPrivateStreamSubject would read a role token no claim names) and the controller
+// would receive no notice, with nothing else failing.
+const LegionNoticeTopicPrefix = ${JSON.stringify(legionNoticeTopicPrefix)}
+const ControllerNoticeSuffix = ${JSON.stringify(controllerNoticeSuffix)}
+
+func ControllerRoleToken(project string) string {
+	return ${JSON.stringify(controllerRolePrefix)} + project + ${JSON.stringify(controllerRoleSuffix)}
+}
 
 // DeliveryDuplicateWindow is how long a repeated delivery is recognised as a duplicate, by the
 // notification stream and by every host that subscribes over core NATS. Generated from

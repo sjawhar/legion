@@ -559,28 +559,69 @@ test("a Dispatch subscription removal that names no topics removes nothing", asy
 })
 
 // A topic the stream captures nothing of is refused by the listener with the whole registration,
-// so one subscription would wedge every later one (INFRA-771 review).
-test("refuses a subscription of a topic no stream subject captures, and follows nothing of it", async () => {
+// so a session that follows one — through the tool, or from the interest row a resume reads —
+// would be refused at every heartbeat, for as long as that row holds it (INFRA-771 review). It is
+// followed all the same, and left out of every registration (`registrationTopics`).
+test("never registers a topic no stream subject captures, however it was followed", async () => {
   const calls: string[] = []
   const nats = new FakeNats(calls)
   const stateDirectory = await scratchState()
+  const subscribes: Array<readonly string[]> = []
+  const client = recordingClient(calls, {
+    getInterest: async () => ({
+      ...noInterest(),
+      // The row an earlier build left: it expanded `notifications.team.>` to the bare base
+      // beside it, which this build's stream captures nothing of.
+      topics: [directSubject, "notifications.team", "notifications.team.deploys"],
+    }),
+    subscribe: async (input) => {
+      subscribes.push(input.topics)
+      // The listener's own rule: a `notifications.` topic no stream subject captures is refused
+      // by name, with the whole registration (cmd/listener's subscribeHandler).
+      const uncaptured = input.topics.find(
+        (topic) => topic === "notifications.team" || topic === "notifications.lxspec.probe",
+      )
+      if (uncaptured !== undefined) {
+        throw new EnvoyApiError({
+          method: "POST",
+          url: "http://127.0.0.1:4000/v1/interests/subscribe",
+          status: 400,
+          responseBody: JSON.stringify({
+            error: `no stream subject captures ${uncaptured}`,
+            expected: ["topics"],
+          }),
+        })
+      }
+      return noInterest()
+    },
+  })
   const session = await startChannelSession(
     sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
       connection: nats,
-      client: recordingClient(calls),
+      client,
     }),
   )
 
   try {
-    await expect(session.follow(["notifications.lxspec.probe"])).rejects.toThrow(
-      "no stream subject captures notifications.lxspec.probe",
-    )
-    expect(session.topics()).toEqual([directSubject])
+    // The bare base came back with the row and is followed; no registration carried it, so none
+    // was refused.
+    expect(session.topics()).toEqual([
+      directSubject,
+      "notifications.team",
+      "notifications.team.deploys",
+    ])
+    expect(subscribes).toEqual([[directSubject, "notifications.team.deploys"]])
 
-    // A wildcard the stream does capture is followed, and its bare base, which the stream
-    // captures nothing of, is not registered beside it.
-    expect(await session.follow(["notifications.team.>"])).toEqual(["notifications.team.>"])
-    expect(session.topics()).toEqual([directSubject, "notifications.team.>"])
+    expect(await session.follow(["notifications.lxspec.probe", "notifications.team.>"])).toEqual([
+      "notifications.lxspec.probe",
+      "notifications.team.>",
+    ])
+    expect(session.topics()).toContain("notifications.lxspec.probe")
+    expect(subscribes.at(-1)).toEqual([
+      directSubject,
+      "notifications.team.deploys",
+      "notifications.team.>",
+    ])
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })

@@ -58,15 +58,17 @@ times is replaced by a notice naming it on
 the same path; a notice that cannot be shown goes to stderr. A crash between the hand-off and the ledger
 write can show a frame twice, never lose it. The host policy pi-envoy shares is the ledger's too:
 which subjects the session follows (`replayFollowedSubjects`: the agent subject and every
-topic but a role's or one reaching a private stream subject, which registration leaves out too:
-`reachesPrivateStreamSubject`, the listener's rule, another session's agent subject, a
-failed-delivery lane, a controller notice lane of a project whose controller role this session
-does not hold, or a wildcard reaching one), which remembered topics come back at start
-(`rememberedTopics`), when a `subscription.removed` frame closes a topic and takes it out of
-the registry, and which topic nothing would ever be delivered on, so a subscription naming it is
-refused rather than followed (`streamDeliversNothing`); those rules are
-`@legion/envoy-client/stream-topics`'s, and this server keeps only how it shows a card, where it
-warns, and its file.
+topic but a role's or one reaching a private stream subject), which remembered topics come back
+at start (`rememberedTopics`), when a `subscription.removed` frame closes a topic and takes it
+out of the registry, and which topics a registration carries (`registrationTopics`: the
+session's own agent subject and every followed topic the listener will store for it, leaving out
+one reaching a private stream subject that is not this session's — `reachesPrivateStreamSubject`,
+the listener's rule: another session's agent subject, a failed-delivery lane, a controller notice
+lane of a project whose controller role this session does not hold, or a wildcard reaching one —
+and one nothing would ever be delivered on, `streamDeliversNothing`, which the listener refuses
+the whole registration for, so a topic the session follows from its row or its remembered state
+wedges nothing); those rules are `@legion/envoy-client/stream-topics`'s, and this server keeps
+only how it shows a card, where it warns, and its file.
 
 `runEnvoyChannelServer` dials NATS with the shared options of
 `@legion/envoy-client/nats-connection` (`natsConnectionOptions`): a ping every 10 s and the

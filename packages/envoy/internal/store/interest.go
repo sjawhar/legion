@@ -92,7 +92,14 @@ func MergedTopics(sessionID string, roles []string, cur []string, topics []strin
 // subject (dropPrivateStreamTopics). Registry.PlanInterest reads the roles once and merges once;
 // the listener's registration route builds the filter from the plan and hands the same plan back
 // to Registry.UpsertPlanned, so no second read can decide the row differently from the filter.
+//
+// Requested is what the registration asked for, and Revision the bucket revision of the row the
+// plan merged it into, 0 for a session with no row: Registry.UpsertPlanned writes at that
+// revision and plans again from Requested when the bucket refuses the write, so an unsubscribe
+// that landed in the seconds between the plan and the write is not undone by it.
 type InterestPlan struct {
-	Roles  []string
-	Topics []string
+	Roles     []string
+	Topics    []string
+	Requested []string
+	Revision  uint64
 }

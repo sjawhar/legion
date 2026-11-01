@@ -132,13 +132,13 @@ func TestControllerNoticeRolePairsALaneWithItsRoleToken(t *testing.T) {
 
 // What a session may register as an interest (/v1/interests/subscribe): anything but a topic
 // reaching a private stream subject that is not its own: another session's agent subject by name
-// or any wildcard over the agent subjects, a failed-delivery lane (its own included) or a wildcard
-// over them, a controller notice lane of a project whose controller role it does not hold, and
-// wildcards reaching any of those. Its own agent subject is its own only when it is one literal
-// subject, and so is the notice lane of the project whose controller role its claims name: the
-// holder registers that lane because the notices reach it through its own consumer alone
-// (INFRA-771), while another project's controller lane, and every other private subject, stay out
-// of a controller's registration too.
+// or any wildcard over the agent subjects, a failed-delivery lane of an agent subject (its own
+// included) or of a team topic, or a wildcard over either, a controller notice lane of a project
+// whose controller role it does not hold, and wildcards reaching any of those. Its own agent
+// subject is its own only when it is one literal subject, and so is the notice lane of the
+// project whose controller role its claims name: the holder registers that lane because the
+// notices reach it through its own consumer alone (INFRA-771), while another project's
+// controller lane, and every other private subject, stay out of a controller's registration too.
 func TestReachesPrivateStreamSubjectBoundsInterests(t *testing.T) {
 	controller := []string{"legion-ACME-controller", "reviewer"}
 	for _, tc := range []struct {
@@ -160,6 +160,8 @@ func TestReachesPrivateStreamSubjectBoundsInterests(t *testing.T) {
 		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.agent.ses_a", want: true},
 		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.agent.ses_b", want: true},
 		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.agent.>", want: true},
+		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.team.deploys", want: true},
+		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.notifications.team.>", want: true},
 		{sessionID: "ses_a", topic: "notifications.envoy.exceptions.>", want: true},
 		{sessionID: "ses_a", topic: "notifications.envoy.>", want: true},
 		{sessionID: "ses_a", topic: "notifications.legion.ACME.controller", want: true},

@@ -178,7 +178,7 @@ export function parseSubscribeAnswer(body: unknown): SubscribeResult {
  * cannot read is still a failure: the listener answered something about delivery that this build
  * would act on wrongly.
  */
-export function parseServingPortSubscribeAnswer(body: unknown): ServingPortSubscribeResult {
+function parseServingPortSubscribeAnswer(body: unknown): ServingPortSubscribeResult {
   const raw =
     typeof body === "object" && body !== null && "delivery" in body ? body.delivery : undefined;
   if (raw === undefined || raw === null) return InterestWireSchema.parse(body);
@@ -234,14 +234,6 @@ export type SubscribeInput = {
    * runs. */
   readonly plugin: { readonly name: string; readonly version: string };
 };
-
-/**
- * A registration of a session the listener pushes to on a serving port (`port` above 0). It asks
- * for a consumer like any other, and is answered one when this listener can give it one, but it
- * is not refused when it cannot: the port is the session's other way in
- * (`subscribeServingPort`).
- */
-export type ServingPortSubscribeInput = SubscribeInput & { readonly port: number };
 
 /**
  * A new {@link SubscribeInput.clientInstanceID}: 128 random bits as 32 lower-case hex characters.
@@ -407,12 +399,11 @@ export class EnvoyApiError extends Error {
 
 export type EnvoyClient = {
   readonly subscribe: (input: SubscribeInput) => Promise<SubscribeResult>;
-  /** Registers a session the listener pushes to on its serving port
-   *  (`ServingPortSubscribeInput`), which is answered a consumer only when this listener can
-   *  give it one. */
-  readonly subscribeServingPort: (
-    input: ServingPortSubscribeInput
-  ) => Promise<ServingPortSubscribeResult>;
+  /**
+   * Registers a session the listener pushes to on its serving port (`SubscribeInput.port`, the
+   * port it serves on), which is answered a consumer only when this listener can give it one.
+   */
+  readonly subscribeServingPort: (input: SubscribeInput) => Promise<ServingPortSubscribeResult>;
   readonly unsubscribe: (input: UnsubscribeInput) => Promise<void>;
   readonly getInterest: (sessionID: string) => Promise<Interest>;
   readonly send: (input: SendInput) => Promise<SendResult>;

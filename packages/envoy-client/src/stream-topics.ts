@@ -42,7 +42,7 @@ export function streamStores(topic: string): boolean {
 
 /**
  * Whether nothing would ever be delivered to a session on `topic`, so the listener refuses the
- * whole registration naming it by name (`bus.UsesCoreTransport` in packages/envoy/internal/bus,
+ * whole registration naming it by name (`bus.ReachesNoSession` in packages/envoy/internal/bus,
  * applied by POST /v1/interests/subscribe): a `notifications.` topic no stream subject captures
  * and that is no role lane. A session takes its messages from its own consumer, which holds what
  * the stream stored, so such an interest would be stored and deliver nothing. A role lane still
@@ -130,6 +130,42 @@ export function reachesPrivateStreamSubject(
   if (role !== undefined) return !roles.includes(role);
   // A session id holding `*` or `>` makes a wildcard of its "own" agent subject, no session's alone.
   return topic !== ownAgentSubject || /[*>]/.test(ownAgentSubject);
+}
+
+/**
+ * The topics a registration carries, for every host that builds one: the session's own agent
+ * subject, which its consumer is always filtered on, and every topic it follows that the
+ * listener will store for it. Two are left out, and a host that followed one still follows it:
+ * it just never goes to the listener.
+ *
+ * A topic reaching a private stream subject that is not this session's
+ * (`reachesPrivateStreamSubject`) is left out because the listener leaves it out of the stored
+ * row itself, answering a warning.
+ *
+ * A topic nothing would ever be delivered on (`streamDeliversNothing`) is left out because the
+ * listener refuses the *whole* registration naming one, `400`, so a single such topic would
+ * leave the session with no consumer at all, at every heartbeat, for as long as anything still
+ * names it. A host cannot refuse it where a topic is first followed and be done: a topic also
+ * comes back from the listener's own stored row and from the transcript the host restores
+ * (INFRA-771 review), and a row written by an earlier build holds `notifications.team`, the bare
+ * base that build expanded `notifications.team.>` to, which this build's stream captures
+ * nothing of. Filtering here is the one place every registration passes through.
+ */
+export function registrationTopics(
+  ownAgentSubject: string,
+  followed: Iterable<string>,
+  roles: readonly string[] = []
+): string[] {
+  return [
+    ...new Set([
+      ownAgentSubject,
+      ...[...followed].filter(
+        (topic) =>
+          !reachesPrivateStreamSubject(ownAgentSubject, topic, roles) &&
+          !streamDeliversNothing(topic)
+      ),
+    ]),
+  ];
 }
 
 /**

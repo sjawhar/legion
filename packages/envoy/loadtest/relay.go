@@ -26,8 +26,8 @@ import (
 // (bus.DeliverSubject), and answers each frame `received`, then `done`, on the frame's reply
 // subject, as the pi plugin does (packages/envoy-client/src/consumer-delivery.ts). The frame is the
 // session's receipt; its Envoy-Stored-At header, the stream's store time of the message, gives the
-// delivery latency from publish. The session keeps its core subscriptions, as the plugin does: a
-// core copy of a relayed subject answers its lane receipt on the agent topic and is not counted.
+// delivery latency from publish. The session subscribes nothing else, as the plugin does not: a
+// relay frame is the only copy of a message it ever sees, so every receipt the run counts is one.
 
 // sessionDeliveryConsumer is the mode the listener answers a registration it gave a consumer
 // (cmd/listener/session_delivery.go deliveryModeConsumer), the only mode it answers at all: a
@@ -91,7 +91,7 @@ type relaySessions struct {
 	frames *collector[relayFrameRec]
 
 	modeChanges, frameCount, duplicates, redelivered, gaps, undecodable atomic.Int64
-	replyErrors, coreCopies                                             atomic.Int64
+	replyErrors                                                         atomic.Int64
 }
 
 func newRelaySessions(sessions, conns int) *relaySessions {
@@ -227,13 +227,6 @@ func (r *relaySessions) reply(m *nats.Msg, word []byte) bool {
 	return true
 }
 
-// coreCopy takes a core copy of a relayed session's subject: the relay frame is the session's
-// delivery, so the copy is counted and dropped. Nothing is answered on it, as a session answers
-// no frame.
-func (r *relaySessions) coreCopy() {
-	r.coreCopies.Add(1)
-}
-
 // sessionDeliverySummary is how the sessions' delivery went.
 type sessionDeliverySummary struct {
 	// ConsumerSessions counts the sessions whose last registration answered consumer delivery;
@@ -255,16 +248,15 @@ type sessionDeliverySummary struct {
 	Gaps        int64 `json:"gaps"`
 	Undecodable int64 `json:"undecodable"`
 	// ReplyErrors counts the replies that could not be sent (no reply subject, or a publish
-	// error); CoreCopies the core copies of relayed sessions' subjects, not counted.
+	// error).
 	ReplyErrors int64 `json:"reply_errors"`
-	CoreCopies  int64 `json:"core_copies"`
 }
 
 func (r *relaySessions) summary() sessionDeliverySummary {
 	out := sessionDeliverySummary{
 		ModeChanges: r.modeChanges.Load(), Frames: r.frameCount.Load(), Duplicates: r.duplicates.Load(),
 		Redelivered: r.redelivered.Load(), Gaps: r.gaps.Load(), Undecodable: r.undecodable.Load(),
-		ReplyErrors: r.replyErrors.Load(), CoreCopies: r.coreCopies.Load()}
+		ReplyErrors: r.replyErrors.Load()}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, a := range r.answers {

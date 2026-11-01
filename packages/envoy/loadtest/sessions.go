@@ -22,11 +22,12 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
-// The simulated sessions: on NATS, each subscribes its agent topic and its watched issues'
-// topics; on the listener, each registers, asks for consumer delivery and sends its heartbeat.
-// Each subscribes its relay subject first, as the pi plugin does before it registers (relay.go):
-// consumer delivery is the only way a session is delivered to, so a registration the listener can
-// give no consumer is refused and counted an error.
+// The simulated sessions: on NATS, each subscribes its relay subject, as the pi plugin does
+// before it registers (relay.go); on the listener, each registers, asks for consumer delivery and
+// sends its heartbeat. It subscribes nothing else: a session is delivered to by the relay of its
+// own consumer alone (INFRA-771), so a registration the listener can give no consumer is refused
+// and counted an error, and a core subscription here would credit such a session with deliveries
+// no plugin receives.
 
 // natsSessions is the sessions' NATS side: the shared connections and their subscriptions, every
 // receipt, and one sample envelope per event type.
@@ -43,8 +44,9 @@ type natsSessions struct {
 }
 
 // subscribeSessions connects natsConns connections the sessions share; each session subscribes
-// its relay subject, then its own agent topic and its watched issues' topics, as the pi plugin's
-// self-subscription does. The connections it made are closed by close, also when it fails.
+// its relay subject, as the pi plugin does before it registers, and nothing else: every message
+// a session gets arrives as a relay frame of its own consumer. The connections it made are
+// closed by close, also when it fails.
 func (st *step) subscribeSessions() (*natsSessions, error) {
 	ns := &natsSessions{receipts: newCollector[receipt](1 << 16), envelopes: envelopeSamples{data: map[string][]byte{}, marked: map[string]bool{}}}
 	for i := range st.cfg.natsConns {
@@ -66,53 +68,12 @@ func (st *step) subscribeSessions() (*natsSessions, error) {
 			return ns, err
 		}
 		ns.subs++
-		if _, err := nc.Subscribe(contracts.AgentSubject(s.id), ns.handler(i, true, st.nonce)); err != nil {
-			return ns, err
-		}
-		ns.subs++
-		for _, w := range s.watched {
-			if _, err := nc.Subscribe(st.issueTopic(w), ns.handler(i, false, st.nonce)); err != nil {
-				return ns, err
-			}
-			ns.subs++
-		}
 	}
 	for _, nc := range ns.conns {
 		_ = nc.Flush()
 	}
 	st.lg.Printf("nats: %d subscriptions on %d connections", ns.subs, len(ns.conns))
 	return ns, nil
-}
-
-// handler records each envelope as a receipt of the event id in its payload, on an agent topic
-// or an issue topic, and offers it as its event type's sample envelope. For a session the listener
-// relays (its last registration answered consumer), the relay frame is the receipt, as in the pi
-// plugin: the core copy is counted, answered nowhere, and dropped.
-func (ns *natsSessions) handler(session int, agent bool, nonce int64) nats.MsgHandler {
-	return func(m *nats.Msg) {
-		now := time.Now().UnixNano()
-		if ns.relay.relayed(session) {
-			ns.relay.coreCopy()
-			return
-		}
-		var env contracts.Envelope
-		if json.Unmarshal(m.Data, &env) != nil {
-			return
-		}
-		var ev struct {
-			ID   int64  `json:"id"`
-			Type string `json:"type"`
-		}
-		if json.Unmarshal([]byte(env.Payload), &ev) != nil {
-			return
-		}
-		key := ev.Type
-		if agent {
-			key = "agent." + ev.Type
-		}
-		ns.envelopes.offer(key, m.Data, nonce)
-		ns.receipts.add(receipt{EventID: ev.ID, Recv: now, Agent: agent})
-	}
 }
 
 func (ns *natsSessions) close() {

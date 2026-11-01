@@ -8,14 +8,15 @@ import {
   ROLE_TOPIC_PREFIX,
   slackMentionTopic,
 } from "@legion/contracts";
-import { deliverSubject, RelayHeader } from "@legion/envoy-client/consumer-delivery";
 import {
   type Block,
   type Cleanup,
+  deliveryFor,
   type Interactive,
   messageStream,
   ompRoot,
   type Request,
+  sendRelayFrame,
   serveStandin,
   spawnInteractive,
   spawnRpc,
@@ -93,12 +94,9 @@ const PROJECT = "legion";
  */
 const SLACK_CHANNEL = "C0CONTROLLER";
 const SLACK_TEAM = "T0LEGION";
-/**
- * The stream the stand-in listener names in its registration answers and in the relay frames it
- * sends: one stream for the whole case, so a frame never reads as a stream the session's resume
- * point does not name (`ConsumerDelivery.answered`).
- */
-const STAND_IN_STREAM_ID = "controller-start-stream";
+// The stand-in stream every registration answer and relay frame of a case names is the
+// harness's (`STANDIN_STREAM_ID`): one stream for the whole case, so a frame never reads as a
+// stream the session's resume point does not name (`ConsumerDelivery.answered`).
 
 /**
  * The extensions every controller loads. The Envoy entry is the sibling plugin's: the controller
@@ -446,16 +444,7 @@ async function serveController(
       // A session takes its messages from its own consumer, which this listener relays on the
       // session's deliver subject (`controllerInbound`): a registration answered without this
       // leaves the plugin with no consumer and the session deaf, which is what it refuses.
-      ...(url.pathname === "/v1/interests/subscribe"
-        ? {
-            delivery: {
-              mode: "consumer",
-              subject: deliverSubject(sid),
-              stream_id: STAND_IN_STREAM_ID,
-              gap: false,
-            },
-          }
-        : {}),
+      ...deliveryFor(url.pathname, body, roleHolder),
     });
   });
   // A request still held at the end (an interrupted one among them) is answered, so the server
@@ -817,46 +806,27 @@ async function controllerInbound(nats: string): Promise<ControllerInbound> {
     return sequence;
   };
   /**
-   * One relay frame, as the listener's relay of the session's consumer sends it: the stored
-   * subject, sequence, stream and time in its headers (`decodeRelayFrame`), on the session's
-   * deliver subject. The request's answer is the session's own `received`, which it sends as it
-   * decodes the frame; until the session has subscribed that subject the server reports no
-   * responder, so the frame is sent again, as the one frame it is. A frame with no stamp of its
+   * One relay frame, as the harness sends it (`sendRelayFrame`). A frame with no stamp of its
    * own is stored as it is relayed, at the sequence after the last.
    */
-  const relay = async (
+  const relay = (
     sid: string,
     subject: string,
-    frame: Uint8Array,
+    payload: Uint8Array,
     stamp: { readonly seq: number; readonly storedAt: string; readonly delivered: number } = {
       seq: nextSequence(),
       storedAt: new Date().toISOString(),
       delivered: 1,
     }
-  ): Promise<unknown> => {
-    const deadline = Date.now() + 30_000;
-    const header = natsHeaders();
-    header.set(RelayHeader.subject, subject);
-    header.set(RelayHeader.streamSeq, String(stamp.seq));
-    header.set(RelayHeader.streamID, STAND_IN_STREAM_ID);
-    header.set(RelayHeader.delivered, String(stamp.delivered));
-    header.set(RelayHeader.storedAt, stamp.storedAt);
-    for (;;) {
-      try {
-        return await connection.request(deliverSubject(sid), frame, {
-          headers: header,
-          timeout: 2_000,
-        });
-      } catch (error) {
-        if (Date.now() > deadline) {
-          throw new Error(`${sid} took no relay frame on ${subject}: ${String(error)}`);
-        }
-        // A real clock, deliberately: a session that has not yet subscribed its deliver subject
-        // emits no signal here — the server only answers the next send with no responder.
-        await Bun.sleep(100);
-      }
-    }
-  };
+  ): Promise<unknown> =>
+    sendRelayFrame({
+      connection,
+      newHeaders: natsHeaders,
+      sessionID: sid,
+      subject,
+      payload,
+      ...stamp,
+    });
   /** One message the stream stores now on `subject`, its envelope's summary and topic set. */
   const store = (
     subject: string,

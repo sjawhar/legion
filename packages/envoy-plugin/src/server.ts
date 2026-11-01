@@ -98,12 +98,22 @@ function envoyTools(
       args: subscribeSpec.arguments(zodSchemaApi(tool.schema)) as never,
       async execute(args, ctx) {
         ctx.metadata({ title: "Envoy subscribe" });
+        const servingPort = port();
+        // This session is reached on the serve port and nowhere else, so a registration carrying
+        // port 0 registers a session the listener can deliver nothing to. The port resolves a
+        // second or so after the plugin loads (`syncPort` retries every second), so the call is
+        // refused and the agent can make it again rather than be registered unreachable.
+        if (servingPort === null) {
+          throw new Error(
+            "the OpenCode serve port is not resolved yet, so this session has no way in; try again in a moment"
+          );
+        }
         return JSON.stringify(
           await client.subscribeServingPort({
             sessionID: ctx.sessionID,
             directory: ctx.directory,
             topics: args.topics as string[],
-            port: port() ?? 0,
+            port: servingPort,
             title: title() ?? "",
             driving: true,
             delivery: DELIVERY_REQUEST,

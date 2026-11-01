@@ -12,7 +12,7 @@ import (
 )
 
 // TestJoinDeliveryTimesFromPublish: a receipt that carries the stream's store time gets a delivery
-// latency from publish; a core receipt, which carries none, gets none.
+// latency from publish; one whose frame carried no readable Envoy-Stored-At gets none.
 func TestJoinDeliveryTimesFromPublish(t *testing.T) {
 	writes := []writeRec{{Marker: 1, Kind: kindComment, Issue: "LGA-1", InWindow: true, Sent: 990 * msNs, Arrival: 1000 * msNs, Response: 1100 * msNs, Status: 201}}
 	commits := []commitRow{{EventID: 10, Type: "comment.created", Marker: 1, CommitNs: 1050 * msNs}}

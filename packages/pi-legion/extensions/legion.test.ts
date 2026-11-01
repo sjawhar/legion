@@ -43,49 +43,14 @@ import type {
 } from "@legion/pi-shared/pi-types";
 import { DEFAULT_STALL_LIMITS } from "@legion/pi-shared/stall-limits";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
+import { deliveryFor } from "@legion/pi-shared/test/omp-harness";
 import { logger } from "@oh-my-pi/pi-utils";
 import pkg from "../package.json";
 import { type CapabilityHost, ENVOY_TOOL_NAMES } from "../src/capability-report";
 import { classifySession } from "../src/classify";
 
-/** The stream id every registration answer in this file names. */
-const TEST_STREAM_ID = "legion-test-stream";
-
-/**
- * The delivery answer a listener gives a registration it can give a consumer: the session's own
- * relay subject, which is the one path a message reaches it by (INFRA-771). A registration
- * answered without one is refused in the client (`parseSubscribeAnswer`), as the listener's own
- * refusal is, and leaves the session with no inbound at all until a later one is accepted.
- */
-interface ConsumerDeliveryAnswer {
-  readonly mode: "consumer";
-  readonly subject: string;
-  readonly stream_id: string;
-  readonly gap: boolean;
-}
-
-function consumerDelivery(sessionId: string): ConsumerDeliveryAnswer {
-  return {
-    mode: "consumer",
-    subject: deliverSubject(sessionId),
-    stream_id: TEST_STREAM_ID,
-    gap: false,
-  };
-}
-
-/**
- * What a registration answer carries beyond the interest, for the session the request names:
- * the consumer, on `/v1/interests/subscribe`, and nothing on any other listener route.
- */
-function deliveryFor(
-  pathname: string,
-  body: { readonly session_id?: unknown } | undefined,
-  fallbackSessionId: string
-): { readonly delivery?: ConsumerDeliveryAnswer } {
-  if (pathname !== "/v1/interests/subscribe") return {};
-  const named = typeof body?.session_id === "string" ? body.session_id : fallbackSessionId;
-  return { delivery: consumerDelivery(named) };
-}
+// The consumer answer every registration here is given is the harness's (`deliveryFor`), shared
+// with the tests that run the real binary.
 
 const natsConnections: {
   readonly name: string;

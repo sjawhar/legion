@@ -9,9 +9,11 @@ import {
   decodeRelayFrame,
   deliverSubject,
   FOLLOW_CLOCK_ALLOWANCE_MS,
+  inboundUnavailable,
   RELAY_PROGRESS_INTERVAL_MS,
   type RelayMessage,
   type RelayReply,
+  registerWithRelay,
 } from "../consumer-delivery";
 import { createDeliveryLedger, type DeliveryLedger, type LedgerSnapshot } from "../delivery-ledger";
 
@@ -638,5 +640,91 @@ describe("persisting the snapshot", () => {
     delivery.setFollowed([AGENT, ISSUE_TOPIC]);
 
     expect(delivery.snapshot().follows).toEqual({ [ISSUE_TOPIC]: T0 });
+  });
+});
+
+describe("one registration", () => {
+  const UNCAPTURED = "notifications.team";
+  const TEAM = "notifications.team.deploys";
+
+  /** A relay that records what a registration stamped on it. */
+  function fakeRelay() {
+    const followed: string[][] = [];
+    return {
+      followed,
+      setFollowed: (topics: Iterable<string>) => followed.push([...topics]),
+      registration: () => ({ consumer: true, epoch: "epoch-1" }) as const,
+    };
+  }
+
+  test("carries the topics the listener will store, and takes the answer", async () => {
+    const relay = fakeRelay();
+    const told: string[] = [];
+    const answers: string[] = [];
+    const sent: { topics: readonly string[]; epoch: string }[] = [];
+
+    const result = await registerWithRelay({
+      relay,
+      ownAgentSubject: AGENT,
+      // The bare base a stored row or a transcript brings back: the listener refuses the whole
+      // registration naming it, so it never goes out (INFRA-771 review).
+      followed: [TEAM, UNCAPTURED, "notifications.agent.ses_b"],
+      outage: inboundUnavailable((why) => told.push(why)),
+      send: (topics, delivery) => {
+        sent.push({ topics, epoch: delivery.epoch });
+        return Promise.resolve("registered");
+      },
+      answered: (answer) => answers.push(answer),
+    });
+
+    expect(sent).toEqual([{ topics: [AGENT, TEAM], epoch: "epoch-1" }]);
+    expect(relay.followed).toEqual([[AGENT, TEAM]]);
+    expect([result, answers, told]).toEqual(["registered", ["registered"], []]);
+  });
+
+  test("a session holding no relay subject registers nothing and is told once", async () => {
+    const told: string[] = [];
+    const outage = inboundUnavailable((why) => told.push(why));
+    const sent: unknown[] = [];
+    const register = () =>
+      registerWithRelay({
+        relay: undefined,
+        ownAgentSubject: AGENT,
+        followed: [TEAM],
+        outage,
+        send: (topics) => {
+          sent.push(topics);
+          return Promise.resolve("registered");
+        },
+        answered: () => undefined,
+      });
+
+    await expect(register()).rejects.toThrow("holds no relay subject");
+    // The second outage tick says nothing more: the session was told once.
+    await expect(register()).rejects.toThrow("holds no relay subject");
+    expect(sent).toEqual([]);
+    expect(told).toEqual([
+      "this session holds no relay subject, so the listener can give it no consumer and it can receive nothing",
+    ]);
+  });
+
+  test("a refused registration tells the session once and takes no answer", async () => {
+    const relay = fakeRelay();
+    const told: string[] = [];
+    const answers: string[] = [];
+
+    await expect(
+      registerWithRelay({
+        relay,
+        ownAgentSubject: AGENT,
+        followed: [TEAM],
+        outage: inboundUnavailable((why) => told.push(why)),
+        send: () => Promise.reject(new Error("no_grant")),
+        answered: (answer: string) => answers.push(answer),
+      })
+    ).rejects.toThrow("no_grant");
+
+    expect(relay.followed).toEqual([[AGENT, TEAM]]);
+    expect([answers, told]).toEqual([[], ["no_grant"]]);
   });
 });

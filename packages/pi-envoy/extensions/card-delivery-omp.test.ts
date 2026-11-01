@@ -2,20 +2,21 @@ import { afterEach, beforeAll, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
-import { deliverSubject, RelayHeader } from "@legion/envoy-client/consumer-delivery";
 import {
   type Block,
   type Cleanup,
   call,
+  deliveryFor,
   isSummarization,
   messageStream,
   ompRoot,
   type Request,
+  sendRelayFrame,
   serveStandin,
   spawnRpc,
   writeStandinProfile,
 } from "@legion/pi-shared/test/omp-harness";
-import { connect, ErrorCode, headers, type NatsConnection, NatsError, StringCodec } from "nats";
+import { connect, headers, type NatsConnection, StringCodec } from "nats";
 import { z } from "zod";
 
 // How an Envoy card and a person's Send reach the real Oh My Pi (extensions/envoy.ts's card send,
@@ -66,9 +67,6 @@ const WAKE_TEXT = /Envoy messages? above arrived with no turn to read (it|them)/
 
 /** How long a case waits for one thing the session owes it before failing on it. */
 const DEADLINE_MS = 30_000;
-
-/** The `envoy_stream_id` the stand-in listener's consumer relays, on every frame and answer. */
-const STREAM_ID = "card-delivery-stream";
 
 const cleanup: Cleanup = [];
 afterEach(async () => {
@@ -312,12 +310,7 @@ async function startSession(
       return Response.json({
         ...interest,
         topics: [],
-        delivery: {
-          mode: "consumer",
-          subject: deliverSubject(id),
-          stream_id: STREAM_ID,
-          gap: false,
-        },
+        ...deliveryFor(url.pathname, body, id),
       });
     }
     return Response.json({ ...interest, topics: [] });
@@ -379,47 +372,27 @@ async function startSession(
   // inbox, where the listener's role lane forwards a role card and Dispatch addresses a Send. A
   // session always follows it, so no frame of a case is dropped by the follow filter.
   const stored = `notifications.agent.${sid}`;
-  const relay = deliverSubject(sid);
 
-  // Sends one frame as the listener's relay sends it: the stream's headers, and an inbox the
-  // session answers on (`received` as it takes the frame, `done` once it is written). Sent as a
-  // request, so that until the session's relay subscription is open there is no responder and
-  // nothing took the frame, which is then sent again; the session's first answer says it took
-  // it, which is what the caller waits on.
+  // Sends one frame as the listener's relay sends it (`sendRelayFrame`), under the sequence
+  // after the last: one stream for the whole case. A run whose binary died fails the wait at
+  // once rather than at the frame's own deadline.
   let streamSeq = 0;
   const relayFrame = async (what: string, envelope: string): Promise<void> => {
     streamSeq += 1;
-    const seq = streamSeq;
-    await until(
-      what,
-      async () => {
-        const frame = headers();
-        frame.set(RelayHeader.subject, stored);
-        frame.set(RelayHeader.streamSeq, String(seq));
-        frame.set(RelayHeader.streamID, STREAM_ID);
-        frame.set(RelayHeader.delivered, "1");
-        frame.set(RelayHeader.storedAt, new Date().toISOString());
-        try {
-          await connection.request(relay, codec.encode(envelope), {
-            timeout: 1_000,
-            headers: frame,
-          });
-          return true;
-        } catch (error) {
-          if (
-            error instanceof NatsError &&
-            (error.code === ErrorCode.NoResponders || error.code === ErrorCode.Timeout)
-          ) {
-            // No relay subscription yet, or one that answered nothing: the same frame goes
-            // again, and a copy of a frame the session already holds is answered, never shown
-            // twice (`createConsumerDelivery`).
-            return undefined;
-          }
-          throw error;
-        }
-      },
-      closed
-    );
+    try {
+      await sendRelayFrame({
+        connection,
+        newHeaders: headers,
+        sessionID: sid,
+        subject: stored,
+        payload: codec.encode(envelope),
+        seq: streamSeq,
+        withinMs: DEADLINE_MS,
+        stopped: closed,
+      });
+    } catch (error) {
+      throw new Error(`${what} failed: ${String(error)}`);
+    }
   };
 
   let taken = 0;

@@ -120,8 +120,10 @@ describe("envoyToolSpecs", () => {
       );
       expect(description).not.toContain("live only");
     }
+    // Every way a role publish ends in an error: no holder (404), the holder's refusal (403),
+    // and the window the listener spends waiting for the stream (504).
     expect(publish?.description).toContain(
-      "a role message errs only when no session holds the role, since its 200 says the stream stored the forward for the holder's consumer, not that the holder answered"
+      "A role message gets an error when no session holds the role, when the holder refuses the message, and when the forward is not stored within four seconds."
     );
     expect(publish?.description).toContain(
       "A notifications. topic no stream subject captures is refused by name: nothing would store it."

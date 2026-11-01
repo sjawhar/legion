@@ -9780,10 +9780,14 @@ console.log(JSON.stringify(args));
     ]);
   });
 
-  // A topic the stream captures nothing of would be refused by the listener with the whole
-  // registration, so one envoy_subscribe would wedge every later one (INFRA-771 review).
-  test("envoy_subscribe refuses a topic no stream subject captures, and keeps registering", async () => {
+  // A topic the stream captures nothing of is refused by the listener with the whole
+  // registration, so a session that follows one — through the tool, or from the interest row and
+  // the transcript a restore reads — would be refused at every heartbeat, for as long as that row
+  // holds it (INFRA-771 review). It is followed all the same, and left out of every registration
+  // (`registrationTopics`).
+  test("never registers a topic no stream subject captures, however it was followed", async () => {
     const registrations: string[][] = [];
+    const refused: string[] = [];
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
@@ -9796,38 +9800,62 @@ console.log(JSON.stringify(args));
           (topic) => topic === "notifications.team" || topic === "notifications.lxspec.probe"
         );
         if (uncaptured !== undefined) {
+          refused.push(uncaptured);
           return new Response(
             JSON.stringify({ error: `no stream subject captures ${uncaptured}` }),
             { status: 400 }
           );
         }
       }
+      if (url.pathname === "/v1/interests/ses_uncaptured") {
+        // The row an earlier build left: it expanded `notifications.team.>` to the bare base
+        // beside it, which this build's stream captures nothing of.
+        return response({
+          session_id: "ses_uncaptured",
+          machine_id: "test",
+          dir: "/tmp",
+          topics: ["notifications.team", "notifications.team.deploys"],
+        });
+      }
       return responseWithRegistration(input, init, {});
     };
     const { default: envoyExtension } = await import("./envoy.ts?uncaptured-subscribe");
     const fixture = createPi();
     envoyExtension(fixture.pi);
-    const context = sessionContext("ses_uncaptured");
+    // A resumed session, which is what reads its stored interest row again and follows what it
+    // holds (`recoverRegisteredInterests`).
+    const base = sessionContext("ses_uncaptured");
+    const context = {
+      ...base,
+      sessionManager: { ...base.sessionManager, getBranch: () => [{}] },
+    };
     await fixture.handlers.get("session_start")?.({}, context);
     const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
     if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
 
-    const refused = await subscribeTool.execute("", { topics: ["notifications.lxspec.probe"] });
-    expect(refused.isError).toBe(true);
-    expect(refused.content[0]?.text).toContain("notifications.lxspec.probe");
-    expect(await followedTopics(fixture.tools, context)).not.toContain(
-      "notifications.lxspec.probe"
-    );
+    const subscribed = await subscribeTool.execute("", {
+      topics: ["notifications.lxspec.probe", "notifications.team.>"],
+    });
 
-    // A wildcard whose bare base the stream captures nothing of carries only the wildcard, so
-    // the registration stands and every later one does too.
-    const wildcard = await subscribeTool.execute("", { topics: ["notifications.team.>"] });
-    expect(wildcard.isError).toBeFalsy();
-    expect(wildcard.details).toMatchObject({ added: ["notifications.team.>"] });
+    expect(subscribed.isError).toBeFalsy();
+    expect(subscribed.details).toMatchObject({
+      added: ["notifications.lxspec.probe", "notifications.team.>"],
+    });
+    // Both the restored bare base and the tool's uncaptured topic are followed, and neither
+    // reached the listener, so no registration was refused.
+    const followed = await followedTopics(fixture.tools, context);
+    for (const topic of ["notifications.team", "notifications.lxspec.probe"]) {
+      expect(followed).toContain(topic);
+    }
+    expect(refused).toEqual([]);
+    expect(registrations.length).toBeGreaterThan(0);
+    for (const topics of registrations) {
+      expect(topics).not.toContain("notifications.team");
+      expect(topics).not.toContain("notifications.lxspec.probe");
+    }
     const registered = registrations.at(-1) ?? [];
     expect(registered).toContain("notifications.team.>");
-    expect(registered).not.toContain("notifications.team");
-    expect(registrations.every((topics) => !topics.includes("notifications.team"))).toBe(true);
+    expect(registered).toContain("notifications.team.deploys");
   });
 
   test("unsubscribes role-shaped subscriptions locally without releasing the held role", async () => {

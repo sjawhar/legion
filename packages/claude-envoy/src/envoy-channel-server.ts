@@ -15,6 +15,7 @@ import {
   gapNoticeText,
   inboundUnavailable,
   inboundUnavailableNoticeText,
+  registerWithRelay,
 } from "@legion/envoy-client/consumer-delivery"
 import {
   createDeliveryDedupe,
@@ -44,10 +45,9 @@ import {
 } from "@legion/envoy-client/session-settings"
 import { postSlackReply } from "@legion/envoy-client/slack-post"
 import {
-  reachesPrivateStreamSubject,
+  registrationTopics,
   rememberedTopics,
   replayFollowedSubjects,
-  streamDeliversNothing,
 } from "@legion/envoy-client/stream-topics"
 import {
   EnvoyToolOperation,
@@ -818,24 +818,18 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    */
   function dropFromTopicsAndRegistry(topics: readonly string[]): Promise<void> {
     followedTopics.unfollow(topics)
-    // The relay takes the topics the session follows now, before a registration carries them.
-    if (relay?.sessionID === identity.id) relay.delivery.setFollowed(registeredTopics())
+    // The relay takes the topics the session follows now, before a registration carries them:
+    // the same set the registration will carry (`registrationTopics`).
+    if (relay?.sessionID === identity.id) {
+      relay.delivery.setFollowed(
+        registrationTopics(
+          directSubject,
+          followedTopics.topics(),
+          heldRole === undefined ? [] : [heldRole],
+        ),
+      )
+    }
     return serialized(() => options.client.unsubscribe({ sessionID: identity.id, topics }))
-  }
-
-  /**
-   * The topics a registration carries: every subject followed, the direct one included, but a
-   * followed topic reaching a private stream subject of another session (a wildcard over the
-   * agent subjects, another session's by name, a failed-delivery lane, or the controller notice
-   * lane of a project whose controller role this session does not hold), which the listener
-   * refuses to store. The lane of a role it does hold is carried: a session receives what its
-   * own consumer delivers and nothing else.
-   */
-  function registeredTopics(): string[] {
-    const roles = heldRole === undefined ? [] : [heldRole]
-    return followedTopics
-      .topics()
-      .filter((topic) => !reachesPrivateStreamSubject(directSubject, topic, roles))
   }
 
   /**
@@ -863,12 +857,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
 
   /**
    * Advertise the current id and topics; runs only inside `serialized`. The title is also stamped
-   * for the `dispatch` command (`options.stampTitle`) whenever it or the id changes. Every
-   * registration asks for consumer delivery (`delivery`: the relay's epoch and resume point),
-   * the relay taking the topics it carries as followed first: a session receives only what its
-   * own consumer holds, so a registration carrying no relay would be refused `409 not_requested`
-   * and leave nothing registered. With no relay open the registration fails here instead, and
-   * the next heartbeat tries again; the answer's consumer is taken by `takeDeliveryAnswer`.
+   * for the `dispatch` command (`options.stampTitle`) whenever it or the id changes. The rest is
+   * the sequence every host shares, `registerWithRelay`: the topics the listener will store for
+   * this session (`registrationTopics`), taken by the relay as followed first, the relay's
+   * delivery request, the outage told once, and the answer's consumer taken
+   * (`takeDeliveryAnswer`).
    */
   const register = async (): Promise<void> => {
     const title = options.title?.(identity.id) ?? ""
@@ -892,40 +885,34 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       }
     }
     const sessionID = identity.id
-    const topics = registeredTopics()
     const asking = relay?.sessionID === sessionID ? relay : undefined
-    if (asking === undefined) {
-      const refused = new Error(
-        "this session holds no relay subject, so the listener can give it no consumer and it can receive nothing",
-      )
-      inboundOutage.refused(refused)
-      throw refused
-    }
-    asking.delivery.setFollowed(topics)
-    let result: SubscribeResult
-    try {
-      result = await options.client.subscribe({
-        sessionID,
-        directory: identity.directory,
-        topics,
-        port: 0,
-        title,
-        capabilities: options.capabilities,
-        driving: false,
-        selfSubscribed: true,
-        clientInstanceID: options.clientInstanceID,
-        plugin: { name: packageName, version: options.pluginVersion },
-        delivery: asking.delivery.registration(),
-      })
-    } catch (error) {
+    await registerWithRelay({
+      relay: asking?.delivery,
+      ownAgentSubject: directSubject,
+      followed: followedTopics.topics(),
+      roles: heldRole === undefined ? [] : [heldRole],
+      outage: inboundOutage,
+      send: (topics, deliveryRequest) =>
+        options.client.subscribe({
+          sessionID,
+          directory: identity.directory,
+          topics,
+          port: 0,
+          title,
+          capabilities: options.capabilities,
+          driving: false,
+          selfSubscribed: true,
+          clientInstanceID: options.clientInstanceID,
+          plugin: { name: packageName, version: options.pluginVersion },
+          delivery: deliveryRequest,
+        }),
       // A registration the listener refused (`503 consumer_error|no_grant`, `409
       // not_requested|invalid_session_id`) leaves the session with no consumer at all, as every
       // other failed registration does: the session is told once and the heartbeat asks again.
-      inboundOutage.refused(error)
-      throw error
-    }
-    inboundOutage.accepted()
-    takeDeliveryAnswer(sessionID, asking, result)
+      answered: (result) => {
+        if (asking !== undefined) takeDeliveryAnswer(sessionID, asking, result)
+      },
+    })
   }
 
   /**
@@ -1377,23 +1364,6 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     topics: () => followedTopics.topics(),
     async follow(topics) {
       if (shuttingDown) return []
-      // A topic no stream subject captures is refused here, before anything follows it: the
-      // listener refuses the whole registration naming one (`streamDeliversNothing`), so a
-      // single such topic would make every later registration of this session fail, its
-      // interest row lapse and its role claims fail with it, until the process restarts.
-      // Only a topic the registration would carry: one reaching a private stream subject is
-      // left out of it instead (`registeredTopics`), which the listener answers with a warning
-      // rather than a refusal, so it wedges nothing.
-      const roles = heldRole === undefined ? [] : [heldRole]
-      const uncaptured = topics.filter(
-        (topic) =>
-          streamDeliversNothing(topic) && !reachesPrivateStreamSubject(directSubject, topic, roles),
-      )
-      if (uncaptured.length > 0) {
-        throw new Error(
-          `no stream subject captures ${uncaptured.join(", ")}, so nothing would be delivered to this session on ${uncaptured.length === 1 ? "it" : "them"}; follow a notifications.team.<name> topic instead`,
-        )
-      }
       const fresh: string[] = []
       for (const topic of expandSubscriptionTopics(topics)) {
         if (topic === directSubject || userTopics.has(topic)) continue

@@ -1448,10 +1448,10 @@ func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string
 }
 
 // subscribeHandler answers POST /v1/interests/subscribe. Its store work - the interest record's
-// read and write (store.Registry.UpsertWithin), the session entry's write and the unwired-repository
-// checks - runs within sendRequestBudget of the request's own context, so a bus that does not answer
-// is the bus-unavailable 503 with Retry-After: 1 inside the caller's attempt (writeStoreError); a
-// refused key is still its 413 or 400.
+// read and write (store.Registry.PlanInterest, then UpsertPlanned), the session entry's write and
+// the unwired-repository checks - runs within sendRequestBudget of the request's own context, so a
+// bus that does not answer is the bus-unavailable 503 with Retry-After: 1 inside the caller's
+// attempt (writeStoreError); a refused key is still its 413 or 400.
 func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1555,6 +1555,10 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			writeJSON(w, refusal.status, refusal)
 			return
 		}
+		// The write stores the plan at the revision the plan read, and plans again when the
+		// bucket refuses it (store.Registry.UpsertPlanned): the consumer work above takes up to
+		// 5 s per bus call, and an unsubscribe landing in that window would otherwise have every
+		// topic it removed written back by this plan.
 		item, err := d.registry.UpsertPlanned(ctx, store.Interest{
 			SessionID: body.SessionID,
 			MachineID: machineID,

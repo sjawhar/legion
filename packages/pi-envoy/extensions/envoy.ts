@@ -33,6 +33,7 @@ import {
   gapNoticeText,
   inboundUnavailable,
   inboundUnavailableNoticeText,
+  registerWithRelay,
 } from "@legion/envoy-client/consumer-delivery";
 import {
   createDeliveryDedupe,
@@ -92,11 +93,7 @@ import {
   sessionSettings,
 } from "@legion/envoy-client/session-settings";
 import { postSlackReply } from "@legion/envoy-client/slack-post";
-import {
-  reachesPrivateStreamSubject,
-  replayFollowedSubjects,
-  streamDeliversNothing,
-} from "@legion/envoy-client/stream-topics";
+import { replayFollowedSubjects } from "@legion/envoy-client/stream-topics";
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -2166,85 +2163,55 @@ export default function envoyExtension(pi: PiApi): void {
     unwritten.sendNotice(inboundUnavailableNoticeText(why));
   });
 
-  // What this session registers with the listener, read afresh at every registration. The
-  // listener delivers nothing to a self-subscribed session (its own consumer's relay does), so
-  // the registered topics are what that consumer is filtered on: every subject the session
-  // follows, a role-bound one included, since a notice lane reaches this session from its own
-  // consumer and from nowhere else (INFRA-771). One reaching another session's agent subject (a
-  // fork parent's, until a pass closes it, or a wildcard over them) stays out, as the listener
-  // refuses to store it; so does the controller notice lane of a project whose controller role
-  // this session does not hold, which the listener reads from its own role claims, so the lane
-  // leaves the stored row at the first registration after the role ends.
-  // Every registration asks the listener for consumer delivery (`delivery`: the relay's epoch
-  // and resume point), the relay taking the topics it carries as followed first: a session
-  // receives only what its own consumer holds, so a registration carrying no relay would be
-  // refused `409 not_requested` and leave nothing registered.
-  const registrationInput = (asking: Relay): RegistrationInput => {
-    const own = agentSubject(sessionID);
-    const role = registrationState.heldRole();
-    const roles = role === undefined ? [] : [role];
-    const topics = [
-      ...new Set([
-        own,
-        ...[...followed].filter((subject) => !reachesPrivateStreamSubject(own, subject, roles)),
-      ]),
-    ];
-    asking.delivery.setFollowed(topics);
-    return {
-      sessionID,
-      directory: sessionDirectory,
-      topics,
-      port: 0,
-      // Read at every registration: the heartbeat re-registers, which picks up
-      // titles assigned after session_start and later renames.
-      title: activeSessionContext?.sessionManager.getSessionName?.() ?? "",
-      capabilities:
-        sideTurn(activeSessionContext) === undefined
-          ? CAPABILITIES_WITHOUT_BTW
-          : DELIVERY_CAPABILITIES,
-      driving: false,
-      selfSubscribed: true,
-      plugin: { name: packageName, version: packageVersion },
-      delivery: asking.delivery.registration(),
-    };
-  };
-
   // One registration, whichever path sends it: `registrationState.refreshRegistration` outside a
-  // queue, a queued task's own fenced `handle.register` inside one. Every registration asks for
-  // consumer delivery, and the answer decides whether the listener relays the topics it carried
-  // (`takeDeliveryAnswer`); one this session has no relay subject for asks for none, so it fails
-  // here rather than leave the session registered and deaf.
+  // queue, a queued task's own fenced `handle.register` inside one. The sequence every host
+  // shares is `registerWithRelay`: the topics the listener will store for this session, the
+  // relay's delivery request, the outage told once, and the answer's consumer taken
+  // (`takeDeliveryAnswer`).
+  //
+  // The listener delivers nothing to a self-subscribed session (its own consumer's relay does),
+  // so the registered topics are what that consumer is filtered on, which `registrationTopics`
+  // decides for every host: every subject the session follows, a role-bound one included, since
+  // a notice lane reaches this session from its own consumer and from nowhere else (INFRA-771),
+  // but one the listener would not store for it. They are read afresh at every registration.
   const sendRegistration = (
     send: (input: RegistrationInput) => Promise<SubscribeResult>
   ): Promise<SubscribeResult> => {
     const registeringFor = sessionID;
     const asking =
       relay?.sessionID === registeringFor && relay.subscription !== undefined ? relay : undefined;
-    // With no relay subject open (no NATS connection yet, or inbound off for this session) there
-    // is nothing to ask a consumer for, so the registration fails here, loudly, and the next
-    // heartbeat tries again.
-    if (asking === undefined) {
-      const refused = new Error(
-        "this session holds no relay subject, so the listener can give it no consumer and it can receive nothing"
-      );
-      inboundOutage.refused(refused);
-      return Promise.reject(refused);
-    }
-    const input = registrationInput(asking);
-    return send(input).then(
-      (result) => {
-        inboundOutage.accepted();
-        takeDeliveryAnswer(registeringFor, asking, result);
-        return result;
+    const role = registrationState.heldRole();
+    return registerWithRelay({
+      relay: asking?.delivery,
+      ownAgentSubject: agentSubject(registeringFor),
+      followed,
+      roles: role === undefined ? [] : [role],
+      outage: inboundOutage,
+      send: (topics, delivery) =>
+        send({
+          sessionID: registeringFor,
+          directory: sessionDirectory,
+          topics,
+          port: 0,
+          // Read at every registration: the heartbeat re-registers, which picks up
+          // titles assigned after session_start and later renames.
+          title: activeSessionContext?.sessionManager.getSessionName?.() ?? "",
+          capabilities:
+            sideTurn(activeSessionContext) === undefined
+              ? CAPABILITIES_WITHOUT_BTW
+              : DELIVERY_CAPABILITIES,
+          driving: false,
+          selfSubscribed: true,
+          plugin: { name: packageName, version: packageVersion },
+          delivery,
+        }),
+      // A registration the listener refused leaves the session with no consumer at all
+      // (`503 consumer_error|no_grant`, `409 not_requested|invalid_session_id`): the outage
+      // tells the session once and the heartbeat asks again.
+      answered: (result) => {
+        if (asking !== undefined) takeDeliveryAnswer(registeringFor, asking, result);
       },
-      (error: unknown) => {
-        // A registration the listener refused leaves the session with no consumer at all
-        // (`503 consumer_error|no_grant`, `409 not_requested|invalid_session_id`), so the
-        // session is told once and the heartbeat asks again.
-        inboundOutage.refused(error);
-        throw error;
-      }
-    );
+    });
   };
 
   // Registers the session outside any queue, carrying this instance's client instance id: a
@@ -3613,27 +3580,6 @@ export default function envoyExtension(pi: PiApi): void {
           // on, so the tool refuses here, saying why.
           requireInbound();
           const requested = topicsFor(parameters);
-          // A topic no stream subject captures is refused here, before anything follows it: the
-          // listener refuses the whole registration naming one (`streamDeliversNothing`), so a
-          // single such topic would make every later registration of this session fail, its
-          // interest row lapse and its role claims fail with it, until the process restarts.
-          // Only a topic the registration would carry: one reaching a private stream subject is
-          // left out of the registration instead, which the listener answers with a warning
-          // rather than a refusal, so it wedges nothing.
-          const ownSubject = agentSubject(sessionID);
-          const role = registrationState.heldRole();
-          const uncaptured = requested.filter(
-            (topic) =>
-              streamDeliversNothing(topic) &&
-              !reachesPrivateStreamSubject(ownSubject, topic, role === undefined ? [] : [role])
-          );
-          if (uncaptured.length > 0) {
-            return toolFailure(
-              new Error(
-                `no stream subject captures ${uncaptured.join(", ")}, so nothing would be delivered to this session on ${uncaptured.length === 1 ? "it" : "them"}; follow a notifications.team.<name> topic instead`
-              )
-            );
-          }
           const added: string[] = [];
           const already: string[] = [];
           for (const topic of requested) {

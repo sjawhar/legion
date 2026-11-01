@@ -166,7 +166,7 @@ var privateStreamSubjects = []string{
 	// The Legion daemon's notices for one project's controller (daemon notify.ControllerTopic),
 	// which only the session holding that project's controller role may register
 	// (ControllerNoticeRole), and no other session may.
-	"notifications.legion.>",
+	contracts.LegionNoticeTopicPrefix + ">",
 	// A failed delivery's report, carrying the undelivered message's payload and the session it
 	// was for (cmd/listener publishDeliveryException); a session's own lane included.
 	ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
@@ -175,33 +175,25 @@ var privateStreamSubjects = []string{
 	ExceptionTopicPrefix + "notifications.team.>",
 }
 
-// legionNoticeTopicPrefix opens every Legion daemon notice subject (LEGION_NOTICE_TOPIC_PREFIX,
-// packages/contracts/src/subject.ts). Nothing outside this package reads it: a caller asks
-// ControllerNoticeRole or NamesControllerNoticeLane instead.
-const legionNoticeTopicPrefix = "notifications.legion."
-
-// controllerNoticeSuffix ends the one subject of that family naming a controller rather than an
-// issue (legionControllerNoticeSubject in packages/contracts, notify.ControllerTopic in the Go
-// daemon, which lists what it carries).
-const controllerNoticeSuffix = ".controller"
-
 // ControllerNoticeRole reports the Legion role token whose holder topic's notices are for, and
 // whether topic is a controller notice lane at all: project <p>'s lane is
-// notifications.legion.<p>.controller and its role token is legion-<p>-controller (controllerToken,
-// packages/contracts/src/legion-roles.ts). Both are read here from the one project token the lane
+// contracts.LegionNoticeTopicPrefix + <p> + contracts.ControllerNoticeSuffix and its role token
+// is contracts.ControllerRoleToken(<p>), all three generated from legionControllerNoticeSubject
+// and controllerToken in packages/contracts (scripts/gen-go.ts), so a rename there reaches this
+// package rather than a hand copy of it. Both are read here from the one project token the lane
 // names, so no caller builds the pair a second time. Only a literal lane names a role: a wildcard
 // token, an empty project, a longer subject, and the issue notices of the same family
 // (notifications.legion.<p>.<issue key>) name none.
 func ControllerNoticeRole(topic string) (string, bool) {
-	project, found := strings.CutPrefix(topic, legionNoticeTopicPrefix)
+	project, found := strings.CutPrefix(topic, contracts.LegionNoticeTopicPrefix)
 	if !found {
 		return "", false
 	}
-	project, found = strings.CutSuffix(project, controllerNoticeSuffix)
+	project, found = strings.CutSuffix(project, contracts.ControllerNoticeSuffix)
 	if !found || project == "" || strings.ContainsAny(project, ".*>") {
 		return "", false
 	}
-	return "legion-" + project + "-controller", true
+	return contracts.ControllerRoleToken(project), true
 }
 
 // NamesControllerNoticeLane reports whether any of topics is a controller notice lane

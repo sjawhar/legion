@@ -4,6 +4,7 @@ import * as os from "node:os";
 import path from "node:path";
 import { version } from "../../package.json" with { type: "json" };
 import { logger } from "../log";
+import * as port from "../port";
 import { isolateEnvoyConfig } from "./isolated-config";
 
 // Each test's scratch HOME, holding the empty envoy.json ENVOY_CONFIG_FILE names.
@@ -208,6 +209,39 @@ describe("envoy plugin init", () => {
       // Should fail fast due to connection refused, not hang indefinitely
       expect(elapsed).toBeLessThan(6000);
     } finally {
+      process.env.ENVOY_URL = originalEnvoyUrl;
+    }
+  });
+
+  it("refuses envoy_subscribe while the serve port is unknown, and calls no listener", async () => {
+    const originalEnvoyUrl = process.env.ENVOY_URL;
+    process.env.ENVOY_URL = "http://127.0.0.1:59999";
+    const originalFetch = globalThis.fetch;
+    const requests: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return new Response("no request belongs here", { status: 500 });
+    }) as typeof fetch;
+    // A serve whose port the URL does not name and `ss` does not find: the plugin loads, and
+    // the port stays unknown until a later `syncPort` finds one.
+    const resolving = spyOn(port, "resolvePort").mockResolvedValue(null);
+    try {
+      const hooks = await loadPlugin();
+
+      await expect(
+        hooks.tool.envoy_subscribe.execute({ topics: ["notifications.team.deploys"] }, {
+          sessionID: "ses_no_port",
+          directory: "/tmp",
+          metadata: () => {},
+        } as never)
+      ).rejects.toThrow("the OpenCode serve port is not resolved yet");
+      // A registration would carry port 0 and leave the session registered where the listener
+      // can reach it by neither a port nor a consumer, so none was sent.
+      expect(requests.filter((url) => url.startsWith("http://127.0.0.1:59999"))).toEqual([]);
+      hooks.dispose();
+    } finally {
+      resolving.mockRestore();
+      globalThis.fetch = originalFetch;
       process.env.ENVOY_URL = originalEnvoyUrl;
     }
   });

@@ -611,6 +611,7 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 // UpdatedAt, and the row is younger than InterestRefreshAge. An unchanged row is thus rewritten
 // once per InterestRefreshAge, its UpdatedAt lags the session's last heartbeat by less than that,
 // and Reap adds InterestRefreshAge to its grace window (InterestReapAllowance), so that lag never
+// shortens a paused session's grace. A changed row is written, and so is a record it cannot
 // decode; any other failed read refuses the write (mergeForUpsert). The session row
 // (session.SessionRegistry.Put) is written on every heartbeat: its bucket's MaxAge is the liveness
 // clock, and NATS connect notices ($SYS) are not available to replace it.
@@ -628,12 +629,13 @@ func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []str
 }
 
 // PlanInterest plans the interest row a registration of sessionID naming requested will store:
-// the topics it will hold (MergedTopics of the stored row and requested) and the roles read to
-// decide them, read once for the row's topics and requested together (controllerLaneRoles). The
-// listener's registration route filters the session's consumer on the plan and hands the same
-// plan back to UpsertPlanned, so a registration whose body leaves out a controller notice lane
-// its row holds keeps that lane in the filter and in the row alike: the roles behind both are
-// this one read, which the row's own topics are part of.
+// the topics it will hold (MergedTopics of the stored row and requested), the roles read to
+// decide them, read once for the row's topics and requested together (controllerLaneRoles),
+// requested itself and the bucket revision of the row it read. The listener's registration route
+// filters the session's consumer on the plan and hands the same plan back to UpsertPlanned, so a
+// registration whose body leaves out a controller notice lane its row holds keeps that lane in
+// the filter and in the row alike: the roles behind both are this one read, which the row's own
+// topics are part of.
 //
 // A session with no row, and a row this build cannot decode, plan from no stored topics: the
 // registration's own topics are the authority on such a record, as the write that follows treats
@@ -641,7 +643,14 @@ func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []str
 // that cannot answer yet (ErrRoleViewNotReady): the route refuses the registration rather than
 // filter a consumer on a row the write would decide differently.
 func (r *Registry) PlanInterest(ctx context.Context, sessionID string, requested []string) (InterestPlan, error) {
-	cur, err := r.Get(ctx, sessionID)
+	return r.planInterest(ctx, sessionID, slices.Clone(requested), false)
+}
+
+// planInterest is PlanInterest over a row read from the cache, or from the bucket alone when
+// fromBucket is set: a plan made again after the bucket refused a write at the revision the last
+// plan read must see the row that refused it, which the cache may not hold yet.
+func (r *Registry) planInterest(ctx context.Context, sessionID string, requested []string, fromBucket bool) (InterestPlan, error) {
+	cur, revision, err := r.getWithRevision(ctx, sessionID, fromBucket)
 	if err != nil && !errors.Is(err, nats.ErrKeyNotFound) && !errors.Is(err, ErrMalformedInterest) {
 		return InterestPlan{}, err
 	}
@@ -649,30 +658,102 @@ func (r *Registry) PlanInterest(ctx context.Context, sessionID string, requested
 	if err != nil {
 		return InterestPlan{}, err
 	}
-	return InterestPlan{Roles: roles, Topics: MergedTopics(sessionID, roles, cur.Topics, requested)}, nil
+	return InterestPlan{
+		Roles:     roles,
+		Topics:    MergedTopics(sessionID, roles, cur.Topics, requested),
+		Requested: requested,
+		Revision:  revision,
+	}, nil
 }
+
+// ErrInterestPlanConflict is a registration whose interest row was rewritten under every plan
+// UpsertPlanned made for it. The listener answers it the bus-unavailable 503, and the plugin's
+// next heartbeat registers again; nothing is stored, so the row keeps whatever the write that
+// won it holds.
+var ErrInterestPlanConflict = errors.New("the interest record changed under every plan of this registration")
+
+// interestPlanAttempts bounds UpsertPlanned's plans of one registration. Each conflict means
+// another writer stored sessionID's row between this plan and its write, which only an
+// unsubscribe, a role claim or another registration of the same session does; three attempts
+// cover a burst of those and still end, rather than letting one session's registration spin
+// against a writer that keeps winning.
+const interestPlanAttempts = 3
 
 // UpsertPlanned is UpsertWithin for a caller holding a plan (PlanInterest): it writes the row
 // that plan decided, under the roles that decided it, rather than reading the session's roles
-// again. The row it merges the plan into is read again here, so a row another registration wrote
-// meanwhile loses no topic; under the plan's roles that merge is the plan again whenever the row
-// has not changed.
+// again.
+//
+// The write is a compare-and-swap at the revision the plan read (putInterestAt), because seconds
+// pass between the plan and this call - the listener's registration route creates or re-filters
+// the session's consumer in between - and an unsubscribe landing in that window would otherwise
+// be undone: the plan merged the row as it stood, so writing it back puts every topic the
+// unsubscribe removed into the row again, and the row only ever grows from there. A refused
+// write plans again from the row the bucket now holds (planInterest from the bucket, so the plan
+// sees the row that refused the write rather than a cache still behind it) and writes that,
+// interestPlanAttempts times in all; past that it is ErrInterestPlanConflict and nothing is
+// stored.
 func (r *Registry) UpsertPlanned(ctx context.Context, item Interest, plan InterestPlan) (Interest, error) {
-	cur, getErr := r.Get(ctx, item.SessionID)
-	return r.upsert(ctx, cur, getErr, item, plan)
+	for attempt := 1; ; attempt++ {
+		cur, getErr := r.Get(ctx, item.SessionID)
+		merged, buf, unchanged, err := r.interestRow(cur, getErr, item, plan)
+		if err != nil {
+			return Interest{}, err
+		}
+		if unchanged {
+			return cur, nil
+		}
+		revision, stored, err := r.putInterestAt(ctx, merged.SessionID, buf, plan.Revision)
+		if err != nil {
+			return Interest{}, err
+		}
+		if stored {
+			r.recordInterest(merged, revision, getErr)
+			return merged, nil
+		}
+		if attempt == interestPlanAttempts {
+			return Interest{}, fmt.Errorf("write %s's interest record: %w after %d plans",
+				item.SessionID, ErrInterestPlanConflict, attempt)
+		}
+		plan, err = r.planInterest(ctx, item.SessionID, plan.Requested, true)
+		if err != nil {
+			return Interest{}, err
+		}
+	}
 }
 
 // upsert is UpsertWithin's write, over the row cur that getErr reports the read of and the plan
-// its caller decided.
+// its caller decided. It writes unconditionally, where UpsertPlanned compares and swaps:
+// UpsertWithin reads and writes within the one call, so no window stands between them for
+// another writer to lose a topic in, and UpsertWithin's own docstring says why a write of its
+// that lands after its answer is safe.
 func (r *Registry) upsert(ctx context.Context, cur Interest, getErr error, item Interest, plan InterestPlan) (Interest, error) {
-	now := r.now().UnixMilli()
-	merged, err := mergeForUpsert(cur, getErr, item, now, plan)
+	merged, buf, unchanged, err := r.interestRow(cur, getErr, item, plan)
 	if err != nil {
 		return Interest{}, err
 	}
-	buf, err := json.Marshal(merged)
+	if unchanged {
+		return cur, nil
+	}
+	revision, err := r.putInterest(ctx, merged.SessionID, buf)
 	if err != nil {
 		return Interest{}, err
+	}
+	r.recordInterest(merged, revision, getErr)
+	return merged, nil
+}
+
+// interestRow is the row a write of item under plan over the row cur that getErr reports the read
+// of stores, and its encoding, or unchanged when the bucket already holds that row young enough
+// to leave alone (UpsertWithin's heartbeat skip).
+func (r *Registry) interestRow(cur Interest, getErr error, item Interest, plan InterestPlan) (merged Interest, buf []byte, unchanged bool, err error) {
+	now := r.now().UnixMilli()
+	merged, err = mergeForUpsert(cur, getErr, item, now, plan)
+	if err != nil {
+		return Interest{}, nil, false, err
+	}
+	buf, err = json.Marshal(merged)
+	if err != nil {
+		return Interest{}, nil, false, err
 	}
 	if getErr == nil && now-cur.UpdatedAt < InterestRefreshAge.Milliseconds() {
 		// What the skip asks is whether this write would store the row it holds, so it compares
@@ -680,20 +761,22 @@ func (r *Registry) upsert(ctx context.Context, cur Interest, getErr error, item 
 		// a field added to Interest, and the difference between a null and an empty topic list,
 		// are then covered by the encoding itself. The current row is stamped with merged's
 		// UpdatedAt, the one field a write of an unchanged row would move.
-		unchanged := cur
-		unchanged.UpdatedAt = merged.UpdatedAt
-		stored, err := json.Marshal(unchanged)
+		stored := cur
+		stored.UpdatedAt = merged.UpdatedAt
+		encoded, err := json.Marshal(stored)
 		if err != nil {
-			return Interest{}, err
+			return Interest{}, nil, false, err
 		}
-		if bytes.Equal(buf, stored) {
-			return cur, nil
+		if bytes.Equal(buf, encoded) {
+			return merged, buf, true, nil
 		}
 	}
-	revision, err := r.putInterest(ctx, merged.SessionID, buf)
-	if err != nil {
-		return Interest{}, err
-	}
+	return merged, buf, false, nil
+}
+
+// recordInterest caches the row a write stored at its revision, and logs the replacement of a
+// record this build cannot decode, which getErr reports.
+func (r *Registry) recordInterest(merged Interest, revision uint64, getErr error) {
 	r.mu.Lock()
 	r.cacheInterestLocked(merged.SessionID, merged, revision)
 	r.mu.Unlock()
@@ -704,7 +787,6 @@ func (r *Registry) upsert(ctx context.Context, cur Interest, getErr error, item 
 			slog.Any("topics", merged.Topics),
 		)
 	}
-	return merged, nil
 }
 
 // mergeForUpsert computes the Interest to persist by reconciling the requested
@@ -796,6 +878,34 @@ func (r *Registry) putInterest(ctx context.Context, sessionID string, value []by
 		return 0, fmt.Errorf("write %s's interest record: %w", sessionID, err)
 	}
 	return revision, err
+}
+
+// putInterestAt writes sessionID's interest record only while its latest revision is revision,
+// creating it when revision is 0, which names the session that had no row when its plan read the
+// bucket. It reports the revision written and whether the bucket took the write: a bucket that
+// refused it holds another writer's row since, which is no error here (nats.ErrKeyExists, the
+// wrong-last-sequence answer a Create and an Update share), and the caller plans again over that
+// row. Each call waits no longer than ctx (bus.Bounded); a write ctx abandoned may still land,
+// and is safe for the same reason a conditional delete is: it stores only over the very revision
+// it read, so it cannot undo a write that landed after it.
+func (r *Registry) putInterestAt(ctx context.Context, sessionID string, value []byte, revision uint64) (uint64, bool, error) {
+	interests := r.interests()
+	written, answered, err := bus.Bounded(ctx, func() (uint64, error) {
+		if revision == 0 {
+			return interests.Create(sessionID, value)
+		}
+		return interests.Update(sessionID, value, revision)
+	})
+	if !answered {
+		return 0, false, fmt.Errorf("write %s's interest record at revision %d: %w", sessionID, revision, err)
+	}
+	if errors.Is(err, nats.ErrKeyExists) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return written, true, nil
 }
 
 // roleClaim reads role's claim from the bucket, waiting no longer than ctx (bus.Bounded), and
@@ -1212,19 +1322,35 @@ var ErrMalformedInterest = errors.New("malformed interest record")
 // records it decoded (applyWatched evicts the rest), so only the bucket read can meet a record this
 // build cannot decode: that is ErrMalformedInterest, logged at WARN with the session it belongs to.
 func (r *Registry) Get(ctx context.Context, sessionID string) (Interest, error) {
-	r.mu.RLock()
-	item, ok := r.cache[sessionID]
-	r.mu.RUnlock()
-	if ok {
-		return item, nil
+	item, _, err := r.getWithRevision(ctx, sessionID, false)
+	return item, err
+}
+
+// getWithRevision is Get with the bucket revision the record it answers was read at: the latest
+// revision the cache has applied on a cache hit, the entry's own on a bucket read, and 0 for a
+// session the bucket holds no record for. A record this build cannot decode carries its revision
+// too, since the write that replaces it is conditional on it (putInterestAt).
+//
+// fromBucket reads the bucket even when the cache holds the record, for a caller whose
+// compare-and-swap the bucket refused: the cache is then behind the row that refused it, and
+// a plan made from the cache would be refused again (UpsertPlanned).
+func (r *Registry) getWithRevision(ctx context.Context, sessionID string, fromBucket bool) (Interest, uint64, error) {
+	if !fromBucket {
+		r.mu.RLock()
+		item, ok := r.cache[sessionID]
+		revision := r.cacheRevisions[sessionID]
+		r.mu.RUnlock()
+		if ok {
+			return item, revision, nil
+		}
 	}
 	interests := r.interests()
 	entry, answered, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return interests.Get(sessionID) })
 	if !answered {
-		return Interest{}, fmt.Errorf("read %s's interest record: %w", sessionID, err)
+		return Interest{}, 0, fmt.Errorf("read %s's interest record: %w", sessionID, err)
 	}
 	if err != nil {
-		return Interest{}, err
+		return Interest{}, 0, err
 	}
 	var fresh Interest
 	if err := json.Unmarshal(entry.Value(), &fresh); err != nil {
@@ -1233,12 +1359,12 @@ func (r *Registry) Get(ctx context.Context, sessionID string) (Interest, error) 
 			slog.Uint64("revision", entry.Revision()),
 			slog.String("error", err.Error()),
 		)
-		return Interest{}, fmt.Errorf("%w: %w", ErrMalformedInterest, err)
+		return Interest{}, entry.Revision(), fmt.Errorf("%w: %w", ErrMalformedInterest, err)
 	}
 	r.mu.Lock()
 	r.cacheInterestLocked(sessionID, fresh, entry.Revision())
 	r.mu.Unlock()
-	return fresh, nil
+	return fresh, entry.Revision(), nil
 }
 
 // CachedInterest returns sessionID's interest from the cache alone, and whether the cache holds

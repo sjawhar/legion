@@ -3320,6 +3320,8 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   a role lane, which `POST /v1/roles/set` stores and the stream does not capture, is no filter subject, because a role message reaches its holder as a forward to the agent subject the filter already covers.
   The registration or unsubscribe call sets the filter before it answers.
   A registration's filter and the interest row it stores come from one plan: the session's roles are read once, for the topics the body names and for the row it already holds, and the merge they decide is written as it is (`store.Registry.PlanInterest` and `UpsertPlanned`), so a heartbeat whose body leaves out the controller notice lane its row holds keeps that lane in the filter as well as in the row.
+  That write is a compare-and-swap at the revision the plan read, and a refused write plans again from the bucket, up to three plans in all before the registration is answered 503 (`store.ErrInterestPlanConflict`):
+  the consumer work between the plan and the write waits up to 5 s a bus call, and an unsubscribe landing in that window would otherwise have every topic it removed written back by the plan that read them, leaving a row that only grows.
   A consumer keeps its position when its filter changes, so a newly followed topic starts at that position.
 
 - **Owner:** the listener whose machine id is on the session's entry, and, among the tasks of one machine id, the task that holds the machine's durable binding (`sessionRelays.setOwned`).

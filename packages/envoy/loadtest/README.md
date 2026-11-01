@@ -585,10 +585,10 @@ the same wrap. A step with fewer than 1,000 sessions touches only the first N is
 - Each session registers with the listener as the pi plugin does: `POST /v1/interests/subscribe`,
   `self_subscribed: true`, port 0. It sends a heartbeat every 90 s. The heartbeats of all sessions
   are spread evenly.
-- Each session subscribes over core NATS to its agent topic (`notifications.agent.<session>`) and
-  to the topics of its five issues (`notifications.dispatch.issue.<key>.>`). The sessions share 50
-  NATS connections. `run.log` records the subscriptions (N × 6 expected), the sessions registered
-  and the registration errors.
+- A session subscribes nothing over core NATS: it is delivered to by the relay of its own
+  consumer alone, so a core subscription here would count copies no plugin receives. The sessions
+  share 50 NATS connections. `run.log` records the subscriptions (one relay subject per session,
+  N expected), the sessions registered and the registration errors.
 
 #### Consumer delivery
 
@@ -605,20 +605,18 @@ holds:
   nothing to it.
 - It answers each relay frame `received`, then `done`, on the frame's reply subject. The frame is
   the session's receipt: the first frame of each stream sequence counts, matched to its write by
-  the event id in the payload as a core receipt is. A frame of a sequence that the session has
-  received already counts as a duplicate, not as a receipt.
-- It keeps its core subscriptions. While the listener relays the session, a core copy is not
-  counted; on the agent topic it answers the empty lane receipt when it has a reply subject.
+  the event id in the payload. A frame of a sequence that the session has received already counts
+  as a duplicate, not as a receipt.
 
 A relay frame carries the stream's store time of the event (`Envoy-Stored-At`). The **delivery
 latency from publish** is the receipt time minus that time, over the same receipts as the other
-latencies (`events.delivery_ms_from_publish`). A core receipt has no such time. Each relay frame
-is a row of `relay-frames.csv` in the step directory.
+latencies (`events.delivery_ms_from_publish`). Each relay frame is a row of `relay-frames.csv` in
+the step directory.
 
-In both modes, `loadgen` subscribes `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` on a
-connection of its own and counts the pull requests on the stream's consumers, those of session
-consumers (`s-<session>`) apart. The 5 s sampler also reads NATS `/jsz`: the JetStream consumers
-and API requests.
+`loadgen` subscribes `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` on a connection of its own
+and counts the pull requests on the stream's consumers, those of session consumers
+(`s-<session>`) apart. The 5 s sampler also reads NATS `/jsz`: the JetStream consumers and API
+requests.
 
 ### Event kinds
 
