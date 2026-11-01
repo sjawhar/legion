@@ -50,8 +50,9 @@ When the gate is armed, run this exact sequence before the tree's work starts:
 3. Before every approval request, give two fresh reviewers the current root spec, the code and
    command output it relies on, and the human's words: `task(agent="plan-gap-analyst")` finds its
    gaps, and `task(agent="plan-reviewer")`, told the document is a spec, checks each factual claim
-   against the code, the docs or a read-only command it runs. Resolve every finding in the root
-   spec. Check with a command each claim either reviewer marks unverified: fix it when it is
+   against the code, the docs or a read-only command it runs. Each runs as a job of its own, so
+   `wait` for its result and read what it found before you act on it. Resolve every finding in the
+   root spec. Check with a command each claim either reviewer marks unverified: fix it when it is
    false, or take it out.
 4. Request approval only once the human has agreed to every point in the spec, because the human
    approves what they already agreed to and a point new in the request has no decision block for
@@ -105,15 +106,15 @@ Facts about the request:
 
 Then end your turn. The registration hands the spec to the human: when nothing else holds the
 slot, the root returns its admission slot and waits on its design gate (`awaiting_person`), as a
-root question handed to the human does ("Every turn" in `skill://legion-architect/SKILL.md`). The
-human's approval or changes request resumes you, and so does a newer spec version once Dispatch
-shows the request back on your turn. While the root waits on a question instead, the human's
-approval or changes request of the spec answers that wait too, and the resume task says how the
-spec stands. Release no wave until a delivered wake shows `design-approved` on the root, or a
-resume task says its design gate is open: the daemon sends a root waiting on a person no
-`design-approved` notice, and "this resume is your design-approved wake" is that wake. On
-`design-changes-requested`: revise the spec as the human's reason asks, run step 3's two reviews on
-the new version, resolve every finding, request approval again and end your turn. A
+root question handed to the human does ("Every turn" in `skill://legion-architect/SKILL.md`). Stay
+live to read the human's comments and replies. Their approval or changes request delivers your next
+task, and so does a newer spec version once Dispatch shows the request back on your turn. While the
+root waits on a question instead, the human's approval or changes request of the spec answers that
+wait too, and the task says how the spec stands. Release no wave until a delivered wake shows
+`design-approved` on the root, or a task says its design gate is open: the daemon sends a root
+waiting on a person no `design-approved` notice, and "this resume is your design-approved wake" is
+that wake. On `design-changes-requested`: revise the spec as the human's reason asks, run step 3's
+two reviews on the new version, resolve every finding, request approval again and end your turn. A
 `design-changes-requested` may name a version below the latest, or arrive after another for the
 same version: it is a request the human made that reached the daemon late, and no approval came
 after it. Each request arrives once. The gate is as the newest review left it; still read the
@@ -162,8 +163,8 @@ approved spec. If the Summary, the Acceptance, the scope and every settled decis
 the plan is the record and the tree carries on; otherwise change the root spec and request
 approval again.
 
-Later waves, re-scoping open children toward the same Acceptance, and integration-failure children
-need no spec edit and no new approval. A child issue's spec is never gated.
+Later waves and re-scoping open children toward the same Acceptance need no spec edit and no new
+approval. A child issue's spec is never gated.
 
 ## A decision block for a read no pod can make
 

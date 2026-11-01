@@ -6,8 +6,10 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
@@ -36,7 +38,8 @@ const poolSizeParam = "pool_max_conns"
 
 // Open connects to databaseURL and verifies the database is reachable. The pool's size is
 // sharedPoolSize: how many connections Dispatch may hold is a property of Dispatch, not of the
-// string that names its database.
+// string that names its database. Every connection it opens scans timestamptz in UTC
+// (scanTimestampsInUTC), as do the pools Pool.separate copies from its configuration.
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	declared, err := declaresPoolSize(databaseURL)
 	if err != nil {
@@ -52,6 +55,7 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		return nil, fmt.Errorf("parse Postgres URL: %w", err)
 	}
 	config.MaxConns = sharedPoolSize
+	config.AfterConnect = scanTimestampsInUTC
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("open Postgres pool: %w", err)
@@ -61,6 +65,39 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		return nil, fmt.Errorf("ping Postgres: %w", err)
 	}
 	return &Store{Pool: NewPool(pool)}, nil
+}
+
+// scanTimestampsInUTC makes every timestamptz a connection scans come back in UTC, whatever zone
+// the host runs in. pgx builds a scanned timestamptz with time.Unix, which carries time.Local,
+// and time.Time marshals JSON in the zone it carries - so one instant left Dispatch as
+// "2026-10-02T00:00:01.12Z" from a UTC host and "2026-10-01T17:00:01.12-07:00" from a Pacific
+// one, and every reader that compares a timestamp as a string (the dashboard's read-through
+// mark, a client ordering replies written in the same second) read two different servers. Only
+// the zone the value carries changes; the instant does not. The connection's own session
+// timezone is Postgres's and is untouched, so what a timestamptz is compared with and stored as
+// is unchanged too.
+//
+// Registered per connection rather than in pgtype's default map, which is shared with every
+// other pgx user in the process, and for the array and range types over timestamptz as well:
+// each holds the element type as it was registered when the map was built, so re-registering the
+// element alone would leave a timestamptz[] scanning in the host's zone.
+func scanTimestampsInUTC(_ context.Context, conn *pgx.Conn) error {
+	types := conn.TypeMap()
+	timestamptz := &pgtype.Type{
+		Name: "timestamptz", OID: pgtype.TimestamptzOID,
+		Codec: &pgtype.TimestamptzCodec{ScanLocation: time.UTC},
+	}
+	tstzrange := &pgtype.Type{
+		Name: "tstzrange", OID: pgtype.TstzrangeOID, Codec: &pgtype.RangeCodec{ElementType: timestamptz},
+	}
+	types.RegisterTypes([]*pgtype.Type{
+		timestamptz,
+		tstzrange,
+		{Name: "_timestamptz", OID: pgtype.TimestamptzArrayOID, Codec: &pgtype.ArrayCodec{ElementType: timestamptz}},
+		{Name: "_tstzrange", OID: pgtype.TstzrangeArrayOID, Codec: &pgtype.ArrayCodec{ElementType: tstzrange}},
+		{Name: "tstzmultirange", OID: pgtype.TstzmultirangeOID, Codec: &pgtype.MultirangeCodec{ElementType: tstzrange}},
+	})
+	return nil
 }
 
 // declaresPoolSize reports whether databaseURL carries poolSizeParam. It asks pgx.ParseConfig
@@ -138,7 +175,17 @@ func (s *Store) createVersionTable(ctx context.Context) error {
 	return tx.Commit(ctx)
 }
 
+// applyMigration applies one migration in a transaction of its own, trying it again while its lock
+// wait outlasts its lock_timeout, up to pgmigrate.LockTimeoutAttempts times, holding nothing between
+// attempts (pgmigrate.RetryLockTimeouts). A migration that times out on every attempt fails the
+// runner, and boot with it.
 func (s *Store) applyMigration(ctx context.Context, migration pgmigrate.Migration) error {
+	return pgmigrate.RetryLockTimeouts(ctx, migration.Name, func(ctx context.Context) error {
+		return s.applyMigrationOnce(ctx, migration)
+	})
+}
+
+func (s *Store) applyMigrationOnce(ctx context.Context, migration pgmigrate.Migration) error {
 	// A migration is a transaction like any other, so it is marked like any other: nothing it
 	// runs may take a second pooled connection while it is open.
 	ctx = WithTransactionTracking(ctx)

@@ -1,9 +1,0 @@
-kind: Changed
-body: |-
-    `dispatch issue-update --help` says closing an issue withdraws its open asks (record kind
-    `withdrawn`, naming the closer, written only by Dispatch) and a reopen brings back exactly those,
-    and `dispatch resolve-ask --help` says an ask on a closed issue is refused (`409 ISSUE_CLOSED`)
-    until the issue reopens.
-time: 2026-10-28T10:08:55.711096368Z
-custom:
-    Issue: pr2233

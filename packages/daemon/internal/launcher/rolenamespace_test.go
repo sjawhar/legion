@@ -24,7 +24,7 @@ const (
 // requireRoleNamespaces skips a test that cannot create the namespaces a role generation runs
 // in, or cannot mount inside them. Unprivileged user namespaces are refused on a host whose
 // AppArmor sysctl restricts them (Ubuntu 24.04's default), and the job that must run these
-// tests turns the restriction off and proves it (.github/workflows/pr-and-main.yaml), so a
+// tests turns the restriction off and proves it (the test job of .github/workflows/ci.yaml), so a
 // refusal under GITHUB_ACTIONS is a failure and never a skip, as namespace_test's rig has it.
 func requireRoleNamespaces(t *testing.T) {
 	t.Helper()

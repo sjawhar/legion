@@ -8,13 +8,20 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/listenfd"
 )
 
 type Service struct {
-	MachineID    string
-	NATSURLs     []string
+	MachineID string
+	NATSURLs  []string
+	// NATSReplicas is ENVOY_NATS_REPLICAS (bus.ParseNATSReplicas): the deployment's replica count
+	// for the stream and every bucket the listener opens, which the listener raises them to at
+	// start and every keeper period after (bus.ConnectOwningStream).
 	NATSReplicas int
+	// StreamMaxBytes is ENVOY_STREAM_MAX_BYTES (bus.ParseStreamMaxBytes): the stream's byte limit,
+	// or 0 when unset, which sets none and keeps a deployed one.
+	StreamMaxBytes int64
 	// ListenHost and Port are the address the listener serves on: the inherited socket's own
 	// address with ENVOY_LISTEN_FD, else the one main binds, from ENVOY_LISTEN_HOST (127.0.0.1 when
 	// unset) and PORT (Load's default when unset). The API auth fence judges ListenHost, so what it
@@ -84,13 +91,13 @@ func Load(defaultPort int) (Service, error) {
 		}
 		listenHost, port, listenSocket = socket.Addr().IP.String(), socket.Addr().Port, &socket
 	}
-	replicas := 1
-	if value := strings.TrimSpace(os.Getenv("ENVOY_NATS_REPLICAS")); value != "" {
-		next, err := strconv.Atoi(value)
-		if err != nil {
-			return Service{}, fmt.Errorf("invalid ENVOY_NATS_REPLICAS: %w", err)
-		}
-		replicas = next
+	replicas, err := bus.ParseNATSReplicas(os.Getenv(bus.ReplicasEnvVar))
+	if err != nil {
+		return Service{}, err
+	}
+	streamMaxBytes, err := bus.ParseStreamMaxBytes(os.Getenv(bus.StreamMaxBytesEnvVar))
+	if err != nil {
+		return Service{}, err
 	}
 	allowedHosts, err := parseAllowedHosts(os.Getenv("ENVOY_ALLOWED_HOSTS"))
 	if err != nil {
@@ -105,6 +112,7 @@ func Load(defaultPort int) (Service, error) {
 		MachineID:          machine,
 		NATSURLs:           urls,
 		NATSReplicas:       replicas,
+		StreamMaxBytes:     streamMaxBytes,
 		ListenHost:         listenHost,
 		Port:               port,
 		ListenSocket:       listenSocket,

@@ -78,9 +78,9 @@ func wantTokenJSON(t *testing.T, node *Node) []byte {
 	return want
 }
 
-// assertTokenSpans checks that the spans AppendTokenJSON recorded into encoded, whose first prefix
-// bytes are not tree's, are tree's block-id nodes in pre-order, each over its own representation.
-func assertTokenSpans(t *testing.T, name string, tree *Node, encoded []byte, prefix int, spans []TokenSpan) {
+// assertTokenSpans checks that the spans EncodeTokenJSON recorded into encoded are tree's block-id
+// nodes in pre-order, each over its own representation.
+func assertTokenSpans(t *testing.T, name string, tree *Node, encoded []byte, spans []TokenSpan) {
 	t.Helper()
 	var nodes []*Node
 	Walk(tree, func(node *Node) bool {
@@ -97,8 +97,8 @@ func assertTokenSpans(t *testing.T, name string, tree *Node, encoded []byte, pre
 		if want := node.Attrs[BlockIDAttr].(string); span.ID != want {
 			t.Fatalf("%s: span %d is block %q, want %q", name, index, span.ID, want)
 		}
-		if span.Start < prefix || span.End > len(encoded) || span.Start > span.End {
-			t.Fatalf("%s: span %d (%q) is [%d, %d) of %d bytes after a %d-byte prefix", name, index, span.ID, span.Start, span.End, len(encoded), prefix)
+		if span.Start < 0 || span.End > len(encoded) || span.Start > span.End {
+			t.Fatalf("%s: span %d (%q) is [%d, %d) of %d bytes", name, index, span.ID, span.Start, span.End, len(encoded))
 		}
 		if got, want := encoded[span.Start:span.End], wantTokenJSON(t, node); string(got) != string(want) {
 			t.Fatalf("%s: span %d (%q) differs\n got: %s\nwant: %s", name, index, span.ID, got, want)
@@ -147,8 +147,8 @@ func largeTokenTestTree(t *testing.T, documents []tokenTestDocument) *Node {
 // each block token from its span, and callers hold those tokens across releases as edit
 // preconditions: the whole encoding and every span are byte for byte what encoding/json makes of
 // the representation built whole, for every document the corpus and the fixtures hold and for one
-// far larger than Parse reads, whatever the buffer holds before it.
-func TestAppendTokenJSONIsWhatEncodingJSONMakesOfEveryDocument(t *testing.T) {
+// far larger than Parse reads.
+func TestEncodeTokenJSONIsWhatEncodingJSONMakesOfEveryDocument(t *testing.T) {
 	documents := tokenTestDocuments(t)
 	type tree struct {
 		name string
@@ -166,18 +166,15 @@ func TestAppendTokenJSONIsWhatEncodingJSONMakesOfEveryDocument(t *testing.T) {
 	for _, tree := range trees {
 		markTokenTestTree(tree.node)
 		want := wantTokenJSON(t, tree.node)
-		for _, prefix := range []string{"", "sha256 prefix:"} {
-			name := fmt.Sprintf("%s after %q", tree.name, prefix)
-			var spans []TokenSpan
-			got, err := AppendTokenJSON([]byte(prefix), tree.node, &spans)
-			if err != nil {
-				t.Fatalf("%s: %v", name, err)
-			}
-			if !strings.HasPrefix(string(got), prefix) || string(got[len(prefix):]) != string(want) {
-				t.Fatalf("%s: encoding differs\n got: %s\nwant: %s%s", name, got, prefix, want)
-			}
-			assertTokenSpans(t, name, tree.node, got, len(prefix), spans)
+		var spans []TokenSpan
+		got, err := EncodeTokenJSON(tree.node, &spans)
+		if err != nil {
+			t.Fatalf("%s: %v", tree.name, err)
 		}
+		if string(got) != string(want) {
+			t.Fatalf("%s: encoding differs\n got: %s\nwant: %s", tree.name, got, want)
+		}
+		assertTokenSpans(t, tree.name, tree.node, got, spans)
 	}
 }
 
@@ -253,7 +250,7 @@ func tokenValueTrees(key string, value any) (onNode, onMark *Node) {
 	return onNode, onMark
 }
 
-// assertTokenJSONAsEncodingJSON checks that AppendTokenJSON makes of tree what encoding/json makes
+// assertTokenJSONAsEncodingJSON checks that EncodeTokenJSON makes of tree what encoding/json makes
 // of its representation: the same bytes, or an error of the same message and class.
 func assertTokenJSONAsEncodingJSON(t *testing.T, name string, tree *Node) {
 	t.Helper()
@@ -261,7 +258,7 @@ func assertTokenJSONAsEncodingJSON(t *testing.T, name string, tree *Node) {
 		t.Fatalf("%s: %v", name, err)
 	}
 	var spans []TokenSpan
-	got, gotErr := AppendTokenJSON(nil, tree, &spans)
+	got, gotErr := EncodeTokenJSON(tree, &spans)
 	want, wantErr := json.Marshal(tokenRepresentation(tree))
 	if (gotErr == nil) != (wantErr == nil) {
 		t.Fatalf("%s: error %v, encoding/json's %v", name, gotErr, wantErr)
@@ -270,15 +267,15 @@ func assertTokenJSONAsEncodingJSON(t *testing.T, name string, tree *Node) {
 		if gotErr.Error() != wantErr.Error() || tokenErrorClass(gotErr) != tokenErrorClass(wantErr) {
 			t.Fatalf("%s: error %T %q, encoding/json's %T %q", name, gotErr, gotErr, wantErr, wantErr)
 		}
-		if len(got) != 0 || len(spans) != 0 {
-			t.Fatalf("%s: an error left %q and spans %v", name, got, spans)
+		if got != nil {
+			t.Fatalf("%s: an error returned %q", name, got)
 		}
 		return
 	}
 	if string(got) != string(want) {
 		t.Fatalf("%s: encoding differs\n got: %s\nwant: %s", name, got, want)
 	}
-	assertTokenSpans(t, name, tree, got, 0, spans)
+	assertTokenSpans(t, name, tree, got, spans)
 }
 
 // tokenErrorClass names which of encoding/json's marshal errors err is.
@@ -301,7 +298,7 @@ func tokenErrorClass(err error) string {
 // Every value an attribute can hold is encoded as encoding/json encodes it, byte for byte and
 // error for error, on a node and on a mark alike: strings escaped as it escapes them, numbers in its
 // shortest forms, the canonical form's conversions, and every other type left to it.
-func TestAppendTokenJSONEncodesEveryValueAsEncodingJSON(t *testing.T) {
+func TestEncodeTokenJSONEncodesEveryValueAsEncodingJSON(t *testing.T) {
 	for _, test := range tokenValueCases() {
 		onNode, onMark := tokenValueTrees(test.key, test.value)
 		assertTokenJSONAsEncodingJSON(t, test.name+" on a node", onNode)
@@ -310,7 +307,7 @@ func TestAppendTokenJSONEncodesEveryValueAsEncodingJSON(t *testing.T) {
 }
 
 // A node's marks are one token in whatever order they arrive.
-func TestAppendTokenJSONWritesMarksInTheOrderOfTheirEncodings(t *testing.T) {
+func TestEncodeTokenJSONWritesMarksInTheOrderOfTheirEncodings(t *testing.T) {
 	marks := []Mark{
 		{Type: "proofComment", Attrs: Attrs{"id": "c2", "by": "user:bob", "at": int64(7)}},
 		{Type: "strong"},
@@ -336,7 +333,7 @@ func TestAppendTokenJSONWritesMarksInTheOrderOfTheirEncodings(t *testing.T) {
 
 // A typed block's server-owned attributes are the server's to change, so they are no part of its
 // token.
-func TestAppendTokenJSONLeavesOutServerOwnedAttributes(t *testing.T) {
+func TestEncodeTokenJSONLeavesOutServerOwnedAttributes(t *testing.T) {
 	open, err := Parse(":::ask{#decision urgency=\"high\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n")
 	if err != nil {
 		t.Fatal(err)
@@ -359,7 +356,7 @@ func TestAppendTokenJSONLeavesOutServerOwnedAttributes(t *testing.T) {
 
 // A node's attributes are encoded before its marks, so a node whose attributes and marks both
 // fail reports its attributes' error, as encoding/json does.
-func TestAppendTokenJSONReportsTheAttributesErrorBeforeTheMarks(t *testing.T) {
+func TestEncodeTokenJSONReportsTheAttributesErrorBeforeTheMarks(t *testing.T) {
 	tree := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{
 		Type:  "text",
 		Text:  "x",

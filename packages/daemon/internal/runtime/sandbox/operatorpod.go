@@ -10,6 +10,8 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -40,11 +42,14 @@ type setter struct {
 // podVariables maps every variable a worker's Oh My Pi finds set before the shim exports a
 // provider key (shim.ReadProviderEnv) to who sets it: the runtime (runtimeOwned, the session
 // store's two variables named apart, since they are Legion's under either store, the controller's
-// Slack channel list, which the runtime sets in the controller's pod alone, and the name the
+// Slack channel list, which the runtime sets in the controller's pod alone, Claude Code's three
+// (claudelaunch.Environment) and the session its launcher keeps (claudelaunch.SessionVariable),
+// which it tells a Claude role alone, in its start command, and the name the
 // providers volume mounts the session database's URL under, ompsessions.DSNFileName), the worker
 // image (imageEnv), every launch's spec (the role App's git identity, and each launch secret's
-// `<NAME>_FILE` pointer), the pod baseline, and the operator's own pod env. The first setter of a
-// name is the one named.
+// `<NAME>_FILE` pointer), the pod baseline, the settings overlays this runtime composes for each
+// role (roleOperatorEnv), and the operator's own pod env. The first setter of a name is the one
+// named.
 func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 	set := map[string]setter{}
 	add := func(name, who string, operatorMay bool) {
@@ -57,6 +62,13 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 	}
 	add(ompsessions.DSNFileName, "is the name the providers volume mounts the session database's URL under (runtime.kubernetes.session_store)", false)
 	add(slackChannelsVariable, "Legion's runtime sets for the controller it launches, from the project's slack_channels alone", false)
+	add(launcher.TestPGVariable, "Legion's runtime sets in every role of an issue pod whose deployment serves the pod's own test database (runtime.kubernetes.test_postgres), and refuses here whether or not it does, since a pod env naming another server would point every test at it", false)
+	const claude = "Legion's runtime sets for a role it launches on Claude Code (worker_backends)"
+	for _, pair := range claudelaunch.Environment("") {
+		name, _, _ := strings.Cut(pair, "=")
+		add(name, claude, false)
+	}
+	add(claudelaunch.SessionVariable, claude, false)
 	for _, name := range slices.Sorted(maps.Keys(runtimeOwned)) {
 		add(name, "Legion's runtime sets in every pod", false)
 	}
@@ -70,12 +82,13 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 		add(name+"_FILE", "every launch sets (the pointer to the launch secret "+name+")", false)
 	}
 	for _, v := range podsafety.Variables() {
-		if v.Reserved != "" {
-			add(v.Name, "the pod baseline sets, and "+v.Reserved, false)
-		} else {
-			add(v.Name, "the pod baseline sets (internal/podsafety)", true)
-		}
+		add(v.Name, "the pod baseline sets, and "+v.Reserved, false)
 	}
+	// The settings overlays are this runtime's to compose, from the operator's own pod env and the
+	// role's own files (roleOperatorEnv): the operator sets the pod's value, which is where its own
+	// overlays come from, but a provider key of that name would be exported over a value every
+	// role's agent already starts with.
+	add(settingsOverlays, "the runtime composes in every pod from the operator's own overlays and the role's own (role_config_files)", true)
 	for name := range pod.Env {
 		add(name, "runtime.kubernetes.pod.env sets", true)
 	}

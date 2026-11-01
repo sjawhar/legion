@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
@@ -36,6 +36,8 @@ import { ApprovalChip } from "../doc/ApprovalChip";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath, buildProjectPath, documentRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 function documentUpdatedAt(document: Artifact): string {
   return document.versions.at(-1)?.created_at ?? document.created_at;
@@ -114,14 +116,21 @@ export function DocumentList({ project }: { project: string }): ReactNode {
     queryKey: ["project", project, "artifacts"],
     queryFn: () => api.listProjectArtifacts(project, true),
   });
-  const create = useMutation({
-    mutationFn: (name: string) => api.uploadArtifact({ project }, { content: `# ${name}\n`, name }),
+  // The form shows its own refusal under the name it was refused over.
+  const create = useKeyedWrite({
+    inline: true,
+    label: (name: string) => `New document ${name}`,
+    write: (name: string, bounds) =>
+      api.uploadArtifact({ project }, { content: `# ${name}\n`, name }, bounds),
     onSettled: () => submitGuard.release(),
-    onSuccess: ({ artifact }) => {
+    onSuccess: (made) => {
       setCreating(false);
       setTitle("");
       void queryClient.invalidateQueries({ queryKey: ["project", project, "artifacts"] });
-      navigate(buildProjectPath({ kind: "document", project, slug: artifact.slug }));
+      // Made, with no answer to open: the form closes, so a second press makes nothing, and the
+      // list says what was made (`create.unanswered`).
+      if (made === null) return;
+      navigate(buildProjectPath({ kind: "document", project, slug: made.artifact.slug }));
     },
   });
   const submit = (event: FormEvent<HTMLFormElement>) => {
@@ -153,12 +162,16 @@ export function DocumentList({ project }: { project: string }): ReactNode {
           onClick={() => {
             setCreating(true);
             setDuplicateName(undefined);
+            create.forgetUnanswered();
           }}
           type="button"
         >
           New document
         </button>
       </div>
+      {create.unanswered === undefined ? null : (
+        <LandedWithoutAnswer what={`Document ${create.unanswered.variables}`} />
+      )}
       {creating ? (
         <form aria-label="New document" className="space-y-3" onSubmit={submit}>
           <label className={`block text-sm font-medium ${textSecondaryOnCanvas}`}>

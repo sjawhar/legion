@@ -15,11 +15,13 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// blockIndexDocumentBatch is how many owed documents one block-index tick reads and
-// blockIndexItemBatch how many owed items; blockIndexStep is the wait before the next tick while
-// either batch was full, BlockIndexReconcileInterval the wait once neither is. The owed reads go
-// through partial indexes (document_block_versions_owed, block_grammar_owed_enqueued), so a tick
-// that finds nothing owed reads nothing else.
+// blockIndexDocumentBatch is how many owed documents one block-index tick reads,
+// blockIndexItemBatch how many items owed an index with the block grammar and, separately, how
+// many comments and messages owed a block index of their own blocks; blockIndexStep is the wait
+// before the next tick while any batch was full, BlockIndexReconcileInterval the wait once none
+// is. The owed reads go through partial indexes (document_block_versions_owed,
+// block_grammar_owed_enqueued, comment_block_state_owed, message_block_state_owed), so a tick that
+// finds nothing owed reads nothing else.
 const (
 	blockIndexDocumentBatch     = 20
 	blockIndexItemBatch         = 200
@@ -34,30 +36,43 @@ const blockIndexLease = "block-index"
 
 // BlockIndexTick is what one tick of the block-index reconciliation did (ReconcileBlockIndex).
 type BlockIndexTick struct {
-	// Documents is how many owed documents it indexed, and Items how many owed comments, asks and
-	// issue messages it indexed with the block grammar.
-	Documents int
-	Items     int
+	// Documents is how many owed documents it indexed, Items how many owed comments, asks and
+	// issue messages it indexed with the block grammar, and ItemBlocks how many owed comments and
+	// messages (direct messages included) it indexed the blocks of.
+	Documents  int
+	Items      int
+	ItemBlocks int
 	// LiveAhead is how many owed documents, none of a closed issue, it skipped because their live
 	// text is ahead of their latest version and differs from it: owed a settlement that has not run.
 	LiveAhead int
-	// OwedDocuments and OwedItems are what is still owed after the tick.
-	OwedDocuments int
-	OwedItems     int
+	// OwedDocuments, OwedItems and OwedItemBlocks are what is still owed after the tick.
+	OwedDocuments  int
+	OwedItems      int
+	OwedItemBlocks int
 	// Cursor is the document the next tick's batch starts after: the last one this batch listed
 	// while the batch was full, empty once a batch lists fewer and the next starts over.
 	Cursor string
-	// Full reports a batch of documents or of items that was full, so more may be owed.
+	// Full reports a batch of documents, of items or of item blocks that was full, so more may be
+	// owed.
 	Full bool
 }
 
 // RunBlockIndexReconciliation indexes what no block-aware version write indexed: every document
 // owed a block index (document_block_versions.version null) - each one at migration 0121, each
 // version any build writes (migration 0122's trigger) that its own writer did not index, and each
-// rebuild-refs marks - and every comment, ask and issue message whose text holds `#b-`, owed an
+// rebuild-refs marks - every comment, ask and issue message whose text holds `#b-`, owed an
 // index with the block grammar (block_grammar_owed, migrations 0123-0126), which a build older
-// than the block grammar indexes without. One tick per lease, at start, then every blockIndexStep
-// while a batch is full and every BlockIndexReconcileInterval once none is, until ctx ends.
+// than the block grammar indexes without, and every comment and message owed a block index of its
+// own blocks (comment_block_state and message_block_state owed_at, set by migrations 0143-0144's
+// triggers on every write and by rebuild-refs), which a build older than item blocks leaves owed.
+// One tick per lease, at start, then every blockIndexStep while a batch is full and every
+// BlockIndexReconcileInterval once none is, until ctx ends.
+//
+// The ticks are duty.RunLeasedAfterEachPass's, each one the wait the pass before it asked for after
+// that pass returned, and so is the period each runs under: that wait, as in
+// RunReferenceExcerptReconciliation, so a tick inside it is one some process already made. A tick
+// whose lease another process holds, or whose period that process has already served, waits the
+// full interval: that process is doing this work.
 func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
 	var cursor string
@@ -65,23 +80,11 @@ func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.L
 	// counts (an open issue's document whose live text stays ahead, skipped every tick) logs nothing.
 	var logged BlockIndexTick
 	liveAhead := liveAheadDocuments{}
-	// period is this loop's own interval at this moment, the wait the last tick asked for, as
-	// in RunReferenceExcerptReconciliation: a tick inside it is one some process already made.
-	period := BlockIndexReconcileInterval
-	for {
-		// A tick whose lease another process holds, or whose period that process has already
-		// served, waits the full interval: that process is doing this work.
-		wait := BlockIndexReconcileInterval
-		duty.Exclusive(ctx, leases, blockIndexLease, period, func(ctx context.Context) {
-			wait, cursor = s.blockIndexTick(ctx, cursor, liveAhead, &logged)
-		})
-		period = wait
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(wait):
-		}
-	}
+	duty.RunLeasedAfterEachPass(ctx, leases, blockIndexLease, BlockIndexReconcileInterval, func(ctx context.Context) time.Duration {
+		var wait time.Duration
+		wait, cursor = s.blockIndexTick(ctx, cursor, liveAhead, &logged)
+		return wait
+	})
 }
 
 // blockIndexTick runs one tick from cursor, logs what it did unless it indexed nothing and left the
@@ -95,10 +98,12 @@ func (s *Service) blockIndexTick(ctx context.Context, cursor string, liveAhead l
 	if err != nil {
 		slog.Error("dispatch: block index reconciliation", "error", err)
 	}
-	if tick.Documents > 0 || tick.Items > 0 || tick.LiveAhead != logged.LiveAhead ||
-		tick.OwedDocuments != logged.OwedDocuments || tick.OwedItems != logged.OwedItems {
+	if tick.Documents > 0 || tick.Items > 0 || tick.ItemBlocks > 0 || tick.LiveAhead != logged.LiveAhead ||
+		tick.OwedDocuments != logged.OwedDocuments || tick.OwedItems != logged.OwedItems ||
+		tick.OwedItemBlocks != logged.OwedItemBlocks {
 		slog.Info("dispatch: block index", "documents", tick.Documents, "items", tick.Items,
-			"owed_documents", tick.OwedDocuments, "owed_items", tick.OwedItems, "live_ahead", tick.LiveAhead)
+			"item_blocks", tick.ItemBlocks, "owed_documents", tick.OwedDocuments, "owed_items", tick.OwedItems,
+			"owed_item_blocks", tick.OwedItemBlocks, "live_ahead", tick.LiveAhead)
 		*logged = tick
 	}
 	if tick.Full {
@@ -133,13 +138,17 @@ type owedDocument struct {
 type liveAheadDocuments map[string]owedDocument
 
 // ReconcileBlockIndex runs one tick: one batch of the documents owed a block index past after (a
-// document id; empty is the start), and one batch of the items owed an index with the block
-// grammar, oldest first (refs.ReindexOwedItem). The documents are listed by keyset, so a document
-// it skips never holds back the ones past it: the tick's Cursor moves past every document its
-// batch lists, indexed or not, and goes back to the start once a batch lists fewer than a full
-// one. A document or item it cannot index for a reason of its own is logged and left owed, so one
-// never holds back the rest of its batch. liveAhead is the documents the calling loop's earlier
-// ticks found live ahead, which this tick counts again without reading and keeps up to date.
+// document id; empty is the start), one batch of the items owed an index with the block grammar,
+// oldest first (refs.ReindexOwedItem), and one batch of the comments and messages owed a block
+// index of their own blocks, oldest owed_at first (refs.IndexOwedItemBlocks), each in its own
+// transaction taking the item row then its state row, never an owner row. The item blocks run
+// last, so an item the grammar batch indexed, blocks included, is no longer owed. The documents
+// are listed by keyset, so a document it skips never holds back the ones past it: the tick's
+// Cursor moves past every document its batch lists, indexed or not, and goes back to the start
+// once a batch lists fewer than a full one. A document or item it cannot index for a reason of
+// its own is logged and left owed, so one never holds back the rest of its batch. liveAhead is
+// the documents the calling loop's earlier ticks found live ahead, which this tick counts again
+// without reading and keeps up to date.
 func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhead liveAheadDocuments) (BlockIndexTick, error) {
 	tick := BlockIndexTick{Cursor: after}
 	owed, err := s.owedDocuments(ctx, after)
@@ -197,12 +206,33 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 		}
 		tick.Items++
 	}
-	tick.Full = documentsFull || len(items) == blockIndexItemBatch
+
+	itemBlocks, err := refs.OwedItemBlocks(ctx, s.store.Pool, blockIndexItemBatch)
+	if err != nil {
+		return tick, err
+	}
+	for _, item := range itemBlocks {
+		indexed, err := refs.IndexOwedItemBlocks(ctx, s.store.Pool, item, s.serverURL)
+		if err != nil {
+			if ctx.Err() != nil {
+				return tick, ctx.Err()
+			}
+			slog.Error("dispatch: block index skipped the blocks of an item it could not index",
+				"kind", item.Kind, "id", item.ID, "error", err)
+			continue
+		}
+		if indexed {
+			tick.ItemBlocks++
+		}
+	}
+	tick.Full = documentsFull || len(items) == blockIndexItemBatch || len(itemBlocks) == blockIndexItemBatch
 
 	if err := s.store.Pool.QueryRow(ctx, `
 		select (select count(*) from document_block_versions where version is null),
-		       (select count(*) from block_grammar_owed)
-	`).Scan(&tick.OwedDocuments, &tick.OwedItems); err != nil {
+		       (select count(*) from block_grammar_owed),
+		       (select count(*) from comment_block_state where owed_at is not null) +
+		       (select count(*) from message_block_state where owed_at is not null)
+	`).Scan(&tick.OwedDocuments, &tick.OwedItems, &tick.OwedItemBlocks); err != nil {
 		return tick, fmt.Errorf("count what is owed a block index: %w", err)
 	}
 	return tick, nil

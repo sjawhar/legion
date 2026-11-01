@@ -25,14 +25,165 @@ const (
 	authBearer routeAuth = "bearer"
 )
 
-// apiRoute is one mounted route. Register mounts the table and GET /api/v1 lists it, so the
-// two can never disagree about what the server serves.
-type apiRoute struct {
+// writeScope is what a mutating route's write belongs to, which is what lets one check decide a
+// caller whose credential names one project (project_scope.go). Unlike routeAuth, which
+// describes a check its handler makes, this is the enforcement point itself: register wraps
+// every mutating route in it.
+type writeScope string
+
+const (
+	// scopeProject is a write to an object that belongs to one project: the issue-key rows, the
+	// project-key rows, the artifact-id rows, the ask-id rows, the comment-id rows, and the
+	// message rows that carry an issue. A caller whose credential names another project is
+	// refused, naming both projects.
+	scopeProject writeScope = "project"
+	// scopeSession is a write that belongs to the calling session rather than to any project:
+	// an agent conversation's own artifact, messages and stream frames, the two routes a
+	// session answers its own delivery on, and the caller-private `me` rows. There is no
+	// project to compare, and each row is held to its caller another way, each one read:
+	//
+	//   - The rows whose path names a session — the `agents/{session_id}` writes and
+	//     `PUT /api/v1/me/agents/{session_id}/state` — are held to it by withinSessionScope,
+	//     which refuses a credential that proved another session (project_scope.go). Only a
+	//     broker-issued token proves one; `POST /api/v1/agents/{session_id}/messages`, the
+	//     stream publish and the `me` state row are human-only besides, since a person writing
+	//     to a session is writing to someone else's conversation by design.
+	//   - `POST /api/v1/messages/{id}/deliveries/{attempt}/accept` and
+	//     `POST /api/v1/messages/{id}/reply` take the session from the caller's own credential
+	//     or `actor` and refuse an attempt that is not that session's, `403 ACCEPT_FORBIDDEN`
+	//     and `403 REPLY_FORBIDDEN`.
+	//   - The `me` token rows name no session at all: they are the calling person's, read and
+	//     written under requireHuman and keyed on that person.
+	scopeSession writeScope = "session"
+	// scopeDeployment is a write that belongs to the deployment rather than to any project: a
+	// credential that may write one project may not create another or change a deployment-wide
+	// setting, so a project-scoped caller is refused these by name.
+	scopeDeployment writeScope = "deployment"
+	// scopeProjectInBody is a write that belongs to one project the request's body names rather
+	// than its path: the issue create, whose project comes from the body, or from the
+	// repository an external ref names. There is no object to resolve before the handler runs,
+	// so createIssue makes the check itself once that project is settled
+	// (refuseWriteOutsideProjectScope), and withinProjectScope passes the row through by this
+	// class rather than by a name it compares.
+	scopeProjectInBody writeScope = "project-in-body"
+)
+
+// writeClasses is the class of every mutating route, by "<method> <pattern>". It stands beside
+// the table rather than in each row because Go leaves no field out of a positional composite
+// literal: a sixth value on the row would have to be written on all 146 rows, every GET row
+// included, and a GET row needs no class. routes() stamps it onto the row, so apiRoute.Scope is
+// what every reader of a route sees, and undecidableWrites holds the two in exact correspondence
+// — a mutating row this table does not name, and a name that is no mutating row, each fail
+// TestEveryMutatingRouteIsClassed and refuse to mount (register).
+var writeClasses = map[string]writeScope{
+	// The rows that write an object belonging to one project: its issue, its project, its
+	// document, its ask, its comment, or a message on one of its issues. The issue create
+	// leads them by path and is the one of them whose project its address does not name.
+	"POST /api/v1/issues":                                  scopeProjectInBody,
+	"PATCH /api/v1/issues/{key}":                           scopeProject,
+	"POST /api/v1/issues/{key}/claim":                      scopeProject,
+	"DELETE /api/v1/issues/{key}/claim":                    scopeProject,
+	"DELETE /api/v1/issues/{key}/subscribers/{session_id}": scopeProject,
+	"POST /api/v1/issues/{key}/artifacts":                  scopeProject,
+	"POST /api/v1/issues/{key}/artifacts/{slug}/versions":  scopeProject,
+	"POST /api/v1/issues/{key}/artifacts/{slug}/edits":     scopeProject,
+	"POST /api/v1/issues/{key}/messages":                   scopeProject,
+	"POST /api/v1/issues/{key}/asks":                       scopeProject,
+	"POST /api/v1/issues/{key}/comments":                   scopeProject,
+
+	"POST /api/v1/projects/{key}/artifacts":                                scopeProject,
+	"POST /api/v1/projects/{key}/artifacts/{slug}/versions":                scopeProject,
+	"POST /api/v1/projects/{key}/artifacts/{slug}/edits":                   scopeProject,
+	"PUT /api/v1/projects/{key}/default-assignee":                          scopeProject,
+	"PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}":       scopeProject,
+	"DELETE /api/v1/projects/{key}/architecture-sources/{owner}/{repo}":    scopeProject,
+	"POST /api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync": scopeProject,
+	"POST /api/v1/projects/{key}/architecture-sources/sync":                scopeProject,
+	"POST /api/v1/projects/{key}/architecture-source/sync":                 scopeProject,
+	// The POST form of the related-item check writes nothing, but it reads the project its path
+	// names, so a credential scoped to one project runs it over that project and no other.
+	"POST /api/v1/projects/{key}/related": scopeProject,
+
+	"POST /api/v1/artifacts/{id}/asks":                       scopeProject,
+	"POST /api/v1/artifacts/{id}/comments":                   scopeProject,
+	"DELETE /api/v1/artifacts/{id}/subscribers/{session_id}": scopeProject,
+	"POST /api/v1/artifacts/{id}/rebuild":                    scopeProject,
+	"POST /api/v1/artifacts/{id}/reviews":                    scopeProject,
+	"POST /api/v1/artifacts/{id}/approval-requests":          scopeProject,
+	"POST /api/v1/artifacts/{id}/versions":                   scopeProject,
+	"POST /api/v1/artifacts/{id}/edits":                      scopeProject,
+	"POST /api/v1/artifacts/{id}/_test/outside-schema":       scopeProject,
+
+	"PUT /api/v1/asks/{id}/followers/{session_id}":    scopeProject,
+	"DELETE /api/v1/asks/{id}/followers/{session_id}": scopeProject,
+	"PATCH /api/v1/asks/{id}":                         scopeProject,
+	"POST /api/v1/asks/{id}/answer":                   scopeProject,
+	"POST /api/v1/asks/{id}/resolve":                  scopeProject,
+
+	"POST /api/v1/comments/{id}/resolve":    scopeProject,
+	"POST /api/v1/comments/{id}/reopen":     scopeProject,
+	"POST /api/v1/comments/{id}/deliveries": scopeProject,
+	"POST /api/v1/comments/{id}/reply":      scopeProject,
+	"POST /api/v1/comments/{id}/accept":     scopeProject,
+	"PATCH /api/v1/comments/{id}":           scopeProject,
+	"POST /api/v1/comments/{id}/reject":     scopeProject,
+
+	"POST /api/v1/messages/{id}/deliveries": scopeProject,
+
+	// The rows that write what belongs to the calling session: its own conversation, its answer
+	// to its own delivery, and the caller-private `me` rows.
+	"POST /api/v1/messages/{id}/deliveries/{attempt}/accept": scopeSession,
+	"POST /api/v1/messages/{id}/reply":                       scopeSession,
+	"POST /api/v1/agents/{session_id}/messages":              scopeSession,
+	"POST /api/v1/agents/{session_id}/artifacts":             scopeSession,
+	"POST /api/v1/agents/{session_id}/stream/_test/publish":  scopeSession,
+	"POST /api/v1/me/agent-tokens":                           scopeSession,
+	"DELETE /api/v1/me/agent-tokens/{id}":                    scopeSession,
+	"PUT /api/v1/me/threads/{id}/read":                       scopeSession,
+	"PUT /api/v1/me/issues/{key}/state":                      scopeSession,
+	"PUT /api/v1/me/agents/{session_id}/state":               scopeSession,
+	"PUT /api/v1/me/asks/{id}/snooze":                        scopeSession,
+	"DELETE /api/v1/me/asks/{id}/snooze":                     scopeSession,
+
+	// The rows that write what belongs to the deployment: a project-scoped credential may not
+	// create another project, remap a repository, change a deployment-wide setting, broadcast,
+	// decide a credential, or reach into this process.
+	"POST /api/v1/projects":                                scopeDeployment,
+	"PUT /api/v1/settings/repo-projects/{owner}/{repo}":    scopeDeployment,
+	"DELETE /api/v1/settings/repo-projects/{owner}/{repo}": scopeDeployment,
+	"PUT /api/v1/settings/delivery":                        scopeDeployment,
+	"POST /api/v1/delivery/session-groups":                 scopeDeployment,
+	"PATCH /api/v1/delivery/session-groups/{id}":           scopeDeployment,
+	"DELETE /api/v1/delivery/session-groups/{id}":          scopeDeployment,
+	"POST /api/v1/broadcasts":                              scopeDeployment,
+	"POST /api/v1/credential-requests/{id}/approve":        scopeDeployment,
+	"POST /api/v1/credential-requests/{id}/deny":           scopeDeployment,
+	"POST /api/v1/credential-requests/machine-lookup":      scopeDeployment,
+	"POST /api/v1/credential-grants/{id}/revoke":           scopeDeployment,
+	"POST /api/v1/machine-logins/{id}/revoke":              scopeDeployment,
+	"POST /api/v1/live/_test/disconnect":                   scopeDeployment,
+	"POST /api/v1/live/_test/rotate":                       scopeDeployment,
+	"POST /api/v1/artifacts/_test/quiesce":                 scopeDeployment,
+	"POST /api/v1/writes/_test/slow":                       scopeDeployment,
+}
+
+// routeRow is a row as the table writes it: the five columns every route has, written as a
+// positional literal, which is why the write class is not among them (writeClasses).
+type routeRow struct {
 	Method      string
 	Pattern     string
 	Auth        routeAuth
 	Description string
 	Handler     http.HandlerFunc
+}
+
+// apiRoute is one mounted route: the table's row and the class routes() stamps onto it from
+// writeClasses. Register mounts the table and GET /api/v1 lists it, so the two can never
+// disagree about what the server serves. Every mutating row carries a Scope, and a GET row
+// carries none (project_scope.go); the row's own five columns are read through it by promotion.
+type apiRoute struct {
+	routeRow
+	Scope writeScope
 }
 
 // routeIndexEntry is the public shape of a route in GET /api/v1.
@@ -46,18 +197,24 @@ type routeIndexEntry struct {
 // routeIndexDocs names the agent-facing guide for the routes below.
 const routeIndexDocs = "skills/dispatch/SKILL.md"
 
-// routes lists every native-workspace route. Add a row here, never a mux.HandleFunc line.
+// routes lists every native-workspace route. Add a row here, never a mux.HandleFunc line. A
+// mutating row's write class comes from writeClasses, which Register's project-scope check
+// reads; a row that names no class there is one that check cannot decide, and Register refuses
+// to mount it (undecidableWrites).
 func (s *server) routes() []apiRoute {
-	routes := []apiRoute{
+	rows := []routeRow{
 		{http.MethodGet, "/api/v1", authPublic, "This index: every route with its method, auth, and purpose.", s.getRouteIndex},
 		{http.MethodGet, "/api/v1/schema/blocks", authPublic, "The typed document block schema as JSON.", s.getBlockSchema},
 		{http.MethodGet, "/api/v1/projects", authAny, "List projects.", s.listProjects},
 		{http.MethodPost, "/api/v1/projects", authAny, fmt.Sprintf("Create a project {key, name}: any signed-in person or agent session; a bearer names its session in actor. A key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate, or a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) is 400 INVALID_PROJECT; a name over %d characters is 400 CAP_EXCEEDED; a key that already exists is 409 PROJECT_EXISTS.", contracts.ProjectNameMax), s.createProject},
 		{http.MethodGet, "/api/v1/projects/{key}/artifacts", authAny, "List a project's documents.", s.listProjectArtifacts},
 		{http.MethodPost, "/api/v1/projects/{key}/artifacts", authAny, "Upload a project document or file (JSON or multipart); a file's kind is read from its bytes, and a new artifact's name held to its bound, as an issue upload's are.", s.uploadProjectArtifact},
+		{http.MethodGet, "/api/v1/projects/{key}/related", authAny, fmt.Sprintf("Run the related-item check an issue create runs, over ?title= and ?text= (checked as the title, a newline and the text; either alone is enough), without writing anything: no issue, ask, suggestion or related_checks record. ?exclude_issue= leaves that issue of the project and everything it holds out of the results and out of the word statistics (400 EXCLUDE_ISSUE_INPUT when it is not an issue of the project); ?keywords_only=true skips meaning search. It waits at most 5 seconds and answers the create's advice.suggestions shape: outcome found, none or not_made (a blank text is 200 not_made, the reason in missing), search, search_note, search_query, related and decision. Title and text over %d characters together are 400 CAP_EXCEEDED; POST takes a longer text. An unknown project is 404 PROJECT_NOT_FOUND.", contracts.SearchQueryMax), s.getRelated},
+		{http.MethodPost, "/api/v1/projects/{key}/related", authAny, fmt.Sprintf("The GET form of this route with its fields in a JSON body {title, text, exclude_issue, keywords_only}: the related-item check over a title and a text as long as an issue's spec (the body's 1 MiB bound; a title over %d characters is 400 CAP_EXCEEDED), writing nothing and waiting at most 5 seconds; answers the same suggestions shape.", contracts.IssueTitleMax), s.postRelated},
 		{http.MethodGet, "/api/v1/settings/repo-projects", authAny, "List GitHub repository to project mappings, each marked whether it is its project's default.", s.listRepoProjects},
 		{http.MethodPut, "/api/v1/settings/repo-projects/{owner}/{repo}", authAny, "Map a GitHub repository to a project {project, default?}; default true makes it the project's one default.", s.putRepoProject},
 		{http.MethodDelete, "/api/v1/settings/repo-projects/{owner}/{repo}", authAny, "Remove a repository mapping no issue names as its repo.", s.deleteRepoProject},
+		{http.MethodGet, "/api/v1/github/app-installation/{owner}/{repo}", authAny, "Whether Dispatch's GitHub App, which GitHub sends the repository's webhook events through, is installed on the repository: 200 {installed}, false when GitHub answers 404; 503 GITHUB_APP_UNCONFIGURED when Dispatch holds no App key, 502 GITHUB_UNREADABLE naming the repository and GitHub's error on any other failure.", s.getAppInstallation},
 		{http.MethodGet, "/api/v1/settings/architecture-sources", authAny, "List every project's architecture sources, by project and then in the order each project added them.", s.listArchitectureSources},
 		{http.MethodGet, "/api/v1/projects/{key}/architecture-sources", authAny, "A project's architecture sources, one per repository, in the order they were added; [] when it has none. The project's component model is every source's components together.", s.listProjectArchitectureSources},
 		{http.MethodGet, "/api/v1/projects/{key}/architecture-source", authAny, "Kept for dispatch clients older than this release, logged at warn: the project's first architecture source, or null when it has none. GET /api/v1/projects/{key}/architecture-sources replaces it.", s.getArchitectureSource},
@@ -82,9 +239,10 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/me/agent-tokens", authHuman, "Mint a personal agent token.", s.createAgentToken},
 		{http.MethodDelete, "/api/v1/me/agent-tokens/{id}", authHuman, "Revoke a personal agent token.", s.revokeAgentToken},
 		{http.MethodGet, "/api/v1/users", authHuman, "Everyone who has signed in, by lowercase email: the assignee picker's options.", s.listUsers},
-		{http.MethodGet, "/api/v1/whoami", authAny, "Who the server takes the caller for: {kind: user, login} (login is the person's lowercase email) or {kind: agent, owner, service} (owner is a personal token's owner by lowercase email, null for the shared token; service is a verified service-account token's Kubernetes subject, null otherwise).", s.whoami},
+		{http.MethodGet, "/api/v1/whoami", authAny, "Who the server takes the caller for: {kind: user, login} (login is the person's lowercase email) or {kind: agent, owner, service, session, project} (owner is a personal token's owner by lowercase email, null for the shared token; service is a verified service-account token's Kubernetes subject, null otherwise; session is the session the caller's credential proved, null for a credential that proves none, which every one but an access token the secrets broker issued is; project is the one project key that credential lets the caller write, null where it names none).", s.whoami},
+		{http.MethodGet, "/api/v1/dashboard/builds", authAny, "Which dashboard builds are served: {serving, live}, serving the entry chunk (/assets/index-*.js) of the build this process serves (empty when none), live the distinct entry chunks of the builds every live server process serves, sorted. A tab offers its reload notice only when live holds exactly one entry and it is not the tab's own.", s.getDashboardBuilds},
 		{http.MethodGet, "/api/v1/issues", authAny, fmt.Sprintf("List issues; filters project, status, parent, label, priority (repeatable: 0-3, or none for unset), open, updated_since, route_status (live, no_holder or unknown; open issues only); ?pinned=true is human-only. Each issue carries progress: {tasks, children}, its spec's task-list items and its direct children as {done, total}, each null when it has none. Pages with limit (1-%d) and offset (0 or more; alone it pages %d): a paged answer is {issues, total, limit, offset}, total counting every issue the filters match; without either it is every matching issue as an array. cursor is 400 INVALID_QUERY.", contracts.MaxIssuePageLimit, contracts.DefaultIssuePageLimit), s.listIssues},
-		{http.MethodPost, "/api/v1/issues", authAny, fmt.Sprintf("Create an issue (native, or from a GitHub owner/repo#n ref); assignee defaults to the creating person, the personal token's owner, the parent's assignee, or the project's default assignee when that still names a person who has signed in. A title over %d characters is 400 CAP_EXCEEDED. The response's advice.suggestions names the three existing items most like it, found by search, without ever blocking or slowing the write.", contracts.IssueTitleMax), s.createIssue},
+		{http.MethodPost, "/api/v1/issues", authAny, fmt.Sprintf("Create an issue (native, or from a GitHub owner/repo#n ref); assignee defaults to the creating person, the personal token's owner, the parent's assignee, or the project's default assignee when that still names a person who has signed in. A title over %d characters is 400 CAP_EXCEEDED. After the write commits, a related-item check searches the project by meaning and by its rarest words and waits at most 5 seconds; the response's advice.suggestions says whether it found related items (outcome found, none or not_made with the reason in missing), how it searched (search, search_note), the three items most like the new issue, one per owner, with each ask item's answer state, any answered ask that settles it, words to search with by hand (search_query), and under force the title overlaps forced past (title_matches).", contracts.IssueTitleMax), s.createIssue},
 		{http.MethodGet, "/api/v1/issues/resolve", authAny, "Resolve ?ref=<KEY | owner/repo#n> to an issue key.", s.resolveIssue},
 		{http.MethodGet, "/api/v1/issues/{key}", authAny, "Read an issue with its open asks, primary document, children, and progress: {tasks, children}, its spec's task-list items (`- [ ]` / `- [x]`, nested lists included) and its direct children as {done, total}, each null when it has none.", s.getIssue},
 		{http.MethodGet, "/api/v1/issues/{key}/summary", authAny, "What a reference to an issue shows, read without the full issue: {key, project, title, status, documents}, documents every artifact of the issue in the order the issue read lists them, each {id, slug, name, kind, latest_version, primary}, primary whether the document is the issue's spec; 404 NOT_FOUND for no such issue.", s.getIssueSummary},
@@ -92,17 +250,18 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/issues/{key}/claim", authAny, "Claim the issue for the calling session (or human): records who is working it. The status does not move. The answer is the issue with legion_managed_status beside it: true when the issue carries the legion label in any case, or sits under one that does, which means the Legion daemon owns the status and a status another writer sets is undone. 409 ISSUE_CLAIMED names a live holder (or a human one, whose claim has no session to end); a human may pass {force: true} to take it anyway. 409 CLAIM_CONTENDED means the holder changed twice while the request ran, so nothing was applied and nobody's liveness was checked: read the issue and retry.", s.claimIssue},
 		{http.MethodDelete, "/api/v1/issues/{key}/claim", authAny, "Release the issue's claim: its holder, any human, or anyone when the holding session is no longer live. The status does not move. The answer is the issue with legion_managed_status beside it: true when the issue carries the legion label in any case, or sits under one that does, which means the Legion daemon owns the status and a status another writer sets is undone. 409 ISSUE_CLAIMED names the holder this caller may not release (there is no force on this route); 409 CLAIM_CONTENDED means the holder changed twice while the request ran, so nothing was applied and nobody's liveness was checked.", s.releaseIssueClaim},
 		{http.MethodGet, "/api/v1/issues/{key}/events", authAny, "Page an issue's event log (after, before, ids, order, limit).", s.listIssueEvents},
-		{http.MethodGet, "/api/v1/issues/{key}/references", authAny, "Cross-references to and from an issue.", s.getIssueReferences},
-		{http.MethodGet, "/api/v1/references", authAny, "Edges of one node in the reference graph: ?to=<dispatch ref> backlinks or ?from= links; ?kind=, ?since=<events.id> (mentions only).", s.getReferences},
+		{http.MethodGet, "/api/v1/issues/{key}/references", authAny, "The eight-hop closure of documents the issue's content references: {members, truncated}, each member a document in the closure with its depth and the node it was reached via, under an ETag (If-None-Match answers 304). ?versions=latest leaves each member's artifact.versions holding only its latest version, under its own ETag; absent, empty or all is the full answer; another value, or versions given more than once, is 400 INVALID_QUERY.", s.getIssueReferences},
+		{http.MethodGet, "/api/v1/references", authAny, "Edges of one node in the reference graph: ?to=<dispatch ref> backlinks or ?from= links; ?kind=, ?since=<events.id> (mentions only, read up to the event log's safe horizon: every mention committed before the read, unless an open transaction holds the horizon back past 1 s, when the read answers the mentions at or below it and a later read the rest).", s.getReferences},
 		{http.MethodGet, "/api/v1/block-links", authAny, "Links from blocks of one document to blocks of another: ?from=<document ref>&to=<document ref>; both block nodes, the edge kind, and when and in which version the source wrote each, newest first.", s.getBlockLinks},
 		{http.MethodGet, "/api/v1/issues/{key}/subscribers", authHuman, "Sessions subscribed to an issue's topics.", s.listIssueSubscribers},
 		{http.MethodDelete, "/api/v1/issues/{key}/subscribers/{session_id}", authHuman, "Unsubscribe a session from an issue.", s.unsubscribeIssueSession},
 		{http.MethodGet, "/api/v1/issues/{key}/artifacts", authAny, "List an issue's documents and files.", s.listArtifacts},
 		{http.MethodPost, "/api/v1/issues/{key}/artifacts", authAny, fmt.Sprintf("Upload an issue document or file (JSON or multipart). A text/markdown upload is a document; any other is an image only when its bytes are a PNG, JPEG, GIF or WebP, stored under the type its bytes are whatever was declared, and otherwise a file under its declared type. A name no artifact has yet is 400 INVALID_ARTIFACT when it, or the reference key <owner>/<slug> it gives the new artifact, is over %d bytes; an upload under an existing artifact's name is never refused for its length.", maxNewArtifactKeyBytes), s.uploadArtifact},
-		{http.MethodPost, "/api/v1/issues/{key}/messages", authAny, "Post an issue message; target and delivery address a session or role.", s.createMessage},
+		{http.MethodPost, "/api/v1/issues/{key}/messages", authAny, "Post an issue message; target and delivery address a session or role. A reply names the message it answers in in_reply_to, and one block of it in in_reply_to_block.", s.createMessage},
 		{http.MethodGet, "/api/v1/issues/{key}/messages", authAny, "List an issue's message threads: every root message, oldest first, each with its deliveries and its replies.", s.listIssueMessages},
 		{http.MethodGet, "/api/v1/issues/{key}/messages/{id}", authAny, "Read one message with its deliveries and replies.", s.getMessage},
-		{http.MethodGet, "/api/v1/messages/{id}", authAny, "Read the conversation a message belongs to by any message id in it, issue-less or not: the thread root with its deliveries and every reply, oldest first. An issue thread follows the issue's rule. On a direct (issue-less) thread a bearer names its session in ?session= and reads only one whose root targets that session or that it replied in (403 THREAD_FORBIDDEN), a guard against reading another session's conversation by mistake, not an authorization boundary. Direct-conversation text also reaches every authenticated caller through GET /api/v1/events; nothing in Dispatch restricts it by session.", s.getMessageThread},
+		{http.MethodGet, "/api/v1/messages/{id}", authAny, "Read the conversation a message belongs to by any message id in it, issue-less or not: the thread root with its deliveries and every reply, oldest first. An issue thread follows the issue's rule. On a direct (issue-less) thread a bearer names its session in ?session= and reads only one whose root targets that session or that it replied in (403 THREAD_FORBIDDEN), a guard against reading another session's conversation by mistake, not an authorization boundary. Direct-conversation text also reaches every authenticated caller through that caller's events view on GET /ws/live; nothing in Dispatch restricts it by session.", s.getMessageThread},
+		{http.MethodGet, "/api/v1/messages/{id}/blocks", authAny, "A message's current blocks in body order: {item, indexed, blocks: [{id, type, text, ref, from, to}]}, item the message's graph node, from and to UTF-16 code units into its stored body, ref absent for a direct message's block (it has no address). Read under GET /api/v1/messages/{id}'s rule: a bearer reading a direct message names its session in ?session= (400 SESSION_REQUIRED, 403 THREAD_FORBIDDEN). While the message is owed a block index, indexed is false and blocks empty; the read writes nothing.", s.getMessageBlocks},
 		{http.MethodPost, "/api/v1/messages/{id}/deliveries", authAny, "Retry delivering a targeted message.", s.createDelivery},
 		{http.MethodPost, "/api/v1/messages/{id}/deliveries/{attempt}/accept", authBearer, "The attempt's session records that it took the message as its user's own turn; the session names itself in actor (403 ACCEPT_FORBIDDEN for another's attempt). One compare-and-set: only a direct message to that session, on no issue, neither a broadcast's copy nor a reply in a broadcast's thread, in a thread whose root targets it (409 ACCEPT_NOT_DIRECT), that a person wrote (409 ACCEPT_NOT_WRITTEN_BY_PERSON), sent as a Send or an Aside (409 ACCEPT_NOT_ASIDE_OR_STEER); only the message's latest attempt (409 ACCEPT_SUPERSEDED), when no attempt of it was accepted before (409 ACCEPT_ALREADY_ACCEPTED), which a person requested (409 ACCEPT_NOT_REQUESTED_BY_PERSON), that person being the message's author (409 ACCEPT_NOT_REQUESTED_BY_AUTHOR), which did not fail (409 ACCEPT_FAILED; a pending or sent attempt is taken), within the last minute (409 ACCEPT_STALE). Answers the attempt with accepted_at and accepted_as and the message's stored body; leaves the attempt's state to the send, and appends message.accepted.", s.acceptDelivery},
 		{http.MethodPost, "/api/v1/messages/{id}/reply", authBearer, "The targeted session's reply to a delivery; the session names itself in actor. Once the attempt is answered, ?follow_up=true posts other text as the session's follow-up, threaded under its first reply; with follow_up=false or absent, or with text the session already posted there, nothing is posted and the stored message comes back marked duplicate. Any other follow_up is 400 MESSAGE_INPUT.", s.replyMessage},
@@ -112,17 +271,18 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPut, "/api/v1/me/threads/{id}/read", authHuman, "Move the caller's read mark on one thread forward to {read_through} (RFC3339; stored as no later than now; more than a minute ahead of the server is 400 INVALID_STATE). It only moves forward; a thread the caller never wrote in writes nothing; 204 either way. A non-uuid id is 400 THREAD_ID_INPUT.", s.putThreadRead},
 		{http.MethodGet, "/api/v1/search", authAny, fmt.Sprintf("Full-text search ?q= across issues, documents, asks, comments, and messages, within ?project= when given: each kind ranked on its own and merged by reciprocal rank fusion, one page of ?limit= (1-50, default 20) from ?offset=, with the total match count and how many the pages can reach (each kind's best %d); a q over %d characters is 400 CAP_EXCEEDED, and a project that is not a project key is 400 INVALID_PROJECT.", contracts.SearchKindDepth, contracts.SearchQueryMax), s.search},
 		{http.MethodGet, "/api/v1/search/coverage", authAny, "Meaning search's coverage {identity, place, model, total, kinds}: the configured embedder's identity, its place (bedrock or azure) and model, all three null with none configured; then, in total and for each kind (issue, document, comment, ask, message), the searchable items, how many carry a current vector from that identity, how many lack one, how many failed for good, and how many seconds the oldest lacking item has waited (null when none lacks).", s.searchCoverage},
+		{http.MethodGet, "/api/v1/related-checks", authAny, "Count the related-item checks recorded when an issue, an ask or a new decision block was written, within [from, to) (RFC3339, each optional) and of ?project= and ?source_kind= (issue, ask or decision_block; any other is 400 INVALID_QUERY) when given: {project, source_kind, from, to} echo the filters (null when absent), total, by_source_kind, by_outcome (found, none, not_made), by_search (meaning_and_keywords, keywords_only, not_made), by_reason (each reason a check was not made or searched by keywords only), completed (found or none), skipped_for_time (reason timeout), and keyword_ms and total_ms each {count, p50, p95, max, over_300ms}: the checks holding that time, its discrete percentiles and largest value (null with no check), and how many took over 300 ms.", s.getRelatedChecks},
 		{http.MethodGet, "/api/v1/agents", authAny, "Live sessions with roles, capabilities, open asks, and last activity, from Dispatch's copy of the Envoy listener's session list, at most 5 s old.", s.listAgents},
+		{http.MethodGet, "/api/v1/agents/{session_id}/answers", authAny, "What people wrote that Dispatch delivered to one session, newest first by at, then by id: each ask's current answer (replaced when it changed an earlier answer), each comment at its current body (edited_at when edited; a resolved comment stays) and each message, once however it arrived. It reads the ask.answered, comment.created, message.created and message.answered events a person wrote whose published_destinations hold the session's own topic, the session's sent message deliveries (targeted and broadcast messages) and its sent comment deliveries (mentions); it never lists an agent's or the system's words, an ask's resolution or hand-back, or a delivery to a role: route's topic. Each item names its relation to the session (mentioned_you over replied_on_your_ask over replied_in_a_comment_thread over commented_on_a_document over commented_on_an_issue for a comment; replied_to_your_message over sent_you_a_message for a message; answered_your_ask for an answer), the ask and its whole question on an answer and on a reply in an ask's thread, its owner, dispatch:// ref and href (null owner and ref, and /agents/<session_id>/live, for a direct message). ?since= (RFC3339, default 72 hours ago; older than 7 days or in the future is 400 INVALID_QUERY) starts the window; ?max_chars= (1-100000, else 400 INVALID_QUERY) stops the list after the item whose text takes the running sum of text lengths (UTF-16 units) past it, while total counts every item in the window; {session_id, since, total, items}. A session_id that is not a session id is 400 INVALID_SESSION_ID, as on the agent artifact routes. Not an authorization boundary: direct-message text already reaches every authenticated caller through GET /api/v1/events, and a person may read any session's list.", s.listSessionAnswers},
 		{http.MethodGet, "/api/v1/agents/{session_id}/messages", authHuman, "A session's targeted messages, newest first.", s.listAgentMessages},
-		{http.MethodPost, "/api/v1/agents/{session_id}/messages", authHuman, "Send an issue-less targeted message to a session.", s.createAgentMessage},
-		{http.MethodGet, "/api/v1/agents/{session_id}/stream", authHuman, "Server-sent stream of a live session's own conversation, relayed from the session itself: an SSE `replay` event with what the session can still replay, then a `frame` event per turn, tool call, and streamed update. Nothing is stored.", s.streamAgentConversation},
-		{http.MethodPost, "/api/v1/agents/{session_id}/artifacts", authAny, "Upload a file or image to an agent's conversation (multipart, as an issue upload, its kind read from its bytes): ref_key agent/<session_id>/<slug>, addressed dispatch://agent/<session_id>/artifact/<slug>. It holds files and images only: a markdown document (JSON content or a text/markdown file) is 400 ARTIFACT_INPUT, since a document belongs to an issue or a project. No event is appended. A session_id that is empty or holds /, ?, #, whitespace, a control character or a character that ends a reference in text (<>\"'`[]|) is 400 INVALID_SESSION_ID on every agent artifact route.", s.uploadAgentArtifact},
+		{http.MethodPost, "/api/v1/agents/{session_id}/messages", authHuman, "Send an issue-less targeted message to a session: {body, delivery, in_reply_to?}, answered once its own delivery attempt has settled, on past a client that gives up. Under an Idempotency-Key header (as every POST and PATCH takes one), a repeat with the same request answers 201 with the message the key made and its deliveries as they stand, Idempotency-Replayed: ?1, first sending the one attempt it still owes (none yet, or one stranded past its claim) and nothing else; a listener it cannot reach is recorded on the attempt, so a repeat is answered while the listener is down. An attempt a stopped process left owed is resumed by the server's delivery sweep whether anyone asks again or not.", s.createAgentMessage},
+		{http.MethodPost, "/api/v1/agents/{session_id}/artifacts", authAny, "Upload a file or image to an agent's conversation (multipart, as an issue upload, its kind read from its bytes): ref_key agent/<session_id>/<slug>, addressed dispatch://agent/<session_id>/artifact/<slug>. It holds files and images only: a markdown document (JSON content or a text/markdown file) is 400 ARTIFACT_INPUT, since a document belongs to an issue or a project. No event is appended. A caller whose credential proves a session of its own uploads only into that session: any other session_id is 403 SESSION_SCOPE. A session_id that is empty or holds /, ?, #, whitespace, a control character or a character that ends a reference in text (<>\"'`[]|) is 400 INVALID_SESSION_ID on every agent artifact route.", s.uploadAgentArtifact},
 		{http.MethodGet, "/api/v1/agents/{session_id}/artifacts/{slug}", authAny, "Read an agent's conversation's file or image and its versions by slug.", s.getArtifact},
 		{http.MethodGet, "/api/v1/agents/{session_id}/artifacts/{slug}/versions/{number}", authAny, "Download one version of an agent's conversation's file or image, as the issue form serves it (Cache-Control: private, max-age=31536000, immutable).", s.getArtifactVersion},
-		{http.MethodPost, "/api/v1/broadcasts", authHuman, "Send one message to many sessions: one targeted message per recipient under a shared broadcast. A selected session that is not live or does not advertise the mode is excluded and named in the response, never switched to another mode. `idempotency_key` names one send: a repeat with the same key and request answers the original broadcast (200); a reuse for a different request is 409 BROADCAST_KEY_REUSED naming the broadcast that used it, and sends nothing.", s.createBroadcast},
+		{http.MethodPost, "/api/v1/broadcasts", authHuman, "Send one message to many sessions: {body, delivery, session_ids}, one targeted message per recipient under a shared broadcast, answered once it is committed while each recipient's delivery runs behind the answer. A selected session that is not live or does not advertise the mode is excluded and named in the response, never switched to another mode. Under an Idempotency-Key header (as every POST and PATCH takes one), a repeat with the same request answers 201 at once with the broadcast the key made, every recipient's attempts as they stand and the first answer's exclusions, Idempotency-Replayed: ?1, and puts every recipient it still owes on its way behind the answer. A recipient a stopped process left owed is resumed by the server's delivery sweep whether anyone asks again or not.", s.createBroadcast},
 		{http.MethodGet, "/api/v1/broadcasts", authHuman, "Recent broadcasts, newest first, with their recipient and reply counts.", s.listBroadcasts},
 		{http.MethodGet, "/api/v1/broadcasts/{id}", authHuman, "One broadcast with every recipient's delivery attempts and replies, recipients in the order the send named them; a broadcast from before that order was stored falls back to created_at, id.", s.getBroadcast},
-		{http.MethodPost, "/api/v1/issues/{key}/asks", authAny, "Open a question ask on an issue (options optional). The response's advice.suggestions names any already-answered ask that may settle the same question, with who answered and when, without ever blocking or slowing the write.", s.createAsk},
+		{http.MethodPost, "/api/v1/issues/{key}/asks", authAny, "Open a question ask on an issue (options optional). After the write commits, a related-item check searches the project for the question and waits at most 5 seconds; the response's advice.suggestions says whether it found related items (outcome, with the reason in missing when not made), how it searched, the three items most like it with each ask item's answer state, and any already-answered ask that may settle the same question, with who answered and when.", s.createAsk},
 		{http.MethodGet, "/api/v1/issues/{key}/asks", authAny, "List an issue's asks, each with its newest reply; ?state= filters, and ?thread=1 adds each ask's thread (replies, rewordings, answers, followers, claimant, route, route_holder).", s.listIssueAsks},
 		{http.MethodGet, "/api/v1/asks/open", authAny, "Open asks in one scope, with counts: ?author_session= for one session's own, or ?project= for every open ask on a project's issues and documents; exactly one is required.", s.listOpenAsks},
 		{http.MethodGet, "/api/v1/asks/{id}", authAny, "Read one ask with its replies, edit history, answers and followers, plus claimant (the session holding its issue's claim) and route (its issue's route), whom a person's answer and replies also reach, and route_holder (the live session that route reaches now: the session itself or the role's holder); each is null when absent, route_holder also when nobody holds the route or the Envoy listener did not answer, and all are null on a project document's ask.", s.getAsk},
@@ -133,17 +293,18 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/asks/{id}/answer", authHuman, "Answer an ask with selected options and/or text.", s.answerAsk},
 		{http.MethodPost, "/api/v1/asks/{id}/resolve", authAny, "Retract or resolve an ask without answering it (kind retracted or resolved; withdrawn is written only by an issue's close, and an ask on a closed issue is 409 ISSUE_CLOSED); a block ask's block records it too.", s.resolveAsk},
 		{http.MethodGet, "/api/v1/issues/{key}/comments", authAny, "List an issue's comments; ?artifact= scopes to a document.", s.listComments},
-		{http.MethodPost, "/api/v1/issues/{key}/comments", authAny, "Comment on an issue, a document quote, or an ask.", s.createComment},
+		{http.MethodPost, "/api/v1/issues/{key}/comments", authAny, "Comment on an issue, a document quote, or an ask. A reply names the comment it answers in reply_to, and one block of it in reply_to_block.", s.createComment},
 		{http.MethodPost, "/api/v1/comments/{id}/resolve", authAny, "Resolve a comment thread.", s.resolveComment},
 		{http.MethodPost, "/api/v1/comments/{id}/reopen", authHuman, "Reopen a resolved comment thread.", s.reopenComment},
 		{http.MethodGet, "/api/v1/comments/{id}", authAny, "Read one comment with its thread.", s.getComment},
+		{http.MethodGet, "/api/v1/comments/{id}/blocks", authAny, "A comment's current blocks in body order: {item, revision, indexed, blocks: [{id, type, text, ref, from, to, changed_revision, changed_at}]}, item the comment's graph node, revision its indexed revision, from and to UTF-16 code units into its stored body, changed_revision and changed_at the revision its block's text last changed in. While the comment is owed a block index, or was indexed from another body than it stores, indexed is false and blocks empty; the read writes nothing. A non-uuid id is 400 COMMENT_ID_INPUT.", s.getCommentBlocks},
 		{http.MethodPost, "/api/v1/comments/{id}/deliveries", authAny, "Retry a comment mention delivery; target is required when it has multiple mentions.", s.createCommentDelivery},
 		{http.MethodPost, "/api/v1/comments/{id}/reply", authBearer, "The mentioned session's reply to a delivery; the session names itself in actor.", s.replyComment},
 		{http.MethodPost, "/api/v1/comments/{id}/accept", authHuman, "Accept a suggestion, applying its replacement.", s.acceptComment},
-		{http.MethodPatch, "/api/v1/comments/{id}", authHuman, "Edit a comment's body.", s.editComment},
+		{http.MethodPatch, "/api/v1/comments/{id}", authHuman, "Edit a comment's body. The dashboard editor also sends blocks ([{id, from}], from in UTF-16 code units into the new body) and base_revision, the revision GET /api/v1/comments/{id}/blocks gave, so each block keeps its id; without them the ids follow the text.", s.editComment},
 		{http.MethodPost, "/api/v1/comments/{id}/reject", authHuman, "Reject a suggestion.", s.rejectComment},
 		{http.MethodGet, "/api/v1/artifacts/{id}/asks", authAny, "List a document's asks.", s.listArtifactAsks},
-		{http.MethodPost, "/api/v1/artifacts/{id}/asks", authAny, "Open an ask on a document. The response's advice.suggestions names any already-answered ask that may settle the same question, searched within the document's project, without ever blocking or slowing the write.", s.createArtifactAsk},
+		{http.MethodPost, "/api/v1/artifacts/{id}/asks", authAny, "Open an ask on a document. After the write commits, a related-item check searches the document's project for the question and waits at most 5 seconds; the response's advice.suggestions says whether it found related items (outcome, with the reason in missing when not made), how it searched, the three items most like it with each ask item's answer state, and any already-answered ask that may settle the same question, with who answered and when.", s.createArtifactAsk},
 		{http.MethodGet, "/api/v1/artifacts/{id}/comments", authAny, "List a document's comments.", s.listArtifactComments},
 		{http.MethodPost, "/api/v1/artifacts/{id}/comments", authAny, "Comment on a document or one of its quotes.", s.createArtifactComment},
 		{http.MethodGet, "/api/v1/artifacts/{id}/events", authAny, "Page a document's event log.", s.listArtifactEvents},
@@ -180,7 +341,6 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPut, "/api/v1/me/agents/{session_id}/state", authHuman, "Clear an agent's conversation for the caller (cleared_before hides exchanges at or before it), mark it read (read_through only moves forward), and/or mark some of its replies read by id (read_replies, the session's own messages); answers the session's state.", s.putUserAgentState},
 		{http.MethodPut, "/api/v1/me/asks/{id}/snooze", authHuman, "Snooze an inbox row for the caller until snoozed_until.", s.putAskSnooze},
 		{http.MethodDelete, "/api/v1/me/asks/{id}/snooze", authHuman, "Un-snooze an inbox row for the caller.", s.deleteAskSnooze},
-		{http.MethodGet, "/api/v1/events", authAny, "Server-sent event stream; Last-Event-ID or ?since= resumes.", s.streamEvents},
 		{http.MethodGet, "/api/v1/credential-requests", authHuman, "List credential requests the caller may decide (?approver=me only): those naming the caller, a shared secret's and a service's machine login, which anyone signed in decides; null without a configured secrets broker.", s.listCredentialPending},
 		{http.MethodGet, "/api/v1/credential-requests/{id}", authHuman, "Read one credential request's facts; the broker is authoritative.", s.getCredentialRecord},
 		{http.MethodPost, "/api/v1/credential-requests/{id}/approve", authHuman, "Approve a credential request as the caller (a machine login also takes its typed code); the broker decides whether the caller is its approver.", s.approveCredentialRecord},
@@ -192,13 +352,18 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/machine-logins/{id}/revoke", authHuman, "Revoke a machine login, expired or not, ending every session it enrolled, a service's pods included: anyone signed in revokes a service's login, and only the person who approved a person's machine login revokes that one.", s.revokeMachineLogin},
 	}
 	if s.deps.TestHooksEnabled {
-		routes = append(routes,
-			apiRoute{http.MethodPost, "/api/v1/events/_test/disconnect", authAny, "Test hook: drop every open event stream.", s.disconnectAllStreams},
-			apiRoute{http.MethodPost, "/api/v1/delivery/_test/disconnect", authAny, "Test hook: close every open delivery socket with 1012, as a restart does.", s.disconnectDeliverySockets},
-			apiRoute{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document and finish the settlements in flight.", s.quiesceDocuments},
-			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
-			apiRoute{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},
+		rows = append(rows,
+			routeRow{http.MethodPost, "/api/v1/live/_test/disconnect", authAny, "Test hook: close every open live socket with 1012, as a restart does.", s.disconnectLiveSockets},
+			routeRow{http.MethodPost, "/api/v1/live/_test/rotate", authAny, "Test hook: close every open live socket with 4001 (max age), as its age does.", s.rotateLiveSockets},
+			routeRow{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document and finish the settlements in flight.", s.quiesceDocuments},
+			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
+			routeRow{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},
+			routeRow{http.MethodPost, "/api/v1/writes/_test/slow", authAny, "Test hook: {method, path, delay_ms} delays every keyed run of that method and path by delay_ms after its key is claimed, on the handler's own context; 0 disarms.", s.armSlowWrite},
 		)
+	}
+	routes := make([]apiRoute, len(rows))
+	for index, row := range rows {
+		routes[index] = apiRoute{row, writeClasses[row.Method+" "+row.Pattern]}
 	}
 	return routes
 }

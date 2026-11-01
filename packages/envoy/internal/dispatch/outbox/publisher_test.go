@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"strings"
@@ -21,6 +23,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/metrics"
 )
 
 // answered is a channel already holding err, the outcome of a test publisher that answers each
@@ -32,10 +35,13 @@ func answered(err error) <-chan error {
 	return answer
 }
 
-// publish runs one attempt of event to its end, as scanBatch does for each event of a batch, and
-// returns why it did not finish: errMentionPending when it held a mentioned session's copy back.
+// publish runs one attempt of event to its end, as scanBatch does for each event of a batch, with
+// the comment recipients read as scanBatch reads a batch's (resolveCommentRecipients), and returns
+// why it did not finish: errMentionPending when it held a mentioned session's copy back.
 func publish(ctx context.Context, deps Deps, event model.Event, slug string, routing routing, delivered map[string]struct{}) error {
-	a := send(ctx, deps, deps.Publisher.Window(), event, slug, routing, delivered)
+	pending := []pendingEvent{{event: event, slug: slug, routing: routing}}
+	resolveCommentRecipients(ctx, deps, pending)
+	a := send(ctx, deps, deps.Publisher.Window(), pending[0], delivered)
 	a.wait(ctx)
 	return a.err()
 }
@@ -342,7 +348,7 @@ func TestPublishAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing
 				Actor:   model.Actor{Kind: "user", ID: "alice"},
 				Payload: map[string]any{"ask_id": "5a660655-04ad-4ce0-8a9b-93dd03c412b7", "session_id": "session-asker"},
 			}
-			if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
+			if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 				t.Fatalf("publish author routes: %v", err)
 			}
 			got := publisher.all()
@@ -812,7 +818,11 @@ func TestPublishAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
 		Actor:   model.Actor{Kind: "session", ID: "session-writer"},
 		Payload: map[string]any{"reply_to": rootID},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
+	recipients, err := loadCommentRecipients(context.Background(), deps, []string{rootID})
+	if err != nil {
+		t.Fatalf("load comment recipients: %v", err)
+	}
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{sessions: recipients[rootID]}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 
@@ -836,7 +846,7 @@ func TestPublishAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T)
 			"topics":     []any{"notifications.dispatch.issue.T-1.>"},
 		},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 
@@ -857,7 +867,7 @@ func TestPublishAuthorRoutesSkipsSubscriptionRemovedWithoutASessionID(t *testing
 		Actor:   model.Actor{Kind: "user", ID: "alice"},
 		Payload: map[string]any{"by": map[string]any{"kind": "user", "id": "alice"}, "topics": []any{}},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 
@@ -992,9 +1002,9 @@ func TestRunStillPublishesWhenTheRootWalkHitsAReplyToCycle(t *testing.T) {
 	stop := run(t, database, publisher, broker)
 	defer stop()
 
-	// A malformed cycle must not stop the event from reaching its own issue topic or
-	// resolving the direct parent's author (a plain, non-recursive lookup); only the
-	// unresolvable thread-root walk is skipped.
+	// A malformed cycle must not stop the event from reaching its own issue topic or the
+	// author of the comment it replies to, which the bounded walk up visited; only the
+	// thread root, which the walk cannot find, is missing.
 	waitFor(t, 5*time.Second, "cyclic reply_to publication", func() bool {
 		return len(publisher.all()) == 2 && publishedAt(t, database, event.ID) != nil
 	})
@@ -1208,6 +1218,125 @@ func TestRunPublishesEveryEventButRoutesOnlyNotifyingEvents(t *testing.T) {
 				t.Fatalf("payload notify = %t, want %t", payload.Notify, tc.want)
 			}
 		})
+	}
+}
+
+// What a reader following an owner topic is given to decide on. `notify` is false for every
+// event an agent wrote, so a reader that skipped on it never saw an agent's comment on an issue
+// it had subscribed to; `quiet` says whether the event carries anything at all.
+func TestEnvelopePayloadStatesWhetherTheEventIsQuiet(t *testing.T) {
+	agent := model.Actor{Kind: "session", ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7"}
+	for _, tc := range []struct {
+		name  string
+		event model.Event
+		quiet bool
+	}{
+		{
+			name: "an agent's comment on an issue",
+			event: model.Event{
+				ID: 1, IssueKey: new("T-1"), Type: "comment.created", Actor: agent,
+				Payload: map[string]any{"id": "comment-9", "body": "Slice 3 is pushed."},
+			},
+			quiet: false,
+		},
+		{
+			name: "the delivery receipt of that comment",
+			event: model.Event{
+				ID: 2, IssueKey: new("T-1"), Type: "comment.delivery", Actor: agent,
+				Payload: map[string]any{"id": "comment-9", "state": "delivered"},
+			},
+			quiet: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item, err := envelope(tc.event, "")
+			if err != nil {
+				t.Fatalf("envelope: %v", err)
+			}
+			var payload struct {
+				Type   string `json:"type"`
+				Notify bool   `json:"notify"`
+				Quiet  bool   `json:"quiet"`
+			}
+			if err := json.Unmarshal([]byte(item.Payload), &payload); err != nil {
+				t.Fatalf("decode event payload %s: %v", item.Payload, err)
+			}
+			if payload.Type != tc.event.Type {
+				t.Fatalf("payload type = %q, want %q", payload.Type, tc.event.Type)
+			}
+			if payload.Quiet != tc.quiet {
+				t.Fatalf("payload quiet = %t, want %t", payload.Quiet, tc.quiet)
+			}
+			if payload.Notify {
+				t.Fatalf("payload notify = true, want false: an agent's event wakes no route")
+			}
+		})
+	}
+
+	// What a reader is actually given: the outbox answers Quiet for the event it scanned out of
+	// Postgres, whose payload decoded into a map rather than the typed value the append held, and
+	// a targeted message is quiet either way - the session it names already had it through the
+	// synchronous listener send, so the issue's followers are not shown it a second time.
+	t.Run("a targeted message the outbox scanned out of Postgres", func(t *testing.T) {
+		database := storetest.Open(t)
+		broker := events.NewBroker()
+		seedIssue(t, database, "T-1", nil)
+		target := "session:ses_target"
+		appendEvent(t, database, broker, model.Event{
+			IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+			Payload: model.MessageEventPayload{Message: model.Message{
+				ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new("T-1"),
+				Body: "Target this update", Target: &target,
+			}},
+		})
+		publisher := &recordingPublisher{}
+		scan(context.Background(), Deps{Store: database, Publisher: publisher})
+
+		items := publisher.all()
+		if len(items) != 1 {
+			t.Fatalf("published %#v, want the issue topic alone", topicsOf(items))
+		}
+		var payload struct {
+			Quiet bool `json:"quiet"`
+		}
+		if err := json.Unmarshal([]byte(items[0].Payload), &payload); err != nil {
+			t.Fatalf("decode event payload %s: %v", items[0].Payload, err)
+		}
+		if !payload.Quiet {
+			t.Fatalf("payload quiet = false for a targeted message: %s", items[0].Payload)
+		}
+	})
+}
+
+// Every destination that did not reach NATS is counted, the one that ends the attempt included:
+// an answer already in when the send returns - NATS unreachable, the outage the metric exists for
+// - ends the attempt there, so attempt.wait never reads it and only publishDestination can count
+// it. It is counted once, because that destination is never added to the attempt's sent list.
+func TestAPublishFailureThatEndsTheAttemptIsCountedOnce(t *testing.T) {
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new("T-1"), Body: "NATS is unreachable"},
+	})
+	registry := metrics.New()
+	publisher := &countingPublisher{fail: fmt.Errorf("bus: %w", bus.ErrUnavailable)}
+	deps := Deps{Store: database, Publisher: publisher,
+		PublishFailures: registry.NewCounter("envoy_dispatch_outbox_publish_failures_total",
+			"Destinations of an outbox publish attempt that did not reach NATS")}
+
+	err := publish(context.Background(), deps, event, "", routing{}, map[string]struct{}{})
+	if !errors.Is(err, bus.ErrUnavailable) {
+		t.Fatalf("publish returned %v, want the unreachable connection", err)
+	}
+	if topics := publisher.attempted(); len(topics) != 1 {
+		t.Fatalf("published %#v, want the attempt ended at its first destination", topics)
+	}
+	response := httptest.NewRecorder()
+	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if body := response.Body.String(); !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="failed"} 1`) {
+		t.Fatalf("/metrics body = %q, want the unreachable destination counted once", body)
 	}
 }
 
@@ -1546,9 +1675,17 @@ func TestRunMarksIssueLessTargetedMessagesPublishedWithoutRepublishing(t *testin
 
 func run(t *testing.T, database *store.Store, publisher Publisher, broker *events.Broker) func() {
 	t.Helper()
+	return runDeps(t, Deps{Store: database, Publisher: publisher, Broker: broker})
+}
+
+// runDeps runs the outbox over deps - a test that needs more of Deps than run's store, publisher
+// and broker, a metrics counter among them, builds it itself - and returns the stop every test
+// here defers.
+func runDeps(t *testing.T, deps Deps) func() {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { Run(ctx, Deps{Store: database, Publisher: publisher, Broker: broker}); close(done) }()
+	go func() { Run(ctx, deps); close(done) }()
 	return func() {
 		cancel()
 		select {

@@ -30,6 +30,7 @@ import { encode } from "@toon-format/toon";
 import { z } from "zod";
 import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine } from "./dispatch-command";
+import { DispatchClient } from "./dispatch-http";
 import { dispatchChildRef, dispatchDocumentRef, dispatchIssueRef } from "./dispatch-owner";
 import { pictureAddresses } from "./dispatch-pictures";
 import { humanEditDiffBlock, humanEditHead } from "./human-edit";
@@ -107,7 +108,9 @@ function dispatchReplyPath(resource: DispatchDelivery["resource"], id: string): 
 /**
  * Answers a targeted Dispatch delivery on the sender's behalf: the reply body when the
  * host delivered it, or the error when it could not (so the sender sees the attempt fail
- * instead of waiting on a reply that never comes). A plain fetch with no deadline of its own.
+ * instead of waiting on a reply that never comes). A write through `DispatchClient`, so it
+ * carries a key of its own, is asked again under it while Dispatch gives no definitive answer,
+ * and throws Dispatch's refusal as a `DispatchServiceError`.
  */
 export async function postDeliveryReply(
   config: { readonly url: string; readonly token: string },
@@ -115,22 +118,12 @@ export async function postDeliveryReply(
   delivery: DispatchDelivery,
   result: { readonly body?: string; readonly error?: string }
 ): Promise<void> {
-  const response = await fetch(
-    `${config.url}${dispatchReplyPath(delivery.resource, delivery.id)}`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        actor: { kind: "session", id: sessionId },
-        attempt: delivery.attempt,
-        ...delivery.replyFields,
-        ...result,
-      }),
-    }
-  );
-  if (!response.ok) {
-    throw new Error(`Dispatch reply failed: ${response.status} ${await response.text()}`);
-  }
+  await new DispatchClient(config.url, config.token).deliveryReply(delivery.resource, delivery.id, {
+    actor: { kind: "session", id: sessionId },
+    attempt: delivery.attempt,
+    ...delivery.replyFields,
+    ...result,
+  });
 }
 
 /**
@@ -793,7 +786,12 @@ function dispatchReplyRef(
 // kept (`raw`) so no data is dropped and nothing renders as a hand-built text
 // template.
 type DispatchFrame =
-  | { readonly event: DispatchEvent; readonly notify: unknown; readonly delivery: unknown }
+  | {
+      readonly event: DispatchEvent;
+      readonly notify: unknown;
+      readonly quiet: unknown;
+      readonly delivery: unknown;
+    }
   | {
       readonly raw: unknown;
       readonly rejectedDelivery?: DispatchDelivery;
@@ -816,10 +814,15 @@ function parseDispatchFrame(rawPayload: string): DispatchFrame {
   if (isObject(value) && "delivery" in value) {
     const targeted = DispatchTargetedFrameSchema.safeParse(value);
     if (targeted.success) {
-      const wireFrame = value as { readonly event: DispatchEvent & { readonly notify?: unknown } };
+      // `notify` and `quiet` are fields of the event the frame wraps, which is where the
+      // outbox marshals them, and the schema drops both as unknown keys.
+      const wireFrame = value as {
+        readonly event: DispatchEvent & { readonly notify?: unknown; readonly quiet?: unknown };
+      };
       return {
         event: targeted.data.event,
         notify: wireFrame.event.notify,
+        quiet: wireFrame.event.quiet,
         delivery: targeted.data.delivery,
       };
     }
@@ -849,10 +852,14 @@ function parseDispatchFrame(rawPayload: string): DispatchFrame {
 
   const parsed = DispatchEventSchema.safeParse(value);
   if (!parsed.success) return { raw: value };
-  const wireEvent = value as DispatchEvent & { readonly notify?: unknown };
+  const wireEvent = value as DispatchEvent & {
+    readonly notify?: unknown;
+    readonly quiet?: unknown;
+  };
   return {
     event: parsed.data,
     notify: wireEvent.notify,
+    quiet: wireEvent.quiet,
     delivery: undefined,
   };
 }
@@ -919,7 +926,19 @@ export function renderInbound(
     } else {
       const frame = parseDispatchFrame(envelope.payload);
       if ("event" in frame) {
-        if (frame.notify === false && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
+        // An owner topic carries every event of its issue, document or project, so a frame
+        // carrying nothing to read is dropped here rather than shown or recorded. Dispatch
+        // states that as `quiet` (`events.Quiet`): a delivery receipt, an anchor refresh,
+        // settings or per-viewer bookkeeping, a targeted message its session already had, an ask
+        // edit that only moved a version, or a version nobody named. `notify` is a different
+        // question — whether to wake the issue's route and claimant — and it is false for every
+        // event an agent wrote, so skipping on it dropped exactly the activity a session that
+        // subscribed to `notifications.dispatch.issue.<KEY>.>` asked for
+        // (skills/dispatch/SKILL.md). A frame with no `quiet` was published by a Dispatch from
+        // before this field and is judged by the old rule: the stream still holds 72 hours of
+        // them, and a replay must not start showing their receipts and autosaves.
+        const quiet = frame.quiet === undefined ? frame.notify === false : frame.quiet === true;
+        if (quiet && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
           return { skip: true, content: "", envelope };
         }
         if (frame.event.actor.kind === "session" && frame.event.actor.id === sessionID) {

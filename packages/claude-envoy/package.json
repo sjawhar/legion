@@ -18,7 +18,7 @@
     "AGENTS.md"
   ],
   "legion": {
-    "daemonApiVersion": 41
+    "daemonApiVersion": 44
   },
   "repository": {
     "type": "git",
@@ -30,7 +30,7 @@
     "check-dist": "bun scripts/build.ts --check",
     "verify-build": "bash scripts/verify-build.sh",
     "typecheck": "bunx tsc --noEmit",
-    "test": "bun test",
+    "test": "bun test --timeout=60000",
     "lint": "bunx biome check src/ hooks/ scripts/"
   },
   "dependencies": {

@@ -160,6 +160,9 @@ func TestSendAnswersServiceUnavailableWhileTheBusIsUnreachable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the interest registry: %v", err)
 	}
+	// The sends below stamp their sender from the role claim view (senderStamp), so the listener's
+	// own startup gate is taken here, with the bus still reachable and before the cut.
+	waitForRegistry(t, registry)
 	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
 	if err != nil {
 		t.Fatalf("open the session registry: %v", err)
@@ -270,6 +273,9 @@ func TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget(t *testin
 			if err != nil {
 				t.Fatalf("open the interest registry: %v", err)
 			}
+			// The requests below stamp their sender from the role claim view (senderStamp), so the
+			// listener's own startup gate is taken here, before the freeze.
+			waitForRegistry(t, registry)
 			sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
 			if err != nil {
 				t.Fatalf("open the session registry: %v", err)
@@ -337,7 +343,7 @@ func TestSendAnswersServiceUnavailableWhenTheBusRefusesThePublish(t *testing.T) 
 	const target = "ses_refused_publish_target"
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{target: 1})
-	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	state := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	// The stream goes after every store is open: opening one reconciles the stream back.
 	if err := client.JS().DeleteStream(bus.Stream); err != nil {
 		t.Fatalf("delete the notification stream: %v", err)
@@ -436,7 +442,7 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 	const sender = "ses_recorded_sender"
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{target: 1, sender: 1})
-	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	state := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	send := func(body string) (*httptest.ResponseRecorder, map[string]any) {
 		t.Helper()
 		return serveRecorded(t,

@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 )
 
 // testDSN is the devbox and CI Postgres the store tests run against. Without it
@@ -31,7 +32,7 @@ func testDSN(t *testing.T) string {
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
 		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against. Start one and set it:\n" +
-			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16\n" +
+			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 " + testpg.Image + "\n" +
 			"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
 			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./internal/store/")
 	}
@@ -887,7 +888,7 @@ func TestReadyMergeDedupMigrationHoldsOffAConcurrentEnqueue(t *testing.T) {
 func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
 	seed := func(t *testing.T, store *Store) {
 		t.Helper()
-		ctx, records := context.Background(), record.NewStore()
+		ctx := context.Background()
 		until, root := time.Now().Add(time.Hour), "LEGION-212"
 		awaiting := func(key, status string) record.Issue {
 			return record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: key, Project: "LEGION", Title: key, Phase: phase.AwaitingMerge, Generation: 1, Status: status, Rank: "U"}
@@ -921,7 +922,12 @@ func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
 				if seeded.pr == "" {
 					continue
 				}
-				if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: seeded.issue.Key, Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "ready-head", MergeNote: seeded.mergeNote}); err != nil {
+				// The merger's phase row is written as the schema under test holds it, for the same
+				// reason: the record store's PutPhase writes columns later migrations add (0067's
+				// assignment).
+				if _, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, summary, merge_note)
+					values ($1, $2, 'merge-claim', 'ready-head', 0, '', '', $3)`,
+					seeded.issue.Key, string(claim.RoleMerger), seeded.mergeNote); err != nil {
 					return err
 				}
 				// The pull request is written as the schema under test holds it, not through the

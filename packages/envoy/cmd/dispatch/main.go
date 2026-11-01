@@ -4,6 +4,9 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,12 +25,14 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
+	"github.com/sjawhar/envoy/internal/dispatch/dashboard"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
@@ -40,6 +45,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/redact"
 	"github.com/sjawhar/envoy/listenfd"
@@ -62,8 +68,8 @@ var buildCommit string
 
 type bootConfig struct {
 	DatabaseURL string
-	// AgentTokens is DISPATCH_AGENT_TOKEN parsed: every value the API and the document websocket
-	// accept as the shared agent token, the first the current one.
+	// AgentTokens is DISPATCH_AGENT_TOKEN parsed: every value the API accepts as the shared agent
+	// token, the first the current one.
 	AgentTokens    *auth.SharedAgentTokens
 	RepoProjects   string
 	DefaultProject string
@@ -79,7 +85,12 @@ type bootConfig struct {
 	SignInGroup        string
 	SignInDomain       string
 	NATSDisabled       bool
-	TestHooksEnabled   bool
+	// NATSReplicas is ENVOY_NATS_REPLICAS, the deployment's replica count for the stream and the
+	// webhook redelivery bucket, and StreamMaxBytes is ENVOY_STREAM_MAX_BYTES, the stream's byte
+	// limit or 0 for none set (bus.ParseNATSReplicas, bus.ParseStreamMaxBytes).
+	NATSReplicas     int
+	StreamMaxBytes   int64
+	TestHooksEnabled bool
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
 	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
 	SettleDelay time.Duration
@@ -116,13 +127,15 @@ type bootConfig struct {
 	// (pprofAddress); empty, nothing listens.
 	PprofAddr string
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
-	// fence; the signing key is then per process.
+	// fence; the signing key is then per process, or derived from DevSignInSharedKey.
 	DevSignIn bool
+	// DevSignInSharedKey is DISPATCH_DEV_SIGNIN_SHARED_KEY: under dev sign-in, the secret every
+	// process of one local harness derives its cookie key from (sessionSigningKey), so they
+	// accept each other's cookies. resolveBootConfig refuses it without dev sign-in.
+	DevSignInSharedKey string
 	// WebDist is DISPATCH_WEB_DIST: the dashboard directory to serve, or empty to find it from
 	// the binary (defaultWebDistDir).
 	WebDist string
-	// AssetStoreBucket is DISPATCH_ASSET_STORE_BUCKET. Empty preserves local-only asset serving.
-	AssetStoreBucket string
 	// SigningKey is DISPATCH_SIGNING_KEY: the session cookie keys, the current one first, or the
 	// empty set to keep one key in the data dir (sessionSigningKey).
 	SigningKey auth.SigningKeys
@@ -178,7 +191,11 @@ func main() {
 		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource.String())
 	}
 	if boot.DevSignIn {
-		slog.Warn("dispatch: dev sign-in mounted: any email signs in at /auth/_dev/signin without the sign-in issuer; cookies are valid on this process only", "origin", serverURL)
+		cookies := "cookies are valid on this process only"
+		if boot.DevSignInSharedKey != "" {
+			cookies = "cookies are valid on every process given this DISPATCH_DEV_SIGNIN_SHARED_KEY"
+		}
+		slog.Warn("dispatch: dev sign-in mounted: any email signs in at /auth/_dev/signin without the sign-in issuer; "+cookies, "origin", serverURL)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -198,7 +215,7 @@ func main() {
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
-		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverClient(bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))...)
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverClient(dispatchStreamOptions(boot, env)...)...)
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
@@ -238,6 +255,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// asks_anchor_artifact_id (migration 0148) indexes the anchors whose artifact_id is a
+	// lower-case document id, the form every server-written anchor carries. A row an earlier
+	// release stored with another spelling is left out, and settlement records no mark for it:
+	// the migration refuses no such row, so the log is where its count is visible. A count that
+	// fails is a log line too, never a boot that stops: the server serves without it.
+	if outside, err := database.AsksOutsideAnchorArtifactIndex(ctx); err != nil {
+		slog.Warn("dispatch: count the anchored asks left out of asks_anchor_artifact_id", "error", err)
+	} else if outside > 0 {
+		slog.Warn("dispatch: anchored asks left out of asks_anchor_artifact_id: their anchor's artifact_id is not a lower-case document id, so settlement records no mark for them", "count", outside)
+	}
+
 	if err := validateDefaultProject(ctx, database, boot.DefaultProject); err != nil {
 		slog.Error("dispatch: validate default project", "error", err)
 		os.Exit(1)
@@ -246,6 +274,18 @@ func main() {
 	webDistDir, err := defaultWebDistDir(boot.WebDist)
 	if err != nil {
 		slog.Error("dispatch: resolve web dist dir", "error", err)
+		os.Exit(1)
+	}
+	// The build's assets are in the database before the process serves, before it binds its port
+	// or adopts the socket DISPATCH_LISTEN_FD names, so a page of this build that another process
+	// serves, during a rolling update or a rollback, finds its chunks here, and this process
+	// answers another build's from there (dashboard.Store below). A process that cannot publish
+	// exits before it is ready, and a rolling update keeps the processes it would have replaced.
+	// The build is what the process registers below as the build it serves, and its entry chunk
+	// what GET /api/v1/dashboard/builds answers as this process's.
+	dashboardBuild, err := publishDashboard(store.WithTransactionTracking(ctx), database.Pool, webDistDir, dashboardPublishTimeout)
+	if err != nil {
+		slog.Error("dispatch: publish dashboard assets", "error", err)
 		os.Exit(1)
 	}
 
@@ -257,14 +297,6 @@ func main() {
 	}
 	if fileStore != nil {
 		slog.Info("dispatch: storing uploaded files in a bucket", "bucket", boot.FileStoreBucket)
-	}
-	var assetStore routes.AssetStore
-	if boot.AssetStoreBucket != "" {
-		assetStore, err = routes.NewS3AssetStore(ctx, boot.AssetStoreBucket)
-		if err != nil {
-			slog.Error("dispatch: configure retained asset store", "error", err)
-			os.Exit(1)
-		}
 	}
 
 	// INFRA-555: neither issuer is read at boot. The sign-in issuer's code flow and the
@@ -291,7 +323,7 @@ func main() {
 	requestIdentity := requestIdentityFor(boot, signingKey, people, sessions, signIn)
 
 	broker := events.NewBroker()
-	documentService := newDocumentService(boot, docs.Deps{
+	documentService := docs.New(docs.Deps{
 		Store:           database,
 		Events:          broker,
 		Identity:        requestIdentity,
@@ -328,27 +360,37 @@ func main() {
 	}
 
 	built := routes.AppContextOptions{
-		SigningKey:  signingKey,
-		WebDistDir:  webDistDir,
-		AssetStore:  assetStore,
-		People:      people,
-		Sessions:    sessions,
-		Identity:    requestIdentity,
-		SignIn:      signIn,
-		Store:       database,
-		ServerURL:   serverURL,
-		Docs:        documentService,
-		Embedder:    embedder,
-		Events:      broker,
-		App:         appCfg,
-		AgentStream: agentStream,
-		Files:       fileStore,
-		Lifetime:    ctx,
+		SigningKey:     signingKey,
+		WebDistDir:     webDistDir,
+		AssetStore:     dashboard.NewStore(database.Pool),
+		DashboardEntry: dashboardBuild.Entry,
+		People:         people,
+		Sessions:       sessions,
+		Identity:       requestIdentity,
+		SignIn:         signIn,
+		Store:          database,
+		ServerURL:      serverURL,
+		Docs:           documentService,
+		Embedder:       embedder,
+		Events:         broker,
+		App:            appCfg,
+		AgentStream:    agentStream,
+		Files:          fileStore,
+		Lifetime:       ctx,
 	}
 	// Set only when configured: a nil *oidc.LazyVerifier in the interface field would read as a
 	// configured verifier, and every JWT-shaped bearer would be sent to it.
 	if serviceTokens != nil {
 		built.OIDC = serviceTokens
+	}
+	brokerTokens, err := brokerTokenVerifier(boot, database, serverURL)
+	if err != nil {
+		slog.Error("dispatch: build the broker access-token verifier", "error", err)
+		os.Exit(1)
+	}
+	built.BrokerTokens = brokerTokens
+	if brokerTokens != nil {
+		slog.Info("dispatch: deciding access tokens the secrets broker issued", "broker", redact.URL(boot.AgentSecretsURL))
 	}
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, built))
 
@@ -390,6 +432,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The registry /metrics serves (dispatchHandler), built whether or not NATS is configured:
+	// the probe answers from the moment the server does, and a process with no bus simply leaves
+	// the outbox's counter at zero.
+	met := metrics.New()
+	outboxPublishFailures := met.NewCounter(
+		"envoy_dispatch_outbox_publish_failures_total",
+		"Destinations of an outbox publish attempt that did not reach NATS, by reason: one per destination denied, refused or otherwise failed",
+	)
 	if natsClient != nil {
 		outboxPool, err := database.Pool.Outbox()
 		if err != nil {
@@ -397,11 +447,12 @@ func main() {
 			os.Exit(1)
 		}
 		go outbox.Run(ctx, outbox.Deps{
-			Store:     &store.Store{Pool: outboxPool},
-			Publisher: natsClient,
-			Broker:    broker,
-			Docs:      documentService,
-			Leases:    leases,
+			Store:           &store.Store{Pool: outboxPool},
+			Publisher:       natsClient,
+			Broker:          broker,
+			Docs:            documentService,
+			Leases:          leases,
+			PublishFailures: outboxPublishFailures,
 		})
 	}
 	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: the server's
@@ -427,8 +478,9 @@ func main() {
 	// Postgres, and the room this process holds for it closes within that round trip, so its
 	// browsers reconnect and re-sync instead of reading text the store no longer holds.
 	go documentService.RunStaleRoomEviction(ctx)
-	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule.
-	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases)
+	// The related-item check's keyword statistics (each project's df and N), rebuilt at
+	// boot and every ten minutes.
+	go api.RunSearchTermStatsRefresh(ctx, database.Pool, api.SearchTermStatsInterval, leases)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
 	// added the count columns found, and any the task this one replaces versions while both run -
 	// are counted again, at start and on an interval, so their progress shows without anyone
@@ -451,7 +503,7 @@ func main() {
 	// reopens during a roll are withdrawn or restored every interval after the boot's own pass.
 	go api.RunIssueAskRepair(ctx, issueAskRepairDeps, leases)
 
-	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
+	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase, boot.NATSReplicas)
 	if err != nil {
 		slog.Error("dispatch: open webhook redelivery", "error", err)
 		os.Exit(1)
@@ -503,8 +555,13 @@ func main() {
 	}
 	announcer := startup.New(startup.Deps{Pool: database.Pool, Publisher: announcements})
 
-	routesHandler, waitDelivery := routes.New(appCtx)
-	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
+	routesHandler, background := routes.New(appCtx)
+	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule; the
+	// same pass deletes the Idempotency-Keys past their 24 hours and sends every delivery a process
+	// that died left owed (INFRA-258), which is why it starts once the API server it resumes them
+	// through is built.
+	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases, background.ResumeDeliveries)
+	handler := dispatchHandler(routesHandler, met, database, natsClient, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
 	server := newHTTPServer(handler, time.Now)
 	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and
 	// does either before serving, so a socket it cannot serve on or an address it cannot take ends
@@ -521,7 +578,7 @@ func main() {
 	}
 	registration, err := joinRegistry(ctx, database, processes.Instance{
 		Commit:         buildCommit,
-		DashboardBuild: routes.DashboardBuild(webDistDir),
+		DashboardBuild: dashboardBuild.Build,
 		SigningKeys:    signingKey.Fingerprints(),
 	}, leases, announcer)
 	if err != nil {
@@ -535,7 +592,7 @@ func main() {
 		slog.Error("dispatch: register this server process", "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitDelivery,
+	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, background.Wait,
 		deregisterAfterDrain(registration), registration.Lost()); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
@@ -627,6 +684,24 @@ func loadAppCredentials(env settingValues, dataDir string) (*auth.AppConfig, app
 	return cfg, appCredentialSource{Path: path}, nil
 }
 
+// dispatchStreamOptions are the options the Dispatch server's publisher connects with, the
+// stream's other owner (bus.ConnectOwningStream): its name, the settings table's lookup for NATS's
+// reach and nkey, the deployment's replica count and byte limit from boot, and the webhook
+// redelivery bucket, the one bucket Dispatch opens at that count (webhookSweeper) and its NATS
+// grant covers, which the client's keeper raises back to it when a concurrent start or an
+// operator lowered it (bus.WithKeptBuckets). A server with no App key opens no such bucket, and
+// the keeper skips one that does not exist. main and the tests that start Dispatch's stream both
+// take them from here.
+func dispatchStreamOptions(boot bootConfig, env settingValues) []bus.ConnectOption {
+	return []bus.ConnectOption{
+		bus.WithEnvironment(env.lookup),
+		bus.WithName("dispatch"),
+		bus.WithReplicas(boot.NATSReplicas),
+		bus.WithStreamMaxBytes(boot.StreamMaxBytes),
+		bus.WithKeptBuckets(bus.WebhookRedeliveryBucket),
+	}
+}
+
 // resolveBootConfig is the server's configuration from what the settings table read (env),
 // checked before anything connects. It holds the settings main hands on as values; three groups
 // reach their readers from env instead, through the table's lookup: the GitHub App credentials
@@ -651,7 +726,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		TestHooksEnabled:   env.get("DISPATCH_TEST_HOOKS") == "1",
 		WebDist:            env.get("DISPATCH_WEB_DIST"),
 		FileStoreBucket:    strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")),
-		AssetStoreBucket:   strings.TrimSpace(env.get("DISPATCH_ASSET_STORE_BUCKET")),
+		DevSignInSharedKey: env.get("DISPATCH_DEV_SIGNIN_SHARED_KEY"),
 		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
 		EnvoyToken:         env.get("ENVOY_TOKEN"),
 	}
@@ -681,6 +756,12 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.PprofAddr = pprofAddr
+	if boot.NATSReplicas, err = bus.ParseNATSReplicas(env.get(bus.ReplicasEnvVar)); err != nil {
+		return bootConfig{}, err
+	}
+	if boot.StreamMaxBytes, err = bus.ParseStreamMaxBytes(env.get(bus.StreamMaxBytesEnvVar)); err != nil {
+		return bootConfig{}, err
+	}
 	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_SETTLE_DELAY")); raw != "" {
 		if !boot.TestHooksEnabled {
 			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_SETTLE_DELAY")
@@ -719,12 +800,18 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	default:
 		return bootConfig{}, fmt.Errorf("DISPATCH_DEV_SIGNIN=%q (expected 1 or unset)", flag)
 	}
+	// The shared key only ever replaces dev sign-in's per-process key; a server without the flag
+	// would ignore it, and a value an operator sets expecting it to sign their deployment's cookies
+	// would sign nothing.
+	if !devSignIn && boot.DevSignInSharedKey != "" {
+		return bootConfig{}, errors.New("DISPATCH_DEV_SIGNIN_SHARED_KEY is read only with DISPATCH_DEV_SIGNIN=1, by the processes of one local harness; unset it, and set DISPATCH_SIGNING_KEY to give a deployment's processes one key")
+	}
 
 	switch mode := identityMode; {
 	case mode == "" || mode == "cookie":
-		if err := requireCookieSignIn(boot, devSignIn); err != nil {
-			return bootConfig{}, err
-		}
+		// Cookie identity takes no sign-in setting: with none set, and no DISPATCH_DEV_SIGNIN,
+		// Dispatch asks nobody to sign in, refuses every cookie an earlier sign-in minted (requestIdentityFor), and serves
+		// its agent-token API alone.
 	case strings.HasPrefix(mode, "header:"):
 		boot.IdentityHeader = strings.TrimSpace(strings.TrimPrefix(mode, "header:"))
 		if boot.IdentityHeader == "" {
@@ -785,7 +872,9 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 // main loads after it. With the flag any loopback client signs in as any person it names, so the
 // process must listen, keep its data and reach the services that act on a human's word (NATS, the
 // secrets broker, the Envoy listener that delivers mentions and messages, GitHub as the App) on
-// this machine alone, and sign its cookies with a key no other process holds.
+// this machine alone, and sign its cookies with a key no production server holds: one of its own,
+// or one derived from DISPATCH_DEV_SIGNIN_SHARED_KEY under a dev-only label (sessionSigningKey),
+// which the other processes of its harness derive too and a production server never signs with.
 func devSignInFence(boot bootConfig, env settingValues) error {
 	if boot.IdentityHeader != "" {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 mints session cookies, so DISPATCH_IDENTITY must be cookie")
@@ -803,7 +892,7 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 		return err
 	}
 	if !boot.SigningKey.Empty() {
-		return errors.New("DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process; unset DISPATCH_SIGNING_KEY")
+		return errors.New("DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process, or derived from DISPATCH_DEV_SIGNIN_SHARED_KEY when the processes of one local harness share their cookies; unset DISPATCH_SIGNING_KEY")
 	}
 	if !boot.NATSDisabled && env.get(bus.AllowRemoteEnvVar) == "1" {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 publishes to this machine's NATS only: unset %s, or set DISPATCH_NATS_DISABLED=1", bus.AllowRemoteEnvVar)
@@ -899,15 +988,20 @@ func explainMigrateError(err error) error {
 	)
 }
 
-// sessionSigningKey is the key set session cookies are signed with: one key generated for this
-// process under dev sign-in, otherwise DISPATCH_SIGNING_KEY's keys when it is set (a deployment's,
-// from its secrets manager), otherwise the data dir's signing-key file, created on first start (a
-// local run's). Outside dev sign-in the keys must stay the same across deploys, or every dsession
-// cookie is invalidated whenever a container rolls; a rotation adds the new key second first. An
-// empty signing-key file is refused by name: the empty set signs nothing, and the people store
-// would refuse it only by panicking.
+// sessionSigningKey is the key set session cookies are signed with. Under dev sign-in it holds one
+// key: the key derived from DISPATCH_DEV_SIGNIN_SHARED_KEY when it is set
+// (devSignInSharedSigningKey), otherwise one generated for this process. Outside it, it is
+// DISPATCH_SIGNING_KEY's keys when that is set (a deployment's, from its secrets manager),
+// otherwise the data dir's signing-key file, created on first start (a local run's). Outside dev
+// sign-in the keys must stay the same across deploys, or every dsession cookie is invalidated
+// whenever a container rolls; a rotation adds the new key second first. An empty signing-key file
+// is refused by name: the empty set signs nothing, and the people store would refuse it only by
+// panicking.
 func sessionSigningKey(boot bootConfig, dataDir string) (auth.SigningKeys, error) {
 	if boot.DevSignIn {
+		if boot.DevSignInSharedKey != "" {
+			return auth.SingleSigningKey(devSignInSharedSigningKey(boot.DevSignInSharedKey)), nil
+		}
 		key, err := auth.NewSigningKey()
 		if err != nil {
 			return auth.SigningKeys{}, err
@@ -928,13 +1022,62 @@ func sessionSigningKey(boot bootConfig, dataDir string) (auth.SigningKeys, error
 	return keys, nil
 }
 
-// newDocumentService is the document service main serves the document websocket and the API's
-// documents from: built, what main made from the rest of the configuration, with every setting the
-// service takes from boot filled in. The settings tests build it through here, as they build the
-// router through appContextOptions, so dropping a hand-off here fails a case.
-func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
-	built.AgentTokens = boot.AgentTokens
-	return docs.New(built)
+// devSignInSharedSigningKeyLabel separates the cookie key dev sign-in derives from every key a
+// production server signs with.
+const devSignInSharedSigningKeyLabel = "dispatch dev sign-in"
+
+// devSignInSharedSigningKey is the cookie key every dev-sign-in process given shared derives, the
+// base64url of HMAC-SHA256 keyed by shared over a fixed dev-only label. It is never shared itself,
+// so a production DISPATCH_SIGNING_KEY pasted into DISPATCH_DEV_SIGNIN_SHARED_KEY signs no cookie,
+// and seals no refresh token, that the production server it came from accepts.
+func devSignInSharedSigningKey(shared string) string {
+	mac := hmac.New(sha256.New, []byte(shared))
+	mac.Write([]byte(devSignInSharedSigningKeyLabel))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// dashboardPublishTimeout bounds the boot's publish of its dashboard build and the prune after it.
+// A first publish writes the whole build, 45 files and 5.4 MB for the dashboard of 2026-10-27; a
+// restart on a stored build writes nothing.
+const dashboardPublishTimeout = 60 * time.Second
+
+// publishDashboard stores the dashboard build at webDistDir in the database
+// (dashboard.Publish, stamped with buildCommit) and then prunes the builds no process needs any
+// more (dashboard.Prune), both within timeout, and returns what it published: the build's id
+// (routes.DashboardBuild's) and entry chunk among it. A dist with no index.html (the Go test
+// rigs serve an empty directory) publishes nothing, logs that it did not, and returns the zero
+// Published, whose empty build and entry say this process serves no dashboard. A failed publish
+// is the error returned, and refuses the boot; a failed prune is logged and the start goes on,
+// since it leaves only builds the next boot's prune deletes.
+func publishDashboard(ctx context.Context, pool *store.Pool, webDistDir string, timeout time.Duration) (dashboard.Published, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	published, err := dashboard.Publish(ctx, pool, webDistDir, buildCommit)
+	switch {
+	case errors.Is(err, dashboard.ErrNoBuild):
+		slog.Info("dispatch: no dashboard build to publish: the web dist holds no index.html", "dir", webDistDir)
+	case err != nil:
+		return dashboard.Published{}, err
+	default:
+		slog.Info("dispatch: published dashboard assets", "build", published.Build, "entry", published.Entry,
+			"assets", published.Assets, "written", published.Written)
+	}
+	// The prune keeps every build a live server process serves (processes.Live, read here at boot)
+	// beside the newest dashboard.KeepNewest. This process registers only once it listens, after
+	// this, so it is not among them yet; the publish above has just renewed its build's
+	// last_started_at, which puts it among the newest.
+	liveBuilds, err := api.LiveDashboardBuilds(ctx, pool)
+	if err != nil {
+		slog.Error("dispatch: prune dashboard builds", "error", err)
+		return published, nil
+	}
+	pruned, err := dashboard.Prune(ctx, pool, liveBuilds)
+	if err != nil {
+		slog.Error("dispatch: prune dashboard builds", "error", err)
+		return published, nil
+	}
+	slog.Info("dispatch: pruned dashboard builds", "builds", pruned.Builds, "assets", pruned.Assets)
+	return published, nil
 }
 
 // decidedWordingRestoreTimeout bounds the boot's restoration of decided asks' wordings. On the
@@ -1088,15 +1231,19 @@ func serverClient(extra ...bus.ConnectOption) []bus.ConnectOption {
 	return extra
 }
 
-// dispatchHandler mounts the one /healthz the process serves, and /livez, above every dashboard
-// and API route, so each probe is answered whatever the router is doing. Go's ServeMux prefers
-// the longer pattern, so "GET /healthz" and "GET /livez" win over the router's "/". /livez
-// answers 204 and touches nothing: it says only that the process answers, for a liveness or
-// startup probe, which must not wait on or fail with Postgres, NATS or the file store.
-func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.Handler {
+// dispatchHandler mounts the three probes the process serves - /healthz, /livez and /metrics -
+// above every dashboard and API route, so each is answered whatever the router is doing. Go's
+// ServeMux prefers the longer pattern, so "GET /healthz", "GET /livez" and "GET /metrics" win
+// over the router's "/", which is also what keeps a scrape of /metrics from falling through to
+// the SPA shell the router answers an unknown path with. /livez answers 204 and touches nothing:
+// it says only that the process answers, for a liveness or startup probe, which must not wait on
+// or fail with Postgres, NATS or the file store. /metrics is unauthenticated like the other two,
+// so whoever reaches Dispatch's HTTP port can read it, and registry serves it.
+func dispatchHandler(handler http.Handler, registry *metrics.Registry, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit, announcer, issuers))
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	mux.Handle("GET /metrics", registry.Handler())
 	mux.Handle("/", handler)
 	return mux
 }
@@ -1118,6 +1265,33 @@ func serviceTokenVerifier(boot bootConfig) *oidc.LazyVerifier {
 		return nil
 	}
 	return oidc.NewLazyVerifier(boot.OIDCIssuer, boot.OIDCAudience)
+}
+
+// brokerTokenVerifier decides callers presenting an access token the secrets broker issued, under
+// the RFC 9449 DPoP scheme. It is built from the settings Dispatch already has and needs none of
+// its own: the broker DISPATCH_AGENT_SECRETS_URL names, which the approval relays already call,
+// Dispatch's own projected ServiceAccount token from DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE,
+// which it already presents there, and DISPATCH_SERVER_URL as the origin a proof's 'htu' is
+// checked against. Spent proofs are recorded in Dispatch's own database (store.DPoPProofs), which
+// the maintenance pass sweeps.
+//
+// A deployment with no broker gets nil: Dispatch then has no such credential kind, and a DPoP
+// presentation is refused as any non-bearer Authorization header has always been
+// (401 UNAUTHORIZED).
+func brokerTokenVerifier(boot bootConfig, database *store.Store, serverURL string) (*brokertoken.Verifier, error) {
+	if boot.AgentSecretsURL == "" {
+		return nil, nil
+	}
+	return brokertoken.New(brokertoken.Options{
+		BrokerURL: boot.AgentSecretsURL,
+		Account:   brokertoken.NewAccountToken(boot.AgentSecretsTokenFile),
+		Origin:    strings.TrimSuffix(serverURL, "/"),
+		Replay:    store.NewDPoPProofs(database.Pool),
+		// Dispatch's own rule for which address a request came from, the one its access log and
+		// its other buckets read; the check itself has none, so this says whose proxy header is
+		// trusted here (auth.ForwardedAddress).
+		Address: auth.ForwardedAddress,
+	})
 }
 
 // healthzHandler answers the readiness probe: 200 while this process can serve requests, which is
@@ -1161,6 +1335,11 @@ func serviceTokenVerifier(boot bootConfig) *oidc.LazyVerifier {
 // compares commit and schema_version with the commit its image pin names and that commit's
 // migrations, so neither is ever filled with a guess; the Legion daemon reads fleet_commit, since
 // mid-roll whichever process answers it may serve a build the rest do not.
+//
+// `idempotency_keys` is true on every build that judges a write's Idempotency-Key (INFRA-258,
+// api/request_keys.go): the agents' client reads it before it retries a write under its key, since
+// an earlier Dispatch ignores the header and would run a retried write again. It is a fact of the
+// binary, never of the probe, so it is true whatever the database or NATS answer.
 func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.HandlerFunc {
 	var reportedCommit *string
 	if commit != "" {
@@ -1220,16 +1399,21 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(struct {
-			OK            bool    `json:"ok"`
-			DB            bool    `json:"db"`
-			NATS          *bool   `json:"nats"`
-			Files         *bool   `json:"files"`
-			SignIn        *bool   `json:"signin"`
-			ServiceTokens *bool   `json:"service_tokens"`
-			Commit        *string `json:"commit"`
-			FleetCommit   *string `json:"fleet_commit"`
-			SchemaVersion *int    `json:"schema_version"`
-		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, SignIn: signInOK, ServiceTokens: serviceTokensOK, Commit: reportedCommit, FleetCommit: announcer.FleetCommit(), SchemaVersion: schemaVersion})
+			OK              bool    `json:"ok"`
+			DB              bool    `json:"db"`
+			NATS            *bool   `json:"nats"`
+			Files           *bool   `json:"files"`
+			SignIn          *bool   `json:"signin"`
+			ServiceTokens   *bool   `json:"service_tokens"`
+			Commit          *string `json:"commit"`
+			FleetCommit     *string `json:"fleet_commit"`
+			SchemaVersion   *int    `json:"schema_version"`
+			IdempotencyKeys bool    `json:"idempotency_keys"`
+		}{
+			OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, SignIn: signInOK, ServiceTokens: serviceTokensOK,
+			Commit: reportedCommit, FleetCommit: announcer.FleetCommit(), SchemaVersion: schemaVersion,
+			IdempotencyKeys: true,
+		})
 	}
 }
 

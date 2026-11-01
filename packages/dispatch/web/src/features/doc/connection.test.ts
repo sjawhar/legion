@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, jest, spyOn, test } from "bun:test";
 import { waitFor } from "@testing-library/react";
 import { createDecoder, readVarString, readVarUint, readVarUint8Array } from "lib0/decoding";
 import * as Y from "yjs";
@@ -59,7 +59,12 @@ test("a read-only Hocuspocus admission signals a schema reload", () => {
 });
 
 test("pending document labels describe retained, read-only, rebuilt, and unretained edits", () => {
-  const retained = { count: 2, readOnly: false, rebuiltAt: undefined, stored: true };
+  const retained = {
+    count: 2,
+    readOnly: false,
+    rebuiltAt: undefined,
+    stored: true,
+  };
   expect(connectionLabel("offline", pendingNotice("offline", retained))).toBe(
     "offline · 2 edits saved in this browser, not sent yet."
   );
@@ -118,20 +123,26 @@ interface ProviderHarness {
   synced(): boolean;
   /** The `index`th socket the provider opened, once the provider has written to it. */
   socket(index: number): Promise<OpenSocket>;
+  /** Sets the share of the reconnect spread (`Math.random()`) each socket draws when it opens. */
+  draw(share: number): void;
 }
 
 /**
  * Connects `artifact` through the real transport and Hocuspocus provider, over `OpenSocket`s the
  * test answers as the server, runs `body` with what the host is told, and then destroys the
- * connection and puts the browser's WebSocket back.
+ * connection and puts the browser's WebSocket and `Math.random` back. Each socket draws `share`
+ * of the reconnect spread when it opens, 0 unless the test says otherwise, so the reconnect after
+ * a dropped socket opens at once.
  */
 async function withProvider(
   artifact: string,
-  body: (harness: ProviderHarness) => Promise<void>
+  body: (harness: ProviderHarness) => Promise<void>,
+  share = 0
 ): Promise<void> {
   const realSocket = globalThis.WebSocket;
   globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
   OpenSocket.opened = [];
+  const random = spyOn(Math, "random").mockReturnValue(share);
   let connection: DocumentConnection | undefined;
   try {
     const connect = await loadDocumentTransport();
@@ -151,6 +162,7 @@ async function withProvider(
     await body({
       admissions,
       connection,
+      draw: (next) => random.mockReturnValue(next),
       pending,
       async socket(index) {
         await waitFor(() => expect(OpenSocket.opened[index]?.sent.length).toBeGreaterThan(0));
@@ -160,6 +172,7 @@ async function withProvider(
     });
   } finally {
     connection?.destroy();
+    random.mockRestore();
     globalThis.WebSocket = realSocket;
   }
 }
@@ -570,5 +583,56 @@ test("a document whose browser keeps no edits says so, and still connects", asyn
   } finally {
     Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: realStorage });
     logged.mockRestore();
+  }
+});
+
+/** Lets the provider's promise chain (a socket's open, its retry's wait, then its attempt) run. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+}
+
+test("a document's first connect opens at once, and each reconnect after a server close waits a fresh draw of the 2 s spread", async () => {
+  const artifact = artifactId();
+  try {
+    await withProvider(
+      artifact,
+      async ({ draw }) => {
+        // The page's first connect waits nothing, whatever the draw would be.
+        expect(OpenSocket.opened).toHaveLength(1);
+
+        // The socket opens with the draw at 0.5: the reconnect after it waits 0.5 of 2 s.
+        jest.useFakeTimers();
+        draw(0.5);
+        await settle();
+        const first = OpenSocket.opened[0] as OpenSocket;
+        first.receive(authenticatedFrame("read-write", artifact));
+        // Dispatch restarts: the server closes the socket.
+        first.drop();
+        await settle();
+        expect(OpenSocket.opened).toHaveLength(1);
+        jest.advanceTimersByTime(999);
+        await settle();
+        expect(OpenSocket.opened).toHaveLength(1);
+        // The next socket opens with a fresh draw: 0.25 of 2 s.
+        draw(0.25);
+        jest.advanceTimersByTime(1);
+        await settle();
+        expect(OpenSocket.opened).toHaveLength(2);
+
+        const second = OpenSocket.opened[1] as OpenSocket;
+        second.receive(authenticatedFrame("read-write", artifact));
+        second.drop();
+        await settle();
+        jest.advanceTimersByTime(499);
+        await settle();
+        expect(OpenSocket.opened).toHaveLength(2);
+        jest.advanceTimersByTime(1);
+        await settle();
+        expect(OpenSocket.opened).toHaveLength(3);
+      },
+      0.999
+    );
+  } finally {
+    jest.useRealTimers();
   }
 });

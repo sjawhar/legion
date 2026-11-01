@@ -43,16 +43,23 @@ publishes nothing, so the first publisher wins. The object carries:
 - `bootstrappedSession` — the transcript of the session this process bootstrapped as its Legion
   identity (`src/subagent-session.ts`).
 - `startupTurn` — `{session, sentAt}` or undefined: the session whose first turn a start that runs
-  after Oh My Pi's startup owns, and when that start was sent (milliseconds since the epoch). The
-  Legion entry sets it (`markStartupTurnSent`, `src/startup-turn.ts`): any claim that sends the
-  operator's controller its start message to an idle session, right before the send (the claim
-  `/legion-controller-start` runs after Oh My Pi's startup, a later `/legion-claim-controller`, or
-  a re-claim after a session change), and the daemon-launched controller right before
-  `claims/ready`. A start message queued as a follow-up behind a turn the operator already started
-  sets nothing: that run, the session's first, has already started. That session's first
-  `agent_start`, and its `session_shutdown`, clear it (`clearStartupTurn`;
-  `packages/pi-legion/AGENTS.md`, "The controller's start turn"). The Envoy entry does not read it
-  yet; a later pi-envoy change uses it.
+  after Oh My Pi's startup owns, and when that start was sent (milliseconds since the epoch;
+  undefined while the start is due and not sent yet). The Legion entry sets it
+  (`src/startup-turn.ts`): the operator-launched controller marks its session unsent at
+  `session_start` (`markStartupTurnPending`), since it claims and sends only from
+  `/legion-controller-start`, which Oh My Pi runs after its startup; any claim that sends the
+  operator's controller its start message to an idle session marks it sent right before the send
+  (`markStartupTurnSent`: the claim `/legion-controller-start` runs, a later
+  `/legion-claim-controller`, or a re-claim after a session change); and the daemon-launched
+  controller marks it sent right before `claims/ready`. A start message queued as a follow-up behind
+  a turn the operator already started marks nothing: that run, the session's first, has already
+  started, and its `agent_start` cleared the unsent mark. That session's first `agent_start`, and
+  its `session_shutdown`, clear it, and so does a start command whose claim fails before the send or
+  hands over to a new session (`clearStartupTurn`; `packages/pi-legion/AGENTS.md`, "The
+  controller's start turn"). The Envoy entry reads it (`packages/pi-envoy/src/card-wake.ts`): while
+  it names the Envoy entry's own live session and its start was sent under 30 s ago, or is unsent
+  and the Envoy entry first read that unsent mark under 30 s ago (re-read every second until then),
+  a card that finds the session idle starts no turn and the startup wake waits for the start turn.
 
 Every consumer resolves the object at each use through `envoyPluginInterface()`; nothing caches it
 at module scope, and `resetEnvoyPluginInterfaceForTests()` is the one test seam.
@@ -70,9 +77,11 @@ exact `Symbol.for` strings, so renaming one is a daemon change too):
 it, bumps `ENVOY_PLUGIN_INTERFACE_VERSION`; both plugins release from the same commit, and the
 daemon's gate refuses a pair whose versions differ.
 
-**The current version, 4.** Version 2 told the two separately bundled plugins that typed turns are
+**The current version, 5.** Version 2 told the two separately bundled plugins that typed turns are
 tag-matched rather than text-matched and that a tagged `skill-prompt` is the person's turn;
-version 3 adds `roleClaim.slackRoleOwned`; version 4 adds `startupTurn`. The real readers are the
+version 3 adds `roleClaim.slackRoleOwned`; version 4 adds `startupTurn`; version 5 lets
+`startupTurn.sentAt` be undefined (a start due and not sent yet) and has the Envoy entry read the
+mark. The real readers are the
 Legion load marker (`extensions/legion.ts`), `readEnvoyPluginInterface`, the Envoy publisher's
 mismatch refusal and the daemon probe (`packages/daemon/probe.mjs`), which take
 `ENVOY_PLUGIN_INTERFACE_VERSION`, and
@@ -124,7 +133,7 @@ it returns reads back as `turns`, `selfChecks`, `toolResults` and `transcriptEnt
 | Phase ops | `src/legion-phase-ops.ts`, `src/legion-phase-ops.test.ts` | `read_record`, `handoff_complete` and `request_backward_move`, the operations every harness's `legion` tool serves: `PhaseOpArguments`, the one strict schema each call is refused against before any daemon request, every problem named and joined by `; `; `phaseOpParameters(zod)`, its fields as a host declares them in its tool's one object schema, keyed by name so a host lays them out in its own order, built with the host's Zod (Oh My Pi's `pi.zod`, whose converter reads only schemas its own Zod built); `legionToolDescription`, the one description template, the host naming its Envoy publish tool and the sentences it sets before and after `handoff_complete`'s contract (`PHASE_OP_SENTENCES` for `read_record` and `request_backward_move`, which claude-envoy states and pi-legion leaves out); `executePhaseOp`, the one executor, whose refusals come in a fixed order: a field the operation does not take, then a root architect's `handoff_complete` (unavailable, before its own fields are read), then each problem with the operation's own fields, then a refused handoff-commit lookup, all before the grant is minted; and `mintClaimGrant`, a claim's per-write grant. `packages/pi-legion/src/tools.test.ts` pins the description and the serialized parameter schema Oh My Pi agents read, byte for byte |
 | Handoff commit | `src/handoff-commit.ts`, `src/handoff-commit.test.ts` | `findHandoffCommit`: the commit a `handoff_complete` reports, found in the pane with its own jj (the rules are in the module's doc comment); both `legion` tools call it before they post |
 | Stale git lock note | `src/git-lock.ts`, `src/git-lock.test.ts` | `staleGitLockNote`: the note `handoff-commit`'s jj runner adds for each git lock a failure names that is still on disk, worded as the daemon's shim words it (`packages/daemon/internal/shim/gitlock.go`) |
-| Shell command scan | `src/shell-command.ts`, `src/shell-command.test.ts` | `dispatchCommandHead`: the first line of one `dispatch` command, optionally fed one here-document opened with a quoted delimiter, ending where bash ends it (a tab before the delimiter counts only under `<<-`), or undefined for any other command. pi-envoy's run-end check reads it; the test compares the scan with a real non-interactive bash fed over a pipe |
+| Shell command scan | `src/shell-command.ts`, `src/shell-command.test.ts` | `dispatchCommandHead`: the first line of one `dispatch` command, without a comment that ends it (a `#` that starts a word outside quotes, as bash reads one: the comment AskGate keeps an override flag in), optionally fed one here-document opened with a quoted delimiter, ending where bash ends it (a tab before the delimiter counts only under `<<-`), or undefined for any other command. pi-envoy's run-end check reads it; the test compares the scan with a real non-interactive bash fed over a pipe, here-documents and comments both |
 | Skills guard rules | `test/skills-guard.ts` | What `packages/pi-envoy/src/skills-guard.test.ts` and `packages/pi-legion/src/skills-guard.test.ts` run over each plugin's staged partition: `stageSkills(<package name>)` stages it through `scripts/pi-plugin-prepack.sh --stage-skills`, exactly as the prepack does; `oversizedFiles` (a file at or over Oh My Pi's 51,200-byte spill threshold), `longSkillBodies` (a `SKILL.md` of 500 lines or more), `misnamedSkills` (a frontmatter `name` that is not the directory's), `brokenSkillLinks` (a `skill://<name>/<path>[#anchor]` link naming a missing file or heading, resolved against the repository's `skills/`, where both partitions live), `brokenRelativeLinks` (a `](../…)` or `](./…)` link outside a code fence that leaves the staged partition or names no file: a cross-partition link is written `skill://<name>/<path>`), and, for the Envoy guard, `unresolvedAgentDispatches` (a `task(agent="<name>")` read whole, fences included, as the daemon's gate reads a prompt, naming an agent in neither `shippedAgents(<package root>)`, the `*.md` under its `agents/`, nor `bundledAgents(<omp>)`, what the pinned binary's `omp agents unpack` writes under a fresh HOME) |
 | Skills partition | `test/skills-partition.test.ts` | Stages both partitions and holds them to the repository's `skills/`: together they are every skill directory, none is in both, each staged skill is a copy of the repository's, and a package the prepack does not know (`@sjawhar/pi-shared`) has none |
 | No cross import | `test/cross-imports.ts` | `shippedSources(<package root>)` is every `.ts` under its `extensions/` and `src/` that is not a `*.test.ts`; `crossImports(<package root>, <sibling root>)` reports each relative import of those files that resolves into the sibling's directory. `packages/pi-envoy/src/no-cross-import.test.ts` and `packages/pi-legion/src/no-cross-import.test.ts` each run it against the other plugin |

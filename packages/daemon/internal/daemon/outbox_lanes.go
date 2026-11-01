@@ -14,9 +14,10 @@ import (
 )
 
 // The outbox runs its rows on lanes. A lane is one issue's rows of one kind of work — its lifecycle
-// rows (starts, stops, the branch, the workspace) or its board rows (status writes, messages,
-// notices), record.OutboxLane — run one at a time in the order they are due, on a goroutine of its
-// own that lives only while the issue has such rows. A lane is woken by the write that commits one
+// rows (starts, stops, the branch, the workspace), its board rows (status writes, messages,
+// notices) or its role messages (the end of a role's phase), record.OutboxLane — run one at a time
+// in the order they are due, on a goroutine of its own that lives only while the issue has such
+// rows. A lane is woken by the write that commits one
 // of its rows (projectRecords, through intake.OnCommit), by the timer it arms for its next row due
 // later, and by the sweep, which every outboxLease lists the lanes with a row still in the outbox
 // (record.Store.UnfinishedLanes) and wakes each: a row whose run ended without its finish or retry
@@ -116,21 +117,25 @@ func (r *outbox) wake(issue string, kind record.OutboxKind) {
 // registry lock, where it never blocks (nudge), because a lane decides to exit under the same lock
 // after finding no wake pending: a wake sent after that decision would be a wake to a lane that is
 // gone, while one sent under the lock either reaches the lane before it decides or finds the lane
-// already deleted and starts a new one.
+// already deleted and starts a new one. A new lane's wake is sent before its goroutine starts, so
+// it is pending when the lane first looks: a lane that looked first would make a pass no wake asked
+// for and then a second for the wake that came after, re-arming its timer and retrying a row whose
+// claim just failed.
 func (r *outbox) wakeLane(key record.LaneKey) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !r.running {
 		return
 	}
-	lane, ok := r.lanes[key]
-	if !ok {
-		lane = &outboxLane{key: key, wake: make(chan struct{}, 1)}
-		r.lanes[key] = lane
-		r.wg.Add(1)
-		go r.runLane(r.laneCtx, lane)
+	if lane, ok := r.lanes[key]; ok {
+		nudge(lane.wake)
+		return
 	}
+	lane := &outboxLane{key: key, wake: make(chan struct{}, 1)}
+	r.lanes[key] = lane
 	nudge(lane.wake)
+	r.wg.Add(1)
+	go r.runLane(r.laneCtx, lane)
 }
 
 // runLane is one lane's life: drain the rows due now, arm one timer for the row due next, and

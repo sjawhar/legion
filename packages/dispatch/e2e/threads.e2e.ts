@@ -11,8 +11,9 @@ import {
   resolveAsk,
 } from "./api";
 import { conversationFilter, threadCard } from "./editor";
+import { inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
-import { holdPosts, refusePosts } from "./sends";
+import { holdPosts, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
 
 // "bob" names the session that opened the ask - authenticated over the API with
@@ -137,7 +138,7 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await expect(margin.getByText(/Answered by/)).toBeVisible();
 
   // The asking session replies over the API (bearer auth, its own comment on
-  // the ask). Alice's already-open page shows it live over SSE, no reload.
+  // the ask). Alice's already-open page shows it live from the event feed, no reload.
   await createComment(issue.key, { ask_id: ask.id, body: "Thanks, merging." }, bobSession);
   await expect(threadAfterAnswer.getByText("Thanks, merging.")).toBeVisible();
   await expect(replies).toHaveCount(2);
@@ -469,7 +470,8 @@ test("a session retraction leaves its reason on the card and removes the human's
   const alice = await asUser(browser, "alice");
   const inboxPage = await alice.newPage();
   await inboxPage.goto("/");
-  await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toBeVisible();
+  await expect(inboxRow(inboxPage, ask.id)).toBeVisible();
+  await expect(inboxPage.getByText(/^Blocked on you: 1 item/)).toBeVisible();
   await inboxPage.screenshot({
     fullPage: true,
     path: testInfo.outputPath("inbox-before-ask-retraction.png"),
@@ -497,7 +499,14 @@ test("a session retraction leaves its reason on the card and removes the human's
     bobSession
   );
 
-  await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
+  // The retraction takes the question out of the human's Inbox, live: the "Blocked on you"
+  // strip counts what the server lists, and it drops with no reload.
+  await expect(inboxPage.getByText(/^Blocked on you:/)).toHaveCount(0);
+  // The row itself: a question the server withdraws leaves the list at once, at every width and
+  // with no reload - a withdrawn question with a live answer form invites an answer the server
+  // refuses, and nothing holds a row the reader has not touched (INFRA-575).
+  await expect(inboxRow(inboxPage, ask.id)).toHaveCount(0);
+  await expect(inboxPage.getByText("Nothing needs you")).toBeVisible();
   await inboxPage.screenshot({
     fullPage: true,
     path: testInfo.outputPath("inbox-after-ask-retraction.png"),
@@ -778,7 +787,7 @@ test("a failed queued Conversation comment action keeps its thread and reply, cl
       requests += 1;
       if (requests === 1) {
         await firstResponse;
-        await route.fulfill({ status: 500 });
+        await route.fulfill({ status: 400 });
         return;
       }
       await route.continue();
@@ -791,9 +800,10 @@ test("a failed queued Conversation comment action keeps its thread and reply, cl
     await firstThread.getByRole("button", { name: "Resolve" }).click();
     await secondThread.getByRole("button", { name: "Resolve" }).click();
     resolveFirst?.();
-    // A 500 with no body is still an answer from the API, so the card shows what the client made
-    // of it, as the header, settings and composer do.
-    await expect(firstThread.getByText("Dispatch request failed (500)")).toBeVisible();
+    // A 400 with no body is still a verdict from the API, so the card shows what the client made
+    // of it, as the header, settings and composer do (a 5xx would be tried again under the
+    // write's key instead).
+    await expect(firstThread.getByText("Dispatch request failed (400)")).toBeVisible();
     await expect.poll(() => requests).toBe(1);
     await expect(firstReply).toHaveValue("Half a reply");
     await firstThread.getByRole("button", { name: "Retry" }).click();
@@ -858,7 +868,7 @@ test("a suggestion accepted while its thread's own reply is out keeps the reply'
     await expect(field).toHaveValue("Reply under an accept");
 
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Reply under an accept");
     await expect(field).toBeEnabled();
 

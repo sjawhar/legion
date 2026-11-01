@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/metrics"
 )
 
 const (
@@ -70,9 +71,9 @@ const (
 	// counts as undecided only for model.DeliveryClaimLapse, the minute its sender's claim holds
 	// (mentionDeliveryQuery).
 	mentionPendingDelay = 2 * time.Second
-	// maxCommentThreadDepth bounds the reply_to walk in loadRootCommentAuthor so a
-	// malformed cycle (comments.reply_to has no acyclicity constraint) cannot spin the
-	// recursive query and stall the outbox scan.
+	// maxCommentThreadDepth bounds the reply_to walks (loadRootCommentAuthor and
+	// loadCommentRecipients) so a malformed cycle (comments.reply_to has no acyclicity
+	// constraint) cannot spin the recursive query and stall the outbox scan.
 	maxCommentThreadDepth = 32
 	// recordTimeout bounds the write of a batch's outcome (recordBatch), which a stopping process
 	// still makes after its context has ended: one statement, which a healthy database answers in
@@ -98,7 +99,9 @@ var errMentionPending = errors.New("a mention's delivery is still undecided")
 // Publisher is the NATS publication boundary used by the Dispatch outbox.
 type Publisher interface {
 	// Window starts one batch's sends: each is sent without waiting for NATS's answer, all on one
-	// connection and in the order they were made, or not at all (bus.Client.Window).
+	// connection and in the order they were made, or not at all (bus.Client.Window). A send the
+	// window has to make again leaves after the window's later sends, and a copy it sends without
+	// its id is stored by the stream as a message of its own.
 	Window() bus.Sender
 }
 
@@ -116,10 +119,25 @@ type Deps struct {
 	Publisher Publisher
 	Broker    *events.Broker
 	Docs      docs.API
-	// Leases is where the compaction tick takes documentCompactionLease (compactDocuments). It
+	// Leases is where the compaction tick takes documentCompactionLease (compactDaily). It
 	// is required of a Run that ticks: there is no nil-means-unleased path, and cmd/dispatch
 	// exits at boot if the lease pool cannot be opened.
 	Leases duty.Leases
+	// PublishFailures counts a destination of a publish attempt that did not reach NATS, by
+	// reason (countPublishFailure). cmd/dispatch registers it on the process's metrics
+	// registry, so a denied or refused destination shows on /metrics rather than only in the
+	// log.
+	PublishFailures *metrics.Counter
+}
+
+// countPublishFailure counts one destination of a publish attempt that did not reach NATS, under
+// reason ("denied", "refused" or "failed"). Every increment goes through here: a Deps built
+// without a counter - the package's own tests - then counts nothing instead of dereferencing nil.
+func (d Deps) countPublishFailure(reason string) {
+	if d.PublishFailures == nil {
+		return
+	}
+	d.PublishFailures.Inc([2]string{"reason", reason})
 }
 
 // Run drains unpublished events at startup, after committed local events, and
@@ -160,30 +178,26 @@ func Run(ctx context.Context, deps Deps) {
 // compactDaily runs compactDocuments once per compactInterval until ctx ends, on a goroutine of its
 // own: a compaction walks every document for minutes, and on the outbox's loop nothing would
 // publish meanwhile. It goes through the document service's store, not the outbox's pool.
+//
+// Each compaction runs under documentCompactionLease, so that one process does that walk however
+// many serve the database, once per compactInterval and not once per process: the period is this
+// loop's own interval, so a process whose tick comes hours after the other's finds the day's
+// compaction already done and skips it. The ticks are duty.RunLeased's, a ticker's: the first one
+// interval after the call, then one each interval; the first tick a compaction overran comes at
+// once with the moment it was due, and only the ones after it are dropped.
 func compactDaily(ctx context.Context, deps Deps) {
 	ctx = store.WithTransactionTracking(ctx)
-	compact := time.NewTicker(compactInterval)
-	defer compact.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-compact.C:
-			compactDocuments(ctx, deps)
-		}
-	}
+	duty.RunLeased(ctx, deps.Leases, documentCompactionLease, compactInterval, duty.TickAfterInterval, func(ctx context.Context) {
+		compactDocuments(ctx, deps)
+	})
 }
 
-// compactDocuments runs the daily compaction of every document under documentCompactionLease, so
-// that one process does that walk however many serve the database, once per compactInterval and
-// not once per process: the period is this loop's own tick, so a process whose ticker fires hours
-// after the other's finds the day's compaction already done and skips it.
+// compactDocuments is one daily compaction of every document, the pass compactDaily runs under
+// documentCompactionLease.
 func compactDocuments(ctx context.Context, deps Deps) {
-	duty.Exclusive(ctx, deps.Leases, documentCompactionLease, compactInterval, func(ctx context.Context) {
-		if err := deps.Docs.CompactAll(ctx); err != nil {
-			slog.Error("dispatch outbox: compact documents", "error", err)
-		}
-	})
+	if err := deps.Docs.CompactAll(ctx); err != nil {
+		slog.Error("dispatch outbox: compact documents", "error", err)
+	}
 }
 
 func scan(ctx context.Context, deps Deps) {
@@ -208,9 +222,18 @@ type pendingEvent struct {
 	destinations []string
 	slug         string
 	routing      routing
+	// threadSessions are the sessions a person's reply reaches through its thread
+	// (loadCommentRecipients), read for the whole batch by resolveCommentRecipients and filtered by
+	// publishAuthorRoutes.
+	threadSessions recipientList
+	// primaryAuthors are the sessions the primary document of the event's issue credits, which a
+	// person's comment reaches when the issue has no route and no session claimant, read for the
+	// whole batch by resolveCommentRecipients and filtered by publishPrimaryDocumentAuthors.
+	primaryAuthors recipientList
 	// failure is why the row cannot be published as it was read - it did not scan, or its
-	// actor or payload JSON did not decode - and failureLog is the predicate it reports
-	// under. The batch backs such an event off instead of publishing it.
+	// actor or payload JSON did not decode - and failureLog is the predicate it reports under.
+	// The batch backs such an event off instead of publishing it. A recipient query that failed
+	// is no failure of the row's (recipientList).
 	failure    error
 	failureLog string
 }
@@ -228,11 +251,13 @@ type routing struct {
 // envelope is sent to each of its destinations, in id order and each event's destinations in
 // turn, before any answer is waited for, so a batch costs one NATS round trip rather than one per
 // destination, and NATS takes the envelopes in the order they were sent: on the stream, on the role
-// lanes and on each issue's subject, a batch's events arrive in id order. Then every answer is
-// read, and what the batch came to is written in one statement (recordBatch). An event is marked
-// published only once NATS accepted each of its destinations; one that failed is backed off, so
-// the events queued behind it are not stuck behind it; and one that held a session's copy back for
-// a mention still being sent (errMentionPending) is deferred, its other destinations recorded.
+// lanes and on each issue's subject, a batch's events arrive in id order. A send the window has to
+// make again is the exception: it leaves after the window's later sends (bus.Client.Window). Then
+// every answer is read, and what the batch came to is written in one statement (recordBatch). An
+// event is marked published only once NATS accepted each of its destinations; one that failed is
+// backed off, so the events queued behind it are not stuck behind it; and one that held a
+// session's copy back for a mention still being sent (errMentionPending) is deferred, its other
+// destinations recorded.
 //
 // A failure of the connection rather than the envelope (bus.ErrUnavailable: no connection, one
 // lost or reconnected mid-batch, no answer at all) is no fault of its event. The window sends
@@ -240,16 +265,30 @@ type routing struct {
 // NATS is a prefix of it: no event after the first send that met the lost connection is sent, and
 // every event that met the failure, or was not sent, is released rather than backed off, so the
 // next scan sends them again in id order, and the stream's MsgId drops the copies of those that
-// had landed. An event backed off instead would reach its issue's subject after the later events
-// of that issue, which the Legion daemon then drops as stale by their sequence. The guarantee
-// covers a failed connection only: an answer that times out, or no responders, on a connection
-// still current stops no later send, so the released event can land after a later event of its
-// issue that NATS did store.
+// had landed, except a copy the window sent again without its id, which the stream stored as a
+// message of its own. An event backed off instead would reach its issue's subject after the later
+// events of that issue, which the Legion daemon then drops as stale by their sequence. The
+// guarantee covers a failed connection only: an answer that times out, or no responders, on a
+// connection still current stops no later send, so the released event can land after a later
+// event of its issue that NATS did store.
 func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	pending, blocked, err := scanPendingEvents(ctx, deps)
 	if err != nil {
 		return 0, false, err
 	}
+	unavailable, err := publishBatch(ctx, deps, pending)
+	if err != nil {
+		return len(pending), true, err
+	}
+	return len(pending), blocked || unavailable, nil
+}
+
+// publishBatch is scanBatch's work after the read: it reads the batch's comment recipients
+// (resolveCommentRecipients), sends every event through one window, settles each and records what
+// the batch came to (recordBatch). It reports whether NATS was unreachable, which holds the rest of
+// the backlog for the next scan, and returns the record's error.
+func publishBatch(ctx context.Context, deps Deps, pending []pendingEvent) (bool, error) {
+	resolveCommentRecipients(ctx, deps, pending)
 
 	sender := deps.Publisher.Window()
 	attempts := make([]*attempt, len(pending))
@@ -260,7 +299,7 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 		if item.failure != nil {
 			continue
 		}
-		attempts[index] = send(ctx, deps, sender, item.event, item.slug, item.routing, publishedDestinationSet(item.destinations))
+		attempts[index] = send(ctx, deps, sender, item, publishedDestinationSet(item.destinations))
 		if errors.Is(attempts[index].ended, bus.ErrUnavailable) {
 			break
 		}
@@ -280,9 +319,9 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	record, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	if err := recordBatch(record, deps, outcomes); err != nil {
-		return len(pending), true, err
+		return false, err
 	}
-	return len(pending), blocked || unavailable, nil
+	return unavailable, nil
 }
 
 // outcomeState is what an event of a batch came to.
@@ -590,22 +629,24 @@ func releaseClaim(ctx context.Context, deps Deps, ids []int64) {
 	}
 }
 
-// send starts event's attempt: its envelope is sent to each of its destinations not in delivered
-// (publishDestinations), and the attempt returned holds the answers still to come (attempt.wait).
-// A destination NATS denies (a role route outside Dispatch's grant, say) holds back none of the
-// others: it is left unreached, and the denial fails the attempt once every destination was
-// tried, so the event is retried. Any other failure that comes back before anything is sent, of
-// the connection or of the store, ends the attempt at once, since every destination after it would
-// fail the same way. A session's copy of a new comment held back for a mention still being sent
+// send starts the attempt of pending's event: its envelope is sent to each of its destinations not
+// in delivered (publishDestinations), and the attempt returned holds the answers still to come
+// (attempt.wait). A destination NATS denies (a role route outside Dispatch's grant, say) holds back
+// none of the others: it is left unreached, and the denial fails the attempt once every destination
+// was tried, so the event is retried. Any other failure that comes back before anything is sent, of
+// the connection or of the store (a recipient query of the batch that failed, recipientList, among
+// them), ends the attempt at once, since every destination after it would fail the same way. A
+// session's copy of a new comment held back for a mention still being sent
 // (attempt.leftToMention) holds back none of the others either: the attempt is marked deferred and
 // reports errMentionPending once every answer is in (attempt.err). The destinations the attempt
 // reached are recorded with the batch (recordBatch), so a retry publishes only the rest.
-func send(ctx context.Context, deps Deps, sender bus.Sender, event model.Event, slug string, routing routing, delivered map[string]struct{}) *attempt {
-	a := &attempt{delivered: delivered, sender: sender}
+func send(ctx context.Context, deps Deps, sender bus.Sender, pending pendingEvent, delivered map[string]struct{}) *attempt {
+	a := &attempt{deps: deps, delivered: delivered, sender: sender}
+	event := pending.event
 	if event.IssueKey == nil && event.ArtifactID == nil && event.Project == "" {
 		return a
 	}
-	item, err := envelope(event, slug)
+	item, err := envelope(event, pending.slug)
 	if err != nil {
 		a.ended = err
 		return a
@@ -620,28 +661,39 @@ func send(ctx context.Context, deps Deps, sender bus.Sender, event model.Event, 
 		return a
 	}
 	a.mentions = mentions
-	a.ended = publishDestinations(ctx, deps, event, item, routing, a)
+	a.ended = publishDestinations(ctx, deps, pending, item, a)
 	return a
 }
 
-// publishDestinations sends item to each of event's destinations in turn, and returns the first
-// error that ends the attempt.
-func publishDestinations(ctx context.Context, deps Deps, event model.Event, item contracts.Envelope, routing routing, a *attempt) error {
+// publishDestinations sends item to each of the destinations of pending's event in turn, and
+// returns the first error that ends the attempt. The order is fixed: the owner topic, the route,
+// the claimant (publishClaimantRoute), the sessions of the issue's primary document when the issue
+// has no route and no session claimant (publishPrimaryDocumentAuthors), the author routes, the
+// ask's followers, and the session that lost the issue's claim. The route, the claimant, the
+// primary document's sessions and the author routes are for an event that notifies
+// (events.Broker.Notify) and is no targeted message. A topic is sent once, in its first place
+// (publishDestination). A recipient query that failed for the batch ends the attempt at the step
+// that needed it, once the owner topic, the route and the claimant are sent.
+func publishDestinations(ctx context.Context, deps Deps, pending pendingEvent, item contracts.Envelope, a *attempt) error {
+	event := pending.event
 	if err := publishDestination(deps, event.ID, item, a, "publish owner topic", item.Topic); err != nil {
 		return err
 	}
 	targeted := (event.Type == "message.created" || event.Type == "message.answered") &&
 		payloadString(event.Payload, "target") != ""
 	if event.Notify && !targeted {
-		if !suppressesCurrentRoute(event.Payload, routing.route, a) {
-			if err := publishRoute(deps, event.ID, item, a, routing.route); err != nil {
+		if !suppressesCurrentRoute(event.Payload, pending.routing.route, a) {
+			if err := publishRoute(deps, event.ID, item, a, pending.routing.route); err != nil {
 				return err
 			}
 		}
-		if err := publishClaimantRoute(deps, event.ID, item, event, routing.claimant, a); err != nil {
+		if err := publishClaimantRoute(deps, event.ID, item, event, pending.routing.claimant, a); err != nil {
 			return err
 		}
-		if err := publishAuthorRoutes(ctx, deps, event.ID, item, event, a); err != nil {
+		if err := publishPrimaryDocumentAuthors(deps, item, event, pending.primaryAuthors, a); err != nil {
+			return err
+		}
+		if err := publishAuthorRoutes(ctx, deps, event.ID, item, event, pending.threadSessions, a); err != nil {
 			return err
 		}
 	}
@@ -651,8 +703,30 @@ func publishDestinations(ctx context.Context, deps Deps, event model.Event, item
 	return publishPreviousClaimant(deps, event.ID, item, event, a)
 }
 
+// publishPrimaryDocumentAuthors sends a person's comment, or its edit, on an issue with no route
+// and no session claimant to every session the issue's primary document credits, each on its own
+// topic: a session that writes an issue's spec without a claim still hears the comments on it. The
+// comment's own thread does not matter: a comment in an ask's thread, or a reply, reaches those
+// sessions too. resolveCommentRecipients chose the events and read the sessions (primaryAuthors);
+// when that query failed, its error ends the attempt here. The actor is skipped, and so is a
+// session the comment's mentions resolved to (payloadMentionedSessions) once its mention delivered
+// the comment (recipientFilter).
+func publishPrimaryDocumentAuthors(deps Deps, item contracts.Envelope, event model.Event, authors recipientList, a *attempt) error {
+	if authors.err != nil {
+		return authors.err
+	}
+	filter := newRecipientFilter(event, a)
+	var targets []string
+	for _, sessionID := range authors.sessions {
+		if filter.keep(sessionID) {
+			targets = append(targets, sessionID)
+		}
+	}
+	return publishSessionRoutes(deps, event.ID, item, a, targets, "publish primary document author route to")
+}
+
 // attempt is one pass over an event's destinations, sent through sender, its batch's window
-// (Publisher.Window). delivered holds the destinations the event
+// (Publisher.Window), for the run deps describes. delivered holds the destinations the event
 // reached before this pass and those this pass sent, so that none is sent twice; sent is what this
 // pass sent, in order, with each one's answer to come. wait reads those answers into reached, the
 // destinations NATS accepted or refused (bus.ErrRefused), denied, the denials
@@ -661,6 +735,7 @@ func publishDestinations(ctx context.Context, deps Deps, event model.Event, item
 // delivered (a new comment's alone), and deferred whether a session's copy was held back for a
 // mention still being sent.
 type attempt struct {
+	deps      Deps
 	sender    bus.Sender
 	delivered map[string]struct{}
 	sent      []sentDestination
@@ -717,11 +792,14 @@ func (a *attempt) answer(sent sentDestination, err error) error {
 	switch {
 	case err == nil:
 	case errors.Is(err, bus.ErrPublishDenied):
+		a.deps.countPublishFailure("denied")
 		a.denied = append(a.denied, fmt.Errorf("%s %q: %w", sent.label, sent.id, err))
 		return nil
 	case !errors.Is(err, bus.ErrRefused):
+		a.deps.countPublishFailure("failed")
 		return fmt.Errorf("%s %q: %w", sent.label, sent.id, err)
 	default:
+		a.deps.countPublishFailure("refused")
 		slog.Error("dispatch outbox: destination refused", "event_id", sent.eventID, "topic", sent.topic, "error", err)
 	}
 	a.reached = append(a.reached, sent.topic)
@@ -954,35 +1032,30 @@ func publishClaimantRoute(deps Deps, eventID int64, item contracts.Envelope, eve
 // publishAuthorRoutes delivers a human comment-thread action, or a person's settled edit of a
 // document, directly to the involved sessions' own topics, regardless of the issue's route (which
 // may point at an entirely different reviewer) and regardless of whether the event's owner is an
-// issue or a project document (which has no route at all). Without this, the agent that started
-// the thread or is the thread's own root author never learns about the human's reply, resolution,
-// reopening, or edit, and the agent that wrote a document never learns of a new comment on it or
-// of a person's edit to it. A reply reaches its thread's root author and its direct parent's
-// author; a new comment on a document (no reply_to and no ask_id), and its edit, reach every
-// session that document credits (loadDocumentSessionAuthors); a comment on an issue's
-// conversation names no document and reaches no author; and artifact.human_edited, which the
-// notice sweep appends once a person's quiet window on a document ends (docs.sendEditNotice),
-// reaches every session the document its payload's artifact_id names credits. Ask threads are not
-// walked here: their asker and repliers are the ask's followers (publishFollowerRoutes). The
-// event's own actor is skipped, and so is a session the comment's mentions resolved to
-// (suppressed_authors) once its mention delivered the comment (attempt.leftToMention); an author
-// whose mention failed is published to instead.
-func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, a *attempt) error {
-	suppressedAuthors := payloadStringSet(event.Payload, "suppressed_authors")
-	seen := map[string]bool{}
+// issue or a project document (which has no route at all). Without this, the sessions in a thread
+// never learn of the human's reply, resolution, reopening, or edit, and the agent that wrote a
+// document never learns of a new comment on it or of a person's edit to it.
+//
+// A reply (reply_to set), and its edit, reach threadSessions, which resolveCommentRecipients read
+// for the batch (loadCommentRecipients): every session that wrote a comment in the thread, its root
+// and each reply, then every session the thread's document credits; when that query failed, its
+// error ends the attempt here. A new comment on a document (no reply_to and no ask_id), and its
+// edit, reach every session that document credits (loadDocumentSessionAuthors); a new comment on an
+// issue's conversation names no document and reaches no author. A resolution or a reopening reaches
+// the thread root's author only, so the reopening a reply makes tells no new session twice.
+// artifact.human_edited, which the notice sweep appends once a person's quiet window on a document
+// ends (docs.sendEditNotice), reaches every session the document its payload's artifact_id names
+// credits. Ask threads are not walked here: their asker and repliers are the ask's followers
+// (publishFollowerRoutes). The event's own actor is skipped, and so is a session the comment's
+// mentions resolved to (payloadMentionedSessions) once its mention delivered the comment
+// (recipientFilter); an author whose mention failed is published to instead.
+func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, threadSessions recipientList, a *attempt) error {
+	filter := newRecipientFilter(event, a)
 	var targets []string
 	consider := func(author model.Actor, found bool) {
-		if !found || author.Kind != "session" || seen[author.ID] {
-			return
+		if found && author.Kind == "session" && filter.keep(author.ID) {
+			targets = append(targets, author.ID)
 		}
-		if event.Actor.SameAs(author) {
-			return
-		}
-		seen[author.ID] = true
-		if _, suppressed := suppressedAuthors[author.ID]; suppressed && a.leftToMention(author.ID) {
-			return
-		}
-		targets = append(targets, author.ID)
 	}
 	considerLoaded := func(author model.Actor, found bool, err error) error {
 		if err != nil {
@@ -991,41 +1064,10 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		consider(author, found)
 		return nil
 	}
-
-	var inReplyTo, commentID, messageInReplyTo string
-	switch event.Type {
-	case "comment.created", "comment.resolved", "comment.reopened", "comment.edited":
-		inReplyTo = payloadString(event.Payload, "reply_to")
-		commentID = payloadString(event.Payload, "id")
-	case "message.created", "message.answered":
-		messageInReplyTo = payloadString(event.Payload, "in_reply_to")
-	case "subscription.removed", "ask.follower_added", "ask.follower_removed":
-		// The target is the unsubscribed, added, or removed session itself, carried directly
-		// in the payload — there is no thread or ask to walk to find it.
-		if sessionID := payloadString(event.Payload, "session_id"); sessionID != "" {
-			consider(model.Actor{Kind: "session", ID: sessionID}, true)
+	considerDocument := func(document string) error {
+		if document == "" {
+			return nil
 		}
-	case "artifact.human_edited":
-		// The edited document is named in the payload (editedDocument); its writers are read
-		// below.
-	default:
-		return nil
-	}
-
-	if inReplyTo != "" {
-		// New comment threads persist ReplyTo as their root ID. Walking still keeps
-		// routing correct for legacy nested rows and finds the root author.
-		if err := considerLoaded(loadRootCommentAuthor(ctx, deps, inReplyTo)); err != nil {
-			return err
-		}
-		if err := considerLoaded(loadCommentAuthor(ctx, deps, inReplyTo)); err != nil {
-			return err
-		}
-	} else if commentID != "" && (event.Type == "comment.resolved" || event.Type == "comment.reopened") {
-		if err := considerLoaded(loadRootCommentAuthor(ctx, deps, commentID)); err != nil {
-			return err
-		}
-	} else if document := editedDocument(event); document != "" {
 		authors, err := loadDocumentSessionAuthors(ctx, deps, document)
 		if err != nil {
 			return err
@@ -1033,22 +1075,52 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		for _, author := range authors {
 			consider(model.Actor{Kind: "session", ID: author}, true)
 		}
-	} else if (event.Type == "comment.created" || event.Type == "comment.edited") && payloadString(event.Payload, "ask_id") == "" {
-		document := commentedDocument(event)
-		if document != "" {
-			authors, err := loadDocumentSessionAuthors(ctx, deps, document)
-			if err != nil {
+		return nil
+	}
+
+	switch event.Type {
+	case "comment.created", "comment.edited":
+		switch {
+		case payloadString(event.Payload, "ask_id") != "":
+			// An ask's thread reaches the ask's followers (publishFollowerRoutes).
+		case payloadString(event.Payload, "reply_to") != "":
+			if threadSessions.err != nil {
+				return threadSessions.err
+			}
+			for _, sessionID := range threadSessions.sessions {
+				consider(model.Actor{Kind: "session", ID: sessionID}, true)
+			}
+		default:
+			if err := considerDocument(commentedDocument(event)); err != nil {
 				return err
 			}
-			for _, author := range authors {
-				consider(model.Actor{Kind: "session", ID: author}, true)
+		}
+	case "comment.resolved", "comment.reopened":
+		// New threads persist a reply's reply_to as the thread root. Walking from the comment
+		// still finds the root for legacy nested rows.
+		if commentID := payloadString(event.Payload, "id"); commentID != "" {
+			if err := considerLoaded(loadRootCommentAuthor(ctx, deps, commentID)); err != nil {
+				return err
 			}
 		}
-	}
-	if messageInReplyTo != "" {
-		if err := considerLoaded(loadMessageAuthor(ctx, deps, messageInReplyTo)); err != nil {
+	case "message.created", "message.answered":
+		if inReplyTo := payloadString(event.Payload, "in_reply_to"); inReplyTo != "" {
+			if err := considerLoaded(loadMessageAuthor(ctx, deps, inReplyTo)); err != nil {
+				return err
+			}
+		}
+	case "subscription.removed", "ask.follower_added", "ask.follower_removed":
+		// The target is the unsubscribed, added, or removed session itself, carried directly
+		// in the payload — there is no thread or ask to walk to find it.
+		if sessionID := payloadString(event.Payload, "session_id"); sessionID != "" {
+			consider(model.Actor{Kind: "session", ID: sessionID}, true)
+		}
+	case "artifact.human_edited":
+		if err := considerDocument(payloadString(event.Payload, "artifact_id")); err != nil {
 			return err
 		}
+	default:
+		return nil
 	}
 
 	return publishSessionRoutes(deps, eventID, item, a, targets, "publish author route to")
@@ -1065,17 +1137,6 @@ func loadMessageAuthor(ctx context.Context, deps Deps, messageID string) (model.
 	return decodeAuthor(authorJSON, "message", messageID)
 }
 
-func loadCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.Actor, bool, error) {
-	var authorJSON []byte
-	if err := deps.Store.Pool.QueryRow(ctx, `select author from comments where id = $1`, commentID).Scan(&authorJSON); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return model.Actor{}, false, nil
-		}
-		return model.Actor{}, false, fmt.Errorf("load comment author %q: %w", commentID, err)
-	}
-	return decodeAuthor(authorJSON, "comment", commentID)
-}
-
 // commentedDocument names the artifact a top-level comment is on: its anchor's for a comment on a
 // passage (of an issue's document or a project artifact), otherwise the event's own artifact for a
 // comment on a whole project artifact. The author lookup decides whether that artifact is a document.
@@ -1090,41 +1151,21 @@ func commentedDocument(event model.Event) string {
 	return document
 }
 
-// editedDocument names the document a person's artifact.human_edited is about, its payload's
-// artifact_id, or "" for every other event.
-func editedDocument(event model.Event) string {
-	if event.Type != "artifact.human_edited" {
-		return ""
-	}
-	return payloadString(event.Payload, "artifact_id")
-}
-
-// loadDocumentSessionAuthors lists, in one query, the sessions a document credits: the one that
-// created it (artifacts.created_by) and every one a version lists (artifact_versions.authors), each
-// once and in the order the document first credits it, its creator first. A person has no Envoy
-// topic, so people are left out, and so is a session credit naming no id, which has none either.
-// A version's authors are a JSON array, or JSON null where a writer encoded a nil list, which
-// every Go reader of the column decodes as no authors; the query reads null the same way rather
-// than failing the event's every publish on jsonb_array_elements' refusal of a scalar.
+// loadDocumentSessionAuthors lists, in one query, the sessions a document credits
+// (documentCreditsSQL): the one that created it and every one a version lists, each once and in
+// the order the document first credits it, its creator first. People, and session credits with no
+// id, are left out (sessionCreditSQL).
 func loadDocumentSessionAuthors(ctx context.Context, deps Deps, artifactID string) ([]string, error) {
 	rows, err := deps.Store.Pool.Query(ctx, `
-		with credited as (
-			select a.created_by as author, 0 as number, 0::bigint as position
-			from artifacts a
-			where a.id = $1 and a.kind = 'doc'
-			union all
-			select credit.author, v.number, credit.position
-			from artifact_versions v
-			join artifacts a on a.id = v.artifact_id and a.kind = 'doc'
-			cross join lateral jsonb_array_elements(nullif(v.authors, 'null'::jsonb))
-				with ordinality as credit(author, position)
-			where v.artifact_id = $1
-		)
+		with documents as (
+			select $1::uuid as key, $1::uuid as artifact_id
+		),
+		credited as (`+documentCreditsSQL+`)
 		select author->>'id'
 		from credited
-		where author->>'kind' = 'session' and coalesce(author->>'id', '') <> ''
+		where `+sessionCreditSQL+`
 		group by author->>'id'
-		order by min(array[number, position])
+		order by min(rank)
 	`, artifactID)
 	if err != nil {
 		return nil, fmt.Errorf("load document %q session authors: %w", artifactID, err)
@@ -1180,7 +1221,9 @@ func publishedDestinationSet(subjects []string) map[string]struct{} {
 // reached, or this attempt already sent, is skipped. The answer is read later (attempt.wait),
 // except one that came back before anything was sent: a refusal or a denial is kept for wait to
 // read, and any other failure - NATS unreachable (bus.ErrUnavailable), say - ends the attempt,
-// named by label and id.
+// named by label and id. Such a failure is counted here, as attempt.answer counts the ones it
+// reads, and counted once: a destination that ends the attempt is never added to a.sent, so wait
+// never reads its answer.
 func publishDestination(deps Deps, eventID int64, item contracts.Envelope, a *attempt, label, id string) error {
 	if _, ok := a.delivered[item.Topic]; ok {
 		return nil
@@ -1190,6 +1233,7 @@ func publishDestination(deps Deps, eventID int64, item contracts.Envelope, a *at
 	select {
 	case err := <-sent.answer:
 		if err != nil && !errors.Is(err, bus.ErrPublishDenied) && !errors.Is(err, bus.ErrRefused) {
+			deps.countPublishFailure("failed")
 			return fmt.Errorf("%s %q: %w", label, id, err)
 		}
 		answered := make(chan error, 1)
@@ -1220,8 +1264,16 @@ func publishRoute(deps Deps, eventID int64, item contracts.Envelope, a *attempt,
 	return publishDestination(deps, eventID, item, a, "publish route", *route)
 }
 
+// envelope builds the bus envelope of one event. Its payload is the event with one field the
+// event log does not hold: `quiet` (events.Quiet), whether the event carries nothing for a
+// reader following its owner topic. A reader takes it as the whole answer, where `notify` says
+// only whether the event wakes the route, so an agent's comment on an issue reaches the sessions
+// that subscribed to that issue's topic.
 func envelope(event model.Event, slug string) (contracts.Envelope, error) {
-	payload, err := json.Marshal(event)
+	payload, err := json.Marshal(struct {
+		model.Event
+		Quiet bool `json:"quiet"`
+	}{Event: event, Quiet: events.Quiet(event)})
 	if err != nil {
 		return contracts.Envelope{}, fmt.Errorf("encode event: %w", err)
 	}
@@ -1346,27 +1398,6 @@ func suppressesCurrentRoute(payload any, current *string, a *attempt) bool {
 		return false
 	}
 	return a.leftToMention(sessionID)
-}
-
-func payloadStringSet(payload any, key string) map[string]struct{} {
-	values, ok := payload.(map[string]any)
-	if !ok {
-		return nil
-	}
-	result := map[string]struct{}{}
-	switch entries := values[key].(type) {
-	case []string:
-		for _, entry := range entries {
-			result[entry] = struct{}{}
-		}
-	case []any:
-		for _, entry := range entries {
-			if value, ok := entry.(string); ok {
-				result[value] = struct{}{}
-			}
-		}
-	}
-	return result
 }
 
 // payloadMentionedSessions reads the sessions a comment payload's mentions resolved to (each

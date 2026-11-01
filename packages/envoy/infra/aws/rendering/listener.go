@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sjawhar/envoy/infra/core"
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 const (
@@ -91,6 +92,11 @@ func (e ListenerEnv) Check() error {
 	}
 	if e.NatsReplicas < 1 {
 		return core.InputErrorf("natsReplicas", "natsReplicas %d is below 1", e.NatsReplicas)
+	}
+	// The listener refuses a larger ENVOY_NATS_REPLICAS at load by the same bound
+	// (bus.ParseNATSReplicas).
+	if e.NatsReplicas > bus.MaxReplicas {
+		return core.InputErrorf("natsReplicas", "natsReplicas %d is above %d, the most copies NATS keeps", e.NatsReplicas, bus.MaxReplicas)
 	}
 	return nil
 }

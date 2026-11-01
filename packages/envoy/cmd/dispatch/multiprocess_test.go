@@ -13,7 +13,7 @@
 package main
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -26,9 +26,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -50,9 +53,11 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
+	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -140,55 +145,46 @@ func (p *dispatchPair) name(one *dispatchProcess) string {
 	return "B"
 }
 
-// ───── server-sent events ───────────────────────────────────────────────────
+// ───── the live socket's event feed ─────────────────────────────────────────
 
-// sseFrame is one server-sent event the stream handler wrote: its type and its data line. Its
-// `id:` line names the event, which the data carries too, so nothing here keeps it.
-type sseFrame struct {
-	event string
-	data  string
+// feedEvent is one event the event feed sent: its type and the event's JSON.
+type feedEvent struct {
+	eventType string
+	data      string
 }
 
-// openEventStream holds GET /api/v1/events open as a dashboard tab does and reports every frame
-// it reads on the returned channel, until the test ends or the connection does. One request, read
-// to the end: a row about a live stream carrying the other process's event has to show that event
-// arriving on the connection the reader already had, never on a reconnect's catch-up.
-func (p *dispatchProcess) openEventStream(t *testing.T) <-chan sseFrame {
+// openEventFeed holds GET /ws/live open as a dashboard tab does, subscribed to the event feed, and
+// reports every event it is sent on the returned channel, until the test ends or the socket does.
+// One subscription, read to the end: a row about the live feed carrying the other process's event
+// has to show that event arriving on the subscription the page already had, never on a
+// resubscribe's catch-up.
+func (p *dispatchProcess) openEventFeed(t *testing.T) <-chan feedEvent {
 	t.Helper()
-	response, err := p.send(http.MethodGet, "/api/v1/events", "")
-	if err != nil {
-		t.Fatalf("open the event stream: %v", err)
-	}
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		_ = response.Body.Close()
-		t.Fatalf("open the event stream: status %d: %s", response.StatusCode, body)
-	}
-	t.Cleanup(func() { _ = response.Body.Close() })
-	frames := make(chan sseFrame, 256)
+	conn := p.openLiveEvents(t)
+	events := make(chan feedEvent, 256)
 	go func() {
-		defer close(frames)
-		reader := bufio.NewReader(response.Body)
-		var frame sseFrame
+		defer close(events)
 		for {
-			line, err := reader.ReadString('\n')
-			switch trimmed := strings.TrimRight(line, "\r\n"); {
-			case trimmed == "":
-				if frame.data != "" {
-					frames <- frame
-				}
-				frame = sseFrame{}
-			case strings.HasPrefix(trimmed, "event: "):
-				frame.event = strings.TrimPrefix(trimmed, "event: ")
-			case strings.HasPrefix(trimmed, "data: "):
-				frame.data = strings.TrimPrefix(trimmed, "data: ")
+			var frame struct {
+				Type  string          `json:"type"`
+				Event json.RawMessage `json:"event"`
 			}
-			if err != nil {
+			if err := conn.ReadJSON(&frame); err != nil {
 				return
 			}
+			if frame.Type != "event" {
+				continue
+			}
+			var event struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(frame.Event, &event); err != nil {
+				return
+			}
+			events <- feedEvent{eventType: event.Type, data: string(frame.Event)}
 		}
 	}()
-	return frames
+	return events
 }
 
 // ───── the API a row drives ─────────────────────────────────────────────────
@@ -250,11 +246,11 @@ func (p *dispatchProcess) documentText(t *testing.T, artifactID string) string {
 	return document.Markdown
 }
 
-// ───── a live stream carries the other process's events ─────────────────────
+// ───── the live feed carries the other process's events ─────────────────────
 
 // A dashboard tab is open on one process and the work happens on the other: the event of an issue
-// created through B's API has to reach the stream A is holding, on the connection it already has.
-// The live source of an open stream is no longer this process's in-memory broker, which hears
+// created through B's API has to reach the event feed A's socket holds, on the subscription it
+// already has. The live source of an open feed is not this process's in-memory broker, which hears
 // only its own writes, but a relay over `listen dispatch_events`, so what either process commits
 // every process publishes.
 func TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent(t *testing.T) {
@@ -262,21 +258,21 @@ func TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent(t *testing.T) {
 	project := uniqueProjectKey(t, "XPR")
 	pair.a.createProject(t, project, "Cross process")
 
-	frames := pair.a.openEventStream(t)
+	events := pair.a.openEventFeed(t)
 	key, _ := pair.b.createIssueIn(t, project, "Created on the other process", "spec")
 
 	deadline := time.After(30 * time.Second)
 	for {
 		select {
-		case frame, open := <-frames:
+		case event, open := <-events:
 			if !open {
-				t.Fatalf("the stream A held closed before B's event arrived:\n%s", pair.a.Output.String())
+				t.Fatalf("the feed A held closed before B's event arrived:\n%s", pair.a.Output.String())
 			}
-			if frame.event == "issue.created" && strings.Contains(frame.data, `"`+key+`"`) {
+			if event.eventType == "issue.created" && strings.Contains(event.data, `"`+key+`"`) {
 				return
 			}
 		case <-deadline:
-			t.Fatalf("the stream A held never carried the issue B created (%s):\nA:\n%s\nB:\n%s",
+			t.Fatalf("the feed A held never carried the issue B created (%s):\nA:\n%s\nB:\n%s",
 				key, pair.a.Output.String(), pair.b.Output.String())
 		}
 	}
@@ -1103,9 +1099,7 @@ func durableText(t *testing.T, pair *dispatchPair, artifactID string) string {
 func captureDefaultLog(t *testing.T) *storetest.LockedLog {
 	t.Helper()
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 	return logs
 }
 
@@ -1183,22 +1177,31 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Four of the nine leases are observable inside a window a test can wait out:
-// reference-excerpts, block-index and webhook-redelivery, whose first pass is immediate, and
-// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other five
-// are not, and this row says so rather than pretending: document-compaction's ticker is 24 h;
-// issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in, the boot's
-// repair taking no lease; architecture-import's and delivery-reconcile's first pass is jittered
-// uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether
-// their passes ever overlap is a coin toss no test should turn into a flake; and edit-notices'
-// period is five seconds, so this window holds many of its periods, each served once
-// (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for).
+// Five of the eleven leases are observable inside a window a test can wait out:
+// reference-excerpts, block-index, search-term-stats and webhook-redelivery, whose first pass is
+// immediate, and suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in.
+// The other six are not, and this row says so rather than pretending: document-compaction's
+// interval is 24 h; issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in,
+// the boot's repair taking no lease; architecture-import's and delivery-reconcile's first pass is
+// jittered uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own,
+// so whether their passes ever overlap is a coin toss no test should turn into a flake;
+// edit-notices' period is five seconds, so this window holds many of its periods, each served once
+// (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for); and
+// server-processes' prune is one delete on server_processes, the table every process's heartbeat
+// writes every five seconds, so a lock that held the prune would hold the registry itself.
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
+	// The term-statistics refresh writes nothing for a database with no project, so one exists
+	// before either process starts.
+	if _, err := pair.database.Pool.Exec(context.Background(), `insert into projects (key, name) values ('LEASE', 'Lease')`); err != nil {
+		t.Fatalf("create the project the term-statistics refresh rebuilds: %v", err)
+	}
 	// refs is where the reference-excerpt reconciliation's first statement writes
-	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does.
-	gate := lockTables(t, pair.database, "exclusive", "refs", "write_suggestions")
+	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does, and
+	// search_term_totals where the term-statistics refresh's first write for a project goes (its
+	// first statement only reads projects, which an exclusive lock does not hold).
+	gate := lockTables(t, pair.database, "exclusive", "refs", "write_suggestions", "search_term_totals")
 	// The block-index reconciliation's first statements read document_block_versions and
 	// block_grammar_owed, which only access exclusive mode holds back. They are held in a gate of
 	// their own, released as soon as the other process has found the lease held: that pass's
@@ -1215,6 +1218,10 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	waitForLease(t, pair, leaseSkipped, "reference-excerpts", 60*time.Second)
 	if ran := countLease(pair.a, leaseRan, "reference-excerpts") + countLease(pair.b, leaseRan, "reference-excerpts"); ran != 0 {
 		t.Errorf("a reference-excerpt pass reported running %d times while the one holding the lease is still inside the refs lock", ran)
+	}
+	waitForLease(t, pair, leaseSkipped, "search-term-stats", 60*time.Second)
+	if ran := countLease(pair.a, leaseRan, "search-term-stats") + countLease(pair.b, leaseRan, "search-term-stats"); ran != 0 {
+		t.Errorf("a term-statistics pass reported running %d times while the one holding the lease is still inside the search_term_totals lock", ran)
 	}
 
 	if waiting := storetest.WaitForLockWaiters(t, blockGate, 1, 60*time.Second); waiting < 1 {
@@ -1246,10 +1253,12 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	}
 	waitForLease(t, pair, leaseRan, "reference-excerpts", 60*time.Second)
 	waitForLease(t, pair, leaseRan, "suggestion-outcomes", 60*time.Second)
+	waitForLease(t, pair, leaseRan, "search-term-stats", 60*time.Second)
 	requireLeasedOnce(t, pair, "reference-excerpts")
 	requireLeasedOnce(t, pair, "suggestion-outcomes")
+	requireLeasedOnce(t, pair, "search-term-stats")
 	for _, unobserved := range []struct{ lease, why string }{
-		{"document-compaction", "its ticker is 24 h, so no pass is due inside any window a test can wait out"},
+		{"document-compaction", "its interval is 24 h, so no pass is due inside any window a test can wait out"},
 		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
@@ -1265,7 +1274,7 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 }
 
 // A rolling update starts the second process minutes after the first, and at a steady two
-// replicas each process keeps a ticker of its own: two ticks of one leased loop almost never
+// replicas each process keeps a timer of its own: two ticks of one leased loop almost never
 // overlap, because a pass is seconds and its interval is minutes. This row is that shape - the
 // second process is started only after the first has finished a pass and given the lease back -
 // and it is where "runs once overall" has to hold, not only while a pass is in flight.
@@ -1276,14 +1285,14 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 // list calls for one result", redeliver/sweep.go). So the GitHub fake's count of those listings
 // is what one sweep window cost the installation's rate limit, whichever process paid it.
 //
-// A period is a bucket of the database's clock (duty.Exclusive, migration 0115), so both
+// A period is a bucket of the tick's due time (duty.Exclusive, migration 0115), so both
 // processes are started inside one bucket on purpose: a second process whose first tick lands
 // past a bucket boundary is entitled to sweep, and this row is about the one that lands inside
 // the bucket its peer has already served. waitOutABucketBoundary is what keeps which of the two
 // this run gets from being luck.
 func TestALeasedLoopRunsOnceAcrossAStaggeredStart(t *testing.T) {
 	pair := newPair(t)
-	waitOutABucketBoundary(t, pair, redeliver.Interval)
+	waitOutABucketBoundary(t, redeliver.Interval)
 	fake := startGitHubFake(t)
 	// Nothing is held here: this row is about two passes that never meet, so the first one must
 	// finish and give the lease back before the second process exists.
@@ -1322,20 +1331,16 @@ func TestALeasedLoopRunsOnceAcrossAStaggeredStart(t *testing.T) {
 }
 
 // waitOutABucketBoundary returns with enough of period's current bucket left for a row to start
-// both processes and read their first ticks inside it. A period is floor(epoch / period) on the
-// database's clock, so a row that straddles a boundary watches a second process legitimately
-// sweep rather than skip; this waits the boundary out instead, on the same clock the gate reads,
-// and waits at most the margin it needs.
-func waitOutABucketBoundary(t *testing.T, pair *dispatchPair, period time.Duration) {
+// both processes and read their first ticks inside it. A period is floor(epoch / period) of a
+// tick's due time, on the clock of the process that ticks, so a row that straddles a boundary
+// watches a second process legitimately sweep rather than skip; this waits the boundary out
+// instead, on the clock both processes share with this test (one host), and waits at most the
+// margin it needs.
+func waitOutABucketBoundary(t *testing.T, period time.Duration) {
 	t.Helper()
 	// What one run of the row needs inside the bucket: two process starts and their first ticks.
 	const margin = 45 * time.Second
-	var left time.Duration
-	if err := pair.database.Pool.QueryRow(context.Background(),
-		`select make_interval(secs => $1 - mod(extract(epoch from now()), $1))`, period.Seconds(),
-	).Scan(&left); err != nil {
-		t.Fatalf("read how much of the period's bucket is left: %v", err)
-	}
+	left := period - time.Duration(time.Now().UnixNano()%period.Nanoseconds())
 	if left >= margin {
 		return
 	}
@@ -1699,6 +1704,150 @@ func requireSealedUnder(t *testing.T, database *store.Store, signingKey, what st
 	}
 }
 
+// ───── the component's three-apply key rotation ─────────────────────────────
+
+// The two keys the staged-rotation rows walk: generation 0's, the key the deployment already
+// runs under, and generation 1's, the key a rotation adds. They are a pair of their own so that
+// TestAKeyRotationKeepsPeopleSignedInAcrossTwoProcesses keeps rotationK0 and rotationK1 to
+// itself, and they stand for the keys envoy-infra:gcp:Dispatch generates, one per generation of
+// its signingKeyGenerations input.
+const (
+	stagedK0 = "multiprocess-staged-rotation-k0"
+	stagedK1 = "multiprocess-staged-rotation-k1"
+)
+
+// The four DISPATCH_SIGNING_KEY settings the component renders along the rotation it is built
+// for, [0] → [0, 1] → [1, 0] → [1]: one generation renders its key alone, several render the
+// generations' keys in the list's order with exactly one space between them. Each is written as
+// that join rather than as one literal, so what a reader checks against the component is the
+// setting's shape and the generations' order rather than this file's spelling of two keys.
+const (
+	stagedGeneration0   = stagedK0
+	stagedGenerations01 = stagedK0 + " " + stagedK1
+	stagedGenerations10 = stagedK1 + " " + stagedK0
+	stagedGeneration1   = stagedK1
+)
+
+// The whole rotation signingKeyGenerations is built for, three applies against two real
+// processes: [0], the deployment before it starts, then [0, 1], which adds generation 1's key
+// second, then [1, 0], which promotes it, then [1], which drops generation 0's. Each apply is a
+// rolling update, one process replaced at a time with a live peer beside it, which is the pairing
+// processes.keySetsShared judges at every boot: no step of the rotation is refused, and nobody
+// holding a cookie is signed out at any of them. Every cookie is read on both processes and never
+// only on the one that minted it, because a fleet halfway through a roll answers whichever
+// request the load balancer sends to either task.
+//
+// The last apply is the one step that does sign someone out, and by design: a cookie signed under
+// generation 0's key is refused once that key is gone, which is what dropping a generation means.
+// Only the cookies signed under generation 1 survive it, which is why the component's README
+// makes "no sooner than 30 days after the promote" - a session cookie's whole life - the
+// precondition of that apply: run it then, and every cookie signed under generation 0 has already
+// expired on its own, so the drop refuses nobody who is still signed in.
+func TestAStagedKeyRotationAcrossThreeAppliesKeepsPeopleSignedIn(t *testing.T) {
+	issuer := oidctest.New(t)
+	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), cookieClientID, cookieClientSecret)
+	pair := newPair(t)
+	// Every process of the walk runs the same unstamped build, and only its DISPATCH_SIGNING_KEY
+	// differs, so the binary is built once rather than once per start.
+	binary := cmdtest.Build(t, "envoy-dispatch")
+	start := func(setting string) *dispatchProcess {
+		t.Helper()
+		process := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+			NATSURL: pair.nats, SigningKey: setting, Env: cookieSignIn(issuer), Binary: binary,
+		})
+		process.waitHealthy(t)
+		return process
+	}
+	// apply is what one `pulumi up` of a changed signingKeyGenerations does to the app
+	// Deployment: a rolling update that replaces one pod at a time, so the process coming up
+	// always has a live peer still carrying the setting of the apply before it. That pairing,
+	// not the setting on its own, is what the registry admits or refuses at a boot.
+	apply := func(setting string) {
+		t.Helper()
+		pair.a.Terminate(t)
+		pair.a.WaitExit(t, "SIGTERM to A")
+		pair.a = start(setting)
+		pair.b.Terminate(t)
+		pair.b.WaitExit(t, "SIGTERM to B")
+		pair.b = start(setting)
+	}
+	// readOnBoth requires both processes to name the person on the cookie, which is what "nobody
+	// is signed out" means for a fleet: the browser's next request reaches either task.
+	readOnBoth := func(session *http.Cookie, what string) {
+		t.Helper()
+		requireWhoami(t, pair, pair.a, session, what)
+		requireWhoami(t, pair, pair.b, session, what)
+	}
+
+	// [0]: the deployment as it runs before the rotation, both processes on generation 0's key
+	// alone. The person signed in here is the one every later apply must not sign out.
+	pair.a, pair.b = start(stagedGeneration0), start(stagedGeneration0)
+	underK0 := signInThrough(t, pair.b, issuer)
+	readOnBoth(underK0, "the cookie B minted under generation 0")
+	requireSealedUnder(t, pair.database, stagedK0, "the refresh token B's sign-in stored")
+
+	// Apply 1, [0] → [0, 1]: generation 1's key is added second, so generation 0's still signs
+	// every new cookie and seals every new refresh token while the roll brings both processes to
+	// hold both keys. A sign-in during this apply is as good as the one before it, and the person
+	// signed in at [0] carries on, which is the whole point of adding a key before promoting it.
+	apply(stagedGenerations01)
+	readOnBoth(underK0, "the cookie minted at [0], once both processes held both keys")
+	alsoUnderK0 := signInThrough(t, pair.a, issuer)
+	readOnBoth(alsoUnderK0, "the cookie A minted at [0, 1], which generation 0 still signs")
+	requireSealedUnder(t, pair.database, stagedK0, "the refresh token after the add")
+
+	// Apply 2, [0, 1] → [1, 0]: generation 1's key moves first, so it signs every cookie minted
+	// from here on while generation 0's still verifies every cookie minted before it.
+	apply(stagedGenerations10)
+	readOnBoth(underK0, "the cookie minted at [0], after the promote")
+	readOnBoth(alsoUnderK0, "the cookie minted at [0, 1], after the promote")
+
+	// The seal follows the promote at the person's next hourly confirmation rather than at the
+	// roll: the request that finds the confirmation lapsed opens the token under generation 0's
+	// key and seals it again under generation 1's, so the drop two applies later leaves it
+	// readable. Nothing in the roll itself rewrites a seal, which is why this is worth showing.
+	lapseConfirmation(t, pair.database)
+	refreshes := issuer.Refreshes()
+	requireWhoami(t, pair, pair.a, underK0, "the cookie minted at [0], once the confirmation lapsed")
+	if got := issuer.Refreshes(); got != refreshes+1 {
+		t.Fatalf("A answered a lapsed confirmation with %d refreshes at the issuer, want 1", got-refreshes)
+	}
+	requireSealedUnder(t, pair.database, stagedK1, "the refresh token after the refresh that followed the promote")
+
+	underK1 := signInThrough(t, pair.b, issuer)
+	readOnBoth(underK1, "the cookie B minted at [1, 0], which generation 1 signs")
+
+	// Apply 3, [1, 0] → [1]: generation 0's key is dropped. Everything signed under generation 1
+	// - the cookies minted since the promote, and the seal the confirmation above moved - carries
+	// on across the roll, and the fleet signs people in as it did before the rotation began.
+	apply(stagedGeneration1)
+	readOnBoth(underK1, "the cookie minted at [1, 0], after the drop")
+	afterTheDrop := signInThrough(t, pair.a, issuer)
+	readOnBoth(afterTheDrop, "the cookie A minted at [1], the rotation's last setting")
+	requireSealedUnder(t, pair.database, stagedK1, "the refresh token after the drop")
+
+	// The cookies signed under generation 0's key are what the drop signs out: no process holds
+	// the key that verifies them any more, so each answers 401 rather than the person's name.
+	// This is the loss the README's 30 days prevent - waited out, no such cookie is left to
+	// refuse - and never something the component's inputs can guarantee, so the row asserts the
+	// refusal rather than pretending the drop is free.
+	for _, signedOut := range []struct {
+		what    string
+		session *http.Cookie
+	}{
+		{"the cookie minted at [0]", underK0},
+		{"the cookie minted at [0, 1]", alsoUnderK0},
+	} {
+		for _, process := range []*dispatchProcess{pair.a, pair.b} {
+			answer, status := whoami(t, process, signedOut.session)
+			if status != http.StatusUnauthorized {
+				t.Errorf("%s answered whoami on %s with %d %s, want 401: generation 0's key, which signed it, is gone\n%s",
+					pair.name(process), signedOut.what, status, answer, process.Output.String())
+			}
+		}
+	}
+}
+
 // ───── the fleet's build ────────────────────────────────────────────────────
 
 // The two builds TestTwoProcessesAnnounceTheirBuildOnce rolls between, stamped into its binaries
@@ -1829,5 +1978,240 @@ func waitForFleetCommit(t *testing.T, want string, processes ...*dispatchProcess
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
+	}
+}
+
+// ───── two dashboard builds ─────────────────────────────────────────────────
+
+// dashboardBuild is a web dist a test wrote: its directory and every file below its assets
+// directory, by URL path.
+type dashboardBuild struct {
+	dir    string
+	assets map[string][]byte
+}
+
+// writeDashboardBuild writes a dist as Vite does, for build name: an index.html naming its own
+// entry chunk, the entry, chunks of the sizes the dashboard's own run to (its largest is 1,747,955
+// bytes) whose names and bytes are this build's alone, and a chunk of the same name and bytes in
+// every build, as yjs and the stylesheet are across two builds of one source.
+func writeDashboardBuild(t *testing.T, name string) dashboardBuild {
+	t.Helper()
+	build := dashboardBuild{dir: t.TempDir(), assets: map[string][]byte{}}
+	entry := "/assets/index-" + name + ".js"
+	build.assets[entry] = []byte("import './chunk-" + name + "-0.js'; console.log('" + name + "')")
+	for i, size := range []int{1_747_955, 420_000, 96_000, 12_000, 2_000, 300, 1} {
+		build.assets[fmt.Sprintf("/assets/chunk-%s-%d.js", name, i)] = bytes.Repeat([]byte(name), size)
+	}
+	build.assets["/assets/fonts/inter-"+name+".woff2"] = []byte{0x77, 0x4f, 0x46, 0x32, 0x00, byte(len(name))}
+	build.assets["/assets/yjs-shared.js"] = []byte("export const yjs = 'the same in every build'")
+	files := map[string][]byte{"index.html": []byte(`<!doctype html><html><head><script type="module" crossorigin src="` + entry + `"></script></head><body><div id="root"></div></body></html>`)}
+	for path, content := range build.assets {
+		files[strings.TrimPrefix(path, "/")] = content
+	}
+	for name, content := range files {
+		file := filepath.Join(build.dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return build
+}
+
+// startOnBuild starts a Dispatch process serving build on database, with no NATS: the dashboard's
+// assets need none. It carries multiprocessSigningKey, as every process beside a live peer must.
+func startOnBuild(t *testing.T, database string, build dashboardBuild) *dispatchProcess {
+	t.Helper()
+	process := startDispatchProcessWith(t, database, dispatchOptions{SigningKey: multiprocessSigningKey, Env: map[string]string{"DISPATCH_WEB_DIST": build.dir}})
+	process.waitHealthy(t)
+	return process
+}
+
+// getAsset fetches path from the process and says what is wrong with the answer, or nothing.
+func getAsset(client *http.Client, p *dispatchProcess, path string, want []byte) error {
+	response, err := client.Get(p.url(path))
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", path, err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return fmt.Errorf("GET %s: read: %w", path, err)
+	}
+	if response.StatusCode != http.StatusOK || !bytes.Equal(body, want) {
+		return fmt.Errorf("GET %s: status %d with %d bytes, want 200 with the %d bytes on disk", path, response.StatusCode, len(body), len(want))
+	}
+	if got := response.Header.Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		return fmt.Errorf("GET %s: Cache-Control %q, want the immutable year", path, got)
+	}
+	return nil
+}
+
+// A rolling update runs two builds on one database, each process holding its own build's files
+// alone: a page one process served asks the other for its chunks. Every file of either build
+// answers 200 with its bytes from both processes.
+func TestDashboardServesEveryFileOfEitherBuildFromBothProcesses(t *testing.T) {
+	database := (&dispatchPair{database: storetest.Open(t)}).databaseURL(t)
+	builds := []dashboardBuild{writeDashboardBuild(t, "a"), writeDashboardBuild(t, "b")}
+	processes := []*dispatchProcess{startOnBuild(t, database, builds[0]), startOnBuild(t, database, builds[1])}
+
+	for i, process := range processes {
+		for j, build := range builds {
+			for path, content := range build.assets {
+				if err := getAsset(http.DefaultClient, process, path, content); err != nil {
+					t.Errorf("process %s, build %s's file: %v", "AB"[i:i+1], "ab"[j:j+1], err)
+				}
+			}
+		}
+	}
+}
+
+// Every chunk a stale tab's route imports is asked for at once, by every such tab: a burst of 200
+// concurrent requests for build A's files, every one but the shared chunk missing from B's disk, is
+// answered 200 with each file's bytes by B.
+func TestDashboardServesABurstOfTheOtherBuildsFiles(t *testing.T) {
+	database := (&dispatchPair{database: storetest.Open(t)}).databaseURL(t)
+	a := writeDashboardBuild(t, "a")
+	startOnBuild(t, database, a)
+	b := startOnBuild(t, database, writeDashboardBuild(t, "b"))
+	paths := slices.Sorted(maps.Keys(a.assets))
+
+	const burst = 200
+	client := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: burst}}
+	failures := make([]error, burst)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range burst {
+		wg.Go(func() {
+			<-start
+			path := paths[i%len(paths)]
+			failures[i] = getAsset(client, b, path, a.assets[path])
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	failed := 0
+	for _, err := range failures {
+		if err != nil {
+			failed++
+			t.Error(err)
+		}
+	}
+	if failed > 0 {
+		t.Fatalf("%d of %d concurrent requests for A's files to B failed:\n%s", failed, burst, b.Output.String())
+	}
+}
+
+// A pod restarted on the build it ran writes no asset: the restart's publish writes no file's
+// bytes and leaves every stored asset row as it was, renewing only the build's last start, and the
+// restarted process still serves every file.
+func TestDashboardRestartOnTheSameBuildWritesNoAssetBytes(t *testing.T) {
+	ctx := context.Background()
+	pair := &dispatchPair{database: storetest.Open(t)}
+	database := pair.databaseURL(t)
+	build := writeDashboardBuild(t, "a")
+	first := startOnBuild(t, database, build)
+	if !first.logged("dispatch: published dashboard assets", fmt.Sprintf("assets=%d written=%d", len(build.assets), len(build.assets))) {
+		t.Fatalf("the first boot did not write every one of the build's %d files:\n%s", len(build.assets), first.Output.String())
+	}
+	assetRows := func() string {
+		var rows string
+		if err := pair.database.Pool.QueryRow(ctx, `select string_agg(path || ':' || xmin::text || ':' || created_at::text, ',' order by path) from dashboard_assets`).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	lastStarted := func() time.Time {
+		var at time.Time
+		if err := pair.database.Pool.QueryRow(ctx, `select last_started_at from dashboard_builds`).Scan(&at); err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+	rowsBefore, startedBefore := assetRows(), lastStarted()
+	first.Terminate(t)
+	first.WaitExit(t, "SIGTERM")
+
+	restarted := startOnBuild(t, database, build)
+
+	if !restarted.logged("dispatch: published dashboard assets", fmt.Sprintf("assets=%d written=0", len(build.assets))) {
+		t.Errorf("the restart wrote asset bytes, want none:\n%s", restarted.Output.String())
+	}
+	if rowsAfter := assetRows(); rowsAfter != rowsBefore {
+		t.Errorf("the restart changed asset rows: before %s, after %s", rowsBefore, rowsAfter)
+	}
+	if startedAfter := lastStarted(); !startedAfter.After(startedBefore) {
+		t.Errorf("the build's last start is %s after the restart, want later than %s", startedAfter, startedBefore)
+	}
+	for path, content := range build.assets {
+		if err := getAsset(http.DefaultClient, restarted, path, content); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// dashboardBuildsOf is GET /api/v1/dashboard/builds from the process, as the test's person.
+func dashboardBuildsOf(t *testing.T, p *dispatchProcess) (serving string, live []string) {
+	t.Helper()
+	var answer struct {
+		Serving string   `json:"serving"`
+		Live    []string `json:"live"`
+	}
+	if err := json.Unmarshal(p.call(t, http.MethodGet, "/api/v1/dashboard/builds", "", http.StatusOK), &answer); err != nil {
+		t.Fatal(err)
+	}
+	return answer.Serving, answer.Live
+}
+
+// A tab offers "A new version is available" only when one build is live and it is not the tab's,
+// so the builds route is what a rolling update shows it. While A and B run both builds are live,
+// whichever process answers; once B shuts down gracefully it has deregistered and only A's build
+// is; and a process that stopped beating without deregistering drops out once its heartbeat is
+// older than the live window, aged here in the database rather than waited for.
+func TestDashboardBuildsAnswersTheBuildsTheLiveProcessesServe(t *testing.T) {
+	ctx := context.Background()
+	pair := &dispatchPair{database: storetest.Open(t)}
+	database := pair.databaseURL(t)
+	const entryA, entryB = "/assets/index-a.js", "/assets/index-b.js"
+	buildB := writeDashboardBuild(t, "b")
+	a := startOnBuild(t, database, writeDashboardBuild(t, "a"))
+	b := startOnBuild(t, database, buildB)
+
+	for _, process := range []struct {
+		name    string
+		p       *dispatchProcess
+		serving string
+	}{{"A", a, entryA}, {"B", b, entryB}} {
+		if serving, live := dashboardBuildsOf(t, process.p); serving != process.serving || !slices.Equal(live, []string{entryA, entryB}) {
+			t.Errorf("process %s with both live: serving %q, live %q; want %q and both builds", process.name, serving, live, process.serving)
+		}
+	}
+
+	b.Terminate(t)
+	b.WaitExit(t, "SIGTERM")
+	if serving, live := dashboardBuildsOf(t, a); serving != entryA || !slices.Equal(live, []string{entryA}) {
+		t.Fatalf("after B shut down: serving %q, live %q; want %q alone", serving, live, entryA)
+	}
+
+	// A process on B's build that is beating, and then one whose last heartbeat left the window.
+	var instance string
+	if err := pair.database.Pool.QueryRow(ctx, `
+		insert into server_processes (instance, dashboard_build, signing_keys) values (gen_random_uuid(), $1, '{fingerprint}')
+		returning instance::text`, routes.DashboardBuild(buildB.dir)).Scan(&instance); err != nil {
+		t.Fatal(err)
+	}
+	if _, live := dashboardBuildsOf(t, a); !slices.Equal(live, []string{entryA, entryB}) {
+		t.Fatalf("with a beating process on B's build: live %q, want both builds", live)
+	}
+	if _, err := pair.database.Pool.Exec(ctx, `
+		update server_processes set heartbeat_at = now() - make_interval(secs => $2) where instance = $1::uuid`,
+		instance, processes.LiveWindow.Seconds()+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, live := dashboardBuildsOf(t, a); !slices.Equal(live, []string{entryA}) {
+		t.Fatalf("after its heartbeat aged past the live window: live %q, want %q alone", live, entryA)
 	}
 }

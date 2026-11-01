@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -13,10 +12,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
@@ -35,12 +36,13 @@ import (
 const natsDownCommit = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
 
 // A process started while NATS is unreachable serves: /healthz answers 200 with `ok` true and
-// `nats` false, an API read answers, the agent conversation route answers 503 at once rather than
-// holding a stream nothing reaches, and the webhook sweeper's first pass runs and says why it
-// swept nothing. Once the server answers, every client connects with no restart: `nats` reads
-// true, an issue written afterwards has its event on the stream, the announcement of the stamped
-// build is on it, both delivery intakes bind their durables, and the agent conversation route
-// relays a session's frame. Before INFRA-555 the boot exited on the first failed connect.
+// `nats` false, an API read answers, an agent view on the live socket ends at once as `dropped`,
+// which the page answers by subscribing again, rather than holding a view nothing reaches, and the
+// webhook sweeper's first pass runs and says why it swept nothing. Once the server answers, every
+// client connects with no restart: `nats` reads true, an issue written afterwards has its event on
+// the stream, the announcement of the stamped build is on it, both delivery intakes bind their
+// durables, and an agent view relays a session's frame. Before INFRA-555 the boot exited on the
+// first failed connect.
 func TestAProcessStartedWhileNATSIsDownServesAndConnectsLater(t *testing.T) {
 	database := storetest.Open(t)
 	seedDeliverySettings(t, database)
@@ -62,8 +64,8 @@ func TestAProcessStartedWhileNATSIsDownServesAndConnectsLater(t *testing.T) {
 		t.Fatalf("/healthz while NATS is down = %d %+v, want 200 with ok true and nats false", status, health)
 	}
 	process.call(t, http.MethodGet, "/api/v1/projects", "", http.StatusOK)
-	if status, body := process.openAgentStream(t); status != http.StatusServiceUnavailable || !strings.Contains(body, "STREAM_UNAVAILABLE") {
-		t.Fatalf("the agent conversation route while NATS is down = %d %s, want 503 STREAM_UNAVAILABLE", status, body)
+	if frame := process.openAgentView(t); frame.Type != "ended" || frame.Reason != "dropped" {
+		t.Fatalf("an agent view while NATS is down first sent %+v, want it ended as dropped", frame)
 	}
 	process.waitForLog(t, 30*time.Second, `msg="webhook redelivery sweep failed"`, "NATS is not connected")
 
@@ -97,7 +99,7 @@ func TestAProcessStartedWhileNATSIsDownServesAndConnectsLater(t *testing.T) {
 	for _, durable := range deliveryDurables {
 		process.waitForLog(t, 30*time.Second, `msg="dispatch delivery: NATS consumer bound"`, "name="+durable)
 	}
-	process.requireAgentStreamRelays(t, testnats.Connect(t, natsURL))
+	process.requireAgentViewRelays(t, testnats.Connect(t, natsURL))
 }
 
 // The server's NATS client declares a connection whose server stops answering without closing it
@@ -195,59 +197,80 @@ func waitUntil(t *testing.T, within time.Duration, what string, done func() bool
 	}
 }
 
-// agentStreamClient bounds an agent conversation request, its stream's body included, so a route
-// that holds the request open fails the test instead of hanging it.
-var agentStreamClient = &http.Client{Timeout: 20 * time.Second}
-
-// startAgentStream opens the agent conversation route for streamedSessionID as the test's login.
-func (p *dispatchProcess) startAgentStream(t *testing.T) *http.Response {
-	t.Helper()
-	request, err := http.NewRequest(http.MethodGet, p.url("/api/v1/agents/"+streamedSessionID+"/stream"), nil)
-	if err != nil {
-		t.Fatalf("build the agent stream request: %v", err)
-	}
-	request.Header.Set("X-Dispatch-User", dispatchTestLogin)
-	response, err := agentStreamClient.Do(request)
-	if err != nil {
-		t.Fatalf("open the agent conversation stream: %v", err)
-	}
-	return response
+// agentViewFrame is a frame the live socket sends an agent view: an agent frame (Event, Data), the
+// view's end (Reason) or its refusal (Code).
+type agentViewFrame struct {
+	Type   string          `json:"type"`
+	Sub    string          `json:"sub"`
+	Event  string          `json:"event"`
+	Data   json.RawMessage `json:"data"`
+	Reason string          `json:"reason"`
+	Code   string          `json:"code"`
 }
 
-// openAgentStream opens the agent conversation route and returns its status and, for an answer
-// that is not a stream, its body.
-func (p *dispatchProcess) openAgentStream(t *testing.T) (int, string) {
+// startAgentView opens GET /ws/live as the test's login and subscribes it to streamedSessionID's
+// agent view, as an agent's page does. The socket closes when the test ends.
+func (p *dispatchProcess) startAgentView(t *testing.T) *gws.Conn {
 	t.Helper()
-	response := p.startAgentStream(t)
-	defer response.Body.Close()
-	if response.StatusCode == http.StatusOK {
-		return response.StatusCode, ""
+	conn, response, err := gws.DefaultDialer.Dial("ws://127.0.0.1:"+strconv.Itoa(p.port)+"/ws/live", http.Header{
+		"X-Dispatch-User": {dispatchTestLogin},
+	})
+	if err != nil {
+		status := "no response"
+		if response != nil {
+			status = response.Status
+		}
+		t.Fatalf("open the live socket: %v (%s)", err, status)
 	}
-	body, _ := io.ReadAll(response.Body)
-	return response.StatusCode, string(body)
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := conn.WriteJSON(map[string]any{"type": "subscribe", "sub": "agent", "view": map[string]string{"kind": "agent", "session_id": streamedSessionID}}); err != nil {
+		t.Fatalf("subscribe the live socket to the agent view: %v", err)
+	}
+	return conn
 }
 
-// requireAgentStreamRelays opens the agent conversation route until the relay's own connection
-// has connected and the route streams, then requires a frame the session publishes on conn to
-// reach the viewer.
-func (p *dispatchProcess) requireAgentStreamRelays(t *testing.T, conn *natsgo.Conn) {
+// nextAgentViewFrame reads conn up to the next frame of its agent view, passing over heartbeats, and
+// fails the test when none arrives within ten seconds, so a view held open with nothing in it fails
+// rather than hangs.
+func (p *dispatchProcess) nextAgentViewFrame(t *testing.T, conn *gws.Conn) agentViewFrame {
 	t.Helper()
-	var response *http.Response
-	waitUntil(t, 30*time.Second, "the agent conversation route to stream", func() bool {
-		response = p.startAgentStream(t)
-		if response.StatusCode == http.StatusOK {
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	for {
+		var frame agentViewFrame
+		if err := conn.ReadJSON(&frame); err != nil {
+			t.Fatalf("read the agent view: %v\n%s", err, p.Output.String())
+		}
+		if frame.Sub == "agent" {
+			return frame
+		}
+	}
+}
+
+// openAgentView subscribes a new live socket to the agent view and returns the view's first frame.
+func (p *dispatchProcess) openAgentView(t *testing.T) agentViewFrame {
+	t.Helper()
+	conn := p.startAgentView(t)
+	frame := p.nextAgentViewFrame(t, conn)
+	_ = conn.Close()
+	return frame
+}
+
+// requireAgentViewRelays subscribes agent views, as the page does after each `dropped`, until the
+// relay's own connection has connected and a view opens with the session's responder verdict, then
+// requires a frame the session publishes on conn to reach that view.
+func (p *dispatchProcess) requireAgentViewRelays(t *testing.T, conn *natsgo.Conn) {
+	t.Helper()
+	var view *gws.Conn
+	waitUntil(t, 30*time.Second, "an agent view to open with the session's responder verdict", func() bool {
+		view = p.startAgentView(t)
+		frame := p.nextAgentViewFrame(t, view)
+		if frame.Type == "agent" && frame.Event == "responder" {
 			return true
 		}
-		_ = response.Body.Close()
+		_ = view.Close()
 		return false
 	})
-	defer response.Body.Close()
-	reader := bufio.NewReader(response.Body)
-	// The stream opens with the responder verdict, sent once the replay request has its answer,
-	// and the viewer's subscription is in place before either.
-	if event, _ := nextStreamEvent(t, reader); event != "responder" {
-		t.Fatalf("the agent stream's first event is %q, want the responder verdict", event)
-	}
 	const frame = `{"v":1,"kind":"message","seq":1}`
 	if err := conn.Publish(contracts.AgentStreamFramesSubject(streamedSessionID), []byte(frame)); err != nil {
 		t.Fatalf("publish the session's frame: %v", err)
@@ -256,36 +279,14 @@ func (p *dispatchProcess) requireAgentStreamRelays(t *testing.T, conn *natsgo.Co
 		t.Fatalf("flush the session's frame: %v", err)
 	}
 	for {
-		event, data := nextStreamEvent(t, reader)
-		if event == "replay" {
+		got := p.nextAgentViewFrame(t, view)
+		if got.Type == "agent" && got.Event == "replay" {
 			continue
 		}
-		if event != "frame" || data != frame {
-			t.Fatalf("the agent stream relayed %q %q, want the session's frame", event, data)
+		if got.Type != "agent" || got.Event != "frame" || string(got.Data) != frame {
+			t.Fatalf("the agent view relayed %+v (data %s), want the session's frame", got, got.Data)
 		}
 		return
-	}
-}
-
-// nextStreamEvent reads the stream up to its next named event and returns its name and data,
-// passing over heartbeat comments as a viewer does.
-func nextStreamEvent(t *testing.T, reader *bufio.Reader) (string, string) {
-	t.Helper()
-	var name, data string
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("read the agent stream: %v (event %q so far)", err, name)
-		}
-		line = strings.TrimRight(line, "\r\n")
-		switch {
-		case line == "" && name != "":
-			return name, data
-		case strings.HasPrefix(line, "event: "):
-			name = strings.TrimPrefix(line, "event: ")
-		case strings.HasPrefix(line, "data: "):
-			data = strings.TrimPrefix(line, "data: ")
-		}
 	}
 }
 

@@ -33,10 +33,11 @@ export interface MarkdownEngine {
    * as one plain-text node. The engine parses read-only: a container directive the block schema
    * refuses (`:::note` … `:::`), or a typed block whose content breaks its content rule (an ask
    * holding a heading), is drawn as its literal fence lines around its formatted content rather
-   * than refused or silently dropped, and a Pandoc `::: warning` fence or a `::leaf` / `:text{`
-   * line reads as paragraph text, so none of them throws. Proof's schema has no node for
-   * CommonMark's raw-HTML spans (a bare tag-shaped substring outside a code span or fence, e.g.
-   * `<img src=x>`) or a mark span of a kind this schema does not carry, so the parser still
+   * than refused or silently dropped, a Pandoc `::: warning` fence or a `::leaf` / `:text{` line
+   * reads as paragraph text, and so does a `:::` opener inside 32 open container directives, the
+   * deepest the parser nests them (INFRA-581), so none of them throws. Proof's schema has no node
+   * for CommonMark's raw-HTML spans (a bare tag-shaped substring outside a code span or fence,
+   * e.g. `<img src=x>`) or a mark span of a kind this schema does not carry, so the parser still
    * throws for them. HTML-like text inside a code span or fence parses safely as literal text,
    * so nothing is escaped beforehand:
    * escaping the whole source regardless of context would print literal backslashes around any
@@ -149,6 +150,16 @@ function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
 /** Loads the schema and headless Proof chunk before Markdown-bearing UI needs to render. */
 export async function warmMarkdownRenderer(): Promise<void> {
   await loadEngine(await loadBlockSchema());
+}
+
+/**
+ * The shared engine when a load has already resolved, and `undefined` until then: what a caller
+ * that must answer in this task parses with. It starts no load of its own - a caller that wants
+ * one awaits `warmMarkdownRenderer` first, as the change marks' caller does - and so is the
+ * synchronous half of `renderWithEngine` without its callback or its background load.
+ */
+export function loadedEngine(): MarkdownEngine | undefined {
+  return readyEngine;
 }
 
 /**

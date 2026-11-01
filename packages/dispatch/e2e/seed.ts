@@ -4,6 +4,13 @@ import { resetFakeBroker } from "./fake-broker-helpers";
 import { resetFakeGithub } from "./fake-github-helpers";
 import { sql } from "./psql";
 
+// The dashboard tables (dashboard_builds, dashboard_assets, dashboard_build_assets, migration 0136)
+// are not on this list, and no foreign key ties them to a table on it, so the CASCADE below never
+// reaches them: every server process publishes its build's assets there once, at boot, and in
+// two-process mode each answers the other build's chunks from there. A reset between scenarios
+// must not delete what both processes published when they started. The registry of live server
+// processes (server_processes, migration 0135) stays off it too: a process registers once, at
+// boot, and GET /api/v1/dashboard/builds reads the builds the live ones serve from it.
 const tables = [
   "agent_tokens",
   "repo_projects",

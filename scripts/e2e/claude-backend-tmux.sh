@@ -3,10 +3,11 @@
 # implementer on Claude Code (`worker_backends: {implementer: claude}`) drives one scratch Dispatch
 # issue: a real Oh My Pi architect and planner take it to implementing, and the implementer then runs
 # as `legion claude-bridge -- claude -p …` in its pane. The proof holds that the Claude Code
-# implementer registers its transcript as its session and takes its phase, completes it through the
-# `legion` MCP tool's handoff_complete with a pushed `.legion/<issue>/` handoff commit, and, once its
-# pane is killed, comes back with `--resume` into the same Claude Code session, its transcript's
-# earlier turns intact and in its context.
+# implementer registers its transcript as its session and takes its phase, is reminded by Claude
+# Code's own `Stop` hook when a turn of its ends with that phase still open, completes the phase
+# through the `legion` MCP tool's handoff_complete with a pushed `.legion/<issue>/` handoff commit,
+# and, once its pane is killed, comes back with `--resume` into the same Claude Code session, its
+# transcript's earlier turns intact and in its context.
 #
 # Run it as `LEGION_E2E_MODEL_ROUTE=<gateway|key-file> … bash scripts/e2e/claude-backend-tmux.sh`.
 # LEGION_E2E_MODEL_ROUTE is required, as Stage 2's and Stage 3's is, and picks how the Oh My Pi
@@ -14,19 +15,29 @@
 #   - `gateway`: the Hawk model gateway, as Stage 3's agents do, with
 #     LEGION_E2E_MODEL_GATEWAY_URL (required in this mode; lib/install-model-gateway.sh) and
 #     hawk-token on PATH; LEGION_E2E_CLAUDE_KEY_FILE names the Claude Code pane's own key file.
-#   - `key-file`: Anthropic's own endpoint keyed by a 0600 file read fresh on every call
-#     (lib/install-key-file-model-route.sh), for a devbox with no Hawk gateway. The file is
-#     LEGION_E2E_ANTHROPIC_KEY_FILE, and LEGION_E2E_CLAUDE_KEY_FILE unset falls back to it, so one
-#     key file serves both halves of the run; naming both puts the Claude Code pane on
-#     LEGION_E2E_CLAUDE_KEY_FILE and the Oh My Pi agents on LEGION_E2E_ANTHROPIC_KEY_FILE, and the
-#     notes name both paths.
-# The Claude Code pane's key file holds the Anthropic API key the Claude Code implementer reaches
-# its model with, and Anthropic's own `GET /v1/models` must accept it before any pane starts: the
-# run copies it once into its work directory (0600), and the implementer's claim directory names a
-# key command that prints that copy (Claude Code's apiKeyHelper), so the key reaches no pane's
-# environment, no argv and no transcript.
+#   - `key-file`: the model endpoint LEGION_E2E_MODEL_BASE_URL names (Anthropic's own when unset),
+#     keyed by a 0600 file read fresh on every call (lib/install-key-file-model-route.sh), for a
+#     devbox with no Hawk gateway. The file is LEGION_E2E_ANTHROPIC_KEY_FILE, and
+#     LEGION_E2E_CLAUDE_KEY_FILE unset falls back to it, so one key file serves both halves of the
+#     run; naming both puts the Claude Code pane on LEGION_E2E_CLAUDE_KEY_FILE and the Oh My Pi
+#     agents on LEGION_E2E_ANTHROPIC_KEY_FILE, and the notes name both paths.
+# LEGION_E2E_MODEL_BASE_URL (optional; an http:// or https:// URL with no credentials in it) is the
+# endpoint the key files' keys are for, unset for Anthropic's own: an Anthropic-compatible model
+# gateway (a LiteLLM proxy, say) whose gateway key the key file holds, so no Anthropic key is
+# needed. The Claude Code pane calls it under either route, as ANTHROPIC_BASE_URL in legion.yaml's
+# runtime.tmux.pane_env; under `key-file` the Oh My Pi agents' profile names it as anthropic's
+# baseUrl too (lib/install-key-file-model-route.sh --base-url).
+# The Claude Code pane's key file holds the key the Claude Code implementer reaches its model with,
+# and the endpoint's own `GET /v1/models` must accept it before any pane starts. With
+# LEGION_E2E_MODEL_BASE_URL named, the preflight (lib/model-endpoint.sh) also holds the endpoint to
+# refusing that call with no key, notes the alias its `GET /key/info` names for the key, and
+# holds the agents' key file to the same when it is another file. The run copies the pane's key
+# once into its work directory (0600), and the implementer's claim directory names a key command
+# that prints that copy (Claude Code's apiKeyHelper), so the key reaches no pane's environment, no
+# argv and no transcript.
 # The rig is Stage 3's without its GitHub ingress bridge: scratch
-# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through `agent-secrets` (this
+# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through the App key runner
+# (LEGION_E2E_APP_KEY_RUNNER, `agent-secrets` by default; this
 # deployment's own pair unless the four LEGION_E2E_*_APP_* inputs name another deployment's,
 # lib/github-apps.sh; each key is resolved by the daemon's private_key_command and once by
 # lib/app-logins.ts, which proves it is its id's App before the run writes anything, never in this
@@ -35,8 +46,8 @@
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-work=$(mktemp -d "/tmp/legion-e2ecc.$$.XXXXXXXX")
-evidence=${CLAUDE_E2E_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2ecc-evidence.XXXXXXXX)}
+work=$(mktemp -d "${TMPDIR:-/tmp}/legion-e2ecc.$$.XXXXXXXX")
+evidence=${CLAUDE_E2E_EVIDENCE_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/legion-e2ecc-evidence.XXXXXXXX")}
 if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence"); then
   echo "FAIL setup: $reason" >&2
   rmdir "$work"
@@ -77,6 +88,7 @@ proof_human_user=smoke
 issue=
 pr_number=
 smoke_file=
+stall_offset=
 timeout_hook=
 
 begin() { check=$1; TZ=UTC printf -v check_started '%(%FT%TZ)T' -1; printf '== %s\n' "$check"; }
@@ -91,6 +103,10 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/workflow.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/claude-transcript.sh
+. "$root/scripts/e2e/lib/claude-transcript.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/model-endpoint.sh
+. "$root/scripts/e2e/lib/model-endpoint.sh"
 # Nothing the run starts inherits the operator's production Dispatch bearer.
 unset DISPATCH_TOKEN
 
@@ -127,10 +143,11 @@ cleanup() {
   # FAIL line, and the run's exit status stays the one the checks set.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
   # First, before anything slower (stopping panes, docker, the gh calls in remove_run_branch) can
-  # hang or be ended by a second signal: the Claude pane's key copy and the key-file route's own
-  # key command, which bakes in --key-file's resolved path. Neither may survive this script on any
-  # exit, so neither is conditioned on how the rest of cleanup goes. Stages 2 and 3 do the same.
-  rm -f "$work/claude-model-key" "$work/claude-key-header"
+  # hang or be ended by a second signal: the key copies and their header files, and the key-file
+  # route's own key command, which bakes in --key-file's resolved path. None may survive this
+  # script on any exit, so none is conditioned on how the rest of cleanup goes. Stages 2 and 3 do
+  # the same.
+  rm -f "$work/claude-model-key" "$work/claude-key-header" "$work/agent-model-key" "$work/agent-key-header"
   rm -rf "$work/model-gateway-key" || true
   stop_tree "$watcher_pid"
   stop_pid "$daemon_pid"
@@ -197,7 +214,9 @@ start_dispatch() {
 }
 
 # The one setting under test is worker_backends; the design gate is off, so the architect's gate
-# registration starts planning with no human approval.
+# registration starts planning with no human approval. A named LEGION_E2E_MODEL_BASE_URL is every
+# pane's ANTHROPIC_BASE_URL (runtime.tmux.pane_env, a plain value), which the Claude Code pane
+# calls; an Oh My Pi pane calls its profile's own anthropic baseUrl, which outranks the variable.
 write_legion_config() {
   cat >"$work/legion.yaml" <<EOF
 project: $project
@@ -224,6 +243,8 @@ worker_backends:
   implementer: claude
 $(<"$work/github-apps.yaml")
 EOF
+  [ -z "$model_base_url" ] ||
+    printf 'runtime:\n  tmux:\n    pane_env:\n      ANTHROPIC_BASE_URL: "%s"\n' "$model_base_url" >>"$work/legion.yaml"
 }
 
 # start_daemon runs the Go daemon with the run's Claude Code launch pinned: the claude and bun it
@@ -480,21 +501,30 @@ bridged() {
 }
 # argv_has_pair ARGV FLAG VALUE: ARGV (one argument per line) holds FLAG immediately followed by VALUE.
 argv_has_pair() { awk -v flag="$2" -v value="$3" 'prev == flag && $0 == value { found = 1 } { prev = $0 } END { exit !found }' <<<"$1"; }
-# legion_handoff_in TRANSCRIPT: the transcript holds a call of the `legion` MCP tool whose input names
-# handoff_complete, and a tool result for it that is not an error.
-legion_handoff_in() {
-  jq -R -s -e '
+# transcript_since OFFSET prints the transcript's bytes past OFFSET, read from its file on the
+# devbox: the tail every predicate of lib/claude-transcript.sh judges.
+transcript_since() { tail -c "+$(($1 + 1))" -- "$transcript"; }
+# background_pair_started OFFSET BASH AGENT: past OFFSET the transcript holds the two calls the
+# background checkpoint asks for — a `Bash` call run in the background whose command names BASH,
+# and a subagent call whose input names AGENT. Both are read from the tool calls themselves, never
+# from the model's prose, so a turn that only said it had started them does not pass. The subagent
+# tool is named by whichever of the two names the pinned Claude Code writes in the transcript: it
+# is `Task` in the model's own prompt and `Agent` in the API, and 2.1.310 writes `Agent`
+# (measured on a devbox run of this script at head ab49995f, where the launch succeeded and only
+# this predicate's name check failed).
+background_pair_started() {
+  transcript_since "$1" | jq -R -s -e --arg bash "$2" --arg agent "$3" '
     [split("\n")[] | fromjson? | select(.message.content | type == "array") | .message.content[]] as $blocks
-    | [$blocks[] | select(.type == "tool_use" and (.name | endswith("__legion")) and (.input | tostring | contains("handoff_complete"))) | .id] as $calls
-    | any($blocks[]; .type == "tool_result" and (.tool_use_id as $id | $calls | index($id)) and (.is_error != true))' "$1" >/dev/null
+    | any($blocks[]; .type == "tool_use" and .name == "Bash" and .input.run_in_background == true
+        and ((.input.command // "") | contains($bash)))
+      and any($blocks[]; .type == "tool_use" and (.name == "Agent" or .name == "Task")
+        and ((.input | tostring) | contains($agent)))' >/dev/null
 }
-# resumed_reply_names TRANSCRIPT OFFSET MARKER: an assistant text written past OFFSET bytes quotes MARKER.
-resumed_reply_names() {
-  local text
-  text=$(tail -c "+$(($2 + 1))" "$1" | jq -R -r 'fromjson? | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text')
-  grep -Fq -- "$3" <<<"$text"
-}
-handoff_recorded() { [ -n "$(role_handoff "$issue" implementer implementing)" ]; }
+# unprompted_turn: the daemon has the implementer's claim in a turn it handed no task — the turn
+# Claude Code starts by itself when a background result lands, which the bridge reports to the
+# daemon as agent_start…agent_end like any other. A claim working on a pending delivery is the
+# daemon's own task and is not one.
+unprompted_turn() { implementer_claim | jq -e '.state == "working" and .pending == null' >/dev/null; }
 
 begin prerequisites
 require_app_inputs implement review
@@ -503,6 +533,11 @@ case "$model_route" in
 gateway | key-file) ;;
 *) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
 esac
+# The endpoint the key files' keys are for (lib/model-endpoint.sh), Anthropic's own when unset.
+model_base_url=${LEGION_E2E_MODEL_BASE_URL:-}
+if [ -n "$model_base_url" ] && why=$(model_base_url_refusal "$model_base_url") && [ -n "$why" ]; then
+  fail "LEGION_E2E_MODEL_BASE_URL $why: name the model endpoint's base URL, or leave it unset for Anthropic's own"
+fi
 # The Claude Code pane's own key file. Under the key-file route the Oh My Pi agents read a key
 # file too, so one file can serve both halves: whichever of the two variables is set serves both,
 # and naming both puts the Claude pane on LEGION_E2E_CLAUDE_KEY_FILE and the agents on
@@ -525,21 +560,36 @@ if [ "$model_route" = key-file ]; then
     fail "LEGION_E2E_ANTHROPIC_KEY_FILE names $agent_key_file, which is not a readable file"
 fi
 refuse_leftovers legion-e2ecc
-for tool in go docker jq curl python3 tmux bun mise agent-secrets gh jj pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl python3 tmux bun mise gh jj pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+command -v "$app_key_runner" >/dev/null || fail "$app_key_runner, the App key runner LEGION_E2E_APP_KEY_RUNNER names, is required"
 [ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 (umask 077 && tr -d '[:space:]' <"$key_file" >"$work/claude-model-key")
 [ -s "$work/claude-model-key" ] || fail "$key_file_var ($key_file) holds no key"
-# The key's preflight: Anthropic lists its models to a key it accepts. The header goes by file, so the
-# key is in no argv.
-(umask 077 && printf 'x-api-key: %s\n' "$(cat "$work/claude-model-key")" >"$work/claude-key-header")
-code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "@$work/claude-key-header" -H 'anthropic-version: 2023-06-01' \
-  https://api.anthropic.com/v1/models) || code="unreachable (curl exited $?)"
-rm -f "$work/claude-key-header"
-[ "$code" = 200 ] || fail "Anthropic refuses the key in $key_file_var ($key_file): GET /v1/models answered $code"
-note "the Claude Code implementer's key from $key_file: Anthropic accepts it"
+# The key's preflight: the model endpoint lists its models to a key it accepts, and a named one is
+# held to more (lib/model-endpoint.sh). The header goes by file, so the key is in no argv.
+model_key_preflight "$model_base_url" "$work/claude-model-key" "$work/claude-key-header" "$key_file_var ($key_file)"
+note "the Claude Code implementer's key from $key_file: ${model_base_url:-Anthropic} accepts it"
+# The agents' own key file, when it is another, is held to the same before any pane reads it.
+if [ -n "$model_base_url" ] && [ "$agent_key_file" != "$key_file" ]; then
+  (umask 077 && tr -d '[:space:]' <"$agent_key_file" >"$work/agent-model-key")
+  [ -s "$work/agent-model-key" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE ($agent_key_file) holds no key"
+  model_key_preflight "$model_base_url" "$work/agent-model-key" "$work/agent-key-header" "LEGION_E2E_ANTHROPIC_KEY_FILE ($agent_key_file)"
+  rm -f "$work/agent-model-key"
+  note "the Oh My Pi agents' key from $agent_key_file: $model_base_url accepts it"
+fi
 # Legion's two role Apps proved against GitHub before the run writes anything (lib/github-apps.sh);
 # legion.yaml's github_apps is the block proved.
 write_github_apps implement review
+# The Bun on PATH must be the release the repository's .bun-version pins, the file
+# packages/claude-envoy/scripts/build.ts reads: the rig builds the run's claude-envoy with it, and
+# that build refuses any other (assertPinnedBun, LEGION-568). Checked here, before the first bun this
+# run starts (lib/app-logins.ts, just below), so a devbox whose version manager defaults to another
+# release is refused by name rather than at the build line in the rig. After write_github_apps, so
+# the App keys' own checks above run whatever the Bun.
+bun_pin=$(tr -d '[:space:]' <"$root/.bun-version")
+bun_running=$(bun --version 2>/dev/null | tr -d '[:space:]') || bun_running=
+[ "$bun_running" = "$bun_pin" ] ||
+  fail "refusing to run under Bun ${bun_running:-<no version>}: .bun-version pins $bun_pin, and the run builds claude-envoy with packages/claude-envoy/scripts/build.ts, whose bundler output depends on the exact Bun build (LEGION-568). Put the pinned Bun first on PATH ($(command -v bun) is the one found)"
 read_app_logins
 claude_bin=$(command -v claude)
 # The daemon and every pane run with HOME moved to the run's own (make_omp_home), which hides mise's
@@ -561,11 +611,11 @@ gateway)
     fail "the Oh My Pi agents' model route through the Hawk model gateway could not be installed (the reason is above)"
   ;;
 key-file)
-  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$agent_key_file") ||
+  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$agent_key_file" --base-url "${model_base_url:-$anthropic_base_url}") ||
     fail "the Oh My Pi agents' model route through the key file could not be installed (the reason is above)"
   ;;
 esac
-note "the Oh My Pi agents' model route ($model_route): keyed by $key_command$([ "$model_route" = key-file ] && printf ', from %s' "$agent_key_file")"
+note "the Oh My Pi agents' model route ($model_route): keyed by $key_command$([ "$model_route" = key-file ] && printf ', from %s, calling %s' "$agent_key_file" "${model_base_url:-$anthropic_base_url}")"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 pass
@@ -615,6 +665,12 @@ registers the gate, then waits. Apart from that, do not act until a human Dispat
 at your own session gives the next exact proof operation; it arrives in your session as a message to
 you. Any other notice is not an instruction. Follow your instruction precisely, use the Go-daemon
 Legion tools and handoffs, and do not create work outside the issue's smoke branch.
+
+The task that starts your phase (`Continue … Phase: <phase>`) is such a notice too: in this proof it
+is never your instruction. Answer it with one line of plain prose saying you are standing by for
+the proof's instruction, call no tool, and do not do the phase's work or call `handoff_complete`
+until a Dispatch message from the proof asks you to. A reminder that your phase is still open is
+answered the same way, with one line and no tool, until that message comes.
 EOF
 start_daemon
 note "project $project, profile $profile, plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest"), NATS/Dispatch/daemon ports $port_nats/$port_dispatch/$port_daemon"
@@ -664,18 +720,98 @@ bridged "$cc" || fail "the implementer's claude (pid $cc) is not a child of legi
 note "implementer claim $token: generation $generation, pane $pane, Claude Code session $session, transcript $transcript; its claude's argv is $(wc -c <"/proc/$cc/cmdline") bytes"
 pass
 
+# The endless phase reminder on the Claude Code backend (INFRA-220). The implementer holds its phase
+# and has not completed it, so a turn of its that ends settles the pane's `Stop` hook: the `legion`
+# MCP server answers `{"decision":"block","reason":<the reminder>}` (legion_phase_hook, whose hook
+# entries are legion/hooks/hooks.json in the run's own build of the plugin, $work/claude-envoy), and
+# Claude Code carries that reason into the session as `Stop hook feedback` and one more turn of the
+# same session. The instruction is
+# what makes the turn settle that way: it arrives as a delivery, which puts the run of reminders back
+# at zero, so the reminder this settle earns is the hook's own continuation rather than a later
+# timer's; it forbids the `legion` tool, so the phase is still open when the turn ends; and it
+# forbids a WAITING line, which would buy a quiet wait in place of the block. The run moves no
+# LEGION_STALL_* number: every wait of this step is on that first reminder, which the machine hands
+# back to the hook as the turn settles. The reminded turn's own settle earns the stall's second
+# reminder, which the server arms on the default five-minute timer instead; the next step's
+# instruction arrives well inside that, and were it not to, that reminder is the behaviour under
+# test and the worker answers it as it answered this one.
+begin stop-hook-reminds-the-open-phase
+stall_offset=$(stat -c %s "$transcript")
+send_agent "$issue" implementer "Claude backend proof stall operation: reply with one line of plain prose saying you are standing by for your implementation instruction, and end your turn there. Change nothing, do not call the legion tool in this turn, call no other tool either, and do not begin any line with WAITING. Legion will then remind you that your phase is not complete: answer that reminder with one more line of plain prose saying the proof will instruct you next, under these same rules — no legion tool, no other tool, no WAITING line."
+timeout_hook=report_stall_entries
+until_true 600 "the implementer's turn to end with its phase open and the reminder to reach it as Stop hook feedback" \
+  reminded_or_completed "$stall_offset"
+stop_hook_reminded "$stall_offset" ||
+  fail "the implementer completed its phase (handoff $(role_handoff "$issue" implementer implementing)) before the proof's stall instruction left it a turn ending with the phase open: it did the work of the task that started its phase, against the proof's instructions, so there was no open phase for the Stop hook to remind"
+until_true 300 "the blocked turn to be continued in the same session" reminded_turn_continued "$stall_offset"
+timeout_hook=
+until_true 300 "the reminded implementer's turn to end" issue_worker_state "$issue" implementer idle
+note "the implementer ended a turn with implementing still open: Claude Code carried its Stop hook's block back as Stop hook feedback naming \"$stall_reminder_needle\", and took one more turn on it"
+pass
+
 begin claude-implementer-handoff
 marker="claude-proof-marker-$ptoken-$RANDOM$RANDOM"
 send_agent "$issue" implementer "Claude backend proof implementation operation ($marker): make the smallest one-file change this issue's spec describes in your $repo workspace, commit it on legion/$issue, write and commit the required implementation handoff, push the branch to origin, then call the legion tool's handoff_complete with a concise summary. Do not open a pull request and do not merge."
 until_true 900 "the daemon to record the implementer's handoff_complete" handoff_recorded
 commit=$(role_handoff "$issue" implementer implementing)
 assert_handoff_committer "$issue" implementer implementing 0
-files=$(timeout 60 gh api "repos/$repo/commits/$commit" --jq '.files[].filename') ||
-  fail "the handoff commit $commit the implementer reported is not on $repo"
+files=$(smoke_commit_files "$commit") || exit 1
 grep -q "^\.legion/$issue/" <<<"$files" || fail "the handoff commit $commit changes nothing under .legion/$issue/: $(tr '\n' ' ' <<<"$files")"
-legion_handoff_in "$transcript" || fail "the transcript $transcript holds no successful legion handoff_complete call"
+legion_handoff_in || fail "the transcript $transcript holds no successful legion handoff_complete call"
 until_true 300 "the implementer's turn to end" issue_worker_state "$issue" implementer idle
 note "handoff_complete through mcp__legion__legion recorded commit $commit, pushed to $repo under .legion/$issue/"
+pass
+
+# Background work on the Claude Code backend. The runtime sets no
+# CLAUDE_CODE_DISABLE_BACKGROUND_TASKS on a Claude Code pane — only CLAUDE_CODE_DISABLE_CRON, the
+# one feature that would start a turn no task of the daemon's asked for and nothing would read —
+# so a role can start work that outlives the turn that started it, and a result that lands after
+# that turn wakes Claude Code into a turn of its own. The bridge reports that turn to the daemon
+# as agent_start…agent_end like any other, and the daemon, which handed it no task, sees a claim
+# working on no delivery. The implementer's phase is complete by here, so these turns are its own
+# and no phase waits on them; its Stop hook is quiet for the same reason, which keeps the reminder
+# this proof measured in stop-hook-reminds-the-open-phase out of the way.
+begin claude-background-tasks
+cc=$(claude_pid "$(claim_pane_pid "$issue" implementer)") || fail "the implementer pane runs no Claude Code"
+declare -A background_env=()
+# read_environ fills the array in this shell, so it is called directly: a command substitution's
+# subshell would print its reason and drop the array. A read that fails prints why on this run's
+# own output, which the fail line below points at.
+read_environ "$cc" background_env ||
+  fail "the implementer's Claude Code (pid $cc) environment was not read; its reason is the line above"
+[ -z "${background_env[CLAUDE_CODE_DISABLE_BACKGROUND_TASKS]+set}" ] ||
+  fail "the implementer's Claude Code (pid $cc) carries CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=${background_env[CLAUDE_CODE_DISABLE_BACKGROUND_TASKS]}, want it unset: the runtime sets it no more, and an operator that wants it off sets it itself"
+[ "${background_env[CLAUDE_CODE_DISABLE_CRON]-}" = 1 ] ||
+  fail "the implementer's Claude Code (pid $cc) has CLAUDE_CODE_DISABLE_CRON=${background_env[CLAUDE_CODE_DISABLE_CRON]-<unset>}, want 1: scheduled prompts stay off"
+note "the implementer's Claude Code (pid $cc) sets no CLAUDE_CODE_DISABLE_BACKGROUND_TASKS and keeps CLAUDE_CODE_DISABLE_CRON=1"
+bash_marker="claude-background-bash-$ptoken-$RANDOM$RANDOM"
+agent_marker="claude-background-agent-$ptoken-$RANDOM$RANDOM"
+background_file="$work/claude-background-$ptoken.txt"
+rm -f -- "$background_file"
+background_offset=$(stat -c %s "$transcript")
+send_agent "$issue" implementer "Claude backend proof background operation: start two pieces of work that outlive this turn and then end the turn at once. (1) With the Bash tool and run_in_background true, run exactly: /usr/bin/sleep 90 && printf '%s\\n' $bash_marker > $background_file && echo $bash_marker. (2) With your subagent tool, whichever of Task and Agent this build gives you, and run_in_background true, dispatch a subagent whose whole instruction is: sleep 90 seconds, then answer with the single word $agent_marker. Then end your turn with one line of plain prose saying both are running. Do not wait for either result in this turn, change no file of the repository, and call the legion tool in no turn of this operation. When the bash job's result reaches you, reply with one line BASH-RESULT $bash_marker and nothing else; when the subagent's result reaches you, reply with one line AGENT-RESULT $agent_marker and nothing else. Write neither of those two lines before the result it names has reached you."
+until_true 600 "the implementer to start the background bash job and the background subagent" \
+  background_pair_started "$background_offset" "$bash_marker" "$agent_marker"
+until_true 300 "the implementer's turn to end while that work runs on" issue_worker_state "$issue" implementer idle
+[ ! -e "$background_file" ] ||
+  fail "$background_file exists while the turn that started the job has only just ended: the job must still be sleeping, or it proves nothing of a result that outlives its turn"
+turn_ended_offset=$(stat -c %s "$transcript")
+note "the implementer started a background Bash job and a background subagent and ended its turn with both still running; $background_file is not written yet"
+# The turn each result starts is the daemon's own reading of it: a claim working on no delivery,
+# which only an agent_start the bridge sent for a turn the daemon never prompted can make.
+until_true 600 "a turn the daemon handed no task, which the first background result started" unprompted_turn
+note "the daemon has the implementer working on no delivery of its own: the turn a background result started, reported by the bridge as agent_start…agent_end"
+# Each result is read in the turn it starts: the reply naming it is written after the turn that
+# started the work ended, so neither line can be the first turn's own prose.
+until_true 900 "the bash job's result to reach the implementer in a turn of its own" \
+  resumed_reply_names "$turn_ended_offset" "BASH-RESULT $bash_marker"
+until_true 900 "the subagent's result to reach the implementer in a turn of its own" \
+  resumed_reply_names "$turn_ended_offset" "AGENT-RESULT $agent_marker"
+[ -s "$background_file" ] || fail "the background bash job never wrote $background_file"
+grep -Fq -- "$bash_marker" "$background_file" ||
+  fail "$background_file does not carry $bash_marker: $(head -c 200 -- "$background_file")"
+until_true 300 "the implementer's last background turn to end" issue_worker_state "$issue" implementer idle
+note "both results reached the implementer in turns of their own, after the turn that started them had ended, and the bash job wrote $background_file"
 pass
 
 begin kill-resumes-the-same-claude-session
@@ -695,7 +831,7 @@ argv=$(claude_argv "$cc")
 argv_has_pair "$argv" --resume "$session" || fail "the relaunched claude was not started with --resume $session: $(tr '\n' ' ' <<<"$argv" | cut -c1-300)"
 [ "$(head -c "$size" "$transcript" | sha256sum)" = "$prefix" ] || fail "the transcript's first $size bytes changed across the relaunch"
 send_agent "$issue" implementer "Claude backend proof after a relaunch: reply with one line starting WAITING that quotes the proof marker your implementation instruction in this session carried. Change nothing and call no tool."
-until_true 600 "the resumed implementer to quote its first instruction's marker" resumed_reply_names "$transcript" "$size" "$marker"
+until_true 600 "the resumed implementer to quote its first instruction's marker" resumed_reply_names "$size" "$marker"
 note "killed pane $pane (generation $generation): generation $(jq -r .generation <<<"$claim") runs claude --resume $session; the transcript kept its $turns earlier turns ($size bytes unchanged) and the resumed session quoted $marker"
 pass
 

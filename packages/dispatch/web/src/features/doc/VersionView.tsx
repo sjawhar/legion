@@ -1,17 +1,20 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useContext, useEffect, useRef, useState } from "react";
+import { type ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Doc } from "yjs";
 
 import { api } from "../../api/client";
 import { whoAmIQuery } from "../../api/queries";
 import type { Ask, BlockSchema } from "../../api/types";
+import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { Timestamp } from "../refs/Timestamp";
 import { AskBlockCard } from "./AskBlockCard";
 import { installTypedBlocks } from "./ask-block";
+import { changeMarksAgainst } from "./change-marks";
 import { colorForLogin } from "./connection";
 import { createDoc, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
+import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { DocumentRuntime } from "./runtime";
 import type { AskBlockHost } from "./typed-block-drawing";
 
@@ -20,6 +23,10 @@ export interface VersionViewProps {
   /** The document's block-indexed asks, so a historical decision block still names its asker. */
   asks: readonly Ask[];
   blockSchema: BlockSchema | undefined;
+  /** The markdown of the version this one is marked against - the last approved one - with which
+   *  the view draws what changed since it: the words each changed block gained, and each block
+   *  removed since then where it stood. Without it nothing is marked. */
+  changeBaseline?: string;
   createdAt: string | undefined;
   highlight: Highlight | undefined;
   /** The project document shown, for block asks with no issue to be referenced under. */
@@ -31,6 +38,7 @@ export function VersionView({
   artifactId,
   asks,
   blockSchema,
+  changeBaseline,
   createdAt,
   highlight,
   owner,
@@ -51,6 +59,23 @@ export function VersionView({
       ? versionQuery.data.markdown
       : undefined;
 
+  // `ProofDocument` renders this view and forwards `highlight`; `ArtifactDocument` above it
+  // builds that object afresh on every render. So the editor effect below keys on what the
+  // highlight says rather than on the object: keyed on the object, every render of
+  // `ArtifactDocument` destroys the editor, builds a new one and scrolls again, so the page
+  // collapses between mounts and the last scroll can run before the last editor has laid out,
+  // leaving the reader at the top. Keyed on the fields, the editor mounts once per highlighted
+  // comment.
+  const highlightBy = highlight?.by;
+  const highlightId = highlight?.id;
+  const highlightQuote = highlight?.quote;
+  const highlighted = useMemo(
+    () =>
+      highlightBy === undefined || highlightId === undefined || highlightQuote === undefined
+        ? undefined
+        : { by: highlightBy, id: highlightId, quote: highlightQuote },
+    [highlightBy, highlightId, highlightQuote]
+  );
   useEffect(() => {
     const parent = root.current;
     const user = userQuery.data;
@@ -66,6 +91,7 @@ export function VersionView({
     let ydoc: Doc | undefined;
     let handle: EditorHandle | undefined;
     let mounted = true;
+    let disposeRefocus = () => {};
     setRenderError(undefined);
     const mount = async () => {
       const doc = await createDoc();
@@ -88,12 +114,23 @@ export function VersionView({
         return;
       }
       installTypedBlocks(editor.view, blockSchema, setAskBlockHosts);
-      const embedded = highlight === undefined ? undefined : embedHighlight(markdown, highlight);
+      const embedded =
+        highlighted === undefined ? undefined : embedHighlight(markdown, highlighted);
       editor.setMarkdown(embedded ?? markdown);
-      setHighlightMissing(highlight !== undefined && embedded === undefined);
-      if (embedded !== undefined && highlight !== undefined) {
-        editor.focusMark(highlight.id);
+      setHighlightMissing(highlighted !== undefined && embedded === undefined);
+      if (embedded !== undefined && highlighted !== undefined) {
+        editor.focusMark(highlighted.id);
+        // A diagram above the quote that draws after this focus pushes it down, so the focus
+        // runs again once the diagrams have drawn; the cleanup drops it once unmounted.
+        disposeRefocus = refocusAfterDiagrams(() => editor.focusMark(highlighted.id));
       }
+      if (changeBaseline === undefined) return;
+      // The baseline is parsed by the shared headless engine, which the shell warms after the
+      // first paint: awaiting that load marks a version opened straight by its own URL too,
+      // rather than racing the warm-up and marking nothing.
+      await warmMarkdownRenderer().catch(() => undefined);
+      if (!mounted) return;
+      editor.setChangeDecorations(changeMarksAgainst(changeBaseline, editor.view.state.doc));
     };
     mount().catch((error: unknown) => {
       // A version the parser refuses must say so; an empty read-only editor looks like an
@@ -107,10 +144,11 @@ export function VersionView({
 
     return () => {
       mounted = false;
+      disposeRefocus();
       handle?.destroy();
       ydoc?.destroy();
     };
-  }, [blockSchema, createEditor, highlight, markdown, userQuery.data]);
+  }, [blockSchema, changeBaseline, createEditor, highlighted, markdown, userQuery.data]);
 
   if (versionQuery.isPending) {
     return <p>Loading version…</p>;

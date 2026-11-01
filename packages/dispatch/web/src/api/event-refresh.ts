@@ -29,10 +29,10 @@ import type {
 } from "./types";
 
 /**
- * Which cached reads one stream event can change, and nothing else: `eventRefreshTargets` is the
- * whole of it, and `api/query-refresh.ts` decides when each read is fetched. Query keys are the
+ * Which cached reads one event of the feed can change, and nothing else: `eventRefreshTargets` is
+ * the whole of it, and `api/query-refresh.ts` decides when each read is fetched. Query keys are the
  * literal arrays their readers use (the reference reads' builders live in
- * `features/refs/reference-target.ts`; `__tests__/sse.test.ts` holds the two in step).
+ * `features/refs/reference-target.ts`; `__tests__/event-feed.test.ts` holds the two in step).
  *
  * The server says what a write moved where a rule needs it: `changed` and `ancestors` on
  * `issue.created|updated|closed`, `thread_logins` on the writes that can move someone's Replies
@@ -194,12 +194,17 @@ function appendAskReads(targets: RefreshTarget[], event: Event): void {
 }
 
 // A comment event names the comment (a delivery receipt as `comment_id`), the root it replies to,
-// whose read carries its replies, and the ask whose thread holds it.
+// whose read carries its replies, and the ask whose thread holds it. An edit rewrites the
+// comment's blocks, so every read of one of them; a reply that names a block moves that block's
+// read, which lists the reply.
 function appendCommentReads(targets: RefreshTarget[], event: Event): void {
   const id =
     event.type === "comment.delivery" ? event.payload.comment_id : payloadString(event, "id");
   if (id !== undefined) {
     targets.push({ queryKey: ["comment", id] });
+    if (event.type === "comment.edited") {
+      targets.push(commentBlockReads(id));
+    }
   }
   const root = payloadString(event, "reply_to");
   if (root !== undefined) {
@@ -208,6 +213,30 @@ function appendCommentReads(targets: RefreshTarget[], event: Event): void {
   const askID = payloadString(event, "ask_id");
   if (askID !== undefined) {
     targets.push({ queryKey: ["ask", askID] }, { queryKey: ["ask-thread", askID] });
+  }
+  appendRepliedBlock(targets, event);
+}
+
+/**
+ * Every read of a block of comment `id` (`blockQuery`, which each link to the block and its own
+ * panel share, pinned or not), found by its node, `comment/<id>#<block id>`. The node carries the
+ * block's text, which the read keeps until an event refreshes it (`staleTime: Infinity`), and the
+ * server names no block of a comment in `references_changed`: the comment's own edit does. An
+ * issue message is never edited, so its blocks' text never moves.
+ */
+function commentBlockReads(id: string): RefreshTarget {
+  const prefix = `comment/${id}#`;
+  return referencePanels(({ node }) => node.kind === "block" && node.id.startsWith(prefix));
+}
+
+/** The read of the block of a comment or message a reply names (`reply_block`, its node id),
+ *  which lists the reply under the block. */
+function appendRepliedBlock(targets: RefreshTarget[], event: Event): void {
+  const replied = payloadValue(event, "reply_block");
+  const node =
+    typeof replied === "object" && replied !== null ? Reflect.get(replied, "node") : undefined;
+  if (typeof node === "string") {
+    targets.push(referencePanels((read) => read.node.kind === "block" && read.node.id === node));
   }
 }
 
@@ -630,7 +659,7 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     // state's own read always (its `seq` moved), the pinned list only for a pin. Of these the Inbox
     // reads only a snooze, its row's `snoozed_until`, from which its Later band, its banner and the
     // Needs-you badge are all counted: every Inbox read, since the event names no ask (every
-    // signed-in stream carries it). An event without `changed` predates snooze events.
+    // signed-in feed carries it). An event without `changed` predates snooze events.
     if (!isViewer(payloadString(event, "login"), viewer)) {
       return [];
     }
@@ -804,6 +833,7 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     // Every message read of the issue (a reference to a message, which shows the thread under
     // its root): a reply changes its root's read, and a payload need not name the root.
     targets.push({ queryKey: ["issue-messages", key] }, { queryKey: ["issue-message", key] });
+    appendRepliedBlock(targets, event);
     return targets;
   }
   if (event.type === "subscription.removed") {
@@ -988,7 +1018,7 @@ function askThreadsOn(issue: string): RefreshTarget {
 }
 
 /**
- * The reads one stream event can change, each a query key (a prefix unless `exact`) and, where
+ * The reads one event of the feed can change, each a query key (a prefix unless `exact`) and, where
  * only some of a family's reads can have moved, a test of the read's data. `signedInLogin` is the
  * viewer's: the per-viewer events and the Replies rule read it.
  */

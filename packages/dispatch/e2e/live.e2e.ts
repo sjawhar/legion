@@ -2,11 +2,10 @@ import { expect, type Locator, test } from "@playwright/test";
 
 import {
   createAsk,
-  createComment,
   createIssue,
   createMessage,
   createProject,
-  disconnectAllStreams,
+  disconnectLiveSockets,
   getIssue,
   patchIssue,
   putArchitectureSource,
@@ -14,20 +13,20 @@ import {
   resolveAsk,
 } from "./api";
 import { seedFakeGithub } from "./fake-github-helpers";
+import { inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-// These scenarios exercise the event stream fanning updates into other open tabs, so
+// These scenarios exercise the live event feed fanning updates into other open tabs, so
 // the counterparty ("bob") is an autonomous session acting through the bearer API —
 // only alice's browser needs to be real, since that is what proves the live update.
 const bob = { actor: { kind: "session" as const, id: "bob" }, as: "agent" as const };
-const eventStreamUrl = /\/api\/v1\/events(\?|$)/;
 let renames = 0;
 
 /**
  * bob renames the open issue, again every 2 s, until its header shows the new name from a read
  * of `GET /api/v1/issues/<key>` the page sent after the write (`reads` counts them). Only the
- * page's event stream can bring either, so past this the stream is subscribed and every event
+ * page's event feed can bring either, so past this the feed is subscribed and every event
  * written before the rename has been handled.
  */
 async function renameUntilShown(
@@ -86,8 +85,11 @@ test("live: bob's ask updates alice's Inbox and project badges without reload @p
   await expect(navigation.locator('a[href="/projects/CORE"]')).toContainText("1");
   expect(issuePage.url()).toContain(readingIssue.key);
 
-  await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toBeVisible();
-  await expect(inboxPage.getByText("Ship it?")).toBeVisible();
+  // The question arrives as a row of the list, carrying its first line; from 1280 px the
+  // reading column beside it is showing that same row's card (INFRA-575).
+  const arrived = inboxRow(inboxPage, ask.id);
+  await expect(arrived).toBeVisible();
+  await expect(arrived.getByText("Ship it?")).toBeVisible();
 
   await issuePage.screenshot({
     fullPage: true,
@@ -176,7 +178,7 @@ test("live: a message on another issue reads neither the Inbox nor the pinned li
       page.getByRole("navigation", { name: "Navigation" }).locator('a[href="/projects/CORE"]')
     ).toBeVisible();
     const viewedHeader = page.getByTestId("issue-header").getByRole("heading", { level: 1 });
-    // The first rename proves the stream is subscribed, so the message below reaches this page.
+    // The first rename proves the feed is subscribed, so the message below reaches this page.
     await renameUntilShown(viewedHeader, viewedIssue.key, "Viewed issue", () => viewedReads);
     await page.waitForTimeout(250);
     inboxReads = 0;
@@ -343,8 +345,13 @@ test("live: the stream recovers after the connection drops", async ({ browser },
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
+  const socketOpened = page.waitForEvent(
+    "websocket",
+    (socket) => new URL(socket.url()).pathname === "/ws/live"
+  );
   await page.goto("/");
   await expect(page.getByText("Nothing needs you")).toBeVisible();
+  const socket = await socketOpened;
   await expect(page.getByText("Reconnecting")).toHaveCount(0);
 
   // D10: the pill must never move the reading surface. It has to render as an
@@ -353,7 +360,9 @@ test("live: the stream recovers after the connection drops", async ({ browser },
   const heading = page.locator("main").getByRole("heading", { name: "Inbox" });
   const boundsBeforeOutage = await heading.boundingBox();
 
+  const closed = socket.waitForEvent("close");
   await alice.setOffline(true);
+  await closed;
   await expect(page.getByText("Reconnecting")).toBeVisible();
   expect(await heading.boundingBox()).toEqual(boundsBeforeOutage);
   await page.screenshot({ fullPage: true, path: testInfo.outputPath("reconnecting-pill.png") });
@@ -369,118 +378,160 @@ test("live: the stream recovers after the connection drops", async ({ browser },
   await alice.setOffline(false);
 
   await expect(page.getByText("Reconnecting")).toHaveCount(0);
-  await expect(page.getByTestId(`ask-${ask.id}`)).toBeVisible();
-  await expect(page.getByText("Missed while offline?")).toBeVisible();
+  const arrived = inboxRow(page, ask.id);
+  await expect(arrived).toBeVisible();
+  await expect(arrived.getByText("Missed while offline?")).toBeVisible();
   expect(await heading.boundingBox()).toEqual(boundsBeforeOutage);
 
   await alice.close();
 });
 
-test("live: a forced server disconnect reconnects from the last event id, not from zero", async ({
-  browser,
-}) => {
+test("live: a forced server disconnect resumes from the last event id", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Disconnect target" });
   await createMessage(issue.key, { body: "Before disconnect" }, bob);
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
-  const streamRequestUrls: string[] = [];
-  page.on("request", (request) => {
-    if (eventStreamUrl.test(request.url())) {
-      streamRequestUrls.push(request.url());
-    }
+  // Each live socket the page opens, in order: the id of every event frame it received, the
+  // resume of every event feed subscribe it sent, and each events_start's `replay_complete`.
+  const sockets: {
+    readonly events: string[];
+    readonly resumes: (string | undefined)[];
+    readonly starts: (boolean | undefined)[];
+  }[] = [];
+  page.on("websocket", (socket) => {
+    if (new URL(socket.url()).pathname !== "/ws/live") return;
+    const seen = {
+      events: [] as string[],
+      resumes: [] as (string | undefined)[],
+      starts: [] as (boolean | undefined)[],
+    };
+    sockets.push(seen);
+    socket.on("framereceived", ({ payload }) => {
+      const frame = JSON.parse(String(payload)) as {
+        readonly type?: string;
+        readonly id?: string;
+        readonly replay_complete?: boolean;
+      };
+      if (frame.type === "event" && frame.id !== undefined) seen.events.push(frame.id);
+      if (frame.type === "events_start") seen.starts.push(frame.replay_complete);
+    });
+    socket.on("framesent", ({ payload }) => {
+      const frame = JSON.parse(String(payload)) as {
+        readonly type?: string;
+        readonly view?: { readonly kind?: string };
+        readonly resume?: { readonly since?: string };
+      };
+      if (frame.type === "subscribe" && frame.view?.kind === "events") {
+        seen.resumes.push(frame.resume?.since);
+      }
+    });
   });
+  const whoami = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/auth/whoami" && response.ok()
+  );
 
   await page.goto(`/issues/${issue.key}/conversation`);
+  const head: string = (await (await whoami).json()).event_head;
   await expect(page.getByText("Before disconnect")).toBeVisible();
-  // A live message the client actually observes before the outage — the cold
-  // connect itself resolves its head internally without reporting it back, so
-  // without this the reconnect below could not tell "nothing has happened yet"
-  // apart from "many events happened and none reached me".
+  // The first subscription resumes from the sign-in check's head.
+  await expect.poll(() => sockets[0]?.resumes).toEqual([head]);
   await createMessage(issue.key, { body: "Seen live before disconnect" }, bob);
   await expect(page.getByText("Seen live before disconnect")).toBeVisible();
-  await expect.poll(() => streamRequestUrls.length).toBeGreaterThanOrEqual(1);
+  const first = sockets[0];
+  if (first === undefined) throw new Error("the page opened no live socket");
+  expect(first.events.length).toBeGreaterThan(0);
 
-  // Ends every open SSE response on the server, exactly like a real server restart
-  // or a dropped connection the OS never reports as offline — the same recovery
-  // path the watchdog exercises after 45s of silence, proven here instantly.
-  await disconnectAllStreams();
+  // A 1012 restart opens the socket at once and resumes the event feed after the last event the
+  // closed socket carried, which Dispatch's log still holds: its start says the replay covers the
+  // gap, so the page refreshes nothing for it.
+  await disconnectLiveSockets();
+  await expect.poll(() => sockets[1]?.resumes.length ?? 0).toBe(1);
+  expect(sockets).toHaveLength(2);
+  const last = first.events.at(-1);
+  expect(sockets[1]?.resumes).toEqual([last]);
+  expect(BigInt(last ?? "0")).toBeGreaterThan(BigInt(head));
+  await expect.poll(() => sockets[1]?.starts).toEqual([true]);
 
   await createMessage(issue.key, { body: "Missed during disconnect" }, bob);
   await expect(page.getByText("Missed during disconnect")).toBeVisible();
-  await expect.poll(() => streamRequestUrls.length).toBeGreaterThanOrEqual(2);
-
-  // The reconnect resumes from the last event id this page actually saw, not a
-  // full since=0 replay of the issue's history.
-  const reconnectSince = new URL(streamRequestUrls[streamRequestUrls.length - 1]).searchParams.get(
-    "since"
-  );
-  expect(reconnectSince).not.toBe("0");
-  expect(Number(reconnectSince)).toBeGreaterThan(0);
 
   await alice.close();
 });
 
-test("live: an event committed while the stream's first attempt fails shows once the retry opens", async ({
+// The page's first live socket fails its opening handshake. A change committed before the next one
+// opens still reaches the page, with no reload: the page tries again, and its event feed resumes
+// from the sign-in check's head, so Dispatch replays the change on it.
+test("live: a change committed while the first live socket fails to open is shown without a reload", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "First attempt fails" });
+  const issue = await createIssue({ project: "CORE", title: "Before the failed handshake" });
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const { promise: released, resolve: release } = Promise.withResolvers<void>();
-    // Until the document's Conversation read lands, every stream attempt it makes fails the way a
-    // network change aborts one, so its first attempt never opens; later attempts are held until
-    // the comment below is committed, so the retry's cold connect starts at a head past it. The
-    // state is per document, since a chunk download a network change aborts reloads the page.
-    let attemptFailed = false;
-    let readLanded = false;
+    // Every document the page fetched for itself: its first load, and a reload if there were one.
+    // The `load` event is not that count - Playwright's Firefox fires one for the initial
+    // `about:blank` - while a reload is a navigation request of the main frame in every engine.
+    const loaded: string[] = [];
     page.on("request", (request) => {
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
-        attemptFailed = false;
-        readLanded = false;
+        loaded.push(request.url());
       }
     });
-    page.on("response", (response) => {
-      if (new URL(response.url()).pathname === `/api/v1/issues/${issue.key}/events`) {
-        readLanded = true;
-      }
-    });
-    await page.route(eventStreamUrl, async (route) => {
-      if (!readLanded) {
-        attemptFailed = true;
-        await route.abort("failed");
+    let opens = 0;
+    // The event feed's subscribes the second socket carried to Dispatch, in order.
+    const resumes: (string | undefined)[] = [];
+    const refused = Promise.withResolvers<void>();
+    const committed = Promise.withResolvers<void>();
+    await page.routeWebSocket(/\/ws\/live$/u, async (route) => {
+      opens += 1;
+      if (opens === 1) {
+        await route.close({ code: 1006, reason: "the opening handshake failed" });
+        refused.resolve();
         return;
       }
-      await released;
-      await route.continue();
+      await committed.promise;
+      const server = route.connectToServer();
+      route.onMessage((message) => {
+        const frame = JSON.parse(String(message)) as {
+          readonly type?: string;
+          readonly view?: { readonly kind?: string };
+          readonly resume?: { readonly since?: string };
+        };
+        if (frame.type === "subscribe" && frame.view?.kind === "events") {
+          resumes.push(frame.resume?.since);
+        }
+        server.send(message);
+      });
     });
+    const whoami = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/auth/whoami" && response.ok()
+    );
 
     await page.goto(`/issues/${issue.key}/conversation`);
-    await expect.poll(() => attemptFailed && readLanded).toBe(true);
-    // Committed after the Conversation's read and before any stream is open: nothing the page has
-    // read or will be sent includes it.
-    const comment = await createComment(
-      issue.key,
-      { body: "Committed before the retry opened" },
-      bob
-    );
-    const opened = page.waitForResponse((response) => eventStreamUrl.test(response.url()));
-    release();
-    await opened;
+    const head: string = (await (await whoami).json()).event_head;
+    await expect(page.getByText("Before the failed handshake", { exact: true })).toBeVisible();
+    await refused.promise;
+    await patchIssue(issue.key, { title: "Committed while the socket was down" }, bob);
+    committed.resolve();
 
-    await expect(page.locator(`[data-turn="comment:${comment.id}"]`)).toContainText(
-      "Committed before the retry opened"
-    );
+    await expect(
+      page.getByText("Committed while the socket was down", { exact: true })
+    ).toBeVisible();
+    // The first subscribe the page ever sent rode the second socket, and resumed from the sign-in
+    // check's head: the patch is above it, so Dispatch replayed it there.
+    expect(resumes[0]).toBe(head);
+    expect(opens).toBe(2);
+    expect(loaded).toHaveLength(1);
   } finally {
     await alice.close();
   }
 });
 
-test("live: a fresh page load opens the stream at the current head and stays within a bounded request budget @phone", async ({
+test("live: a fresh page load opens the socket at the current head and stays within a bounded request budget @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -499,25 +550,23 @@ test("live: a fresh page load opens the stream at the current head and stays wit
     }
   });
 
+  const socketOpened = page.waitForEvent(
+    "websocket",
+    (socket) => new URL(socket.url()).pathname === "/ws/live"
+  );
   await page.goto(`/issues/${issue.key}/conversation`);
   await expect(page.getByText("Backlog message 4")).toBeVisible();
+  await socketOpened;
 
-  const streamRequest = apiRequestUrls.find((url) => eventStreamUrl.test(url));
-  expect(streamRequest).toBeDefined();
+  // The socket is outside the HTTP request budget, and the sign-in check carries its event head.
+  expect(apiRequestUrls.some((url) => new URL(url).pathname === "/api/v1/events")).toBe(false);
 
-  // The very first connection ever omits since entirely — the server resolves
-  // its own current head after subscribing, instead of the client computing one
-  // via a separate request and passing it here.
-  const since = new URL(streamRequest ?? "").searchParams.get("since");
-  expect(since).toBeNull();
-
-  // Exactly 21 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
+  // Exactly 20 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
   // and Projects queries, me/state, issue detail, the shared inbox query for the
-  // margin's open-ask count, the stream connection, the active-sessions read,
-  // the primary artifact's comments - which the Conversation's own list shares rather
-  // than fetching again - the margin's own list of the issue's asks and the
-  // Conversation's, which asks the same route for each ask's thread (`?thread=1`) and so
-  // is a request of its own, not the margin's shared,
+  // margin's open-ask count, the active-sessions read, the primary artifact's comments -
+  // which the Conversation's own list shares rather than fetching again - the margin's own
+  // list of the issue's asks and the Conversation's, which asks the same route for each
+  // ask's thread (`?thread=1`) and so is a request of its own, not the margin's shared,
   // the issue's message threads, the two one-row event reads the unread mark
   // needs (the first event past the watermark, and the issue's head),
   // Conversation's live-agent query, the one block-schema fetch every document
@@ -532,13 +581,11 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   // the inbox on every page, and `me/replies?limit=1`, whose total the Replies badge counts on
   // every page (the sidebar's on desktop, the compact header's on phone).
   // The Conversation pages no event log at all now that the history is the Activity tab's,
-  // and the Activity panel is unmounted until its tab is opened, so it adds nothing here.
-  // The header's assignee picker reads who has signed in only once the reader
-  // reaches for it, so it is not in this count. The phone project (iphone) does not
-  // fetch the sidebar while its drawer is closed, so it uses 19. Asserted exactly (not
-  // a ceiling) so a panel that starts eagerly fetching before its tab is ever opened
+  // and the Activity panel is unmounted until its tab is opened. The phone project (iphone)
+  // does not fetch the sidebar while its drawer is closed, so it uses 18. Asserted exactly
+  // (not a ceiling) so a panel that starts eagerly fetching before its tab is ever opened
   // trips this immediately instead of only breaking some looser upper bound.
-  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 19 : 21);
+  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 18 : 20);
   expect(
     apiRequestUrls.filter((url) => url.endsWith("/api/v1/settings/repo-projects"))
   ).toHaveLength(1);
@@ -652,7 +699,7 @@ test("live: an event during a project list's first load fetches it again once th
       .getByRole("link", { name: issue.key });
     await expect(pinnedRow).toContainText("OLDTITLE");
     await inFlight;
-    // Renamed, again every 2 s, until the pinned row shows it: the stream is open and the event
+    // Renamed, again every 2 s, until the pinned row shows it: the feed is open and the event
     // was handled while the held first load was still in flight.
     let newTitle = "";
     for (let attempt = 1; attempt <= 10 && newTitle === ""; attempt += 1) {

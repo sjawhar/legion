@@ -12,6 +12,7 @@ import {
   putIssueState,
   releaseClaim,
 } from "./api";
+import { inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -92,7 +93,7 @@ test("the ask card lists the issue's claimant and route, and drops the claimant 
     await dialog.getByRole("button", { name: "Cancel" }).click();
     await expect(dialog).toHaveCount(0);
 
-    // The claimant gives the issue up over the agent API; the open card drops it over SSE.
+    // The claimant gives the issue up over the agent API; the open card drops it over the live socket's event feed.
     await releaseClaim(issue.key, { actor: claimant, as: "agent" });
     await expect(recipients).toContainText("Reaches 2");
     await expect(recipients.locator(`[title='${claimant.id}']`)).toHaveCount(0);
@@ -155,7 +156,7 @@ test("a follower that holds the claim is listed once, and unfollowing it says th
     await expect(recipients.getByRole("list", { name: "Followers" })).toHaveCount(0);
     await expect(recipients).toContainText("Reaches 1");
 
-    // A role route set on the issue joins the card over SSE, naming the session holding the role.
+    // A role route set on the issue joins the card over the event feed, naming the role's holder.
     await patchIssue(issue.key, { route: "role:reviewer" });
     await expect(recipients).toContainText("Reaches 2");
     const roleRow = viaIssue
@@ -308,7 +309,7 @@ test("unfollowing a follower while a role route's holder is unknown says the rou
   }
 });
 
-test("a route change in a status write moves the open card's route row without a reload, and the close that follows withdraws the card", async ({
+test("a route change in a status write moves the open card's route row without a reload, and a close that also moves the route withdraws the card the reader is answering in place", async ({
   browser,
 }) => {
   const moved = "e2e-reach-routed-next";
@@ -319,8 +320,9 @@ test("a route change in a status write moves the open card's route row without a
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship it?" },
     { actor: asker, as: "agent" }
   );
-  // No claim: a claim's `issue.released` would refresh the card on its own, so only the issue
-  // event of each PATCH carries what moves here.
+  // No claim: a claim's `issue.released` would refresh the card on its own (closing a claimed
+  // issue releases it in the same write), so only the issue events of each PATCH carry what moves
+  // here.
   await patchIssue(issue.key, { route: `session:${routed}` });
   await setLiveSessions([
     { session_id: asker.id, title: "Asker (e2e)" },
@@ -335,9 +337,9 @@ test("a route change in a status write moves the open card's route row without a
     const card = page.getByTestId(`ask-${ask.id}`);
     const recipients = card.getByRole("region", { name: "Recipients" });
     await expect(recipients).toContainText("Reaches 2");
-    // Focus stays on this toggle inside the card's row. The Inbox lists an open ask only while its
-    // issue is open, but it holds a row the reader's focus is in where they last saw it, so the
-    // card stays mounted in the Inbox after the close below.
+    // From 1280 px this card is the reading column's: the question the Inbox selected when the
+    // page opened, with the list's short rows beside it. The toggle is in the column, so the
+    // reader's hand is on no row at all.
     await recipients.getByRole("button", { name: /^Reaches/ }).click();
     const viaIssue = recipients.getByRole("list", { name: "Via claim or route" });
     const routeRow = (session: string) =>
@@ -352,12 +354,23 @@ test("a route change in a status write moves the open card's route row without a
     await expect(recipients.locator(`[title='${routed}']`)).toHaveCount(0);
     await expect(recipients).toContainText("Reaches 2");
 
-    // The close withdraws the open ask: the mounted card says so and lists no recipients, since
-    // nobody can answer it any more.
-    await patchIssue(issue.key, { status: "done" });
+    // The reader starts answering. A question the server drops leaves the Inbox at once, except
+    // where they have typed an answer to it: the column then keeps that question, closed, until
+    // they select another row (INFRA-575, `dispatch://INFRA-575/spec`). That is what holds this
+    // card in front of the close below.
+    const typed = "Ship it once the route lands.";
+    await card.locator("[data-ask-answer]").fill(typed);
+
+    // One PATCH moves the route back and closes the issue. The close withdraws the issue's open
+    // asks: the row leaves the list at once, and the card the reader was answering shows its ask
+    // withdrawn by the closer where it stands, listing no recipient at all - nobody can answer it
+    // any more - with their unsent text kept under it to copy.
+    await patchIssue(issue.key, { route: `session:${routed}`, status: "done" });
     await expect(card).toContainText("Withdrawn when alice closed the issue");
     await expect(recipients).toHaveCount(0);
     await expect(card).toBeVisible();
+    await expect(page.getByTestId("ask-unsent-answer")).toContainText(typed);
+    await expect(inboxRow(page, ask.id)).toHaveCount(0);
   } finally {
     await alice.close();
   }
@@ -404,8 +417,9 @@ test("a claim that lands while the Inbox is loading reaches the card that mounts
     }
     await route.fallback();
   });
-  const streamOpened = page.waitForResponse(
-    (response) => new URL(response.url()).pathname === "/api/v1/events"
+  const streamOpened = page.waitForEvent(
+    "websocket",
+    (socket) => new URL(socket.url()).pathname === "/ws/live"
   );
   const pinnedListRead = () =>
     page.waitForRequest((request) => {
@@ -415,7 +429,9 @@ test("a claim that lands while the Inbox is loading reaches the card that mounts
   try {
     const firstPinnedRead = pinnedListRead();
     const navigation = page.goto("/");
-    // The claim must reach an open stream: a cold client's stream replays nothing from before.
+    // The claim goes out once the page's live socket is open and the sidebar has read its pinned
+    // list, so its flush reaches the page while the Inbox load it is timed against is still in
+    // flight, and the rename after it is seen by a pinned list already loaded.
     await Promise.all([firstFetched.promise, streamOpened, firstPinnedRead]);
     expect(staleClaimant).toBeNull();
 

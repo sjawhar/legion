@@ -3,6 +3,7 @@ import { act, fireEvent, waitFor, within } from "@testing-library/react";
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import {
   answerTextReadsWithTheSeededText,
   createQueryClient,
@@ -134,6 +135,7 @@ test("ProofDocument hands its decision blocks the indexed ask; the hosted card a
     expect(answerAsk.mock.calls[0]).toEqual([
       "ask-1",
       { expected_edited_at: null, selected: ["Ship"], text: "Go." },
+      keyedAttempt,
     ]);
     // The server writes the outcome into the block, so the document's own reads go stale and the
     // text is read again.
@@ -314,6 +316,65 @@ test("the open-decision link names its block as encodeBlockId writes it, in its 
   } finally {
     window.history.replaceState(null, "", originalHash || "/");
     listIssueAsks.mockRestore();
+    view.unmount();
+  }
+});
+
+// A pane's editor is read-only, but `blocksReadOnly` is `isClosed || schemaReadOnly` still: the
+// whole point of the Inbox's reading pane is that the reader answers the decision there.
+test("a pane's decision block hosts its answer form and tells its host which question was answered", async () => {
+  const queryClient = createQueryClient();
+  queryClient.setQueryData(["asks", "CORE-1"], [blockAsk]);
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({
+    ask: blockAsk,
+    answers: [],
+    edits: [],
+    claimant: null,
+    followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
+    replies: [],
+  });
+  const answerAsk = spyOn(api, "answerAsk").mockResolvedValue({
+    ...blockAsk,
+    answer: { at: new Date().toISOString(), selected: ["Ship"], text: null, user: "alice" },
+    state: "answered",
+  });
+  const answered: string[] = [];
+  const { editors, sync, view } = renderProofDocument({
+    onAskAnswered: (askId) => answered.push(askId),
+    queryClient,
+    surface: "pane",
+  });
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const editor = editors[0];
+    if (editor === undefined) throw new Error("editor missing");
+    expect(editor.readOnly).toBe(true);
+    const nodeViews = editor.viewProps.nodeViews as Record<
+      string,
+      (node: ProseMirrorNode) => { dom: HTMLElement; destroy(): void }
+    >;
+    const construct = nodeViews.ask;
+    if (construct === undefined) throw new Error("the ask node view was not installed");
+    act(() => {
+      editor.root.append(construct(askNode({ urgency: "high" })).dom);
+    });
+    const section = editor.root.querySelector("section[data-dispatch-ask-block]");
+    if (section === null) throw new Error("the ask block shell was not mounted");
+    const block = within(section as HTMLElement);
+    // The hosted card, not the block's own read-only record of its attributes.
+    expect(await block.findByRole("article", { name: "Urgency: High" })).toBeDefined();
+    fireEvent.click(await block.findByRole("radio", { name: "Ship Release it" }));
+    fireEvent.click(block.getByRole("button", { name: "Answer" }));
+    await waitFor(() => expect(answerAsk).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(answered).toEqual(["ask-1"]));
+  } finally {
+    answerAsk.mockRestore();
+    getAsk.mockRestore();
     view.unmount();
   }
 });

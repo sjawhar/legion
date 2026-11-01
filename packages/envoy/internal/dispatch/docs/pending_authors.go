@@ -185,6 +185,12 @@ func (hold *roomHold) snapshot() heldUpdates {
 type roomInstance struct {
 	hold   roomHold
 	cursor roomCursor
+	// loadedHead is the head the instance's load read (roomLoad.head), the version through which
+	// the document it loaded holds every stored update: the load folds the stored history through
+	// that head (servicePersistenceAdapter.LoadDoc, PgVersioned.Load). It is not the cursor's
+	// start, which also folds in the versions took recorded while the load ran - those are durable,
+	// but not in the loaded document. Set once, when the load starts the instance (roomLoad.start).
+	loadedHead int64
 }
 
 // roomLoad is one room load's record of the durable history behind the room it loads, kept from
@@ -200,6 +206,9 @@ type roomInstance struct {
 type roomLoad struct {
 	mu   sync.Mutex
 	head int64
+	// state is the durable state the load read, which the room's load takes before anything that
+	// can refuse it (takeLoadedState) and applies itself (applyLoadedState) rather than ygo.
+	state []byte
 	// appended are the versions took recorded before the instance existed, folded into its cursor
 	// when it does (start). instance is that instance, which took advances directly from then on.
 	appended []int64
@@ -217,12 +226,24 @@ func (s *Service) beginRoomLoad(room string) *roomLoad {
 	return load
 }
 
-// readHead records the head the load's read of the store saw, the version the room it loads holds
-// every update through.
-func (load *roomLoad) readHead(head persistence.Version) {
+// read records what the load's read of the store saw: the head, the version the room it loads
+// holds every update through, and the state through that head, which the room's load applies next
+// (takeState).
+func (load *roomLoad) read(head persistence.Version, state []byte) {
 	load.mu.Lock()
 	defer load.mu.Unlock()
 	load.head = int64(head)
+	load.state = state
+}
+
+// takeState hands over the state the load read, once, so the record holds no copy of it for as
+// long as the document it loaded lives.
+func (load *roomLoad) takeState() []byte {
+	load.mu.Lock()
+	defer load.mu.Unlock()
+	state := load.state
+	load.state = nil
+	return state
 }
 
 // took records version, which this process has made durable for the room while its load runs: on
@@ -252,7 +273,7 @@ func (load *roomLoad) start() *roomInstance {
 		}
 	}
 	load.appended = nil
-	load.instance = &roomInstance{hold: roomHold{loaded: load.head}, cursor: roomCursor{through: through}}
+	load.instance = &roomInstance{hold: roomHold{loaded: load.head}, cursor: roomCursor{through: through}, loadedHead: load.head}
 	return load.instance
 }
 

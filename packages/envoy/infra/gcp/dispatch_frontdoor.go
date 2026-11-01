@@ -5,9 +5,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/sql"
 	corev1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/core/v1"
 	metav1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/meta/v1"
 	rbacv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/rbac/v1"
+	"github.com/pulumi/pulumi-tailscale/sdk/go/tailscale"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"github.com/sjawhar/envoy/infra/core"
@@ -16,9 +18,10 @@ import (
 // Dispatch's front door is a Tailscale Service host (tailnet_service.go): frontDoorReplicas pods
 // of Deployment <hostname>-tailnet, each its own tailnet node registered under its pod's name, all
 // hosting the Tailscale Service svc:<hostname>. Each terminates TLS for <hostname>.<tailnetDnsName>
-// on 443 and proxies to the app's Service, and each runs tailscaled's SOCKS5 proxy on 1055, which
-// the app and the listener reach the NATS hub through at Service <hostname>-tailnet. So the name
-// every reader reaches Dispatch at, and the hub, answer while any one front-door pod serves.
+// on 443 and proxies to the app's Service. Without natsInCluster each also runs tailscaled's SOCKS5
+// proxy on 1055, which the app and the listener reach the NATS hub through at Service
+// <hostname>-tailnet. So the name every reader reaches Dispatch at, and in that mode the hub, answer
+// while any one front-door pod serves.
 //
 // Every pod holds the Service name's certificate, and Let's Encrypt issues at most 5 certificates
 // for one exact set of names in 7 days, from every account together
@@ -470,13 +473,40 @@ gate() {
 }
 `
 
+// newDispatchTailscaleService declares the Tailscale Service the front door's pods host,
+// svc:<hostname>, the name every reader reaches Dispatch at. The component declares it rather
+// than being handed one, so a consumer has one thing to apply and the Service and the nodes that
+// advertise it can never name each other differently. It is a tailnet resource and no child of
+// the cluster, so it is parented on the component alone and takes none of the Kubernetes
+// children's options.
+//
+// Its Protect follows deletionProtection, the input that already guards the cluster and the
+// database, rather than being hard-coded: a child's own Protect overrides the one it would
+// inherit from the component (registerResource takes the parent's only when the child names
+// none, pulumi/sdk/v3 v3.268.0's go/pulumi/context.go:1832-1835), so a hard-coded one could be
+// changed only by a resource transform on the component or by a state edit
+// (`pulumi state unprotect <urn>`), and deleting a Dispatch would need one of the two.
+//
+// It waits for the Cloud SQL instance because the front door waits for it in turn: switching the
+// instance's availability type updates it in place and restarts it, and the name must come back
+// only once that restart is over, not while the database is away.
+func newDispatchTailscaleService(ctx *pulumi.Context, comp *Dispatch, s dispatchSettings, instance *sql.DatabaseInstance) (*tailscale.Service, error) {
+	return tailscale.NewService(ctx, s.hostname, &tailscale.ServiceArgs{
+		Name:    pulumi.String(tailnetServiceName(s.hostname)),
+		Comment: pulumi.String("Dispatch, served at " + core.TailnetHostName(s.hostname, s.tailnetDNSName)),
+		Ports:   pulumi.StringArray{pulumi.String("tcp:443")},
+		Tags:    pulumi.ToStringArray(s.tags),
+	}, pulumi.Parent(comp), pulumi.Protect(s.deletionProtection), pulumi.DependsOn([]pulumi.Resource{instance}))
+}
+
 // newDispatchFrontDoor registers the front door's own objects and renders its pod, for the
 // Deployment newDispatchKubernetes registers as <hostname>-tailnet: ServiceAccount
 // <hostname>-tailnet, Secret <hostname>-tailnet-tls with the Role that lets that account alone
 // write it, and ConfigMap <hostname>-serve. It returns the pod and the options that Deployment
-// registers with. tailnetService is checked once it resolves; authKeySecret names the Secret
-// holding TS_AUTHKEY.
-func newDispatchFrontDoor(ctx *pulumi.Context, dispatch string, s dispatchSettings, tailnetService pulumi.StringInput, authKeySecret string, metadata func(string) *metav1.ObjectMetaArgs, child []pulumi.ResourceOption) (corev1.PodSpecArgs, []pulumi.ResourceOption, error) {
+// registers with. service is the Tailscale Service newDispatchTailscaleService declared and
+// instance the Cloud SQL instance, both of which that Deployment waits for; authKeySecret names
+// the Secret holding TS_AUTHKEY.
+func newDispatchFrontDoor(ctx *pulumi.Context, s dispatchSettings, service *tailscale.Service, instance *sql.DatabaseInstance, authKeySecret string, metadata func(string) *metav1.ObjectMetaArgs, child []pulumi.ResourceOption) (corev1.PodSpecArgs, []pulumi.ResourceOption, error) {
 	name := s.hostname + "-tailnet"
 	tlsName := name + "-tls"
 	serveName := s.hostname + "-serve"
@@ -519,29 +549,31 @@ func newDispatchFrontDoor(ctx *pulumi.Context, dispatch string, s dispatchSettin
 		return corev1.PodSpecArgs{}, nil, err
 	}
 
+	// Every front-door pod runs the SOCKS5 proxy the app and the listener reach the NATS hub
+	// through, on every address, since its callers are pods of their own. With natsInCluster those
+	// two dial the hub themselves, so no pod runs a proxy: an empty socks5Server renders no
+	// TS_SOCKS5_SERVER (tailnet_service.go).
+	socks5Server := ""
+	if !s.natsInCluster {
+		socks5Server = "0.0.0.0:" + strconv.Itoa(dispatchSOCKS5Port)
+	}
 	host := tailnetServiceHost{
 		paths: paths.service, name: s.hostname,
 		authKeySecret: authKeySecret, authKeyKey: "TS_AUTHKEY",
 		tags: s.tags, serveConfig: dispatchServeConfig,
-		// Every front-door pod runs the SOCKS5 proxy the app and the listener reach the NATS hub
-		// through, on every address, since its callers are pods of their own.
-		socks5Server: "0.0.0.0:" + strconv.Itoa(dispatchSOCKS5Port),
+		socks5Server: socks5Server,
 		graceSeconds: dispatchFrontDoorGraceSeconds,
 		certificate:  fqdn,
 	}
 
-	// The serve config is rendered from the resolved tailnetService, so a consumer passing its
-	// Tailscale Service's name output orders the ConfigMap after that Service. The value is checked
-	// first: the pods host svc:<hostname>, whose name the certificate and the URL carry, so any other
-	// value is refused, naming the input and never the value.
-	want := host.service()
-	serveJSON := tailnetService.ToStringOutput().ApplyT(func(service string) (string, error) {
-		if service != want {
-			return "", fmt.Errorf("%s: tailnetService must be %s, the Tailscale Service the front door hosts, as Tailscale's API names it (not echoed)", dispatch, want)
-		}
-		return tailnetServeHTTPS(s.hostname, s.tailnetDNSName, "http://"+clusterLocal(s.hostname, s.namespace)+":8766"), nil
-	}).(pulumi.StringOutput)
-	serve, err := corev1.NewConfigMap(ctx, serveName, &corev1.ConfigMapArgs{Metadata: metadata(serveName), Data: pulumi.StringMap{"serve.json": serveJSON}}, child...)
+	// The serve config is rendered from the component's own names alone. It still waits for the
+	// Tailscale Service: the ConfigMap is what the pods serve the Service's name by, and the
+	// Deployment that mounts it waits for it in turn, so ordering it after the Service keeps the
+	// whole front door behind the name it hosts.
+	serve, err := corev1.NewConfigMap(ctx, serveName, &corev1.ConfigMapArgs{
+		Metadata: metadata(serveName),
+		Data:     pulumi.StringMap{"serve.json": pulumi.String(tailnetServeHTTPS(s.hostname, s.tailnetDNSName, s.clusterURL()))},
+	}, append(append([]pulumi.ResourceOption{}, child...), pulumi.DependsOn([]pulumi.Resource{service}))...)
 	if err != nil {
 		return corev1.PodSpecArgs{}, nil, err
 	}
@@ -629,11 +661,11 @@ func newDispatchFrontDoor(ctx *pulumi.Context, dispatch string, s dispatchSettin
 	}
 	// The pod names the ConfigMap and the TLS Secret by their constant names, and the Deployment
 	// waits for both, so no pod waits on a missing volume and a ConfigMap the provider replaces
-	// changes nothing in the Deployment's inputs. It also waits for whatever tailnetService came
-	// from: on a fresh stack no pod exists, and so none advertises, before the Tailscale Service
-	// does, since a node that names a Service before it exists is not approved when it appears
-	// (tailnetAdvertiseStuckSeconds).
-	serviceDeps := serveJSON.ApplyT(func(string) []pulumi.Resource { return nil }).(pulumi.ResourceArrayOutput)
-	opts := []pulumi.ResourceOption{pulumi.DependsOn([]pulumi.Resource{serve, tlsSecret}), pulumi.DependsOnInputs(serviceDeps)}
+	// changes nothing in the Deployment's inputs. It waits for the Tailscale Service because a
+	// node that advertises a Service before it exists is not approved when it appears
+	// (tailnetAdvertiseStuckSeconds), and for the Cloud SQL instance because an availability-type
+	// change updates that instance in place and restarts it: the name must come back only once
+	// the database it fronts is back.
+	opts := []pulumi.ResourceOption{pulumi.DependsOn([]pulumi.Resource{serve, tlsSecret, service, instance})}
 	return pod, opts, nil
 }

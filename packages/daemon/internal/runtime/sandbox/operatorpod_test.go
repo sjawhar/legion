@@ -79,9 +79,10 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		byEnvoy      = "every launch sets (the pointer to the launch secret ENVOY_TOKEN)"
 		bySessions   = "the pod baseline sets, and it decides where Oh My Pi keeps the session a resume reads"
 		byStore      = "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)"
-		byBaseline   = "the pod baseline sets (internal/podsafety)"
+		byOverlays   = "the runtime composes in every pod from the operator's own overlays and the role's own (role_config_files)"
 		byOperator   = "runtime.kubernetes.pod.env sets"
 		byController = "Legion's runtime sets for the controller it launches, from the project's slack_channels alone"
+		byClaude     = "Legion's runtime sets for a role it launches on Claude Code (worker_backends)"
 	)
 	fixture := operatorRouteFixture(t)
 	for _, tc := range []struct {
@@ -92,6 +93,18 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 	}{
 		{name: "a variable the runtime sets", pod: env("LEGION_TREE", "LEGSMOKE-1"), want: envSets("LEGION_TREE", byRuntime)},
 		{name: "the pod's PATH", pod: env("PATH", "/usr/bin"), want: envSets("PATH", byRuntime)},
+		// Claude Code's two: a worker's configuration directory is placed by the launch, on the
+		// issue's volume, and its scheduled prompts are off so the clock prompts no role
+		// (mainEnvironment).
+		{name: "a Claude Code worker's configuration directory", pod: env("CLAUDE_CONFIG_DIR", "/etc/operator/claude"),
+			want: envSets("CLAUDE_CONFIG_DIR", byClaude)},
+		{name: "Claude Code's scheduled prompts", pod: env("CLAUDE_CODE_DISABLE_CRON", "0"),
+			want: envSets("CLAUDE_CODE_DISABLE_CRON", byClaude)},
+		// Every other variable of Claude Code's own is the operator's to set, as the model route's
+		// are, its background tasks among them: the runtime turns those on by setting nothing, and
+		// a task that finishes wakes a turn the bridge reports to the daemon.
+		{name: "Claude Code's background tasks", pod: env("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "0")},
+		{name: "an operator's Claude Code setting", pod: env("CLAUDE_CODE_USE_FOUNDRY", "1")},
 		{name: "the image's HOME", pod: env("HOME", "/tmp/elsewhere"), want: envSets("HOME", byImage)},
 		{name: "the AWS CLI CA bundle", pod: env("AWS_CA_BUNDLE", "/tmp/roots.pem"), want: envSets("AWS_CA_BUNDLE", byImage)},
 		{name: "the image's profile", pod: env("OMP_PROFILE", "other"), want: envSets("OMP_PROFILE", byImage)},
@@ -147,7 +160,12 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a mount under a path the image owns", pod: mountAt("/opt/omp/bin"), want: overlaps("/opt/omp/bin", "/opt/omp", true)},
 		{name: "a mount over a database the image owns", pod: mountAt("/home/legion/.omp/profiles/legion/agent/agent.db"),
 			want: overlaps("/home/legion/.omp/profiles/legion/agent/agent.db", "/home/legion/.omp/profiles/legion/agent/agent.db", true)},
-		{name: "a mount above the image's gh and jj", pod: mountAt("/usr/local/bin"), want: overlaps("/usr/local/bin", "/usr/local/bin/gh", true)},
+		// /usr/local/bin holds the bun a Claude role's MCP server runs on (imageOwnedPaths) beside
+		// gh and jj (the Tools), and the refusal names the first of them it finds. Claude Code is
+		// not among them: the image carries none, and a role's install of it sits under /legion.
+		{name: "a mount above the image's bun, gh and jj", pod: mountAt("/usr/local/bin"), want: overlaps("/usr/local/bin", "/usr/local/bin/bun", true)},
+		{name: "a mount at the image's Claude Code pin", pod: mountAt("/opt/legion/claude-code"), want: overlaps("/opt/legion/claude-code", "/opt/legion", true)},
+		{name: "a mount at the image's bun", pod: mountAt("/usr/local/bin/bun"), want: overlaps("/usr/local/bin/bun", "/usr/local/bin/bun", true)},
 		{name: "a mount at the image's jj", pod: mountAt("/usr/local/bin/jj"), want: overlaps("/usr/local/bin/jj", "/usr/local/bin/jj", true)},
 		{name: "a mount at the image's git", pod: mountAt("/usr/bin/git"), want: overlaps("/usr/bin/git", "/usr/bin/git", true)},
 		{name: "a mount at Legion's reserved state home", pod: mountAt("/home/legion/.local/state"), want: overlapsStateHome("/home/legion/.local/state")},
@@ -158,7 +176,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a provider key whose pointer the runtime sets", keys: map[string]string{"DISPATCH_TOKEN": "dispatch"},
 			want: keyPointer("DISPATCH_TOKEN", byRuntime)},
 		{name: "a provider key for the settings overlays", keys: map[string]string{"PI_CONFIG_FILES": "overlays"},
-			want: keyNames("PI_CONFIG_FILES", byBaseline)},
+			want: keyNames("PI_CONFIG_FILES", byOverlays)},
 		{name: "a provider key for the config root", keys: map[string]string{"PI_CONFIG_DIR": "root"}, want: keyNames("PI_CONFIG_DIR", bySessions)},
 		{name: "a provider key for the session store", keys: map[string]string{"OMP_SESSION_STORAGE": "store"},
 			want: keyNames("OMP_SESSION_STORAGE", byStore)},
@@ -177,7 +195,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a provider key reading the session database's URL", keys: map[string]string{"DATABASE_URL": "SESSION_DSN"},
 			want: "provider_keys names DATABASE_URL from the providers Secret's key SESSION_DSN, which holds the session database's URL (runtime.kubernetes.session_dsn_secret): the shim would export that URL into Oh My Pi's environment as DATABASE_URL"},
 		{name: "the live harnesses' operator pod", pod: fixture, keys: map[string]string{"ANTHROPIC_API_KEY": "anthropic"}},
-		{name: "an operator's own overlays, which the baseline composes with",
+		{name: "an operator's own overlays, which the role's are composed after",
 			pod: Pod{Env: map[string]string{"PI_CONFIG_FILES": "/etc/operator/overlay.yml"}}},
 		// Dispatch's dashboard as people open it, which the dispatch command links to in place of the
 		// in-cluster DISPATCH_URL the runtime hands every agent.

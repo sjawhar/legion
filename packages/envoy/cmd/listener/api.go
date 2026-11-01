@@ -224,12 +224,24 @@ func writeNATSError(w http.ResponseWriter, err error, status int, message string
 const busUnansweredPrefix = "envoy: the message bus did not answer"
 
 // publishDeniedPrefix opens the body of every answer this listener gives a publish the NATS server
-// refused under its connection's own publish permissions, so one string matches in a test and in a
-// deployed log filter. It is deliberately not busUnansweredPrefix: the bus answered this publish,
-// and answered it with a denial, so "the message bus did not answer" would be false of it, and the
-// operator reading it would go looking for an outage instead of for the grant that forbids the
-// subject.
+// refused under its connection's own publish permissions, so one string matches in a test, in a
+// deployed log filter and in the Legion daemon, whose notify.HTTPPublisher finishes a notice on a
+// 403 whose error opens with its copy of this string (publishDeniedPrefix,
+// packages/daemon/internal/notify/notify.go). Rewording it turns that denial back into a notice the
+// daemon retries without a cap, holding the architect's later notices behind it. It is
+// deliberately not busUnansweredPrefix: the bus answered this publish, and answered it with a
+// denial, so "the message bus did not answer" would be false of it, and the operator reading it
+// would go looking for an outage instead of for the grant that forbids the subject.
 const publishDeniedPrefix = "envoy: the message bus denied the publish under this listener's own permissions"
+
+// streamFullPrefix opens the body of every answer this listener gives a send or publish the stream
+// refused because it holds its byte limit (bus.ErrStreamFull: ENVOY_STREAM_MAX_BYTES with
+// DiscardNew), so one string matches in a test and in a deployed log filter. It is deliberately not
+// busUnansweredPrefix: the bus answered, that the stream is full, so "the message bus did not
+// answer" would send an operator looking for an outage instead of at the stream's size. Unlike a
+// denial it is worth retrying: the stream takes the same message once age or an operator has made
+// room.
+const streamFullPrefix = "envoy: the message bus refused the message because its stream is full"
 
 // writeBusUnavailable answers a send, a publish, a role lookup or a session or interest read the
 // bus did not serve, in the one place that writes that 503, so the body's prefix and the hint never
@@ -245,17 +257,29 @@ const publishDeniedPrefix = "envoy: the message bus denied the publish under thi
 // bus.ErrInvalidSubject and bus.ErrInvalidKey, each of them this client's own refusal of the
 // caller's bytes, decided before anything is sent. A denial is the opposite: the publish reached a
 // server that answered `-ERR 'Permissions Violation for Publish to "<subject>"'` and dropped it,
-// which internal/bus/confirm.go names bus.ErrPublishDenied around nats.ErrPermissionViolation and
-// the server's own text. So it is not an outage and not a malformed request, and retrying it can
-// never succeed: the grant this listener connects with forbids the subject until an operator
-// changes it. 403 says exactly that - the request was understood and the server refuses to
-// authorise it - where 400 would blame the caller's bytes, which are fine, and where any 5xx would
-// be retried: packages/envoy-client/src/transport.ts retries every status at or past 500 and no
-// status below it. No Retry-After rides it for the same reason.
+// which internal/bus names bus.ErrPublishDenied around nats.ErrPermissionViolation and the
+// server's own text (confirmPublished for a core publish, deniedPublish for a JetStream one). So
+// it is not an outage and not a malformed request, and retrying it can never succeed: the grant
+// this listener connects with forbids the subject until an operator changes it. 403 says exactly
+// that - the request was understood and the server refuses to authorise it - where 400 would
+// blame the caller's bytes, which are fine, and where any 5xx would be retried:
+// packages/envoy-client/src/transport.ts retries every status at or past 500 and no status below
+// it. No Retry-After rides it for the same reason.
+//
+// A message the stream refused because it is full (bus.ErrStreamFull) is answered ahead of the
+// bus-unavailable 503 too, with a 503 and Retry-After of its own under streamFullPrefix: the bus
+// answered, so the body must not say it did not, but the same message is taken once the stream
+// has room, so the caller's retry is right. A republish that failed because the stream is full
+// (bus.ErrNotStored wrapping bus.ErrStreamFull) is answered the same way.
 func writeBusUnavailable(w http.ResponseWriter, err error) int {
 	if errors.Is(err, bus.ErrPublishDenied) {
 		writeJSONError(w, http.StatusForbidden, fmt.Sprintf("%s: %s", publishDeniedPrefix, err))
 		return http.StatusForbidden
+	}
+	if errors.Is(err, bus.ErrStreamFull) {
+		w.Header().Set("Retry-After", "1")
+		writeJSONError(w, http.StatusServiceUnavailable, fmt.Sprintf("%s: %s", streamFullPrefix, err))
+		return http.StatusServiceUnavailable
 	}
 	if !errors.Is(err, bus.ErrRefused) {
 		w.Header().Set("Retry-After", "1")
@@ -404,18 +428,91 @@ func senderStamp(ctx context.Context, registry *store.Registry, sessions *sessio
 	return sender
 }
 
+// forwardVerdictKind is how beforeForward judged a message to a holder.
+type forwardVerdictKind uint8
+
+const (
+	// forwardAllowed: nothing stops the forward.
+	forwardAllowed forwardVerdictKind = iota
+	// forwardEcho: the message's source session is the holder itself.
+	forwardEcho
+	// forwardRepeat: the holder already took a message under this dedupe key.
+	forwardRepeat
+	// forwardModeUnreadable: the payload's delivery mode cannot be read unambiguously.
+	forwardModeUnreadable
+	// forwardModeUnadvertised: the holder does not advertise the payload's delivery mode.
+	forwardModeUnadvertised
+)
+
+// forwardVerdict is beforeForward's judgement. mode is the payload's delivery mode, set for
+// forwardModeUnadvertised; refusal is the refusal's text, set for both mode verdicts, and is what
+// sendHandler and the publish route answer in their 403.
+type forwardVerdict struct {
+	kind    forwardVerdictKind
+	mode    string
+	refusal string
+}
+
+// beforeForward applies, to a message about to be forwarded to holder, whose session entry is
+// entry, the rules a role delivery applies before it forwards, in this order: the source session
+// holds the role (an echo, never forwarded back), seen reports the holder already took this dedupe
+// key (a repeat), and the holder cannot take the payload's delivery mode (deliveryModeVerdict). The
+// role lane (roleTopicDelivery) and the publish route (roleSend.settledBeforeForward) both judge by
+// it, each with the record it trusts as seen, so both refuse and skip the same messages. Guarding
+// after the dedupe check keeps a delivered repeat from being judged by the holder's current
+// capabilities, which can have changed since the original forward and would misreport a delivered
+// message as failed — a false signal the Legion daemon treats as cause to probe and potentially
+// resume the worker.
+func beforeForward(item contracts.Envelope, holder string, entry session.SessionEntry, seen func(key, sessionID string) bool) forwardVerdict {
+	if item.SourceSession != "" && item.SourceSession == holder {
+		return forwardVerdict{kind: forwardEcho}
+	}
+	if seen(item.DedupeKey, holder) {
+		return forwardVerdict{kind: forwardRepeat}
+	}
+	return deliveryModeVerdict(holder, entry, item.Payload)
+}
+
+// deliveryModeVerdict judges a message to sessionID, whose session entry is entry, by its
+// payload's delivery mode, read as the receiving client reads it (frameDeliveryMode): the mode
+// cannot be read unambiguously, or entry does not advertise it (hasCapability); otherwise the
+// message may be forwarded. sendHandler answers a refusal 403 with its text, recorded as
+// outcomeCapabilityRefused, as the publish route does through beforeForward.
+func deliveryModeVerdict(sessionID string, entry session.SessionEntry, payload string) forwardVerdict {
+	var framed *string
+	if payload != "" {
+		framed = &payload
+	}
+	mode, err := frameDeliveryMode(framed)
+	switch {
+	case err != nil:
+		return forwardVerdict{
+			kind:    forwardModeUnreadable,
+			refusal: fmt.Sprintf("session %s (%s) sent a delivery mode that cannot be read unambiguously", sessionID, entry.Title),
+		}
+	case mode != "" && !hasCapability(entry.Capabilities, mode):
+		return forwardVerdict{
+			kind:    forwardModeUnadvertised,
+			mode:    mode,
+			refusal: fmt.Sprintf("session %s (%s) does not advertise %s", sessionID, entry.Title, mode),
+		}
+	}
+	return forwardVerdict{kind: forwardAllowed}
+}
+
 // sendRequestBudget is the bus work a /v1 route does under the request's own context: the send
-// route's read of the target session, the publish route's resolution of a role lane's holder
-// (resolveLiveRoleHolder, every attempt of it), both routes' read of the sender's interest record
-// (senderStamp) and both routes' publish share it, and GET /v1/roles/<role> resolves its holder
-// within it too. GET /v1/sessions, GET /v1/registry/<session_id> and GET
-// /v1/interests/<session_id> read within it as well, and every route that writes does its store
-// work within it: subscribe, unsubscribe, POST /v1/roles/set, and DELETE of
-// /v1/interests/<session_id> and /v1/sessions/<session_id>. The HTTP client gives each
-// attempt 5 s (packages/envoy-client/src/transport.ts) and this listener's HTTP write timeout is
-// 10 s (main.go), so answering inside 3.5 s leaves the rest for TLS, scheduling and the body: a
-// sender whose bus cannot be reached reads the 503 that names the reason, in time to act on it,
-// instead of the timeout it would otherwise retry blind.
+// route's read of the target session, its read of the sender's interest record (senderStamp) and
+// its publish share it, and GET /v1/roles/<role> resolves its holder within it too. The publish
+// route spends it on the publish of a topic the stream captures, and a role send's first
+// resolution of the role's holder (sendToRole, every attempt of that resolution) is answered within
+// it too; a role or ad-hoc topic send then runs on within publishDeliveryWindow (confirmed.go). GET
+// /v1/sessions, GET /v1/registry/<session_id> and GET /v1/interests/<session_id> read within it as
+// well, and every route that writes does its store work within it: subscribe, unsubscribe, POST
+// /v1/roles/set, and DELETE of /v1/interests/<session_id> and /v1/sessions/<session_id>. The HTTP
+// client gives each attempt 5 s (packages/envoy-client/src/transport.ts) and this listener's HTTP
+// write timeout is 10 s (main.go), so answering inside 3.5 s leaves the rest for TLS, scheduling
+// and the body: a sender whose bus cannot be reached reads the 503 that names the reason, in time
+// to act on it, instead of the timeout it would otherwise retry blind.
 const sendRequestBudget = 3500 * time.Millisecond
 
 // sendSessionReadTimeout bounds the send route's read of the target session from the bucket, so a
@@ -434,7 +531,8 @@ const senderStampReadTimeout = 1 * time.Second
 // sendHandler publishes a direct message only while the session store itself, not merely this
 // listener's cache of it, holds the target's entry: a 404 here is a sender's cue to route around
 // the pane, so only the store's word that the key is gone earns one, and a store or a bus that did
-// not answer earns the 503 that asks the sender to try the same route again. Every one of those
+// not answer earns the 503 that asks the sender to try the same route again. A target that cannot
+// take the payload's delivery mode (deliveryModeVerdict) is the 403 naming it. Every one of those
 // answers is written through record, so this route's one line per request is written with it.
 func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -497,21 +595,8 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuseBusUnavailable(w, err)
 			return
 		}
-		var itemPayload *string
-		if item.Payload != "" {
-			itemPayload = &item.Payload
-		}
-		mode, deliveryErr := frameDeliveryMode(itemPayload)
-		if deliveryErr != nil {
-			record.refuse(w, http.StatusForbidden, outcomeCapabilityRefused, fmt.Sprintf(
-				"session %s (%s) sent a delivery mode that cannot be read unambiguously", targetSession, target.Title,
-			))
-			return
-		}
-		if mode != "" && !hasCapability(target.Capabilities, mode) {
-			record.refuse(w, http.StatusForbidden, outcomeCapabilityRefused, fmt.Sprintf(
-				"session %s (%s) does not advertise %s", targetSession, target.Title, mode,
-			))
+		if verdict := deliveryModeVerdict(targetSession, target, item.Payload); verdict.refusal != "" {
+			record.refuse(w, http.StatusForbidden, outcomeCapabilityRefused, verdict.refusal)
 			return
 		}
 		item.Sender = senderStamp(ctx, d.registry, d.sessions, item.SourceSession)
@@ -526,9 +611,22 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	}
 }
 
-// deleteSessionHandler removes a live session registration at shutdown. The delete runs within
-// sendRequestBudget of the request's own context, so one the bus does not answer is the
-// bus-unavailable 503 with Retry-After: 1 inside the caller's attempt (writeStoreError).
+// deleteSessionHandler removes a live session registration at shutdown, and answers 200 whether or
+// not there was one to remove. A client that mints its own instance id sends it as the
+// client_instance_id query parameter, and then the registration is removed only while it carries
+// that id or carries none (session.SessionRegistry.DeleteIfInstance): a Claude Code /clear handoff
+// deregisters the session it hands off from before it claims that session's role, and the entry
+// under that id can by then be another process's live registration, which the handoff must leave
+// alone instead of clearing the predecessor its claim is then weighed against. Such a request
+// answers {"deleted":true} for a registration that is gone and {"deleted":false} with a reason for
+// one that stayed, both 200: the deregistering client has nothing to retry either way. Each of
+// DeleteIfInstance's two kept outcomes gets its own reason, because only one of them knows that
+// another client instance owns the registration: a delete that lost both compare-and-swaps read
+// an entry this very instance may own and says only that the registration changed under it. A
+// request naming no instance id removes the registration whoever wrote it, and answers 200 with
+// no body, as this route always has. The delete runs within sendRequestBudget of the request's
+// own context, so one the bus does not answer is the bus-unavailable 503 with Retry-After: 1
+// inside the caller's attempt (writeStoreError).
 func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
@@ -540,18 +638,56 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
+		instanceID := strings.TrimSpace(r.URL.Query().Get("client_instance_id"))
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
-		if err := sessions.Delete(ctx, sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+		if instanceID == "" {
+			if err := sessions.Delete(ctx, sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+				writeStoreError(ctx, w, err, http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		outcome, err := sessions.DeleteIfInstance(ctx, sessionID, instanceID)
+		if err != nil {
 			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		switch outcome {
+		case session.EntryDeleted:
+			writeJSON(w, http.StatusOK, deleteSessionResponse{Deleted: true})
+		case session.EntryKeptForAnotherInstance:
+			writeJSON(w, http.StatusOK, deleteSessionResponse{
+				Reason: "the registration belongs to another client instance",
+			})
+		default:
+			// session.EntryKeptAfterLostRace: the entry matched and both conditional deletes
+			// lost to a write that landed under them, this client instance's own heartbeat
+			// among the likeliest, so the only true thing to say is that it stayed and
+			// changed. session.EntryUnanswered never reaches here: it comes with the error
+			// answered above.
+			writeJSON(w, http.StatusOK, deleteSessionResponse{
+				Reason: "the registration changed while it was being removed",
+			})
+		}
 	}
 }
 
+// deleteSessionResponse is what DELETE /v1/sessions/<session_id> answers a request that named a
+// client instance id: whether the registration is gone, and for one that stayed why it did. A
+// request that named none answers 200 with no body at all, as this route always has.
+type deleteSessionResponse struct {
+	Deleted bool   `json:"deleted"`
+	Reason  string `json:"reason,omitempty"`
+}
+
 // publishHandler rejects agent-targeted topics (must use /v1/messages/send
-// instead) and publishes the envelope to NATS. An explicit dedupe_key is used
+// instead) and sends the envelope. A role topic is forwarded to its holder and
+// an ad-hoc topic confirmed with each self-subscribed recipient, both answered
+// once confirmed or when publishDeliveryWindow from the request's arrival has
+// passed (sendToRole, sendToTopic in confirmed.go); a topic the stream captures
+// is answered once the stream stored it. An explicit dedupe_key is used
 // verbatim (a re-send a receiver's own dedupe recognises); it is mutually
 // exclusive with idempotency_key, may not begin with roleForwardDedupePrefix,
 // the mark the role arbiter drops on sight, and may not ride a dispatch
@@ -561,20 +697,16 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 // host drop the real event it names. Dispatch itself never needs this route's
 // key: its outbox publishes to the bus directly and its sends go through
 // /v1/messages/send, whose key is the listener's. Like the send route, it answers through record,
-// which writes this route's one line per request with the answer.
+// which writes this route's one line per request with the answer; a confirmed send answers through
+// it too.
 func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		arrived := time.Now()
 		record := &requestRecord{logger: logger, line: "listener publish", laneKey: "topic"}
 		if r.Method != http.MethodPost {
 			record.refuse(w, http.StatusMethodNotAllowed, outcomeInvalidRequest, "method not allowed")
 			return
 		}
-		// Every bus call below - the role-holder resolution of a role lane and the publish - takes
-		// this one deadline, derived from the caller's own context, so this route too answers a bus
-		// it cannot reach rather than spending the caller's attempt: a resolution that runs it out
-		// is the 503 below, and one that leaves little of it leaves the publish only that little.
-		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
-		defer cancel()
 		var request struct {
 			messageBody
 			Topic string `json:"topic"`
@@ -631,45 +763,29 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, err.Error())
 			return
 		}
-		result := roleHolderResult{state: roleHolderLive}
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
-			var err error
-			result, err = resolveLiveRoleHolder(ctx, d.registry, d.sessions, role)
-			if errors.Is(err, errRoleHolderChanged) {
-				// The claim moved while it was being resolved: the role has a holder, this
-				// publish simply never got a settled one to forward to. Retrying is right, so
-				// the 503 and the Retry-After stand, but the answer says the race rather than
-				// claiming the bus went quiet.
-				record.refuseRoleHolderChanged(w, role)
-				return
-			}
-			if errors.Is(err, store.ErrMalformedRoleClaim) {
-				// The bus answered with a claim record no read can decode, and will answer the same
-				// record again, so this is neither the bus going quiet nor a retry's to fix.
-				record.refuseRoleClaimUnreadable(w, role, err)
-				return
-			}
-			if err != nil {
-				// A role holder read that did not answer - within its own cap or within this
-				// request's budget - says nothing about the role: the claim is not resolved, so the
-				// caller is asked to try again rather than told the role has no live holder.
-				record.refuseBusUnavailable(w, err)
-				return
-			}
-			if result.state != roleHolderLive {
-				record.refuseRoleHolder(w, role, result)
-				return
-			}
-			// The lane resolved: the session this role topic reaches is on the record from here
-			// on, which nothing else in the line names.
-			record.holder = result.holder
+			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
+			defer cancel()
+			sendToRole(ctx, w, record, d, item, role, arrived)
+			return
 		}
+		if bus.UsesCoreTransport(request.Topic) {
+			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
+			defer cancel()
+			sendToTopic(ctx, w, record, d, item, arrived)
+			return
+		}
+		// The sender stamp's read and the publish take this one deadline, derived from the
+		// caller's own context, so this route too answers a bus it cannot reach rather than
+		// spending the caller's attempt.
+		ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(sendRequestBudget))
+		defer cancel()
 		item.Sender = senderStamp(ctx, d.registry, d.sessions, item.SourceSession)
 		if err := d.client.PublishWithin(ctx, item); err != nil {
 			record.refuseBusUnavailable(w, err)
 			return
 		}
-		record.accept(w, publishResponse{Envelope: item, Holder: result.holder})
+		record.accept(w, publishResponse{Envelope: item})
 	}
 }
 
@@ -694,6 +810,10 @@ type sessionInfo struct {
 	Roles          []string `json:"roles"`
 	UpdatedAt      int64    `json:"updated_at"`
 	LastSeen       int64    `json:"last_seen"`
+	// The plugin the session registered through and its build; absent for a session whose plugin
+	// predates the fields.
+	Plugin        string `json:"plugin,omitempty"`
+	PluginVersion string `json:"plugin_version,omitempty"`
 }
 
 // sessionInterestReadTimeout bounds sessionInfoFor's read of one session's interest record from
@@ -733,6 +853,8 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID str
 		Roles:          roles,
 		UpdatedAt:      entry.UpdatedAt,
 		LastSeen:       entry.UpdatedAt,
+		Plugin:         entry.Plugin,
+		PluginVersion:  entry.PluginVersion,
 	}
 	readCtx, cancel := context.WithTimeout(ctx, sessionInterestReadTimeout)
 	defer cancel()
@@ -891,14 +1013,38 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 	}
 }
 
-// adminInterestsHandler lists, reads and removes persisted interests. GET /v1/interests/<session_id>
+// interestRow is one persisted interest as GET /v1/interests/ and GET /v1/interests/<session_id>
+// answer it: the stored record plus LastSeen, the session's last heartbeat (Unix ms) as this
+// listener's session cache knows it, omitted when unknown. The record's own UpdatedAt can lag that
+// heartbeat by up to store.InterestRefreshAge, since an unchanged row is rewritten only that often.
+type interestRow struct {
+	store.Interest
+	LastSeen int64 `json:"last_seen,omitempty"`
+}
+
+// interestRowFor answers item with its session's last heartbeat: the live entry's UpdatedAt while
+// the session is live, else the final heartbeat the cache still retains for it
+// (session.SessionRegistry.LastSeen), else none. A listener restart empties those records, so a
+// session that died before it reads as unknown.
+func interestRowFor(sessions *session.SessionRegistry, item store.Interest) interestRow {
+	row := interestRow{Interest: item}
+	if entry, err := sessions.Get(item.SessionID); err == nil {
+		row.LastSeen = entry.UpdatedAt
+	} else {
+		row.LastSeen = sessions.LastSeen(item.SessionID)
+	}
+	return row
+}
+
+// adminInterestsHandler lists, reads and removes persisted interests. Each row a GET answers
+// carries its session's last heartbeat (interestRowFor). GET /v1/interests/<session_id>
 // reads within sendRequestBudget of the request's own context: a cache miss is read through to the
 // bucket, the bucket's word that the key is absent is a 404, a record this build cannot decode is
 // the 500 writeInterestRecordUnreadable writes, and a read that did not answer is the
 // bus-unavailable 503 with Retry-After: 1 (a key NATS refuses is still the 413 or 400
 // writeBusUnavailable gives it). DELETE removes within the same budget, and answers store work that
 // did not answer with that 503 too (writeStoreError).
-func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
+func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
 
@@ -907,7 +1053,12 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 				writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 				return
 			}
-			writeJSON(w, http.StatusOK, registry.List())
+			items := registry.List()
+			rows := make([]interestRow, 0, len(items))
+			for _, item := range items {
+				rows = append(rows, interestRowFor(sessions, item))
+			}
+			writeJSON(w, http.StatusOK, rows)
 			return
 		}
 
@@ -930,7 +1081,7 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 				writeBusUnavailable(w, err)
 				return
 			}
-			writeJSON(w, http.StatusOK, item)
+			writeJSON(w, http.StatusOK, interestRowFor(sessions, item))
 		case http.MethodDelete:
 			ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 			defer cancel()
@@ -951,7 +1102,12 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 // context, so a bus that does not answer is the bus-unavailable 503 with Retry-After: 1 inside the
 // caller's attempt (writeStoreError). The store's own answers keep the answers they had: a held
 // role is a 409, a refused key a 413 or 400, and an unreadable claim the 503 or 500 it was.
-func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
+//
+// logger is registerV1Routes's own. One decision of this route is logged with it: a soft claim that
+// takes a role from the predecessor it names because the claimant's entry or the predecessor's
+// carries no client instance id, which is the one takeover the route cannot tell from a different
+// client instance's, and so names both session ids.
+func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -960,17 +1116,27 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 		var body struct {
 			SessionID string `json:"session_id"`
 			Role      string `json:"role"`
-			// A soft claim takes the role only when it is unheld, its holder is
-			// no longer live, or its holder is the claimant's declared
-			// predecessor; any other live holder answers 409 with its id. This
-			// is how a resumed or forked session recovers its own role without
-			// ever taking one from a peer. Default false: last-claim-wins.
+			// A soft claim takes the role only when it is unheld, when its
+			// holder is no longer live, or when its holder is the claimant's
+			// declared predecessor and that predecessor's own client instance
+			// allows it (PreviousSessionID); any other live holder answers 409
+			// with its id. This is how a resumed or forked session recovers its
+			// own role without ever taking one from a peer. Default false:
+			// last-claim-wins.
 			Soft bool `json:"soft"`
 			// The session id this claimant is continuing (a /fork, /branch, or
-			// /handoff mints a new id in the same process). That predecessor is
-			// still heartbeating and therefore live, yet it is the same
-			// conversation, so a soft claim may take the role from it. Only
-			// honoured with soft; ignored otherwise.
+			// /handoff mints a new id in the same process). Naming it is not
+			// enough to take the role from it: a soft claim naming a
+			// predecessor takes the role only when that predecessor has no live
+			// registry entry, when its live entry carries this claimant's own
+			// client instance id (the same conversation continuing inside its
+			// own Oh My Pi Envoy extension instance or Claude Code
+			// channel-server process), or when the claimant's entry or the
+			// predecessor's carries no client instance id at all, which is a
+			// client predating the field and whose takeover is logged. A
+			// predecessor still live in another client instance keeps the role,
+			// and the claim answers 409 naming it. Only honoured with soft;
+			// ignored otherwise.
 			PreviousSessionID string `json:"previous_session_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -1002,6 +1168,18 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 			writeJSONError(w, http.StatusServiceUnavailable, "read session registration: "+err.Error())
 			return
 		}
+		// Get answers from the cache alone, and the cache follows the session bucket through a
+		// watcher and so trails it. A trailing cache would decide this claim twice over: it would
+		// read an empty client instance id from an entry this process has not caught up with,
+		// demoting every claim to the "no instance id" case below, and PutWithin would write that
+		// stale entry back over a newer one. So the claimant's own entry is read from the bucket
+		// itself, and when that read answers, its entry is the one refreshed here and the one the
+		// claimant's instance id is taken from. A read that does not answer keeps the cache's
+		// entry and goes on, so this claim is never worse off than it was without the bucket read.
+		if fresh, freshErr := bucketSessionEntry(ctx, d.sessions, body.SessionID, roleHolderReadTimeout); freshErr == nil {
+			entry = fresh
+		}
+		claimantInstanceID := entry.ClientInstanceID
 		entry.MachineID = machineID
 		entry.SelfSubscribed = true
 		if err := d.sessions.PutWithin(ctx, body.SessionID, entry); err != nil {
@@ -1012,10 +1190,13 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 		var supersedable []string
 		if body.Soft {
 			// The registry sees only interest rows; liveness is the session
-			// bucket's call (liveSessionEntry). A holder whose session entry
-			// has aged out (5m TTL) is dead and may be superseded; so may the
-			// claimant's own predecessor, live or not; any other live holder is
-			// protected.
+			// bucket's call. A holder whose session entry has aged out (5m
+			// TTL) is dead and may be superseded, and the claimant's own
+			// declared predecessor is weighed on the client instance it
+			// belongs to as well: roleSupersessionVerdict reads both from the
+			// bucket and answers the three cases this switch words — the role
+			// is taken from its holder, it stays with it, or a read did not
+			// answer and nothing is taken from anyone.
 			claim, err := d.registry.RoleClaim(ctx, body.Role)
 			if err != nil {
 				writeStoreError(ctx, w, fmt.Errorf("read role holder: %w", err), http.StatusServiceUnavailable)
@@ -1024,13 +1205,24 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 			holder := claim.HolderSessionID
 			previous = strings.TrimSpace(body.PreviousSessionID)
 			if holder != "" && holder != body.SessionID {
-				if previous != "" && holder == previous {
-					supersedable = append(supersedable, holder)
-				} else if _, liveErr := liveSessionEntry(ctx, d.sessions, holder, roleHolderReadTimeout, registered); errors.Is(liveErr, nats.ErrKeyNotFound) {
-					supersedable = append(supersedable, holder)
-				} else if liveErr != nil {
-					writeBusUnavailable(w, fmt.Errorf("read role holder liveness: %w", liveErr))
+				verdict, readErr := roleSupersessionVerdict(ctx, d.sessions, holder, previous, claimantInstanceID)
+				switch verdict {
+				case roleHolderUnread:
+					// A read that did not answer takes nothing from a holder.
+					writeBusUnavailable(w, readErr)
 					return
+				case roleTakenFromUnidentifiedPredecessor:
+					logger.Info("listener role taken from a live predecessor because one side carries no client instance id",
+						slog.String("role", body.Role),
+						slog.String("session_id", body.SessionID),
+						slog.String("previous_session_id", holder))
+					supersedable = append(supersedable, holder)
+				case roleTakenFromHolder:
+					supersedable = append(supersedable, holder)
+				case roleStaysWithHolder:
+					// A live holder keeps the role, a predecessor still live inside another
+					// client instance among them, and store.Registry.SetRoleWithPrevious
+					// answers the 409 that names it.
 				}
 			}
 		}
@@ -1053,7 +1245,8 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 }
 
 // roleGetHandler answers GET /v1/roles/<role> with the role's live holder. It resolves the holder
-// within sendRequestBudget of the request's own context, as a role-lane publish does, so a bus that
+// (resolveRoleHolder, with registered: any entry) within sendRequestBudget of the request's own
+// context, as a role send's first resolution through the publish route does, so a bus that
 // does not answer is reported inside the caller's attempt. A resolution that lost the race for the
 // role's claim (errRoleHolderChanged) is the publish route's 503 with Retry-After: 1, worded for a
 // lookup, since every read answered and a fresh lookup wins the race once the replacement claim
@@ -1076,7 +1269,7 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
-		result, err := resolveLiveRoleHolder(ctx, d.registry, d.sessions, role)
+		result, err := resolveRoleHolder(ctx, d.registry, d.sessions, role, registered)
 		if errors.Is(err, errRoleHolderChanged) {
 			writeRoleHolderChanged(w, role, "lookup")
 			return
@@ -1254,7 +1447,7 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			writeJSONError(w, http.StatusBadRequest, "host is not a host name or address", "host")
 			return
 		}
-		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))
+		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir), slog.String("plugin", body.Plugin), slog.String("plugin_version", body.PluginVersion))
 		// A topic reaching a private stream subject (another session's inbox, a failed-delivery
 		// lane, the Legion controller lane; bus.ReachesPrivateStreamSubject) is left out and named in
 		// a warning, the rest of the registration stored: the topics stored here drive the
@@ -1363,11 +1556,11 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 		}
 		writeJSON(w, http.StatusOK, map[string][]string{"removed": removed})
 	})
-	v1.HandleFunc("/v1/roles/set", roleSetHandler(d, machineID))
+	v1.HandleFunc("/v1/roles/set", roleSetHandler(d, machineID, logger))
 	v1.HandleFunc("/v1/roles/", roleGetHandler(d))
 	v1.HandleFunc("/v1/registry/", sessionEntryHandler(d))
 
-	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry))
+	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry, d.sessions))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))
 	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
 	v1.HandleFunc("/v1/messages/send", sendHandler(d, logger))

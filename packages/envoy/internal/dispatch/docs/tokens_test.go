@@ -57,6 +57,17 @@ func setBlockID(node *pmdoc.Node, id string) {
 	node.Attrs[pmdoc.BlockIDAttr] = id
 }
 
+// validTokenTree is tree validated as the read cache validates it, for the reads that take a
+// validated tree (documentTokens, renderedBlocks, buildDocumentRead).
+func validTokenTree(t *testing.T, tree *pmdoc.Node) pmdoc.ValidDocument {
+	t.Helper()
+	valid, err := pmdoc.ValidateDocument(tree, "BlockPathsAndTableRows")
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	return valid
+}
+
 // sameError reports whether got is want as a caller tells errors apart: the same message and the
 // same answer to whether it is a document outside the schema.
 func sameError(got, want error) bool {
@@ -98,7 +109,7 @@ func TestDocumentTokensKeepTheLastNodeInPreOrderForARepeatedID(t *testing.T) {
 		}
 	}
 
-	tokens := documentTokens(tree)
+	tokens := documentTokens(validTokenTree(t, tree))
 	if tokens.documentErr != nil || tokens.blocksErr != nil {
 		t.Fatalf("documentTokens errors: document %v, blocks %v", tokens.documentErr, tokens.blocksErr)
 	}
@@ -138,7 +149,7 @@ func TestDocumentTokensRefuseAnUnencodableValueInsideABlockAsTheBlockDoes(t *tes
 		t.Fatal("the document holding NaN encoded")
 	}
 
-	tokens := documentTokens(tree)
+	tokens := documentTokens(validTokenTree(t, tree))
 	if tokens.documentErr == nil || tokens.documentErr.Error() != wantDocumentErr.Error() {
 		t.Fatalf("documentErr = %v, want %v", tokens.documentErr, wantDocumentErr)
 	}
@@ -154,7 +165,7 @@ func TestDocumentTokensRefuseAnUnencodableValueInsideABlockAsTheBlockDoes(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = renderedBlocks(tree, rows)
+	_, err = renderedBlocks(validTokenTree(t, tree), rows)
 	if !sameError(err, want) {
 		t.Fatalf("renderedBlocks error = %v, want %v", err, want)
 	}
@@ -162,7 +173,7 @@ func TestDocumentTokensRefuseAnUnencodableValueInsideABlockAsTheBlockDoes(t *tes
 	if !errors.As(err, &unsupported) {
 		t.Fatalf("renderedBlocks error %v is not a *json.UnsupportedValueError", err)
 	}
-	_, err = buildDocumentRead("artifact", DocumentStamp{Version: 1}, tree)
+	_, err = buildDocumentRead("artifact", DocumentStamp{Version: 1}, validTokenTree(t, tree))
 	if !sameError(err, want) {
 		t.Fatalf("buildDocumentRead error = %v, want %v", err, want)
 	}
@@ -170,7 +181,7 @@ func TestDocumentTokensRefuseAnUnencodableValueInsideABlockAsTheBlockDoes(t *tes
 		t.Fatalf("buildDocumentRead error %v is not a *json.UnsupportedValueError", err)
 	}
 
-	err = checkEditPrecondition(tree, model.EditPrecondition{Blocks: []model.EditBlockPrecondition{{ID: "intro", Token: "sha256:stale"}}})
+	_, err = checkEditPrecondition(tree, model.EditPrecondition{Blocks: []model.EditBlockPrecondition{{ID: "intro", Token: "sha256:stale"}}})
 	if !sameError(err, wantDocumentErr) {
 		t.Fatalf("checkEditPrecondition error = %v, want %v", err, wantDocumentErr)
 	}
@@ -205,7 +216,7 @@ func TestDocumentTokensKeepEveryBlockWhenOnlyTheDocumentCannotBeEncoded(t *testi
 		t.Fatal("the document holding NaN encoded")
 	}
 
-	tokens := documentTokens(tree)
+	tokens := documentTokens(validTokenTree(t, tree))
 	if tokens.blocksErr != nil {
 		t.Fatalf("blocksErr = %v, want nil", tokens.blocksErr)
 	}
@@ -216,7 +227,7 @@ func TestDocumentTokensKeepEveryBlockWhenOnlyTheDocumentCannotBeEncoded(t *testi
 		t.Fatalf("documentErr = %v, want %v", tokens.documentErr, wantDocumentErr)
 	}
 
-	_, err = buildDocumentRead("artifact", DocumentStamp{Version: 1}, tree)
+	_, err = buildDocumentRead("artifact", DocumentStamp{Version: 1}, validTokenTree(t, tree))
 	if !sameError(err, wantDocumentErr) {
 		t.Fatalf("buildDocumentRead error = %v, want %v", err, wantDocumentErr)
 	}

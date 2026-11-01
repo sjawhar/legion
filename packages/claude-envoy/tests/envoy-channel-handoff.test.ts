@@ -27,6 +27,7 @@ import {
   directSubject,
   FakeNats,
   noInterest,
+  observedClient,
   recordingClient,
   scratchState,
   sessionOptions,
@@ -111,9 +112,15 @@ test("follows the session id its Claude process hands off: new subject first, th
 
     expect(await readdir(join(stateDirectory, "roles"))).toEqual(["ses_new.json"])
 
+    // A tick already inside the registry chain when shutdown begins still registers; shutdown's
+    // deregistration queues behind it, so it is the last write, and nothing else may come.
     calls.length = 0
     await session.shutdown()
-    expect(calls).toEqual(["nats.unsubscribe notifications.agent.ses_new", "unregister ses_new"])
+    expect(calls.filter((call) => call !== reregister)).toEqual([
+      "nats.unsubscribe notifications.agent.ses_new",
+      "unregister ses_new",
+    ])
+    expect(calls.at(-1)).toBe("unregister ses_new")
     // The handoff file outlives this server: a restart inside the same Claude process reads it.
     expect(await readdir(join(stateDirectory, "sessions"))).toEqual(["777"])
   } finally {
@@ -179,7 +186,7 @@ test("a name chosen after the server started is what the next registration and s
   })
   // The real title function over the real state directory, so this row exercises the precedence
   // the server wires rather than a stub of it.
-  const title = sessionTitle({}, "/work/legion", {
+  const title = await sessionTitle({}, "/work/legion", {
     chosen: (sessionId) => readChosenTitleSync(sessionTitleFile(stateDirectory, sessionId)),
   })
   const session = await startChannelSession(
@@ -218,7 +225,7 @@ test("two channel servers under different Claude processes rebind independently"
     sessionOptions(identityA, stateDirectory, {
       connection: new FakeNats(callsA),
       client: recordingClient(callsA, {
-        unregisterSession: async (sessionID) => {
+        unregisterSession: async ({ sessionID }) => {
           callsA.push(`unregister ${sessionID}`)
           rebound.resolve()
         },
@@ -314,7 +321,7 @@ test("a subscription made while a handoff deregisters the old id registers under
   const unregistering = Promise.withResolvers<void>()
   let unregisterStarted = false
   const client = recordingClient(calls, {
-    unregisterSession: async (sessionID) => {
+    unregisterSession: async ({ sessionID }) => {
       calls.push(`unregister ${sessionID}`)
       if (sessionID !== "ses_old") return
       unregisterStarted = true
@@ -508,7 +515,7 @@ test("a handoff that fails before the id switch leaves the new subject out of re
       return noInterest()
     },
     // Every handoff attempt fails before the id switch.
-    unregisterSession: async (sessionID) => {
+    unregisterSession: async ({ sessionID }) => {
       if (sessionID !== "ses_old") return
       refusedDeregistrations += 1
       throw new Error("listener unavailable")
@@ -589,22 +596,29 @@ test("a role claim that fails at startup still starts the session, and the next 
   // so a single failure would pass even if that retry were one-shot.
   let holder = ""
   let claims = 0
-  const client = recordingClient([], {
-    setRole: async (input) => {
-      claims += 1
-      if (claims <= 2) throw new Error("listener unavailable")
-      holder = input.sessionID
-      return { claimed: true, interest: noInterest() }
-    },
-    getRole: async (role) => ({ role, holder, last_seen: 1 }),
-  })
+  const observed = observedClient(
+    recordingClient([], {
+      setRole: async (input) => {
+        claims += 1
+        if (claims <= 2) throw new Error("listener unavailable")
+        holder = input.sessionID
+        return { claimed: true, interest: noInterest() }
+      },
+      getRole: async (role) => ({ role, holder, last_seen: 1 }),
+    }),
+  )
+  const state = (): string => `holder now "${holder}"; ${observed.describe()}`
   const session = await startChannelSession(
-    sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25 }),
+    sessionOptions(identity, stateDirectory, { client: observed.client, heartbeatMs: 25 }),
   )
 
   try {
     expect(holder).toBe("")
-    await waitFor(async () => holder === "ses_claude", "the listener naming ses_claude holder")
+    await waitFor(
+      async () => holder === "ses_claude",
+      "the listener naming ses_claude holder",
+      state,
+    )
     expect(await readPersistedRole(roleFile)).toEqual({
       session_id: "ses_claude",
       role: "reviewer",
@@ -612,7 +626,11 @@ test("a role claim that fails at startup still starts the session, and the next 
     // The session counts the role as its own, not only the listener: a holder the listener then
     // loses is one the heartbeat's soft claim takes back, and it reclaims only a role it holds.
     holder = "ses_lost"
-    await waitFor(async () => holder === "ses_claude", "the heartbeat reclaiming the held role")
+    await waitFor(
+      async () => holder === "ses_claude",
+      "the heartbeat reclaiming the held role",
+      state,
+    )
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })
@@ -691,6 +709,114 @@ test("a record already past the sweep's age survives a startup whose claim was r
       session_id: "ses_claude",
       role: "reviewer",
     })
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a refused claim naming the predecessor itself as holder keeps that record: a live process's", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_claude", "/tmp")
+  const roleFile = roleStateFile(stateDirectory, "ses_claude")
+  await mkdir(dirname(roleFile), { recursive: true })
+  await writeFile(roleFile, JSON.stringify({ session_id: "ses_claude", role: "reviewer" }))
+  // Another channel server resumed this session id, registered under its own client instance and
+  // holds the role, so the listener refuses this claim and names that predecessor holder. The
+  // record is keyed by session id in a state directory both processes share: deleting it here
+  // would take the live holder's only way back to the role.
+  const setRoles: unknown[] = []
+  const client = recordingClient([], {
+    setRole: async (input) => {
+      setRoles.push(input)
+      return { claimed: false, holder: "ses_claude" }
+    },
+  })
+  const session = await startChannelSession(sessionOptions(identity, stateDirectory, { client }))
+
+  try {
+    expect(setRoles).toEqual([
+      { sessionID: "ses_claude", role: "reviewer", soft: true, previousSessionID: "ses_claude" },
+    ])
+    expect(await readPersistedRole(roleFile)).toEqual({
+      session_id: "ses_claude",
+      role: "reviewer",
+    })
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a refused claim naming a third session holder drops the predecessor's record", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_claude", "/tmp")
+  const roleFile = roleStateFile(stateDirectory, "ses_claude")
+  await mkdir(dirname(roleFile), { recursive: true })
+  await writeFile(roleFile, JSON.stringify({ session_id: "ses_claude", role: "reviewer" }))
+  // The role has moved on to a session this one never was: the predecessor demonstrably no
+  // longer holds it, and its record is the one thing that would claim otherwise.
+  const client = recordingClient([], {
+    setRole: async () => ({ claimed: false, holder: "ses_other" }),
+  })
+  const session = await startChannelSession(sessionOptions(identity, stateDirectory, { client }))
+
+  try {
+    expect(await readdir(join(stateDirectory, "roles"))).toEqual([])
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("every registration and both deregistrations carry the one client instance id the process minted", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_old", "/tmp")
+  const handoff = sessionHandoffFile(stateDirectory, 785)
+  await writeSessionHandoff(handoff, "ses_old")
+  /** What each call carried, with the instance id as the client's own API has it: optional, so
+   * a call that sent none shows as one and the assertions below catch it. */
+  interface InstanceCall {
+    readonly sessionID: string
+    readonly clientInstanceID?: string | undefined
+  }
+  const subscribes: InstanceCall[] = []
+  const deregistrations: InstanceCall[] = []
+  const client = recordingClient([], {
+    subscribe: async (input) => {
+      subscribes.push(input)
+      return noInterest()
+    },
+    unregisterSession: async (input) => {
+      deregistrations.push(input)
+    },
+  })
+  const session = await startChannelSession(
+    sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25, handoffPid: 785 }),
+  )
+
+  try {
+    // The id is minted per process and random, so it is read back from the first registration
+    // rather than named here: 128 bits as lower-case hex.
+    const instance = subscribes[0]?.clientInstanceID
+    expect(instance).toMatch(/^[0-9a-f]{32}$/)
+    await writeSessionHandoff(handoff, "ses_new")
+    await waitFor(
+      async () => subscribes.some((input) => input.sessionID === "ses_new"),
+      "a registration under the handed-off id",
+    )
+    await session.shutdown()
+
+    // The handoff's deregistration of the old id, then shutdown's of the new one, both this
+    // instance's: the listener keeps an entry another process made under either id.
+    expect(deregistrations).toEqual([
+      { sessionID: "ses_old", clientInstanceID: instance },
+      { sessionID: "ses_new", clientInstanceID: instance },
+    ])
+    // Every registration since, the handed-off id's included, carries that same id.
+    expect(subscribes.filter((input) => input.clientInstanceID === instance)).toHaveLength(
+      subscribes.length,
+    )
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })

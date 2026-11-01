@@ -126,6 +126,7 @@ func (d *outboxDispatch) BuildCommit(context.Context) (string, error) {
 func (d *outboxDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *outboxDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 func TestOutboxStatusWriteCallsDispatchOnlyForItsObservedStatus(t *testing.T) {
 	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, time.Now())
@@ -707,6 +708,54 @@ func TestOutboxMergeQueueWithNoLiveHolderSaysSoOnTheIssue(t *testing.T) {
 	publisher.err = errors.New("listener unavailable")
 	if err := runner.execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "listener unavailable") {
 		t.Fatalf("merge queue publish failure = %v, want the listener failure, retried", err)
+	}
+}
+
+// A merge queue holder that does not advertise the packet's delivery mode (403 capability)
+// refuses every attempt until another session holds the role, and the listener's own NATS grant
+// denies every forward (403 with no reason) until an operator changes it, as a role with no holder
+// does: the issue is told the role refused the packet and which holder did, or that the listener
+// was denied the forward and why, and the row is done. A holder that did not confirm the packet in
+// time (504 receipt_timeout or delivery_failed) is retried.
+func TestOutboxMergeQueueAnswersOfTheConfirmedPublishRoute(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
+	row.ID = 59
+	publisher := &outboxPublisher{err: fmt.Errorf(`publish notice to notifications.role.merge-queue: listener returned 403 Forbidden: {"reason":"capability","holder":"ses_mq"}: %w`,
+		notify.ErrRefusedByHolder{Holder: "ses_mq"})}
+	client := &outboxDispatch{}
+	runner := &outbox{notices: publisher, dispatch: client, now: func() time.Time { return time.Date(2026, 9, 25, 3, 4, 5, 0, time.UTC) }}
+
+	if err := runner.execute(context.Background(), row); err != nil {
+		t.Fatalf("execute merge queue publish its holder refused: %v", err)
+	}
+	if got := client.messages; len(got) != 1 ||
+		!strings.HasPrefix(got[0], "merge queue role merge-queue refused the packet: its holder ses_mq does not advertise the delivery mode, at 2026-09-25T03:04:05Z") ||
+		!strings.HasSuffix(got[0], "<!-- legion-outbox:59 -->") {
+		t.Fatalf("Dispatch messages = %q, want one naming the role and the holder that refused the packet", got)
+	}
+
+	denied := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
+	denied.ID = 60
+	const denial = `envoy: the message bus denied the publish under this listener's own permissions: bus: NATS denied the publish to "notifications.agent.ses_mq"`
+	publisher.err = fmt.Errorf(`publish notice to notifications.role.merge-queue: listener returned 403 Forbidden: {"error":%q}: %w`, denial, notify.ErrPublishDenied{Message: denial})
+	if err := runner.execute(context.Background(), denied); err != nil {
+		t.Fatalf("execute merge queue publish the listener was denied: %v", err)
+	}
+	if got := client.messages; len(got) != 2 ||
+		!strings.HasPrefix(got[1], "merge queue role merge-queue: the listener's NATS grant denied the forward ("+denial+"), at 2026-09-25T03:04:05Z") ||
+		!strings.HasSuffix(got[1], "<!-- legion-outbox:60 -->") {
+		t.Fatalf("Dispatch messages = %q, want a second naming the role and the listener's denial", got)
+	}
+
+	for _, reason := range []string{notify.ReasonReceiptTimeout, notify.ReasonDeliveryFailed} {
+		publisher.err = fmt.Errorf("publish notice to notifications.role.merge-queue: listener returned 504 Gateway Timeout: %w", notify.ErrNotDelivered{Reason: reason, Holder: "ses_mq"})
+		var notDelivered notify.ErrNotDelivered
+		if err := runner.execute(context.Background(), row); !errors.As(err, &notDelivered) || notDelivered.Reason != reason {
+			t.Fatalf("merge queue publish answered %s = %v, want the answer as a failure, retried", reason, err)
+		}
+	}
+	if got := client.messages; len(got) != 2 {
+		t.Fatalf("Dispatch messages = %q, want no message for a packet that is retried", got)
 	}
 }
 
@@ -1537,9 +1586,7 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	if err != nil || result.Refusal != nil {
 		t.Fatalf("complete implementing = %+v, %v", result.Refusal, err)
 	}
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
-		t.Fatalf("end the turn: %v", err)
-	}
+	endTurn(ctx, t, machine, token)
 	implementerLaunches := func() int {
 		n := 0
 		for _, call := range rt.Calls() {
@@ -1693,9 +1740,7 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			// moved to testing: the round-2 task still pending is the finished phase's, and is dropped.
 			apply("handoff:implementer:implementing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: implementer, Commit: "impl-round-2"})
 			due("the move to testing")
-			if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer}); err != nil {
-				t.Fatalf("end the steer's turn: %v", err)
-			}
+			endTurn(ctx, t, machine, implementer)
 			if got := machine.Claim(); got.State != supervise.StateIdle || got.Pending != nil || len(rt.CallsOf("Suspend")) != 0 {
 				t.Fatalf("after round 2's turn the implementer is %s holding %+v with %d suspensions, want idle, holding nothing, never stopped",
 					got.State, got.Pending, len(rt.CallsOf("Suspend")))

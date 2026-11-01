@@ -10,6 +10,8 @@ import {
   createProject,
   createProjectDocument,
   editArtifact,
+  getIssue,
+  putIssueState,
   resolveAsk,
   resolveComment,
   search,
@@ -23,6 +25,14 @@ import {
 } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
+
+// What this file's init scripts keep on the page's window.
+declare global {
+  interface Window {
+    /** The page's scroll offset at every frame since it loaded (`recordScrollEachFrame`). */
+    __scrollEachFrame?: number[];
+  }
+}
 
 const spec = "# Instruments\n\nThe astrolabe measures altitude.\n";
 const agentSession = {
@@ -627,6 +637,11 @@ for (const journey of hiddenEditorJourneys) {
     if (journey.namedVersion) {
       await createNamedVersion(issue.primary_artifact_id, "Initial long document");
     }
+    // Alice has read the issue, so its Conversation shows no New mark and writes no read mark.
+    // That write lands a second after the Conversation opens, and its answer drops the New mark
+    // and moves the cards up: a press on View in document caught between its down and its up
+    // releases off the link, and the click navigates nowhere.
+    await putIssueState(issue.key, { last_read_seq: (await getIssue(issue.key)).last_seq });
     const context = await asUser(browser, "alice");
 
     try {
@@ -659,6 +674,81 @@ for (const journey of hiddenEditorJourneys) {
     }
   });
 }
+
+/** Records the page's scroll offset (`window.__scrollEachFrame`) at every animation frame from
+ *  the moment it loads, so a row can see a fall that no single read would. */
+async function recordScrollEachFrame(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const offsets: number[] = [];
+    window.__scrollEachFrame = offsets;
+    const sample = () => {
+      offsets.push(Math.round(window.scrollY));
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
+}
+
+/** How far below the highest offset it has reached the page may fall while it lands on the
+ *  quote. Measured at the head over 80 runs of the row below, 20 in each of chromium, iphone,
+ *  webkit and firefox: the largest fall any of them showed is 0 px, because the landing scroll
+ *  only goes down. The collapse this row guards against falls about 990 px on the same page
+ *  (half the landing offset of 1980), so this bound is above every legitimate adjustment with
+ *  room to spare and more than fifteen times below the fault. */
+const MAX_SCROLL_FALL_PX = 64;
+
+// The past version's first landing with no diagram at all, so nothing runs it again: when every
+// render of the page rebuilt the version's editor, the last scroll could run before the last
+// editor had laid out and leave the reader at the top of the page.
+test("a past version's comment link lands on its quote in a document with no diagram @phone", async ({
+  browser,
+}) => {
+  const filler = Array.from({ length: 50 }, (_, index) => `Filler paragraph ${index + 1}.`);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: `Plain document:\n\n${filler.join("\n\n")}\n\nTarget paragraph holds the quoted words.\n`,
+    title: "Highlighted mark in a plain document",
+  });
+  const comment = await createComment(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "quoted words" }, body: "Read this." },
+    agentSession
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await recordScrollEachFrame(page);
+    await page.goto(
+      `/issues/${issue.key}/artifact/spec?v=1&comment=${encodeURIComponent(comment.id)}`
+    );
+    const versionView = page.getByRole("region", { name: "Document version 1" });
+    const highlight = versionView.locator(`[data-id="${comment.id}"]`);
+    await expect(highlight).toHaveText("quoted words");
+    await expect(highlight).toBeInViewport();
+    // A page that rebuilt the version's editor collapsed to the viewport's height between builds,
+    // throwing the reader back after the scroll to the quote began. Waiting is the only way to
+    // show a jump that does not come.
+    await page.waitForTimeout(1_500);
+    const offsets = (await page.evaluate(() => window.__scrollEachFrame)) ?? [];
+    const started = offsets.findIndex((offset) => offset > 0);
+    expect(started).toBeGreaterThanOrEqual(0);
+    // The scroll to the quote only goes down, so the one fall a reader sees is the collapse: the
+    // page rebuilt the version's editor and threw them back. A fall to the top is one of these,
+    // and so is one to the middle of the page.
+    let peak = 0;
+    const falls: { from: number; to: number }[] = [];
+    for (const offset of offsets) {
+      if (peak - offset > MAX_SCROLL_FALL_PX) falls.push({ from: peak, to: offset });
+      peak = Math.max(peak, offset);
+    }
+    expect(falls).toEqual([]);
+    await expect(highlight).toBeInViewport();
+  } finally {
+    await alice.close();
+  }
+});
 
 test("a resolving reference above a linked card does not end the hold", async ({ browser }) => {
   const { comment, issue } = await seedLongDocument();

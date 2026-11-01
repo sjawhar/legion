@@ -2,8 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import { readFile, symlink } from "node:fs/promises";
 import * as path from "node:path";
 import {
-  type Block,
   type Cleanup,
+  call,
   type LegionPane,
   type Reply,
   runLegionPane,
@@ -89,11 +89,6 @@ async function toolsPane(
     },
     cleanup
   );
-}
-
-/** A tool call with the one-line intent every Oh My Pi tool requires. */
-function call(name: string, input: Record<string, unknown>): Block {
-  return { type: "tool_use", name, input: { i: "Checking the pane's tools", ...input } };
 }
 
 /** The turns every pane runs, one tool call each: write, read and edit the scratch file, then the

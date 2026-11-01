@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -391,12 +392,25 @@ func populatedState(t *testing.T) State {
 				}},
 			},
 			Refused: []RefusedRepositoryView{{Repo: "acme/gadgets", Reason: "the review App is not installed on acme/gadgets"}},
+			// Dispatch's GitHub App is not installed on zeta/tools, which is served all the same.
+			WithoutWebhookApp: []WebhookAppGapView{{Repo: "zeta/tools", Reason: "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes"}},
 			Caches: []CacheView{{
 				Repo: "acme/legacy", Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "starting", RetainedUntil: time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC),
 			}},
 		},
 		// The resolved maximal kubernetes file, so the fixture pins every key `settings` can carry.
 		Settings: SettingsOf(settingsFixtureConfig(t)),
+		// The Dispatch consumer is caught up; the Dispatch-server consumer's info read ran out of the
+		// bound; the GitHub consumer has 412 messages waiting and has handled none for over a
+		// minute.
+		Consumers: ConsumerLagViewsOf([]intake.ConsumerLag{
+			{Name: "legion-go-LEGION-dispatch", LastHandledAt: time.Date(2026, 9, 22, 9, 17, 50, 0, time.UTC)},
+			{Name: "legion-go-LEGION-dispatch-server", Unavailable: "read the consumer's info: context deadline exceeded"},
+			{
+				Name: "legion-go-LEGION-github", Waiting: 412, OldestAt: time.Date(2026, 9, 22, 9, 5, 34, 0, time.UTC), OldestAge: 754 * time.Second,
+				LastHandledAt: time.Date(2026, 9, 22, 9, 16, 41, 0, time.UTC), Stalled: true,
+			},
+		}),
 	}
 }
 
@@ -657,6 +671,22 @@ func operatorClaim() OperatorClaim {
 // What the spawn, deliver, suspend, resume, and stop routes answer.
 func TestOperatorClaimGolden(t *testing.T) {
 	golden(t, "operator-claim.json", operatorClaim())
+}
+
+func TestForgetSessionOperatorClaimGolden(t *testing.T) {
+	golden(t, "operator-forget-session.json", OperatorClaim{
+		Token:                "legion-legion-legion-208-architect",
+		Tree:                 "LEGION-208",
+		Issue:                "LEGION-208",
+		Role:                 claim.RoleArchitect,
+		Generation:           4,
+		State:                "failed",
+		ForgottenSession:     "ses_architect",
+		ForgottenSessionFile: "/sessions/ses_architect.jsonl",
+		Budgets:              BudgetsView{LaunchFailures: 3},
+		UncertainStreak:      0,
+		PluginContract:       38,
+	})
 }
 
 // What the list route answers: a queued claim carries no locator and no delivery yet, and a

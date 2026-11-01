@@ -1,6 +1,6 @@
 import { DELIVERY_CAPABILITIES } from "@legion/contracts";
 import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   type RefObject,
@@ -76,6 +76,7 @@ import { closestMatching, focusOnDocument } from "../shell/roving";
 import { MD_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AgentMessageComposer, type AgentReply, agentSendKey } from "./AgentMessageComposer";
 import {
   type AgentFilters,
@@ -86,9 +87,10 @@ import {
   useAgentSearch,
 } from "./agent-search";
 import { deliveryAttempts } from "./attempts";
-import { type BroadcastSend, BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
+import { BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
 import { useBroadcastComposition } from "./broadcast-composition";
 import { broadcastSendState, type ComposedBroadcast, composedBroadcast } from "./broadcast-plan";
+import type { BroadcastSend } from "./broadcast-queue";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
 import { AGENT_ROW_SELECTOR, foldToggleOf, leaveAgentComposer, useAgentsKeymap } from "./keyboard";
 import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
@@ -257,12 +259,16 @@ function AgentExchangeReply({
   replyDisabled: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const retry = useMutation({
-    mutationFn: (delivery: MessageDeliveryMode) => api.createMessageDelivery(reply.id, delivery),
+  const text = useAgentText();
+  const label = text.sessionText(agent.session_id, agent.title);
+  const retry = useKeyedWrite({
+    label: (delivery: MessageDeliveryMode) =>
+      `Delivery to ${label} again, as ${MODE_LABELS[delivery]}`,
     onSuccess: () =>
       void queryClient.invalidateQueries({
         queryKey: agentMessagesQuery(agent.session_id).queryKey,
       }),
+    write: (delivery, bounds) => api.createMessageDelivery(reply.id, delivery, bounds),
   });
   const parent = [read.message, ...read.replies].find((item) => item.id === reply.in_reply_to);
   const answer = read.replies.find(
@@ -300,6 +306,7 @@ function AgentExchangeReply({
           ? undefined
           : {
               author: parent.author,
+              block: reply.reply_block,
               excerpt: parent.body,
               ...(parent.issue_key === null
                 ? {}
@@ -328,13 +335,16 @@ function AgentTargetedMessage({
   replyDisabled: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const retry = useMutation({
-    mutationFn: (delivery: MessageDeliveryMode) =>
-      api.createMessageDelivery(read.message.id, delivery),
+  const text = useAgentText();
+  const label = text.sessionText(agent.session_id, agent.title);
+  const retry = useKeyedWrite({
+    label: (delivery: MessageDeliveryMode) =>
+      `Delivery to ${label} again, as ${MODE_LABELS[delivery]}`,
     onSuccess: () =>
       void queryClient.invalidateQueries({
         queryKey: agentMessagesQuery(agent.session_id).queryKey,
       }),
+    write: (delivery, bounds) => api.createMessageDelivery(read.message.id, delivery, bounds),
   });
   const answer = read.replies.find((reply) => reply.author.kind === "session");
   return (
@@ -441,18 +451,21 @@ function AgentMessageList({
     agent.session_id,
     !open || messages.isPending || agentState.isPending ? undefined : rendered
   );
+  const text = useAgentText();
+  const label = text.sessionText(agent.session_id, agent.title);
   // The cutoff is the newest visible message's own timestamp, not the browser clock: both are
   // compared against `created_at` (the server's clock), so a slow browser clock would otherwise
   // make Clear a silent no-op. This hides exactly what the viewer saw.
-  const clear = useMutation({
-    mutationFn: (cutoff: string) => api.putAgentState(agent.session_id, { cleared_before: cutoff }),
+  const clear = useKeyedWrite({
+    write: (cutoff: string, bounds) =>
+      api.putAgentState(agent.session_id, { cleared_before: cutoff }, bounds),
+    label: () => `Conversation with ${label} cleared`,
+    // A landing with no answer to give has the store read every query again.
     onSuccess: (next) => {
       setShowCleared(false);
-      storeAgentState(queryClient, agent.session_id, next);
+      if (next !== null) storeAgentState(queryClient, agent.session_id, next);
     },
   });
-  const text = useAgentText();
-  const label = text.sessionText(agent.session_id, agent.title);
   if (messages.isPending || agentState.isPending) return null;
   if (messages.isError || agentState.isError) {
     return <p className={`mt-3 text-sm ${dangerText}`}>Could not load this conversation.</p>;
@@ -1157,7 +1170,12 @@ function BroadcastComposer({
         className="mt-2 narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4"
         describedBy={sendState.notice === null || sendState.refusalOnNotice ? undefined : noticeId}
         onPress={() =>
-          onSend({ input: composed.input, selected: [...selected], picked: !defaulted })
+          onSend({
+            input: composed.input,
+            key: composed.key,
+            picked: !defaulted,
+            selected: [...selected],
+          })
         }
         refusal={refusal}
         refusalShownBy={sendState.refusalOnNotice ? noticeId : undefined}
@@ -1239,7 +1257,7 @@ export function AgentsPage(): ReactNode {
   );
   // A restored request is re-sent word for word until an edit drops it, so its own mode is the one
   // the page shows and sends while it is held.
-  const delivery = composition.restored?.delivery ?? composition.delivery ?? defaultDelivery;
+  const delivery = composition.restored?.input.delivery ?? composition.delivery ?? defaultDelivery;
   const composing = draft.trim() !== "" || selected.size > 0;
   const queue = useBroadcastQueue(composing);
   const restoreRefusal = composing
@@ -1439,11 +1457,13 @@ export function AgentsPage(): ReactNode {
           {queue.rows.length === 0 ? null : (
             <BroadcastSends
               className="narrow-or-short:mt-3"
+              onDiscard={queue.dismiss}
               onRestore={(row) => {
                 queue.dismiss(row);
-                composition.restore(row.send);
+                if (row.status === "failed") composition.restore(row.send, row.error);
               }}
               onRetry={queue.retry}
+              onStop={queue.stop}
               restoreRefusal={restoreRefusal}
               rows={queue.rows}
             />

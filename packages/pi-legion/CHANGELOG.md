@@ -3,10 +3,298 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [15.7.0] - 2026-10-31
+
+### Changed
+
+- `legion-worker`'s tools reference opens with the database a role's tests use: never the URL in
+  the file `OMP_SESSION_SQL_DSN_FILE`, the live sessions database every pod shares, whose login
+  can create and drop databases there, but `$LEGION_TEST_PG_DSN`, the pod's own PostgreSQL, which
+  the worker image now carries and the roles container's launcher starts at container start. The
+  rule names every Postgres variable a test reads, how a suite that resets the database it is
+  given makes one of its own with `createdb`, and what a role on a digest that predates the
+  server does instead.
+
+## [15.6.0] - 2026-10-31
+
+### Changed
+
+- A phase worker's handoff carries no `completed` time: a handoff's time is the committer date of
+  the commit that carries it. Each handoff instead carries `previousHandoff`, the newest commit on
+  the branch that changed that handoff's file (usually the role's previous handoff of the phase),
+  so a round that repeats its predecessor's words still writes a new commit; a reviewer's also
+  carries `headReviewed`. Every worker, architect and controller is told that a time or date it
+  writes comes from a command, a task result or its own task, never from an estimate.
+
+## [15.5.1] - 2026-10-31
+
+### Changed
+
+- The daemon's role prompts for every architect, every phase worker and the controller it launches say that, under Oh My Pi, the bash tool keeps one shell for the whole session, so a variable changed or unset in one command stays so for every later one. They say never to change or unset `DISPATCH_URL`, `DISPATCH_HOST`, `DISPATCH_SESSION_ID`, `DISPATCH_TOKEN_FILE` or `ENVOY_CONFIG_FILE` there, give the command that exports a lost `DISPATCH_URL` again from the session's start environment, and say that `Unable to connect` is the server, not these variables: wait and run the same command again. An architect that unset `DISPATCH_URL` while Dispatch restarted had Dispatch off for the rest of its session.
+
+## [15.5.0] - 2026-10-31
+
+### Added
+
+- `legion-worker`'s reference table sends a phase worker to `skill://outside-message` before its
+  text reaches a person outside the company: a comment, issue or pull request on a repository the
+  company does not own, an email, or a message to another project's maintainers.
+
+## [15.4.2] - 2026-10-31
+
+### Changed
+
+- legion-architect: a child issue is a separately deliverable change (its own pull request or deploy); a fresh red team checks every proposed child before it is filed or released, and the root proves its acceptance in its own last round instead of an integration child.
+
+## [15.3.1] - 2026-10-30
+
+### Fixed
+
+- The `legion-retro` skill names a retro learning file `docs/solutions/<category>/<slug>-pr<number>.md` by the pull request number, and its front-matter example carries the pull request alone, so no Dispatch issue key reaches a file name in this public repository.
+
+## [15.3.0] - 2026-10-30
+
+### Added
+
+- The skill-scenarios rig's `askgate` scenario gets five cases of AskGate's rules check, which
+  `SKILL_SCENARIOS_ASKGATE_CASE` names beside the three it had: `nochange` (an ask whose own
+  recommendation changes nothing), `nochange-rebuttal` (the same ask with `--advisor-rebuttal`),
+  `nochange-block` (the same ask inserted as an ask block with one `dispatch doc-edit`), and
+  `untried` and `tried` (an ask for a `gh api` read the agent did not run, or ran first and quotes
+  the error of). Each rules case's prompt asks for the write as one `dispatch` command of literal
+  words, the form AskGate reads: a write sent any other way reaches no review at all, and the CLI
+  refuses it or posts it with a warning. `SKILL_SCENARIOS_ASKGATE_MODE` (`warn` or `block`) sets
+  the run's `OMP_ASKGATE` and is written to `<run>/mode.txt`; unset, the pane gets no
+  `OMP_ASKGATE`, so AskGate's verdicts block and its marker checks warn. An askgate run's
+  directory is still `askgate-<case>-<label>-<n>`, so the batches of the eight cases keep their
+  own runs, and `rig.sh score askgate` counts each case and label on its own. `score.ts` reads the
+  rule a refusal names, the rules call's outcome and each call's own mode from the transcript: a
+  `nochange`, `nochange-block` or `untried` run passes when the rules check refused the case's
+  call in either mode, and a `nochange-rebuttal` or `tried` run passes when the ask posted and no
+  entry refused it. An entry no review stands behind — a command AskGate could not read, and a
+  gated write the CLI found no marker for — is no review of the case's call in any of them.
+
+## [15.2.0] - 2026-10-30
+
+### Changed
+
+- Daemon API contract 43: `GET /legion/v1/state` carries `consumers`, the lag of each of the
+  daemon's durable consumers (`name`, `waiting`, `oldestAt`, `oldestAgeSeconds`,
+  `lastHandledAt`, `stalled`, and `unavailable` when NATS did not answer), and
+  `repositories.withoutWebhookApp`, each served repository Dispatch's GitHub App is not known to
+  be installed on, with the reason. A plugin of contract 42 reads this state strictly and refuses
+  it, so the boot gate and `legion probe-image` refuse the mixed pair. The `legion` tool's
+  `handoff_complete` description names the implementer's new refusal `HANDOFF_NO_PULL_REQUEST`:
+  the daemon reads the branch's open pull request before it applies the completion, and refuses
+  the completion, recording nothing, when there is none and the record holds none merged.
+
+## [14.0.0] - 2026-10-29
+
+### Changed
+
+- A phase worker whose turn ends with its Legion phase still open is now reminded at the end of
+  **every** turn, for as long as that phase stays open. It used to get one follow-up,
+  and a second only when it answered the first by writing the tool call as text again, after which
+  a stalled worker sat silent: in Stage 3 two trees waited six hours each on a worker that had had
+  its one follow-up. The first reminder of a run is still the `session_stop` continuation, one more
+  turn of the same session; every one after it is a steered `legion-phase-reminder` message sent
+  from a timer, so the run settles first and the daemon sees the turn end and can deliver a queued
+  task. A reply whose line starts WAITING buys a quiet wait and then the same reminder again, and
+  a worker the daemon relaunched into an open phase is reminded from a timer, since nothing else
+  would wake it. The count of reminders the worker did nothing about drops to zero as soon as it
+  runs a tool call — Oh My Pi's `toolCall` block, not only Claude Code's `tool_use` — or anything
+  reaches the session, and a run of unanswered ones tells the issue's
+  architect over Envoy — once, under one idempotency key kept until the count resets, retried while
+  no live session holds that role. Four variables, read from the worker's own environment (the
+  daemon passes on whichever its own holds, to a pane and to a pod alike), tune it:
+  `LEGION_STALL_REMINDER_MS` (300000), `LEGION_STALL_WAITING_MS` (900000), `LEGION_STALL_RESUME_MS`
+  (120000) and `LEGION_STALL_ARCHITECT_AFTER` (3, clamped to 2 or more); a bad value is one `warn`
+  and the default. The state machine, the runner and the numbers now live in `@legion/pi-shared`
+  (`phase-stall.ts`, `phase-reminder.ts`, `stall-limits.ts`), which `@sjawhar/claude-envoy` drives
+  from Claude Code's own hooks, so one machine serves both harnesses and the Go bridge's copy of it
+  is gone. The transcript entry keeps its `legion-phase-stall` name and its `state`, and now also
+  carries the head of the worker's last message, so the notice a relaunched worker's resume
+  reminder earns still says what it last said; an entry an earlier build wrote, without it, still
+  reads. A session resumed on an
+  entry this build does not know — `{"state":"quiet"}` or `{"state":"text-call"}`, what the build
+  now in the pods wrote — reads as an open phase with no reminder yet, so it is reminded rather
+  than left alone. Daemon API contract 42 carries the four variables (and, in a pod, Claude Code's
+  three): install this release's pair with a `legion` built from the same commit.
+
+## [12.2.0] - 2026-10-29
+
+### Fixed
+
+- Plugin interface version 5: the operator's controller names its session in the interface's
+  `startupTurn` at `session_start` with the start due and not sent yet (`sentAt` undefined), so
+  pi-envoy keeps a card that reaches the session before `/legion-controller-start` sends the start
+  message from taking the first turn, for up to 30 s. The start command's send marks it sent; the
+  session's first run and its shutdown clear it, and so does a start claim refused before the send
+  or stopped for a session change. Install it with the `@sjawhar/pi-envoy` released beside it.
+
+## [12.1.1] - 2026-10-29
+
+### Changed
+
+- The bundled `legion-worker` merge-gate skill has the reviewer re-run only a run's failed and cancelled jobs (`gh run rerun <run> --failed`), never the whole run.
+
+## [12.1.0] - 2026-10-28
+
+### Changed
+
+- The `legion-controller` skill this plugin ships says when the controller is registered: at session
+  startup, or, in a controller an operator started, from its first command once Oh My Pi has
+  started, where it said the extension's startup claim; its takeover note's reason not to set
+  `LEGION_CONTROLLER=1` says that marker makes the session the launched controller, which needs a
+  start message.
+
+## [12.0.0] - 2026-10-28
+
+### Changed
+
+- A production check of `sjawhar/legion` wakes on Dispatch's `server.started` once every Dispatch
+  server process serves a build containing the merge, which is what that event now announces, and
+  the look's task names it `Dispatch serving build <sha> on every server process` where it said
+  `Dispatch's start on build <sha>`; the recorded cause keeps the name `dispatch start`. The
+  daemon's boot reads the build Dispatch's fleet serves from `/healthz`'s `fleet_commit`, falling
+  back to `commit` for a Dispatch older than the field. The `legion-worker` merge-gate reference and
+  the implementer's role prompt say so.
+- The `legion-controller` skill's daily-report reference and the `legion-worker` skill's findings
+  reference this plugin ships say a closed issue's close withdrew its open asks and a reopen brings
+  them back, where they said Dispatch hides them or takes them out of the Inbox.
+
+### Fixed
+
+- Daemon API contract 41 and plugin interface version 4: the operator's controller
+  start turn runs after Oh My Pi's startup, where the operator sees it, can type during it and can
+  interrupt it with Esc, and it is the session's first turn, ahead of any Envoy card or Legion
+  notice. The extension sent the start message (`LEGION_CONTROLLER_START_MESSAGE`) from its
+  `session_start` claim, and Oh My Pi holds every send a `session_start` handler makes and drains
+  them at the end of its startup, so the whole start turn ran inside the startup wait: the TUI
+  showed no start message and no busy row, Enter did not take typed text, and Esc did nothing. And
+  an Envoy card is a steer that starts its own turn, so with the role claimed during startup a card
+  on the role's lane, or a notice on the controller topic, could start its turn ahead of the start
+  message. The operator's controller now claims nothing at `session_start`: `legion controller
+  start` ends Oh My Pi's command line with `/legion-controller-start`, which Oh My Pi runs once its
+  startup is over and its TUI listens, and that new extension command runs the whole claim — the
+  start message read first, then the daemon's state and `claims/register` — and sends the start
+  message once the registration is in, right before the Envoy role claim and the controller-topic
+  subscription, so neither can deliver anything ahead of it (a card the listener forwards as soon
+  as it records the role can reach the session before the role claim's answer does), as a
+  follow-up when the operator already started a turn. The session is the controller to the
+  `legion` tool from its registration on, so the start turn's `read_state` and `set_status` work
+  while the role claim runs and after it fails. A send to an idle session names the session
+  current at the send in the plugin interface's new `startupTurn` (`{session, sentAt}` or
+  undefined) right before the send; a follow-up behind the operator's turn sets nothing, since that
+  run's one `agent_start` has already fired. A refusal anywhere in that claim is logged and shown
+  as one warning naming the refusal and `/legion-claim-controller`: refused before the send, that
+  command claims again and sends the start message once its claim succeeds; refused after it (the
+  role claim or the subscription), the warning says the start message was sent and the start turn
+  has the registration, and that command claims the role and its wakes again, sending nothing
+  more. Run again after a successful claim, or in any other session, the command says there is
+  nothing to do; run again once the start message is sent while the last claim that registered
+  (the one that sent it, or a later one) did not finish, it names `/legion-claim-controller` and
+  claims nothing. A `/new` while the command's claim runs stops that claim at its registration,
+  before the send, with no warning: the session change's re-claim registers the new session, sends
+  the start message there, and shows an info notice saying so. A claim that has to wait for one in
+  flight says so in one notice. A claim from `/legion-claim-controller` or a re-claim after a
+  session change sends the start message the same way when it is still unsent, and the message
+  still goes out once per process. A re-claim after a session change refused past its own
+  registration warns that the session keeps that registration; one refused before it warns that
+  the session has no controller grant. A re-claim that has to wait says so at once, while the
+  `/new` waits on it. Its refusal and that hand-over go to the host's extension widget
+  (`legion-controller-claim`), which Oh My Pi's `/new` leaves up when it resets the transcript
+  after the session_switch handlers return, a subagent view focused or not, until the session's
+  next run or a later claim that succeeds takes it down, so the operator
+  sees them. The session's first `agent_start` and its `session_shutdown` clear the mark. The
+  daemon-launched controller still claims at `session_start`, sends no start message of its own and
+  sets the mark, with `sentAt` now, right before `claims/ready`, after which the daemon delivers its
+  start prompt. `legion controller start` refuses a stdin that is not a terminal, right after the
+  operator token file's check and before any probe or mint: given the positional word and no
+  terminal, Oh My Pi would run headless print mode, running the start command after the mint
+  revoked the running controller. A pi-legion before 41 under this CLI would send from
+  `session_start` and then get the word as a prompt, and this plugin under an earlier CLI would
+  never claim the controller nor send the start, so the controller probe refuses either pair before
+  the mint. Install this release's pair with a `legion` built from the same commit.
+
 ## Before changelog fragments
 
 ### Added
 
+- The skill-scenario rig takes a third model route, `LEGION_E2E_MODEL_ROUTE=provider`: the
+  anthropic-messages provider block `LEGION_E2E_MODEL_PROVIDER` names in the operator's own
+  `LEGION_E2E_MODEL_PROVIDER_FILE`, copied with its `apiKey: "!cat <absolute file>"` as written, so
+  agents and judges read the key where the operator keeps it and no key is copied into a profile.
+  `LEGION_E2E_MODEL_PROVIDER_MODEL` picks the agents' model; the judge keeps its own. A judge's
+  container mounts that file's directory read-only, and extracts its own native addon instead of
+  mounting the operator's shared cache, which other sessions prune. Every transcript names the
+  block as the provider that served each turn. The rig's Postgres, NATS and judge containers now
+  run under CPU and memory limits, and every run and profile probe names its label's pinned omp
+  binary by path, so an `omp` wrapper earlier on the caller's PATH never stands in for the pin.
+- The skill-scenario scorer (`score.ts`) reads a `dispatch` call an eval cell makes from Python as a
+  list literal (`subprocess.run(["dispatch", "doc-edit", ...])`) as the command it runs, and the
+  CLI's answer printed after the call's exit code. Such a spec write was invisible to `checked`:
+  a run whose every write came from Python failed with "no spec write", and other runs had writes
+  left out, which made `checked` easier to pass. A refusal printed after the exit code
+  (`1 dispatch ask was not called: …`, `2 dispatch: DISPATCH_HOST is not set…`) is read too: it was
+  invisible to `refusals`, so a refused call never fixed could pass.
+- The skill-scenario scorer flags a run whose tool calls (its own or a subagent's) name an absolute
+  path outside its work directory, its label's checkout and the system locations, such as the
+  operator's home or another repository: nothing isolates an agent from the operator's files. The
+  run is still scored. Its row counts the hits by where they sit (`outside=ran:N,wrote:N,assigned:N`:
+  a command or path it ran, text it wrote into a file, a subagent's assignment) and prints up to
+  three of each with the call's text around them. A flag shows the run named the path, not that it
+  read it nor that its result is wrong; prose and reaches share the same arguments. A path a call
+  reaches without naming it, as a glob from `/` does, is not caught.
+- The skill-scenario scorer voids a run for another label's skills only when the run read one: a
+  `read` call of a skill file outside its label's own or of a file under another label's checkout,
+  a `cat`, `sed`, `head` or other reading command in a `bash` call or eval cell that names one, or
+  a file an eval cell opens. A run that only names one (a spec about the Dispatch skills pasted into
+  the check the skill requires, a heredoc plan naming `skills/dispatch/SKILL.md`, a relative
+  mention) was voided, and is now scored and flagged `skills=ran:N,wrote:N,assigned:N`, with up to
+  three hits of each kind printed as the `outside` flag prints them. Subagents' calls count too.
+- The skill-scenario scorer's summary tables end with a `flagged` column: per scenario and label,
+  and per source and label beside the median fault counts, how many counted runs carry a flag
+  (`outside=`, `skills=` or `writes_seen=`). A flagged run stays in the pass counts and the
+  medians; the column says how many of them to read before trusting the numbers.
+- The skill-scenario scorer takes a run's own directory, work directory and profile from the cwd
+  its session's header records (`<run dir>/cwd`), not from where the run is scored. Scoring a copy
+  of the runs flagged nearly every run `outside=` and voided runs that read their own skills.
+- The skill-scenario scorer tells a review of the run's own spec from one of a sibling issue's:
+  each spec an assignment pastes (`## Summary` to the end of its `## Acceptance` section) is the
+  run's own when it holds at least a tenth of the 5-word runs of a version the run's session
+  wrote. The share is of the written version, so text pasted after the spec cannot lower it. A
+  review of only a sibling's spec checks no write. One that pastes both, in one assignment or one
+  task of a call, still checks the write, but its findings are not judged: the row prints why and
+  is flagged `unjudged=N`, since no finding can be told to be about this spec. A call's tasks are
+  taken one by one, each on its own assignment: a task that reviews only the run's own spec stays
+  a judged check with its own report, and a task that is no spec-only check by itself (a fact
+  check given no spec) is no part of the check, though the call's other tasks carry the outline.
+- The skill-scenario scorer takes the report of a subagent that ends with an empty `yield`
+  (`{"type":"result"}`) from the text it wrote before the yield, not the word `result`.
+- The findings judge lists each check whose report finds nothing in `clean`, and the scorer needs
+  each check to have a row or a `clean` entry. A findings file that covered only some checks
+  passed, and a run whose every check found nothing could never be scored.
+- The skill-scenario scorer reads a spec-only check from the subagent's own transcript
+  (`sessions/<session>/<name>.jsonl`), not only from a `task` tool call. A check the agent started
+  from an eval cell (`tool.task(…)` with the spec pasted in, or the `agent(…)` helper) leaves no
+  `task` call, so `checked` missed it and the findings judge never saw its report. Such a check
+  counts for the first spec write after its report (its last assistant message, or the `yield`
+  it ends with) when it started after the write before that one. A subagent a `task` call names is
+  that call's check alone, so a call rejected for a path or a failed task stays rejected, and
+  nothing counts twice. `specWork` is the one list of checks that `checked` and the findings
+  judge both read.
+- The skill-scenario scorer compares the spec writes it reads in the transcript with the versions
+  Dispatch recorded for the run's session (`spec-versions.json`). A write through a helper function
+  of the agent's own, a list built in a variable or an answer hidden by `>/dev/null` made a version
+  no command showed, so `checked` could pass on the writes it saw alone. Each such version is now a
+  spec write at its recorded time, unchecked unless a check counts for it, and `routed` needs the
+  skill read before it too. A row whose two counts disagree is flagged `writes_seen=N versions=M`,
+  with each unseen version and each shown write no version matches under it.
+- The skill-scenario scorer takes a `findings.json` with no row for a run that has one or more
+  spec-only checks as a rig error that asks to run `rig.sh judge` again, as it takes any other judge
+  file that does not cover its inputs. judge.ts writes no row only when a run has no check, so
+  such a file was judged before its checks were known, and it read as "no finding left".
 - Daemon API contract 40: a root whose architect asked a person a question and handed the turn
   back gives its admission slot up in the new phase `awaiting_person`, its architect suspended with
   its session kept, and the person's answer, or the spec's design gate standing open, puts it at
@@ -23,7 +311,6 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `design-approved` notice, and its `design-changes-requested` row says a waiting root's resume
   task, not a notice, names the changes request. The `legion-controller` skill reads the
   `awaiting-person` wake and a waiting root as no reason to label or admit anything.
-
 - A ninth Legion skill, `leading-a-work-stream`, rebuilt from dotfiles
   `feb1271d4f5021f2e0b9b22b7496a300e6f46790`: a `SKILL.md` and seven references (daily plan,
   decision rights, direction and coaching, Dispatch upkeep, sources, the speed tick, the record of

@@ -41,7 +41,10 @@ Each page's freshness row says **Live** while the connection is open, with how l
 change arrived. A source Dispatch reports as stale, or a failed reconcile, still shows
 in red with its age and error. While the connection is lost the row reads **Reconnecting** in red,
 with how long it has been lost; the page reconnects by itself and is sent only what changed while
-it was away. A page away for more than a day reads its window once, whole.
+it was away. A page away for more than a day reads its window once, whole. The whole verdict
+follows a reconnect — which sources are stale, the last reconcile and its error, and how many pull
+requests Dispatch can no longer fetch — so a failure that cleared or appeared while the page was
+away shows at once rather than at its next full read.
 
 ## Grouping sessions
 
@@ -128,14 +131,22 @@ timeline. The routes and the page's live updates compute from the same stored fa
 code, so they agree. `flags_source` says whether recorded flags fed the change failure rate;
 `none` means no flags are recorded yet.
 
-`GET /ws/delivery` is the websocket the pages keep themselves current over, and any signed-in
-person or agent token may open it. Each frame is one JSON object; `DeliveryLive*` in
-`packages/contracts/src/dispatch-api.ts` types them all. A client subscribes to a view with
-`{"type": "subscribe", "sub": "<its own id>", "view": ...}`, where the view is
-`{"kind": "timeline" | "measures", "window": {"preset": 28}, "query": "repo=acme%2Fwidgets"}`
-(a window is a preset of 7, 14, 28 or 84 days, or a custom `{"from", "to"}`; `query` is the GET
-route's query string without `from` and `to`), or `{"kind": "pipeline"}` with an optional `at`.
-`{"type": "unsubscribe", "sub"}` ends one. Dispatch answers a subscription with:
+`GET /ws/live` is the one websocket each browser tab keeps open for all of its live views. A
+signed-in person or agent token may open it; only a person may subscribe to an agent conversation.
+Every client message is one JSON object:
+
+```json
+{"type":"subscribe","sub":"<client id>","view":{"kind":"timeline","window":{"preset":28},"query":""}}
+```
+
+`sub` identifies that subscription in every response. `unsubscribe` with the same `sub` ends it.
+A delivery view is `timeline` or `measures` with its window and GET-route query, or `pipeline`
+with optional `at`; it may resume with `{"seq":"…","revs":{…}}`. An event-feed view is
+`{"kind":"events"}` and resumes with `{"since":"<event id>"}`. An agent view is
+`{"kind":"agent","session_id":"<uuid>"}` and never has a resume. A resume of the wrong shape, or
+any unknown member, is an `INVALID_FRAME` error.
+
+Dispatch answers a delivery view with:
 
 - a `snapshot`: the matching GET route's body for the window resolved now, the change it reflects
   (`seq`), when that change was recorded (`changed_at`), and a revision for every key it holds;
@@ -143,18 +154,46 @@ route's query string without `from` and `to`), or `{"kind": "pipeline"}` with an
   each list's `upsert` and the ids it `remove`s), the map entries and counts that changed (`maps`
   and `counts`, null for a key that left), and the fields replaced whole (`set`, which carries
   `window` whenever it moved, never alone);
-- `freshness`, sent to every subscriber only when the freshness verdict changes;
-- `error`, with the code the GET route would answer (`INVALID_QUERY`,
-  `DELIVERY_NOT_CONFIGURED`) or `INVALID_FRAME`;
+- `freshness`, the whole freshness verdict - the `freshness` object the snapshot carries (the last
+  event, the last reconcile, its error and how many pull requests cannot be fetched) and the
+  `stale` source list - sent right after a subscription's first answer when Dispatch
+  holds one, so a socket opened or resumed after the verdict changed still gets it, and to every
+  subscriber whenever it changes;
+- `error`, with the code the matching GET route would answer (`INVALID_QUERY`,
+  `DELIVERY_NOT_CONFIGURED`) or `INVALID_FRAME`; and
 - `heartbeat`, every 15 seconds. While nothing the view shows changes, the heartbeat is the only
-  frame sent: a reconcile pass that records nothing new sends nothing.
+  frame sent.
 
-A client that reconnects subscribes again with `"resume": {"seq", "revs"}`, the last change it
-applied and the revisions it holds, and is sent a delta of what changed since; a resume from
-before the day of changes Dispatch keeps is answered with a snapshot. Dispatch closes every
-socket with code 1012 when it restarts, and a client reconnects at once.
+An events subscription first receives `events_start` with the decimal id it starts after and
+`replay_complete`, then `event` frames with their id and event. A page that has no cursor adopts
+`events_start.since`, so the next subscription resumes without a gap. `replay_complete` is true
+when the subscription resumed from an id at or below the log's head: Dispatch replays every event
+after it, so the page refreshes only what those events change. It is false with no resume, and for
+a resume above the head (a log that was reset), whose replay cannot cover the gap: then the page
+refreshes everything it holds. An agent subscription receives `agent` frames whose `event` is
+`responder`, `replay`, or `frame`; their `data` is the session's JSON. Either kind may receive
+`ended` with `behind` or `dropped`; subscribe that view again at once. An events view that ends
+with no `events_start` since it was sent is one Dispatch could not start, which it ends a second
+after each subscription while its database does not answer: subscribe it again after a backoff
+from 1 s, doubling up to 30 s, as after an events `error`, and refresh what the page holds once, at
+the next `events_start`, unless that start says its replay is complete. An agent refusal is
+terminal for that view (`HUMAN_ONLY`, `SESSION_ID_INPUT`, or `STREAM_UNAVAILABLE`).
 
-`packages/dispatch/e2e/delivery-live-probe.ts` is the way to watch the route from a checkout:
+A client that reconnects subscribes a delivery view again with `"resume": {"seq", "revs"}`, the
+last change it applied and the revisions it holds, and is sent a delta of what changed since; a
+resume from before the day of changes Dispatch keeps is answered with a snapshot.
+
+Reconnect every subscription when the socket closes. A 4001 `max age` close is routine: Dispatch
+chooses an age in [30, 60) minutes, and the page reconnects at once without refreshing. Dispatch
+closes every socket with code 1012 when it restarts, and the page reconnects after a random wait of
+under two seconds, so the pages one restart closed do not all reach the next server at the same
+moment, and resumes; the `events_start` that follows decides what the page refreshes, as above. A
+1008 close means the caller no longer resolves; re-check sign-in before retrying. A 1013 full-queue
+close, 1009 oversized frame, 1011 internal error, or an ordinary connection loss backs off and
+resumes. The page may close a silent socket with 4000 before it opens its replacement.
+
+`packages/dispatch/e2e/delivery-live-probe.ts` is the way to watch one delivery subscription from
+a checkout:
 
 ```sh
 cd packages/dispatch

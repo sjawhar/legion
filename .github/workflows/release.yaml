@@ -12,8 +12,7 @@ on:
       - "packages/pi-envoy/package.json"
       - "packages/pi-legion/package.json"
       - "packages/pi-shared/package.json"
-      - "packages/envoy-plugin/package.json"
-      - "packages/claude-envoy/package.json"
+      - "packages/claude-envoy/**"
       - "packages/proof-editor/package.json"
       - "packages/dispatch/package.json"
       - "packages/envoy/internal/dispatch/pmdoc/gen/package.json"
@@ -22,7 +21,6 @@ on:
       - "go.work"
       - "go.work.sum"
       - "packages/envoy/**"
-      - "packages/envoy-plugin/**"
       - "packages/envoy-client/**"
       - "packages/contracts/**"
       - "packages/pi-envoy/**"
@@ -39,14 +37,15 @@ on:
       - ".github/go-release-targets.json"
       # The worker image's remaining inputs (worker_image below).
       - ".omp-pin"
+      - ".bun-version"
       - ".dockerignore"
       - ".github/workflows/worker-image.yaml"
   workflow_dispatch:
 
-# Every job declares its own permissions (legion_build, envoy_plugin_build, pi_envoy_build,
-# pi_legion_build, publish, worker_image, worker_image_attest, worker_image_release below); nothing
-# runs under this workflow-level default, so it stays empty rather than becoming an unreviewed grant
-# to a job added later with no block of its own.
+# Every job declares its own permissions (legion_build, pi_envoy_build, pi_legion_build, publish,
+# worker_image, worker_image_attest, worker_image_release below); nothing runs under this
+# workflow-level default, so it stays empty rather than becoming an unreviewed grant to a job
+# added later with no block of its own.
 #
 # Each package is built by a build job of its own and published by the one publish job. A build job
 # versions, installs, packs, builds and tests: it runs the dependencies' code and every third-party
@@ -58,7 +57,7 @@ on:
 # of the steps that push. release-push.sh handed checks what each build job handed over before
 # anything acts on it.
 #
-# So a release waits for a runner three times: for the four build jobs together; for publish beside
+# So a release waits for a runner three times: for the three build jobs together; for publish beside
 # worker_image's build; and for worker_image_attest's attestation beside worker_image_release. Each
 # stage holds what the one before it may not: publish cannot run in a job that built what it
 # publishes, the image build needs the plugin pair legion_build decides, and the attestation, which
@@ -89,30 +88,25 @@ env:
   # the argument list, split on its spaces. release-bump.sh reads a --patch-path only when it is
   # also one of the paths after --.
   #
-  # The Envoy OpenCode plugin. Before the first opencode-legion-envoy-v* tag it bumps from the
-  # version npm publishes, so an already-published version is never recomputed. The package's
-  # prepack copies skills/ into the tarball (package.json "prepack"), where OpenCode loads it as the
-  # plugin's skills, so a commit there releases whatever its type. Its notices generator is another
-  # shipped build input, so it gets the same patch release.
-  ENVOY_PLUGIN_VERSION_ARGS: >-
-    --package-dir packages/envoy-plugin --first-npm @sjawhar/opencode-legion-envoy
-    --patch-path skills/ --patch-path scripts/third-party-notices.ts
-    -- packages/envoy-plugin/ packages/contracts/ packages/envoy-client/ skills/ scripts/third-party-notices.ts
   # The Envoy Oh My Pi plugin. The seed before the first pi-envoy-v* tag is the version line this
   # package continues, @sjawhar/pi-legion-envoy, which it was split from: its own name on npm holds
   # only a placeholder 0.0.0 until its first publish, so reading it would restart the line at 0.x.
-  # scripts/pi-plugin-prepack.sh copies this plugin's five skills into dist/skills, which every Oh
+  # scripts/pi-plugin-prepack.sh copies this plugin's seven skills into dist/skills, which every Oh
   # My Pi session loads as the plugin's skills, so a commit there releases whatever its type. Its
-  # notices generator and the prepack itself are shipped build inputs too, so they get the same
-  # patch release.
+  # notices generator, the prepack itself and patches/ (the bundle inlines nats.js with
+  # patches/nats@2.29.3.patch applied) are shipped build inputs too, so they get the same patch
+  # release.
   PI_ENVOY_VERSION_ARGS: >-
     --package-dir packages/pi-envoy --first-npm @sjawhar/pi-legion-envoy
     --patch-path skills/asd-ste100/ --patch-path skills/dispatch/ --patch-path skills/dispatch-first/
     --patch-path skills/dispatch-writing-specs/ --patch-path skills/envoy/
+    --patch-path skills/outside-message/ --patch-path skills/plain-words/
     --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh
+    --patch-path patches/
     -- packages/pi-envoy/ packages/pi-shared/ packages/envoy-client/ packages/contracts/
     skills/asd-ste100/ skills/dispatch/ skills/dispatch-first/ skills/dispatch-writing-specs/ skills/envoy/
-    scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh
+    skills/outside-message/ skills/plain-words/
+    scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh patches/
   # The Legion Oh My Pi plugin, seeded as the Envoy one is. scripts/pi-plugin-prepack.sh copies
   # this plugin's nine skills into dist/skills, which a Legion pane's prompts load, so a commit
   # there releases whatever its type. Its notices generator and the prepack itself are shipped
@@ -141,6 +135,14 @@ env:
     -- packages/daemon/ packages/daemon/internal/prompts/roles/ packages/daemon/internal/prompts/go/
     scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh .github/go-release-targets.json
 
+  # A `|` between proxy entries makes a go command fall through to the next source after ANY error,
+  # where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
+  # proxy.golang.org reset a download mid-stream and turned a Go lane red on a module whose hash
+  # go.sum already holds (sjawhar/legion#2512); with `|direct` the command fetches the same bytes
+  # straight from the source and checks them against go.sum, so this is a second path, not a weaker
+  # check.
+  GOPROXY: https://proxy.golang.org|direct
+
 jobs:
   # The Go `legion`: linux and darwin archives of the binary, which embeds its role prompts, with
   # its THIRD_PARTY_NOTICES, on a legion-v* tag of the commit the run checked out. Nothing is
@@ -158,6 +160,7 @@ jobs:
     # Only main releases, as above; a workflow_dispatch on main runs it as a push does.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     # contents: read is for the checkout; nothing here writes to the repository, a registry or a
     # release.
     permissions:
@@ -223,13 +226,21 @@ jobs:
             echo "pi_legion_version=$legion_version"
             echo "pi_envoy_version=$envoy_version"
           } >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.version.outputs.skip != 'true'
         with:
           go-version-file: packages/daemon/go.mod
-          cache-dependency-path: |
-            packages/daemon/go.sum
-            packages/envoy/go.sum
+          cache: false
+      # ci.yaml's go-daemon, restored and never saved: only ci.yaml's main-push jobs write Go caches.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.version.outputs.skip != 'true'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: go-daemon-${{ runner.os }}-
       # CGO_ENABLED=0: a static binary, as the worker image builds it, so a linux archive runs on any
       # distribution. One archive per target .github/go-release-targets.json lists (the pull
       # request's notices check reads the same list), each holding one top-level directory,
@@ -281,16 +292,17 @@ jobs:
       - name: Check this job holds no credential (tripwire)
         run: .github/scripts/release-push.sh no-credential
 
-  # The Envoy OpenCode plugin, @sjawhar/opencode-legion-envoy. envoy_plugin_build versions it,
-  # installs the workspace and packs it (the dependencies' code, so no write scope and no secret),
-  # and hands the tarball to publish, which publishes those bytes to npm, commits and tags the
-  # version bump, creates the GitHub release and pushes the bump to main.
-  envoy_plugin_build:
+  # The Envoy Oh My Pi plugin, @sjawhar/pi-envoy. pi_envoy_build versions it, installs the
+  # workspace and packs it (the dependencies' code, so no write scope and no secret), and hands the
+  # tarball to publish, which publishes those bytes to npm, commits and tags the version bump,
+  # creates the GitHub release and pushes the bump to main.
+  pi_envoy_build:
     # Only main publishes: a workflow_dispatch from another branch skips this job and publish, so
     # no branch build ever reaches npm or moves `latest` (AGENTS.md, "Deploys come only from
     # main"). A workflow_dispatch on main runs it as a push does.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # contents: read is for the checkout; nothing here writes to the repository, a registry or a
     # release.
     permissions:
@@ -305,73 +317,13 @@ jobs:
           persist-credentials: false
 
       # First, before setup-bun: no dependency code has run and no cache has been restored when the
-      # tags are read. A re-run after publish's "envoy-plugin: Push tag" pushed the tag checks out
-      # this same commit with that tag on the bump commit above it, where the range would be empty
-      # and skip the release it never finished; release-push.sh version releases that tag again
-      # instead (`tagged`), and every publish step is safe to repeat: npm reuses a published
-      # version, `release-push.sh release` reuses a published release and publishes a draft one,
-      # `tag` accepts its own tag, and `push-main` pushes nothing once main holds this version or a
-      # later one. Otherwise it bumps from the newest opencode-legion-envoy-v* tag over the paths
-      # $ENVOY_PLUGIN_VERSION_ARGS names (the workflow's `env:` says why each is there).
-      - name: Determine next version
-        id: version
-        run: |
-          # shellcheck disable=SC2086 # $ENVOY_PLUGIN_VERSION_ARGS is the argument list, split on purpose
-          .github/scripts/release-push.sh version opencode-legion-envoy-v $ENVOY_PLUGIN_VERSION_ARGS >> "$GITHUB_OUTPUT"
-
-      - uses: ./.github/actions/setup-bun
-        if: steps.version.outputs.skip != 'true'
-
-      - name: Install dependencies
-        if: steps.version.outputs.skip != 'true'
-        run: bun install --frozen-lockfile
-
-      - name: Set release version
-        if: steps.version.outputs.skip != 'true'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          jq --arg v "$VERSION" '.version = $v' \
-            packages/envoy-plugin/package.json > tmp.json \
-            && mv tmp.json packages/envoy-plugin/package.json
-
-      - name: Pack plugin
-        if: steps.version.outputs.skip != 'true'
-        run: rm -f ./*.tgz && bun pm pack
-        working-directory: packages/envoy-plugin
-
-      # The tarball, exactly as packed, for publish.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: steps.version.outputs.skip != 'true'
-        with:
-          name: envoy-plugin-tarball
-          path: packages/envoy-plugin/*.tgz
-          if-no-files-found: error
-
-      - name: Check this job holds no credential (tripwire)
-        run: .github/scripts/release-push.sh no-credential
-
-  # The Envoy Oh My Pi plugin, @sjawhar/pi-envoy, built and published as the Envoy OpenCode plugin
-  # above is.
-  pi_envoy_build:
-    # Only main publishes, as envoy_plugin_build says.
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
-    # contents: read is for the checkout; nothing here writes to the repository, a registry or a
-    # release.
-    permissions:
-      contents: read
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      skip: ${{ steps.version.outputs.skip }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      # First, before setup-bun, as envoy_plugin_build's version step is, and releasing again a tag
-      # an earlier attempt pushed for this commit as that step does, over the paths
+      # tags are read. A re-run after publish's "pi-envoy: Push tag" pushed the tag checks out this
+      # same commit with that tag on the bump commit above it, where the range would be empty and
+      # skip the release it never finished; release-push.sh version releases that tag again instead
+      # (`tagged`), and every publish step is safe to repeat: npm reuses a published version,
+      # `release-push.sh release` reuses a published release and publishes a draft one, `tag`
+      # accepts its own tag, and `push-main` pushes nothing once main holds this version or a later
+      # one. Otherwise it bumps from the newest pi-envoy-v* tag over the paths
       # $PI_ENVOY_VERSION_ARGS names (the workflow's `env:` says why each is there).
       - name: Determine next version
         id: version
@@ -425,9 +377,10 @@ jobs:
 
   # The Legion Oh My Pi plugin, @sjawhar/pi-legion, built and published as @sjawhar/pi-envoy is.
   pi_legion_build:
-    # Only main publishes, as envoy_plugin_build says.
+    # Only main publishes, as pi_envoy_build says.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # contents: read is for the checkout; nothing here writes to the repository, a registry or a
     # release.
     permissions:
@@ -441,7 +394,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # First, before setup-bun, as envoy_plugin_build's version step is, and releasing again a tag
+      # First, before setup-bun, as pi_envoy_build's version step is, and releasing again a tag
       # an earlier attempt pushed for this commit as that step does, over the paths
       # $PI_LEGION_VERSION_ARGS names (the workflow's `env:` says why each is there).
       - name: Determine next version
@@ -497,14 +450,13 @@ jobs:
       - name: Check this job holds no credential (tripwire)
         run: .github/scripts/release-push.sh no-credential
 
-  # Publishes what the four build jobs made, in one job for all four packages, so their release
+  # Publishes what the three build jobs made, in one job for all three packages, so their release
   # waits for a runner once: pi-envoy, pi-legion, then legion, which links those two and so goes
-  # only once both are on npm, then the Envoy OpenCode plugin. It runs no bun, no node, no Go, no
-  # built binary and no scripts/ program, only release-push.sh, git, gh, jq, sha256sum, npm (view,
-  # and publish of a handed tarball) and the pinned actions below, so the scopes and the deploy key
-  # it holds never meet the code the build jobs ran. It runs on main even when nothing releases: its
-  # pair_ok output decides whether worker_image_attest attests the image, and each step decides for
-  # its own package.
+  # only once both are on npm. It runs no bun, no node, no Go, no built binary and no scripts/
+  # program, only release-push.sh, git, gh, jq, sha256sum, npm (view, and publish of a handed
+  # tarball) and the pinned actions below, so the scopes and the deploy key it holds never meet the
+  # code the build jobs ran. It runs on main even when nothing releases: its pair_ok output decides
+  # whether worker_image_attest attests the image, and each step decides for its own package.
   #
   # A package's first step runs when its build released, and each later step when the one before it
   # in the same package succeeded (`steps.<id>.outcome`, under `!cancelled()`). So a failed step
@@ -516,9 +468,10 @@ jobs:
   # packages' bump commits change different package.json files, so when one lands on main first
   # the other's `push-main` rebase onto it has nothing to resolve.
   publish:
-    needs: [pi_envoy_build, pi_legion_build, legion_build, envoy_plugin_build]
+    needs: [pi_envoy_build, pi_legion_build, legion_build]
     if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # contents: write creates the GitHub releases (`release-push.sh release`, below); id-token: write
     # is the OIDC token npm trusted publishing exchanges for the publish credential (the registry
     # records `trustedPublisher: github` for each plugin; no NPM_TOKEN is set), which also signs npm
@@ -548,7 +501,7 @@ jobs:
           persist-credentials: false
 
       # Only the npm publishes use node.
-      - if: (needs.pi_envoy_build.result == 'success' && needs.pi_envoy_build.outputs.skip != 'true') || (needs.pi_legion_build.result == 'success' && needs.pi_legion_build.outputs.skip != 'true') || (needs.envoy_plugin_build.result == 'success' && needs.envoy_plugin_build.outputs.skip != 'true')
+      - if: (needs.pi_envoy_build.result == 'success' && needs.pi_envoy_build.outputs.skip != 'true') || (needs.pi_legion_build.result == 'success' && needs.pi_legion_build.outputs.skip != 'true')
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
@@ -898,91 +851,6 @@ jobs:
           .github/scripts/release-push.sh release "$TAG" "legion v$VERSION" "${assets[@]}"
           { echo "version=$VERSION"; echo "tag=$TAG"; } >> "$GITHUB_OUTPUT"
 
-      # envoy-plugin: what envoy_plugin_build packed, published as pi-envoy's above is.
-      - name: "envoy-plugin: Download the tarball"
-        id: envoy_plugin_download
-        if: ${{ !cancelled() && needs.envoy_plugin_build.result == 'success' && needs.envoy_plugin_build.outputs.skip != 'true' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: envoy-plugin-tarball
-          path: ${{ runner.temp }}/envoy-plugin-tarball
-
-      - name: "envoy-plugin: Check the hand-over"
-        id: envoy_plugin_handed
-        if: ${{ !cancelled() && steps.envoy_plugin_download.outcome == 'success' }}
-        env:
-          VERSION: ${{ needs.envoy_plugin_build.outputs.version }}
-        run: |
-          git checkout --force --detach "$GITHUB_SHA"
-          git clean -ffdx
-          name=$(jq -r .name packages/envoy-plugin/package.json)
-          stem="${name#@}"
-          stem="${stem//\//-}-$VERSION"
-          tag=$(.github/scripts/release-push.sh handed opencode-legion-envoy-v "$VERSION" "$RUNNER_TEMP/envoy-plugin-tarball" "$stem.tgz")
-          { echo "tag=$tag"; echo "stem=$stem"; } >> "$GITHUB_OUTPUT"
-
-      - name: "envoy-plugin: Set release version"
-        id: envoy_plugin_set_version
-        if: ${{ !cancelled() && steps.envoy_plugin_handed.outcome == 'success' }}
-        env:
-          VERSION: ${{ needs.envoy_plugin_build.outputs.version }}
-        run: |
-          jq --arg v "$VERSION" '.version = $v' \
-            packages/envoy-plugin/package.json > tmp.json \
-            && mv tmp.json packages/envoy-plugin/package.json
-
-      - name: "envoy-plugin: Publish to npm"
-        id: envoy_plugin_npm
-        if: ${{ !cancelled() && steps.envoy_plugin_set_version.outcome == 'success' }}
-        env:
-          VERSION: ${{ needs.envoy_plugin_build.outputs.version }}
-          STEM: ${{ steps.envoy_plugin_handed.outputs.stem }}
-        run: |
-          if npm view "$(jq -r .name package.json)@$VERSION" version >/dev/null 2>&1; then
-            echo "npm already has $VERSION; skipping publish"
-          else
-            npm publish "$RUNNER_TEMP/envoy-plugin-tarball/$STEM.tgz" --access public --provenance
-          fi
-        working-directory: packages/envoy-plugin
-
-      - name: "envoy-plugin: Commit and tag"
-        id: envoy_plugin_tag
-        if: ${{ !cancelled() && steps.envoy_plugin_npm.outcome == 'success' }}
-        env:
-          VERSION: ${{ needs.envoy_plugin_build.outputs.version }}
-          TAG: ${{ steps.envoy_plugin_handed.outputs.tag }}
-        run: |
-          .github/scripts/release-push.sh tag packages/envoy-plugin \
-            "chore: release envoy-plugin v$VERSION [skip ci]" "$TAG"
-
-      # The deploy key reaches this step and "envoy-plugin: Push version bump" alone, as for
-      # pi-envoy.
-      - name: "envoy-plugin: Push tag"
-        id: envoy_plugin_push_tag
-        if: ${{ !cancelled() && steps.envoy_plugin_tag.outcome == 'success' }}
-        env:
-          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
-          TAG: ${{ steps.envoy_plugin_handed.outputs.tag }}
-        run: .github/scripts/release-push.sh push-tag "$TAG"
-
-      - name: "envoy-plugin: Create GitHub release"
-        id: envoy_plugin_release
-        if: ${{ !cancelled() && steps.envoy_plugin_push_tag.outcome == 'success' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.envoy_plugin_handed.outputs.tag }}
-          VERSION: ${{ needs.envoy_plugin_build.outputs.version }}
-          STEM: ${{ steps.envoy_plugin_handed.outputs.stem }}
-        run: .github/scripts/release-push.sh release "$TAG" "Envoy Plugin v$VERSION" "$RUNNER_TEMP/envoy-plugin-tarball/$STEM.tgz"
-
-      - name: "envoy-plugin: Push version bump"
-        id: envoy_plugin_push_main
-        if: ${{ !cancelled() && steps.envoy_plugin_release.outcome == 'success' }}
-        env:
-          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
-          VERSION: ${{ needs.envoy_plugin_build.outputs.version }}
-        run: .github/scripts/release-push.sh push-main packages/envoy-plugin "$VERSION"
-
   # The worker image, built from this run's commit with the plugin pair legion_build decided (empty
   # off main, where legion_build skips and the Dockerfile links none) and labelled with the legion
   # version legion_build decided (`legion_version`; empty when legion_build skips or has nothing to
@@ -1056,6 +924,7 @@ jobs:
       (needs.publish.result == 'success' || needs.publish.result == 'failure') &&
       needs.publish.outputs.tag != ''
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write # gh release edit
       packages: write # the legion version tag on ghcr.io

@@ -14,6 +14,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import type { ComposerKind } from "../conversation/composer-model";
+import type { SaveCommentEdit } from "../conversation/send-request";
 import {
   COMPACT_VIEWPORT_QUERY,
   PHONE_VIEWPORT_QUERY,
@@ -41,7 +42,7 @@ export interface MarginSheetModel {
     closeComposer: (composer: MarginComposer) => void;
     onAction: (id: string, action: MarginItemAction) => void;
     onComposerKindChange: (kind: ComposerKind) => string | undefined;
-    onEdit: (id: string, body: string) => Promise<unknown>;
+    onEdit: SaveCommentEdit;
     onRetryAction: () => void;
     onUnpin: (eventId: number) => void;
     onUnpinConversation: (id: string) => void;

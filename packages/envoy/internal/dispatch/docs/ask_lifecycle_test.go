@@ -247,30 +247,63 @@ func TestWritingIssueAskStatesLeavesTheLatestEditSourceAlone(t *testing.T) {
 }
 
 // The close moves a document's latest edit source from its room to its pending-settlement row, and
-// a room that loads while the issue is closed restores none. The reopen gives it back, so the
-// settlement the document owes names the session that edited it last, not the closer whose write
-// of its asks' states came after that edit.
+// a room that loads while the issue is closed restores none. The reopen closes that room, and the
+// room the next load opens holds the source again, so the settlement the document owes names the
+// session that edited it last, not the closer whose write of its asks' states came after that
+// edit. That load takes the source from the row only while the record holds nothing newer than
+// the row (rowIsCurrent): a record that still holds an update whose append has not landed - the
+// reopen's own ask writes, published into the room just before the reopen closes it - keeps its
+// own source through a load that starts before the close's flush takes that update, and that
+// source is the one the reopen restored (restoreLastActor), not the none the close left.
 func TestReopeningAnIssueRestoresTheLatestEditSourceOfARoomLoadedWhileClosed(t *testing.T) {
-	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	ctx := context.Background()
-	seedServiceText(t, service, artifactID, "Context\n\n"+regionBlock)
-	settleCurrentGeneration(t, service, artifactID)
-	region := blockAskOn(t, service, artifactID, "region")
-	session := model.Actor{Kind: "session", ID: "reopened-session"}
-	writeThroughLedger(t, service, artifactID, session, freshBlock, withSnapshotVersion)
-	closeTestIssue(t, service)
-	closer := model.Actor{Kind: "user", ID: "carol"}
-	writeIssueAskStates(t, service, []model.Ask{withdrawnAsk(region, closer)}, closer, true)
-	if err := service.srv.Apply(withOwnerVerified(ctx), artifactID, func(*crdt.Doc, func(func(*crdt.Transaction))) {}); err != nil && !errors.Is(err, ygws.ErrNoChanges) {
-		t.Fatalf("load the closed issue's room: %v", err)
-	}
-	if service.srv.GetDoc(artifactID) == nil || !service.roomClosed(artifactID) {
-		t.Fatal("the closed issue's room is not resident and flagged closed")
-	}
+	for _, row := range []struct {
+		name string
+		// holdAppend leaves the record holding an append that has not landed, from before the
+		// reopen until after the next load.
+		holdAppend bool
+	}{
+		{name: "the next load takes the row's source"},
+		{name: "a load while the record still holds an append keeps the restored source", holdAppend: true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			ctx := context.Background()
+			seedServiceText(t, service, artifactID, "Context\n\n"+regionBlock)
+			settleCurrentGeneration(t, service, artifactID)
+			region := blockAskOn(t, service, artifactID, "region")
+			session := model.Actor{Kind: "session", ID: "reopened-session"}
+			writeThroughLedger(t, service, artifactID, session, freshBlock, withSnapshotVersion)
+			closeTestIssue(t, service)
+			closer := model.Actor{Kind: "user", ID: "carol"}
+			writeIssueAskStates(t, service, []model.Ask{withdrawnAsk(region, closer)}, closer, true)
+			load := func(what string) {
+				t.Helper()
+				if err := service.srv.Apply(withOwnerVerified(ctx), artifactID, func(*crdt.Doc, func(func(*crdt.Transaction))) {}); err != nil && !errors.Is(err, ygws.ErrNoChanges) {
+					t.Fatalf("load %s: %v", what, err)
+				}
+			}
+			load("the closed issue's room")
+			if service.srv.GetDoc(artifactID) == nil || !service.roomClosed(artifactID) {
+				t.Fatal("the closed issue's room is not resident and flagged closed")
+			}
+			if row.holdAppend {
+				state := service.room(artifactID)
+				state.mu.Lock()
+				state.durableAppends.Add(1)
+				state.mu.Unlock()
+				defer service.finishDurableAppend(artifactID, state)
+			}
 
-	reopenTestIssue(t, service)
-	requireLatestEditSource(t, service, artifactID, session)
+			reopenTestIssue(t, service)
+			waitForNoLiveDocument(t, service, artifactID)
+			load("the reopened issue's room")
+			if service.roomClosed(artifactID) {
+				t.Fatal("the reopened issue's room is flagged closed")
+			}
+			requireLatestEditSource(t, service, artifactID, session)
+		})
+	}
 }
 
 // A close and a reopen are no edit of a document, so neither is ever its latest editor, and

@@ -18,16 +18,59 @@ unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE
 # for the default broker switch below) name the fakes the caller started, whose
 # ports e2e/harness-start.ts reads from their reports.
 #
-# DISPATCH_E2E_PORT unset (or empty), the server serves on a port the kernel
-# chooses, held from that moment until the server serves on it:
-# scripts/e2e/lib/held-port.py opens a listening socket on 127.0.0.1:0 and the
-# server inherits it (DISPATCH_LISTEN_FD). The server's own line reports it,
+# One server (DISPATCH_E2E_PROCESSES unset or 1): DISPATCH_E2E_PORT unset (or
+# empty), the server serves on a port the kernel chooses, held from that moment
+# until the server serves on it: scripts/e2e/lib/held-port.py opens a listening
+# socket on 127.0.0.1:0 and the server inherits it (DISPATCH_LISTEN_FD). The
+# server's own line reports it,
 #   ... msg="dispatch: listening" addr=127.0.0.1:<port>
 # on stderr, the line a caller waits for and reads the port from. Set, the
 # server binds exactly that port, and an occupied one fails with "address
 # already in use". DISPATCH_E2E_LISTEN_FROM instead names the unix socket of a
 # `held-port.py keep` process, for a caller that needs the port before the
-# server starts: the server serves on that keeper's port.
+# server starts: the server serves on that keeper's port. The server's
+# dashboard origin is its own, http://127.0.0.1:<port>.
+#
+# Two processes (DISPATCH_E2E_PROCESSES=2, e2e/harness-processes.ts): the
+# harness runs this script twice, Dispatch A and B, behind the round-robin proxy
+# (e2e/round-robin-proxy.ts) on DISPATCH_E2E_PORT, whose origin both serve as
+# their dashboard origin. Each run's own port is DISPATCH_E2E_SERVER_PORT when
+# its DISPATCH_E2E_PORT_A or _B is set, and otherwise the port of the keeper
+# DISPATCH_E2E_LISTEN_FROM names, which e2e/harness-start.ts holds before it
+# starts the proxy, so the proxy can name it. B gets a web dist of its own in
+# DISPATCH_E2E_SERVER_WEB_DIST (a path from packages/envoy, where the server
+# runs), and both one DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY, required here under dev
+# sign-in: with a key apiece, a person signed in on one process is signed out by
+# the first request the other answers.
+#
+# Sign-in (DISPATCH_E2E_SIGNIN, e2e/harness-signin.ts): unset (or empty), the
+# server mounts its dev sign-in route (DISPATCH_DEV_SIGNIN=1, below). `oidc` is
+# the production sign-in instead, at the dev OIDC issuer the harness started
+# (e2e/run-signin-issuer.sh) on DISPATCH_E2E_SIGNIN_ISSUER_PORT: the server takes
+# it as DISPATCH_SIGNIN_ISSUER, with DISPATCH_E2E_SIGNIN_CLIENT_ID,
+# DISPATCH_E2E_SIGNIN_CLIENT_SECRET and DISPATCH_E2E_SIGNIN_GROUP as its client
+# and the group it admits, and DISPATCH_E2E_SIGNING_KEY as DISPATCH_SIGNING_KEY,
+# one key for every process of the run, all required, and no dev sign-in.
+case "${DISPATCH_E2E_PROCESSES:-1}" in
+  1)
+    own_port_variable=DISPATCH_E2E_PORT
+    own_port="${DISPATCH_E2E_PORT:-}"
+    dashboard_origin=""
+    ;;
+  2)
+    if [ -z "${DISPATCH_E2E_SIGNIN:-}" ]; then
+      : "${DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY:?DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY must give both processes of DISPATCH_E2E_PROCESSES=2 one cookie key}"
+    fi
+    : "${DISPATCH_E2E_PORT:?DISPATCH_E2E_PORT must name the round-robin proxy (e2e/round-robin-proxy.ts) both processes of DISPATCH_E2E_PROCESSES=2 serve behind}"
+    own_port_variable=DISPATCH_E2E_SERVER_PORT
+    own_port="${DISPATCH_E2E_SERVER_PORT:-}"
+    dashboard_origin="http://127.0.0.1:$DISPATCH_E2E_PORT"
+    ;;
+  *)
+    echo "DISPATCH_E2E_PROCESSES must be 1, 2 or unset, not '$DISPATCH_E2E_PROCESSES'" >&2
+    exit 1
+    ;;
+esac
 : "${DATABASE_URL:?DATABASE_URL must name an isolated Dispatch e2e database}"
 : "${FAKE_ENVOY_PORT:?FAKE_ENVOY_PORT must name the fake Envoy (e2e/fake-envoy.ts) this server reads}"
 : "${FAKE_GITHUB_PORT:?FAKE_GITHUB_PORT must name the fake GitHub (e2e/fake-github.ts) this server reads}"
@@ -35,22 +78,55 @@ database_url="$DATABASE_URL"
 fake_envoy_port="$FAKE_ENVOY_PORT"
 fake_github_port="$FAKE_GITHUB_PORT"
 held_port="$(cd "$(dirname "$0")/../../.." && pwd)/scripts/e2e/lib/held-port.py"
-if [ -n "${DISPATCH_E2E_PORT:-}" ] && [ -n "${DISPATCH_E2E_LISTEN_FROM:-}" ]; then
-  echo "run-server.sh: set DISPATCH_E2E_PORT or DISPATCH_E2E_LISTEN_FROM, not both" >&2
+if [ -n "$own_port" ] && [ -n "${DISPATCH_E2E_LISTEN_FROM:-}" ]; then
+  echo "run-server.sh: set $own_port_variable or DISPATCH_E2E_LISTEN_FROM, not both" >&2
   exit 2
 fi
-if [ -n "${DISPATCH_E2E_PORT:-}" ]; then
+if [ -n "$own_port" ]; then
   listen=()
-  port_env=(DISPATCH_PORT="$DISPATCH_E2E_PORT" DISPATCH_SERVER_URL="http://127.0.0.1:$DISPATCH_E2E_PORT")
+  port_env=(DISPATCH_PORT="$own_port" DISPATCH_SERVER_URL="${dashboard_origin:-http://127.0.0.1:$own_port}")
 else
   listen=(python3 "$held_port" exec)
   if [ -n "${DISPATCH_E2E_LISTEN_FROM:-}" ]; then
     listen+=(--from "$DISPATCH_E2E_LISTEN_FROM")
   fi
+  # held-port.py writes the port it holds in for {port}.
+  own_origin='http://127.0.0.1:{port}'
   listen+=(--fd-env DISPATCH_LISTEN_FD
-    --env 'DISPATCH_PORT={port}' --env 'DISPATCH_SERVER_URL=http://127.0.0.1:{port}' --)
+    --env 'DISPATCH_PORT={port}' --env "DISPATCH_SERVER_URL=${dashboard_origin:-$own_origin}" --)
   port_env=()
 fi
+
+# This process's own web dist and sign-in, read before the sweep below: web/dist and dev sign-in
+# with a cookie key of its own unless two-process mode or DISPATCH_E2E_SIGNIN gave it others
+# (above).
+web_dist="${DISPATCH_E2E_SERVER_WEB_DIST:-../dispatch/web/dist}"
+case "${DISPATCH_E2E_SIGNIN:-}" in
+  "")
+    signin_env=(DISPATCH_DEV_SIGNIN=1)
+    if [ -n "${DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY:-}" ]; then
+      signin_env+=(DISPATCH_DEV_SIGNIN_SHARED_KEY="$DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY")
+    fi
+    ;;
+  oidc)
+    : "${DISPATCH_E2E_SIGNIN_ISSUER_PORT:?DISPATCH_E2E_SIGNIN_ISSUER_PORT must name the dev OIDC issuer (e2e/run-signin-issuer.sh) DISPATCH_E2E_SIGNIN=oidc signs in at}"
+    : "${DISPATCH_E2E_SIGNIN_CLIENT_ID:?DISPATCH_E2E_SIGNIN_CLIENT_ID must name the Dispatch client at the dev OIDC issuer}"
+    : "${DISPATCH_E2E_SIGNIN_CLIENT_SECRET:?DISPATCH_E2E_SIGNIN_CLIENT_SECRET must give the secret of that client}"
+    : "${DISPATCH_E2E_SIGNIN_GROUP:?DISPATCH_E2E_SIGNIN_GROUP must name the sign-in pool group the server admits}"
+    : "${DISPATCH_E2E_SIGNING_KEY:?DISPATCH_E2E_SIGNING_KEY must give every process of DISPATCH_E2E_SIGNIN=oidc one cookie key}"
+    signin_env=(
+      DISPATCH_SIGNIN_ISSUER="http://127.0.0.1:$DISPATCH_E2E_SIGNIN_ISSUER_PORT"
+      DISPATCH_SIGNIN_CLIENT_ID="$DISPATCH_E2E_SIGNIN_CLIENT_ID"
+      DISPATCH_SIGNIN_CLIENT_SECRET="$DISPATCH_E2E_SIGNIN_CLIENT_SECRET"
+      DISPATCH_SIGNIN_GROUP="$DISPATCH_E2E_SIGNIN_GROUP"
+      DISPATCH_SIGNING_KEY="$DISPATCH_E2E_SIGNING_KEY"
+    )
+    ;;
+  *)
+    echo "DISPATCH_E2E_SIGNIN must be oidc or unset, not '$DISPATCH_E2E_SIGNIN'" >&2
+    exit 1
+    ;;
+esac
 
 # The secrets broker the server relays credential requests to, read before
 # the sweep below drops every DISPATCH_* variable. DISPATCH_E2E_AGENT_SECRETS_URL
@@ -113,13 +189,18 @@ done
 # commit) beside a fake client id. Identity is the production cookie: the server
 # mints it for the email a test names at its dev sign-in route
 # (DISPATCH_DEV_SIGNIN=1) with a signing key it generates for this process
-# alone, so no key is passed and nothing reaches the caller's persistent data
-# dir; DISPATCH_INSECURE_COOKIE=1 keeps the cookie usable over plain HTTP in
-# every engine. DISPATCH_SERVER_URL stays http://127.0.0.1:<port>, the port the
-# server serves on: it is the origin the CSRF guard compares writes against,
-# the only Host the router serves under the flag, and the Playwright config's
-# baseURL. The flag also refuses a DATABASE_URL whose host is not
-# loopback or a unix socket, and any DISPATCH_SIGNIN_* setting.
+# alone, or in two-process mode derives from the shared key above, so no
+# signing key is passed and nothing reaches the caller's persistent data dir;
+# under DISPATCH_E2E_SIGNIN=oidc it mints it at /auth/callback, signed with the
+# run's DISPATCH_SIGNING_KEY, which keeps the data dir out of it too.
+# DISPATCH_INSECURE_COOKIE=1 keeps the cookie usable over plain HTTP in every
+# engine. DISPATCH_SERVER_URL is the dashboard origin above,
+# http://127.0.0.1:<port> of the port the server serves on, or in two-process
+# mode the round-robin proxy's: it is the origin the CSRF guard compares writes
+# against, the only Host the router serves under dev sign-in, the origin of the
+# sign-in's /auth/callback, and the Playwright config's baseURL. Dev sign-in
+# also refuses a DATABASE_URL whose host is not loopback or a unix socket, and
+# any DISPATCH_SIGNIN_* setting.
 app_pem="$(openssl genrsa 2048 2>/dev/null)"
 
 cd "$(dirname "$0")/../../envoy"
@@ -128,19 +209,19 @@ cd "$(dirname "$0")/../../envoy"
 # so a SIGTERM to it ends the go command and leaves the server listening. Playwright kills the
 # whole process group and the skill-scenarios rig the whole process tree, but a caller that
 # signals the one pid it started (`kill $!`) needs that pid to be the server. One binary per
-# checkout, built under a lock so two harnesses starting at once serialise: Go rewrites it only
-# when the source changed, and a running server keeps the inode it started from. The port is
-# chosen only after the build, and held-port.py execs `env`, which execs the server, so the pid a
-# caller started is still the server's.
+# checkout, built under a lock so two harnesses, or two-process mode's two servers, starting at
+# once serialise: Go rewrites it only when the source changed, and a running server keeps the
+# inode it started from. The port is chosen only after the build, and held-port.py execs `env`,
+# which execs the server, so the pid a caller started is still the server's.
 flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
 exec "${listen[@]}" env \
   "${broker_env[@]}" \
   "${file_store_env[@]}" \
+  "${signin_env[@]}" \
   DATABASE_URL="$database_url" \
   DISPATCH_AGENT_TOKEN=e2e-token \
   DISPATCH_APP_CLIENT_ID=Iv1.e2efake \
   DISPATCH_APP_PEM_B64="$app_pem" \
-  DISPATCH_DEV_SIGNIN=1 \
   DISPATCH_GITHUB_API_BASE="http://127.0.0.1:$fake_github_port" \
   DISPATCH_IDENTITY=cookie \
   DISPATCH_INSECURE_COOKIE=1 \
@@ -149,7 +230,7 @@ exec "${listen[@]}" env \
   "${port_env[@]}" \
   DISPATCH_TEST_HOOKS=1 \
   DISPATCH_TEST_ROSTER_UNCACHED=1 \
-  DISPATCH_WEB_DIST=../dispatch/web/dist \
+  DISPATCH_WEB_DIST="$web_dist" \
   ENVOY_URL="http://127.0.0.1:$fake_envoy_port" \
   HOME=/nonexistent \
   XDG_CACHE_HOME=/nonexistent \

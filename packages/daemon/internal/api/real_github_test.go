@@ -72,8 +72,10 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 	}
 	t.Logf("gh with an empty GH_CONFIG_DIR: exit=%d %s", denied.code, strings.TrimSpace(denied.stderr))
 
+	scratch := t.TempDir()
 	clone := exec.Command("git", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
-		"clone", "https://github.com/sjawhar/legion-smoke", filepath.Join(t.TempDir(), "legion-smoke"))
+		"clone", "https://github.com/sjawhar/legion-smoke", filepath.Join(scratch, "legion-smoke"))
+	clone.Dir = scratch
 	clone.Env = append(realCLIEnvironment(gh, dirs[appauth.Implement]), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0")
 	output, err := clone.CombinedOutput()
 	if err != nil {
@@ -87,10 +89,12 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 // command are written.
 var githubAppsLib = filepath.Join("..", "..", "..", "..", "scripts", "e2e", "lib", "github-apps.sh")
 
-// liveProofAppInputs is the four inputs githubAppsLib reads, each overriding one default.
+// liveProofAppInputs is the five inputs githubAppsLib reads, each overriding one default: the two
+// Apps' ids and key names, and the key runner both key commands run.
 var liveProofAppInputs = []string{
 	"LEGION_E2E_IMPLEMENT_APP_ID", "LEGION_E2E_IMPLEMENT_APP_KEY_NAME",
 	"LEGION_E2E_REVIEW_APP_ID", "LEGION_E2E_REVIEW_APP_KEY_NAME",
+	"LEGION_E2E_APP_KEY_RUNNER",
 }
 
 // liveProofApp is one role's App as githubAppsLib resolves it.

@@ -53,6 +53,7 @@ const schemas: Record<string, z.ZodType> = {
   "controller-github-credential.json": LegionControllerCredentialResponse,
   "error.json": LegionErrorResponse,
   "operator-claim.json": LegionOperatorClaimResponse,
+  "operator-forget-session.json": LegionOperatorClaimResponse,
   "operator-claims.json": LegionOperatorClaimsResponse,
   "grant.json": LegionGrantResponse,
   "handoff-complete.json": LegionHandoffCompleteResponse,
@@ -540,7 +541,9 @@ test("the state golden carries each issue's repository and the project's mapping
 // The state's capability report (contract 16): the golden carries a decided row with the operator's
 // reason and an open row with the legion.yaml line that records a decision, beside the present
 // (codegraph among them: the image carries the tooling and a pod's launch loads it with extension
-// discovery on) and withheld rows, and the six live rows unchecked — no session has reported, so
+// discovery on; claude-code too, since one worker image carries the claude-envoy plugin and the
+// pin a pod installs Claude Code from for a role whose worker_backends names it) and withheld
+// rows, and the six live rows unchecked — no session has reported, so
 // the deployment renders each as `unchecked` with its ruling (contract 21) — and the report is
 // never absent from a state. `installed` left the status set at contract 25: it was codegraph's
 // until LEGION-629, and no row has carried it since. Each deployment row carries `source`
@@ -568,6 +571,13 @@ test("the state golden carries the deployment's capability report", () => {
   });
   expect(rows.codegraph).toEqual({
     name: "codegraph",
+    status: "present",
+    detail: "checked by the daemon's probe of the worker image, which passed",
+  });
+  // A capability `name` is a plain non-empty string, so a row the daemon adds — claude-code at
+  // dispatch://INFRA-220 — parses against the schema already published; the golden carries it.
+  expect(rows["claude-code"]).toEqual({
+    name: "claude-code",
     status: "present",
     detail: "checked by the daemon's probe of the worker image, which passed",
   });
@@ -770,6 +780,87 @@ test("the state golden carries the daemon's settings with no credential, and the
   expect(text).not.toMatch(/BEGIN .*PRIVATE KEY/);
   expect(text).not.toMatch(/postgres:\/\//);
   expect(text).not.toMatch(/:\/\/[^/@\s]+:[^/@\s]+@/);
+});
+
+// The lag of the daemon's durable consumers (contract 43): the golden carries a caught-up consumer,
+// one whose info NATS did not answer and one stalled with messages waiting; a state with no
+// workflow carries an empty list; the oldest and the last handled are null rather than absent, an
+// unknown field and a negative count are refused, and the list cannot be dropped: a plugin from
+// before the field refuses the state, which is what the bump is for.
+test("the state golden carries each durable consumer's lag, and the list cannot be dropped", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  expect(state.consumers).toEqual([
+    {
+      name: "legion-go-LEGION-dispatch",
+      waiting: 0,
+      oldestAt: null,
+      oldestAgeSeconds: null,
+      lastHandledAt: "2026-09-22T09:17:50Z",
+      stalled: false,
+    },
+    {
+      name: "legion-go-LEGION-dispatch-server",
+      waiting: 0,
+      oldestAt: null,
+      oldestAgeSeconds: null,
+      lastHandledAt: null,
+      stalled: false,
+      unavailable: "read the consumer's info: context deadline exceeded",
+    },
+    {
+      name: "legion-go-LEGION-github",
+      waiting: 412,
+      oldestAt: "2026-09-22T09:05:34Z",
+      oldestAgeSeconds: 754,
+      lastHandledAt: "2026-09-22T09:16:41Z",
+      stalled: true,
+    },
+  ]);
+  expect(LegionStateResponse.parse(fixture("state-stage3.json")).consumers).toEqual([]);
+
+  const absent = fixture("state.json") as { consumers: Record<string, unknown>[] };
+  delete absent.consumers[0]?.oldestAt;
+  expect(LegionStateResponse.safeParse(absent).success).toBeFalse();
+
+  const unknown = fixture("state.json") as { consumers: Record<string, unknown>[] };
+  unknown.consumers = [{ ...unknown.consumers[0], pending: 3 }];
+  expect(LegionStateResponse.safeParse(unknown).success).toBeFalse();
+
+  const negative = fixture("state.json") as { consumers: Record<string, unknown>[] };
+  negative.consumers = [{ ...negative.consumers[0], waiting: -1 }];
+  expect(LegionStateResponse.safeParse(negative).success).toBeFalse();
+
+  const dropped = fixture("state.json") as Record<string, unknown>;
+  delete dropped.consumers;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+});
+
+// Each served repository Dispatch's GitHub App is not known to be installed on (contract 43): the
+// golden carries one with its reason, a state with none carries an empty list, an entry without
+// its reason is refused, and the list cannot be dropped: a plugin from before the field refuses
+// the state.
+test("the state golden names each served repository without the webhook App, and the list cannot be dropped", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  expect(state.repositories.withoutWebhookApp).toEqual([
+    {
+      repo: "zeta/tools",
+      reason:
+        "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes",
+    },
+  ]);
+  expect(
+    LegionStateResponse.parse(fixture("state-stage3.json")).repositories.withoutWebhookApp
+  ).toEqual([]);
+
+  const reasonless = fixture("state.json") as {
+    repositories: { withoutWebhookApp: Record<string, unknown>[] };
+  };
+  delete reasonless.repositories.withoutWebhookApp[0]?.reason;
+  expect(LegionStateResponse.safeParse(reasonless).success).toBeFalse();
+
+  const dropped = fixture("state.json") as { repositories: Record<string, unknown> };
+  delete dropped.repositories.withoutWebhookApp;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 
 // An operator spawns a claim on an issue no workflow records — `legion claims spawn`, which is

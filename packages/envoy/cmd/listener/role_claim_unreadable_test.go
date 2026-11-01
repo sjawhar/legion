@@ -24,7 +24,8 @@ var unreadableRoleClaims = []struct {
 }
 
 // openUnreadableRoleClaim stores record raw in the role bucket as role's claim, past every writer
-// that would refuse it, and returns the listener state that resolves it.
+// that would refuse it, and returns the listener state that resolves it, wired for the publish
+// route as main wires it (withPublishRoute).
 func openUnreadableRoleClaim(t *testing.T, role, record string) (*listenerDeps, *store.Registry) {
 	t.Helper()
 	client := setupPublishTestClient(t)
@@ -32,7 +33,7 @@ func openUnreadableRoleClaim(t *testing.T, role, record string) (*listenerDeps, 
 	if _, err := registryRoleKV(t, registry).Put(role, []byte(record)); err != nil {
 		t.Fatalf("store the claim record %q: %v", record, err)
 	}
-	return &listenerDeps{client: client, registry: registry, sessions: sessions}, registry
+	return withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions}), registry
 }
 
 // assertUnreadableRoleClaimAnswer holds the answer both role routes give a claim record no read can
@@ -81,7 +82,7 @@ func TestARoleLookupAnswersAnUnreadableClaimRecordAsAServerError(t *testing.T) {
 	}
 }
 
-// A role-lane publish answers the same record as the lookup does, and records it under its own
+// A role send through the publish route answers the same record as the lookup does, and records it under its own
 // outcome rather than bus_unavailable, at WARN as every refusal is.
 func TestARolePublishAnswersAnUnreadableClaimRecordAsAServerError(t *testing.T) {
 	const role = "reviewer"

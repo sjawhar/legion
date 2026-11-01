@@ -19,9 +19,10 @@ import (
 )
 
 // Image is the pgvector server image CI uses for Dispatch's Postgres service: pgvector 0.8.7 on
-// PostgreSQL 18 (tag 0.8.7-pg18), pinned by digest. The envoy-infra-go job pulls it before the
-// natslive tests run, so a test does not fetch it in the middle of a lane.
-const Image = "mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11"
+// PostgreSQL 18 (tag 0.8.7-pg18), as ghcr.io/sjawhar/legion/ci holds it, the copy of
+// pgvector/pgvector (.github/ci-images.yaml). The envoy-infra-go job pulls it before the natslive
+// tests run, so a test does not fetch it in the middle of a lane.
+const Image = "ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11"
 
 // databaseURLEnv names the Postgres server a test may be given instead of starting one. It is
 // spelled here rather than taken from internal/dispatch/store/storetest, which declares the same
@@ -35,8 +36,8 @@ const databaseURLEnv = "DISPATCH_TEST_DATABASE_URL"
 // dropped when the test ends. It is reached two ways.
 //
 // With DISPATCH_TEST_DATABASE_URL set, the database is created on the server that variable names
-// — the Postgres service the envoy-go job already runs
-// (.github/workflows/envoy-and-contracts.yaml) — and dropped from it afterwards. That variable is
+// — the Postgres service the envoy-go job of .github/workflows/ci.yaml already runs — and
+// dropped from it afterwards. That variable is
 // storetest's own, reused rather than doubled: it is how every Postgres-backed Dispatch test is
 // already told which server CI provides, and a second name would have to be set beside it on every
 // job and in every developer's shell for the same answer. Its database path is ignored exactly as

@@ -17,8 +17,8 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// These tests drive the built listener against a real NATS and a fake serving port: the OpenCode
-// plugin's way of being reached, where the listener POSTs each notification to
+// These tests drive the built listener against a real NATS and a fake serving port: how a session
+// that serves an HTTP port is reached, where the listener POSTs each notification to
 // /session/<id>/prompt_async. They use only what the listener had before INFRA-122 (its binary,
 // its /v1 API and the bus), so the file compiles unchanged at the commit before the change. There
 // TestAServingPortReceivesATopicTheStreamDoesNotStore and
@@ -92,8 +92,8 @@ func (p *servingPort) noPrompt(t *testing.T, window time.Duration) {
 	}
 }
 
-// registerServingSession registers sessionID with the listener as the OpenCode plugin does: its
-// serving port, the host it runs on, and its topics. The listener must answer 200.
+// registerServingSession registers sessionID with the listener as a session that serves an HTTP
+// port does: its serving port, the host it runs on, and its topics. The listener must answer 200.
 func registerServingSession(t *testing.T, listener *listenerProcess, serving *servingPort, host string, topics ...string) {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
@@ -322,10 +322,13 @@ func TestAStoredTopicStillReachesAServingPortOnce(t *testing.T) {
 	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), inbox)
 	serving.noPrompt(t, 2*time.Second)
 
+	// Straight onto the role lane, which the live lane also takes: the publish route would forward
+	// the message to its holder itself.
 	role := "stored-once-" + id.New()
 	_, received := holdRole(t, listener, uri, role)
-	postListener(t, listener.port, "/v1/messages/publish", `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"a message for whoever holds the role"}`)
-	requireOneRoleMessage(t, received, contracts.RoleTopicPrefix+role, "a message for whoever holds the role", 2*time.Second)
+	roleMessage := newEnvelope("agent", contracts.RoleTopicPrefix+role, "a message for whoever holds the role")
+	publish(t, publisher, roleMessage)
+	requireOneRoleMessage(t, received, roleMessage.Topic, roleMessage.PayloadSummary, 2*time.Second)
 }
 
 // Two listeners of one machine, as a rolling deploy runs them, both with the live lane on: NATS

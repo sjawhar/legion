@@ -1,0 +1,9 @@
+kind: Changed
+body: |-
+    A merge the daemon submits now carries its own squash commit message: the pull request's
+    title and number as the subject, and an empty body. GitHub's default joined every commit
+    message of the branch into that body and so onto the base branch; those messages no longer
+    reach it through a merge the daemon makes. An armed auto-merge keeps the title it was armed
+    with, so a title edited after the arm does not reach the merge. On a base that requires a
+    merge queue GitHub ignores the message the daemon sends and keeps its default.
+time: 2026-10-30T17:27:31Z

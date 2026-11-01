@@ -1,12 +1,14 @@
 package record
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -58,6 +60,37 @@ func (s *Postgres) Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error) {
 	issues, err := queryIssues(ctx, tx, "select "+issueColumns+" from issues order by key")
 	if err != nil {
 		return nil, fmt.Errorf("list issues: %w", err)
+	}
+	return issues, nil
+}
+
+// LiveIssues is every record of project that is not finished, by key: each not in phase done, each
+// set back to todo (a done root a person re-admits, a parked child of a live tree), and each done
+// one that still holds a slot, which the next release of slots frees. The first two are the
+// issues_live index's predicate (0062), so the read grows with the project's unfinished records,
+// which admission's cap bounds, and never with the done records a project keeps for good; the
+// last comes through the slots, which the cap bounds too.
+func (s *Postgres) LiveIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
+	issues, err := queryIssues(ctx, tx, "select "+issueColumns+` from issues
+		where project = $1 and (phase <> 'done' or status = 'todo')
+		union all select `+issueColumns+` from issues
+		where project = $1 and phase = 'done' and status <> 'todo' and key in (select issue from slots)
+		order by key`, project)
+	if err != nil {
+		return nil, fmt.Errorf("list the live issues of project %s: %w", project, err)
+	}
+	return issues, nil
+}
+
+// IssuesOf is the record of each of keys that is an issue of project, by key; a key with no record
+// is left out. No keys read nothing.
+func (s *Postgres) IssuesOf(ctx context.Context, tx pgx.Tx, project string, keys []string) ([]Issue, error) {
+	if len(keys) == 0 {
+		return []Issue{}, nil
+	}
+	issues, err := queryIssues(ctx, tx, "select "+issueColumns+" from issues where project = $1 and key = any($2) order by key", project, keys)
+	if err != nil {
+		return nil, fmt.Errorf("read issues %v of project %s: %w", keys, project, err)
 	}
 	return issues, nil
 }
@@ -204,11 +237,41 @@ func (s *Postgres) UnnamedIssues(ctx context.Context, tx pgx.Tx, project string)
 	return s.issuesWhere(ctx, tx, "project = $1 and repo <> '' and github_repo = ''", project, "with no GitHub spelling of their repository")
 }
 
-func (s *Postgres) HandedOffWithoutPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
-	return s.issuesWhere(ctx, tx, "project = $1 and github_repo <> '' and phase = '"+string(phase.Implementing)+"'"+
-		" and key in (select issue from phases where role = '"+string(claim.RoleImplementer)+"' and handoff_commit <> '')"+
-		" and key not in (select issue from pull_requests where state in ('"+string(PullRequestOpen)+"', '"+string(PullRequestMerged)+"'))",
-		project, "in implementing with a recorded handoff and no open or merged pull request")
+func (s *Postgres) HandedOffWithoutOpenOrMergedPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]HandedOff, error) {
+	const what = "in implementing with a recorded handoff and no open or merged pull request"
+	rows, err := tx.Query(ctx, "select "+issueColumns+", implementer.handoff_commit from issues"+
+		" join (select issue, handoff_commit from phases where role = '"+string(claim.RoleImplementer)+"' and handoff_commit <> '')"+
+		" implementer (implementer_issue, handoff_commit) on implementer.implementer_issue = issues.key"+
+		" where project = $1 and github_repo <> '' and phase = '"+string(phase.Implementing)+"'"+
+		" and key not in (select issue from pull_requests where state = any($2))"+
+		" order by key", project, implementationMoveSQLStates)
+	if err != nil {
+		return nil, fmt.Errorf("list the issues of %s %s: %w", project, what, err)
+	}
+	defer rows.Close()
+	var handedOff []HandedOff
+	for rows.Next() {
+		var commit string
+		issue, err := scanIssue(scanThen{row: rows, after: []any{&commit}})
+		if err != nil {
+			return nil, fmt.Errorf("list the issues of %s %s: %w", project, what, err)
+		}
+		handedOff = append(handedOff, HandedOff{Issue: *issue, Commit: commit})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the issues of %s %s: %w", project, what, err)
+	}
+	return handedOff, nil
+}
+
+// scanThen is row with after scanned from the columns that follow the ones a Scan names.
+type scanThen struct {
+	row   scanner
+	after []any
+}
+
+func (s scanThen) Scan(dest ...any) error {
+	return s.row.Scan(append(dest, s.after...)...)
 }
 
 // issuesWhere is every record of project the condition selects, by key; what names them in an
@@ -346,7 +409,7 @@ func scanIssue(row scanner) (*Issue, error) {
 }
 
 func (s *Postgres) Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error) {
-	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, rounds, verdict, summary, last_handoff, decision, completed_at, merge_note from phases
+	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, rounds, verdict, summary, last_handoff, decision, completed_at, merge_note, assignment from phases
 		where issue = $1 order by role`, issue)
 	if err != nil {
 		return nil, fmt.Errorf("list phases for %s: %w", issue, err)
@@ -375,14 +438,14 @@ func (s *Postgres) PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) erro
 		}
 	}
 	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, summary, last_handoff,
-		decision, completed_at, merge_note)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		decision, completed_at, merge_note, assignment)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		on conflict (issue, role) do update set claim = excluded.claim,
 		handoff_commit = excluded.handoff_commit, rounds = excluded.rounds, verdict = excluded.verdict,
 		summary = excluded.summary, last_handoff = excluded.last_handoff, decision = excluded.decision,
-		completed_at = excluded.completed_at, merge_note = excluded.merge_note`,
+		completed_at = excluded.completed_at, merge_note = excluded.merge_note, assignment = excluded.assignment`,
 		phase.Issue, string(phase.Role), string(phase.Claim), phase.HandoffCommit, phase.Rounds, phase.Verdict, phase.Summary, phase.LastHandoff,
-		decision, phase.CompletedAt, phase.MergeNote,
+		decision, phase.CompletedAt, phase.MergeNote, phase.Assignment,
 	)
 	if err != nil {
 		return fmt.Errorf("put %s phase on %s: %w", phase.Role, phase.Issue, err)
@@ -395,7 +458,7 @@ func scanPhase(row scanner) (PhaseRow, error) {
 	var role, token string
 	var decision []byte
 	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Rounds, &phase.Verdict, &phase.Summary, &phase.LastHandoff,
-		&decision, &phase.CompletedAt, &phase.MergeNote); err != nil {
+		&decision, &phase.CompletedAt, &phase.MergeNote, &phase.Assignment); err != nil {
 		return PhaseRow{}, err
 	}
 	phase.CompletedAt = phase.CompletedAt.UTC()
@@ -448,6 +511,22 @@ func (s *Postgres) PullRequestByNumber(ctx context.Context, tx pgx.Tx, repo stri
 		return nil, fmt.Errorf("read pull request %s#%d: %w", repo, number, err)
 	}
 	return pr, nil
+}
+
+// RowQuerier reads one row: a pool (*pgxpool.Pool), a connection or a transaction.
+type RowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// PullRequestRecorded says whether a pull request of repo is recorded by number, as
+// PullRequestByNumber looks it up. It is one read of q: through a pool it takes no transaction and
+// no lock, so a caller with no fact lock can ask before it does any other work.
+func PullRequestRecorded(ctx context.Context, q RowQuerier, repo string, number int) (bool, error) {
+	var recorded bool
+	if err := q.QueryRow(ctx, `select exists(select 1 from pull_requests where repo = $1 and number = $2)`, repo, number).Scan(&recorded); err != nil {
+		return false, fmt.Errorf("read whether %s#%d is recorded: %w", repo, number, err)
+	}
+	return recorded, nil
 }
 
 // OpenPullRequests is every open pull request of the Dispatch project's issues, by issue key.
@@ -589,7 +668,11 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 			"head_run = null, planned_red = false, checked_head = '', failing = '[]'::jsonb, cancelled = '[]'::jsonb, " +
 			"check_runs = '[]'::jsonb where " + where,
 		"delete from design_gates where " + where,
-		"update phases set handoff_commit = '', rounds = 0, verdict = '', summary = '', decision = null, merge_note = '' where " + where,
+		// The assignment goes with the run too: the start that re-enters the phase mints the next
+		// one, and until it does the cleared row names none, which the completion route reads as
+		// nothing to compare rather than as a mismatch to refuse.
+		"update phases set handoff_commit = '', rounds = 0, verdict = '', summary = '', decision = null, merge_note = '', " +
+			"assignment = '' where " + where,
 		// A READY the gate refused waits on the merger's packet, which the statement above clears.
 		"update issues set ready_pending_version = null where " + issues,
 	} {
@@ -1126,7 +1209,7 @@ const outboxLaneFree = `not (outbox.kind = any($5::text[]) and exists (select 1 
 const outboxClaimable = outboxUnleasedDue + ` and ` + outboxInOrder + ` and ` + outboxLaneFree
 
 // lifecycleKindNames is the lifecycle lane's kinds as the outbox stores them, the $5 every
-// statement embedding the predicates takes and the lane UnfinishedLanes sorts rows into.
+// statement embedding the predicates takes: the lane rule is the lifecycle lane's alone.
 var lifecycleKindNames = kindNames(laneKinds[LaneLifecycle])
 
 // outboxDueArgs is the parameters of a statement that embeds the predicates: now, the ordering
@@ -1250,28 +1333,37 @@ func (s *Postgres) NextDue(ctx context.Context, tx pgx.Tx, issue string, kinds [
 }
 
 // UnfinishedLanes is every lane of project's issues with a row still in the outbox — due, running,
-// backing off or held — by issue then lane: the lanes the runner needs an executor for.
+// backing off or held — by issue then lane: the lanes the runner needs an executor for. The kinds
+// left are read and sorted into lanes here (LaneOf), rather than mapped in SQL, so laneKinds stays
+// the one place a kind's lane is written down however many lanes there are. A kind this binary has
+// no lane for — a row a newer daemon of a rolling restart queued — is left out: this daemon has no
+// executor for it either, and the daemon that wrote it runs it.
 func (s *Postgres) UnfinishedLanes(ctx context.Context, tx pgx.Tx, project string) ([]LaneKey, error) {
-	rows, err := tx.Query(ctx, `select distinct issue, case when kind = any($2::text[]) then $3::text else $4::text end as lane
-		from outbox where split_part(issue, '-', 1) = $1 order by issue, lane`,
-		project, lifecycleKindNames, string(LaneLifecycle), string(LaneBoard))
+	rows, err := tx.Query(ctx, `select distinct issue, kind from outbox where split_part(issue, '-', 1) = $1`, project)
 	if err != nil {
 		return nil, fmt.Errorf("list the unfinished outbox lanes of %s: %w", project, err)
 	}
 	defer rows.Close()
 	lanes := []LaneKey{}
+	seen := map[LaneKey]bool{}
 	for rows.Next() {
-		var key LaneKey
-		var lane string
-		if err := rows.Scan(&key.Issue, &lane); err != nil {
+		var issue, kind string
+		if err := rows.Scan(&issue, &kind); err != nil {
 			return nil, fmt.Errorf("list the unfinished outbox lanes of %s: %w", project, err)
 		}
-		key.Lane = OutboxLane(lane)
+		key := LaneKey{Issue: issue, Lane: LaneOf(OutboxKind(kind))}
+		if key.Lane == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
 		lanes = append(lanes, key)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list the unfinished outbox lanes of %s: %w", project, err)
 	}
+	slices.SortFunc(lanes, func(a, b LaneKey) int {
+		return cmp.Or(strings.Compare(a.Issue, b.Issue), strings.Compare(string(a.Lane), string(b.Lane)))
+	})
 	return lanes, nil
 }
 

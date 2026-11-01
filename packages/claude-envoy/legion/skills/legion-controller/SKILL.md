@@ -12,7 +12,7 @@ except a clear defect a role reports ([Issues handed to Legion](#issues-handed-t
 
 ## Rules
 
-- Handle no wake until the extension's startup claim of `legion-<project>-controller` succeeded, because without it the daemon does not know you as its controller.
+- Handle no wake until the extension has registered this session with the daemon as the project's controller, at session startup or, in a controller an operator started, from its first command once Oh My Pi has started, because without that registration the daemon does not know you as its controller.
 - Answer a person's direct message first, in the conversation. A plain user turn that is neither the start message nor a task sent with `legion claims deliver` is a person writing from Dispatch's Agents page.
 - A direct Dispatch message that decides scope, priority or an owner is a ruling: after you answer it, run the weekly-plan reconciliation (`skill://legion-controller/references/backlog-stewardship.md`), because the plan must record the rule.
 - Handle one wake per turn, then end the turn. Never poll or wait for an event, because the daemon wakes you again (`tick` at least every `controller_wake_interval_seconds`).

@@ -1,9 +1,0 @@
-kind: Fixed
-body: |-
-    A document write whose transaction changes nothing appends no update, refreshes no anchors and
-    leaves the document's owed settlement marked when it was, for every writer. ygo hands
-    a document's observers an update for every transaction, one that changes nothing included, and
-    every such update used to be appended and to mark the document owing a settlement again.
-time: 2026-10-28T10:08:51.784200458Z
-custom:
-    Issue: pr2233

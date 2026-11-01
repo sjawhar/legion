@@ -10,6 +10,7 @@ import {
   createIssueArtifact,
   createProject,
   dashboardOrigin,
+  editArtifact,
   getArtifactText,
 } from "./api";
 import { countDocumentSockets, documentEditor, documentTransport, typeAtEnd } from "./editor";
@@ -191,6 +192,49 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   }
 });
 
+// The From/To compare of a document shows what changed as the change view, word by word. It is
+// seeded on a document that is not the issue's primary one, because `ArtifactRoutePanel` mounts
+// `ArtifactDetails` - the version history and this compare - only off the primary document's own
+// route (`isPrimaryDocumentArtifactRoute`, `features/refs/routes.ts`).
+test("the version history compares two versions of a document with the change view", async ({
+  page,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "# Lease handover\n\nThe spec itself is the primary document.\n",
+    title: "Version compare",
+  });
+  const notes = await createIssueArtifact(issue.key, {
+    content: "# Review notes\n\nThe ledger keeps three leases.\n",
+    name: "notes.md",
+  });
+  await editArtifact(
+    notes.artifact.id,
+    {
+      ops: [
+        {
+          find: "The ledger keeps three leases.",
+          op: "replace",
+          with: "The ledger keeps seven leases.",
+        },
+      ],
+      summary: "Seven leases",
+    },
+    { as: "agent" }
+  );
+
+  await page.goto(`/issues/${issue.key}/artifacts/notes-md`);
+  const compare = page.getByRole("region", { name: "Compare versions for notes.md" });
+  await compare.getByRole("button", { name: "Show comparison" }).click();
+  await compare.getByLabel("Compare notes.md from").selectOption("1");
+  await compare.getByLabel("Compare notes.md to").selectOption("2");
+  const changed = compare.getByTestId("change-view").locator('[data-change="changed"]');
+  await expect(changed).toHaveCount(1);
+  await expect(changed.locator("del")).toHaveText(["three"]);
+  await expect(changed.locator("ins")).toHaveText(["seven"]);
+});
+
 test("the artifacts tab filter narrows rows by name and kind @phone", async ({
   page,
 }, testInfo) => {
@@ -236,7 +280,7 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
     name,
   });
 
-  // The live event stream refreshes the issue and its tabs: no reload.
+  // The live event feed refreshes the issue and its tabs: no reload.
   await expect(page.getByRole("tab", { exact: true, name: "Artifacts (2)" })).toBeVisible();
   const tablist = page.getByRole("tablist", { name: "Issue detail" });
   const tabs = tablist.getByRole("tab");
@@ -473,11 +517,14 @@ test("an edit typed while the socket was down survives a text refetch the server
       status: 503,
     });
   });
-  // A tab that becomes visible reopens the event stream. The page has received no event, so it
-  // reopens with no `since`, which the server never answers `X-Dispatch-Event-Replay: complete`,
-  // and the reconnect refreshes every query the page holds, the document's text among them; the
-  // app retries a 5xx twice before it fails the read.
-  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  // A comment anchored in the document names it, so its event refreshes the document's reads, its
+  // text among them; the app retries a 5xx twice before it fails the read. A drop of the page's
+  // live socket would not: Dispatch replays every event the page missed (`replay_complete`), so a
+  // gap that replay covers refreshes nothing.
+  await createComment(issue.key, {
+    anchor: { artifact: upload.artifact.slug, quote: "before" },
+    body: "On the text.",
+  });
   await expect.poll(() => refused).toBeGreaterThanOrEqual(3);
   // The third answer fails the read; nothing on a page that keeps its editor marks that moment, so
   // the page is given a moment to render the failure before what it shows is read.

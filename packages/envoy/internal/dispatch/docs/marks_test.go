@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -109,6 +111,47 @@ func TestVerifyMarkWaitsForTheBrowserUpdate(t *testing.T) {
 	}
 }
 
+// Two processes serving one document can have one evict the room instance a verification
+// subscribed to, so no update of that instance ever announces the mark the browser writes next.
+// The wait ends with a read of the document as it then is, which finds the mark, rather than
+// refusing an anchor the document holds.
+func TestVerifyMarkReadsTheDocumentAgainWhenItsWaitEnds(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "")
+	service := New(Deps{
+		Store:    database,
+		Events:   events.NewBroker(),
+		Settle:   time.Hour,
+		MarkWait: 300 * time.Millisecond,
+	})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+
+	written := make(chan struct{})
+	var replaced atomic.Int32
+	service.afterReadWarm = func(room string) {
+		if room != artifactID || !replaced.CompareAndSwap(0, 1) {
+			return
+		}
+		// The verification subscribes to this instance as the hook returns, so evicting it here
+		// leaves the mark to land in the instance that replaces it, announced to nobody. The
+		// write waits out the verification's first read, which must find nothing.
+		if err := service.Evict(context.Background(), room); err != nil {
+			t.Errorf("evict the warm room: %v", err)
+		}
+		go func() {
+			defer close(written)
+			time.Sleep(100 * time.Millisecond)
+			browserMark(t, service, artifactID, "proofComment", "b1", "brown")
+		}()
+	}
+	anchored, err := service.VerifyMark(context.Background(), artifactID, MarkComment, "b1")
+	<-written
+	if err != nil || anchored.Quote != "brown" {
+		t.Fatalf("VerifyMark of a mark written into the room that replaced the subscribed one = %q, %v, want brown", anchored.Quote, err)
+	}
+}
+
 // Bob's browser comments on "quick brown", Alice's on "brown": the server reads each comment's own
 // whole text, so neither Send is refused as a missing anchor and neither quote is cut.
 func TestVerifyMarkFindsEachOfTwoCommentsOverOneWord(t *testing.T) {
@@ -173,6 +216,35 @@ func TestAcceptSuggestionReplacesMarkedTextAndRemovesTheMark(t *testing.T) {
 	}
 	if err := joinedAcceptSuggestion(service, artifactID, "s1", "x", model.Actor{Kind: "user", ID: "alice"}); !errors.Is(err, ErrAnchorOrphaned) {
 		t.Fatalf("second accept err = %v", err)
+	}
+}
+
+// A web address a person types in the browser editor, which has no autolink input rule, is plain
+// text in the document's tree, though a reader of the markdown may take it for a link: here after
+// a letter and `;`, seeded as a tree. A doc-edit replacing other text of its paragraph, and a
+// suggestion accepted elsewhere in it, are not refused for how that address reads (INFRA-531).
+func TestEditsBesideAPlainWebAddressInTheirParagraphAreAccepted(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "Placeholder.\n")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children[0].Children = []*pmdoc.Node{{Type: "text", Text: "The quick fox x;https://x.test jumps over the lazy dog"}}
+		return tree
+	})
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "replace", Find: "quick", With: "slow"}}, alice, nil); err != nil {
+		t.Fatalf("replace beside the address: %v", err)
+	}
+	spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
+	if _, err := joinedMarkQuote(service, artifactID, spec, "lazy", nil); err != nil {
+		t.Fatalf("suggest beside the address: %v", err)
+	}
+	if err := joinedAcceptSuggestion(service, artifactID, "s1", "sleepy", alice); err != nil {
+		t.Fatalf("accept beside the address: %v", err)
+	}
+	const want = "The slow fox x;https://x.test jumps over the sleepy dog"
+	if got := pmdoc.TextContent(liveTree(t, service, artifactID).Children[0]); got != want {
+		t.Fatalf("the paragraph holds %q, want %q", got, want)
 	}
 }
 
@@ -419,16 +491,227 @@ func TestVersionWriteRefreshesAnchorsByMark(t *testing.T) {
 	}
 }
 
-// An unrecorded comment mark - one no comment, ask or suggestion row records - stays until the
-// first settlement that saw it is UnrecordedMarkTTL old, and the first settlement after that
-// sweeps it; a recorded mark, resolved or not, and a proof-authored mark stay. The sweep ages
-// marks by the service's clock, which the test holds and moves, so a mark's age is what the test
-// sets and never how long a loaded runner took. The sweep re-arms settlement for the mark's
-// remaining TTL in real time; any such settlement reads the held clock and cannot change the
-// result this test asserts.
-func TestSettleSweepsUnrecordedMarksAfterTTL(t *testing.T) {
+// markSweepTTL is the TTL the sweep ages a mark by in every test that holds the clock below.
+const markSweepTTL = time.Minute
+
+// newUnrecordedMarkService is a service whose clock the tests of the unrecorded-mark sweep hold:
+// a mark's age is what the test sets with the returned age function and never how long a loaded
+// runner took. Settlement is armed by hand (settleCurrentGeneration); a sweep the re-arm runs in
+// real time reads the held clock and so decides as the test's own settlements do.
+func newUnrecordedMarkService(t *testing.T) (*Service, string, func(age time.Duration)) {
+	t.Helper()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "")
+	service := New(Deps{
+		Store:             database,
+		Events:            events.NewBroker(),
+		Settle:            time.Hour,
+		UnrecordedMarkTTL: markSweepTTL,
+	})
+	started := time.Now()
+	var aged atomic.Int64
+	service.now = func() time.Time { return started.Add(time.Duration(aged.Load())) }
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	return service, artifactID, func(age time.Duration) { aged.Store(int64(age)) }
+}
+
+// markIsInTheDocument reports whether the live document still carries a comment mark.
+func markIsInTheDocument(t *testing.T, service *Service, artifactID, id string) bool {
+	t.Helper()
+	_, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", id)
+	return found
+}
+
+// An unrecorded comment mark - one no comment, ask or suggestion row records - stays until the
+// first settlement that saw it is UnrecordedMarkTTL old, and the first settlement after that
+// sweeps it; a recorded mark, resolved or not, and a proof-authored mark stay. Bob, who wrote the
+// dangling mark, has no browser on the room, which is what lets it age at all: carol watches the
+// document throughout, and a mark is kept for its own author's presence alone.
+func TestSettleSweepsUnrecordedMarksAfterTTL(t *testing.T) {
+	service, artifactID, age := newUnrecordedMarkService(t)
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	browserMark(t, service, artifactID, "proofComment", "dangling", "quick")
+	browserMarkWithAttrs(t, service, artifactID, "proofAuthored", "fox", pmdoc.Attrs{"id": "auth", "by": "user:bob"})
+	service.addConnection(artifactID, 1, model.Actor{Kind: "user", ID: "carol"})
+	resolvedCommentID := insertAnchoredComment(t, service, artifactID, "brown")
+	if _, err := service.store.Pool.Exec(context.Background(), `update comments set resolved = true where id = $1`, resolvedCommentID); err != nil {
+		t.Fatalf("resolve recorded comment: %v", err)
+	}
+
+	settleCurrentGeneration(t, service, artifactID)
+	age(markSweepTTL / 2)
+	settleCurrentGeneration(t, service, artifactID)
+	if !markIsInTheDocument(t, service, artifactID, "dangling") {
+		t.Fatal("unrecorded mark swept before its TTL")
+	}
+	age(markSweepTTL)
+	settleCurrentGeneration(t, service, artifactID)
+	if markIsInTheDocument(t, service, artifactID, "dangling") {
+		t.Fatal("unrecorded mark not swept once its TTL passed")
+	}
+	if _, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofAuthored", "auth"); !found {
+		t.Fatal("proof-authored mark was swept")
+	}
+	if _, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", resolvedCommentID); !found {
+		t.Fatal("recorded resolved comment mark was swept")
+	}
+}
+
+// A reader with a composer open holds the provisional mark it is anchored to: an unrecorded mark
+// whose author has a browser on the room is kept however long the room settles, whichever
+// spelling of the author the mark carries - the bare login the browser writes, or the
+// user:<login> of a mark the server wrote.
+func TestAnUnrecordedMarkOfAConnectedAuthorIsKept(t *testing.T) {
+	for _, test := range []struct{ name, by string }{
+		{"the bare login a browser writes", "bob"},
+		{"the actor reference a server write carries", "user:bob"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID, age := newUnrecordedMarkService(t)
+			seedServiceText(t, service, artifactID, "The quick brown fox")
+			browserMarkWithAttrs(t, service, artifactID, "proofComment", "quick", pmdoc.Attrs{"id": "composing", "by": test.by})
+			service.addConnection(artifactID, 1, model.Actor{Kind: "user", ID: "bob"})
+
+			settleCurrentGeneration(t, service, artifactID)
+			for _, elapsed := range []time.Duration{markSweepTTL, 2 * markSweepTTL, 3 * markSweepTTL} {
+				age(elapsed)
+				settleCurrentGeneration(t, service, artifactID)
+				if !markIsInTheDocument(t, service, artifactID, "composing") {
+					t.Fatalf("the open composer's mark was swept %v after it was written, with its author connected", elapsed)
+				}
+			}
+		})
+	}
+}
+
+// The tab that held the composer closes: the mark it left behind ages from the author's last
+// presence, so it survives half a TTL after the disconnection and is swept a TTL after it.
+func TestAnUnrecordedMarkIsSweptOneTTLAfterItsAuthorDisconnects(t *testing.T) {
+	service, artifactID, age := newUnrecordedMarkService(t)
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	browserMarkWithAttrs(t, service, artifactID, "proofComment", "quick", pmdoc.Attrs{"id": "abandoned", "by": "bob"})
+	service.addConnection(artifactID, 1, model.Actor{Kind: "user", ID: "bob"})
+	settleCurrentGeneration(t, service, artifactID)
+	age(2 * markSweepTTL)
+	settleCurrentGeneration(t, service, artifactID)
+	service.removeConnection(artifactID, 1)
+
+	age(2*markSweepTTL + markSweepTTL/2)
+	settleCurrentGeneration(t, service, artifactID)
+	if !markIsInTheDocument(t, service, artifactID, "abandoned") {
+		t.Fatal("the mark was swept half a TTL after its author's browser went")
+	}
+	age(3 * markSweepTTL)
+	settleCurrentGeneration(t, service, artifactID)
+	if markIsInTheDocument(t, service, artifactID, "abandoned") {
+		t.Fatal("the mark outlived a TTL of its author's absence")
+	}
+}
+
+// The minute runs from the author's last presence, not from the sweep that last saw them. On a
+// quiet document the sweeps are a TTL apart, so bob's browser dropping a second before one - an
+// idle reconnect - must not cost him the composer he is writing in: the sweep that first misses
+// him keeps the mark, and the mark goes a TTL after the drop (at three TTL less a second), a
+// whole TTL after the sweep that last saw him (at one TTL).
+func TestAnUnrecordedMarkOutlivesASweepRunJustAfterItsAuthorDropped(t *testing.T) {
+	service, artifactID, age := newUnrecordedMarkService(t)
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	browserMarkWithAttrs(t, service, artifactID, "proofComment", "quick", pmdoc.Attrs{"id": "composing", "by": "bob"})
+	service.addConnection(artifactID, 1, model.Actor{Kind: "user", ID: "bob"})
+	age(markSweepTTL)
+	settleCurrentGeneration(t, service, artifactID)
+
+	age(2*markSweepTTL - time.Second)
+	service.removeConnection(artifactID, 1)
+	age(2 * markSweepTTL)
+	settleCurrentGeneration(t, service, artifactID)
+	if !markIsInTheDocument(t, service, artifactID, "composing") {
+		t.Fatal("the mark went a second after its author's browser dropped, a TTL after the sweep that last saw him")
+	}
+	age(3*markSweepTTL - 2*time.Second)
+	settleCurrentGeneration(t, service, artifactID)
+	if !markIsInTheDocument(t, service, artifactID, "composing") {
+		t.Fatal("the mark went a second short of a TTL after its author's browser dropped")
+	}
+	age(3*markSweepTTL - time.Second)
+	settleCurrentGeneration(t, service, artifactID)
+	if markIsInTheDocument(t, service, artifactID, "composing") {
+		t.Fatal("the mark outlived a TTL of its author's absence")
+	}
+}
+
+// The dropped browser comes back: bob is writing in the composer again, so the mark lives past
+// the deadline the drop set and is kept however long the room settles after it.
+func TestAnUnrecordedMarkOutlivesItsDropDeadlineWhenItsAuthorComesBack(t *testing.T) {
+	service, artifactID, age := newUnrecordedMarkService(t)
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	browserMarkWithAttrs(t, service, artifactID, "proofComment", "quick", pmdoc.Attrs{"id": "composing", "by": "bob"})
+	service.addConnection(artifactID, 1, model.Actor{Kind: "user", ID: "bob"})
+	settleCurrentGeneration(t, service, artifactID)
+
+	age(markSweepTTL / 2)
+	service.removeConnection(artifactID, 1)
+	age(markSweepTTL)
+	service.addConnection(artifactID, 2, model.Actor{Kind: "user", ID: "bob"})
+	for _, elapsed := range []time.Duration{2 * markSweepTTL, 3 * markSweepTTL} {
+		age(elapsed)
+		settleCurrentGeneration(t, service, artifactID)
+		if !markIsInTheDocument(t, service, artifactID, "composing") {
+			t.Fatalf("the mark was swept %v after it was written, its author back since half a TTL in", elapsed)
+		}
+	}
+}
+
+// Bob has the document open in two tabs. Closing one leaves the composer open in the other, so
+// the mark's minute starts only when the second goes: no settlement runs between the two closes,
+// so a minute counted from the first would have taken the mark by the check below.
+func TestAnUnrecordedMarkAgesFromItsAuthorsLastBrowserNotTheFirstToClose(t *testing.T) {
+	service, artifactID, age := newUnrecordedMarkService(t)
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	browserMarkWithAttrs(t, service, artifactID, "proofComment", "quick", pmdoc.Attrs{"id": "composing", "by": "bob"})
+	service.addConnection(artifactID, 1, model.Actor{Kind: "user", ID: "bob"})
+	service.addConnection(artifactID, 2, model.Actor{Kind: "user", ID: "bob"})
+	settleCurrentGeneration(t, service, artifactID)
+
+	age(markSweepTTL / 2)
+	service.removeConnection(artifactID, 1)
+	age(2 * markSweepTTL)
+	service.removeConnection(artifactID, 2)
+
+	age(2*markSweepTTL + markSweepTTL/2)
+	settleCurrentGeneration(t, service, artifactID)
+	if !markIsInTheDocument(t, service, artifactID, "composing") {
+		t.Fatal("the mark's minute ran from the first of its author's two tabs to close")
+	}
+	age(3 * markSweepTTL)
+	settleCurrentGeneration(t, service, artifactID)
+	if markIsInTheDocument(t, service, artifactID, "composing") {
+		t.Fatal("the mark outlived a TTL of its author's absence")
+	}
+}
+
+// A mark naming no author is nobody's open composer: it is swept at its TTL, whoever is in the
+// room.
+func TestAnUnrecordedMarkWithNoAuthorIsSweptAtItsTTL(t *testing.T) {
+	service, artifactID, age := newUnrecordedMarkService(t)
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	browserMarkWithAttrs(t, service, artifactID, "proofComment", "quick", pmdoc.Attrs{"id": "anonymous"})
+	service.addConnection(artifactID, 1, model.Actor{Kind: "user", ID: "bob"})
+
+	settleCurrentGeneration(t, service, artifactID)
+	age(markSweepTTL)
+	settleCurrentGeneration(t, service, artifactID)
+	if markIsInTheDocument(t, service, artifactID, "anonymous") {
+		t.Fatal("a mark naming no author outlived its TTL")
+	}
+}
+
+// An ask whose anchor names document A and whose block_artifact_id names document B records its
+// mark on A, so the mark outlives UnrecordedMarkTTL there while an unrecorded mark on A is swept.
+func TestSettleKeepsTheAnchoredMarkOfAnAskThatAlsoNamesABlock(t *testing.T) {
+	database := storetest.Open(t)
+	documentA := createDocument(t, database, "")
+	documentB := createDocument(t, database, "")
 	const ttl = time.Minute
 	service := New(Deps{
 		Store:             database,
@@ -440,34 +723,23 @@ func TestSettleSweepsUnrecordedMarksAfterTTL(t *testing.T) {
 	var aged atomic.Int64
 	service.now = func() time.Time { return started.Add(time.Duration(aged.Load())) }
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
-	seedServiceText(t, service, artifactID, "The quick brown fox")
-	browserMark(t, service, artifactID, "proofComment", "dangling", "quick")
-	browserMarkWithAttrs(t, service, artifactID, "proofAuthored", "fox", pmdoc.Attrs{"id": "auth", "by": "user:bob"})
-	resolvedCommentID := insertAnchoredComment(t, service, artifactID, "brown")
-	if _, err := database.Pool.Exec(context.Background(), `update comments set resolved = true where id = $1`, resolvedCommentID); err != nil {
-		t.Fatalf("resolve recorded comment: %v", err)
+	seedServiceText(t, service, documentA, "The quick brown fox")
+	seedServiceText(t, service, documentB, "The quick brown fox")
+	askID := insertAnchoredAsk(t, service, documentA, "brown")
+	if _, err := database.Pool.Exec(context.Background(), `update asks set block_artifact_id = $1 where id = $2`, documentB, askID); err != nil {
+		t.Fatalf("name the ask's block document: %v", err)
 	}
-	dangling := func() bool {
-		_, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "dangling")
-		return found
-	}
+	browserMark(t, service, documentA, "proofComment", "dangling", "quick")
 
-	settleCurrentGeneration(t, service, artifactID)
-	aged.Store(int64(ttl / 2))
-	settleCurrentGeneration(t, service, artifactID)
-	if !dangling() {
-		t.Fatal("unrecorded mark swept before its TTL")
-	}
+	settleCurrentGeneration(t, service, documentA)
 	aged.Store(int64(ttl))
-	settleCurrentGeneration(t, service, artifactID)
-	if dangling() {
+	settleCurrentGeneration(t, service, documentA)
+	tree := liveTree(t, service, documentA)
+	if _, _, found := pmdoc.FindMark(tree, "proofComment", "dangling"); found {
 		t.Fatal("unrecorded mark not swept once its TTL passed")
 	}
-	if _, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofAuthored", "auth"); !found {
-		t.Fatal("proof-authored mark was swept")
-	}
-	if _, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", resolvedCommentID); !found {
-		t.Fatal("recorded resolved comment mark was swept")
+	if _, _, found := pmdoc.FindMark(tree, "dispatchAsk", askID); !found {
+		t.Fatal("anchored mark of an ask that also names a block on another document was swept")
 	}
 }
 
@@ -815,20 +1087,28 @@ type storedAnchor struct {
 	Orphaned   bool   `json:"orphaned"`
 }
 
-func insertAnchoredAsk(t *testing.T, service *Service, artifactID, quote string) string {
+// markedAnchor marks quote in artifactID's document with a kind mark of id and returns the stored
+// anchor of a row that records that mark.
+func markedAnchor(t *testing.T, service *Service, artifactID string, kind MarkKind, id, quote string) []byte {
 	t.Helper()
-	const id = "00000000-0000-4000-8000-000000000001"
 	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
-		Kind: MarkAsk,
+		Kind: kind,
 		ID:   id,
 		By:   model.Actor{Kind: "user", ID: "alice"},
 	}, quote, nil); err != nil {
-		t.Fatalf("mark ask: %v", err)
+		t.Fatalf("mark %q with %s mark %s: %v", quote, kind, id, err)
 	}
 	anchor, err := json.Marshal(storedAnchor{ArtifactID: artifactID, MarkID: id, Version: 1, Quote: quote})
 	if err != nil {
-		t.Fatalf("encode ask anchor: %v", err)
+		t.Fatalf("encode the anchor of %s mark %s: %v", kind, id, err)
 	}
+	return anchor
+}
+
+func insertAnchoredAsk(t *testing.T, service *Service, artifactID, quote string) string {
+	t.Helper()
+	const id = "00000000-0000-4000-8000-000000000001"
+	anchor := markedAnchor(t, service, artifactID, MarkAsk, id, quote)
 	if _, err := service.store.Pool.Exec(context.Background(), `
 		insert into asks (id, issue_key, author, question, anchor)
 		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Anchored ask', $2)
@@ -858,17 +1138,7 @@ func insertAnchoredComment(t *testing.T, service *Service, artifactID, quote str
 
 func insertAnchoredCommentWithID(t *testing.T, service *Service, artifactID, id, quote string) string {
 	t.Helper()
-	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
-		Kind: MarkComment,
-		ID:   id,
-		By:   model.Actor{Kind: "user", ID: "alice"},
-	}, quote, nil); err != nil {
-		t.Fatalf("mark comment: %v", err)
-	}
-	anchor, err := json.Marshal(storedAnchor{ArtifactID: artifactID, MarkID: id, Version: 1, Quote: quote})
-	if err != nil {
-		t.Fatalf("encode comment anchor: %v", err)
-	}
+	anchor := markedAnchor(t, service, artifactID, MarkComment, id, quote)
 	if _, err := service.store.Pool.Exec(context.Background(), `
 		insert into comments (id, issue_key, author, body, anchor)
 		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Anchored comment', $2)
@@ -1289,9 +1559,9 @@ func TestWritesBesideALiveRepeatedBlockIDAreTaken(t *testing.T) {
 			_, err = joinedReplaceText(service, artifactID, current+"\nAn added line.\n", alice)
 			return err
 		}, want: func(before string) string {
-			// Minted in preorder: the original's paragraph takes minted-1, the copy minted-2.
+			// The original's paragraph, unchanged, keeps its id, so the copy takes the first id minted.
 			copied := strings.LastIndex(before, "{#note ")
-			return before[:copied] + "{#minted-2 " + before[copied+len("{#note "):] + "\nAn added line.\n"
+			return before[:copied] + "{#minted-1 " + before[copied+len("{#note "):] + "\nAn added line.\n"
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1323,4 +1593,375 @@ func installCounterIDs(t *testing.T, prefix string) {
 		return fmt.Sprintf("%s-%d", prefix, n)
 	})
 	t.Cleanup(func() { pmdoc.SetBlockIDGenerator(nil) })
+}
+
+// insertAnchorRow records an open row of kind "ask", "comment" or "suggestion" with the given id,
+// anchored to markID with quote. It writes no mark, so each test decides what the tree holds, and
+// it gives an ask the opened event an ask's refresh event reads.
+func insertAnchorRow(t *testing.T, service *Service, artifactID, kind, id, markID, quote string) {
+	t.Helper()
+	ctx := context.Background()
+	anchor, err := json.Marshal(model.Anchor{ArtifactID: artifactID, MarkID: markID, Version: 1, Quote: quote})
+	if err != nil {
+		t.Fatalf("encode %s anchor: %v", kind, err)
+	}
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin %s row: %v", kind, err)
+	}
+	defer tx.Rollback(ctx)
+	switch kind {
+	case "ask":
+		if _, err := tx.Exec(ctx, `
+			insert into asks (id, issue_key, author, question, anchor)
+			values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Anchored ask', $2)
+		`, id, anchor); err != nil {
+			t.Fatalf("insert anchored ask: %v", err)
+		}
+		if _, err := service.events.Append(ctx, tx, model.Event{
+			IssueKey: new("DOC-1"), Type: "ask.opened", Actor: model.Actor{Kind: "user", ID: "alice"},
+			Payload: model.NewAskEventPayload(model.Ask{ID: id}, model.ReferenceChanges{}),
+		}); err != nil {
+			t.Fatalf("append opened ask event: %v", err)
+		}
+	case "comment", "suggestion":
+		var suggestion *string
+		if kind == "suggestion" {
+			suggestion = new(`{"replace_with":"red","accepted":null}`)
+		}
+		if _, err := tx.Exec(ctx, `
+			insert into comments (id, issue_key, author, body, anchor, suggestion)
+			values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Anchored comment', $2, $3::jsonb)
+		`, id, anchor, suggestion); err != nil {
+			t.Fatalf("insert anchored %s: %v", kind, err)
+		}
+	default:
+		t.Fatalf("unknown anchor row kind %q", kind)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit %s row: %v", kind, err)
+	}
+}
+
+// refreshLiveAnchors runs one refresh of the live tree inside a joined transaction that it commits.
+// It returns the open rows as the refresh's own query lists them, read in that transaction just
+// before it, and the events the refresh collected, in the order it appended them.
+func refreshLiveAnchors(t *testing.T, service *Service, artifactID string) ([]anchoredMark, []model.Event) {
+	t.Helper()
+	tree := liveTree(t, service, artifactID)
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin refresh: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	rows, err := service.openAnchoredMarks(joined, tx, artifactID)
+	if err != nil {
+		t.Fatalf("list open anchors: %v", err)
+	}
+	if err := service.refreshAnchors(joined, tx, artifactID, tree, model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("refresh anchors: %v", err)
+	}
+	refreshed := slices.Clone(ledger.events)
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit refresh: %v", err)
+	}
+	return rows, refreshed
+}
+
+// refreshedAnchor is the row id and the anchor an anchor refresh event announces.
+func refreshedAnchor(t *testing.T, event model.Event) (string, model.Anchor) {
+	t.Helper()
+	switch payload := event.Payload.(type) {
+	case model.AskEventPayload:
+		if event.Type == "ask.anchor_refreshed" && payload.Ask.Anchor != nil {
+			return payload.Ask.ID, *payload.Ask.Anchor
+		}
+	case model.CommentEventPayload:
+		if event.Type == "comment.anchor_refreshed" && payload.Comment.Anchor != nil {
+			return payload.Comment.ID, *payload.Comment.Anchor
+		}
+	}
+	t.Fatalf("event %s with payload %T is not an anchor refresh carrying an anchor", event.Type, event.Payload)
+	return "", model.Anchor{}
+}
+
+// Two rows naming one mark are two rows to refresh: each gets its own event and its own stored
+// quote, so a refresh that walks the found marks, or one row per mark, drops one of them.
+func TestRefreshAnchorsRefreshesEveryRowSharingAMark(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
+		Kind: MarkComment, ID: "shared", By: model.Actor{Kind: "user", ID: "alice"},
+	}, "brown", nil); err != nil {
+		t.Fatalf("mark the shared comment: %v", err)
+	}
+	rows := []string{"00000000-0000-4000-8000-0000000000a1", "00000000-0000-4000-8000-0000000000a2"}
+	for _, id := range rows {
+		insertAnchorRow(t, service, artifactID, "comment", id, "shared", "stale")
+	}
+
+	_, refreshed := refreshLiveAnchors(t, service, artifactID)
+	announced := map[string]model.Anchor{}
+	for _, event := range refreshed {
+		id, anchor := refreshedAnchor(t, event)
+		announced[id] = anchor
+	}
+	if len(refreshed) != len(rows) || len(announced) != len(rows) {
+		t.Fatalf("refresh announced %d events for rows %v, want one for each of %v", len(refreshed), slices.Collect(maps.Keys(announced)), rows)
+	}
+	for _, id := range rows {
+		if anchor := announced[id]; anchor.Quote != "brown" || anchor.Orphaned {
+			t.Errorf("row %s announced quote %q orphaned %t, want brown", id, anchor.Quote, anchor.Orphaned)
+		}
+		if anchor := loadCommentAnchor(t, service, id); anchor.Quote != "brown" || anchor.Orphaned {
+			t.Errorf("row %s stored quote %q orphaned %t, want brown", id, anchor.Quote, anchor.Orphaned)
+		}
+	}
+}
+
+// An accept leaves every row anchored to the accepted suggestion's mark id as it was, a suggestion
+// row and an ask row alike, and still refreshes the rest: AcceptSuggestion skips by mark id, not by
+// mark type and id.
+func TestAcceptSuggestionSkipsItsMarkIDForRowsOfEveryType(t *testing.T) {
+	service, artifactID := newTestService(t)
+	// No settlement may run: it refreshes without the accept's skip.
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "The quick brown fox jumps")
+	by := model.Actor{Kind: "session", ID: "s1"}
+	// The ask's mark shares the suggestion's id, so the ask row would read "quick" if refreshed.
+	for _, mark := range []struct {
+		spec  MarkSpec
+		quote string
+	}{
+		{MarkSpec{Kind: MarkSuggestion, ID: "s1", By: by}, "brown"},
+		{MarkSpec{Kind: MarkAsk, ID: "s1", By: by}, "quick"},
+		{MarkSpec{Kind: MarkComment, ID: "control", By: by}, "fox"},
+	} {
+		if _, err := joinedMarkQuote(service, artifactID, mark.spec, mark.quote, nil); err != nil {
+			t.Fatalf("mark %s %s: %v", mark.spec.Kind, mark.spec.ID, err)
+		}
+	}
+	const (
+		suggestionID = "00000000-0000-4000-8000-0000000000b1"
+		askID        = "00000000-0000-4000-8000-0000000000b2"
+		controlID    = "00000000-0000-4000-8000-0000000000b3"
+	)
+	insertAnchorRow(t, service, artifactID, "suggestion", suggestionID, "s1", "stale suggestion")
+	insertAnchorRow(t, service, artifactID, "ask", askID, "s1", "stale ask")
+	insertAnchorRow(t, service, artifactID, "comment", controlID, "control", "stale control")
+
+	if err := joinedAcceptSuggestion(service, artifactID, "s1", "red", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("accept the suggestion: %v", err)
+	}
+	for _, row := range []struct {
+		name   string
+		stored storedAnchor
+		want   string
+	}{
+		{"suggestion row on the accepted mark id", loadCommentAnchor(t, service, suggestionID), "stale suggestion"},
+		{"ask row on the accepted mark id", loadAskAnchor(t, service, askID), "stale ask"},
+		{"control comment on another mark", loadCommentAnchor(t, service, controlID), "fox"},
+	} {
+		if row.stored.Quote != row.want || row.stored.Orphaned {
+			t.Errorf("%s after the accept = quote %q orphaned %t, want quote %q not orphaned", row.name, row.stored.Quote, row.stored.Orphaned, row.want)
+		}
+	}
+}
+
+// One row follows its mark through removal, restoration over new text and removal again: each
+// change persists the quote and orphaned flag and announces itself once, an orphan keeps the quote
+// it last had, and a refresh that changes nothing writes and announces nothing.
+func TestRefreshAnchorsFollowsAMarkRemovedRestoredAndRemovedAgain(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
+		Kind: MarkComment, ID: "c1", By: model.Actor{Kind: "user", ID: "alice"},
+	}, "brown", nil); err != nil {
+		t.Fatalf("mark the comment: %v", err)
+	}
+	const rowID = "00000000-0000-4000-8000-0000000000c1"
+	insertAnchorRow(t, service, artifactID, "comment", rowID, "c1", "brown")
+	restore := func(tree *pmdoc.Node) *pmdoc.Node {
+		paragraph := tree.Children[0]
+		paragraph.Children = append(paragraph.Children, &pmdoc.Node{Type: "text", Text: "lazy", Marks: []pmdoc.Mark{{
+			Type: string(MarkComment), Attrs: pmdoc.Attrs{"id": "c1", "by": "user:alice"},
+		}}})
+		return tree
+	}
+	for _, step := range []struct {
+		name     string
+		edit     func(*pmdoc.Node) *pmdoc.Node
+		quote    string
+		orphaned bool
+		events   int
+	}{
+		{name: "the marked text deleted", edit: deleteRun("brown"), quote: "brown", orphaned: true, events: 1},
+		{name: "nothing changed while orphaned", quote: "brown", orphaned: true},
+		{name: "the mark written over new text", edit: restore, quote: "lazy", events: 1},
+		{name: "nothing changed while found", quote: "lazy"},
+		{name: "the marked text deleted again", edit: deleteRun("lazy"), quote: "lazy", orphaned: true, events: 1},
+	} {
+		if step.edit != nil {
+			editLiveTree(t, service, artifactID, step.edit)
+		}
+		_, refreshed := refreshLiveAnchors(t, service, artifactID)
+		if len(refreshed) != step.events {
+			t.Fatalf("%s: refresh announced %d events, want %d", step.name, len(refreshed), step.events)
+		}
+		for _, event := range refreshed {
+			if id, anchor := refreshedAnchor(t, event); id != rowID || anchor.Quote != step.quote || anchor.Orphaned != step.orphaned {
+				t.Fatalf("%s: refresh announced row %s quote %q orphaned %t, want row %s quote %q orphaned %t",
+					step.name, id, anchor.Quote, anchor.Orphaned, rowID, step.quote, step.orphaned)
+			}
+		}
+		if stored := loadCommentAnchor(t, service, rowID); stored.Quote != step.quote || stored.Orphaned != step.orphaned {
+			t.Fatalf("%s: stored quote %q orphaned %t, want quote %q orphaned %t",
+				step.name, stored.Quote, stored.Orphaned, step.quote, step.orphaned)
+		}
+	}
+}
+
+// One refresh of asks, comments and a suggestion announces the asks, then the comments, each by
+// creation time and then id, with each row's own event type and quote. The creation times are set
+// so that order is neither the ids' nor the inserts'. The rows go stale and are refreshed again
+// for several rounds, and every round announces them in that same order: a listing with no stable
+// order, or a refresh in a map's order, matches five rows by chance in about one round of five.
+func TestRefreshAnchorsAnnouncesEveryKindInRowOrder(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "alpha bravo charlie delta echo")
+	rows := []struct{ kind, id, quote string }{
+		{"suggestion", "00000000-0000-4000-8000-0000000000d1", "echo"},
+		{"ask", "00000000-0000-4000-8000-0000000000d2", "alpha"},
+		{"comment", "00000000-0000-4000-8000-0000000000d3", "charlie"},
+		{"ask", "00000000-0000-4000-8000-0000000000d4", "bravo"},
+		{"comment", "00000000-0000-4000-8000-0000000000d5", "delta"},
+	}
+	quotes := map[string]string{}
+	for _, row := range rows {
+		kind := map[string]MarkKind{"ask": MarkAsk, "comment": MarkComment, "suggestion": MarkSuggestion}[row.kind]
+		if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
+			Kind: kind, ID: row.id, By: model.Actor{Kind: "user", ID: "alice"},
+		}, row.quote, nil); err != nil {
+			t.Fatalf("mark %s %s: %v", row.kind, row.id, err)
+		}
+		quotes[row.id] = row.quote
+	}
+	for _, row := range rows {
+		insertAnchorRow(t, service, artifactID, row.kind, row.id, row.id, "stale")
+	}
+	// Each update writes a new row version at the end of its table, so updating in the reverse of
+	// the wanted order leaves the tables' physical order the opposite of it: a listing that leans
+	// on that order announces the rows backwards.
+	created := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		id     string
+		offset time.Duration
+	}{
+		{"00000000-0000-4000-8000-0000000000d3", time.Second},
+		{"00000000-0000-4000-8000-0000000000d1", time.Second},
+		{"00000000-0000-4000-8000-0000000000d5", 0},
+		{"00000000-0000-4000-8000-0000000000d2", time.Second},
+		{"00000000-0000-4000-8000-0000000000d4", 0},
+	} {
+		for _, table := range []string{"asks", "comments"} {
+			if _, err := service.store.Pool.Exec(context.Background(),
+				"update "+table+" set created_at = $2 where id = $1::uuid", row.id, created.Add(row.offset)); err != nil {
+				t.Fatalf("set %s %s created_at: %v", table, row.id, err)
+			}
+		}
+	}
+	// Asks by creation time, then comments by creation time and, for d1 and d3 created together, id.
+	want := []string{
+		"00000000-0000-4000-8000-0000000000d4", "00000000-0000-4000-8000-0000000000d2",
+		"00000000-0000-4000-8000-0000000000d5", "00000000-0000-4000-8000-0000000000d1",
+		"00000000-0000-4000-8000-0000000000d3",
+	}
+
+	ids := slices.Collect(maps.Keys(quotes))
+	for round := range 4 {
+		if round > 0 {
+			for _, table := range []string{"asks", "comments"} {
+				if _, err := service.store.Pool.Exec(context.Background(),
+					"update "+table+` set anchor = jsonb_set(anchor, '{quote}', '"stale"') where id = any($1::uuid[])`, ids); err != nil {
+					t.Fatalf("round %d: make the %s stale: %v", round, table, err)
+				}
+			}
+		}
+		listed, refreshed := refreshLiveAnchors(t, service, artifactID)
+		if len(listed) != len(want) || len(refreshed) != len(want) {
+			t.Fatalf("round %d: refresh listed %d rows and announced %d events, want %d of each", round, len(listed), len(refreshed), len(want))
+		}
+		for index, wantID := range want {
+			wantType := "comment.anchor_refreshed"
+			if strings.HasSuffix(wantID, "d2") || strings.HasSuffix(wantID, "d4") {
+				wantType = "ask.anchor_refreshed"
+			}
+			id, anchor := refreshedAnchor(t, refreshed[index])
+			if listed[index].id != wantID || id != wantID || refreshed[index].Type != wantType || anchor.Quote != quotes[wantID] || anchor.Orphaned {
+				t.Fatalf("round %d: row %d listed %s, event %s for row %s quote %q orphaned %t, want %s for row %s quote %q",
+					round, index, listed[index].id, refreshed[index].Type, id, anchor.Quote, anchor.Orphaned, wantType, wantID, quotes[wantID])
+			}
+		}
+	}
+}
+
+// MarkQuote returns the anchor of the mark it wrote, as the committed document reads it: a quote
+// crossing two top-level paragraphs reads joined by a space under no block, a quote's leading space
+// stays under its paragraph, and a quote in a list item names the item's paragraph.
+func TestMarkQuoteReturnsTheWrittenMarksAnchor(t *testing.T) {
+	idOf := func(node *pmdoc.Node) string {
+		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+		if id == "" {
+			t.Fatalf("%s carries no block id", node.Type)
+		}
+		return id
+	}
+	for _, test := range []struct {
+		name, text, quote, want string
+		block                   func(tree *pmdoc.Node) string
+	}{
+		{
+			name: "a quote across two paragraphs", text: "First paragraph ends here.\n\nSecond paragraph starts here.\n",
+			quote: "ends here. Second paragraph", want: "ends here. Second paragraph",
+			block: func(*pmdoc.Node) string { return "" },
+		},
+		{
+			name: "a quote with a leading space", text: "The quick brown fox\n",
+			quote: " brown", want: " brown",
+			block: func(tree *pmdoc.Node) string { return idOf(tree.Children[0]) },
+		},
+		{
+			name: "a quote in a list item", text: "Intro.\n\n- first item\n- second item text\n",
+			quote: "second item", want: "second item",
+			block: func(tree *pmdoc.Node) string { return idOf(tree.Children[1].Children[1].Children[0]) },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, test.text)
+			spec := MarkSpec{Kind: MarkComment, ID: "c1", By: model.Actor{Kind: "user", ID: "alice"}}
+			anchored, err := joinedMarkQuote(service, artifactID, spec, test.quote, nil)
+			if err != nil {
+				t.Fatalf("MarkQuote(%q): %v", test.quote, err)
+			}
+			tree := liveTree(t, service, artifactID)
+			committed, err := readAnchored(tree, spec.Kind, spec.ID)
+			if err != nil {
+				t.Fatalf("read the committed mark: %v", err)
+			}
+			if anchored != committed {
+				t.Fatalf("MarkQuote returned %#v, the committed document reads %#v", anchored, committed)
+			}
+			if want := (Anchored{Quote: test.want, BlockID: test.block(tree)}); anchored != want {
+				t.Fatalf("MarkQuote returned %#v, want %#v", anchored, want)
+			}
+		})
+	}
 }
