@@ -1023,7 +1023,9 @@ const defaultStallWaitingMs = 900_000
 // worker will really run on: no configuration the worker accepts is refused here, and none it
 // accepts slips past the floor either.
 func stallWaitingMs(env func(string) string) float64 {
-	raw := strings.Trim(env("LEGION_STALL_WAITING_MS"), " \t\n\v\f\r\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
+	// JavaScript's own WhiteSpace and LineTerminator set, which Number() trims from both ends:
+	// it holds no NEL (U+0085), which Go's unicode.IsSpace does, and it holds the byte order mark.
+	raw := strings.Trim(env("LEGION_STALL_WAITING_MS"), " \t\v\f\r\n\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
 	if raw == "" {
 		return defaultStallWaitingMs
 	}
@@ -1034,10 +1036,12 @@ func stallWaitingMs(env func(string) string) float64 {
 	return read
 }
 
-// jsNumber is JavaScript's Number() of a string, for the forms a configuration can hold: the
-// radix prefixes it takes (0x, 0o, 0b, each unsigned), and otherwise the decimal and exponent
-// forms, which Go's own ParseFloat reads the same way. A string Number() makes NaN of is this
-// function's false.
+// jsNumber is JavaScript's Number() of a string: the radix forms it takes (0x, 0o, 0b, each
+// unsigned and with no sign before the prefix), and otherwise the StrDecimalLiteral grammar —
+// an optional sign, decimal digits, a decimal point and a decimal exponent, and nothing else.
+// Go's own ParseFloat reads more than that grammar (a separator, a hexadecimal float, the words
+// `Inf` and `NaN`), so every character is checked against it first: a string Number() makes NaN
+// of is this function's false.
 func jsNumber(raw string) (float64, bool) {
 	if strings.ContainsRune(raw, '_') {
 		// Go's own parsers take a separator in a numeric literal and Number() does not, so a value
@@ -1066,6 +1070,13 @@ func jsNumber(raw string) (float64, bool) {
 			if errors.Is(err, strconv.ErrRange) {
 				return math.MaxFloat64, true
 			}
+			return 0, false
+		}
+	}
+	for _, r := range raw {
+		switch {
+		case r >= '0' && r <= '9', r == '+', r == '-', r == '.', r == 'e', r == 'E':
+		default:
 			return 0, false
 		}
 	}

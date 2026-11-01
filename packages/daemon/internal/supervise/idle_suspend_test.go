@@ -326,3 +326,20 @@ func TestAWorkerWaitingOnItsOwnBackgroundWorkIsNotSuspended(t *testing.T) {
 	h.advance(testIdleSuspend)
 	h.wantState(StateSuspended)
 }
+
+// A worker brought back for a message its sender never sends again becomes ready with nothing
+// waiting for it, and never takes a task: the wait is armed there too, so its process is given
+// back rather than held for the rest of the issue.
+func TestAWorkerResumedWithNoTaskIsSuspendedAgainOnceItIsReady(t *testing.T) {
+	h := idleHarness(t)
+	h.reach(StateIdle)
+	h.advance(testIdleSuspend)
+	h.wantState(StateSuspended)
+	h.must(RequestRuleResume{Claim: h.token, Reason: "a message found no holder on its role topic", Only: SuspendedByIdle})
+	h.connect()
+	h.register()
+	h.ready()
+	h.wantState(StateReady)
+	h.advance(testIdleSuspend)
+	h.wantState(StateSuspended)
+}

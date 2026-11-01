@@ -199,6 +199,12 @@ func TestLoadRefusesAnIdleSuspendUnderTheWaitingReminder(t *testing.T) {
 		{name: "a separator the worker does not read leaves the default floor", seconds: "2",
 			env:  waiting("1_000"),
 			want: "worker_idle_suspend_seconds must be more than 900"},
+		{name: "a Go float form the worker does not read leaves the default floor", seconds: "700",
+			env:  waiting("600_000"),
+			want: "worker_idle_suspend_seconds must be more than 900"},
+		{name: "a hexadecimal float form the worker does not read leaves the default floor",
+			seconds: "700", env: waiting("+0x1p19"),
+			want: "worker_idle_suspend_seconds must be more than 900"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := Load(writeConfigFile(t, minimalFile+"worker_idle_suspend_seconds: "+c.seconds+"\n"), c.env)

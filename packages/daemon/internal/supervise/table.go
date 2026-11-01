@@ -586,10 +586,10 @@ func fillTable(t *builder) {
 		StateReady, StateWorking, StateIdle, StateSuspended, StateFailed, StateRetired)
 
 	t.row(onIdleTimer, "the worker has been idle its whole idle suspend: suspend it, keeping its session", idleSuspend,
-		[]ClaimState{StateSuspended, StateFailed}, StateIdle)
+		[]ClaimState{StateSuspended, StateFailed}, StateIdle, StateReady)
 	t.ignore(onIdleTimer, "the agent is in a turn, so it is not idle", StateWorking)
 	t.ignore(onIdleTimer, "the claim is not idle, so no idle suspend is armed",
-		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered, StateReady)
+		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered)
 	t.ignore(onIdleTimer, noProcess, gone...)
 
 	// A re-adopted claim found still speaking another plugin contract, at boot or at a later sweep.
@@ -1039,7 +1039,11 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 // Pi's agent_end names no prompt and a role's own background result starts turns the daemon
 // never prompted.
 func turnEnded(m *Machine, ctx context.Context, ev Event) error {
-	m.asyncWork = ev.(StreamTurnEnd).AwaitingAsyncWork
+	if end, ok := ev.(StreamTurnEnd); ok {
+		// Another event can end the turn too — a hello that finds it over after a restart — and
+		// says nothing about the agent's background work, so what the last agent_end said stands.
+		m.asyncWork = end.AwaitingAsyncWork
+	}
 	m.askFirst = false
 	if m.held != nil {
 		if err := m.suspendHeld(ctx); err != nil {

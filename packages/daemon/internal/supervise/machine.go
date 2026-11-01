@@ -1308,7 +1308,10 @@ func (m *Machine) idleWait() {
 		return
 	}
 	busy, _ := m.notIdle()
-	if m.claim.State != StateIdle || busy {
+	// A ready worker with nothing waiting is idle too: a wake that brought a worker back for a
+	// message its sender never repeats, and a launch no task followed, both end there, and
+	// without this they would keep their process for the rest of the issue.
+	if (m.claim.State != StateIdle && m.claim.State != StateReady) || busy {
 		m.disarm(TimerIdle)
 		return
 	}
