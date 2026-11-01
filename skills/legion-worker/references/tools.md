@@ -517,14 +517,18 @@ reach any work a pod runs, a test or a tool of your own, not a test suite alone.
   `st_dev` and `st_ino`, and refuse when they differ or when the `lstat` says `S_IFLNK`. The
   probe used plain `openat` with `O_NOFOLLOW`; `openat2` with `RESOLVE_NO_SYMLINKS` was out of
   scope and is untested.
-- **Set a large finite stack limit under gVisor, never `unlimited`.** A lane measured this on
-  2026-11-01 in pods under gVisor (4.19.0-gvisor), reading each verdict from the program's own
-  output: `ulimit -s unlimited` is accepted, `/proc/self/limits` reads back `unlimited`, and the
-  behaviour is the 8 MiB default — one program passed at one recursion depth and overflowed at
-  the next, identically with `unlimited` and with no setting at all. A large finite limit does
-  work: `ulimit -s 67108864` moved that overflow point by about an order of magnitude on the same
-  program, with the effective ceiling far below the figure asked for. So ask for a large finite
-  number, and treat a successful `unlimited` as no stack at all.
+- **Set `ulimit -s` to a finite 131072 or more under gVisor, never `unlimited`.** gVisor maps the
+  whole stack at exec and caps it at a constant, `maxStackSize = 128 << 20` in `MapStack`
+  (`pkg/sentry/mm/syscalls.go`), so 128 MiB is the main thread's ceiling and no setting raises
+  it; `RLIM_INFINITY` falls back to the 8 MiB default. A lane measured both on 2026-11-01 in
+  pods under gVisor (4.19.0-gvisor), with a C probe and a second probe in another language: under
+  `unlimited`, which `/proc/self/limits` reads back as `unlimited`, the fault came at 7 MiB and
+  524,150 frames; under two very different finite settings at or above 131072 (KiB), both probes
+  measured the same ceiling, a fault at 127 MiB and 8,388,470 frames. The same probes on an
+  ordinary kernel track the setting as expected, so this is the sandbox and not the probes. One
+  trap follows from it: a helper that raises the stack by setting the soft limit to the hard
+  limit gets 8 MiB in a pod, since the pod's hard limit is `unlimited`, and setting a finite
+  `ulimit -s` first makes that helper's own check pass.
 - **Compare durations within one pod, never across pods.** A gVisor sandbox runs syscall-heavy
   work 2.2 to 3.8 times slower than the same work outside it, and a pod lands on whatever node
   the autoscaler provisions, so two pods are two machines, two sets of neighbours and two
