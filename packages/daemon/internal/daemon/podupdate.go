@@ -179,9 +179,10 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 // on a pod: it takes that pod's launch turn and then waits the pod out, up to
 // worker_boot_timeout_seconds, while every other issue's round, this tick's stale-plugin re-posts
 // and the orphan reaping behind it wait. The bound costs the round nothing. The suspension that
-// displaces the pod has already landed when it hits, so the next tick finds the Sandbox
-// suspended, ReplacePod answers nil and the round ends there; nothing is deleted earlier than it
-// would have been, and the round stays open until the call succeeds.
+// displaces the pod has already landed when it hits. Once that pod is gone, PodDrift answers
+// runtime.ErrPodGone and the sweep decides nothing until the claims record the pod that
+// replaced it, where the round ends as replaced; nothing is deleted earlier than it would have
+// been, and the round stays open until then.
 func (s *supervision) completePodUpdate(ctx context.Context, issue string, snapshot, live []supervise.Claim, round, pod, reasons string, now time.Time) bool {
 	if waiting := waitingClaims(live, round); len(waiting) > 0 {
 		if len(waitingClaims(snapshot, round)) == 0 {
@@ -623,7 +624,7 @@ func (s *supervision) endPodUpdates(group []supervise.Claim, replaced bool) {
 //
 // The pod the claims record not being there is the one error of its own (runtime.ErrPodGone),
 // and it reports false for that too: nothing can be read of a pod that is not there, so this
-// issue decides nothing this tick, exactly as it decides nothing where its claims record no pod
+// issue decides nothing this tick, as it decides no replacement where its claims record no pod
 // at all (reconcileIssuePodUpdate). Read as a pod that has drifted from nothing, it would end
 // the round over a pod that took its workers' unpushed work with it — the issue would be told
 // nothing of what was lost, and every worker that had answered would be sent the task saying the

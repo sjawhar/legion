@@ -1306,9 +1306,10 @@ func TestPodUpdateARoundThatEndsOnAnAskNoTurnConfirmedReleasesItsWorker(t *testi
 // an earlier daemon sent the task for, and the send that follows asks the agent whether it is
 // streaming and confirms the pending ask against that answer (sendPending's askFirst branch).
 // Nothing there says what the turn has already done, so its end is no answer to the round, and
-// the round asks again. The same holds for a turn start that names no delivery, which is
-// confirmed against what the daemon had in flight (turnStarted). Each refusal takes the ask's
-// clock back, so the next sweep asks again rather than the round waiting out the re-task bound.
+// the round asks again. The same holds for a turn start that is the first thing a restarted
+// daemon hears of the turn, which only askFirst confirms (turnStarted). Each refusal takes the
+// ask's clock back, so the next sweep asks again rather than the round waiting out the re-task
+// bound.
 func TestPodUpdateTakesNoTurnTheDaemonLearnedOfFromTheAgentAsTheAnswer(t *testing.T) {
 	t.Run("the send asked the agent whether it was streaming", func(t *testing.T) {
 		h := updateHarness(t, PodUpdateContract-1)
@@ -1357,7 +1358,7 @@ func TestPodUpdateTakesNoTurnTheDaemonLearnedOfFromTheAgentAsTheAnswer(t *testin
 		}
 	})
 
-	// The control for all three: the turn of a live worker, whose agent_start names no delivery
+	// The control for both: the turn of a live worker, whose agent_start names no delivery
 	// because no agent_start ever does, is the turn the daemon sent the ask for and saw begin.
 	// Its end is the answer.
 	t.Run("a live turn of the ask this daemon sent", func(t *testing.T) {

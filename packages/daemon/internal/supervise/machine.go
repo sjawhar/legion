@@ -555,11 +555,12 @@ type Machine struct {
 	roundOver *PodUpdateEnded
 	// unseenTurn is the claim in a turn this daemon never saw begin: one an earlier daemon's
 	// process was already in, which this one learns of from the agent's own get_state answer
-	// (sendPending's askFirst branch, turnStarted's inFlight) rather than from an agent_start it
-	// read. The daemon cannot say what such a turn has done, so a decision that rests on knowing
-	// refuses it: the end of a turn is a worker's answer to an update round only where the
-	// daemon saw the turn start (answerByTurnEnd). turnEnded clears it with the turn, and it is
-	// memory only, as askFirst is: a restart asks the agent again.
+	// (sendPending's askFirst branch, askTurnOver's streaming branch, and turnStarted where only
+	// askFirst confirmed the start) rather than from an agent_start it read. The daemon cannot
+	// say what such a turn has done, so a decision that rests on knowing refuses it: the end of a
+	// turn is a worker's answer to an update round only where the daemon saw the turn start
+	// (answerByTurnEnd). turnEnded clears it with the turn, and it is memory only, as askFirst
+	// is: a restart asks the agent again.
 	unseenTurn bool
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands

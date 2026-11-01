@@ -1302,7 +1302,8 @@ func (m *Machine) afterTurn(ctx context.Context) error {
 // than a disk: this daemon saw the turn start (askFirst and unseenTurn, which turnEnded clears
 // after this runs). A turn restored from an earlier daemon's record is one this daemon never saw
 // begin — the restored machine would otherwise read the agent's "the turn is over" as the answer
-// — and so is a turn start that named no delivery of this daemon's own.
+// — and so is a start confirmed only because askFirst was set (turnStarted), or a turn the
+// agent's own get_state answer reported streaming (askTurnOver).
 //
 // A refusal takes the ask's own clock back (UpdateTaskedAt), so the next sweep asks again at once
 // rather than at the re-task bound hours away. The ask itself is retired by the turn's own
