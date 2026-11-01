@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-627",
+  "previousHandoff": "",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's own harness at head f7d47578 and against the base control 0642a37a. E-1 (e1.sh): a sibling source's sync answered 200 in 0.036 s while legion/arch was held 6.11 s in its blob read, and two concurrent syncs of one source cost 1 installation and 1 head lookup; base blocked the sibling 6.019 s and cost 2 and 2. E-2 (e2.sh 10000): one sweep took 6 NATS messages / 2,784 bytes off the connection at head against 20,006 / 11,042,364 at base, and the head sweep line read since 20:47 (66-min Lookback) with index_entries=0. Both reproduce the implementer's figures within run-to-run noise."
+  },
+  "failures": [
+    {
+      "criterion": "Architect acceptance item 7: the file set against main and every lane ci-ok. The required ci-filters gate must be green at the head.",
+      "evidence": "ci-filters is settled FAILURE at head f7d47578 (run 41352059014, job 124984937998, https://github.com/sjawhar/legion/actions/runs/41352059014/job/124984937998): '55 CI filter problem(s)', e.g. 'dispatch reads packages/envoy/internal/kvwatch/scan.go, which its filter dispatch does not match, so a change to it skips the job'. Root cause introduced by this PR: internal/dispatch/redeliver/sweep.go now imports internal/kvwatch (DrainExistingKeys); base 0642a37a's sweep.go has no such import (verified with git show 0642a37a:.../sweep.go). cmd/dispatch depends on redeliver, so the dispatch, dispatch_browser_multiprocess, dispatch_memory and dispatch_multiprocess jobs now read packages/envoy/internal/kvwatch/* via `go list -deps ./cmd/dispatch`, but those four path filters in .github/workflows/ci.yaml (the `dispatch` filter is lines ~235-273) do not list packages/envoy/internal/kvwatch/*. Fix: add `- 'packages/envoy/internal/kvwatch/*'` to each of those four filters so a change to kvwatch no longer skips the dispatch jobs. The check's own red run is the regression lock; no Go test applies. envoy-go-race (the behavioural race lane over redeliver/architecture/kvwatch) passed at this head."
+    }
+  ],
+  "failed": 1,
+  "proof": [
+    {
+      "criterion": "2i: the running sweep reads only the deliveries the index says are due, and a failed delivery whose attempts have left the listing window is still redelivered when due (never lost over time).",
+      "surface": "A booted envoy-dispatch (head) against a real nats-server v2.10.29 and a fake GitHub whose attempt listing is empty, so every redelivery request it receives came from the sweep's own index. Bucket seeded with a due-indexed record, a due-unindexed record (no entry, no marker), a later-indexed record due 90 s on, a lost-entry record whose Pending names a key never written, and 2,000 not-due noise records (e4seed/e4.sh).",
+      "command": "cd /legion/scratch/tmp/t627 && bash e4.sh head",
+      "observed": "Sweep 1 (deliveries=2 index_entries=2) redelivered due-indexed (1001) and the back-filled due-unindexed (1002); sweep 2 two minutes later (deliveries=1 index_entries=1) redelivered later-indexed (1003) as soon as it came due. Final bucket check: entries moved forward, no strays, 2,000 noise records never read. Nothing lost across sweeps.",
+      "headSha": "f7d47578837e",
+      "negativeControl": "lost-entry (1005), whose index entry was never written, was never requested by the head build (requests 1001,1002,1003 only). The same bucket on base (bash e4.sh base) requested 1001,1002,1005 in one sweep reading all 2,004 records, so the index selection is what the head build relies on."
+    },
+    {
+      "criterion": "2h / departure 4: a caller that pushes and then asks for a Refresh is never answered the pre-push commit.",
+      "surface": "The HTTP sync route POST /api/v1/projects/CORE/architecture-sources/legion/arch/sync on a booted envoy-dispatch against a fake GitHub whose branch head can be moved mid-flight (fakegh2 POST /_control/head).",
+      "command": "cd /legion/scratch/tmp/t627 && bash e5.sh head",
+      "observed": "Caller A syncs with blob reads held and reads head 1111…; the head is moved to 3333… (a push); caller B then syncs. A answered 1111…; B answered 3333… from a second head lookup issued after A's flight finished. PASS.",
+      "headSha": "f7d47578837e",
+      "negativeControl": "The head build with the freshness loop removed from Importer.Sync (dispatch-nofresh) answered B the pre-push commit 1111…, FAIL, on a single head lookup — so the freshness rule is load-bearing on the live surface. The same mutation turns the unit test TestACallerAfterTheHeadWasReadIsNotToldTheOlderHead red."
+    },
+    {
+      "criterion": "2i: envoy-dispatch redeliver-webhooks (and --dry-run) answer exactly as before, and the operator run plus a later running sweep keep the index invariant (every open record names a live entry; no strays; a closed record names none).",
+      "surface": "The operator command and then a booted server over one seeded bucket on a real nats-server (e2-dryrun.sh for the dry run; e6.sh for the real run plus a running sweep, with an invariant checker over the whole bucket).",
+      "command": "cd /legion/scratch/tmp/infra627 && bash e2-dryrun.sh 1000 ; cd /legion/scratch/tmp/t627 && bash e6.sh",
+      "observed": "redeliver-webhooks --dry-run --since 72h: byte-identical normalised output from base and head (sha256 equal), bucket unwritten by either. e6: the real operator run redelivered the 3 due deliveries including lost-entry (self-healing its missing entry) and left check: open=2004 entries=2004 lost=0 mismatched=0 strays=0; a running sweep booted on that bucket kept check: open=2004 entries=2004 lost=0 strays=0.",
+      "headSha": "f7d47578837e",
+      "negativeControl": "A build whose non-continuous sweep read the index instead of every record would return fewer rows and a different hash; the dry-run diff is the control. For the invariant, the mutation that drops the write-time floor in pendingFor (index.go) turns TestARecordWithNoIndexEntryIsBackfilledOnTheFirstSweep red, and setting Lookback back to one hour turns TestADeliveryRecoveredDuringTheLongestBackoffIsDeliveredAndAskedForNoMore red (both verified in a mutation copy)."
+    }
+  ]
+}
