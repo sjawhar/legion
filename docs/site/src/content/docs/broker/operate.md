@@ -183,7 +183,11 @@ and ending one VM's enrollment leaves the others. A VM's credential expires with
 after the token was minted; its enrollment outlives it while it renews. Dispatch's machine-login
 page lists each VM's login, its host `<project>/<zone>/<instance name>` and no approver, and anyone
 signed in may revoke it, which ends that VM's enrollment; the VM logs in again at its next
-`enroll --vm`. To stop a fleet logging in, remove its entries and redeploy the broker: each VM's
+`enroll --vm`. A revoke ends the enrollment, not the VM's identity token: someone who copied that
+token off the VM logs in again with it within its hour, under a new machine login, enrolls a key of
+their own and reads what the VM may read. To end a copied token for certain, take the VM out of its
+fleet and wait out the hour, as [a copied VM token](#a-copied-vm-token) says. To stop a fleet
+logging in, remove its entries and redeploy the broker: each VM's
 credential stops authenticating at its next call, and its next login is refused. Narrowing a fleet,
 by changing its project or its instance-name glob, ends every VM it no longer allows at once: from
 its next call the VM has no session identity, so releasing a grant it holds, opening a request and
@@ -676,6 +680,36 @@ hold:
 That release refuses every pod renewal without a token, so it also removes what only the ratchet
 needs: the pod-UID lookup in `Renew` (`podTokenRatcheted`) and its partial index
 `enrollments_pod_token_renewed`.
+
+## A copied VM token
+
+A Google VM's identity token logs in as that VM for up to an hour after it was minted, wherever it
+is presented. A copy's logins show in the audit record as `launcher_credential.token_login` rows
+for the VM's subject from more than one key:
+
+```sql
+select at, detail->>'credential_id' as credential_id, detail->>'key_thumbprint' as key,
+       detail->>'token_expires_at' as token_expires_at
+from audit
+where kind = 'launcher_credential.token_login'
+  and detail->>'subject' = '<account>@<project>/<zone>/<instance id>'
+order by at;
+```
+
+On the VM itself a copy shows as `enroll --vm` runs refused `401 LAUNCHER_INVALID` or `429
+RATE_LIMITED` while nothing else changed. A copy cannot end or take over the VM's live
+enrollment (no machine login ends a VM's enrollment, `403 VM_ENDS_BY_LOGIN_REVOKE`, and a second
+key for a live VM is `409 ALREADY_ENROLLED`), but it can enroll a key of its own while the VM holds
+none. Revoking the VM's login on Dispatch's machine-login page ends every enrollment that login
+made, the VM's and a copy's alike, but not the copied token: within its hour the copy logs in
+again under a new login and enrolls afresh. To end it for certain, take the VM out of the fleet's
+settings and redeploy the broker: change `BROKER_VM_INSTANCES` so the glob no longer matches the
+VM's name, or, for the whole fleet, remove the account's entries from `BROKER_VM_SERVICES`,
+`BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES`. From then every login and enrollment of that VM,
+the copy's included, is refused at its next call. Find and remove what copied the token before you
+put the VM back: the latest `token_expires_at` above says when the last copied token ends, at most
+an hour after it was minted. Rotate any secret the copy may have read; the broker cannot take back
+a value it released.
 
 ## The audit record
 

@@ -594,6 +594,11 @@ func TestANarrowedVMNeitherRenewsNorEnrolls(t *testing.T) {
 // enrollment even knowing its id (403 VM_ENDS_BY_LOGIN_REVOKE). The VM's enrollment and grant keep
 // working, its next `enroll --vm` (a fresh login, then the same session key) gets its enrollment
 // back, and a person revoking the VM's machine login still ends it.
+//
+// It also pins the boundary of that revoke: it ends the VM's enrollment, not the copied token.
+// Within the token's hour the copier logs in again, under a new launcher credential, enrolls a key
+// of its own and reads the fleet's secret. Removing the VM from the fleet's settings ends that too:
+// the copier's login is then 403 ACCOUNT_NOT_LISTED and its enrollment has no identity.
 func TestACopiedTokenNeitherEndsNorTakesOverALiveVM(t *testing.T) {
 	ts := newVMTestServer(t)
 	vm := member("example-zone-a", "1001")
@@ -639,6 +644,30 @@ func TestACopiedTokenNeitherEndsNorTakesOverALiveVM(t *testing.T) {
 	}
 	if status, body := ts.renewVM(t, sessionKey, enrollmentID, map[string]any{"vm_token": ts.current(t, vm)}); status != http.StatusUnauthorized {
 		t.Fatalf("the VM's renewal after its login's revoke = %d %s, want 401", status, body)
+	}
+
+	status, body = ts.vmLogin(t, vm, copied, copierKey)
+	again := decode[wireTokenLogin](t, body).CredentialID
+	if status != http.StatusOK || again == victimCred {
+		t.Fatalf("the copied token's login after the revoke = %d %s, want 200 under a new credential", status, body)
+	}
+	copierSession := newSigningKey(t)
+	status, body = ts.enrolVM(t, again, copierKey, vm, copied, copierSession)
+	if status != http.StatusCreated {
+		t.Fatalf("the copier enrolling its own key after the revoke = %d %s, want 201", status, body)
+	}
+	copierEnrollment := decode[wireEnrolled](t, body).EnrollmentID
+	status, body = ts.askAs(t, copierSession, copierEnrollment, "FLEET_KEY")
+	if read := decode[wireCreateRequestResponse](t, body); status != http.StatusOK || read.State != "granted" {
+		t.Fatalf("the copier asking for FLEET_KEY after the revoke = %d %s, want granted", status, body)
+	}
+
+	ts.instances[fleetAccount] = "other-vm-*"
+	if status, body := ts.vmLogin(t, vm, copied, newSigningKey(t)); status != http.StatusForbidden || decode[wireError](t, body).Code != "ACCOUNT_NOT_LISTED" {
+		t.Fatalf("the copied token's login once the VM is out of the fleet = %d %s, want 403 ACCOUNT_NOT_LISTED", status, body)
+	}
+	if status, body := ts.askAs(t, copierSession, copierEnrollment, "FLEET_KEY"); status != http.StatusUnauthorized {
+		t.Fatalf("the copier asking once the VM is out of the fleet = %d %s, want 401", status, body)
 	}
 }
 

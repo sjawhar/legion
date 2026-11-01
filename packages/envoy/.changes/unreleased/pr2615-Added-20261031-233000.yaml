@@ -13,7 +13,8 @@ body: |-
     account never move or end each other's. No launcher credential ends a VM's enrollment
     (`DELETE /v1/enrollments/{id}` is `403 VM_ENDS_BY_LOGIN_REVOKE`), so a token copied off the VM
     cannot end or take over its live enrollment; revoking the VM's machine login, or its lease,
-    ends it. `POST /v1/enrollments` takes kind `vm` with `vm_token`
+    ends it. A revoke does not revoke the copied token, which logs in again within its hour; taking
+    the VM out of the fleet's settings ends that. `POST /v1/enrollments` takes kind `vm` with `vm_token`
     (`403 VM_IDENTITY_MISMATCH`, `403 VM_TOKEN_EXPIRED`), every renewal of one carries the VM's
     current token (`403 VM_TOKEN_REQUIRED` without it), and a VM service's secrets go to its own VMs
     at once. A VM its fleet's settings no longer allow (its account dropped, or another project or
@@ -25,7 +26,9 @@ body: |-
     [--audience <aud>] [--out <dir>]` fetches the token, logs in with a key it keeps in memory,
     enrolls `key.pem`, and prints the enrollment id; run again over the same directory it keeps
     `key.pem` and extends the lease. `agent-secrets renew --vm` renews with a fresh token each time
-    and stops (exit 76) on `VM_TOKEN_REQUIRED`, `VM_NOT_LISTED` or `ENROLLMENT_NOT_LIVE`. With no
+    and stops (exit 76) on `VM_TOKEN_REQUIRED`, `VM_NOT_LISTED` or `ENROLLMENT_NOT_LIVE`. Both ask
+    the metadata server directly, never through a proxy `HTTP_PROXY` names, since the token logs
+    in as the VM. With no
     Google audience nothing changes: kind `vm` is still `400 INVALID_KIND`, and the Kubernetes and
     GitHub paths are untouched.
 time: 2026-10-31T23:30:00Z
