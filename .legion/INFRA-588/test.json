@@ -2,62 +2,54 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-588",
-  "previousHandoff": "1e8492bf9b137226060af604aabdf394f909bf77",
-  "completed": "2026-10-31T22:38:00Z",
-  "round": 15,
-  "head": "aa3a96f51df0a3b4fa273b785363fec618601346",
-  "codeHead": "fea4f37cc0ab4a6004ae73c9defb386d442af054",
-  "roundNote": "Round 15 is one forward merge of main f699b131 (#2607, which stops releasing the OpenCode plugin), at code fea4f37c. The architect scoped it to the merge's five points (Envoy f0aa3e8e). Retro's commit 1e8492bf removed .legion/INFRA-588/, so this handoff is written fresh, and previousHandoff names that removal.",
+  "previousHandoff": "7c44d668bb767974923ca87e18a7dd5fc53181f4",
+  "completed": "2026-11-01T04:16:00Z",
+  "round": 16,
+  "head": "323d7449c977f1fd3c0ad46ba7131d1f8e499afa",
+  "codeHead": "911858609804",
+  "roundNote": "Round 16 is one forward merge of main d09b46d7 at code 91185860, which raises migrationid's closings to main's newest numbered migrations. The architect scoped it to four points (Envoy 547d631d). The workspace was recreated, so I used a fresh PostgreSQL 17.11 + pgvector 0.8.0 of my own, where the test role is a superuser and replication connections are allowed. That is the database the census tests need.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran each of the implementer's commands on the merged tree in the workspace: layout checker, release-push.test.sh, check-release-credentials.sh and its test, check-ci-filters.sh, fold-orphans and the fold's plan step. I also re-ran their negative control: an envoy-plugin fragment on top of the merge makes fold-orphans exit 1. Then I did the comparison they summarised as a fingerprint myself, file by file, against the approved diff. All hold."
+    "how": "I re-ran every suite the implementer named, at the merge head and, where a failure was claimed, at main as well. I also read the ci-ok and envoy-session-stall runs they cite on GitHub. Their figures hold, and the failures they saw do not reproduce on a database whose role can create what the tests need."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "(1) Outside the conflict, the diff against main equals the approved diff at d696ff64",
-      "surface": "git diff in a scratch clone: approved = 1a9095e6 (d696ff64's merge base with main) -> d696ff64; merged = main f699b131 -> fea4f37c; .legion/ and docs/solutions/ (retro's) left out",
-      "command": "the changed-file lists of both diffs; then, for each file, the sha1 of its -U0 added and removed lines in each diff",
-      "observed": "54 files in each, the same 54. 51 have identical change lines. The 3 that differ are the conflict #2607 caused: .github/changelog-packages lacks the line packages/envoy-plugin=opencode-legion-envoy-v; changelog-fold.yaml's removed CHANGELOG_PACKAGES line is main's version without envoy-plugin; AGENTS.md's line says 'the six packages … (pi-legion, pi-envoy, envoy, claude-envoy, contracts, envoy-client)' where the approved line said seven with envoy-plugin",
-      "headSha": "aa3a96f51df0a3b4fa273b785363fec618601346",
-      "negativeControl": "the per-file comparison does flag differences: those three files"
+      "criterion": "(1) The closings are main's highest numbered migrations right now",
+      "surface": "origin/main after a fetch at 04:00Z, and migrationid.go at the merge",
+      "command": "jj git fetch; the last *.up.sql of each migrations directory on main@origin; jj diff d09b46d7..main@origin over */migrations/; gh pr view 2394; the closings in migrationid.go at 91185860",
+      "observed": "main@origin is still d09b46d7, whose newest are packages/daemon/internal/store/migrations/0067_phase_assignment.up.sql and packages/envoy/internal/dispatch/store/migrations/0150_dpop_proofs.up.sql, with no timestamped migration yet. #2394 (which adds 0151) is OPEN. The closings are 0067_phase_assignment.up.sql at 67 and 0150_dpop_proofs.up.sql at 150. In a scratch clone, a branch off the merge adding 0068 and 0151 is refused on its own ('…takes version 68: the numbered migrations ended at 67…' and '…151… ended at 150…'), and a branch adding 20261101040000 passes",
+      "headSha": "323d7449c977f1fd3c0ad46ba7131d1f8e499afa",
+      "negativeControl": "the next-number branch above. If #2394 merges first, this branch's next forward merge must raise Dispatch's closing to 0151"
     },
     {
-      "criterion": "(2) .github/changelog-packages holds exactly main's six specs, and changelog-fold.yaml reads that file with no CHANGELOG_PACKAGES",
-      "surface": "the merged tree fea4f37c and main f699b131",
-      "command": "diff of main's CHANGELOG_PACKAGES value, split one word per line, against .github/changelog-packages; grep -c CHANGELOG_PACKAGES and grep -c 'packages=$(<.github/changelog-packages)' in the merged changelog-fold.yaml",
-      "observed": "identical, 6 lines, same order (no envoy-plugin); CHANGELOG_PACKAGES 0 times in changelog-fold.yaml; the file is read in 3 steps. The fold's plan step on the merged tree: exit 0, no warning, packages claude-envoy, envoy, envoy-client, pi-envoy and pi-legion planned (contracts has no fragment)",
-      "headSha": "aa3a96f51df0a3b4fa273b785363fec618601346",
-      "negativeControl": "a commit adding packages/envoy-plugin/.changes/unreleased/x.yaml on the merge: fold-orphans exit 1 naming it, and the fold's plan exits 0 with one ::warning::"
+      "criterion": "(2) Outside the conflict, the diff against main equals the approved diff, plus the closing edits",
+      "surface": "git diff in a scratch clone: round 15's verified merge diff (main f699b131 -> fea4f37c, which round 15 showed equals the approved d696ff64 diff apart from #2607's envoy-plugin lines) against this merge's (main d09b46d7 -> 91185860); .legion/ and docs/solutions/ left out",
+      "command": "the changed-file lists of both diffs, then for each file the sha1 of its -U0 added and removed lines",
+      "observed": "54 files in each, the same 54; 50 identical. The 4 that differ differ only in the closing names: migrationid.go's two closings entries (0064/64 -> 0067/67, 0149/149 -> 0150/150), and one line each in docs/kubernetes.md and packages/daemon/internal/store/migrations/embed.go (0064_pull_request_pass_settlement -> 0067_phase_assignment) and packages/envoy/cmd/dispatch/README.md (0149_event_horizon -> 0150_dpop_proofs). .github/changelog-packages, changelog-fold.yaml, AGENTS.md, release-push.sh and scripts/conflicts are among the identical 50",
+      "headSha": "323d7449c977f1fd3c0ad46ba7131d1f8e499afa",
+      "negativeControl": "the comparison flags those four files, so it compares contents"
     },
     {
-      "criterion": "(3) AGENTS.md names the file and six packages, and the layout checker exits 0",
-      "surface": "AGENTS.md at the merged tree",
-      "command": "grep -n changelog-packages AGENTS.md; bun scripts/semantic-line-breaks.ts AGENTS.md; git grep CHANGELOG_PACKAGES outside .legion",
-      "observed": "AGENTS.md:539 'the six packages `.github/changelog-packages` lists (`pi-legion`, `pi-envoy`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`), the one list the fold and the check below both read'; layout exit 0; CHANGELOG_PACKAGES remains only in check-release-credentials.test.sh's synthetic fixture, as in round 13",
-      "headSha": "aa3a96f51df0a3b4fa273b785363fec618601346",
-      "negativeControl": "the approved AGENTS.md line (d696ff64) names seven packages with envoy-plugin; the merge changed it to six"
-    },
-    {
-      "criterion": "(4) release.yaml and check-release-credentials.sh are main's plus only #2411's own changes, and the release and filter checks pass on the merged tree",
-      "surface": "git diff f699b131..fea4f37c over those files; the scripts run in the workspace at the merged tree",
-      "command": "git diff --stat over release.yaml, check-release-credentials.sh and its test; bash check-release-credentials.sh; bash check-release-credentials.test.sh; uv run --with pyyaml==6.0.2 bash check-ci-filters.sh; bash release-push.test.sh; bash -c 'release-push.sh fold-orphans $(<.github/changelog-packages)'",
-      "observed": "empty diff: the pull request changes none of those three files, so they equal main's. check-release-credentials exit 0, '7 credentialed job(s) and 9 build job(s) across 5 workflows…'. Its test: PASS. check-ci-filters exit 0, 29 gates. release-push.test.sh: 635 passed, 0 failed. fold-orphans exit 0",
-      "headSha": "aa3a96f51df0a3b4fa273b785363fec618601346",
-      "negativeControl": "the envoy-plugin fragment above fails fold-orphans"
-    },
-    {
-      "criterion": "(5) migrationid's closings are unchanged and the store tests pass",
-      "surface": "migrationid.go at the merged tree; go test against my own PostgreSQL 17.11 + pgvector (port 55434)",
-      "command": "git diff d696ff64..fea4f37c over migrationid, the daemon store and Dispatch's store.go and pool.go; git diff 1a9095e6..f699b131 over */migrations/*.up.sql; go test ./internal/store/... (daemon); go test ./migrationid/ ./internal/pgmigrate/... and ./internal/dispatch/store/ -run 'Migrat|Identifier|NumberedAfter|TakesNumbers|Healthy|Embedded' (envoy)",
-      "observed": "no change in those files; main added no migration between the two bases. Closings stay 0064_pull_request_pass_settlement.up.sql at 64 and 0149_event_horizon.up.sql at 149. Daemon store ok (47.4 s), migrations ok; migrationid, pgmigrate, pgmigratetest ok; Dispatch store ok (170.8 s)",
-      "headSha": "aa3a96f51df0a3b4fa273b785363fec618601346",
+      "criterion": "(3) migrationid, pgmigrate, the daemon and Dispatch store suites, the red tests and the timestamped-migration tests pass on a Postgres where the role can create what the census tests need; the implementer's failures settled",
+      "surface": "go test in worktrees of 91185860 and main d09b46d7 against my PostgreSQL 17.11 + pgvector on 127.0.0.1:55434, role postgres (rolsuper t, wal_level logical, replication allowed)",
+      "command": "at the merge: go test ./migrationid/ ./internal/pgmigrate/... ./internal/broker/store/, ./internal/store/... (daemon), the full ./internal/dispatch/store/ twice, ./cmd/dispatch -run 'Healthz|Census|Migrat'. At the merge and at main: the three census tests that need a superuser (TestCensusRefusesALockHolderWhoseAgeItCannotSee, which grants pg_read_all_stats; TestCensusRefusesAWALSenderHoldingALockInATransaction, which opens a replication connection; TestCensusDoesNotExemptACatalogMigrationAnEventTriggerRunsOn, which creates an event trigger) and the implementer's two flaky tests (TestGraphEdgesUnionsMentionsWithEveryStructuralRelation, TestRetirePlainRefreshTokensRetiresATokenStoredAfterTheLastBoot), -count=5 each; and one full Dispatch store run at main",
+      "observed": "all ok: migrationid, pgmigrate, pgmigratetest; daemon store 58.2 s with migrations, the red test TestLoadRefusesANewMigrationNumberedAfterTheShippedSet and the timestamped-migration tests; Dispatch store full 282.8 s, then 340.3 s, with the red tests (next_number_test.go, migrate_out_of_order_test.go) and all 36 Census tests; cmd/dispatch 13.4 s. The five named tests: 5 PASS each at the merge and 5 PASS each at main. Main's full Dispatch store: ok 340.0 s. So the three census failures the implementer saw come from their non-superuser role, and fail at main the same way: not this pull request's. The two flaky tests touch no migration code, failed once each only for the implementer, and pass every time here at both commits: not this pull request's either",
+      "headSha": "323d7449c977f1fd3c0ad46ba7131d1f8e499afa",
       "negativeControl": "round 14: a shipped timestamped migration fails the daemon tests before d910aa0c (unchanged since)"
+    },
+    {
+      "criterion": "(4) envoy-session-stall and ci-ok at the new head",
+      "surface": "GitHub check runs",
+      "command": "gh api repos/sjawhar/legion/commits/<sha>/check-runs?filter=all for 323d7449 and the previous code head aa3a96f5",
+      "observed": "at 323d7449 (04:14Z): changes success, pr-title success, envoy-session-stall and lint queued, and no ci-ok run yet. At aa3a96f5: envoy-session-stall failed at 00:41Z (124682690264) and succeeded on the re-run at 02:29Z (124722836453); ci-ok failed at 02:05Z and succeeded at 03:12Z (124727121579)",
+      "headSha": "323d7449c977f1fd3c0ad46ba7131d1f8e499afa",
+      "negativeControl": "the earlier failed attempt above"
     }
   ],
   "observations": [
-    "CI: fea4f37c has no runs of its own. At aa3a96f5, changes and pr-title were queued when I read them (22:37Z), and no ci-ok yet. The reviewer approves once ci-ok and pr-title are green.",
+    "#2394 is open and adds Dispatch 0151. If it merges before this pull request, the next forward merge must raise Dispatch's closing to 0151_*, or every branch's identifier test fails.",
     "Retro removes .legion/INFRA-588/ again before the new READY."
   ]
 }
