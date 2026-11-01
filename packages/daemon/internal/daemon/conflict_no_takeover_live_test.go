@@ -32,7 +32,7 @@
 // script starts and names in LEGION_E2E_NATS_URL. GitHub is conflictGitHub, a REST stand-in for the
 // one pull request the proof drives, whose base branch requires the check `ci`. Dispatch is the
 // board the package's whole-daemon live proofs share (liveDispatch, in live_proof_test.go, the
-// harness this driver shares with merged_root_waits_live_test.go). Envoy's listener is
+// harness this driver shares with child_adoption_live_test.go). Envoy's listener is
 // conflictListener, the package's noticeListener with the listener's own "no live session holds the
 // role" refusal (notify.ErrNoHolder) added for the topics step 5 names, which noticeListener never
 // gives. The two Apps' tokens are workflowTokenRecorder's placeholders. No agent runs: every claim

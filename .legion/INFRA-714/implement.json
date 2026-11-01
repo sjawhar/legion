@@ -165,12 +165,12 @@
       "negativeControl": "the merge's one conflict was resolved the other way first, taking main's unpackCache whole; that drops R11 and A13 entirely, which is what the resolution exists to prevent"
     },
     {
-      "criterion": "Round five / a dead live-proof driver and three stale references to deleted scripts",
-      "surface": "the repository tree and the e2e-tagged build",
-      "command": "cd packages/daemon && go vet -tags e2e ./... && cd ../.. && grep -rn 'merged-root-waits|no-required-checks|merged_root_waits|no_required_checks' --include='*.go' --include='*.sh' --include='*.ts' --include='*.py' --include='*.yaml' .",
-      "observed": "go vet -tags e2e exit 0 with merged_root_waits_live_test.go removed; the grep returns nothing outside the changelog entry that records the removal and the committed handoffs",
-      "headSha": "4785803e1d466cd95faf98972da32ba40fa52a65",
-      "negativeControl": "before the removal the same grep returned four files, among them a driver whose own doc comment named a script deleted in round one"
+      "criterion": "A dead live-proof driver and every reference to the scripts this change deleted. The entry this replaces claimed the same thing with a command that could not have found it: `grep -rn` with an alternation and no `-E` searches for the literal string `merged-root-waits|no-required-checks|...`, which no file holds, and its `--include` list left out `*.md`. Two live references survived that reading, and the tester found them.",
+      "surface": "The repository tree, read with a command that can fail, and the e2e-tagged build.",
+      "command": "cd packages/daemon && go vet -tags e2e ./internal/daemon/ && cd ../.. && grep -rnE 'merged-root-waits|no-required-checks|merged_root_waits|no_required_checks' . | grep -v '^./.jj' | grep -v node_modules | grep -v '^./docs/solutions' | grep -v '^./.legion/'",
+      "observed": "`go vet -tags e2e ./internal/daemon/` exit 0 with `merged_root_waits_live_test.go` removed, and the sweep prints nothing and exits 1 (grep's no-match status). Everything outside the two exclusions is clean: `docs/solutions/` records what past changes did and keeps its text by the repository's own rule, and `.legion/` holds this issue's committed handoffs, whose earlier rounds quote the names. The two the tester found are fixed at their own words rather than by deleting the sentence: `scripts/e2e/README.md:3520` now names `child-adoption.sh`, the one script that still makes that run, and `conflict_no_takeover_live_test.go:35` names `child_adoption_live_test.go`, the driver it really shares `live_proof_test.go` with.",
+      "headSha": "<pending>",
+      "negativeControl": "The same command run at the head before this round prints the two lines it is meant to catch — `./scripts/e2e/README.md:3520:The four checks below are ... the run `merged-root-waits.sh` and `no-required-checks.sh` make too.` and `./packages/daemon/internal/daemon/conflict_no_takeover_live_test.go:35:// harness this driver shares with merged_root_waits_live_test.go).` — where the entry's old command printed nothing at either head, which is why it proved nothing."
     },
     {
       "criterion": "Round six / the tester's one failing test: packages/pi-legion's refused-turn case asserted the rule the reviewer's finding 7 replaced.",

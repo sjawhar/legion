@@ -3517,7 +3517,7 @@ Runs on any Linux host with `go` — no Docker, no cluster, no agent — so a Le
 the script starts none.
 The broker is the run's own: the `nats-server` `LEGION_E2E_NATS_BIN` names, or the pinned `v2.10.22` the script installs with `go install` into a GOBIN of its own, started with JetStream on a port the kernel picks for it (`-p -1`, read back from its log) and stopped on any exit.
 A run takes about a minute.
-The four checks below are [`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'s, the run `merged-root-waits.sh` and `no-required-checks.sh` make too.
+The four checks below are [`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'s, the run `child-adoption.sh` makes too.
 
 | check | what it holds |
 | :--- | :--- |
