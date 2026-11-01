@@ -1082,6 +1082,9 @@ test("a reply quotes the passage it names", async ({ browser }) => {
 // The Conversation tab's comment editor carries each block's id through the edit, so a reply that
 // cites the second paragraph follows it wherever the author moves it and through every rewording,
 // and the save names it (`blocks`) rather than leaving the server to match it by its text.
+// SLOW(>=2s): the five edits the title names, each one the editor opened on the blocks route, a
+// real keystroke or chord in the field, and a save whose `blocks` the row reads back - every one
+// of them a step this row is about.
 test("the editor keeps a cited passage's id through move, reword, split, delete and restore", async ({
   browser,
 }) => {

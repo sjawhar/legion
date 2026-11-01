@@ -195,18 +195,32 @@ test("a tab holds one live socket for every live view @phone", async ({ browser 
   }
 });
 
-// Sixteen seconds of real idling: a page that holds a request open shows it here and nowhere
-// else. It runs in every engine of this spec's projects, since what it proves - that the live
-// socket replaced the long-lived request - is each engine's own connection behaviour. The idle
-// spans one server heartbeat (15 s, `defaultStreamHeartbeat`,
-// `packages/envoy/internal/dispatch/api/server.go`) and one of the page's own silence checks
-// (`SILENCE_CHECK_MS`, `web/src/api/live-socket.ts`), so it covers a full cycle of the socket
-// that took the long-lived request's place.
+/** The idle a held-open request has to age through here. Every read this suite makes finishes
+ *  well inside a second, while the long-lived request this row guards against is held open for
+ *  tens of them, so five seconds of real idling separates the two by a factor of five either
+ *  way: nothing legitimate is still open at half of it, and the request this row refuses would
+ *  be open at ten times it. */
+const IDLE_MS = 5_000;
+/** How long a request may be open when the idle ends: half of it, as the bound above is read. */
+const HELD_OPEN_MS = IDLE_MS / 2;
+/** The page's own silence check interval (`SILENCE_CHECK_MS`, `web/src/api/live-socket.ts`),
+ *  which is not exported. A jump of it leaves the last frame well inside the 45 s that makes the
+ *  page replace a silent socket (`LIVE_SOCKET_SILENT_MS`), so the check runs on a socket it
+ *  keeps - the cycle this row covers - rather than opening a new one. */
+const SILENCE_CHECK_MS = 15_000;
+
+// Five seconds of real idling: a page that holds a request open shows it here and nowhere else.
+// It runs in every engine of this spec's projects, since what it proves - that the live socket
+// replaced the long-lived request - is each engine's own connection behaviour. The idle covers
+// the cycle of the socket that took the long-lived request's place: the page's own silence
+// check, the one part of that cycle that opens anything, is fired on each page's clock rather
+// than waited out, while the server's heartbeat (15 s, `defaultStreamHeartbeat`) holds no
+// request open on the page and so needs no real time of the row's.
 // SLOW(>=2s): real idling is the measurement. The ages below are read in this process, in real
 // wall time, and a connection Dispatch holds open ages whatever the page's timers believe, so no
-// page clock can stand in for the wait.
+// page clock can stand in for the idle itself.
 test("no request to Dispatch stays open while the page idles @phone", async ({ browser }) => {
-  // The 16 s idle and three page loads are all this row spends.
+  // The 5 s idle and three page loads are all this row spends.
   test.setTimeout(40_000);
   await createProject({ key: "CORE", name: "Core" });
   await createIssue({ project: "CORE", title: "Board issue" });
@@ -219,8 +233,11 @@ test("no request to Dispatch stays open while the page idles @phone", async ({ b
     const board = await alice.newPage();
     const live = await alice.newPage();
     const delivery = await alice.newPage();
-    const pending = [trackApiRequests(board), trackApiRequests(live), trackApiRequests(delivery)];
-    const sockets = [watchLiveSockets(board), watchLiveSockets(live), watchLiveSockets(delivery)];
+    const pages = [board, live, delivery];
+    // Each page's timers are its own, and the silence check below is fired on them.
+    for (const page of pages) await page.clock.install();
+    const pending = pages.map(trackApiRequests);
+    const sockets = pages.map(watchLiveSockets);
 
     await board.goto("/projects/CORE");
     await board.getByRole("button", { name: "Board" }).click();
@@ -234,13 +251,15 @@ test("no request to Dispatch stays open while the page idles @phone", async ({ b
     for (const pageSockets of sockets) await untilFeedStarts(pageSockets);
     await Promise.all(pending.map(waitForReads));
 
-    await board.waitForTimeout(16_000);
-    // Half the idle. Every read this suite makes finishes well inside a second, while the
-    // long-lived request this row guards against is held open for tens of them, so a request
-    // still open after eight is one of those and nothing else.
+    await board.waitForTimeout(IDLE_MS);
+    for (const page of pages) await page.clock.fastForward(SILENCE_CHECK_MS);
+    // Whatever the checks started - the sign-in check that jump also fires among them - is a read
+    // like any other, so a second of real time is more than it takes, and a read still open after
+    // the bound below is the request this row refuses and nothing else.
+    await board.waitForTimeout(1_000);
     const old = pending.flatMap((requests) =>
       [...requests.entries()]
-        .filter(([, started]) => Date.now() - started > 8_000)
+        .filter(([, started]) => Date.now() - started > HELD_OPEN_MS)
         .map(([request]) => request.url())
     );
     expect(old).toEqual([]);

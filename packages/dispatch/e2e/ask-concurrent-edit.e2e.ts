@@ -7,6 +7,7 @@ import {
   test,
 } from "@playwright/test";
 
+import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
 import { createIssue, createProject, getArtifactText, getIssue } from "./api";
 import {
   connectedDot,
@@ -62,21 +63,21 @@ async function seedDecision() {
  * list under the question while neither edit reaches the server or the other page, and lets both
  * edits through at once: the merged block holds two lists. The merge is between two Yjs clients,
  * which two pages are whoever holds them, so one signed-in context serves both and the second
- * editor pays no sign-in and no cold cache. With `clock`, the first page's timers are faked
- * before it loads, for a row that drives one of its own. Each page's errors are collected into
+ * editor pays no sign-in and no cold cache. Every page's timers are faked before it loads, since
+ * the severed transport's reconnect waits a delay the page draws itself; a row that drives one of
+ * its own (`alicePage.clock`) inherits the same install. Each page's errors are collected into
  * `errors`. */
 async function crossOptionLists(
   issueKey: string,
   context: BrowserContext,
   options: readonly string[],
-  errors: string[],
-  { clock = false }: { clock?: boolean } = {}
+  errors: string[]
 ): Promise<Page[]> {
   const opened = [];
   for (const option of options) {
     const page = await context.newPage();
     page.on("pageerror", (error) => errors.push(error.message));
-    if (clock && opened.length === 0) await page.clock.install();
+    await page.clock.install();
     const transport = await documentTransport(page);
     await page.goto(`/issues/${issueKey}`);
     opened.push({ option, page, transport });
@@ -89,18 +90,25 @@ async function crossOptionLists(
     transport.hold();
     await transport.sever();
   }
-  for (const { option, page } of opened) {
-    // The option first, then the `- ` input rule before it: inserted into an empty item, the text
-    // lands in the question, since the block hides an empty option while it reads as malformed.
-    // Only the `- ` needs real keys, which is what the rule reads.
-    await placeCaret(page, "after", "Which one?");
-    await page.keyboard.press("Enter");
-    await page.keyboard.insertText(option);
-    await page.keyboard.press("Home");
-    await page.keyboard.type("- ");
-    await expect(askBlock(page).getByRole("listitem")).toHaveText(option);
-  }
+  // Each page's edit is local while its transport is severed, so neither waits on the other.
+  await Promise.all(
+    opened.map(async ({ option, page }) => {
+      // The option first, then the `- ` input rule before it: inserted into an empty item, the
+      // text lands in the question, since the block hides an empty option while it reads as
+      // malformed. Only the `- ` needs real keys, which is what the rule reads.
+      await placeCaret(page, "after", "Which one?");
+      await page.keyboard.press("Enter");
+      await page.keyboard.insertText(option);
+      await page.keyboard.press("Home");
+      await page.keyboard.type("- ");
+      await expect(askBlock(page).getByRole("listitem")).toHaveText(option);
+    })
+  );
   await Promise.all(opened.map(({ transport }) => transport.release()));
+  // The provider draws its reconnect delay from [0, RECONNECT_SPREAD_MS)
+  // (`web/src/features/doc/connection.ts`), so the crossing would otherwise wait out a random
+  // second of it; the pages' own clocks spend it instead.
+  await Promise.all(opened.map(({ page }) => page.clock.runFor(RECONNECT_SPREAD_MS)));
   return opened.map(({ page }) => page);
 }
 
@@ -185,16 +193,13 @@ async function withTwoLists(
     first: string;
     pages: Page[];
     second: string;
-  }) => Promise<readonly string[]>,
-  { clock = false }: { clock?: boolean } = {}
+  }) => Promise<readonly string[]>
 ): Promise<void> {
   const issue = await seedDecision();
   const alice = await asUser(browser, "alice");
   const errors: string[] = [];
   try {
-    const pages = await crossOptionLists(issue.key, alice, ["Option A", "Option B"], errors, {
-      clock,
-    });
+    const pages = await crossOptionLists(issue.key, alice, ["Option A", "Option B"], errors);
     for (const page of pages) {
       await expect(askBlock(page)).toHaveAttribute("data-dispatch-ask-malformed", "true");
     }
@@ -462,34 +467,30 @@ function secondListText(page: Page): Promise<string> {
 test("Ctrl+Z and Ctrl+Shift+Z with the caret in the question undo and redo a letter typed in the second list of an ask holding two lists", async ({
   browser,
 }) => {
-  await withTwoLists(
-    browser,
-    async ({ alicePage, artifactId, first, pages, second }) => {
-      const typed = `${second.slice(0, -1)}x${second.slice(-1)}`;
-      const storedLines = async () => (await getArtifactText(artifactId)).markdown.split("\n");
-      const expectSecondList = async (text: string) => {
-        for (const page of pages) await expect.poll(() => secondListText(page)).toBe(text);
-        await expect.poll(storedLines).toContain(`* ${text}`);
-      };
-      // Past prosemirror-history's 500 ms group delay, which it reads off `Date.now()`, so the
-      // letter is an undo step of its own: the page's clock is advanced past it rather than waited
-      // out, after the crossed edit above has landed, so nothing of it joins the letter's group.
-      await alicePage.clock.fastForward(600);
-      await placeCaret(alicePage, "after", second, optionList(alicePage, 1));
-      await alicePage.keyboard.press("ArrowLeft");
-      await alicePage.keyboard.type("x");
-      await expectSecondList(typed);
+  await withTwoLists(browser, async ({ alicePage, artifactId, first, pages, second }) => {
+    const typed = `${second.slice(0, -1)}x${second.slice(-1)}`;
+    const storedLines = async () => (await getArtifactText(artifactId)).markdown.split("\n");
+    const expectSecondList = async (text: string) => {
+      for (const page of pages) await expect.poll(() => secondListText(page)).toBe(text);
+      await expect.poll(storedLines).toContain(`* ${text}`);
+    };
+    // Past prosemirror-history's 500 ms group delay, which it reads off `Date.now()`, so the
+    // letter is an undo step of its own: the page's clock is advanced past it rather than waited
+    // out, after the crossed edit above has landed, so nothing of it joins the letter's group.
+    await alicePage.clock.fastForward(600);
+    await placeCaret(alicePage, "after", second, optionList(alicePage, 1));
+    await alicePage.keyboard.press("ArrowLeft");
+    await alicePage.keyboard.type("x");
+    await expectSecondList(typed);
 
-      await placeCaret(alicePage, "after", "Which", questionParagraph(alicePage));
-      await alicePage.keyboard.press("ControlOrMeta+Z");
-      await expectSecondList(second);
+    await placeCaret(alicePage, "after", "Which", questionParagraph(alicePage));
+    await alicePage.keyboard.press("ControlOrMeta+Z");
+    await expectSecondList(second);
 
-      // The undo put the caret back where the letter was; it goes to the question again.
-      await placeCaret(alicePage, "after", "Which", questionParagraph(alicePage));
-      await alicePage.keyboard.press("ControlOrMeta+Shift+Z");
-      await expectSecondList(typed);
-      return ["Which one?", first];
-    },
-    { clock: true }
-  );
+    // The undo put the caret back where the letter was; it goes to the question again.
+    await placeCaret(alicePage, "after", "Which", questionParagraph(alicePage));
+    await alicePage.keyboard.press("ControlOrMeta+Shift+Z");
+    await expectSecondList(typed);
+    return ["Which one?", first];
+  });
 });
